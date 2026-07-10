@@ -27,12 +27,13 @@ The core audio playback system responsible for decoding multiple audio formats, 
 The system that discovers, indexes, and organizes local audio files. It scans directories for supported audio files, extracts metadata (artist, album, title, album artist, genre, year, track number), resolves cover art (embedded metadata first, then filesystem fallback), and provides fast search capabilities.
 
 | Feature | Summary | Status | Priority | Depends On |
-|---|---|---|---|---|---|
+|---|---|---|---|---|---|---|
 | [Library Scanning](features/library-scanning.md) | Recursively scan directories for audio files | implemented | P0 | — |
 | [Metadata Extraction](features/metadata-extraction.md) | Extract and store tags from audio containers | implemented | P0 | Library Scanning |
 | [Cover Art Resolution](features/cover-art-resolution.md) | Resolve cover: embedded metadata > cover.jpg/cover.png | implemented | P1 | Metadata Extraction |
 | [Library Search](features/library-search.md) | Search by artist, album artist, album, title | implemented | P1 | Metadata Extraction |
-| [Music Library Management](features/music-library-management.md) | Manage multiple library paths, OS file picker for add, delete, persist list | pending | P0 | Library Scanning |
+| [Music Library Management](features/music-library-management.md) | Manage multiple library paths, OS file picker for add, delete, persist list | implemented | P0 | Library Scanning |
+| [Library Cache Persistence](features/library-cache-persistence.md) | Persist scanned tracks to disk so library loads instantly on startup without re-scan | implemented | P1 | Library Scanning, Music Library Management |
 
 ### User Interface
 The egui-based graphical interface that provides a main application window, a library explorer with dual views (file tree and searchable list), a player control bar with transport controls, a cover art display panel, and a now playing view. Must work on Linux, Windows, and macOS with minimal external dependencies.
@@ -61,6 +62,7 @@ Cross-platform system integration including a system tray icon that allows the a
 | **Container** | File format that wraps encoded audio data along with metadata tags and optionally cover art (M4A, OGG, FLAC, etc.) |
 | **Cover Art** | Image associated with an album or track, typically embedded in audio file metadata or stored as cover.jpg/cover.png in the same directory |
 | **Library** | The complete set of audio files discovered and indexed by the application |
+| **Library Cache** | Persistent on-disk JSON copy of scanned tracks, artists, and albums that avoids re-scanning on startup |
 | **Playback Queue** | Ordered list of tracks scheduled for sequential playback |
 | **Metadata** | Descriptive information embedded in audio files (artist, album, title, genre, year, track number, etc.) |
 | **Album Artist** | The primary artist credited for an album, distinct from track-specific artists (e.g., compilations) |

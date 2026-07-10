@@ -141,6 +141,7 @@ impl super::app::RiffApp {
                                         state.library.remove_tracks_by_root(&path);
                                         state.library_paths.retain(|p| p != &path);
                                         state.library_statuses.remove(&path);
+                                        state.library.save_cache();
                                         if let Some(storage) = frame.storage_mut() {
                                             save_library_paths(storage, &state.library_paths);
                                         }

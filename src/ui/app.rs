@@ -390,6 +390,9 @@ impl RiffApp {
                             if let Some(tn) = track.metadata.track_number {
                                 ui.label(format!("Track: {}", tn));
                             }
+                            ui.separator();
+                            let path_display = track.file_path.to_string_lossy().to_string();
+                            ui.label(format!("File: {}", path_display));
                         });
                         ui.with_layout(egui::Layout::top_down(egui::Align::RIGHT), |ui| {
                             if let Some(texture) = self.cover_textures.get(&track.id.0) {
@@ -646,6 +649,10 @@ impl RiffApp {
                             ui.label(format!("Track: {} / Disc: {}",
                                 tn, track.metadata.disc_number.unwrap_or(1)));
                         }
+
+                        ui.separator();
+                        let path_display = track.file_path.to_string_lossy().to_string();
+                        ui.label(format!("File: {}", path_display));
 
                         ui.separator();
                         ui.label("Up Next:");

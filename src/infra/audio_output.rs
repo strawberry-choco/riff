@@ -36,6 +36,19 @@ impl CpalAudioOutput {
     }
 }
 
+/// Convert a normalised f32 sample [-1.0, 1.0] to i16.
+#[inline]
+fn f32_to_i16(v: f32) -> i16 {
+    (v.clamp(-1.0, 1.0) * 32767.0) as i16
+}
+
+/// Convert a normalised f32 sample [-1.0, 1.0] to u16.
+/// u16 silence is at 32768 (half of 65535).
+#[inline]
+fn f32_to_u16(v: f32) -> u16 {
+    (v.clamp(-1.0, 1.0) * 32767.0 + 32768.0) as u16
+}
+
 impl AudioOutput for CpalAudioOutput {
     fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), AppError> {
         self.sample_rate = sample_rate;
@@ -52,32 +65,48 @@ impl AudioOutput for CpalAudioOutput {
         let device = self.device.as_ref()
             .ok_or_else(|| AppError::AudioOutput("Device not initialized".to_string()))?;
 
-        let config = device.default_output_config()
+        let supported_config = device.default_output_config()
             .map_err(|e| AppError::AudioOutput(format!("Config error: {}", e)))?;
 
-        let sample_format = config.sample_format();
-        let config: cpal::StreamConfig = config.into();
+        let sample_format = supported_config.sample_format();
 
+        // Build StreamConfig preferring the decoder's sample rate.
+        // On Windows WASAPI shared mode, the device may only support its native
+        // rate (commonly 48000 Hz), so we fall back to the default if the
+        // requested rate is not supported.
+        let stream_config = build_stream_config(device, self.sample_rate, self.channels, &supported_config);
         let buffer_clone = self.buffer.clone();
 
         let stream = match sample_format {
             cpal::SampleFormat::F32 => {
                 device.build_output_stream(
-                    &config,
+                    &stream_config,
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                        let mut buf = match buffer_clone.try_lock() {
-                            Ok(b) => b,
-                            Err(_) => {
-                                // Can't lock — fill with silence
-                                for sample in data.iter_mut() {
-                                    *sample = 0.0;
-                                }
-                                return;
-                            }
-                        };
-                        for sample in data.iter_mut() {
-                            *sample = buf.pop_front().unwrap_or(0.0);
-                        }
+                        audio_callback_f32(data, &buffer_clone);
+                    },
+                    move |err| {
+                        eprintln!("Audio stream error: {}", err);
+                    },
+                    None,
+                )
+            }
+            cpal::SampleFormat::I16 => {
+                device.build_output_stream(
+                    &stream_config,
+                    move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                        audio_callback_i16(data, &buffer_clone);
+                    },
+                    move |err| {
+                        eprintln!("Audio stream error: {}", err);
+                    },
+                    None,
+                )
+            }
+            cpal::SampleFormat::U16 => {
+                device.build_output_stream(
+                    &stream_config,
+                    move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
+                        audio_callback_u16(data, &buffer_clone);
                     },
                     move |err| {
                         eprintln!("Audio stream error: {}", err);
@@ -86,7 +115,9 @@ impl AudioOutput for CpalAudioOutput {
                 )
             }
             _ => {
-                return Err(AppError::AudioOutput("Unsupported sample format".to_string()));
+                return Err(AppError::AudioOutput(
+                    format!("Unsupported sample format: {:?}", sample_format)
+                ));
             }
         }.map_err(|e| AppError::AudioOutput(format!("Stream error: {}", e)))?;
 
@@ -101,11 +132,22 @@ impl AudioOutput for CpalAudioOutput {
         if let Some(ref stream) = self.stream.0 {
             let _ = stream.pause();
         }
+        self.stream = SendStream(None);
+        Ok(())
+    }
+
+    fn buffer_len(&self) -> usize {
+        if let Ok(buf) = self.buffer.lock() {
+            buf.len()
+        } else {
+            0
+        }
+    }
+
+    fn clear_buffer(&mut self) {
         if let Ok(mut buf) = self.buffer.lock() {
             buf.clear();
         }
-        self.stream = SendStream(None);
-        Ok(())
     }
 
     fn write_samples(&mut self, samples: &[f32]) -> Result<usize, AppError> {
@@ -117,5 +159,85 @@ impl AudioOutput for CpalAudioOutput {
 
     fn set_volume(&mut self, _volume: f32) {
         // Volume is handled by the app layer (main.rs audio engine)
+    }
+}
+
+/// Build a `StreamConfig` that tries to match the requested sample rate and
+/// channels. Falls back to the device's default config when the requested
+/// values are outside the device's supported range (common on Windows WASAPI
+/// where shared mode is locked to the system sample rate).
+fn build_stream_config(
+    device: &cpal::Device,
+    requested_rate: u32,
+    requested_channels: u16,
+    default_config: &cpal::SupportedStreamConfig,
+) -> cpal::StreamConfig {
+    let default_stream: cpal::StreamConfig = default_config.clone().into();
+    let requested_sample_rate = cpal::SampleRate(requested_rate);
+
+    let rate_is_supported = device
+        .supported_output_configs()
+        .map(|mut configs| {
+            configs.any(|range| {
+                range.min_sample_rate() <= requested_sample_rate
+                    && requested_sample_rate <= range.max_sample_rate()
+            })
+        })
+        .unwrap_or(false);
+
+    if !rate_is_supported {
+        tracing::warn!(
+            "Sample rate {} Hz not supported, using device default {} Hz",
+            requested_rate,
+            default_stream.sample_rate.0
+        );
+        return default_stream;
+    }
+
+    cpal::StreamConfig {
+        channels: requested_channels,
+        sample_rate: requested_sample_rate,
+        buffer_size: default_stream.buffer_size,
+    }
+}
+
+fn audio_callback_f32(data: &mut [f32], buffer: &AudioBuffer) {
+    let mut buf = match buffer.try_lock() {
+        Ok(b) => b,
+        Err(_) => {
+            data.fill(0.0);
+            return;
+        }
+    };
+    for sample in data.iter_mut() {
+        *sample = buf.pop_front().unwrap_or(0.0);
+    }
+}
+
+fn audio_callback_i16(data: &mut [i16], buffer: &AudioBuffer) {
+    let mut buf = match buffer.try_lock() {
+        Ok(b) => b,
+        Err(_) => {
+            data.fill(0);
+            return;
+        }
+    };
+    for sample in data.iter_mut() {
+        let f32_val = buf.pop_front().unwrap_or(0.0);
+        *sample = f32_to_i16(f32_val);
+    }
+}
+
+fn audio_callback_u16(data: &mut [u16], buffer: &AudioBuffer) {
+    let mut buf = match buffer.try_lock() {
+        Ok(b) => b,
+        Err(_) => {
+            data.fill(32768);
+            return;
+        }
+    };
+    for sample in data.iter_mut() {
+        let f32_val = buf.pop_front().unwrap_or(0.0);
+        *sample = f32_to_u16(f32_val);
     }
 }

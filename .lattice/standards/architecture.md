@@ -214,18 +214,29 @@ Application (app/) and Domain (domain/)
 
 ```
 User clicks "Play" in UI
-    → ui/control_bar.rs sends AudioCommand::Play(track_id) to app/playback_engine.rs
-    → app/playback_engine.rs looks up Track in domain/queue.rs
-    → app/playback_engine.rs calls infra/decoder.rs (SymphoniaDecoder) to open file
-    → infra/decoder.rs returns audio format info (sample rate, channels)
-    → app/playback_engine.rs configures infra/audio_output.rs (CpalAudioOutput)
-    → infra/audio_output.rs starts cpal stream with callback
-    → cpal callback requests samples from app/playback_engine.rs
-    → app/playback_engine.rs requests frames from infra/decoder.rs
-    → infra/decoder.rs decodes from symphonia and returns PCM samples
-    → app/playback_engine.rs applies volume and sends to cpal callback
-    → UI receives position updates via channel and updates progress bar
+    → ui/ sends PlaybackCommand::Play(track_id) via crossbeam channel to audio engine thread
+    → Audio engine thread (run_audio_engine in main.rs) receives command
+    → Looks up Track in AppState.library, resolves file path
+    → Calls SymphoniaDecoder::open() to open file and get format info (sample rate, channels)
+    → Calls CpalAudioOutput::initialize() + start() to create cpal stream
+    → CpalAudioOutput::clear_buffer() discards any leftover samples from previous track
+    → Decode loop begins (push model, on same thread):
+        a. Backpressure check: if shared buffer ≥ 2s of audio, sleep + poll commands
+        b. decoder.next_frames(4096) decodes a batch of PCM samples
+        c. audio_output.write_samples(&scaled) pushes samples into Arc<Mutex<VecDeque<f32>>>
+        d. Position update sent via PlaybackUpdate::PositionChanged channel
+        e. Command poll: try_recv on cmd channel for Pause/Stop/Seek/Volume
+    → cpal callback (separate OS audio thread): try_lock on buffer, pop samples, write to device
+    → On EOF (decoder returns None): send TrackEnded, wait for buffer to drain, then stop stream
+    → UI update thread receives PlaybackUpdate messages, mutates AppState
+    → UI reads AppState each frame for progress bar, state, and errors
 ```
+
+**Key design decisions:**
+- **Push model**: The audio engine pushes decoded samples into a shared buffer; the cpal callback pulls from it. The engine does not respond to cpal callback requests directly — this avoids blocking the real-time audio thread.
+- **Backpressure**: Before each decode, the engine checks if the shared buffer already holds ≥ 2 seconds of audio (sample_rate × channels × 2). If full, it sleeps 10ms and polls for commands (Pause/Stop/Seek). This prevents the decoder from racing ahead of playback and consuming unbounded memory.
+- **Drain on EOF**: When the decoder reaches end-of-file, the engine waits for the remaining buffer to drain through the cpal callback before stopping the audio stream. A Stop command during drain will discard remaining samples.
+- **Buffer lifetime**: The shared buffer is not cleared on stop — it drains naturally through the callback. `clear_buffer()` is called explicitly only at the start of a new track, on Stop command, or on Seek.
 
 ### Flow 2: Scan Library
 
@@ -344,25 +355,29 @@ These checks often have multiple valid outcomes. When you encounter one, present
 
 **Threads:**
 1. **Main thread** — egui event loop, UI rendering, user input handling
-2. **Audio thread** — cpal callback thread (driven by OS audio subsystem), owned by `CpalAudioOutput`
-3. **Library scanner thread** — spawned by `LibraryManager` when scanning, terminates when scan completes
-4. **Cover loader thread** — spawned per cover load request, terminates after image is decoded
+2. **Audio engine thread** — spawned in `main.rs`, runs `run_audio_engine()`: owns the decoder, drives the decode loop, writes samples into the shared buffer, handles all `PlaybackCommand` messages, and sends `PlaybackUpdate` messages back to the update thread
+3. **Update processor thread** — spawned in `main.rs`, receives `PlaybackUpdate` from the engine, mutates `Arc<Mutex<AppState>>`, and auto-advances the queue on `TrackEnded`
+4. **cpal callback thread** — owned by cpal/OS audio subsystem, real-time thread that pulls samples from the shared `Arc<Mutex<VecDeque<f32>>>` buffer via `try_lock` and writes to the hardware
+5. **Library scanner thread** — spawned when scanning, uses `walkdir`, sends `LibraryUpdate` messages
+6. **Cover loader thread** — spawned per cover load request, terminates after image is decoded
 
 **Communication:**
-- Audio thread → Main thread: `mpsc::channel<AudioUpdate>` (position updates, state changes, errors)
-- Main thread → Audio thread: `mpsc::channel<AudioCommand>` (play, pause, seek, volume)
-- Scanner thread → Main thread: `mpsc::channel<LibraryUpdate>` (tracks found, scan complete)
-- Cover thread → Main thread: `mpsc::channel<CoverUpdate>` (image loaded, load failed)
+- Audio engine thread → Update processor thread: `crossbeam_channel<PlaybackUpdate>` (state changes, position updates, track ended, errors)
+- UI thread → Audio engine thread: `crossbeam_channel<PlaybackCommand>` (play, pause, resume, stop, seek, volume, next, previous)
+- UI thread → Library scanner thread: `crossbeam_channel<LibraryCommand>` (scan directory, cancel scan)
+- Library scanner thread → UI thread: `crossbeam_channel<LibraryUpdate>` (scan progress, scan complete, scan error)
+- Cover thread → UI thread: `crossbeam_channel<CoverUpdate>` (image loaded, load failed)
 
 **Shared state:**
-- `Arc<RwLock<AppState>>` — read by UI every frame, written by background threads
-- `Arc<AtomicU64>` — current playback position in samples (updated by audio thread, read by UI)
-- `Arc<AtomicF32>` — current volume level (updated by UI, read by audio thread)
+- `Arc<Mutex<AppState>>` — read by UI every frame, written by the update processor thread. Contains library, queue, playback state, current position, theme, and UI state.
+- `Arc<Mutex<VecDeque<f32>>>` — shared audio buffer between the engine thread (producer) and the cpal callback thread (consumer). The engine pushes decoded samples; the callback pops them via `try_lock`. No hard upper bound; backpressure in the decode loop prevents unbounded growth.
 
 **Constraints:**
-- Audio callback must never block (no I/O, no locking, no allocation)
+- cpal callback must never block — uses `try_lock()` on the shared buffer; on lock failure, outputs silence
+- Audio engine thread must not race ahead of playback — backpressure enforced by checking buffer fill level before each decode
 - UI thread must never block (all heavy work on background threads)
 - Background threads must not hold locks during long operations
+- `AppState` is behind a single `Arc<Mutex<>>` — no nested locking, plan lock ordering carefully
 
 ---
 

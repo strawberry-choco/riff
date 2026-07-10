@@ -101,24 +101,30 @@ fn main() {
                                         chunk_paths,
                                         &reader,
                                     ) {
-                                        let _ = library_update_tx.send(LibraryUpdate::ScanError(
-                                            e.to_string(),
-                                        ));
+                                        let _ = library_update_tx.send(LibraryUpdate::ScanError {
+                                            path: path.clone(),
+                                            message: e.to_string(),
+                                        });
                                     }
                                 }
 
                                 let _ = library_update_tx.send(LibraryUpdate::ScanProgress {
+                                    path: path.clone(),
                                     files_found: processed.min(total),
                                     current_dir: path.to_string_lossy().to_string(),
                                 });
                             }
 
                             let _ = library_update_tx.send(LibraryUpdate::ScanComplete {
+                                path: path.clone(),
                                 total_files: total,
                             });
                         }
                         Err(e) => {
-                            let _ = library_update_tx.send(LibraryUpdate::ScanError(e.to_string()));
+                            let _ = library_update_tx.send(LibraryUpdate::ScanError {
+                                path: path.clone(),
+                                message: e.to_string(),
+                            });
                         }
                     }
                 }

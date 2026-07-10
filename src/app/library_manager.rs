@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use crate::app::errors::AppError;
 use crate::app::traits::MetadataReader;
 use crate::domain::{Track, TrackId, Artist, Album};
@@ -9,7 +9,6 @@ pub struct LibraryManager {
     pub tracks: HashMap<TrackId, Track>,
     pub artists: HashMap<String, Artist>,
     pub albums: HashMap<String, Album>,
-    pub root_path: Option<PathBuf>,
 }
 
 impl LibraryManager {
@@ -18,7 +17,6 @@ impl LibraryManager {
             tracks: HashMap::new(),
             artists: HashMap::new(),
             albums: HashMap::new(),
-            root_path: None,
         }
     }
 
@@ -110,6 +108,21 @@ impl LibraryManager {
                 }
             }
         }
+    }
+
+    /// Remove all tracks whose file_path starts with the given root,
+    /// and clean up orphaned artists/albums.
+    pub fn remove_tracks_by_root(&mut self, root: &Path) -> usize {
+        let ids_to_remove: Vec<TrackId> = self.tracks
+            .iter()
+            .filter(|(_, t)| t.file_path.starts_with(root))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let count = ids_to_remove.len();
+        for id in ids_to_remove {
+            self.remove_track(&id);
+        }
+        count
     }
 
     pub fn search(&self, query: &str) -> Vec<&Track> {

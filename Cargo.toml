@@ -10,7 +10,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 # UI
 egui = "0.28"
-eframe = { version = "0.28", features = ["default"] }
+eframe = { version = "0.28", features = ["default", "persistence"] }
 
 # Audio decoding (pure Rust)
 symphonia = { version = "0.5", features = ["all"] }
@@ -55,6 +55,8 @@ epi = { package = "egui_extras", version = "0.28", features = ["image"] }
 # System tray (macOS/Windows only — requires GTK dev libs on Linux)
 tray-icon = "0.19"
 muda = "0.15"
+# Native file dialog (macOS/Windows only — Linux uses text input)
+rfd = "0.14"
 
 [profile.release]
 opt-level = 3

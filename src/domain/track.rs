@@ -72,7 +72,7 @@ impl TrackMetadata {
 }
 
 /// An album in the music library (aggregate of tracks).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Album {
     pub title: String,
     pub artist: String,
@@ -82,7 +82,7 @@ pub struct Album {
 }
 
 /// An artist in the music library.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Artist {
     pub name: String,
     pub albums: Vec<String>,

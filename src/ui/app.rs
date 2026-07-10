@@ -91,6 +91,7 @@ impl RiffApp {
                     LibraryUpdate::ScanComplete { path, total_files } => {
                         state.library_statuses.insert(path, LibraryStatus::Scanned(total_files));
                         state.scan_status = Some(format!("Scan complete: {} tracks", total_files));
+                        state.library.save_cache();
                     }
                     LibraryUpdate::ScanError { path, message } => {
                         state.library_statuses.insert(path, LibraryStatus::Idle);
@@ -137,6 +138,8 @@ impl eframe::App for RiffApp {
 
         if self.first_frame {
             self.apply_theme(ctx, state.theme);
+
+            state.library = crate::app::library_manager::LibraryManager::load_cache();
             let persisted_paths = crate::ui::settings::load_library_paths(_frame.storage());
             if !persisted_paths.is_empty() {
                 state.library_paths = persisted_paths.clone();

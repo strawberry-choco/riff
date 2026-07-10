@@ -5,6 +5,7 @@ use crate::app::traits::MetadataReader;
 use crate::domain::{Track, TrackId, Artist, Album};
 
 /// Manages the music library: scanning, indexing, metadata, and search.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LibraryManager {
     pub tracks: HashMap<TrackId, Track>,
     pub artists: HashMap<String, Artist>,
@@ -175,5 +176,57 @@ impl LibraryManager {
         self.tracks.clear();
         self.artists.clear();
         self.albums.clear();
+    }
+
+    fn cache_path() -> Option<std::path::PathBuf> {
+        directories::ProjectDirs::from("", "", "riff")
+            .map(|d| d.data_local_dir().join("library_cache.json"))
+    }
+
+    pub fn save_cache(&self) {
+        let path = match Self::cache_path() {
+            Some(p) => p,
+            None => return,
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!("Failed to create cache directory: {e}");
+                return;
+            }
+        }
+        let json = match serde_json::to_string(self) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!("Failed to serialize library cache: {e}");
+                return;
+            }
+        };
+        if let Err(e) = std::fs::write(&path, json) {
+            tracing::warn!("Failed to write library cache: {e}");
+        }
+    }
+
+    pub fn load_cache() -> Self {
+        let path = match Self::cache_path() {
+            Some(p) => p,
+            None => return Self::new(),
+        };
+        if !path.exists() {
+            return Self::new();
+        }
+        let json = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Failed to read library cache: {e}");
+                return Self::new();
+            }
+        };
+        match serde_json::from_str(&json) {
+            Ok(lib) => lib,
+            Err(e) => {
+                tracing::warn!("Failed to deserialize library cache: {e}");
+                Self::new()
+            }
+        }
     }
 }

@@ -1,7 +1,7 @@
 ---
 feature: Music Library Management
 epic: Music Library
-status: pending
+status: implemented
 priority: P0
 depends_on: ["Library Scanning"]
 personas: ["Music Listener"]

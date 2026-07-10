@@ -1,0 +1,66 @@
+[package]
+name = "riff"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["riff contributors"]
+description = "A lightweight, offline-first music player built in Rust with egui"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# UI
+egui = "0.28"
+eframe = { version = "0.28", features = ["default"] }
+
+# Audio decoding (pure Rust)
+symphonia = { version = "0.5", features = ["all"] }
+
+# Audio output (cross-platform)
+cpal = "0.15"
+
+# Metadata reading (pure Rust)
+lofty = "0.19"
+
+# Image decoding for cover art
+image = { version = "0.24", default-features = false, features = ["jpeg", "png"] }
+
+# File system scanning
+walkdir = "2"
+
+# Error handling
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialization for state persistence
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Config directories
+directories = "5"
+
+# Threading / sync
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+
+# Random for shuffle
+rand = "0.8"
+
+# For image data in egui
+epi = { package = "egui_extras", version = "0.28", features = ["image"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+# System tray (macOS/Windows only — requires GTK dev libs on Linux)
+tray-icon = "0.19"
+muda = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1

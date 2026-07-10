@@ -108,11 +108,14 @@ impl AudioDecoder for SymphoniaDecoder {
         let decoded = decoder.decode(&packet)
             .map_err(|e| AppError::Decode(format!("Decode error: {}", e)))?;
 
-        let spec = decoded.spec();
-        let spec_changed = self.spec.as_ref().map_or(true, |s| s != spec);
-        if spec_changed {
+        let spec = *decoded.spec();
+        let spec_changed = self.spec.as_ref().map_or(true, |s| s != &spec);
+        if spec_changed || self.sample_buffer.is_none() {
             let duration = decoded.capacity() as u64;
-            self.sample_buffer = Some(SampleBuffer::<f32>::new(duration, *spec));
+            self.sample_buffer = Some(SampleBuffer::<f32>::new(duration, spec));
+            if spec_changed {
+                self.spec = Some(spec);
+            }
         }
 
         let sample_buffer = self.sample_buffer.as_mut().unwrap();

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use crossbeam_channel::{Sender, Receiver, unbounded};
 use crate::app::commands::{LibraryCommand, LibraryUpdate};
 use crate::app::cover_resolver::CoverResolver;
-use crate::app::state::{AppState, ViewMode, Theme as AppTheme};
+use crate::app::state::{AppState, ViewMode, Theme as AppTheme, LibraryStatus};
 use crate::domain::{PlaybackCommand, PlaybackState, RepeatMode, TrackId, Track};
 use crate::infra::{LoftyMetadataReader, ImageCoverLoader};
 
@@ -19,7 +19,8 @@ pub struct RiffApp {
     cover_request_tx: Option<Sender<(TrackId, PathBuf)>>,
     cover_response_rx: Receiver<(String, Option<crate::app::traits::CoverImage>)>,
     search_focus: bool,
-    pending_scan_path: String,
+    pub(crate) settings_text_input: String,
+    pub(crate) settings_show_input: bool,
     first_frame: bool,
 }
 
@@ -58,7 +59,8 @@ impl RiffApp {
             cover_request_tx: Some(cover_tx),
             cover_response_rx: response_rx,
             search_focus: false,
-            pending_scan_path: String::new(),
+            settings_text_input: String::new(),
+            settings_show_input: false,
             first_frame: true,
         }
     }
@@ -82,17 +84,17 @@ impl RiffApp {
         if let Some(ref rx) = self.library_update_rx {
             while let Ok(update) = rx.try_recv() {
                 match update {
-                    LibraryUpdate::ScanProgress { files_found, current_dir } => {
-                        state.is_scanning = true;
+                    LibraryUpdate::ScanProgress { path, files_found, current_dir } => {
+                        state.library_statuses.insert(path, LibraryStatus::Scanning { files_found });
                         state.scan_status = Some(format!("{} files, {}", files_found, current_dir));
                     }
-                    LibraryUpdate::ScanComplete { total_files } => {
-                        state.is_scanning = false;
+                    LibraryUpdate::ScanComplete { path, total_files } => {
+                        state.library_statuses.insert(path, LibraryStatus::Scanned(total_files));
                         state.scan_status = Some(format!("Scan complete: {} tracks", total_files));
                     }
-                    LibraryUpdate::ScanError(msg) => {
-                        state.is_scanning = false;
-                        state.scan_status = Some(format!("Error: {}", msg));
+                    LibraryUpdate::ScanError { path, message } => {
+                        state.library_statuses.insert(path, LibraryStatus::Idle);
+                        state.scan_status = Some(format!("Error: {}", message));
                     }
                 }
             }
@@ -135,6 +137,18 @@ impl eframe::App for RiffApp {
 
         if self.first_frame {
             self.apply_theme(ctx, state.theme);
+            let persisted_paths = crate::ui::settings::load_library_paths(_frame.storage());
+            if !persisted_paths.is_empty() {
+                state.library_paths = persisted_paths.clone();
+                for path in &persisted_paths {
+                    let status = if path.exists() {
+                        LibraryStatus::Idle
+                    } else {
+                        LibraryStatus::Unavailable
+                    };
+                    state.library_statuses.insert(path.clone(), status);
+                }
+            }
             self.first_frame = false;
         }
 
@@ -175,23 +189,6 @@ impl eframe::App for RiffApp {
             ui.horizontal(|ui| {
                 ui.heading("riff");
 
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.pending_scan_path)
-                        .desired_width(200.0)
-                        .hint_text("/path/to/music"),
-                );
-                let scanning = state.is_scanning;
-                let scan_btn = if scanning {
-                    ui.add_enabled(false, egui::Button::new("\u{23F3} Scan"))
-                } else {
-                    ui.button("\u{1F4C2} Scan")
-                };
-                if scan_btn.clicked() && !self.pending_scan_path.is_empty() {
-                    let path = PathBuf::from(self.pending_scan_path.clone());
-                    if let Some(ref s) = lib_cmd {
-                        let _ = s.send(LibraryCommand::ScanDirectory(path));
-                    }
-                }
                 if let Some(ref status) = state.scan_status {
                     ui.label(status);
                 }
@@ -208,11 +205,14 @@ impl eframe::App for RiffApp {
                         };
                         self.apply_theme(ctx, state.theme);
                     }
-                    if ui.button("\u{2699}").clicked() {}
+                    if ui.button("\u{2699}").clicked() {
+                        state.view_mode = ViewMode::Settings;
+                    }
                     if ui.button("\u{1F3B5}").clicked() {
                         state.view_mode = match state.view_mode {
                             ViewMode::Library => ViewMode::NowPlaying,
                             ViewMode::NowPlaying => ViewMode::Library,
+                            ViewMode::Settings => ViewMode::Library,
                         };
                     }
                 });
@@ -305,6 +305,7 @@ impl eframe::App for RiffApp {
         match state.view_mode {
             ViewMode::Library => self.show_library_view(ctx, &mut state, &cmd),
             ViewMode::NowPlaying => self.show_now_playing_view(ctx, &mut state, &cmd),
+            ViewMode::Settings => self.show_settings_view(ctx, &mut state, &lib_cmd, _frame),
         }
 
         ctx.request_repaint_after(std::time::Duration::from_millis(100));

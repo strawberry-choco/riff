@@ -1,6 +1,19 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use crate::app::library_manager::LibraryManager;
 use crate::domain::{TrackId, PlaybackQueue, PlaybackState, PlaybackPosition};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LibraryStatus {
+    Idle,
+    Scanning { files_found: usize },
+    Scanned(usize),
+    Unavailable,
+}
+
+impl Default for LibraryStatus {
+    fn default() -> Self { Self::Idle }
+}
 
 /// Central state for the entire application.
 pub struct AppState {
@@ -14,8 +27,8 @@ pub struct AppState {
     pub view_mode: ViewMode,
     pub window_visible: bool,
     pub search_query: String,
-    pub library_path: Option<PathBuf>,
-    pub is_scanning: bool,
+    pub library_paths: Vec<PathBuf>,
+    pub library_statuses: HashMap<PathBuf, LibraryStatus>,
     pub scan_status: Option<String>,
     pub theme: Theme,
 }
@@ -24,6 +37,7 @@ pub struct AppState {
 pub enum ViewMode {
     Library,
     NowPlaying,
+    Settings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -46,8 +60,8 @@ impl AppState {
             view_mode: ViewMode::Library,
             window_visible: true,
             search_query: String::new(),
-            library_path: None,
-            is_scanning: false,
+            library_paths: Vec::new(),
+            library_statuses: HashMap::new(),
             scan_status: None,
             theme: Theme::Dark,
         }

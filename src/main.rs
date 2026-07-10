@@ -168,7 +168,10 @@ fn run_audio_engine(
     state: Arc<Mutex<AppState>>,
     cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
 ) {
-    let mut decoder = SymphoniaDecoder::new();
+    let mut codec_registry = symphonia::core::codecs::CodecRegistry::new();
+    symphonia::default::register_enabled_codecs(&mut codec_registry);
+    codec_registry.register_all::<symphonia_adapter_libopus::OpusDecoder>();
+    let mut decoder = SymphoniaDecoder::new(codec_registry);
     let mut audio_output = CpalAudioOutput::new();
     let mut current_track_id: Option<crate::domain::TrackId> = None;
     let mut volume = 1.0f32;

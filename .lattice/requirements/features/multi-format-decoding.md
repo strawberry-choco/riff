@@ -7,8 +7,12 @@ depends_on: []
 personas: ["Music Listener"]
 source_docs: []
 implementation_notes: |
-  Implemented via SymphoniaDecoder in infra/decoder.rs using symphonia with
-  all feature flags. Supports MP3, AAC, Opus, FLAC, OGG Vorbis, WAV.
+  Implemented via SymphoniaDecoder in infra/decoder.rs. All in-scope codecs
+  (MP3, AAC, FLAC, OGG Vorbis, WAV) use symphonia native decoders.
+  Opus uses symphonia-adapter-libopus (FFI wrapper around libopus) because
+  symphonia 0.5's symphonia-codec-opus crate is a placeholder with no decoder.
+  The adapter is registered into a custom CodecRegistry alongside the default
+  symphonia codecs via symphonia::default::register_enabled_codecs.
 ---
 
 # Multi-format Decoding

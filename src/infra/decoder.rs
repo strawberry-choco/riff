@@ -1,29 +1,29 @@
 use std::path::PathBuf;
 use std::time::Duration;
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{CodecRegistry, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use symphonia::default::get_codecs;
 use symphonia::default::get_probe;
 use crate::app::traits::{AudioDecoder, AudioFormatInfo};
 use crate::app::errors::AppError;
 
 pub struct SymphoniaDecoder {
+    codec_registry: CodecRegistry,
     format_reader: Option<Box<dyn FormatReader>>,
     decoder: Option<Box<dyn symphonia::core::codecs::Decoder>>,
     track_id: u32,
     sample_buffer: Option<SampleBuffer<f32>>,
     spec: Option<SignalSpec>,
     duration: Option<Duration>,
-    /// Samples left over from a previous decoded packet that exceeded max_samples.
     pending_samples: Vec<f32>,
 }
 
 impl SymphoniaDecoder {
-    pub fn new() -> Self {
+    pub fn new(codec_registry: CodecRegistry) -> Self {
         Self {
+            codec_registry,
             format_reader: None,
             decoder: None,
             track_id: 0,
@@ -71,7 +71,7 @@ impl AudioDecoder for SymphoniaDecoder {
         let duration = track.codec_params.n_frames
             .map(|frames| Duration::from_secs_f64(frames as f64 / sample_rate as f64));
 
-        let decoder = get_codecs()
+        let decoder = self.codec_registry
             .make(&track.codec_params, &decoder_opts)
             .map_err(|e| AppError::Decode(format!("Decoder creation failed: {}", e)))?;
 

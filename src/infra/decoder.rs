@@ -17,6 +17,8 @@ pub struct SymphoniaDecoder {
     sample_buffer: Option<SampleBuffer<f32>>,
     spec: Option<SignalSpec>,
     duration: Option<Duration>,
+    /// Samples left over from a previous decoded packet that exceeded max_samples.
+    pending_samples: Vec<f32>,
 }
 
 impl SymphoniaDecoder {
@@ -28,6 +30,7 @@ impl SymphoniaDecoder {
             sample_buffer: None,
             spec: None,
             duration: None,
+            pending_samples: Vec::new(),
         }
     }
 }
@@ -77,6 +80,7 @@ impl AudioDecoder for SymphoniaDecoder {
         self.spec = Some(SignalSpec::new(sample_rate, track.codec_params.channels.unwrap_or(symphonia::core::audio::Channels::FRONT_LEFT | symphonia::core::audio::Channels::FRONT_RIGHT)));
 
         self.sample_buffer = None;
+        self.pending_samples.clear();
         self.decoder = Some(decoder);
         self.format_reader = Some(format);
 
@@ -88,6 +92,14 @@ impl AudioDecoder for SymphoniaDecoder {
     }
 
     fn next_frames(&mut self, max_samples: usize) -> Result<Option<Vec<f32>>, AppError> {
+        // Drain leftover samples from a previous oversized decode before decoding more.
+        if !self.pending_samples.is_empty() {
+            let available = self.pending_samples.len();
+            let to_return = max_samples.min(available);
+            let result: Vec<f32> = self.pending_samples.drain(..to_return).collect();
+            return Ok(Some(result));
+        }
+
         let format = self.format_reader.as_mut()
             .ok_or_else(|| AppError::Decode("Decoder not open".to_string()))?;
         let decoder = self.decoder.as_mut()
@@ -122,8 +134,14 @@ impl AudioDecoder for SymphoniaDecoder {
         sample_buffer.copy_interleaved_ref(decoded);
         let samples = sample_buffer.samples().to_vec();
 
-        let samples_to_return = max_samples.min(samples.len());
-        Ok(Some(samples[..samples_to_return].to_vec()))
+        let total = samples.len();
+        if total <= max_samples {
+            Ok(Some(samples))
+        } else {
+            // Packet had more samples than requested — buffer the rest.
+            self.pending_samples = samples[max_samples..].to_vec();
+            Ok(Some(samples[..max_samples].to_vec()))
+        }
     }
 
     fn seek(&mut self, position: Duration) -> Result<(), AppError> {
@@ -140,6 +158,8 @@ impl AudioDecoder for SymphoniaDecoder {
                 ts: sample,
             },
         ).map_err(|e| AppError::Decode(format!("Seek error: {}", e)))?;
+
+        self.pending_samples.clear();
 
         if let Some(decoder) = self.decoder.as_mut() {
             decoder.reset();

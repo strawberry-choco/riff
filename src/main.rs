@@ -66,6 +66,8 @@ fn main() {
                 }
                 PlaybackUpdate::Error(msg) => {
                     tracing::error!("Playback error: {}", msg);
+                    state.playback_state = PlaybackState::Stopped;
+                    state.scan_status = Some(format!("Playback error: {}", msg));
                 }
             }
         }
@@ -195,11 +197,51 @@ fn run_audio_engine(
                                 continue;
                             }
 
+                            audio_output.clear_buffer();
+
                             let mut is_playing = true;
+                            let mut should_stop_audio = true;
                             let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Playing));
                             let start_time = std::time::Instant::now();
+                            let max_buffer_samples = (info.sample_rate as usize) * (info.channels as usize) * 2;
 
                             loop {
+                                if !is_playing {
+                                    break;
+                                }
+
+                                // Backpressure: don't decode when the buffer is already full
+                                while audio_output.buffer_len() >= max_buffer_samples {
+                                    if let Ok(cmd) = cmd_rx.try_recv() {
+                                        match cmd {
+                                            PlaybackCommand::Pause => {
+                                                is_playing = false;
+                                                should_stop_audio = false;
+                                                let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Paused));
+                                                break;
+                                            }
+                                            PlaybackCommand::Stop => {
+                                                audio_output.clear_buffer();
+                                                let _ = audio_output.stop();
+                                                let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Stopped));
+                                                is_playing = false;
+                                                should_stop_audio = false;
+                                                break;
+                                            }
+                                            PlaybackCommand::Seek(pos) => {
+                                                let _ = decoder.seek(pos);
+                                                audio_output.clear_buffer();
+                                            }
+                                            PlaybackCommand::SetVolume(vol) => {
+                                                volume = vol;
+                                                audio_output.set_volume(vol);
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(10));
+                                }
+
                                 if !is_playing {
                                     break;
                                 }
@@ -222,6 +264,19 @@ fn run_audio_engine(
                                     }
                                     Ok(None) => {
                                         let _ = update_tx.send(PlaybackUpdate::TrackEnded);
+                                        // Wait for the remaining buffer to drain before stopping
+                                        while audio_output.buffer_len() > 0 {
+                                            if let Ok(cmd) = cmd_rx.try_recv() {
+                                                match cmd {
+                                                    PlaybackCommand::Stop => {
+                                                        audio_output.clear_buffer();
+                                                        break;
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                            std::thread::sleep(std::time::Duration::from_millis(50));
+                                        }
                                         break;
                                     }
                                     Err(e) => {
@@ -234,15 +289,19 @@ fn run_audio_engine(
                                     match cmd {
                                         PlaybackCommand::Pause => {
                                             is_playing = false;
+                                            should_stop_audio = false;
                                             let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Paused));
                                         }
                                         PlaybackCommand::Stop => {
+                                            audio_output.clear_buffer();
                                             let _ = audio_output.stop();
                                             let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Stopped));
+                                            should_stop_audio = false;
                                             break;
                                         }
                                         PlaybackCommand::Seek(pos) => {
                                             let _ = decoder.seek(pos);
+                                            audio_output.clear_buffer();
                                         }
                                         PlaybackCommand::SetVolume(vol) => {
                                             volume = vol;
@@ -253,7 +312,9 @@ fn run_audio_engine(
                                 }
                             }
 
-                            let _ = audio_output.stop();
+                            if should_stop_audio {
+                                let _ = audio_output.stop();
+                            }
                         }
                         Err(e) => {
                             let _ = update_tx.send(PlaybackUpdate::Error(e.to_string()));

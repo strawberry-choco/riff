@@ -26,6 +26,10 @@ pub trait AudioOutput: Send {
     fn stop(&mut self) -> Result<(), AppError>;
     fn write_samples(&mut self, samples: &[f32]) -> Result<usize, AppError>;
     fn set_volume(&mut self, volume: f32);
+    /// Number of samples currently queued in the output buffer.
+    fn buffer_len(&self) -> usize;
+    /// Discard all queued samples without playing them.
+    fn clear_buffer(&mut self);
 }
 
 /// Trait for metadata readers (implemented by infrastructure).

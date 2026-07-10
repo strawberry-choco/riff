@@ -32,6 +32,7 @@ The system that discovers, indexes, and organizes local audio files. It scans di
 | [Metadata Extraction](features/metadata-extraction.md) | Extract and store tags from audio containers | implemented | P0 | Library Scanning |
 | [Cover Art Resolution](features/cover-art-resolution.md) | Resolve cover: embedded metadata > cover.jpg/cover.png | implemented | P1 | Metadata Extraction |
 | [Library Search](features/library-search.md) | Search by artist, album artist, album, title | implemented | P1 | Metadata Extraction |
+| [Music Library Management](features/music-library-management.md) | Manage multiple library paths, OS file picker for add, delete, persist list | pending | P0 | Library Scanning |
 
 ### User Interface
 The egui-based graphical interface that provides a main application window, a library explorer with dual views (file tree and searchable list), a player control bar with transport controls, a cover art display panel, and a now playing view. Must work on Linux, Windows, and macOS with minimal external dependencies.

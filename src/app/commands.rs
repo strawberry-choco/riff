@@ -8,7 +8,7 @@ pub enum LibraryCommand {
 
 #[derive(Debug, Clone)]
 pub enum LibraryUpdate {
-    ScanProgress { files_found: usize, current_dir: String },
-    ScanComplete { total_files: usize },
-    ScanError(String),
+    ScanProgress { path: PathBuf, files_found: usize, current_dir: String },
+    ScanComplete { path: PathBuf, total_files: usize },
+    ScanError { path: PathBuf, message: String },
 }

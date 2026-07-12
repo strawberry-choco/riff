@@ -159,12 +159,12 @@ impl super::app::RiffApp {
     /// Render the settings view inside CentralPanel.
     pub fn show_settings_view(
         &mut self,
-        ctx: &egui::Context,
+        parent_ui: &mut egui::Ui,
         state: &mut AppState,
         lib_cmd: &Option<Sender<LibraryCommand>>,
         frame: &mut eframe::Frame,
     ) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(parent_ui, |ui| {
             ui.vertical(|ui| {
                 // --- TOP BAR ---
                 ui.horizontal(|ui| {

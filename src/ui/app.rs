@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use crossbeam_channel::{Sender, Receiver, unbounded};
 use crate::app::commands::{LibraryCommand, LibraryUpdate};
 use crate::app::cover_resolver::CoverResolver;
-use crate::app::state::{AppState, ViewMode, Theme as AppTheme, LibraryStatus, BrowseMode};
+use elegance::Theme as EleganceTheme;
+use crate::app::state::{AppState, ViewMode, LibraryStatus, BrowseMode};
 use crate::app::watcher_manager::WatcherManager;
 use crate::domain::{PlaybackCommand, PlaybackState, RepeatMode, TrackId, Track};
 use crate::infra::{LoftyMetadataReader, ImageCoverLoader};
@@ -25,6 +26,7 @@ pub struct RiffApp {
     pub(crate) settings_path_error: Option<String>,
     first_frame: bool,
     pub(crate) watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
+    elegance_theme: bool, // true = dark (slate), false = light (frost)
     #[cfg(not(target_os = "linux"))]
     tray_icon: Arc<Mutex<Option<tray_icon::TrayIcon>>>,
 }
@@ -78,6 +80,7 @@ impl RiffApp {
             settings_path_error: None,
             first_frame: true,
             watcher_manager,
+            elegance_theme: true, // dark (slate) by default
             #[cfg(not(target_os = "linux"))]
             tray_icon,
         }
@@ -88,13 +91,6 @@ impl RiffApp {
             if let Some(ref tx) = self.cover_request_tx {
                 let _ = tx.send((track_id.clone(), file_path.clone()));
             }
-        }
-    }
-
-    fn apply_theme(&self, ctx: &egui::Context, theme: AppTheme) {
-        match theme {
-            AppTheme::Light => ctx.set_visuals(egui::Visuals::light()),
-            AppTheme::Dark => ctx.set_visuals(egui::Visuals::dark()),
         }
     }
 
@@ -155,19 +151,22 @@ impl RiffApp {
 }
 
 impl eframe::App for RiffApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if self.elegance_theme {
+            EleganceTheme::slate().install(ui.ctx());
+        } else {
+            EleganceTheme::frost().install(ui.ctx());
+        }
+
         let cmd = self.command_sender.clone();
         let lib_cmd = self.library_command_sender.clone();
-        // Clone Arc before locking so guard borrows local arc, not self.state
         let state_arc = self.state.clone();
 
         let mut state = state_arc.lock().unwrap();
 
         if self.first_frame {
-            self.apply_theme(ctx, state.theme);
-
             state.library = crate::app::library_manager::LibraryManager::load_cache();
-            let persisted_paths = crate::ui::settings::load_library_paths(_frame.storage());
+            let persisted_paths = crate::ui::settings::load_library_paths(frame.storage());
             if !persisted_paths.is_empty() {
                 state.library_paths = persisted_paths.clone();
                 for path in &persisted_paths {
@@ -180,28 +179,28 @@ impl eframe::App for RiffApp {
                 }
             }
 
-            if let Some(vol) = crate::ui::settings::load_volume(_frame.storage()) {
+            if let Some(vol) = crate::ui::settings::load_volume(frame.storage()) {
                 state.current_volume = vol;
                 if let Some(ref s) = cmd {
                     let _ = s.send(PlaybackCommand::SetVolume(vol));
                 }
             }
 
-            state.watch_states = crate::ui::settings::load_watch_states(_frame.storage());
+            state.watch_states = crate::ui::settings::load_watch_states(frame.storage());
 
             self.first_frame = false;
         }
 
         self.poll_library_updates(&mut state);
-        self.update_cover_cache(ctx);
+        self.update_cover_cache(ui.ctx());
         self.poll_watchers();
 
         // Keyboard shortcuts
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::F)) {
+        if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::F)) {
             self.search_focus = true;
         }
-        if !ctx.wants_keyboard_input() {
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
+        if !ui.ctx().egui_wants_keyboard_input() {
+            if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
                 let playing = state.playback_state == PlaybackState::Playing;
                 if playing {
                     if let Some(ref s) = cmd { let _ = s.send(PlaybackCommand::Pause); }
@@ -219,7 +218,7 @@ impl eframe::App for RiffApp {
                     track.metadata.display_artist(),
                     track.metadata.display_title(&track.file_path)
                 );
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
                 #[cfg(not(target_os = "linux"))]
                 if let Ok(guard) = self.tray_icon.lock() {
                     if let Some(ref tray) = *guard {
@@ -228,7 +227,7 @@ impl eframe::App for RiffApp {
                 }
             }
         } else {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title("riff".to_owned()));
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title("riff".to_owned()));
             #[cfg(not(target_os = "linux"))]
             if let Ok(guard) = self.tray_icon.lock() {
                 if let Some(ref tray) = *guard {
@@ -238,7 +237,7 @@ impl eframe::App for RiffApp {
         }
 
         // --- TOP BAR ---
-        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
+        egui::Panel::top("top_bar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("riff");
 
@@ -247,16 +246,9 @@ impl eframe::App for RiffApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let theme_icon = match state.theme {
-                        AppTheme::Dark => "\u{2600}",
-                        AppTheme::Light => "\u{1F319}",
-                    };
+                    let theme_icon = if self.elegance_theme { "\u{2600}" } else { "\u{1F319}" };
                     if ui.button(theme_icon).clicked() {
-                        state.theme = match state.theme {
-                            AppTheme::Dark => AppTheme::Light,
-                            AppTheme::Light => AppTheme::Dark,
-                        };
-                        self.apply_theme(ctx, state.theme);
+                        self.elegance_theme = !self.elegance_theme;
                     }
                     if ui.button("\u{2699}").clicked() {
                         state.view_mode = ViewMode::Settings;
@@ -273,7 +265,7 @@ impl eframe::App for RiffApp {
         });
 
         // --- CONTROL BAR ---
-        egui::TopBottomPanel::bottom("control_bar").show(ctx, |ui| {
+        egui::Panel::bottom("control_bar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 let playing = state.playback_state == PlaybackState::Playing;
                 let paused = state.playback_state == PlaybackState::Paused;
@@ -332,7 +324,7 @@ impl eframe::App for RiffApp {
                 let mut vol = state.current_volume;
                 if ui.add(egui::Slider::new(&mut vol, 0.0..=1.0)).changed() {
                     state.current_volume = vol;
-                    if let Some(storage) = _frame.storage_mut() {
+                    if let Some(storage) = frame.storage_mut() {
                         crate::ui::settings::save_volume(storage, vol);
                     }
                     if let Some(ref s) = cmd { let _ = s.send(PlaybackCommand::SetVolume(vol)); }
@@ -359,12 +351,12 @@ impl eframe::App for RiffApp {
 
         // --- MAIN CONTENT ---
         match state.view_mode {
-            ViewMode::Library => self.show_library_view(ctx, &mut state, &cmd),
-            ViewMode::NowPlaying => self.show_now_playing_view(ctx, &mut state, &cmd),
-            ViewMode::Settings => self.show_settings_view(ctx, &mut state, &lib_cmd, _frame),
+            ViewMode::Library => self.show_library_view(ui, &mut state, &cmd),
+            ViewMode::NowPlaying => self.show_now_playing_view(ui, &mut state, &cmd),
+            ViewMode::Settings => self.show_settings_view(ui, &mut state, &lib_cmd, frame),
         }
 
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
     }
 }
 
@@ -372,11 +364,11 @@ impl eframe::App for RiffApp {
 impl RiffApp {
     fn show_library_view(
         &mut self,
-        ctx: &egui::Context,
+        parent_ui: &mut egui::Ui,
         state: &mut AppState,
         cmd: &Option<Sender<PlaybackCommand>>,
     ) {
-        egui::SidePanel::left("library_panel").show(ctx, |ui| {
+        egui::Panel::left("library_panel").show_inside(parent_ui, |ui| {
             ui.label("Library");
             ui.separator();
 
@@ -438,7 +430,7 @@ impl RiffApp {
         });
 
         // Right side: track details + cover
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(parent_ui, |ui| {
             if let Some(track_id) = state.selected_track.clone() {
                 if let Some(track) = state.library.get_track(&track_id) {
                     self.request_cover(&track.id, &track.file_path);
@@ -472,7 +464,7 @@ impl RiffApp {
                             } else {
                                 let (rect, _) = ui.allocate_exact_size(egui::vec2(200.0, 200.0), egui::Sense::hover());
                                 ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(40));
-                                ui.allocate_ui_at_rect(rect, |ui| {
+                                ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                                     ui.vertical_centered(|ui| {
                                         ui.add_space(80.0);
                                         ui.label("\u{1F3B5}");
@@ -578,19 +570,19 @@ impl RiffApp {
                                                     if let Some(ref s) = cmd_ct {
                                                         let _ = s.send(PlaybackCommand::Play(track.id.clone()));
                                                     }
-                                                    ui.close_menu();
+                                                    ui.close();
                                                 }
                                                 if ui.button("Play Next").clicked() {
                                                     if let Some(ref s) = cmd_ct {
                                                         let _ = s.send(PlaybackCommand::PlayNext(track.id.clone()));
                                                     }
-                                                    ui.close_menu();
+                                                    ui.close();
                                                 }
                                                 if ui.button("Add to Queue").clicked() {
                                                     if let Some(ref s) = cmd_ct {
                                                         let _ = s.send(PlaybackCommand::AddToQueue(track.id.clone()));
                                                     }
-                                                    ui.close_menu();
+                                                    ui.close();
                                                 }
                                             });
                                         });
@@ -652,19 +644,19 @@ impl RiffApp {
                                 if let Some(ref s) = cmd_ct {
                                     let _ = s.send(PlaybackCommand::Play(tid_ct.clone()));
                                 }
-                                ui.close_menu();
+                                ui.close();
                             }
                             if ui.button("Play Next").clicked() {
                                 if let Some(ref s) = cmd_ct {
                                     let _ = s.send(PlaybackCommand::PlayNext(tid_ct.clone()));
                                 }
-                                ui.close_menu();
+                                ui.close();
                             }
                             if ui.button("Add to Queue").clicked() {
                                 if let Some(ref s) = cmd_ct {
                                     let _ = s.send(PlaybackCommand::AddToQueue(tid_ct.clone()));
                                 }
-                                ui.close_menu();
+                                ui.close();
                             }
                         });
                     });
@@ -675,11 +667,11 @@ impl RiffApp {
 
     fn show_now_playing_view(
         &mut self,
-        ctx: &egui::Context,
+        parent_ui: &mut egui::Ui,
         state: &mut AppState,
         cmd: &Option<Sender<PlaybackCommand>>,
     ) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(parent_ui, |ui| {
             ui.vertical_centered(|ui| {
                 if let Some(track_id) = state.queue.current_track().cloned() {
                     if let Some(track) = state.library.get_track(&track_id) {
@@ -691,7 +683,7 @@ impl RiffApp {
                         } else {
                             let (rect, _) = ui.allocate_exact_size(egui::vec2(300.0, 300.0), egui::Sense::hover());
                             ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(40));
-                            ui.allocate_ui_at_rect(rect, |ui| {
+                            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                                 ui.vertical_centered(|ui| {
                                     ui.add_space(130.0);
                                     ui.label("\u{1F3B5}");
@@ -897,19 +889,19 @@ impl RiffApp {
                             if let Some(ref s) = cmd_ct {
                                 let _ = s.send(PlaybackCommand::Play(tid_ct.clone()));
                             }
-                            ui.close_menu();
+                            ui.close();
                         }
                         if ui.button("Play Next").clicked() {
                             if let Some(ref s) = cmd_ct {
                                 let _ = s.send(PlaybackCommand::PlayNext(tid_ct.clone()));
                             }
-                            ui.close_menu();
+                            ui.close();
                         }
                         if ui.button("Add to Queue").clicked() {
                             if let Some(ref s) = cmd_ct {
                                 let _ = s.send(PlaybackCommand::AddToQueue(tid_ct.clone()));
                             }
-                            ui.close_menu();
+                            ui.close();
                         }
                     });
                 });
@@ -937,7 +929,7 @@ impl RiffApp {
                             }
                         }
                     }
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui.button("Play Next").clicked() {
                     if let Some(ref s) = cmd_ct {
@@ -945,7 +937,7 @@ impl RiffApp {
                             let _ = s.send(PlaybackCommand::PlayNext(tid.clone()));
                         }
                     }
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui.button("Append to Queue").clicked() {
                     if let Some(ref s) = cmd_ct {
@@ -953,7 +945,7 @@ impl RiffApp {
                             let _ = s.send(PlaybackCommand::AddToQueue(tid.clone()));
                         }
                     }
-                    ui.close_menu();
+                    ui.close();
                 }
             });
         }

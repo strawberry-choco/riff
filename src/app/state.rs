@@ -49,7 +49,6 @@ pub struct AppState {
     pub library_paths: Vec<PathBuf>,
     pub library_statuses: HashMap<PathBuf, LibraryStatus>,
     pub scan_status: Option<String>,
-    pub theme: Theme,
     pub browse_mode: BrowseMode,
     pub selected_folder: Option<PathBuf>,
     pub show_artists_view: bool,
@@ -61,13 +60,6 @@ pub enum ViewMode {
     Library,
     NowPlaying,
     Settings,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Theme {
-    #[default]
-    Dark,
-    Light,
 }
 
 impl AppState {
@@ -85,7 +77,6 @@ impl AppState {
             library_paths: Vec::new(),
             library_statuses: HashMap::new(),
             scan_status: None,
-            theme: Theme::Dark,
             browse_mode: BrowseMode::default(),
             selected_folder: None,
             show_artists_view: false,

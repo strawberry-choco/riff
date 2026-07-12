@@ -34,14 +34,14 @@ impl LibraryManager {
                 continue;
             }
 
-            match reader.read_metadata(&path) {
-                Ok(metadata) => {
-                    let duration = reader.read_duration(&path).unwrap_or(None);
+            match reader.read_all(&path) {
+                Ok((metadata, duration, _cover_source)) => {
                     let track = Track {
                         id,
                         file_path: path,
                         metadata,
                         duration,
+                        // sample_rate and channels are populated at decode time by the audio engine, not during scanning.
                         sample_rate: None,
                         channels: None,
                     };

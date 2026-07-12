@@ -25,7 +25,7 @@ impl CoverResolver {
                 let fallback = self.find_filesystem_cover(track_path)?;
                 self.cover_loader.load_cover(&fallback)
             }
-            _ => self.cover_loader.load_cover(&source),
+            CoverSource::Filesystem(_) => self.cover_loader.load_cover(&source),
         }
     }
 

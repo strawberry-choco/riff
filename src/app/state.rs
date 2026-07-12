@@ -42,7 +42,6 @@ pub struct AppState {
     pub playback_state: PlaybackState,
     pub current_position: PlaybackPosition,
     pub current_volume: f32,
-    pub current_cover: Option<Vec<u8>>,
     pub selected_track: Option<TrackId>,
     pub view_mode: ViewMode,
     pub window_visible: bool,
@@ -53,7 +52,7 @@ pub struct AppState {
     pub theme: Theme,
     pub browse_mode: BrowseMode,
     pub selected_folder: Option<PathBuf>,
-    pub selected_artist: Option<String>,
+    pub show_artists_view: bool,
     pub watch_states: HashMap<PathBuf, WatchState>,
 }
 
@@ -79,7 +78,6 @@ impl AppState {
             playback_state: PlaybackState::Stopped,
             current_position: PlaybackPosition::default(),
             current_volume: 1.0,
-            current_cover: None,
             selected_track: None,
             view_mode: ViewMode::Library,
             window_visible: true,
@@ -90,7 +88,7 @@ impl AppState {
             theme: Theme::Dark,
             browse_mode: BrowseMode::default(),
             selected_folder: None,
-            selected_artist: None,
+            show_artists_view: false,
             watch_states: HashMap::new(),
         }
     }

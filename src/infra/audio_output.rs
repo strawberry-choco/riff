@@ -89,7 +89,7 @@ impl AudioOutput for CpalAudioOutput {
                         audio_callback_f32(data, &buffer_clone, &volume_clone);
                     },
                     move |err| {
-                        eprintln!("Audio stream error: {}", err);
+                        tracing::error!("Audio stream error: {}", err);
                     },
                     None,
                 )
@@ -101,7 +101,7 @@ impl AudioOutput for CpalAudioOutput {
                         audio_callback_i16(data, &buffer_clone, &volume_clone);
                     },
                     move |err| {
-                        eprintln!("Audio stream error: {}", err);
+                        tracing::error!("Audio stream error: {}", err);
                     },
                     None,
                 )
@@ -113,7 +113,7 @@ impl AudioOutput for CpalAudioOutput {
                         audio_callback_u16(data, &buffer_clone, &volume_clone);
                     },
                     move |err| {
-                        eprintln!("Audio stream error: {}", err);
+                        tracing::error!("Audio stream error: {}", err);
                     },
                     None,
                 )

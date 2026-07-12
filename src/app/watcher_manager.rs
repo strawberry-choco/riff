@@ -62,17 +62,36 @@ impl WatcherManager {
             return;
         };
 
+        if self.scan_in_progress.get(&lib_path).copied().unwrap_or(false) {
+            self.pending_rescan.insert(lib_path, true);
+            return;
+        }
+
         self.debounce_timers
             .entry(lib_path.clone())
             .and_modify(|t| *t = Instant::now())
             .or_insert_with(Instant::now);
 
-        let lib_cmd_tx = self.lib_cmd_tx.clone();
-        let path = lib_path.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            let _ = lib_cmd_tx.send(LibraryCommand::ScanDirectory(path));
-        });
+        if self.scan_in_progress.get(&lib_path).copied().unwrap_or(false) {
+            self.pending_rescan.insert(lib_path, true);
+        }
+    }
+
+    pub fn poll(&mut self) {
+        let now = Instant::now();
+        let mut expired = Vec::new();
+        for (path, timer) in &self.debounce_timers {
+            if now.duration_since(*timer) >= std::time::Duration::from_secs(2) {
+                expired.push(path.clone());
+            }
+        }
+        for path in expired {
+            self.debounce_timers.remove(&path);
+            if !self.scan_in_progress.get(&path).copied().unwrap_or(false) {
+                self.scan_in_progress.insert(path.clone(), true);
+                let _ = self.lib_cmd_tx.send(LibraryCommand::ScanDirectory(path));
+            }
+        }
     }
 
     pub fn mark_scan_complete(&mut self, path: &Path) {

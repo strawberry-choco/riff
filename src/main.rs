@@ -214,6 +214,7 @@ fn run_audio_engine(
         decoder: &mut SymphoniaDecoder,
         update_tx: &crossbeam_channel::Sender<PlaybackUpdate>,
         cmd_tx: &crossbeam_channel::Sender<PlaybackCommand>,
+        state: &Arc<Mutex<AppState>>,
     ) -> bool {
         match cmd {
             PlaybackCommand::Pause => {
@@ -247,6 +248,18 @@ fn run_audio_engine(
                 *is_playing = false;
                 true
             }
+            PlaybackCommand::PlayNext(track_id) => {
+                if let Ok(mut s) = state.lock() {
+                    s.queue.insert_next(track_id);
+                }
+                false
+            }
+            PlaybackCommand::AddToQueue(track_id) => {
+                if let Ok(mut s) = state.lock() {
+                    s.queue.append(track_id);
+                }
+                false
+            }
             _ => false,
         }
     }
@@ -263,7 +276,29 @@ fn run_audio_engine(
                 current_track_id = Some(track_id.clone());
                 
                 let path = {
-                    let state = state.lock().unwrap();
+                    let mut state = state.lock().unwrap();
+                    // When playing a track from the library with an empty queue,
+                    // populate the queue so that Next/Previous/auto-advance work.
+                    if state.queue.tracks.is_empty() {
+                        let all_ids: Vec<crate::domain::TrackId> = state
+                            .library
+                            .all_tracks()
+                            .iter()
+                            .map(|t| t.id.clone())
+                            .collect();
+                        if !all_ids.is_empty() {
+                            state.queue.tracks = all_ids;
+                            state.queue.current_index = state
+                                .queue
+                                .tracks
+                                .iter()
+                                .position(|id| id == &track_id);
+                            // Reset shuffle state since the queue has been replaced
+                            state.queue.shuffle = false;
+                            state.queue.shuffled_indices.clear();
+                            state.queue.shuffle_history.clear();
+                        }
+                    }
                     state.library.get_track(&track_id).map(|t| t.file_path.clone())
                 };
 
@@ -305,7 +340,7 @@ fn run_audio_engine(
                                         if matches!(cmd, PlaybackCommand::Pause) {
                                             paused_position = Some(start_time.elapsed());
                                         }
-                                        if handle_engine_cmd(cmd, &mut is_playing, &mut should_stop_audio, &mut audio_output, &mut decoder, &update_tx, &cmd_tx) {
+                                        if handle_engine_cmd(cmd, &mut is_playing, &mut should_stop_audio, &mut audio_output, &mut decoder, &update_tx, &cmd_tx, &state) {
                                             break;
                                         }
                                     }
@@ -358,7 +393,7 @@ fn run_audio_engine(
                                     if matches!(cmd, PlaybackCommand::Pause) {
                                         paused_position = Some(start_time.elapsed());
                                     }
-                                    if handle_engine_cmd(cmd, &mut is_playing, &mut should_stop_audio, &mut audio_output, &mut decoder, &update_tx, &cmd_tx) {
+                                    if handle_engine_cmd(cmd, &mut is_playing, &mut should_stop_audio, &mut audio_output, &mut decoder, &update_tx, &cmd_tx, &state) {
                                         break;
                                     }
                                 }
@@ -432,12 +467,22 @@ fn run_audio_engine(
                 }
             }
             PlaybackCommand::PlayNext(track_id) => {
-                let mut state = state.lock().unwrap();
-                state.queue.insert_next(track_id);
+                {
+                    let mut state = state.lock().unwrap();
+                    state.queue.insert_next(track_id.clone());
+                }
+                if current_track_id.is_none() {
+                    let _ = cmd_tx.send(PlaybackCommand::Play(track_id));
+                }
             }
             PlaybackCommand::AddToQueue(track_id) => {
-                let mut state = state.lock().unwrap();
-                state.queue.append(track_id);
+                {
+                    let mut state = state.lock().unwrap();
+                    state.queue.append(track_id.clone());
+                }
+                if current_track_id.is_none() {
+                    let _ = cmd_tx.send(PlaybackCommand::Play(track_id));
+                }
             }
         }
     }

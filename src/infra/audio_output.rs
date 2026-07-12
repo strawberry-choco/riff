@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crate::app::traits::AudioOutput;
@@ -21,6 +22,7 @@ pub struct CpalAudioOutput {
     sample_rate: u32,
     channels: u16,
     buffer: AudioBuffer,
+    volume: Arc<AtomicU32>,
 }
 
 impl CpalAudioOutput {
@@ -32,6 +34,7 @@ impl CpalAudioOutput {
             sample_rate: 44100,
             channels: 2,
             buffer: Arc::new(Mutex::new(VecDeque::with_capacity(65536))),
+            volume: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
         }
     }
 }
@@ -76,13 +79,14 @@ impl AudioOutput for CpalAudioOutput {
         // requested rate is not supported.
         let stream_config = build_stream_config(device, self.sample_rate, self.channels, &supported_config);
         let buffer_clone = self.buffer.clone();
+        let volume_clone = self.volume.clone();
 
         let stream = match sample_format {
             cpal::SampleFormat::F32 => {
                 device.build_output_stream(
                     &stream_config,
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                        audio_callback_f32(data, &buffer_clone);
+                        audio_callback_f32(data, &buffer_clone, &volume_clone);
                     },
                     move |err| {
                         eprintln!("Audio stream error: {}", err);
@@ -94,7 +98,7 @@ impl AudioOutput for CpalAudioOutput {
                 device.build_output_stream(
                     &stream_config,
                     move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                        audio_callback_i16(data, &buffer_clone);
+                        audio_callback_i16(data, &buffer_clone, &volume_clone);
                     },
                     move |err| {
                         eprintln!("Audio stream error: {}", err);
@@ -106,7 +110,7 @@ impl AudioOutput for CpalAudioOutput {
                 device.build_output_stream(
                     &stream_config,
                     move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
-                        audio_callback_u16(data, &buffer_clone);
+                        audio_callback_u16(data, &buffer_clone, &volume_clone);
                     },
                     move |err| {
                         eprintln!("Audio stream error: {}", err);
@@ -157,8 +161,8 @@ impl AudioOutput for CpalAudioOutput {
         Ok(samples.len())
     }
 
-    fn set_volume(&mut self, _volume: f32) {
-        // Volume is handled by the app layer (main.rs audio engine)
+    fn set_volume(&mut self, volume: f32) {
+        self.volume.store(f32::to_bits(volume), Ordering::Relaxed);
     }
 }
 
@@ -201,7 +205,7 @@ fn build_stream_config(
     }
 }
 
-fn audio_callback_f32(data: &mut [f32], buffer: &AudioBuffer) {
+fn audio_callback_f32(data: &mut [f32], buffer: &AudioBuffer, volume: &Arc<AtomicU32>) {
     let mut buf = match buffer.try_lock() {
         Ok(b) => b,
         Err(_) => {
@@ -209,12 +213,13 @@ fn audio_callback_f32(data: &mut [f32], buffer: &AudioBuffer) {
             return;
         }
     };
+    let vol = f32::from_bits(volume.load(Ordering::Relaxed));
     for sample in data.iter_mut() {
-        *sample = buf.pop_front().unwrap_or(0.0);
+        *sample = buf.pop_front().unwrap_or(0.0) * vol;
     }
 }
 
-fn audio_callback_i16(data: &mut [i16], buffer: &AudioBuffer) {
+fn audio_callback_i16(data: &mut [i16], buffer: &AudioBuffer, volume: &Arc<AtomicU32>) {
     let mut buf = match buffer.try_lock() {
         Ok(b) => b,
         Err(_) => {
@@ -222,13 +227,14 @@ fn audio_callback_i16(data: &mut [i16], buffer: &AudioBuffer) {
             return;
         }
     };
+    let vol = f32::from_bits(volume.load(Ordering::Relaxed));
     for sample in data.iter_mut() {
-        let f32_val = buf.pop_front().unwrap_or(0.0);
+        let f32_val = buf.pop_front().unwrap_or(0.0) * vol;
         *sample = f32_to_i16(f32_val);
     }
 }
 
-fn audio_callback_u16(data: &mut [u16], buffer: &AudioBuffer) {
+fn audio_callback_u16(data: &mut [u16], buffer: &AudioBuffer, volume: &Arc<AtomicU32>) {
     let mut buf = match buffer.try_lock() {
         Ok(b) => b,
         Err(_) => {
@@ -236,8 +242,9 @@ fn audio_callback_u16(data: &mut [u16], buffer: &AudioBuffer) {
             return;
         }
     };
+    let vol = f32::from_bits(volume.load(Ordering::Relaxed));
     for sample in data.iter_mut() {
-        let f32_val = buf.pop_front().unwrap_or(0.0);
+        let f32_val = buf.pop_front().unwrap_or(0.0) * vol;
         *sample = f32_to_u16(f32_val);
     }
 }

@@ -202,6 +202,8 @@ fn run_audio_engine(
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
             PlaybackCommand::Play(track_id) => {
+                audio_output.clear_buffer();
+                let _ = audio_output.stop();
                 current_track_id = Some(track_id.clone());
                 
                 let path = {
@@ -260,6 +262,14 @@ fn run_audio_engine(
                                             }
                                             PlaybackCommand::SetVolume(vol) => {
                                                 audio_output.set_volume(vol);
+                                            }
+                                            PlaybackCommand::Play(_)
+                                            | PlaybackCommand::Next
+                                            | PlaybackCommand::Previous => {
+                                                let _ = cmd_tx.send(cmd.clone());
+                                                is_playing = false;
+                                                should_stop_audio = true;
+                                                break;
                                             }
                                             _ => {}
                                         }
@@ -329,6 +339,13 @@ fn run_audio_engine(
                                         }
                                         PlaybackCommand::SetVolume(vol) => {
                                             audio_output.set_volume(vol);
+                                        }
+                                        PlaybackCommand::Play(_)
+                                        | PlaybackCommand::Next
+                                        | PlaybackCommand::Previous => {
+                                            let _ = cmd_tx.send(cmd.clone());
+                                            should_stop_audio = true;
+                                            break;
                                         }
                                         _ => {}
                                     }

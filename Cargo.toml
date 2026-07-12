@@ -2,15 +2,16 @@
 name = "riff"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.92"
 authors = ["riff contributors"]
 description = "A lightweight, offline-first music player built in Rust with egui"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
 # UI
-egui = "0.28"
-eframe = { version = "0.28", features = ["default", "persistence"] }
+egui = "0.34.3"
+eframe = { version = "0.34.3", features = ["default", "persistence"] }
+egui-elegance = "0.13"
 
 # Audio decoding (pure Rust)
 symphonia = { version = "0.5", features = ["all"] }
@@ -18,13 +19,13 @@ symphonia = { version = "0.5", features = ["all"] }
 symphonia-adapter-libopus = "0.2"
 
 # Audio output (cross-platform)
-cpal = "0.15"
+cpal = "0.18"
 
 # Metadata reading (pure Rust)
 lofty = "0.19"
 
 # Image decoding for cover art
-image = { version = "0.24", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # File system scanning
 walkdir = "2"
@@ -54,7 +55,7 @@ notify = "7"
 rand = "0.8"
 
 # For image data in egui
-epi = { package = "egui_extras", version = "0.28", features = ["image"] }
+epi = { package = "egui_extras", version = "0.34.3", features = ["image"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 # System tray (macOS/Windows only — requires GTK dev libs on Linux)

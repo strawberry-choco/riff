@@ -56,7 +56,7 @@ pub fn configure_fonts(ctx: &egui::Context) {
                 let mut fonts = egui::FontDefinitions::default();
                 fonts.font_data.insert(
                     "cjk".to_owned(),
-                    egui::FontData::from_owned(bytes),
+                    egui::FontData::from_owned(bytes).into(),
                 );
                 // Prepend CJK font to proportional family.
                 // CJK fonts like Noto Sans CJK, PingFang, Microsoft YaHei

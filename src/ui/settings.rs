@@ -5,6 +5,7 @@ use crate::app::commands::LibraryCommand;
 use crate::app::state::{AppState, LibraryStatus, ViewMode};
 
 const LIBRARY_PATHS_KEY: &str = "library_paths";
+const VOLUME_KEY: &str = "volume";
 
 pub fn load_library_paths(storage: Option<&dyn eframe::Storage>) -> Vec<PathBuf> {
     let Some(storage) = storage else { return Vec::new(); };
@@ -20,6 +21,16 @@ pub fn save_library_paths(storage: &mut dyn eframe::Storage, paths: &[PathBuf]) 
         .collect();
     let json = serde_json::to_string(&strings).unwrap_or_else(|_| "[]".to_string());
     storage.set_string(LIBRARY_PATHS_KEY, json);
+}
+
+pub fn load_volume(storage: Option<&dyn eframe::Storage>) -> Option<f32> {
+    let Some(storage) = storage else { return None; };
+    storage.get_string(VOLUME_KEY)
+        .and_then(|s| s.parse::<f32>().ok())
+}
+
+pub fn save_volume(storage: &mut dyn eframe::Storage, volume: f32) {
+    storage.set_string(VOLUME_KEY, volume.to_string());
 }
 
 fn add_library_path(path: PathBuf, state: &mut AppState, storage: &mut dyn eframe::Storage) {

@@ -126,6 +126,62 @@ impl LibraryManager {
         count
     }
 
+    pub fn tracks_in_folder(&self, folder: &Path) -> Vec<&Track> {
+        let mut tracks: Vec<&Track> = self.tracks
+            .values()
+            .filter(|t| {
+                t.file_path.parent().map_or(false, |p| p == folder)
+            })
+            .collect();
+        tracks.sort_by(|a, b| {
+            a.metadata.track_number.unwrap_or(0)
+                .cmp(&b.metadata.track_number.unwrap_or(0))
+                .then_with(|| a.file_path.file_name().cmp(&b.file_path.file_name()))
+        });
+        tracks
+    }
+
+    pub fn subdirs_with_audio(&self, folder: &Path) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for track in self.tracks.values() {
+            let track_path = &track.file_path;
+            if !track_path.starts_with(folder) {
+                continue;
+            }
+            let relative = match track_path.strip_prefix(folder) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            if let Some(first_component) = relative.iter().next() {
+                let child_dir = folder.join(first_component);
+                if child_dir.is_dir() && seen.insert(child_dir.clone()) {
+                    dirs.push(child_dir);
+                }
+            }
+        }
+        dirs.sort();
+        dirs
+    }
+
+    pub fn folder_has_audio(&self, folder: &Path) -> bool {
+        self.tracks.values().any(|t| t.file_path.starts_with(folder))
+    }
+
+    pub fn track_ids_in_folder_tree(&self, folder: &Path) -> Vec<TrackId> {
+        let mut ids: Vec<TrackId> = self.tracks
+            .values()
+            .filter(|t| t.file_path.starts_with(folder))
+            .map(|t| t.id.clone())
+            .collect();
+        ids.sort_by(|a, b| {
+            let path_a = self.tracks.get(a).map(|t| &t.file_path);
+            let path_b = self.tracks.get(b).map(|t| &t.file_path);
+            path_a.cmp(&path_b)
+        });
+        ids
+    }
+
     pub fn search(&self, query: &str) -> Vec<&Track> {
         let query_lower = query.to_lowercase();
         self.tracks

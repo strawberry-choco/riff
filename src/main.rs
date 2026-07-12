@@ -11,7 +11,8 @@ use crossbeam_channel::unbounded;
 use crate::app::commands::{LibraryCommand, LibraryUpdate};
 use crate::app::state::AppState;
 use crate::app::traits::{AudioDecoder, AudioOutput};
-use crate::infra::{SymphoniaDecoder, CpalAudioOutput, LoftyMetadataReader, AudioFileScanner};
+use crate::app::watcher_manager::WatcherManager;
+use crate::infra::{SymphoniaDecoder, CpalAudioOutput, LoftyMetadataReader, AudioFileScanner, FilesystemWatcher};
 use crate::ui::RiffApp;
 use crate::domain::{PlaybackCommand, PlaybackUpdate, PlaybackState};
 
@@ -137,6 +138,29 @@ fn main() {
         }
     });
 
+    let (fs_event_tx, fs_event_rx) = unbounded::<std::path::PathBuf>();
+    let watcher = match FilesystemWatcher::new(fs_event_tx) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            tracing::warn!("Failed to create filesystem watcher: {}", e);
+            None
+        }
+    };
+
+    let watcher_manager = Arc::new(Mutex::new(Some(WatcherManager::new(
+        watcher,
+        library_cmd_tx.clone(),
+    ))));
+
+    let fs_watcher_manager = watcher_manager.clone();
+    let _fs_event_thread = thread::spawn(move || {
+        while let Ok(changed_path) = fs_event_rx.recv() {
+            if let Some(ref mut mgr) = *fs_watcher_manager.lock().unwrap() {
+                mgr.on_fs_event(&changed_path);
+            }
+        }
+    });
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
@@ -156,7 +180,7 @@ fn main() {
         }
     };
 
-    let app = RiffApp::new(state.clone(), ui_cmd_tx, ui_library_cmd_tx, library_update_rx);
+    let app = RiffApp::new(state.clone(), ui_cmd_tx, ui_library_cmd_tx, library_update_rx, watcher_manager);
 
     eframe::run_native("riff", options, Box::new(|_cc| Ok(Box::new(app))))
         .expect("Failed to run eframe");

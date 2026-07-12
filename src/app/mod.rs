@@ -4,3 +4,4 @@ pub mod library_manager;
 pub mod state;
 pub mod cover_resolver;
 pub mod commands;
+pub mod watcher_manager;

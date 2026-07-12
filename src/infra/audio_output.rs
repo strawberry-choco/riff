@@ -84,7 +84,7 @@ impl AudioOutput for CpalAudioOutput {
         let stream = match sample_format {
             cpal::SampleFormat::F32 => {
                 device.build_output_stream(
-                    &stream_config,
+                    stream_config.clone(),
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                         audio_callback_f32(data, &buffer_clone, &volume_clone);
                     },
@@ -96,7 +96,7 @@ impl AudioOutput for CpalAudioOutput {
             }
             cpal::SampleFormat::I16 => {
                 device.build_output_stream(
-                    &stream_config,
+                    stream_config.clone(),
                     move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
                         audio_callback_i16(data, &buffer_clone, &volume_clone);
                     },
@@ -108,7 +108,7 @@ impl AudioOutput for CpalAudioOutput {
             }
             cpal::SampleFormat::U16 => {
                 device.build_output_stream(
-                    &stream_config,
+                    stream_config,
                     move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
                         audio_callback_u16(data, &buffer_clone, &volume_clone);
                     },
@@ -177,7 +177,7 @@ fn build_stream_config(
     default_config: &cpal::SupportedStreamConfig,
 ) -> cpal::StreamConfig {
     let default_stream: cpal::StreamConfig = default_config.clone().into();
-    let requested_sample_rate = cpal::SampleRate(requested_rate);
+    let requested_sample_rate = requested_rate;
 
     let rate_is_supported = device
         .supported_output_configs()
@@ -193,7 +193,7 @@ fn build_stream_config(
         tracing::warn!(
             "Sample rate {} Hz not supported, using device default {} Hz",
             requested_rate,
-            default_stream.sample_rate.0
+            default_stream.sample_rate
         );
         return default_stream;
     }

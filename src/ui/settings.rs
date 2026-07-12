@@ -12,8 +12,13 @@ const WATCH_STATES_KEY: &str = "watch_states";
 pub fn load_library_paths(storage: Option<&dyn eframe::Storage>) -> Vec<PathBuf> {
     let Some(storage) = storage else { return Vec::new(); };
     storage.get_string(LIBRARY_PATHS_KEY)
-        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .map(|v| v.into_iter().map(PathBuf::from).collect())
+        .and_then(|s| match serde_json::from_str::<Vec<String>>(&s) {
+            Ok(v) => Some(v.into_iter().map(PathBuf::from).collect()),
+            Err(e) => {
+                tracing::warn!("Failed to deserialize library paths: {}", e);
+                None
+            }
+        })
         .unwrap_or_default()
 }
 
@@ -21,7 +26,13 @@ pub fn save_library_paths(storage: &mut dyn eframe::Storage, paths: &[PathBuf]) 
     let strings: Vec<String> = paths.iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
-    let json = serde_json::to_string(&strings).unwrap_or_else(|_| "[]".to_string());
+    let json = match serde_json::to_string(&strings) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!("Failed to serialize library paths: {}", e);
+            "[]".to_string()
+        }
+    };
     storage.set_string(LIBRARY_PATHS_KEY, json);
 }
 
@@ -39,7 +50,13 @@ pub fn load_watch_states(storage: Option<&dyn eframe::Storage>) -> HashMap<PathB
     let Some(storage) = storage else { return HashMap::new(); };
     storage
         .get_string(WATCH_STATES_KEY)
-        .and_then(|s| serde_json::from_str(&s).ok())
+        .and_then(|s| match serde_json::from_str(&s) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!("Failed to deserialize watch states: {}", e);
+                None
+            }
+        })
         .unwrap_or_default()
 }
 
@@ -47,7 +64,13 @@ pub fn save_watch_states(
     storage: &mut dyn eframe::Storage,
     states: &HashMap<PathBuf, WatchState>,
 ) {
-    let json = serde_json::to_string(states).unwrap_or_else(|_| "{}".to_string());
+    let json = match serde_json::to_string(states) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!("Failed to serialize watch states: {}", e);
+            "{}".to_string()
+        }
+    };
     storage.set_string(WATCH_STATES_KEY, json);
 }
 
@@ -81,26 +104,46 @@ fn pick_folder_ui(
     storage: &mut dyn eframe::Storage,
     text_input: &mut String,
     show_input: &mut bool,
+    path_error: &mut Option<String>,
 ) {
     if *show_input {
+        if let Some(ref err) = *path_error {
+            ui.colored_label(ui.visuals().error_fg_color, err);
+        }
         ui.horizontal(|ui| {
             ui.label("Path:");
             ui.text_edit_singleline(text_input);
             if ui.button("Confirm").clicked() {
-                let path = PathBuf::from(text_input.clone());
-                if path.exists() && path.is_dir() {
+                let expanded = if text_input.starts_with("~/") {
+                    if let Ok(home) = std::env::var("HOME") {
+                        format!("{}/{}" , home, &text_input[2..])
+                    } else {
+                        text_input.clone()
+                    }
+                } else {
+                    text_input.clone()
+                };
+                let path = PathBuf::from(expanded);
+                if !path.exists() {
+                    *path_error = Some(format!("Path does not exist: {}", path.display()));
+                } else if !path.is_dir() {
+                    *path_error = Some(format!("Not a directory: {}", path.display()));
+                } else {
                     add_library_path(path, state, storage);
+                    *text_input = String::new();
+                    *show_input = false;
+                    *path_error = None;
                 }
-                *text_input = String::new();
-                *show_input = false;
             }
             if ui.button("Cancel").clicked() {
                 *text_input = String::new();
                 *show_input = false;
+                *path_error = None;
             }
         });
     } else if ui.button("Add Library").clicked() {
         *show_input = true;
+        *path_error = None;
     }
 }
 
@@ -306,6 +349,7 @@ impl super::app::RiffApp {
                             storage,
                             &mut self.settings_text_input,
                             &mut self.settings_show_input,
+                            &mut self.settings_path_error,
                         );
                     }
 

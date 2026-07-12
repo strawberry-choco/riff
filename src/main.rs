@@ -169,17 +169,23 @@ fn main() {
     };
 
     #[cfg(not(target_os = "linux"))]
-    let _tray_icon = match crate::ui::tray::create_tray(cmd_tx.clone()) {
-        Ok(tray) => {
-            tracing::info!("Tray icon created");
-            Some(tray)
+    let tray_icon = Arc::new(Mutex::new(
+        match crate::ui::tray::create_tray(cmd_tx.clone()) {
+            Ok(tray) => {
+                tracing::info!("Tray icon created");
+                Some(tray)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create tray icon: {}", e);
+                None
+            }
         }
-        Err(e) => {
-            tracing::warn!("Failed to create tray icon: {}", e);
-            None
-        }
-    };
+    ));
 
+    #[cfg(not(target_os = "linux"))]
+    let app = RiffApp::new(state.clone(), ui_cmd_tx, ui_library_cmd_tx, library_update_rx, watcher_manager, tray_icon);
+
+    #[cfg(target_os = "linux")]
     let app = RiffApp::new(state.clone(), ui_cmd_tx, ui_library_cmd_tx, library_update_rx, watcher_manager);
 
     eframe::run_native("riff", options, Box::new(|_cc| Ok(Box::new(app))))
@@ -198,12 +204,62 @@ fn run_audio_engine(
     let mut decoder = SymphoniaDecoder::new(codec_registry);
     let mut audio_output = CpalAudioOutput::new();
     let mut current_track_id: Option<crate::domain::TrackId> = None;
+    let mut paused_position: Option<std::time::Duration> = None;
+
+    fn handle_engine_cmd(
+        cmd: PlaybackCommand,
+        is_playing: &mut bool,
+        should_stop_audio: &mut bool,
+        audio_output: &mut CpalAudioOutput,
+        decoder: &mut SymphoniaDecoder,
+        update_tx: &crossbeam_channel::Sender<PlaybackUpdate>,
+        cmd_tx: &crossbeam_channel::Sender<PlaybackCommand>,
+    ) -> bool {
+        match cmd {
+            PlaybackCommand::Pause => {
+                *is_playing = false;
+                *should_stop_audio = false;
+                let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Paused));
+                true
+            }
+            PlaybackCommand::Stop => {
+                audio_output.clear_buffer();
+                let _ = audio_output.stop();
+                let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Stopped));
+                *should_stop_audio = false;
+                *is_playing = false;
+                true
+            }
+            PlaybackCommand::Seek(pos) => {
+                let _ = decoder.seek(pos);
+                audio_output.clear_buffer();
+                false
+            }
+            PlaybackCommand::SetVolume(vol) => {
+                audio_output.set_volume(vol);
+                false
+            }
+            PlaybackCommand::Play(_)
+            | PlaybackCommand::Next
+            | PlaybackCommand::Previous => {
+                let _ = cmd_tx.send(cmd);
+                *should_stop_audio = true;
+                *is_playing = false;
+                true
+            }
+            _ => false,
+        }
+    }
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
             PlaybackCommand::Play(track_id) => {
                 audio_output.clear_buffer();
                 let _ = audio_output.stop();
+                let is_resuming = current_track_id.as_ref() == Some(&track_id) && paused_position.is_some();
+                if !is_resuming {
+                    paused_position = None;
+                }
                 current_track_id = Some(track_id.clone());
                 
                 let path = {
@@ -214,6 +270,11 @@ fn run_audio_engine(
                 if let Some(path) = path {
                     match decoder.open(&path) {
                         Ok(info) => {
+                            if is_resuming {
+                                if let Some(pos) = paused_position.take() {
+                                    let _ = decoder.seek(pos);
+                                }
+                            }
                             let _ = update_tx.send(PlaybackUpdate::TrackChanged(track_id));
                             
                             if let Err(e) = audio_output.initialize(info.sample_rate, info.channels) {
@@ -241,37 +302,11 @@ fn run_audio_engine(
                                 // Backpressure: don't decode when the buffer is already full
                                 while audio_output.buffer_len() >= max_buffer_samples {
                                     if let Ok(cmd) = cmd_rx.try_recv() {
-                                        match cmd {
-                                            PlaybackCommand::Pause => {
-                                                is_playing = false;
-                                                should_stop_audio = false;
-                                                let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Paused));
-                                                break;
-                                            }
-                                            PlaybackCommand::Stop => {
-                                                audio_output.clear_buffer();
-                                                let _ = audio_output.stop();
-                                                let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Stopped));
-                                                is_playing = false;
-                                                should_stop_audio = false;
-                                                break;
-                                            }
-                                            PlaybackCommand::Seek(pos) => {
-                                                let _ = decoder.seek(pos);
-                                                audio_output.clear_buffer();
-                                            }
-                                            PlaybackCommand::SetVolume(vol) => {
-                                                audio_output.set_volume(vol);
-                                            }
-                                            PlaybackCommand::Play(_)
-                                            | PlaybackCommand::Next
-                                            | PlaybackCommand::Previous => {
-                                                let _ = cmd_tx.send(cmd.clone());
-                                                is_playing = false;
-                                                should_stop_audio = true;
-                                                break;
-                                            }
-                                            _ => {}
+                                        if matches!(cmd, PlaybackCommand::Pause) {
+                                            paused_position = Some(start_time.elapsed());
+                                        }
+                                        if handle_engine_cmd(cmd, &mut is_playing, &mut should_stop_audio, &mut audio_output, &mut decoder, &update_tx, &cmd_tx) {
+                                            break;
                                         }
                                     }
                                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -320,34 +355,11 @@ fn run_audio_engine(
                                 }
 
                                 if let Ok(cmd) = cmd_rx.try_recv() {
-                                    match cmd {
-                                        PlaybackCommand::Pause => {
-                                            is_playing = false;
-                                            should_stop_audio = false;
-                                            let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Paused));
-                                        }
-                                        PlaybackCommand::Stop => {
-                                            audio_output.clear_buffer();
-                                            let _ = audio_output.stop();
-                                            let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Stopped));
-                                            should_stop_audio = false;
-                                            break;
-                                        }
-                                        PlaybackCommand::Seek(pos) => {
-                                            let _ = decoder.seek(pos);
-                                            audio_output.clear_buffer();
-                                        }
-                                        PlaybackCommand::SetVolume(vol) => {
-                                            audio_output.set_volume(vol);
-                                        }
-                                        PlaybackCommand::Play(_)
-                                        | PlaybackCommand::Next
-                                        | PlaybackCommand::Previous => {
-                                            let _ = cmd_tx.send(cmd.clone());
-                                            should_stop_audio = true;
-                                            break;
-                                        }
-                                        _ => {}
+                                    if matches!(cmd, PlaybackCommand::Pause) {
+                                        paused_position = Some(start_time.elapsed());
+                                    }
+                                    if handle_engine_cmd(cmd, &mut is_playing, &mut should_stop_audio, &mut audio_output, &mut decoder, &update_tx, &cmd_tx) {
+                                        break;
                                     }
                                 }
                             }
@@ -366,17 +378,13 @@ fn run_audio_engine(
                 let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Paused));
             }
             PlaybackCommand::Resume => {
-                // For MVP, resume just restarts playback from current position
-                // A full implementation would need to track the current position and seek
                 if let Some(track_id) = current_track_id.clone() {
-                    let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Playing));
-                    // In a real implementation, we'd continue from where we paused
-                    // For now, we restart the track
                     let _ = cmd_rx.try_recv(); // clear any pending
                     let _ = cmd_tx.send(PlaybackCommand::Play(track_id));
                 }
             }
             PlaybackCommand::Stop => {
+                paused_position = None;
                 let _ = audio_output.stop();
                 let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Stopped));
             }
@@ -409,6 +417,20 @@ fn run_audio_engine(
                 }
             }
             PlaybackCommand::ToggleVisibility => {}
+            PlaybackCommand::PlayPause => {
+                let current_state = {
+                    let state = state.lock().unwrap();
+                    state.playback_state
+                };
+                match current_state {
+                    PlaybackState::Playing => {
+                        let _ = cmd_tx.send(PlaybackCommand::Pause);
+                    }
+                    _ => {
+                        let _ = cmd_tx.send(PlaybackCommand::Resume);
+                    }
+                }
+            }
             PlaybackCommand::PlayNext(track_id) => {
                 let mut state = state.lock().unwrap();
                 state.queue.insert_next(track_id);

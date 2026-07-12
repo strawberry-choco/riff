@@ -1,11 +1,13 @@
 use eframe::egui;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use crossbeam_channel::Sender;
 use crate::app::commands::LibraryCommand;
-use crate::app::state::{AppState, LibraryStatus, ViewMode};
+use crate::app::state::{AppState, LibraryStatus, ViewMode, WatchState};
 
 const LIBRARY_PATHS_KEY: &str = "library_paths";
 const VOLUME_KEY: &str = "volume";
+const WATCH_STATES_KEY: &str = "watch_states";
 
 pub fn load_library_paths(storage: Option<&dyn eframe::Storage>) -> Vec<PathBuf> {
     let Some(storage) = storage else { return Vec::new(); };
@@ -31,6 +33,22 @@ pub fn load_volume(storage: Option<&dyn eframe::Storage>) -> Option<f32> {
 
 pub fn save_volume(storage: &mut dyn eframe::Storage, volume: f32) {
     storage.set_string(VOLUME_KEY, volume.to_string());
+}
+
+pub fn load_watch_states(storage: Option<&dyn eframe::Storage>) -> HashMap<PathBuf, WatchState> {
+    let Some(storage) = storage else { return HashMap::new(); };
+    storage
+        .get_string(WATCH_STATES_KEY)
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_watch_states(
+    storage: &mut dyn eframe::Storage,
+    states: &HashMap<PathBuf, WatchState>,
+) {
+    let json = serde_json::to_string(states).unwrap_or_else(|_| "{}".to_string());
+    storage.set_string(WATCH_STATES_KEY, json);
 }
 
 fn add_library_path(path: PathBuf, state: &mut AppState, storage: &mut dyn eframe::Storage) {
@@ -189,6 +207,72 @@ impl super::app::RiffApp {
                                     };
                                     ui.colored_label(status_color, status_text);
                                 });
+                            });
+
+                            // Watch toggle row
+                            ui.horizontal(|ui| {
+                                ui.add_space(20.0);
+                                let watch_state = state
+                                    .watch_states
+                                    .get(&path)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let is_warning = matches!(watch_state, WatchState::Warning(_));
+                                let can_watch = !is_warning && !is_unavailable;
+
+                                let mut watching = watch_state == WatchState::Enabled;
+                                let toggle = ui.add_enabled(
+                                    can_watch,
+                                    egui::Checkbox::new(&mut watching, "Watch"),
+                                );
+
+                                if toggle.changed() {
+                                    let wm = self.watcher_manager.clone();
+                                    let path_c = path.clone();
+                                    if watching {
+                                        let result = {
+                                            let mut guard = wm.lock().unwrap();
+                                            guard
+                                                .as_mut()
+                                                .map(|mgr| mgr.start_watching(&path_c))
+                                                .unwrap_or(Err(
+                                                    "Watcher not initialized".to_string(),
+                                                ))
+                                        };
+                                        match result {
+                                            Ok(()) => {
+                                                state.watch_states.insert(
+                                                    path.clone(),
+                                                    WatchState::Enabled,
+                                                );
+                                            }
+                                            Err(reason) => {
+                                                state.watch_states.insert(
+                                                    path.clone(),
+                                                    WatchState::Warning(reason),
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        if let Some(ref mut mgr) =
+                                            *self.watcher_manager.lock().unwrap()
+                                        {
+                                            mgr.stop_watching(&path);
+                                        }
+                                        state.watch_states.insert(
+                                            path.clone(),
+                                            WatchState::Disabled,
+                                        );
+                                    }
+                                    if let Some(storage) = frame.storage_mut() {
+                                        save_watch_states(storage, &state.watch_states);
+                                    }
+                                }
+
+                                if let WatchState::Warning(ref reason) = watch_state {
+                                    ui.label("\u{26A0}")
+                                        .on_hover_text(reason);
+                                }
                             });
 
                             if is_unavailable {

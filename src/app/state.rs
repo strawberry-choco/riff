@@ -15,7 +15,27 @@ impl Default for LibraryStatus {
     fn default() -> Self { Self::Idle }
 }
 
-/// Central state for the entire application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowseMode {
+    Library,
+    Folders,
+}
+
+impl Default for BrowseMode {
+    fn default() -> Self { Self::Library }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum WatchState {
+    Disabled,
+    Enabled,
+    Warning(String),
+}
+
+impl Default for WatchState {
+    fn default() -> Self { Self::Disabled }
+}
+
 pub struct AppState {
     pub library: LibraryManager,
     pub queue: PlaybackQueue,
@@ -31,6 +51,10 @@ pub struct AppState {
     pub library_statuses: HashMap<PathBuf, LibraryStatus>,
     pub scan_status: Option<String>,
     pub theme: Theme,
+    pub browse_mode: BrowseMode,
+    pub selected_folder: Option<PathBuf>,
+    pub selected_artist: Option<String>,
+    pub watch_states: HashMap<PathBuf, WatchState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +88,10 @@ impl AppState {
             library_statuses: HashMap::new(),
             scan_status: None,
             theme: Theme::Dark,
+            browse_mode: BrowseMode::default(),
+            selected_folder: None,
+            selected_artist: None,
+            watch_states: HashMap::new(),
         }
     }
 }

@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use crossbeam_channel::{Sender, Receiver, unbounded};
 use crate::app::commands::{LibraryCommand, LibraryUpdate};
 use crate::app::cover_resolver::CoverResolver;
-use crate::app::state::{AppState, ViewMode, Theme as AppTheme, LibraryStatus};
+use crate::app::state::{AppState, ViewMode, Theme as AppTheme, LibraryStatus, BrowseMode};
+use crate::app::watcher_manager::WatcherManager;
 use crate::domain::{PlaybackCommand, PlaybackState, RepeatMode, TrackId, Track};
 use crate::infra::{LoftyMetadataReader, ImageCoverLoader};
 
@@ -22,6 +23,7 @@ pub struct RiffApp {
     pub(crate) settings_text_input: String,
     pub(crate) settings_show_input: bool,
     first_frame: bool,
+    pub(crate) watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
 }
 
 impl RiffApp {
@@ -30,6 +32,7 @@ impl RiffApp {
         command_sender: Sender<PlaybackCommand>,
         library_command_sender: Sender<LibraryCommand>,
         library_update_rx: Receiver<LibraryUpdate>,
+        watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
     ) -> Self {
         let reader = Box::new(LoftyMetadataReader::new());
         let loader = Box::new(ImageCoverLoader::new());
@@ -62,6 +65,7 @@ impl RiffApp {
             settings_text_input: String::new(),
             settings_show_input: false,
             first_frame: true,
+            watcher_manager,
         }
     }
 
@@ -89,9 +93,12 @@ impl RiffApp {
                         state.scan_status = Some(format!("{} files, {}", files_found, current_dir));
                     }
                     LibraryUpdate::ScanComplete { path, total_files } => {
-                        state.library_statuses.insert(path, LibraryStatus::Scanned(total_files));
+                        state.library_statuses.insert(path.clone(), LibraryStatus::Scanned(total_files));
                         state.scan_status = Some(format!("Scan complete: {} tracks", total_files));
                         state.library.save_cache();
+                        if let Some(ref mut mgr) = *self.watcher_manager.lock().unwrap() {
+                            mgr.mark_scan_complete(&path);
+                        }
                     }
                     LibraryUpdate::ScanError { path, message } => {
                         state.library_statuses.insert(path, LibraryStatus::Idle);
@@ -159,6 +166,8 @@ impl eframe::App for RiffApp {
                     let _ = s.send(PlaybackCommand::SetVolume(vol));
                 }
             }
+
+            state.watch_states = crate::ui::settings::load_watch_states(_frame.storage());
 
             self.first_frame = false;
         }
@@ -351,29 +360,48 @@ impl RiffApp {
             });
             ui.separator();
 
-            // View mode toggle
-            let mut show_artists = false;
+            // Library / Folders view toggle
             ui.horizontal(|ui| {
-                if ui.selectable_label(!show_artists, "All Tracks").clicked() {
-                    show_artists = false;
+                if ui.selectable_label(state.browse_mode == BrowseMode::Library, "Library").clicked() {
+                    state.browse_mode = BrowseMode::Library;
                 }
-                if ui.selectable_label(show_artists, "Artists").clicked() {
-                    show_artists = true;
+                if ui.selectable_label(state.browse_mode == BrowseMode::Folders, "Folders").clicked() {
+                    state.browse_mode = BrowseMode::Folders;
                 }
             });
             ui.separator();
 
             let query = state.search_query.clone();
-            let has_results = query.is_empty() || !state.library.search(&query).is_empty();
 
-            if !has_results && !query.is_empty() {
-                ui.vertical_centered(|ui| {
-                    ui.label(format!("No tracks found matching '{}'", query));
-                });
-            } else if show_artists {
-                self.render_artist_view(ui, state, cmd, &query);
-            } else {
-                self.render_flat_view(ui, state, cmd, &query);
+            match state.browse_mode {
+                BrowseMode::Library => {
+                    // Existing sub-toggle: All Tracks / Artists
+                    let mut show_artists = false;
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(!show_artists, "All Tracks").clicked() {
+                            show_artists = false;
+                        }
+                        if ui.selectable_label(show_artists, "Artists").clicked() {
+                            show_artists = true;
+                        }
+                    });
+                    ui.separator();
+
+                    let has_results = query.is_empty() || !state.library.search(&query).is_empty();
+
+                    if !has_results && !query.is_empty() {
+                        ui.vertical_centered(|ui| {
+                            ui.label(format!("No tracks found matching '{}'", query));
+                        });
+                    } else if show_artists {
+                        self.render_artist_view(ui, state, cmd, &query);
+                    } else {
+                        self.render_flat_view(ui, state, cmd, &query);
+                    }
+                }
+                BrowseMode::Folders => {
+                    self.render_folder_tree(ui, state, cmd, &query);
+                }
             }
         });
 
@@ -691,6 +719,228 @@ impl RiffApp {
                 }
             });
         });
+    }
+
+    fn render_folder_tree(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &mut AppState,
+        cmd: &Option<Sender<PlaybackCommand>>,
+        query: &str,
+    ) {
+        let current_track = state.queue.current_track().cloned();
+
+        if state.library_paths.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.label("No library paths configured.");
+            });
+            return;
+        }
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for lib_path in state.library_paths.clone() {
+                if !state.library.folder_has_audio(&lib_path) {
+                    continue;
+                }
+                let folder_name = lib_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| lib_path.to_string_lossy().to_string());
+                self.render_folder_node(
+                    ui, state, cmd, &lib_path, &folder_name, 0, &current_track, query,
+                );
+            }
+        });
+    }
+
+    fn render_folder_node(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &mut AppState,
+        cmd: &Option<Sender<PlaybackCommand>>,
+        path: &PathBuf,
+        label: &str,
+        depth: usize,
+        current_track_id: &Option<TrackId>,
+        query: &str,
+    ) {
+        if !state.library.folder_has_audio(path) {
+            return;
+        }
+
+        if !query.is_empty() {
+            let q = query.to_lowercase();
+            let has_match = state.library.all_tracks().iter().any(|t| {
+                t.file_path.starts_with(path) && t.metadata.search_text().contains(&q)
+            });
+            if !has_match {
+                return;
+            }
+        }
+
+        let contains_current = current_track_id.as_ref().map_or(false, |tid| {
+            state
+                .library
+                .get_track(tid)
+                .map_or(false, |t| t.file_path.starts_with(path))
+        });
+
+        let is_selected = state.selected_folder.as_ref() == Some(path);
+
+        let header_text = if depth == 0 {
+            format!("\u{1F4C1} {}", label)
+        } else {
+            label.to_string()
+        };
+
+        let folder_track_ids: Vec<TrackId> = state.library.track_ids_in_folder_tree(path);
+
+        let header = egui::CollapsingHeader::new(header_text)
+            .default_open(contains_current || is_selected);
+
+        let header_response = header.show(ui, |ui| {
+            let children = state.library.subdirs_with_audio(path);
+            for child_path in &children {
+                let child_name = child_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                self.render_folder_node(
+                    ui, state, cmd, child_path, &child_name, depth + 1, current_track_id, query,
+                );
+            }
+
+            let tracks: Vec<crate::domain::Track> = if query.is_empty() {
+                state
+                    .library
+                    .tracks_in_folder(path)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            } else {
+                let q = query.to_lowercase();
+                state
+                    .library
+                    .tracks_in_folder(path)
+                    .into_iter()
+                    .filter(|t| t.metadata.search_text().contains(&q))
+                    .cloned()
+                    .collect()
+            };
+
+            for track in &tracks {
+                let is_track_selected = state.selected_track.as_ref() == Some(&track.id);
+                let is_current = current_track_id.as_ref() == Some(&track.id);
+
+                self.request_cover(&track.id, &track.file_path);
+
+                ui.horizontal(|ui| {
+                    ui.set_min_height(20.0);
+                    if depth > 0 {
+                        ui.add_space(depth as f32 * 16.0);
+                    }
+                    if is_current {
+                        ui.label("\u{25B6}");
+                    }
+                    let display = format!(
+                        "{}. {}",
+                        track.metadata.track_number.unwrap_or(0),
+                        track.metadata.display_title(&track.file_path)
+                    );
+                    let resp = ui.selectable_label(is_track_selected, display);
+                    if resp.clicked() {
+                        state.selected_track = Some(track.id.clone());
+                    }
+                    if resp.double_clicked() {
+                        state.selected_track = Some(track.id.clone());
+                        if let Some(ref s) = cmd {
+                            let _ = s.send(PlaybackCommand::Play(track.id.clone()));
+                        }
+                    }
+                    let cmd_ct = cmd.clone();
+                    let tid_ct = track.id.clone();
+                    resp.context_menu(move |ui| {
+                        if ui.button("Play").clicked() {
+                            if let Some(ref s) = cmd_ct {
+                                let _ = s.send(PlaybackCommand::Play(tid_ct.clone()));
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("Play Next").clicked() {
+                            if let Some(ref s) = cmd_ct {
+                                let _ = s.send(PlaybackCommand::PlayNext(tid_ct.clone()));
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("Add to Queue").clicked() {
+                            if let Some(ref s) = cmd_ct {
+                                let _ = s.send(PlaybackCommand::AddToQueue(tid_ct.clone()));
+                            }
+                            ui.close_menu();
+                        }
+                    });
+                });
+            }
+        });
+
+        if header_response.header_response.clicked() {
+            state.selected_folder = Some(path.clone());
+        }
+
+        if header_response.header_response.double_clicked() {
+            self.play_folder(state, path, cmd);
+        }
+
+        if !folder_track_ids.is_empty() {
+            let cmd_ct = cmd.clone();
+            let tids_ct = folder_track_ids;
+            header_response.header_response.context_menu(move |ui| {
+                if ui.button("Play").clicked() {
+                    if let Some(ref s) = cmd_ct {
+                        if let Some(first) = tids_ct.first() {
+                            let _ = s.send(PlaybackCommand::Play(first.clone()));
+                            for tid in &tids_ct[1..] {
+                                let _ = s.send(PlaybackCommand::AddToQueue(tid.clone()));
+                            }
+                        }
+                    }
+                    ui.close_menu();
+                }
+                if ui.button("Play Next").clicked() {
+                    if let Some(ref s) = cmd_ct {
+                        for tid in tids_ct.iter().rev() {
+                            let _ = s.send(PlaybackCommand::PlayNext(tid.clone()));
+                        }
+                    }
+                    ui.close_menu();
+                }
+                if ui.button("Append to Queue").clicked() {
+                    if let Some(ref s) = cmd_ct {
+                        for tid in &tids_ct {
+                            let _ = s.send(PlaybackCommand::AddToQueue(tid.clone()));
+                        }
+                    }
+                    ui.close_menu();
+                }
+            });
+        }
+    }
+
+    fn play_folder(
+        &self,
+        state: &AppState,
+        path: &PathBuf,
+        cmd: &Option<Sender<PlaybackCommand>>,
+    ) {
+        let track_ids = state.library.track_ids_in_folder_tree(path);
+        let Some(ref s) = cmd else { return };
+        if let Some(first) = track_ids.first() {
+            let _ = s.send(PlaybackCommand::Play(first.clone()));
+            for tid in &track_ids[1..] {
+                let _ = s.send(PlaybackCommand::AddToQueue(tid.clone()));
+            }
+        }
     }
 }
 

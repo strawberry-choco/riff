@@ -1,6 +1,6 @@
 ---
 project: riff
-last_updated: 2025-07-10
+last_updated: 2026-07-12
 ---
 
 # Requirements Index — riff
@@ -34,6 +34,7 @@ The system that discovers, indexes, and organizes local audio files. It scans di
 | [Library Search](features/library-search.md) | Search by artist, album artist, album, title | implemented | P1 | Metadata Extraction |
 | [Music Library Management](features/music-library-management.md) | Manage multiple library paths, OS file picker for add, delete, persist list | implemented | P0 | Library Scanning |
 | [Library Cache Persistence](features/library-cache-persistence.md) | Persist scanned tracks to disk so library loads instantly on startup without re-scan | implemented | P1 | Library Scanning, Music Library Management |
+| [Folder Watching](features/folder-watching.md) | Auto-detect new and deleted files in library folders with per-path toggle and debounced rescan | implemented | P1 | Library Scanning |
 
 ### User Interface
 The egui-based graphical interface that provides a main application window, a library explorer with dual views (file tree and searchable list), a player control bar with transport controls, a cover art display panel, and a now playing view. Must work on Linux, Windows, and macOS with minimal external dependencies.
@@ -41,7 +42,7 @@ The egui-based graphical interface that provides a main application window, a li
 | Feature | Summary | Status | Priority | Depends On |
 |---|---|---|---|---|---|
 | [Main Application Window](features/main-application-window.md) | egui window with cross-platform support | partial | P0 | — |
-| [Library Explorer Panel](features/library-explorer-panel.md) | File tree view + filterable artist/album list | partial | P0 | Library Search |
+| [Library Explorer Panel](features/library-explorer-panel.md) | Dual library/folder views with toggle, folder playback, context menus, search coexistence | implemented | P0 | Library Search |
 | [Player Control Bar](features/player-control-bar.md) | Transport controls, progress bar, volume slider | partial | P0 | Playback Control |
 | [Cover Art Display](features/cover-art-display.md) | Display resolved cover art in UI | partial | P1 | Cover Art Resolution |
 | [Now Playing View](features/now-playing-view.md) | Full track info, large cover art, queue peek | partial | P2 | Playback Queue, Cover Art Display |

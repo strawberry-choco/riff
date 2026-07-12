@@ -188,7 +188,10 @@ fn main() {
     #[cfg(target_os = "linux")]
     let app = RiffApp::new(state.clone(), ui_cmd_tx, ui_library_cmd_tx, library_update_rx, watcher_manager);
 
-    eframe::run_native("riff", options, Box::new(|_cc| Ok(Box::new(app))))
+    eframe::run_native("riff", options, Box::new(|cc| {
+        crate::ui::fonts::configure_fonts(&cc.egui_ctx);
+        Ok(Box::new(app))
+    }))
         .expect("Failed to run eframe");
 }
 

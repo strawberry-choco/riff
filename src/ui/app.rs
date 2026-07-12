@@ -22,8 +22,11 @@ pub struct RiffApp {
     search_focus: bool,
     pub(crate) settings_text_input: String,
     pub(crate) settings_show_input: bool,
+    pub(crate) settings_path_error: Option<String>,
     first_frame: bool,
     pub(crate) watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
+    #[cfg(not(target_os = "linux"))]
+    tray_icon: Arc<Mutex<Option<tray_icon::TrayIcon>>>,
 }
 
 impl RiffApp {
@@ -33,6 +36,8 @@ impl RiffApp {
         library_command_sender: Sender<LibraryCommand>,
         library_update_rx: Receiver<LibraryUpdate>,
         watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
+        #[cfg(not(target_os = "linux"))]
+        tray_icon: Arc<Mutex<Option<tray_icon::TrayIcon>>>,
     ) -> Self {
         let reader = Box::new(LoftyMetadataReader::new());
         let loader = Box::new(ImageCoverLoader::new());
@@ -46,7 +51,13 @@ impl RiffApp {
 
         std::thread::spawn(move || {
             while let Ok((track_id, path)) = cover_rx_inner.recv() {
-                let result = resolver_clone.lock().unwrap().resolve(&path).ok().flatten();
+                let result = match resolver_clone.lock().unwrap().resolve(&path) {
+                    Ok(val) => val,
+                    Err(e) => {
+                        tracing::warn!("Cover resolution failed for {:?}: {}", path, e);
+                        None
+                    }
+                };
                 let _ = response_tx.send((track_id.0.clone(), result));
             }
         });
@@ -64,8 +75,11 @@ impl RiffApp {
             search_focus: false,
             settings_text_input: String::new(),
             settings_show_input: false,
+            settings_path_error: None,
             first_frame: true,
             watcher_manager,
+            #[cfg(not(target_os = "linux"))]
+            tray_icon,
         }
     }
 
@@ -106,6 +120,12 @@ impl RiffApp {
                     }
                 }
             }
+        }
+    }
+
+    fn poll_watchers(&self) {
+        if let Some(ref mut mgr) = *self.watcher_manager.lock().unwrap() {
+            mgr.poll();
         }
     }
 
@@ -174,6 +194,7 @@ impl eframe::App for RiffApp {
 
         self.poll_library_updates(&mut state);
         self.update_cover_cache(ctx);
+        self.poll_watchers();
 
         // Keyboard shortcuts
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::F)) {
@@ -190,7 +211,7 @@ impl eframe::App for RiffApp {
             }
         }
 
-        // Update window title
+        // Update window title and tray tooltip
         if let Some(track_id) = state.queue.current_track() {
             if let Some(track) = state.library.get_track(track_id) {
                 let title = format!(
@@ -198,10 +219,22 @@ impl eframe::App for RiffApp {
                     track.metadata.display_artist(),
                     track.metadata.display_title(&track.file_path)
                 );
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+                #[cfg(not(target_os = "linux"))]
+                if let Ok(guard) = self.tray_icon.lock() {
+                    if let Some(ref tray) = *guard {
+                        crate::ui::tray::update_tooltip(tray, &title);
+                    }
+                }
             }
         } else {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title("riff".to_owned()));
+            #[cfg(not(target_os = "linux"))]
+            if let Ok(guard) = self.tray_icon.lock() {
+                if let Some(ref tray) = *guard {
+                    crate::ui::tray::update_tooltip(tray, "riff");
+                }
+            }
         }
 
         // --- TOP BAR ---
@@ -376,13 +409,12 @@ impl RiffApp {
             match state.browse_mode {
                 BrowseMode::Library => {
                     // Existing sub-toggle: All Tracks / Artists
-                    let mut show_artists = false;
                     ui.horizontal(|ui| {
-                        if ui.selectable_label(!show_artists, "All Tracks").clicked() {
-                            show_artists = false;
+                        if ui.selectable_label(!state.show_artists_view, "All Tracks").clicked() {
+                            state.show_artists_view = false;
                         }
-                        if ui.selectable_label(show_artists, "Artists").clicked() {
-                            show_artists = true;
+                        if ui.selectable_label(state.show_artists_view, "Artists").clicked() {
+                            state.show_artists_view = true;
                         }
                     });
                     ui.separator();
@@ -393,7 +425,7 @@ impl RiffApp {
                         ui.vertical_centered(|ui| {
                             ui.label(format!("No tracks found matching '{}'", query));
                         });
-                    } else if show_artists {
+                    } else if state.show_artists_view {
                         self.render_artist_view(ui, state, cmd, &query);
                     } else {
                         self.render_flat_view(ui, state, cmd, &query);

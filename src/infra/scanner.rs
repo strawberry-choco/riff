@@ -40,7 +40,7 @@ impl AudioFileScanner {
                 }
                 Err(e) => {
                     if let Some(path) = e.path() {
-                        tracing::debug!("Permission denied or error accessing: {:?}", path);
+                        tracing::warn!("Permission denied or error accessing {}: {}", path.display(), e);
                     }
                 }
             }

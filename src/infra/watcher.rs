@@ -2,6 +2,15 @@ use std::path::{Path, PathBuf};
 use crossbeam_channel::Sender;
 use notify::Watcher;
 
+const AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "aac", "opus", "ogg", "flac", "wav"];
+
+fn is_audio_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| AUDIO_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 pub struct FilesystemWatcher {
     inner: notify::RecommendedWatcher,
 }
@@ -13,7 +22,9 @@ impl FilesystemWatcher {
                 match res {
                     Ok(event) => {
                         for path in &event.paths {
-                            let _ = event_tx.send(path.clone());
+                            if is_audio_file(path) {
+                                let _ = event_tx.send(path.clone());
+                            }
                         }
                     }
                     Err(e) => {

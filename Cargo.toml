@@ -48,7 +48,7 @@ crossbeam-channel = "0.5"
 parking_lot = "0.12"
 
 # Filesystem watching
-notify = { version = "7", default-features = false, features = ["macos_fsevent", "macos_kqueue"] }
+notify = "7"
 
 # Random for shuffle
 rand = "0.8"

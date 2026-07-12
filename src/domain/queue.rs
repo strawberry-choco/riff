@@ -95,7 +95,11 @@ impl PlaybackQueue {
 
         let next_idx = if self.shuffle {
             if self.shuffled_indices.is_empty() {
-                self.regenerate_shuffle();
+                if self.repeat == RepeatMode::All {
+                    self.regenerate_shuffle();
+                } else {
+                    return None;
+                }
             }
             self.shuffled_indices.first().copied()
         } else {

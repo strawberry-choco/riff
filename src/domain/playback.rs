@@ -4,7 +4,6 @@ pub enum PlaybackState {
     Stopped,
     Playing,
     Paused,
-    Buffering,
 }
 
 /// Repeat mode for the queue.
@@ -37,6 +36,7 @@ pub enum PlaybackCommand {
     ToggleVisibility,
     PlayNext(crate::domain::TrackId),
     AddToQueue(crate::domain::TrackId),
+    PlayPause,
 }
 
 /// Updates sent from the playback engine to the UI.

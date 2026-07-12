@@ -55,7 +55,7 @@ pub fn create_tray(command_sender: Sender<PlaybackCommand>) -> Result<TrayIcon, 
             if let Ok(event) = menu_channel.try_recv() {
                 let id = event.id;
                 if id == play_pause_id {
-                    let _ = cmd_tx.send(PlaybackCommand::ToggleVisibility);
+                    let _ = cmd_tx.send(PlaybackCommand::PlayPause);
                 } else if id == next_track_id {
                     let _ = cmd_tx.send(PlaybackCommand::Next);
                 } else if id == prev_track_id {
@@ -64,6 +64,7 @@ pub fn create_tray(command_sender: Sender<PlaybackCommand>) -> Result<TrayIcon, 
                     let _ = cmd_tx.send(PlaybackCommand::ToggleVisibility);
                 } else if id == quit_id {
                     let _ = cmd_tx.send(PlaybackCommand::Stop);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                     std::process::exit(0);
                 }
             }

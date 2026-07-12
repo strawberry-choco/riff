@@ -174,7 +174,6 @@ fn run_audio_engine(
     let mut decoder = SymphoniaDecoder::new(codec_registry);
     let mut audio_output = CpalAudioOutput::new();
     let mut current_track_id: Option<crate::domain::TrackId> = None;
-    let mut volume = 1.0f32;
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
@@ -236,7 +235,6 @@ fn run_audio_engine(
                                                 audio_output.clear_buffer();
                                             }
                                             PlaybackCommand::SetVolume(vol) => {
-                                                volume = vol;
                                                 audio_output.set_volume(vol);
                                             }
                                             _ => {}
@@ -251,8 +249,7 @@ fn run_audio_engine(
 
                                 match decoder.next_frames(4096) {
                                     Ok(Some(samples)) => {
-                                        let scaled: Vec<f32> = samples.iter().map(|s| s * volume).collect();
-                                        if let Err(e) = audio_output.write_samples(&scaled) {
+                                        if let Err(e) = audio_output.write_samples(&samples) {
                                             let _ = update_tx.send(PlaybackUpdate::Error(e.to_string()));
                                             break;
                                         }
@@ -307,7 +304,6 @@ fn run_audio_engine(
                                             audio_output.clear_buffer();
                                         }
                                         PlaybackCommand::SetVolume(vol) => {
-                                            volume = vol;
                                             audio_output.set_volume(vol);
                                         }
                                         _ => {}
@@ -347,7 +343,6 @@ fn run_audio_engine(
                 let _ = decoder.seek(pos);
             }
             PlaybackCommand::SetVolume(vol) => {
-                volume = vol;
                 audio_output.set_volume(vol);
             }
             PlaybackCommand::Next => {

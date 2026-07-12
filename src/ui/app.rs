@@ -152,6 +152,14 @@ impl eframe::App for RiffApp {
                     state.library_statuses.insert(path.clone(), status);
                 }
             }
+
+            if let Some(vol) = crate::ui::settings::load_volume(_frame.storage()) {
+                state.current_volume = vol;
+                if let Some(ref s) = cmd {
+                    let _ = s.send(PlaybackCommand::SetVolume(vol));
+                }
+            }
+
             self.first_frame = false;
         }
 
@@ -282,6 +290,9 @@ impl eframe::App for RiffApp {
                 let mut vol = state.current_volume;
                 if ui.add(egui::Slider::new(&mut vol, 0.0..=1.0)).changed() {
                     state.current_volume = vol;
+                    if let Some(storage) = _frame.storage_mut() {
+                        crate::ui::settings::save_volume(storage, vol);
+                    }
                     if let Some(ref s) = cmd { let _ = s.send(PlaybackCommand::SetVolume(vol)); }
                 }
                 ui.separator();

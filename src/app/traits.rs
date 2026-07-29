@@ -9,6 +9,10 @@ pub trait AudioDecoder: Send {
     fn next_frames(&mut self, samples: usize) -> Result<Option<Vec<f32>>, AppError>;
     fn seek(&mut self, position: Duration) -> Result<(), AppError>;
     fn duration(&self) -> Option<Duration>;
+    /// Release the currently open file's resources (format reader, decoder,
+    /// sample buffer) without opening a new file. Safe to call when nothing is
+    /// open. Subsequent `next_frames`/`seek` calls will error until `open`.
+    fn close(&mut self) {}
 }
 
 /// Audio format information returned by decoder.

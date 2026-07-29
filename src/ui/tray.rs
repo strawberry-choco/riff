@@ -10,11 +10,18 @@ use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tray_icon::Icon;
 #[cfg(not(target_os = "linux"))]
 use crate::domain::PlaybackCommand;
+#[cfg(not(target_os = "linux"))]
+use std::sync::Arc;
+#[cfg(not(target_os = "linux"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Create a system tray icon with playback controls.
 /// On Linux this is a no-op (tray-icon requires GTK which isn't always available).
 #[cfg(not(target_os = "linux"))]
-pub fn create_tray(command_sender: Sender<PlaybackCommand>) -> Result<TrayIcon, Box<dyn std::error::Error>> {
+pub fn create_tray(
+    command_sender: Sender<PlaybackCommand>,
+    quit_flag: Arc<AtomicBool>,
+) -> Result<TrayIcon, Box<dyn std::error::Error>> {
     let menu = Menu::new();
 
     let play_pause = MenuItem::new("Play/Pause", true, None);
@@ -52,7 +59,14 @@ pub fn create_tray(command_sender: Sender<PlaybackCommand>) -> Result<TrayIcon, 
         let tray_channel = TrayIconEvent::receiver();
 
         loop {
-            if let Ok(event) = menu_channel.try_recv() {
+            if quit_flag.load(Ordering::Relaxed) {
+                break;
+            }
+
+            // Block up to 200ms waiting for a menu event instead of busy-polling.
+            // recv_timeout returns immediately when an event arrives, and times
+            // out otherwise so we can still observe the quit flag and tray clicks.
+            if let Ok(event) = menu_channel.recv_timeout(std::time::Duration::from_millis(200)) {
                 let id = event.id;
                 if id == play_pause_id {
                     let _ = cmd_tx.send(PlaybackCommand::PlayPause);
@@ -63,22 +77,16 @@ pub fn create_tray(command_sender: Sender<PlaybackCommand>) -> Result<TrayIcon, 
                 } else if id == show_window_id {
                     let _ = cmd_tx.send(PlaybackCommand::ToggleVisibility);
                 } else if id == quit_id {
+                    // Graceful shutdown: stop playback and signal the UI to close
+                    // so eframe can persist storage and the library cache is saved.
                     let _ = cmd_tx.send(PlaybackCommand::Stop);
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    std::process::exit(0);
+                    quit_flag.store(true, Ordering::Relaxed);
                 }
             }
 
-            if let Ok(event) = tray_channel.try_recv() {
-                match event {
-                    TrayIconEvent::Click { button: tray_icon::MouseButton::Left, .. } => {
-                        let _ = cmd_tx.send(PlaybackCommand::ToggleVisibility);
-                    }
-                    _ => {}
-                }
+            if let Ok(TrayIconEvent::Click { button: tray_icon::MouseButton::Left, .. }) = tray_channel.try_recv() {
+                let _ = cmd_tx.send(PlaybackCommand::ToggleVisibility);
             }
-
-            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     });
 

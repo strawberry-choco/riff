@@ -19,7 +19,7 @@ pub struct Track {
     pub metadata: TrackMetadata,
     pub duration: Option<Duration>,
     pub sample_rate: Option<u32>,
-    pub channels: Option<u8>,
+    pub channels: Option<u16>,
 }
 
 /// Metadata extracted from an audio file.

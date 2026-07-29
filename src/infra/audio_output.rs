@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crate::app::traits::AudioOutput;
 use crate::app::errors::AppError;
+use crate::domain::PlaybackUpdate;
 
 /// Shared audio buffer between decoder (producer) and cpal callback (consumer).
 type AudioBuffer = Arc<Mutex<VecDeque<f32>>>;
@@ -23,10 +24,11 @@ pub struct CpalAudioOutput {
     channels: u16,
     buffer: AudioBuffer,
     volume: Arc<AtomicU32>,
+    error_tx: crossbeam_channel::Sender<PlaybackUpdate>,
 }
 
 impl CpalAudioOutput {
-    pub fn new() -> Self {
+    pub fn new(error_tx: crossbeam_channel::Sender<PlaybackUpdate>) -> Self {
         Self {
             host: cpal::default_host(),
             device: None,
@@ -35,6 +37,7 @@ impl CpalAudioOutput {
             channels: 2,
             buffer: Arc::new(Mutex::new(VecDeque::with_capacity(65536))),
             volume: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
+            error_tx,
         }
     }
 }
@@ -84,7 +87,7 @@ impl AudioOutput for CpalAudioOutput {
         let stream = match sample_format {
             cpal::SampleFormat::F32 => {
                 device.build_output_stream(
-                    stream_config.clone(),
+                    stream_config,
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                         audio_callback_f32(data, &buffer_clone, &volume_clone);
                     },
@@ -96,7 +99,7 @@ impl AudioOutput for CpalAudioOutput {
             }
             cpal::SampleFormat::I16 => {
                 device.build_output_stream(
-                    stream_config.clone(),
+                    stream_config,
                     move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
                         audio_callback_i16(data, &buffer_clone, &volume_clone);
                     },
@@ -177,32 +180,27 @@ fn build_stream_config(
     default_config: &cpal::SupportedStreamConfig,
 ) -> cpal::StreamConfig {
     let default_stream: cpal::StreamConfig = default_config.clone().into();
-    let requested_sample_rate = requested_rate;
-
-    let rate_is_supported = device
-        .supported_output_configs()
-        .map(|mut configs| {
-            configs.any(|range| {
-                range.min_sample_rate() <= requested_sample_rate
-                    && requested_sample_rate <= range.max_sample_rate()
-            })
-        })
-        .unwrap_or(false);
-
-    if !rate_is_supported {
-        tracing::warn!(
-            "Sample rate {} Hz not supported, using device default {} Hz",
-            requested_rate,
-            default_stream.sample_rate
-        );
-        return default_stream;
+    
+    // For Windows WASAPI shared mode, we need to be more careful about configuration.
+    // The issue is that shared mode may not support arbitrary buffer sizes or sample rates.
+    // Let's try to use the default configuration to avoid "Stream configuration is not supported" errors.
+    let mut config = default_stream;
+    
+    // Only change channels if requested and supported
+    if requested_channels != config.channels {
+        // Check if the requested channels are supported
+        if let Ok(mut supported_configs) = device.supported_output_configs() {
+            if supported_configs.any(|range| {
+                let channels_min = range.channels().min(2); // Use a reasonable default
+                let channels_max = range.channels().max(2); // Use a reasonable default
+                channels_min <= requested_channels && channels_max >= requested_channels
+            }) {
+                config.channels = requested_channels;
+            }
+        }
     }
-
-    cpal::StreamConfig {
-        channels: requested_channels,
-        sample_rate: requested_sample_rate,
-        buffer_size: default_stream.buffer_size,
-    }
+    
+    config
 }
 
 fn audio_callback_f32(data: &mut [f32], buffer: &AudioBuffer, volume: &Arc<AtomicU32>) {

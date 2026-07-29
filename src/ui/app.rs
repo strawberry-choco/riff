@@ -1,9 +1,11 @@
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use crossbeam_channel::{Sender, Receiver, unbounded};
 use crate::app::commands::{LibraryCommand, LibraryUpdate};
 use crate::app::cover_resolver::CoverResolver;
+use crate::app::MutexExt;
 use elegance::Theme as EleganceTheme;
 use crate::app::state::{AppState, ViewMode, LibraryStatus, BrowseMode};
 use crate::app::watcher_manager::WatcherManager;
@@ -29,6 +31,7 @@ pub struct RiffApp {
     elegance_theme: bool, // true = dark (slate), false = light (frost)
     #[cfg(not(target_os = "linux"))]
     tray_icon: Arc<Mutex<Option<tray_icon::TrayIcon>>>,
+    quit_flag: Arc<AtomicBool>,
 }
 
 impl RiffApp {
@@ -40,6 +43,7 @@ impl RiffApp {
         watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
         #[cfg(not(target_os = "linux"))]
         tray_icon: Arc<Mutex<Option<tray_icon::TrayIcon>>>,
+        quit_flag: Arc<AtomicBool>,
     ) -> Self {
         let reader = Box::new(LoftyMetadataReader::new());
         let loader = Box::new(ImageCoverLoader::new());
@@ -53,7 +57,7 @@ impl RiffApp {
 
         std::thread::spawn(move || {
             while let Ok((track_id, path)) = cover_rx_inner.recv() {
-                let result = match resolver_clone.lock().unwrap().resolve(&path) {
+                let result = match resolver_clone.lock_or_recover().resolve(&path) {
                     Ok(val) => val,
                     Err(e) => {
                         tracing::warn!("Cover resolution failed for {:?}: {}", path, e);
@@ -83,6 +87,7 @@ impl RiffApp {
             elegance_theme: true, // dark (slate) by default
             #[cfg(not(target_os = "linux"))]
             tray_icon,
+            quit_flag,
         }
     }
 
@@ -106,7 +111,7 @@ impl RiffApp {
                         state.library_statuses.insert(path.clone(), LibraryStatus::Scanned(total_files));
                         state.scan_status = Some(format!("Scan complete: {} tracks", total_files));
                         state.library.save_cache();
-                        if let Some(ref mut mgr) = *self.watcher_manager.lock().unwrap() {
+                        if let Some(ref mut mgr) = *self.watcher_manager.lock_or_recover() {
                             mgr.mark_scan_complete(&path);
                         }
                     }
@@ -120,7 +125,7 @@ impl RiffApp {
     }
 
     fn poll_watchers(&self) {
-        if let Some(ref mut mgr) = *self.watcher_manager.lock().unwrap() {
+        if let Some(ref mut mgr) = *self.watcher_manager.lock_or_recover() {
             mgr.poll();
         }
     }
@@ -138,7 +143,9 @@ impl RiffApp {
                     egui::TextureOptions::default(),
                 );
                 self.cover_textures.insert(key.clone(), texture);
-                self.cover_lru_keys.push(key);
+                // Dedupe: remove any existing instance to avoid duplicates.
+                self.cover_lru_keys.retain(|k| k != &key);
+                self.cover_lru_keys.push(key.clone());
                 while self.cover_lru_keys.len() > 50 {
                     if let Some(oldest) = self.cover_lru_keys.first().cloned() {
                         self.cover_lru_keys.remove(0);
@@ -148,8 +155,20 @@ impl RiffApp {
             }
         }
     }
-}
 
+    /// Get a cover texture, touching the LRU to mark it as recently used.
+    fn get_cover_texture(&mut self, key: &str) -> Option<egui::TextureHandle> {
+        if let Some(tex) = self.cover_textures.get(key) {
+            // Move to end (most recently used) and return a clone.
+            self.cover_lru_keys.retain(|k| k != key);
+            self.cover_lru_keys.push(key.to_string());
+            Some(tex.clone())
+        } else {
+            None
+        }
+    }
+
+}
 impl eframe::App for RiffApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         if self.elegance_theme {
@@ -162,7 +181,13 @@ impl eframe::App for RiffApp {
         let lib_cmd = self.library_command_sender.clone();
         let state_arc = self.state.clone();
 
-        let mut state = state_arc.lock().unwrap();
+        let mut state = state_arc.lock_or_recover();
+
+        if self.quit_flag.load(Ordering::Relaxed) {
+            state.library.save_cache();
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
 
         if self.first_frame {
             state.library = crate::app::library_manager::LibraryManager::load_cache();
@@ -458,7 +483,7 @@ impl RiffApp {
                             ui.label(format!("File: {}", path_display));
                         });
                         ui.with_layout(egui::Layout::top_down(egui::Align::RIGHT), |ui| {
-                            if let Some(texture) = self.cover_textures.get(&track.id.0) {
+                            if let Some(texture) = self.get_cover_texture(&track.id.0) {
                                 let sized = egui::load::SizedTexture::new(texture.id(), egui::vec2(200.0, 200.0));
                                 ui.add(egui::Image::from_texture(sized));
                             } else {
@@ -677,7 +702,7 @@ impl RiffApp {
                     if let Some(track) = state.library.get_track(&track_id) {
                         self.request_cover(&track.id, &track.file_path);
 
-                        if let Some(texture) = self.cover_textures.get(&track.id.0) {
+                        if let Some(texture) = self.get_cover_texture(&track.id.0) {
                             let sized = egui::load::SizedTexture::new(texture.id(), egui::vec2(300.0, 300.0));
                             ui.add(egui::Image::from_texture(sized));
                         } else {

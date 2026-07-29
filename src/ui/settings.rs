@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crossbeam_channel::Sender;
 use crate::app::commands::LibraryCommand;
 use crate::app::state::{AppState, LibraryStatus, ViewMode, WatchState};
+use crate::app::MutexExt;
 
 const LIBRARY_PATHS_KEY: &str = "library_paths";
 const VOLUME_KEY: &str = "volume";
@@ -274,7 +275,7 @@ impl super::app::RiffApp {
                                     let path_c = path.clone();
                                     if watching {
                                         let result = {
-                                            let mut guard = wm.lock().unwrap();
+                                            let mut guard = wm.lock_or_recover();
                                             guard
                                                 .as_mut()
                                                 .map(|mgr| mgr.start_watching(&path_c))
@@ -298,7 +299,7 @@ impl super::app::RiffApp {
                                         }
                                     } else {
                                         if let Some(ref mut mgr) =
-                                            *self.watcher_manager.lock().unwrap()
+                                            *self.watcher_manager.lock_or_recover()
                                         {
                                             mgr.stop_watching(&path);
                                         }

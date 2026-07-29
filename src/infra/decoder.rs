@@ -171,4 +171,13 @@ impl AudioDecoder for SymphoniaDecoder {
     fn duration(&self) -> Option<Duration> {
         self.duration
     }
+
+    fn close(&mut self) {
+        self.format_reader = None;
+        self.decoder = None;
+        self.sample_buffer = None;
+        self.spec = None;
+        self.duration = None;
+        self.pending_samples.clear();
+    }
 }

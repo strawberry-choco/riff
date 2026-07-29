@@ -10,6 +10,7 @@ use crossbeam_channel::unbounded;
 
 use crate::app::commands::{LibraryCommand, LibraryUpdate};
 use crate::app::state::AppState;
+use crate::app::MutexExt;
 use crate::app::traits::{AudioDecoder, AudioOutput};
 use crate::app::watcher_manager::WatcherManager;
 use crate::infra::{SymphoniaDecoder, CpalAudioOutput, LoftyMetadataReader, AudioFileScanner, FilesystemWatcher};
@@ -40,7 +41,7 @@ fn main() {
     let update_cmd_tx = cmd_tx.clone();
     let _update_thread = thread::spawn(move || {
         while let Ok(update) = update_rx.recv() {
-            let mut state = update_state.lock().unwrap();
+            let mut state = update_state.lock_or_recover();
             match update {
                 PlaybackUpdate::StateChanged(new_state) => {
                     state.playback_state = new_state;
@@ -55,13 +56,13 @@ fn main() {
                     // Auto-advance to next track
                     drop(state);
                     let next_track = {
-                        let mut state = update_state.lock().unwrap();
+                        let mut state = update_state.lock_or_recover();
                         state.queue.next().cloned()
                     };
                     if let Some(track_id) = next_track {
                         let _ = update_cmd_tx.send(PlaybackCommand::Play(track_id));
                     } else {
-                        let mut state = update_state.lock().unwrap();
+                        let mut state = update_state.lock_or_recover();
                         state.playback_state = PlaybackState::Stopped;
                     }
                 }
@@ -99,7 +100,7 @@ fn main() {
                                 let processed = i * chunk_size + chunk.len();
 
                                 {
-                                    let mut state = scan_state.lock().unwrap();
+                                    let mut state = scan_state.lock_or_recover();
                                     if let Err(e) = state.library.scan_and_add_tracks(
                                         chunk_paths,
                                         &reader,
@@ -155,7 +156,7 @@ fn main() {
     let fs_watcher_manager = watcher_manager.clone();
     let _fs_event_thread = thread::spawn(move || {
         while let Ok(changed_path) = fs_event_rx.recv() {
-            if let Some(ref mut mgr) = *fs_watcher_manager.lock().unwrap() {
+            if let Some(ref mut mgr) = *fs_watcher_manager.lock_or_recover() {
                 mgr.on_fs_event(&changed_path);
             }
         }
@@ -168,9 +169,11 @@ fn main() {
         ..Default::default()
     };
 
+    let quit_flag = Arc::new(AtomicBool::new(false));
+
     #[cfg(not(target_os = "linux"))]
     let tray_icon = Arc::new(Mutex::new(
-        match crate::ui::tray::create_tray(cmd_tx.clone()) {
+        match crate::ui::tray::create_tray(cmd_tx.clone(), quit_flag.clone()) {
             Ok(tray) => {
                 tracing::info!("Tray icon created");
                 Some(tray)
@@ -183,10 +186,10 @@ fn main() {
     ));
 
     #[cfg(not(target_os = "linux"))]
-    let app = RiffApp::new(state.clone(), ui_cmd_tx, ui_library_cmd_tx, library_update_rx, watcher_manager, tray_icon);
+    let app = RiffApp::new(state.clone(), ui_cmd_tx, ui_library_cmd_tx, library_update_rx, watcher_manager, tray_icon, quit_flag.clone());
 
     #[cfg(target_os = "linux")]
-    let app = RiffApp::new(state.clone(), ui_cmd_tx, ui_library_cmd_tx, library_update_rx, watcher_manager);
+    let app = RiffApp::new(state.clone(), ui_cmd_tx, ui_library_cmd_tx, library_update_rx, watcher_manager, quit_flag.clone());
 
     eframe::run_native("riff", options, Box::new(|cc| {
         crate::ui::fonts::configure_fonts(&cc.egui_ctx);
@@ -205,7 +208,7 @@ fn run_audio_engine(
     symphonia::default::register_enabled_codecs(&mut codec_registry);
     codec_registry.register_all::<symphonia_adapter_libopus::OpusDecoder>();
     let mut decoder = SymphoniaDecoder::new(codec_registry);
-    let mut audio_output = CpalAudioOutput::new();
+    let mut audio_output = CpalAudioOutput::new(update_tx.clone());
     let mut current_track_id: Option<crate::domain::TrackId> = None;
     let mut paused_position: Option<std::time::Duration> = None;
 
@@ -279,7 +282,7 @@ fn run_audio_engine(
                 current_track_id = Some(track_id.clone());
                 
                 let path = {
-                    let mut state = state.lock().unwrap();
+                    let mut state = state.lock_or_recover();
                     // When playing a track from the library with an empty queue,
                     // populate the queue so that Next/Previous/auto-advance work.
                     if state.queue.tracks.is_empty() {
@@ -424,6 +427,7 @@ fn run_audio_engine(
             PlaybackCommand::Stop => {
                 paused_position = None;
                 let _ = audio_output.stop();
+                decoder.close();
                 let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Stopped));
             }
             PlaybackCommand::Seek(pos) => {
@@ -434,7 +438,7 @@ fn run_audio_engine(
             }
             PlaybackCommand::Next => {
                 let next_track = {
-                    let mut state = state.lock().unwrap();
+                    let mut state = state.lock_or_recover();
                     state.queue.next().cloned()
                 };
                 if let Some(track_id) = next_track {
@@ -445,7 +449,7 @@ fn run_audio_engine(
             }
             PlaybackCommand::Previous => {
                 let prev_track = {
-                    let mut state = state.lock().unwrap();
+                    let mut state = state.lock_or_recover();
                     state.queue.previous().cloned()
                 };
                 if let Some(track_id) = prev_track {
@@ -457,7 +461,7 @@ fn run_audio_engine(
             PlaybackCommand::ToggleVisibility => {}
             PlaybackCommand::PlayPause => {
                 let current_state = {
-                    let state = state.lock().unwrap();
+                    let state = state.lock_or_recover();
                     state.playback_state
                 };
                 match current_state {
@@ -471,7 +475,7 @@ fn run_audio_engine(
             }
             PlaybackCommand::PlayNext(track_id) => {
                 {
-                    let mut state = state.lock().unwrap();
+                    let mut state = state.lock_or_recover();
                     state.queue.insert_next(track_id.clone());
                 }
                 if current_track_id.is_none() {
@@ -480,7 +484,7 @@ fn run_audio_engine(
             }
             PlaybackCommand::AddToQueue(track_id) => {
                 {
-                    let mut state = state.lock().unwrap();
+                    let mut state = state.lock_or_recover();
                     state.queue.append(track_id.clone());
                 }
                 if current_track_id.is_none() {

@@ -46,6 +46,7 @@ directories = "5"
 
 # Threading / sync
 crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
 parking_lot = "0.12"
 
 # Filesystem watching

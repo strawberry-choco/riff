@@ -90,3 +90,38 @@ There is **no CI pipeline**, **no test suite** (zero `#[test]` or `#[cfg(test)]`
 ## Config Files
 
 `clippy.toml` configures Clippy (msrv, tool-level options). Lint levels are set in `Cargo.toml` under `[lints.clippy]` (pedantic with selected allowances). No rustfmt or CI config files exist. Architecture rules live in `docs/technical/architecture.md`. Feature requirements live in `docs/product/features.md`. The full documentation index is in `docs/README.md`.
+
+## Agent Skills
+
+Agent Skills (`~/.config/opencode/skills/agent-skills/`) provide production-grade engineering workflows. They are auto-discovered — the `skill` tool loads `SKILL.md` from the relevant directory.
+
+**Use the `using-agent-skills` meta-skill first** when starting a session to decide which skill applies. Mapping by intent:
+
+- **Design / spec a feature** → `spec-driven-development`
+- **Plan work into tasks** → `planning-and-task-breakdown`
+- **Implement a feature** → `incremental-implementation` (+ `test-driven-development`, `frontend-ui-engineering`)
+- **Fix a bug** → `debugging-and-error-recovery`
+- **Review code** → `code-review-and-quality`
+- **Simplify code** → `code-simplification`
+- **Security / performance / CI work** → `security-and-hardening`, `performance-optimization`, `ci-cd-and-automation`
+- **Ship / release** → `shipping-and-launch`, `git-workflow-and-versioning`
+
+**Rules:**
+- If a skill applies, invoke it with the `skill` tool and follow it exactly.
+- Do not jump directly to implementation — spec before code, plan before build, test before ship.
+- Never partially apply a skill — follow the workflow to its exit criteria.
+
+### Slash Commands
+
+Commands live in `.opencode/commands/`. Invoke by name; each loads a structured prompt backed by the corresponding skill:
+
+| Command | Skill | What it does |
+|---|---|---|
+| `/spec` | spec-driven-development | Write a structured spec before writing code |
+| `/planning` | planning-and-task-breakdown | Break work into verifiable tasks |
+| `/build` | incremental-implementation + test-driven-development | Implement one task (RED→GREEN→commit). Add `auto` to run the whole plan |
+| `/test` | test-driven-development | TDD loop or Prove-It for bugs |
+| `/review` | code-review-and-quality | Five-axis code review |
+| `/code-simplify` | code-simplification | Reduce complexity, preserve behavior |
+| `/ship` | shipping-and-launch | Parallel fan-out review + go/no-go decision |
+| `/webperf` | (web-performance-auditor) | Web performance audit (web apps only) |

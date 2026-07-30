@@ -191,7 +191,7 @@ impl eframe::App for RiffApp {
 
         if self.first_frame {
             state.library = crate::app::library_manager::LibraryManager::load_cache();
-            let persisted_paths = crate::ui::settings::load_library_paths(frame.storage());
+            let persisted_paths = crate::ui::settings::load_library_paths_immutable(frame.storage());
             if !persisted_paths.is_empty() {
                 state.library_paths = persisted_paths.clone();
                 for path in &persisted_paths {
@@ -204,14 +204,14 @@ impl eframe::App for RiffApp {
                 }
             }
 
-            if let Some(vol) = crate::ui::settings::load_volume(frame.storage()) {
+            if let Some(vol) = crate::ui::settings::load_volume_immutable(frame.storage()) {
                 state.current_volume = vol;
                 if let Some(ref s) = cmd {
                     let _ = s.send(PlaybackCommand::SetVolume(vol));
                 }
             }
 
-            state.watch_states = crate::ui::settings::load_watch_states(frame.storage());
+            state.watch_states = crate::ui::settings::load_watch_states_immutable(frame.storage());
 
             self.first_frame = false;
         }
@@ -245,19 +245,15 @@ impl eframe::App for RiffApp {
                 );
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
                 #[cfg(not(target_os = "linux"))]
-                if let Ok(guard) = self.tray_icon.lock() {
-                    if let Some(ref tray) = *guard {
-                        crate::ui::tray::update_tooltip(tray, &title);
-                    }
+                if let Some(ref tray) = *self.tray_icon.lock_or_recover() {
+                    crate::ui::tray::update_tooltip(tray, &title);
                 }
             }
         } else {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title("riff".to_owned()));
             #[cfg(not(target_os = "linux"))]
-            if let Ok(guard) = self.tray_icon.lock() {
-                if let Some(ref tray) = *guard {
-                    crate::ui::tray::update_tooltip(tray, "riff");
-                }
+            if let Some(ref tray) = *self.tray_icon.lock_or_recover() {
+                crate::ui::tray::update_tooltip(tray, "riff");
             }
         }
 

@@ -255,15 +255,13 @@ fn run_audio_engine(
                 true
             }
             PlaybackCommand::PlayNext(track_id) => {
-                if let Ok(mut s) = state.lock() {
-                    s.queue.insert_next(track_id);
-                }
+                let mut s = state.lock_or_recover();
+                s.queue.insert_next(track_id);
                 false
             }
             PlaybackCommand::AddToQueue(track_id) => {
-                if let Ok(mut s) = state.lock() {
-                    s.queue.append(track_id);
-                }
+                let mut s = state.lock_or_recover();
+                s.queue.append(track_id);
                 false
             }
             _ => false,

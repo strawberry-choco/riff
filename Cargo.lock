@@ -3884,6 +3884,7 @@ dependencies = [
  "serde_json",
  "symphonia",
  "symphonia-adapter-libopus",
+ "tempfile",
  "thiserror 1.0.69",
  "tracing",
  "tracing-subscriber",

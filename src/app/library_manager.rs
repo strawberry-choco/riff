@@ -35,15 +35,14 @@ impl LibraryManager {
             }
 
             match reader.read_all(&path) {
-                Ok((metadata, duration, _cover_source)) => {
+                Ok((metadata, duration, _cover_source, audio_format)) => {
                     let track = Track {
                         id,
                         file_path: path,
                         metadata,
                         duration,
-                        // sample_rate and channels are populated at decode time by the audio engine, not during scanning.
-                        sample_rate: None,
-                        channels: None,
+                        sample_rate: Some(audio_format.sample_rate),
+                        channels: Some(audio_format.channels),
                     };
                     self.add_track(track);
                     added += 1;

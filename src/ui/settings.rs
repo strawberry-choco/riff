@@ -7,72 +7,298 @@ use crate::app::state::{AppState, LibraryStatus, ViewMode, WatchState};
 use crate::app::MutexExt;
 
 const LIBRARY_PATHS_KEY: &str = "library_paths";
+const LIBRARY_PATHS_BACKUP_KEY: &str = "library_paths_backup";
 const VOLUME_KEY: &str = "volume";
+const VOLUME_BACKUP_KEY: &str = "volume_backup";
 const WATCH_STATES_KEY: &str = "watch_states";
+const WATCH_STATES_BACKUP_KEY: &str = "watch_states_backup";
 
-pub fn load_library_paths(storage: Option<&dyn eframe::Storage>) -> Vec<PathBuf> {
+pub fn load_library_paths(storage: Option<&mut dyn eframe::Storage>) -> Vec<PathBuf> {
     let Some(storage) = storage else { return Vec::new(); };
-    storage.get_string(LIBRARY_PATHS_KEY)
+    
+    // Try to load from primary storage first
+    if let Some(paths) = storage.get_string(LIBRARY_PATHS_KEY)
         .and_then(|s| match serde_json::from_str::<Vec<String>>(&s) {
             Ok(v) => Some(v.into_iter().map(PathBuf::from).collect()),
             Err(e) => {
-                tracing::warn!("Failed to deserialize library paths: {}", e);
+                tracing::warn!("Failed to deserialize library paths from primary storage: {}", e);
                 None
             }
-        })
-        .unwrap_or_default()
+        }) {
+        return paths;
+    }
+    
+    // If primary storage fails, try to load from backup
+    if let Some(paths) = storage.get_string(LIBRARY_PATHS_BACKUP_KEY)
+        .and_then(|s| match serde_json::from_str::<Vec<String>>(&s) {
+            Ok(v) => {
+                tracing::info!("Restored library paths from backup");
+                // Restore to primary storage
+                let json = serde_json::to_string(&v)
+                    .map_err(|e| tracing::error!("Failed to serialize restored paths: {}", e))
+                    .unwrap_or_default();
+                storage.set_string(LIBRARY_PATHS_KEY, json);
+                Some(v.into_iter().map(PathBuf::from).collect())
+            }
+            Err(e) => {
+                tracing::warn!("Failed to deserialize library paths from backup: {}", e);
+                None
+            }
+        }) {
+        return paths;
+    }
+    
+    // If both fail, return empty vector and create a backup of the empty state
+    let empty_json = serde_json::to_string(&Vec::<String>::new())
+        .map_err(|e| tracing::error!("Failed to serialize empty paths: {}", e))
+        .unwrap_or_default();
+    storage.set_string(LIBRARY_PATHS_KEY, empty_json.clone());
+    storage.set_string(LIBRARY_PATHS_BACKUP_KEY, empty_json);
+    
+    Vec::new()
+}
+
+/// Load library paths from immutable storage (read-only)
+pub fn load_library_paths_immutable(storage: Option<&dyn eframe::Storage>) -> Vec<PathBuf> {
+    let Some(storage) = storage else { return Vec::new(); };
+    
+    // Try to load from primary storage first
+    if let Some(paths) = storage.get_string(LIBRARY_PATHS_KEY)
+        .and_then(|s| match serde_json::from_str::<Vec<String>>(&s) {
+            Ok(v) => Some(v.into_iter().map(PathBuf::from).collect()),
+            Err(e) => {
+                tracing::warn!("Failed to deserialize library paths from primary storage: {}", e);
+                None
+            }
+        }) {
+        return paths;
+    }
+    
+    // If primary storage fails, try to load from backup
+    if let Some(paths) = storage.get_string(LIBRARY_PATHS_BACKUP_KEY)
+        .and_then(|s| match serde_json::from_str::<Vec<String>>(&s) {
+            Ok(v) => Some(v.into_iter().map(PathBuf::from).collect()),
+            Err(e) => {
+                tracing::warn!("Failed to deserialize library paths from backup: {}", e);
+                None
+            }
+        }) {
+        return paths;
+    }
+    
+    Vec::new()
 }
 
 pub fn save_library_paths(storage: &mut dyn eframe::Storage, paths: &[PathBuf]) {
     let strings: Vec<String> = paths.iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
-    let json = match serde_json::to_string(&strings) {
+    
+    // Save to primary storage
+    let primary_json = match serde_json::to_string(&strings) {
         Ok(j) => j,
         Err(e) => {
             tracing::warn!("Failed to serialize library paths: {}", e);
-            "[]".to_string()
+            return;
         }
     };
-    storage.set_string(LIBRARY_PATHS_KEY, json);
+    storage.set_string(LIBRARY_PATHS_KEY, primary_json.clone());
+    
+    // Create/update backup
+    storage.set_string(LIBRARY_PATHS_BACKUP_KEY, primary_json);
 }
 
-pub fn load_volume(storage: Option<&dyn eframe::Storage>) -> Option<f32> {
+pub fn load_volume(storage: Option<&mut dyn eframe::Storage>) -> Option<f32> {
     let Some(storage) = storage else { return None; };
-    storage.get_string(VOLUME_KEY)
-        .and_then(|s| s.parse::<f32>().ok())
+    
+    // Try to load from primary storage first
+    if let Some(volume) = storage.get_string(VOLUME_KEY)
+        .and_then(|s| s.parse::<f32>().ok()) {
+        return Some(volume);
+    }
+    
+    // If primary storage fails, try to load from backup
+    if let Some(volume) = storage.get_string(VOLUME_BACKUP_KEY)
+        .and_then(|s| s.parse::<f32>().ok()) {
+        tracing::info!("Restored volume from backup");
+        // Restore to primary storage
+        storage.set_string(VOLUME_KEY, volume.to_string());
+        return Some(volume);
+    }
+    
+    // If both fail, return default volume and create backup
+    let default_volume = 1.0;
+    storage.set_string(VOLUME_KEY, default_volume.to_string());
+    storage.set_string(VOLUME_BACKUP_KEY, default_volume.to_string());
+    
+    Some(default_volume)
+}
+
+/// Load volume from immutable storage (read-only)
+pub fn load_volume_immutable(storage: Option<&dyn eframe::Storage>) -> Option<f32> {
+    let Some(storage) = storage else { return None; };
+    
+    // Try to load from primary storage first
+    if let Some(volume) = storage.get_string(VOLUME_KEY)
+        .and_then(|s| s.parse::<f32>().ok()) {
+        return Some(volume);
+    }
+    
+    // If primary storage fails, try to load from backup
+    if let Some(volume) = storage.get_string(VOLUME_BACKUP_KEY)
+        .and_then(|s| s.parse::<f32>().ok()) {
+        return Some(volume);
+    }
+    
+    None
 }
 
 pub fn save_volume(storage: &mut dyn eframe::Storage, volume: f32) {
+    // Save to primary storage
     storage.set_string(VOLUME_KEY, volume.to_string());
+    
+    // Create/update backup
+    storage.set_string(VOLUME_BACKUP_KEY, volume.to_string());
 }
 
-pub fn load_watch_states(storage: Option<&dyn eframe::Storage>) -> HashMap<PathBuf, WatchState> {
+pub fn load_watch_states(storage: Option<&mut dyn eframe::Storage>) -> HashMap<PathBuf, WatchState> {
     let Some(storage) = storage else { return HashMap::new(); };
-    storage
+    
+    // Try to load from primary storage first
+    if let Some(states) = storage
         .get_string(WATCH_STATES_KEY)
         .and_then(|s| match serde_json::from_str(&s) {
             Ok(v) => Some(v),
             Err(e) => {
-                tracing::warn!("Failed to deserialize watch states: {}", e);
+                tracing::warn!("Failed to deserialize watch states from primary storage: {}", e);
                 None
             }
-        })
-        .unwrap_or_default()
+        }) {
+        return states;
+    }
+    
+    // If primary storage fails, try to load from backup
+    if let Some(states) = storage
+        .get_string(WATCH_STATES_BACKUP_KEY)
+        .and_then(|s| match serde_json::from_str(&s) {
+            Ok(v) => {
+                tracing::info!("Restored watch states from backup");
+                // Restore to primary storage
+                let json = serde_json::to_string(&v)
+                    .map_err(|e| tracing::error!("Failed to serialize restored watch states: {}", e))
+                    .unwrap_or_default();
+                storage.set_string(WATCH_STATES_KEY, json);
+                Some(v)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to deserialize watch states from backup: {}", e);
+                None
+            }
+        }) {
+        return states;
+    }
+    
+    // If both fail, return empty HashMap and create backup of empty state
+    let empty_json = serde_json::to_string(&HashMap::<PathBuf, WatchState>::new())
+        .map_err(|e| tracing::error!("Failed to serialize empty watch states: {}", e))
+        .unwrap_or_default();
+    storage.set_string(WATCH_STATES_KEY, empty_json.clone());
+    storage.set_string(WATCH_STATES_BACKUP_KEY, empty_json);
+    
+    HashMap::new()
+}
+
+/// Load watch states from immutable storage (read-only)
+pub fn load_watch_states_immutable(storage: Option<&dyn eframe::Storage>) -> HashMap<PathBuf, WatchState> {
+    let Some(storage) = storage else { return HashMap::new(); };
+    
+    // Try to load from primary storage first
+    if let Some(states) = storage
+        .get_string(WATCH_STATES_KEY)
+        .and_then(|s| match serde_json::from_str(&s) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!("Failed to deserialize watch states from primary storage: {}", e);
+                None
+            }
+        }) {
+        return states;
+    }
+    
+    // If primary storage fails, try to load from backup
+    if let Some(states) = storage
+        .get_string(WATCH_STATES_BACKUP_KEY)
+        .and_then(|s| match serde_json::from_str(&s) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!("Failed to deserialize watch states from backup: {}", e);
+                None
+            }
+        }) {
+        return states;
+    }
+    
+    HashMap::new()
 }
 
 pub fn save_watch_states(
     storage: &mut dyn eframe::Storage,
     states: &HashMap<PathBuf, WatchState>,
 ) {
+    // Save to primary storage
     let json = match serde_json::to_string(states) {
         Ok(j) => j,
         Err(e) => {
             tracing::warn!("Failed to serialize watch states: {}", e);
-            "{}".to_string()
+            return;
         }
     };
-    storage.set_string(WATCH_STATES_KEY, json);
+    storage.set_string(WATCH_STATES_KEY, json.clone());
+    
+    // Create/update backup
+    storage.set_string(WATCH_STATES_BACKUP_KEY, json);
+}
+
+/// Check if storage is corrupted and attempt to restore from backup
+pub fn restore_from_backup_if_corrupted(storage: &mut dyn eframe::Storage) {
+    // Check library paths
+    if let Some(primary) = storage.get_string(LIBRARY_PATHS_KEY) {
+        if serde_json::from_str::<Vec<String>>(&primary).is_err() {
+            tracing::warn!("Library paths storage is corrupted, attempting to restore from backup");
+            if let Some(backup) = storage.get_string(LIBRARY_PATHS_BACKUP_KEY) {
+                if serde_json::from_str::<Vec<String>>(&backup).is_ok() {
+                    storage.set_string(LIBRARY_PATHS_KEY, backup);
+                    tracing::info!("Library paths restored from backup");
+                }
+            }
+        }
+    }
+    
+    // Check volume
+    if let Some(primary) = storage.get_string(VOLUME_KEY) {
+        if primary.parse::<f32>().is_err() {
+            tracing::warn!("Volume storage is corrupted, attempting to restore from backup");
+            if let Some(backup) = storage.get_string(VOLUME_BACKUP_KEY) {
+                if backup.parse::<f32>().is_ok() {
+                    storage.set_string(VOLUME_KEY, backup);
+                    tracing::info!("Volume restored from backup");
+                }
+            }
+        }
+    }
+    
+    // Check watch states
+    if let Some(primary) = storage.get_string(WATCH_STATES_KEY) {
+        if serde_json::from_str::<HashMap<PathBuf, WatchState>>(&primary).is_err() {
+            tracing::warn!("Watch states storage is corrupted, attempting to restore from backup");
+            if let Some(backup) = storage.get_string(WATCH_STATES_BACKUP_KEY) {
+                if serde_json::from_str::<HashMap<PathBuf, WatchState>>(&backup).is_ok() {
+                    storage.set_string(WATCH_STATES_KEY, backup);
+                    tracing::info!("Watch states restored from backup");
+                }
+            }
+        }
+    }
 }
 
 fn add_library_path(path: PathBuf, state: &mut AppState, storage: &mut dyn eframe::Storage) {

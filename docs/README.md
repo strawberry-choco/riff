@@ -23,11 +23,29 @@ If you are new, start with [Product → Overview](product/overview.md). If you w
 
 What riff is, what it does, and how to use it.
 
+**Orientation**
 - [Overview](product/overview.md) — what riff is, its offline-first philosophy, who it is for, and what it deliberately is not.
-- [Features](product/features.md) — the canonical feature catalog: every epic and feature with status, priority, and dependencies, plus the deferred items.
-- [User guide](product/user-guide.md) — how to run riff, build a library, browse, and play music, with platform-specific notes.
 - [Personas](product/personas.md) — the target users (the collector, the minimalist, the archivist) and how riff serves each.
+- [Features](product/features.md) — the canonical feature catalog: every epic and feature with status, priority, and dependencies, plus the deferred items.
 - [Roadmap](product/roadmap.md) — deferred items with their reasons, and recommended near-term improvements.
+- [User guide](product/user-guide.md) — how to run riff, build a library, browse, and play music, with platform-specific notes.
+
+**Specifications**
+- [Requirements](product/requirements.md) — atomic acceptance criteria for every feature, organized by epic. The canonical reference for what each feature must do.
+- [User flows](product/user-flows.md) — end-to-end user journeys across the product: first launch, daily browsing, search, folder playback, tray playback, and error recovery.
+- [Interaction specs](product/interaction-specs.md) — per-widget interaction behavior: what happens on every click, double-click, right-click, and toggle across the entire UI.
+- [Error states](product/error-states.md) — every error condition a user can encounter, what they see, what the system does, and how to recover.
+- [Specs](product/specs/) — detailed per-feature specifications for the features currently marked partial:
+  - [Player control bar](product/specs/player-control-bar.md)
+  - [Now Playing view](product/specs/now-playing-view.md)
+  - [System tray](product/specs/system-tray.md)
+
+**Product decisions**
+- [001: Offline-first design](product/decisions/001-offline-first.md) — why riff never connects to the internet.
+- [002: No system tray on Linux](product/decisions/002-no-tray-on-linux.md) — why Linux builds run window-only.
+- [003: Track identity is the file path](product/decisions/003-track-identity-is-path.md) — why the full file path is the canonical track ID.
+- [004: Library cache as JSON](product/decisions/004-library-cache-as-json.md) — why the cache is a human-readable JSON file.
+- [005: Native picker on macOS/Windows, text input on Linux](product/decisions/005-native-picker-platform-split.md) — why the add-library dialog differs by platform.
 
 ### Technical
 

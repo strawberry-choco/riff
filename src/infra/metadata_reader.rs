@@ -96,7 +96,18 @@ impl MetadataReader for LoftyMetadataReader {
         Ok(CoverSource::None)
     }
 
-    fn read_all(&self, path: &PathBuf) -> Result<(TrackMetadata, Option<Duration>, CoverSource), AppError> {
+fn read_audio_format(&self, path: &PathBuf) -> Result<crate::app::traits::AudioFormatInfo, AppError> {
+        let tagged_file = Self::read_tagged_file(path)?;
+        let properties = tagged_file.properties();
+
+        Ok(crate::app::traits::AudioFormatInfo {
+            sample_rate: properties.sample_rate().unwrap_or(44100),
+            channels: properties.channels().unwrap_or(2) as u16,
+            duration: Some(properties.duration()),
+        })
+    }
+
+    fn read_all(&self, path: &PathBuf) -> Result<(TrackMetadata, Option<Duration>, CoverSource, crate::app::traits::AudioFormatInfo), AppError> {
         let tagged_file = Self::read_tagged_file(path)?;
 
         let metadata = {
@@ -104,7 +115,12 @@ impl MetadataReader for LoftyMetadataReader {
                 Some(tag) => tag,
                 None => {
                     let properties = tagged_file.properties();
-                    return Ok((TrackMetadata::default(), Some(properties.duration()), CoverSource::None));
+                    let audio_format = crate::app::traits::AudioFormatInfo {
+                        sample_rate: properties.sample_rate().unwrap_or(44100),
+                        channels: properties.channels().unwrap_or(2) as u16,
+                        duration: Some(properties.duration()),
+                    };
+                    return Ok((TrackMetadata::default(), Some(properties.duration()), CoverSource::None, audio_format));
                 }
             };
 
@@ -154,6 +170,12 @@ impl MetadataReader for LoftyMetadataReader {
         let properties = tagged_file.properties();
         let duration = Some(properties.duration());
 
+        let audio_format = crate::app::traits::AudioFormatInfo {
+            sample_rate: properties.sample_rate().unwrap_or(44100),
+            channels: properties.channels().unwrap_or(2) as u16,
+            duration: Some(properties.duration()),
+        };
+
         let cover_source = if let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
             let mut source = CoverSource::None;
             for picture in tag.pictures() {
@@ -169,6 +191,6 @@ impl MetadataReader for LoftyMetadataReader {
             CoverSource::None
         };
 
-        Ok((metadata, duration, cover_source))
+        Ok((metadata, duration, cover_source, audio_format))
     }
 }

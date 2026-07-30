@@ -6,6 +6,7 @@ use crate::app::traits::AudioOutput;
 use crate::app::errors::AppError;
 use crate::domain::PlaybackUpdate;
 
+
 /// Shared audio buffer between decoder (producer) and cpal callback (consumer).
 type AudioBuffer = Arc<Mutex<VecDeque<f32>>>;
 
@@ -160,8 +161,10 @@ impl AudioOutput for CpalAudioOutput {
     fn write_samples(&mut self, samples: &[f32]) -> Result<usize, AppError> {
         if let Ok(mut buf) = self.buffer.lock() {
             buf.extend(samples.iter());
+            Ok(samples.len())
+        } else {
+            Err(AppError::AudioOutput("Failed to acquire audio buffer lock".to_string()))
         }
-        Ok(samples.len())
     }
 
     fn set_volume(&mut self, volume: f32) {
@@ -175,7 +178,7 @@ impl AudioOutput for CpalAudioOutput {
 /// where shared mode is locked to the system sample rate).
 fn build_stream_config(
     device: &cpal::Device,
-    requested_rate: u32,
+    _requested_rate: u32,
     requested_channels: u16,
     default_config: &cpal::SupportedStreamConfig,
 ) -> cpal::StreamConfig {
@@ -207,6 +210,7 @@ fn audio_callback_f32(data: &mut [f32], buffer: &AudioBuffer, volume: &Arc<Atomi
     let mut buf = match buffer.try_lock() {
         Ok(b) => b,
         Err(_) => {
+            // If we can't get the lock, fill with silence to avoid glitches
             data.fill(0.0);
             return;
         }
@@ -221,6 +225,7 @@ fn audio_callback_i16(data: &mut [i16], buffer: &AudioBuffer, volume: &Arc<Atomi
     let mut buf = match buffer.try_lock() {
         Ok(b) => b,
         Err(_) => {
+            // If we can't get the lock, fill with silence to avoid glitches
             data.fill(0);
             return;
         }
@@ -236,6 +241,7 @@ fn audio_callback_u16(data: &mut [u16], buffer: &AudioBuffer, volume: &Arc<Atomi
     let mut buf = match buffer.try_lock() {
         Ok(b) => b,
         Err(_) => {
+            // If we can't get the lock, fill with silence to avoid glitches
             data.fill(32768);
             return;
         }

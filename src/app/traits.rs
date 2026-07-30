@@ -41,7 +41,8 @@ pub trait MetadataReader: Send + Sync {
     fn read_metadata(&self, path: &PathBuf) -> Result<TrackMetadata, AppError>;
     fn read_duration(&self, path: &PathBuf) -> Result<Option<Duration>, AppError>;
     fn read_cover_source(&self, path: &PathBuf) -> Result<CoverSource, AppError>;
-    fn read_all(&self, path: &PathBuf) -> Result<(TrackMetadata, Option<Duration>, CoverSource), AppError>;
+    fn read_audio_format(&self, path: &PathBuf) -> Result<AudioFormatInfo, AppError>;
+    fn read_all(&self, path: &PathBuf) -> Result<(TrackMetadata, Option<Duration>, CoverSource, AudioFormatInfo), AppError>;
 }
 
 /// Trait for cover art loaders (implemented by infrastructure).

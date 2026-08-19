@@ -1,9 +1,9 @@
+use crate::app::commands::LibraryCommand;
+use crate::infra::watcher::FilesystemWatcher;
+use crossbeam_channel::Sender;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use crossbeam_channel::Sender;
-use crate::app::commands::LibraryCommand;
-use crate::infra::watcher::FilesystemWatcher;
 
 pub struct WatcherManager {
     watcher: Option<FilesystemWatcher>,
@@ -14,10 +14,7 @@ pub struct WatcherManager {
 }
 
 impl WatcherManager {
-    pub fn new(
-        watcher: Option<FilesystemWatcher>,
-        lib_cmd_tx: Sender<LibraryCommand>,
-    ) -> Self {
+    pub fn new(watcher: Option<FilesystemWatcher>, lib_cmd_tx: Sender<LibraryCommand>) -> Self {
         Self {
             watcher,
             lib_cmd_tx,
@@ -32,7 +29,9 @@ impl WatcherManager {
             return Err("Watcher not initialized".to_string());
         };
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        watcher.watch(&canonical).map_err(|e| format!("Watch failed: {}", e))?;
+        watcher
+            .watch(&canonical)
+            .map_err(|e| format!("Watch failed: {e}"))?;
         self.scan_in_progress.insert(canonical.clone(), false);
         self.pending_rescan.insert(canonical, false);
         Ok(())
@@ -62,7 +61,12 @@ impl WatcherManager {
             return;
         };
 
-        if self.scan_in_progress.get(&lib_path).copied().unwrap_or(false) {
+        if self
+            .scan_in_progress
+            .get(&lib_path)
+            .copied()
+            .unwrap_or(false)
+        {
             self.pending_rescan.insert(lib_path, true);
             return;
         }
@@ -72,7 +76,12 @@ impl WatcherManager {
             .and_modify(|t| *t = Instant::now())
             .or_insert_with(Instant::now);
 
-        if self.scan_in_progress.get(&lib_path).copied().unwrap_or(false) {
+        if self
+            .scan_in_progress
+            .get(&lib_path)
+            .copied()
+            .unwrap_or(false)
+        {
             self.pending_rescan.insert(lib_path, true);
         }
     }
@@ -98,14 +107,22 @@ impl WatcherManager {
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         self.scan_in_progress.insert(canonical.clone(), false);
 
-        if self.pending_rescan.get(&canonical).copied().unwrap_or(false) {
+        if self
+            .pending_rescan
+            .get(&canonical)
+            .copied()
+            .unwrap_or(false)
+        {
             self.pending_rescan.insert(canonical.clone(), false);
-            let _ = self.lib_cmd_tx.send(LibraryCommand::ScanDirectory(canonical));
+            let _ = self
+                .lib_cmd_tx
+                .send(LibraryCommand::ScanDirectory(canonical));
         }
     }
 
     fn find_library_path(&self, changed_path: &Path) -> Option<PathBuf> {
-        let canonical = std::fs::canonicalize(changed_path).unwrap_or_else(|_| changed_path.to_path_buf());
+        let canonical =
+            std::fs::canonicalize(changed_path).unwrap_or_else(|_| changed_path.to_path_buf());
         self.scan_in_progress
             .keys()
             .find(|lib_path| canonical.starts_with(lib_path))

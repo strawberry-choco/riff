@@ -1,9 +1,11 @@
-pub mod errors;
-pub mod traits;
-pub mod library_manager;
-pub mod state;
-pub mod cover_resolver;
 pub mod commands;
+pub mod cover_resolver;
+pub mod errors;
+pub mod gapless;
+pub mod library_manager;
+pub mod playlist_manager;
+pub mod state;
+pub mod traits;
 pub mod watcher_manager;
 
 use std::sync::{Mutex, MutexGuard};
@@ -21,6 +23,7 @@ pub trait MutexExt<T> {
 
 impl<T> MutexExt<T> for Mutex<T> {
     fn lock_or_recover(&self) -> MutexGuard<'_, T> {
-        self.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }

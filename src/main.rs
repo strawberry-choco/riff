@@ -1,21 +1,42 @@
-mod domain;
-mod app;
-mod infra;
-mod ui;
+// The module tree lives in the library crate (`src/lib.rs`). Import the
+// modules into the binary crate root so the existing `crate::app::...`,
+// `crate::domain::...`, `crate::infra::...` and `crate::ui::...` paths below
+// keep resolving unchanged.
+use riff::app;
+use riff::domain;
+use riff::infra;
+use riff::ui;
 
+use crossbeam_channel::unbounded;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use crossbeam_channel::unbounded;
 
 use crate::app::commands::{LibraryCommand, LibraryUpdate};
+use crate::app::errors::AppError;
+use crate::app::gapless::{
+    elapsed_from_samples, formats_gapless_compatible, is_gapless_eligible, pre_buffer_cap,
+    samples_from_duration, GaplessConditions, QueueConditions,
+};
 use crate::app::state::AppState;
-use crate::app::MutexExt;
-use crate::app::traits::{AudioDecoder, AudioOutput};
+use crate::app::traits::{AudioDecoder, AudioFormatInfo, AudioOutput};
 use crate::app::watcher_manager::WatcherManager;
-use crate::infra::{SymphoniaDecoder, CpalAudioOutput, LoftyMetadataReader, AudioFileScanner, FilesystemWatcher};
+use crate::app::MutexExt;
+use crate::domain::{PlaybackCommand, PlaybackState, PlaybackUpdate, RepeatMode, TrackId};
+use crate::infra::{
+    AudioFileScanner, CpalAudioOutput, FilesystemWatcher, LoftyMetadataReader, SymphoniaDecoder,
+};
 use crate::ui::RiffApp;
-use crate::domain::{PlaybackCommand, PlaybackUpdate, PlaybackState};
+use std::path::PathBuf;
+use std::time::Duration;
+
+/// Gapless (Task 4.1): how many seconds before EOF the engine starts
+/// pre-decoding the successor track.
+const PRE_ENCODE_SECONDS: f32 = 2.0;
+/// Gapless (Task 4.1): max seconds of successor audio held in the pre-buffer
+/// (~1.5 MB at 48 kHz stereo). Exactly one successor is buffered, so total
+/// extra memory is bounded independently of queue length.
+const PRE_BUFFER_SECONDS: f32 = 4.0;
 
 fn main() {
     tracing_subscriber::fmt::init();
@@ -36,131 +57,18 @@ fn main() {
         run_audio_engine(cmd_rx, update_tx, app_state, engine_cmd_tx);
     });
 
-    // Spawn update processor thread
-    let update_state = state.clone();
-    let update_cmd_tx = cmd_tx.clone();
-    let _update_thread = thread::spawn(move || {
-        while let Ok(update) = update_rx.recv() {
-            let mut state = update_state.lock_or_recover();
-            match update {
-                PlaybackUpdate::StateChanged(new_state) => {
-                    state.playback_state = new_state;
-                }
-                PlaybackUpdate::PositionChanged(pos) => {
-                    state.current_position = pos;
-                }
-                PlaybackUpdate::TrackChanged(track_id) => {
-                    state.queue.current_index = state.queue.tracks.iter().position(|id| id == &track_id);
-                }
-                PlaybackUpdate::TrackEnded => {
-                    // Auto-advance to next track
-                    drop(state);
-                    let next_track = {
-                        let mut state = update_state.lock_or_recover();
-                        state.queue.next().cloned()
-                    };
-                    if let Some(track_id) = next_track {
-                        let _ = update_cmd_tx.send(PlaybackCommand::Play(track_id));
-                    } else {
-                        let mut state = update_state.lock_or_recover();
-                        state.playback_state = PlaybackState::Stopped;
-                    }
-                }
-                PlaybackUpdate::Error(msg) => {
-                    tracing::error!("Playback error: {}", msg);
-                    state.playback_state = PlaybackState::Stopped;
-                    state.scan_status = Some(format!("Playback error: {}", msg));
-                }
-            }
-        }
-    });
+    spawn_update_processor(state.clone(), update_rx, cmd_tx.clone());
 
-    // Spawn library scan thread
-    let scan_state = state.clone();
+    // Library scan thread
     let cancel_flag = Arc::new(AtomicBool::new(false));
-    let _library_scan_thread = thread::spawn(move || {
-        let reader = LoftyMetadataReader::new();
-        while let Ok(cmd) = library_cmd_rx.recv() {
-            match cmd {
-                LibraryCommand::ScanDirectory(path) => {
-                    cancel_flag.store(false, Ordering::Relaxed);
-                    let scanner = AudioFileScanner::new(cancel_flag.clone());
+    spawn_library_scanner(
+        state.clone(),
+        library_cmd_rx,
+        library_update_tx,
+        cancel_flag.clone(),
+    );
 
-                    match scanner.scan(&path) {
-                        Ok(files) => {
-                            let total = files.len();
-                            let chunk_size = 10;
-
-                            for (i, chunk) in files.chunks(chunk_size).enumerate() {
-                                if cancel_flag.load(Ordering::Relaxed) {
-                                    break;
-                                }
-
-                                let chunk_paths: Vec<_> = chunk.to_vec();
-                                let processed = i * chunk_size + chunk.len();
-
-                                {
-                                    let mut state = scan_state.lock_or_recover();
-                                    if let Err(e) = state.library.scan_and_add_tracks(
-                                        chunk_paths,
-                                        &reader,
-                                    ) {
-                                        let _ = library_update_tx.send(LibraryUpdate::ScanError {
-                                            path: path.clone(),
-                                            message: e.to_string(),
-                                        });
-                                    }
-                                }
-
-                                let _ = library_update_tx.send(LibraryUpdate::ScanProgress {
-                                    path: path.clone(),
-                                    files_found: processed.min(total),
-                                    current_dir: path.to_string_lossy().to_string(),
-                                });
-                            }
-
-                            let _ = library_update_tx.send(LibraryUpdate::ScanComplete {
-                                path: path.clone(),
-                                total_files: total,
-                            });
-                        }
-                        Err(e) => {
-                            let _ = library_update_tx.send(LibraryUpdate::ScanError {
-                                path: path.clone(),
-                                message: e.to_string(),
-                            });
-                        }
-                    }
-                }
-                LibraryCommand::CancelScan => {
-                    cancel_flag.store(true, Ordering::Relaxed);
-                }
-            }
-        }
-    });
-
-    let (fs_event_tx, fs_event_rx) = unbounded::<std::path::PathBuf>();
-    let watcher = match FilesystemWatcher::new(fs_event_tx) {
-        Ok(w) => Some(w),
-        Err(e) => {
-            tracing::warn!("Failed to create filesystem watcher: {}", e);
-            None
-        }
-    };
-
-    let watcher_manager = Arc::new(Mutex::new(Some(WatcherManager::new(
-        watcher,
-        library_cmd_tx.clone(),
-    ))));
-
-    let fs_watcher_manager = watcher_manager.clone();
-    let _fs_event_thread = thread::spawn(move || {
-        while let Ok(changed_path) = fs_event_rx.recv() {
-            if let Some(ref mut mgr) = *fs_watcher_manager.lock_or_recover() {
-                mgr.on_fs_event(&changed_path);
-            }
-        }
-    });
+    let watcher_manager = spawn_fs_watcher(library_cmd_tx);
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -171,31 +79,284 @@ fn main() {
 
     let quit_flag = Arc::new(AtomicBool::new(false));
 
+    // The tray icon is owned directly by the UI (single owner, main thread);
+    // no Arc<Mutex<..>> wrapper is needed around the !Send handle.
     #[cfg(not(target_os = "linux"))]
-    let tray_icon = Arc::new(Mutex::new(
-        match crate::ui::tray::create_tray(cmd_tx.clone(), quit_flag.clone()) {
-            Ok(tray) => {
-                tracing::info!("Tray icon created");
-                Some(tray)
-            }
-            Err(e) => {
-                tracing::warn!("Failed to create tray icon: {}", e);
-                None
-            }
+    let tray_icon = match crate::ui::tray::create_tray(cmd_tx.clone(), quit_flag.clone()) {
+        Ok(tray) => {
+            tracing::info!("Tray icon created");
+            Some(tray)
         }
-    ));
+        Err(e) => {
+            tracing::warn!("Failed to create tray icon: {}", e);
+            None
+        }
+    };
 
     #[cfg(not(target_os = "linux"))]
-    let app = RiffApp::new(state.clone(), ui_cmd_tx, ui_library_cmd_tx, library_update_rx, watcher_manager, tray_icon, quit_flag.clone());
+    let app = RiffApp::new(
+        state.clone(),
+        ui_cmd_tx,
+        ui_library_cmd_tx,
+        library_update_rx,
+        watcher_manager,
+        tray_icon,
+        quit_flag.clone(),
+    );
 
     #[cfg(target_os = "linux")]
-    let app = RiffApp::new(state.clone(), ui_cmd_tx, ui_library_cmd_tx, library_update_rx, watcher_manager, quit_flag.clone());
+    let app = RiffApp::new(
+        state.clone(),
+        ui_cmd_tx,
+        ui_library_cmd_tx,
+        library_update_rx,
+        watcher_manager,
+        quit_flag.clone(),
+    );
 
-    eframe::run_native("riff", options, Box::new(|cc| {
-        crate::ui::fonts::configure_fonts(&cc.egui_ctx);
-        Ok(Box::new(app))
-    }))
-        .expect("Failed to run eframe");
+    eframe::run_native(
+        "riff",
+        options,
+        Box::new(|cc| {
+            crate::ui::fonts::configure_fonts(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
+    )
+    .expect("Failed to run eframe");
+}
+
+/// Thread that applies [`PlaybackUpdate`]s to the shared state and drives
+/// auto-advance when a track ends.
+fn spawn_update_processor(
+    state: Arc<Mutex<AppState>>,
+    update_rx: crossbeam_channel::Receiver<PlaybackUpdate>,
+    cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
+) {
+    let _handle = thread::spawn(move || {
+        while let Ok(update) = update_rx.recv() {
+            let mut locked = state.lock_or_recover();
+            match update {
+                PlaybackUpdate::StateChanged(new_state) => {
+                    locked.playback_state = new_state;
+                }
+                PlaybackUpdate::PositionChanged(pos) => {
+                    locked.current_position = pos;
+                }
+                PlaybackUpdate::TrackChanged(track_id) => {
+                    locked.queue.current_index =
+                        locked.queue.tracks.iter().position(|id| id == &track_id);
+                }
+                PlaybackUpdate::TrackEnded => {
+                    drop(locked);
+                    handle_track_ended(&state, &cmd_tx);
+                }
+                PlaybackUpdate::Error(msg) => {
+                    tracing::error!("Playback error: {}", msg);
+                    locked.playback_state = PlaybackState::Stopped;
+                    locked.scan_status = Some(format!("Playback error: {msg}"));
+                }
+            }
+        }
+    });
+}
+
+/// Record play history for the track that just finished — the queue's current
+/// track at this moment, before the auto-advance below moves the index — and
+/// persist it so play counts survive restarts (REQ-ML-009). Then advance the
+/// queue (or stop when nothing follows).
+fn handle_track_ended(
+    state: &Arc<Mutex<AppState>>,
+    cmd_tx: &crossbeam_channel::Sender<PlaybackCommand>,
+) {
+    {
+        let mut locked = state.lock_or_recover();
+        if let Some(finished_id) = locked.queue.current_track().cloned() {
+            locked.library.increment_play_count(&finished_id);
+            locked.library.save_cache();
+        }
+    }
+    let next_track = {
+        let mut locked = state.lock_or_recover();
+        if locked.queue.repeat == RepeatMode::One {
+            // Repeat-one loops the SAME track (Task 4.1): the queue
+            // deliberately doesn't model it (`advance()` would move on), so
+            // re-play the current track. If the engine already handed off
+            // gaplessly, its Play(current) dedup guard swallows this no-op.
+            locked.queue.current_track().cloned()
+        } else {
+            locked.queue.advance().cloned()
+        }
+    };
+    if let Some(track_id) = next_track {
+        let _ = cmd_tx.send(PlaybackCommand::Play(track_id));
+    } else {
+        let mut locked = state.lock_or_recover();
+        locked.playback_state = PlaybackState::Stopped;
+    }
+}
+
+/// Thread that receives [`LibraryCommand`]s and runs directory scans.
+fn spawn_library_scanner(
+    state: Arc<Mutex<AppState>>,
+    library_cmd_rx: crossbeam_channel::Receiver<LibraryCommand>,
+    library_update_tx: crossbeam_channel::Sender<LibraryUpdate>,
+    cancel_flag: Arc<AtomicBool>,
+) {
+    let _handle = thread::spawn(move || {
+        let reader = LoftyMetadataReader::new();
+        while let Ok(cmd) = library_cmd_rx.recv() {
+            match cmd {
+                LibraryCommand::ScanDirectory(path) => {
+                    cancel_flag.store(false, Ordering::Relaxed);
+                    let scanner = AudioFileScanner::new(cancel_flag.clone());
+                    scan_directory(
+                        &state,
+                        &reader,
+                        &scanner,
+                        &path,
+                        &library_update_tx,
+                        &cancel_flag,
+                    );
+                }
+                LibraryCommand::CancelScan => {
+                    cancel_flag.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+    });
+}
+
+/// Scan one directory in chunks, adding tracks to the shared library and
+/// reporting progress. Per-file read failures are skipped inside
+/// `scan_and_add_tracks`, so a scan never aborts on one bad file.
+fn scan_directory(
+    state: &Arc<Mutex<AppState>>,
+    reader: &LoftyMetadataReader,
+    scanner: &AudioFileScanner,
+    path: &std::path::Path,
+    library_update_tx: &crossbeam_channel::Sender<LibraryUpdate>,
+    cancel_flag: &Arc<AtomicBool>,
+) {
+    let files = scanner.scan(path);
+    let total = files.len();
+    let chunk_size = 10;
+
+    for (i, chunk) in files.chunks(chunk_size).enumerate() {
+        if cancel_flag.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let chunk_paths: Vec<_> = chunk.to_vec();
+        let processed = i * chunk_size + chunk.len();
+
+        {
+            let mut locked = state.lock_or_recover();
+            locked.library.scan_and_add_tracks(chunk_paths, reader);
+        }
+
+        let _ = library_update_tx.send(LibraryUpdate::Progress {
+            path: path.to_path_buf(),
+            files_found: processed.min(total),
+            current_dir: path.to_string_lossy().to_string(),
+        });
+    }
+
+    let _ = library_update_tx.send(LibraryUpdate::Complete {
+        path: path.to_path_buf(),
+        total_files: total,
+    });
+}
+
+/// Create the filesystem watcher and its manager, and spawn the thread that
+/// forwards watch events. Returns the shared manager handle.
+fn spawn_fs_watcher(
+    library_cmd_tx: crossbeam_channel::Sender<LibraryCommand>,
+) -> Arc<Mutex<Option<WatcherManager>>> {
+    let (fs_event_tx, fs_event_rx) = unbounded::<PathBuf>();
+    let watcher = match FilesystemWatcher::new(fs_event_tx) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            tracing::warn!("Failed to create filesystem watcher: {}", e);
+            None
+        }
+    };
+
+    let watcher_manager = Arc::new(Mutex::new(Some(WatcherManager::new(
+        watcher,
+        library_cmd_tx,
+    ))));
+
+    let thread_manager = watcher_manager.clone();
+    let _handle = thread::spawn(move || {
+        while let Ok(changed_path) = fs_event_rx.recv() {
+            if let Some(ref mut mgr) = *thread_manager.lock_or_recover() {
+                mgr.on_fs_event(&changed_path);
+            }
+        }
+    });
+
+    watcher_manager
+}
+
+/// Build the shared codec registry (symphonia defaults + the Opus adapter).
+/// Used for both the primary decoder and the gapless pre-decode decoder.
+fn build_codec_registry() -> symphonia::core::codecs::CodecRegistry {
+    let mut registry = symphonia::core::codecs::CodecRegistry::new();
+    symphonia::default::register_enabled_codecs(&mut registry);
+    registry.register_all::<symphonia_adapter_libopus::OpusDecoder>();
+    registry
+}
+
+/// The audio engine thread: owns the decoders and audio output, processes
+/// [`PlaybackCommand`]s, and drives decode/position/gapless logic.
+struct AudioEngine {
+    cmd_rx: crossbeam_channel::Receiver<PlaybackCommand>,
+    update_tx: crossbeam_channel::Sender<PlaybackUpdate>,
+    cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
+    state: Arc<Mutex<AppState>>,
+    decoder: SymphoniaDecoder,
+    next_decoder: SymphoniaDecoder,
+    audio_output: CpalAudioOutput,
+    current_track_id: Option<TrackId>,
+    paused_position: Option<Duration>,
+    /// Set on a gapless handoff: the `TrackEnded` we emit makes the update
+    /// processor re-send Play(current) for the track that is ALREADY playing;
+    /// that duplicate must be swallowed or it would tear down the stream.
+    gapless_dup_expected: bool,
+    pre_decode: PreDecodeState,
+}
+
+/// Gapless pre-decode state (Task 4.1). Purely additive: when a valid,
+/// format-compatible successor has been pre-buffered, EOF hands off without
+/// stopping the cpal stream; in EVERY other case these fields are ignored and
+/// the existing gapped path runs unchanged.
+#[derive(Default)]
+struct PreDecodeState {
+    buffer: Vec<f32>,
+    track_id: Option<TrackId>,
+    track_path: Option<PathBuf>,
+    format: Option<AudioFormatInfo>,
+    /// Whether the (one-shot) pre-encode attempt has run for this track.
+    attempted: bool,
+}
+
+impl PreDecodeState {
+    fn reset(&mut self) {
+        self.buffer.clear();
+        self.track_id = None;
+        self.track_path = None;
+        self.format = None;
+        self.attempted = false;
+    }
+}
+
+/// Outcome of the end-of-track handling in the decode loop.
+#[derive(PartialEq, Eq)]
+enum EndOfTrack {
+    /// Gapless handoff happened; continue the loop with the promoted track.
+    HandedOff,
+    /// Session ended (gapped path or mid-handoff write error).
+    SessionEnded,
 }
 
 fn run_audio_engine(
@@ -204,63 +365,446 @@ fn run_audio_engine(
     state: Arc<Mutex<AppState>>,
     cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
 ) {
-    let mut codec_registry = symphonia::core::codecs::CodecRegistry::new();
-    symphonia::default::register_enabled_codecs(&mut codec_registry);
-    codec_registry.register_all::<symphonia_adapter_libopus::OpusDecoder>();
-    let mut decoder = SymphoniaDecoder::new(codec_registry);
-    let mut audio_output = CpalAudioOutput::new(update_tx.clone());
-    let mut current_track_id: Option<crate::domain::TrackId> = None;
-    let mut paused_position: Option<std::time::Duration> = None;
+    let engine = AudioEngine {
+        cmd_rx,
+        update_tx,
+        cmd_tx,
+        state,
+        decoder: SymphoniaDecoder::new(build_codec_registry()),
+        next_decoder: SymphoniaDecoder::new(build_codec_registry()),
+        audio_output: CpalAudioOutput::new(),
+        current_track_id: None,
+        paused_position: None,
+        gapless_dup_expected: false,
+        pre_decode: PreDecodeState::default(),
+    };
+    engine.run();
+}
 
-    fn handle_engine_cmd(
+impl AudioEngine {
+    fn run(mut self) {
+        while let Ok(cmd) = self.cmd_rx.recv() {
+            self.dispatch(cmd);
+        }
+    }
+
+    fn dispatch(&mut self, cmd: PlaybackCommand) {
+        match cmd {
+            PlaybackCommand::Play(track_id) => self.handle_play(track_id),
+            PlaybackCommand::Pause => {
+                let _ = self
+                    .update_tx
+                    .send(PlaybackUpdate::StateChanged(PlaybackState::Paused));
+            }
+            PlaybackCommand::Resume => {
+                if let Some(track_id) = self.current_track_id.clone() {
+                    let _ = self.cmd_rx.try_recv(); // clear any pending
+                    let _ = self.cmd_tx.send(PlaybackCommand::Play(track_id));
+                }
+            }
+            PlaybackCommand::Stop => {
+                self.paused_position = None;
+                self.gapless_dup_expected = false;
+                let _ = self.audio_output.stop();
+                self.decoder.close();
+                // Discard any gapless pre-decode state (Task 4.1).
+                self.pre_decode.reset();
+                self.next_decoder.close();
+                // Drop any stale per-track ReplayGain factor (Task 4.3).
+                self.audio_output.set_replaygain(1.0);
+                let _ = self
+                    .update_tx
+                    .send(PlaybackUpdate::StateChanged(PlaybackState::Stopped));
+            }
+            PlaybackCommand::Seek(pos) => {
+                let _ = self.decoder.seek(pos);
+            }
+            PlaybackCommand::SetVolume(vol) => {
+                self.audio_output.set_volume(vol);
+            }
+            // User navigation invalidates any pending gapless Play dup.
+            PlaybackCommand::Next => self.jump_queue(true),
+            PlaybackCommand::Previous => self.jump_queue(false),
+            PlaybackCommand::ToggleVisibility => {
+                // Close-to-tray (REQ-SI-001): the tray thread cannot touch the
+                // window, so flip the shared flag; the UI's per-frame `logic`
+                // reconciles it with the real viewport visibility (Show Window
+                // and the left-click toggle both route through here).
+                let mut s = self.state.lock_or_recover();
+                s.window_visible = !s.window_visible;
+            }
+            PlaybackCommand::PlayPause => {
+                let current_state = {
+                    let state = self.state.lock_or_recover();
+                    state.playback_state
+                };
+                match current_state {
+                    PlaybackState::Playing => {
+                        let _ = self.cmd_tx.send(PlaybackCommand::Pause);
+                    }
+                    _ => {
+                        let _ = self.cmd_tx.send(PlaybackCommand::Resume);
+                    }
+                }
+            }
+            PlaybackCommand::PlayNext(track_id) => {
+                {
+                    let mut state = self.state.lock_or_recover();
+                    state.queue.insert_next(track_id.clone());
+                }
+                if self.current_track_id.is_none() {
+                    let _ = self.cmd_tx.send(PlaybackCommand::Play(track_id));
+                }
+            }
+            PlaybackCommand::AddToQueue(track_id) => {
+                {
+                    let mut state = self.state.lock_or_recover();
+                    state.queue.append(track_id.clone());
+                }
+                if self.current_track_id.is_none() {
+                    let _ = self.cmd_tx.send(PlaybackCommand::Play(track_id));
+                }
+            }
+        }
+    }
+
+    /// Next/Previous navigation: move the queue and play the new current
+    /// track.
+    fn jump_queue(&mut self, advance: bool) {
+        self.gapless_dup_expected = false;
+        let target = {
+            let mut state = self.state.lock_or_recover();
+            if advance {
+                state.queue.advance().cloned()
+            } else {
+                state.queue.previous().cloned()
+            }
+        };
+        if let Some(track_id) = target {
+            self.current_track_id = Some(track_id.clone());
+            let _ = self.audio_output.stop();
+            let _ = self.cmd_tx.send(PlaybackCommand::Play(track_id));
+        }
+    }
+
+    fn handle_play(&mut self, track_id: TrackId) {
+        // Gapless dedup (Task 4.1): after a gapless handoff the update
+        // processor's TrackEnded handling re-sends Play() for the track that
+        // is ALREADY playing. Swallow exactly that duplicate so it cannot
+        // tear down the live stream; any other Play clears the expectation
+        // and runs normally.
+        if self.gapless_dup_expected && self.current_track_id.as_ref() == Some(&track_id) {
+            self.gapless_dup_expected = false;
+            tracing::debug!("Gapless: ignored auto-Play for the already-playing track");
+            return;
+        }
+        self.gapless_dup_expected = false;
+
+        // Reset pre-decode state left over from a previous session.
+        self.pre_decode.reset();
+
+        self.audio_output.clear_buffer();
+        let _ = self.audio_output.stop();
+        let is_resuming =
+            self.current_track_id.as_ref() == Some(&track_id) && self.paused_position.is_some();
+        if !is_resuming {
+            self.paused_position = None;
+        }
+        self.current_track_id = Some(track_id.clone());
+
+        let Some((path, replaygain)) = self.resolve_track(&track_id) else {
+            return;
+        };
+
+        // Apply the per-track ReplayGain factor before samples flow.
+        self.audio_output.set_replaygain(replaygain);
+        let mut info = match self.decoder.open(&path) {
+            Ok(info) => info,
+            Err(e) => {
+                let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
+                return;
+            }
+        };
+        if is_resuming {
+            if let Some(pos) = self.paused_position.take() {
+                let _ = self.decoder.seek(pos);
+            }
+        }
+        let _ = self.update_tx.send(PlaybackUpdate::TrackChanged(track_id));
+
+        if let Err(e) = self.start_output(info.sample_rate, info.channels) {
+            let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
+            return;
+        }
+
+        self.audio_output.clear_buffer();
+        let _ = self
+            .update_tx
+            .send(PlaybackUpdate::StateChanged(PlaybackState::Playing));
+        let should_stop_audio = self.run_decode_loop(&mut info);
+
+        if should_stop_audio {
+            let _ = self.audio_output.stop();
+        }
+    }
+
+    /// Initialize and start the audio output for the given format.
+    fn start_output(&mut self, sample_rate: u32, channels: u16) -> Result<(), AppError> {
+        self.audio_output.initialize(sample_rate, channels)?;
+        self.audio_output.start()?;
+        Ok(())
+    }
+
+    /// Look up the file path and `ReplayGain` factor for a track. When
+    /// playing from the library with an empty queue, populate the queue so
+    /// that Next/Previous/auto-advance work.
+    fn resolve_track(&mut self, track_id: &TrackId) -> Option<(PathBuf, f32)> {
+        let mut state = self.state.lock_or_recover();
+        if state.queue.tracks.is_empty() {
+            let all_ids: Vec<TrackId> = state
+                .library
+                .all_tracks()
+                .iter()
+                .map(|t| t.id.clone())
+                .collect();
+            if !all_ids.is_empty() {
+                state.queue.tracks = all_ids;
+                state.queue.current_index = state.queue.tracks.iter().position(|id| id == track_id);
+                // Reset shuffle state since the queue was replaced
+                state.queue.shuffle = false;
+                state.queue.shuffled_indices.clear();
+                state.queue.shuffle_history.clear();
+            }
+        }
+        // ReplayGain (Task 4.3): compute the peak-capped factor from the
+        // track's tags and the user preference. Untagged tracks (or the
+        // disabled setting) yield 1.0 — no adjustment.
+        let (gain_db, peak) = state.library.get_track(track_id).map_or((None, None), |t| {
+            (
+                t.metadata.replaygain_track_gain,
+                t.metadata.replaygain_track_peak,
+            )
+        });
+        let factor = crate::app::state::replaygain_factor(state.replaygain_enabled, gain_db, peak);
+        state
+            .library
+            .get_track(track_id)
+            .map(|t| (t.file_path.clone(), factor))
+    }
+
+    /// The decode loop for the currently open track: decode + write with
+    /// backpressure, position updates, gapless handoff at EOF, pre-decode,
+    /// and inline command polling. Returns `true` when the audio output
+    /// should be stopped afterwards (every break except Pause/Stop, which
+    /// manage the stream themselves).
+    fn run_decode_loop(&mut self, info: &mut AudioFormatInfo) -> bool {
+        // Sample-exact elapsed tracking (Task 4.1): every decoded chunk adds
+        // its length; elapsed = samples / (rate * ch). Replaces the old
+        // wall-clock timing and resets to 0 at each gapless handoff.
+        let mut accumulated_samples: usize = 0;
+        let mut is_playing = true;
+        let mut should_stop_audio = true;
+        let mut max_buffer_samples = (info.sample_rate as usize) * usize::from(info.channels) * 2;
+
+        loop {
+            if !is_playing {
+                break;
+            }
+
+            // Backpressure: don't decode when the buffer is already full
+            self.wait_for_buffer_space(
+                max_buffer_samples,
+                &mut is_playing,
+                &mut should_stop_audio,
+                &mut accumulated_samples,
+                info,
+            );
+
+            if !is_playing {
+                break;
+            }
+
+            match self.decoder.next_frames(4096) {
+                Ok(Some(samples)) => {
+                    if let Err(e) = self.audio_output.write_samples(&samples) {
+                        let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
+                        break;
+                    }
+                    accumulated_samples += samples.len();
+                    let elapsed =
+                        elapsed_from_samples(accumulated_samples, info.sample_rate, info.channels);
+                    let _ = self.update_tx.send(PlaybackUpdate::PositionChanged(
+                        crate::domain::PlaybackPosition {
+                            current: elapsed,
+                            total: info.duration,
+                        },
+                    ));
+                }
+                Ok(None) => {
+                    // Final position at the track's true total.
+                    if let Some(dur) = info.duration {
+                        let _ = self.update_tx.send(PlaybackUpdate::PositionChanged(
+                            crate::domain::PlaybackPosition {
+                                current: dur,
+                                total: Some(dur),
+                            },
+                        ));
+                    }
+
+                    if self.end_of_track(info, &mut accumulated_samples, &mut max_buffer_samples)
+                        == EndOfTrack::HandedOff
+                    {
+                        continue;
+                    }
+                    break;
+                }
+                Err(e) => {
+                    let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
+                    break;
+                }
+            }
+
+            self.maybe_pre_encode(info, accumulated_samples);
+
+            if let Ok(cmd) = self.cmd_rx.try_recv() {
+                if self.handle_loop_command(
+                    cmd,
+                    &mut is_playing,
+                    &mut should_stop_audio,
+                    &mut accumulated_samples,
+                    info,
+                ) {
+                    break;
+                }
+            }
+        }
+
+        // The decode loop ended for a reason other than a gapless handoff
+        // (Pause, Stop, error, or the gapped EOF path): discard any leftover
+        // pre-decode state so nothing leaks into the next session. Pause and
+        // the gapped path already clear it; this covers Stop and decode-error
+        // breaks that bypass those sites.
+        self.pre_decode.reset();
+        self.next_decoder.close();
+
+        should_stop_audio
+    }
+
+    /// Block until the output buffer has space, processing any commands that
+    /// arrive while waiting.
+    fn wait_for_buffer_space(
+        &mut self,
+        max_buffer_samples: usize,
+        is_playing: &mut bool,
+        should_stop_audio: &mut bool,
+        accumulated_samples: &mut usize,
+        info: &AudioFormatInfo,
+    ) {
+        while self.audio_output.buffer_len() >= max_buffer_samples {
+            if let Ok(cmd) = self.cmd_rx.try_recv() {
+                if self.handle_loop_command(
+                    cmd,
+                    is_playing,
+                    should_stop_audio,
+                    accumulated_samples,
+                    info,
+                ) {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Process one command received mid-session (during the backpressure wait
+    /// or the per-chunk poll). Handles the gapless Play-dedup, records the
+    /// pause position, and rebases elapsed tracking after seeks. Returns
+    /// `true` when the decode loop should end.
+    fn handle_loop_command(
+        &mut self,
         cmd: PlaybackCommand,
         is_playing: &mut bool,
         should_stop_audio: &mut bool,
-        audio_output: &mut CpalAudioOutput,
-        decoder: &mut SymphoniaDecoder,
-        update_tx: &crossbeam_channel::Sender<PlaybackUpdate>,
-        cmd_tx: &crossbeam_channel::Sender<PlaybackCommand>,
-        state: &Arc<Mutex<AppState>>,
+        accumulated_samples: &mut usize,
+        info: &AudioFormatInfo,
+    ) -> bool {
+        // Gapless dedup (Task 4.1): swallow the post-handoff auto-Play
+        // instead of tearing down the stream.
+        if self.gapless_dup_expected
+            && matches!(&cmd, PlaybackCommand::Play(id)
+                if self.current_track_id.as_ref() == Some(id))
+        {
+            self.gapless_dup_expected = false;
+            return false;
+        }
+        if matches!(cmd, PlaybackCommand::Pause) {
+            self.paused_position = Some(elapsed_from_samples(
+                *accumulated_samples,
+                info.sample_rate,
+                info.channels,
+            ));
+            // Discard the pre-buffer; resume re-does pre-encode
+            // (safe/simple).
+            self.pre_decode.reset();
+        }
+        if let PlaybackCommand::Seek(pos) = &cmd {
+            // Elapsed continues from the seek target (exact integer math).
+            *accumulated_samples = samples_from_duration(*pos, info.sample_rate, info.channels);
+        }
+        self.apply_command(cmd, is_playing, should_stop_audio)
+    }
+
+    /// Apply one command to the output/decoder/queue. Returns `true` when the
+    /// command ends the current decode session.
+    fn apply_command(
+        &mut self,
+        cmd: PlaybackCommand,
+        is_playing: &mut bool,
+        should_stop_audio: &mut bool,
     ) -> bool {
         match cmd {
             PlaybackCommand::Pause => {
                 *is_playing = false;
                 *should_stop_audio = false;
-                let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Paused));
+                let _ = self
+                    .update_tx
+                    .send(PlaybackUpdate::StateChanged(PlaybackState::Paused));
                 true
             }
             PlaybackCommand::Stop => {
-                audio_output.clear_buffer();
-                let _ = audio_output.stop();
-                let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Stopped));
+                self.audio_output.clear_buffer();
+                let _ = self.audio_output.stop();
+                // Drop any stale per-track ReplayGain factor (Task 4.3).
+                self.audio_output.set_replaygain(1.0);
+                let _ = self
+                    .update_tx
+                    .send(PlaybackUpdate::StateChanged(PlaybackState::Stopped));
                 *should_stop_audio = false;
                 *is_playing = false;
                 true
             }
             PlaybackCommand::Seek(pos) => {
-                let _ = decoder.seek(pos);
-                audio_output.clear_buffer();
+                let _ = self.decoder.seek(pos);
+                self.audio_output.clear_buffer();
                 false
             }
             PlaybackCommand::SetVolume(vol) => {
-                audio_output.set_volume(vol);
+                self.audio_output.set_volume(vol);
                 false
             }
-            PlaybackCommand::Play(_)
-            | PlaybackCommand::Next
-            | PlaybackCommand::Previous => {
-                let _ = cmd_tx.send(cmd);
+            PlaybackCommand::Play(_) | PlaybackCommand::Next | PlaybackCommand::Previous => {
+                let _ = self.cmd_tx.send(cmd);
                 *should_stop_audio = true;
                 *is_playing = false;
                 true
             }
             PlaybackCommand::PlayNext(track_id) => {
-                let mut s = state.lock_or_recover();
+                let mut s = self.state.lock_or_recover();
                 s.queue.insert_next(track_id);
                 false
             }
             PlaybackCommand::AddToQueue(track_id) => {
-                let mut s = state.lock_or_recover();
+                let mut s = self.state.lock_or_recover();
                 s.queue.append(track_id);
                 false
             }
@@ -268,227 +812,191 @@ fn run_audio_engine(
         }
     }
 
-    while let Ok(cmd) = cmd_rx.recv() {
-        match cmd {
-            PlaybackCommand::Play(track_id) => {
-                audio_output.clear_buffer();
-                let _ = audio_output.stop();
-                let is_resuming = current_track_id.as_ref() == Some(&track_id) && paused_position.is_some();
-                if !is_resuming {
-                    paused_position = None;
-                }
-                current_track_id = Some(track_id.clone());
-                
-                let path = {
-                    let mut state = state.lock_or_recover();
-                    // When playing a track from the library with an empty queue,
-                    // populate the queue so that Next/Previous/auto-advance work.
-                    if state.queue.tracks.is_empty() {
-                        let all_ids: Vec<crate::domain::TrackId> = state
-                            .library
-                            .all_tracks()
-                            .iter()
-                            .map(|t| t.id.clone())
-                            .collect();
-                        if !all_ids.is_empty() {
-                            state.queue.tracks = all_ids;
-                            state.queue.current_index = state
-                                .queue
-                                .tracks
-                                .iter()
-                                .position(|id| id == &track_id);
-                            // Reset shuffle state since the queue has been replaced
-                            state.queue.shuffle = false;
-                            state.queue.shuffled_indices.clear();
-                            state.queue.shuffle_history.clear();
+    /// Gapless pre-decode (Task 4.1): once playback nears EOF, opportunistically
+    /// decode up to `PRE_BUFFER_SECONDS` of the natural successor on this same
+    /// thread (symphonia decodes faster than real time, so the ring buffer
+    /// cannot starve). Best-effort: any failure leaves `pre_decode.track_id`
+    /// unset and the gapped path runs unchanged at EOF.
+    fn maybe_pre_encode(&mut self, info: &AudioFormatInfo, accumulated_samples: usize) {
+        let ready = !self.pre_decode.attempted
+            && self.pre_decode.track_id.is_none()
+            && info.duration.is_some_and(|d| {
+                elapsed_from_samples(accumulated_samples, info.sample_rate, info.channels)
+                    >= d.saturating_sub(Duration::from_secs_f32(PRE_ENCODE_SECONDS))
+            });
+        if !ready {
+            return;
+        }
+        self.pre_decode.attempted = true;
+
+        let successor = {
+            let s = self.state.lock_or_recover();
+            let next_id = if s.queue.repeat == RepeatMode::One {
+                // Repeat-one loops the SAME track gaplessly.
+                s.queue.current_track().cloned()
+            } else {
+                s.queue.upcoming(1).into_iter().next().cloned()
+            };
+            next_id.and_then(|id| s.library.get_track(&id).map(|t| (id, t.file_path.clone())))
+        };
+        let Some((next_id, path)) = successor else {
+            return;
+        };
+
+        match self.next_decoder.open(&path) {
+            Ok(fmt) => {
+                let cap = pre_buffer_cap(fmt.sample_rate, fmt.channels, PRE_BUFFER_SECONDS);
+                let mut failed = false;
+                while self.pre_decode.buffer.len() < cap {
+                    match self.next_decoder.next_frames(4096) {
+                        Ok(Some(samples)) => {
+                            self.pre_decode.buffer.extend_from_slice(&samples);
                         }
-                    }
-                    state.library.get_track(&track_id).map(|t| t.file_path.clone())
-                };
-
-                if let Some(path) = path {
-                    match decoder.open(&path) {
-                        Ok(info) => {
-                            if is_resuming {
-                                if let Some(pos) = paused_position.take() {
-                                    let _ = decoder.seek(pos);
-                                }
-                            }
-                            let _ = update_tx.send(PlaybackUpdate::TrackChanged(track_id));
-                            
-                            if let Err(e) = audio_output.initialize(info.sample_rate, info.channels) {
-                                let _ = update_tx.send(PlaybackUpdate::Error(e.to_string()));
-                                continue;
-                            }
-                            if let Err(e) = audio_output.start() {
-                                let _ = update_tx.send(PlaybackUpdate::Error(e.to_string()));
-                                continue;
-                            }
-
-                            audio_output.clear_buffer();
-
-                            let mut is_playing = true;
-                            let mut should_stop_audio = true;
-                            let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Playing));
-                            let start_time = std::time::Instant::now();
-                            let max_buffer_samples = (info.sample_rate as usize) * (info.channels as usize) * 2;
-
-                            loop {
-                                if !is_playing {
-                                    break;
-                                }
-
-                                // Backpressure: don't decode when the buffer is already full
-                                while audio_output.buffer_len() >= max_buffer_samples {
-                                    if let Ok(cmd) = cmd_rx.try_recv() {
-                                        if matches!(cmd, PlaybackCommand::Pause) {
-                                            paused_position = Some(start_time.elapsed());
-                                        }
-                                        if handle_engine_cmd(cmd, &mut is_playing, &mut should_stop_audio, &mut audio_output, &mut decoder, &update_tx, &cmd_tx, &state) {
-                                            break;
-                                        }
-                                    }
-                                    std::thread::sleep(std::time::Duration::from_millis(10));
-                                }
-
-                                if !is_playing {
-                                    break;
-                                }
-
-                                match decoder.next_frames(4096) {
-                                    Ok(Some(samples)) => {
-                                        if let Err(e) = audio_output.write_samples(&samples) {
-                                            let _ = update_tx.send(PlaybackUpdate::Error(e.to_string()));
-                                            break;
-                                        }
-
-                                        let elapsed = start_time.elapsed();
-                                        let _ = update_tx.send(PlaybackUpdate::PositionChanged(
-                                            crate::domain::PlaybackPosition {
-                                                current: elapsed,
-                                                total: info.duration,
-                                            }
-                                        ));
-                                    }
-                                    Ok(None) => {
-                                        let _ = update_tx.send(PlaybackUpdate::TrackEnded);
-                                        // Wait for the remaining buffer to drain before stopping
-                                        while audio_output.buffer_len() > 0 {
-                                            if let Ok(cmd) = cmd_rx.try_recv() {
-                                                match cmd {
-                                                    PlaybackCommand::Stop => {
-                                                        audio_output.clear_buffer();
-                                                        break;
-                                                    }
-                                                    _ => {}
-                                                }
-                                            }
-                                            std::thread::sleep(std::time::Duration::from_millis(50));
-                                        }
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        let _ = update_tx.send(PlaybackUpdate::Error(e.to_string()));
-                                        break;
-                                    }
-                                }
-
-                                if let Ok(cmd) = cmd_rx.try_recv() {
-                                    if matches!(cmd, PlaybackCommand::Pause) {
-                                        paused_position = Some(start_time.elapsed());
-                                    }
-                                    if handle_engine_cmd(cmd, &mut is_playing, &mut should_stop_audio, &mut audio_output, &mut decoder, &update_tx, &cmd_tx, &state) {
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if should_stop_audio {
-                                let _ = audio_output.stop();
-                            }
-                        }
+                        // Short track: fully buffered already.
+                        Ok(None) => break,
                         Err(e) => {
-                            let _ = update_tx.send(PlaybackUpdate::Error(e.to_string()));
+                            tracing::warn!("Gapless pre-decode error: {}", e);
+                            failed = true;
+                            break;
                         }
                     }
                 }
-            }
-            PlaybackCommand::Pause => {
-                let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Paused));
-            }
-            PlaybackCommand::Resume => {
-                if let Some(track_id) = current_track_id.clone() {
-                    let _ = cmd_rx.try_recv(); // clear any pending
-                    let _ = cmd_tx.send(PlaybackCommand::Play(track_id));
+                if failed || self.pre_decode.buffer.is_empty() {
+                    self.pre_decode.buffer.clear();
+                    self.next_decoder.close();
+                } else {
+                    tracing::info!(
+                        "Gapless: pre-buffered successor {:?} ({} samples)",
+                        path,
+                        self.pre_decode.buffer.len()
+                    );
+                    self.pre_decode.format = Some(fmt);
+                    self.pre_decode.track_id = Some(next_id);
+                    self.pre_decode.track_path = Some(path);
                 }
             }
-            PlaybackCommand::Stop => {
-                paused_position = None;
-                let _ = audio_output.stop();
-                decoder.close();
-                let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Stopped));
-            }
-            PlaybackCommand::Seek(pos) => {
-                let _ = decoder.seek(pos);
-            }
-            PlaybackCommand::SetVolume(vol) => {
-                audio_output.set_volume(vol);
-            }
-            PlaybackCommand::Next => {
-                let next_track = {
-                    let mut state = state.lock_or_recover();
-                    state.queue.next().cloned()
-                };
-                if let Some(track_id) = next_track {
-                    current_track_id = Some(track_id.clone());
-                    let _ = audio_output.stop();
-                    let _ = cmd_tx.send(PlaybackCommand::Play(track_id));
-                }
-            }
-            PlaybackCommand::Previous => {
-                let prev_track = {
-                    let mut state = state.lock_or_recover();
-                    state.queue.previous().cloned()
-                };
-                if let Some(track_id) = prev_track {
-                    current_track_id = Some(track_id.clone());
-                    let _ = audio_output.stop();
-                    let _ = cmd_tx.send(PlaybackCommand::Play(track_id));
-                }
-            }
-            PlaybackCommand::ToggleVisibility => {}
-            PlaybackCommand::PlayPause => {
-                let current_state = {
-                    let state = state.lock_or_recover();
-                    state.playback_state
-                };
-                match current_state {
-                    PlaybackState::Playing => {
-                        let _ = cmd_tx.send(PlaybackCommand::Pause);
-                    }
-                    _ => {
-                        let _ = cmd_tx.send(PlaybackCommand::Resume);
-                    }
-                }
-            }
-            PlaybackCommand::PlayNext(track_id) => {
-                {
-                    let mut state = state.lock_or_recover();
-                    state.queue.insert_next(track_id.clone());
-                }
-                if current_track_id.is_none() {
-                    let _ = cmd_tx.send(PlaybackCommand::Play(track_id));
-                }
-            }
-            PlaybackCommand::AddToQueue(track_id) => {
-                {
-                    let mut state = state.lock_or_recover();
-                    state.queue.append(track_id.clone());
-                }
-                if current_track_id.is_none() {
-                    let _ = cmd_tx.send(PlaybackCommand::Play(track_id));
-                }
+            Err(e) => {
+                tracing::warn!("Gapless pre-decode open failed: {}", e);
+                self.next_decoder.close();
             }
         }
+    }
+
+    /// End-of-track handling (Task 4.1): attempt the gapless handoff when a
+    /// valid, format-compatible, pre-buffered natural successor exists;
+    /// otherwise run the gapped path (`TrackEnded` → drain buffer → stop).
+    /// Purely additive: any ineligible case falls through unchanged.
+    fn end_of_track(
+        &mut self,
+        info: &mut AudioFormatInfo,
+        accumulated_samples: &mut usize,
+        max_buffer_samples: &mut usize,
+    ) -> EndOfTrack {
+        let promoted = self
+            .pre_decode
+            .track_id
+            .take()
+            .zip(self.pre_decode.format.take())
+            .map(|(id, fmt)| (id, fmt, self.pre_decode.track_path.take()));
+
+        if let Some((promoted_id, promoted_format, promoted_path)) = promoted {
+            let eligible = {
+                let s = self.state.lock_or_recover();
+                let repeat_one = s.queue.repeat == RepeatMode::One;
+                let natural = if repeat_one {
+                    s.queue.current_track().cloned()
+                } else {
+                    s.queue.upcoming(1).into_iter().next().cloned()
+                };
+                let has_successor =
+                    natural.as_ref() == Some(&promoted_id) && !self.pre_decode.buffer.is_empty();
+                let compatible = formats_gapless_compatible(
+                    self.audio_output.effective_sample_rate(),
+                    info.channels,
+                    promoted_format.sample_rate,
+                    promoted_format.channels,
+                );
+                is_gapless_eligible(GaplessConditions {
+                    queue: QueueConditions {
+                        shuffle: s.queue.shuffle,
+                        repeat_one,
+                    },
+                    formats_compatible: compatible,
+                    has_successor,
+                }) || (!s.queue.shuffle && repeat_one && compatible && has_successor)
+            };
+
+            if eligible {
+                // Expect (and swallow) the update processor's automatic
+                // Play() for the promoted track.
+                self.gapless_dup_expected = true;
+                // TrackEnded keeps play-count and auto-advance bookkeeping
+                // intact; the resulting Play dup is neutralized by the dedup
+                // guard.
+                let _ = self.update_tx.send(PlaybackUpdate::TrackEnded);
+                // 1. Flush the successor's pre-buffer. The cpal stream is
+                //    NEVER stopped/re-initialized across this boundary; the
+                //    ring buffer is NOT cleared.
+                if let Err(e) = self.audio_output.write_samples(&self.pre_decode.buffer) {
+                    let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
+                    return EndOfTrack::SessionEnded;
+                }
+                // 2. Promote the pre-decode decoder to primary and retire the
+                //    old primary.
+                std::mem::swap(&mut self.decoder, &mut self.next_decoder);
+                self.next_decoder.close();
+                // 3. Position tracking restarts for the new track.
+                *accumulated_samples = 0;
+                self.pre_decode.buffer.clear();
+                self.pre_decode.attempted = false;
+                // ReplayGain (Task 4.3): apply the promoted track's factor at
+                // the boundary.
+                let rg = {
+                    let s = self.state.lock_or_recover();
+                    let (g, p) = s.library.get_track(&promoted_id).map_or((None, None), |t| {
+                        (
+                            t.metadata.replaygain_track_gain,
+                            t.metadata.replaygain_track_peak,
+                        )
+                    });
+                    crate::app::state::replaygain_factor(s.replaygain_enabled, g, p)
+                };
+                self.audio_output.set_replaygain(rg);
+                // 4. Announce the new track at the sample boundary.
+                self.current_track_id = Some(promoted_id.clone());
+                let _ = self
+                    .update_tx
+                    .send(PlaybackUpdate::TrackChanged(promoted_id.clone()));
+                tracing::info!("Gapless handoff to {:?} ({:?})", promoted_id, promoted_path);
+                // 5. Continue the decode loop with the new track.
+                *info = promoted_format;
+                *max_buffer_samples = (info.sample_rate as usize) * usize::from(info.channels) * 2;
+                return EndOfTrack::HandedOff;
+            }
+
+            // Successor was pre-buffered but the handoff is ineligible (format
+            // mismatch, shuffle/jump, or pre-buffer issues). The gapped path
+            // below runs unchanged and discards the pre-buffer.
+            tracing::info!(
+                "Gapless: skipping handoff to {:?} (ineligible); gapped path",
+                promoted_id
+            );
+        }
+
+        // --- Existing gapped path, unchanged ---
+        let _ = self.update_tx.send(PlaybackUpdate::TrackEnded);
+        // Wait for the remaining buffer to drain before stopping
+        while self.audio_output.buffer_len() > 0 {
+            if let Ok(PlaybackCommand::Stop) = self.cmd_rx.try_recv() {
+                self.audio_output.clear_buffer();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Discard any unused pre-buffer (format mismatch, stale successor, or
+        // none); the next Play re-arms pre-decode.
+        self.pre_decode.reset();
+        self.next_decoder.close();
+        EndOfTrack::SessionEnded
     }
 }

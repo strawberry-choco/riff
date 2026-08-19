@@ -1,6 +1,6 @@
-use crate::domain::{TrackId, RepeatMode};
+use crate::domain::{RepeatMode, TrackId};
 use rand::seq::SliceRandom;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Manages the playback queue and shuffle/repeat state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -40,7 +40,7 @@ impl PlaybackQueue {
     }
 
     pub fn insert_next(&mut self, track: TrackId) {
-        let insert_idx = self.current_index.map(|i| i + 1).unwrap_or(0);
+        let insert_idx = self.current_index.map_or(0, |i| i + 1);
         if insert_idx <= self.tracks.len() {
             self.tracks.insert(insert_idx, track);
         } else {
@@ -88,7 +88,10 @@ impl PlaybackQueue {
         };
     }
 
-    pub fn next(&mut self) -> Option<&TrackId> {
+    /// Advance to the next track (respecting shuffle/repeat state) and make
+    /// it current. Named `advance` rather than `next` to avoid confusion
+    /// with `std::iter::Iterator::next`.
+    pub fn advance(&mut self) -> Option<&TrackId> {
         if self.tracks.is_empty() {
             return None;
         }
@@ -103,7 +106,9 @@ impl PlaybackQueue {
             }
             self.shuffled_indices.first().copied()
         } else {
-            self.current_index.map(|i| i + 1).filter(|&i| i < self.tracks.len())
+            self.current_index
+                .map(|i| i + 1)
+                .filter(|&i| i < self.tracks.len())
         };
 
         if let Some(idx) = next_idx {
@@ -164,7 +169,7 @@ impl PlaybackQueue {
             return result;
         }
 
-        let start = self.current_index.map(|i| i + 1).unwrap_or(0);
+        let start = self.current_index.map_or(0, |i| i + 1);
 
         if self.shuffle && !self.shuffled_indices.is_empty() {
             for &idx in self.shuffled_indices.iter().take(count) {

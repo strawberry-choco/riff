@@ -54,10 +54,9 @@ pub fn configure_fonts(ctx: &egui::Context) {
         match std::fs::read(path) {
             Ok(bytes) => {
                 let mut fonts = egui::FontDefinitions::default();
-                fonts.font_data.insert(
-                    "cjk".to_owned(),
-                    egui::FontData::from_owned(bytes).into(),
-                );
+                fonts
+                    .font_data
+                    .insert("cjk".to_owned(), egui::FontData::from_owned(bytes).into());
                 // Prepend CJK font to proportional family.
                 // CJK fonts like Noto Sans CJK, PingFang, Microsoft YaHei
                 // all have high-quality Latin glyphs, so it's safe to use them

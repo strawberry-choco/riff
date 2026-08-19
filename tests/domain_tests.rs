@@ -291,6 +291,40 @@ mod tests {
     }
 
     #[test]
+    fn test_repeat_all_wraps_single_track_queue_to_itself() {
+        // A one-track queue with repeat-all keeps yielding the same track
+        // instead of stopping at the end.
+        let a = TrackId("only.mp3".to_string());
+        let mut queue = PlaybackQueue::new(vec![a.clone()]);
+        queue.current_index = Some(0);
+        queue.repeat = RepeatMode::All;
+
+        assert_eq!(queue.advance(), Some(&a));
+        assert_eq!(queue.current_index, Some(0));
+        // Wrapping is repeatable, not a one-shot.
+        assert_eq!(queue.advance(), Some(&a));
+        assert_eq!(queue.current_index, Some(0));
+    }
+
+    #[test]
+    fn test_advance_walks_queue_in_order_until_end() {
+        // Without repeat, `advance` plays tracks strictly in queue order from
+        // the current position, then stops at the end.
+        let a = TrackId("a.mp3".to_string());
+        let b = TrackId("b.mp3".to_string());
+        let c = TrackId("c.mp3".to_string());
+        let mut queue = PlaybackQueue::new(vec![a.clone(), b.clone(), c.clone()]);
+        queue.current_index = Some(0);
+
+        assert_eq!(queue.advance(), Some(&b));
+        assert_eq!(queue.advance(), Some(&c));
+        assert!(queue.advance().is_none());
+        // The position stays on the last track after the queue is exhausted.
+        assert_eq!(queue.current_index, Some(2));
+        assert_eq!(queue.current_track(), Some(&c));
+    }
+
+    #[test]
     fn test_previous_at_index_zero_stays_put() {
         let a = TrackId("a.mp3".to_string());
         let mut queue = PlaybackQueue::new(vec![a.clone(), TrackId("b.mp3".to_string())]);

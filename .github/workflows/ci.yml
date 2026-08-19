@@ -55,10 +55,10 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      # Respects the repo's [lints.clippy] levels (pedantic = warn). Promote to
-      # `-D warnings` once the tree is clippy-clean to make this a hard gate.
+      # Respects the repo's [lints.clippy] levels (pedantic = warn). The tree
+      # is kept clippy-clean, so any warning fails the build (-D warnings).
       - name: Clippy
-        run: cargo clippy --all-targets
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --all-targets

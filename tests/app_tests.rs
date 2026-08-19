@@ -1213,6 +1213,60 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_and_add_tracks_dedupes_same_file_across_separate_scans() {
+        // Two library paths can overlap: scanning a second root that contains
+        // an already-indexed file must not duplicate the track or its index
+        // entries. Dedup is by TrackId (the full file path).
+        let mut library = LibraryManager::new();
+        let reader = MockMetadataReader { fail: false };
+        let shared = PathBuf::from("music/shared.mp3");
+
+        let first_added = library.scan_and_add_tracks(
+            vec![shared.clone(), PathBuf::from("music/first-only.mp3")],
+            &reader,
+        );
+        assert_eq!(first_added, 2);
+
+        // The second scan overlaps on `shared` and adds one new file.
+        let second_added = library.scan_and_add_tracks(
+            vec![shared.clone(), PathBuf::from("music/second-only.mp3")],
+            &reader,
+        );
+        assert_eq!(second_added, 1);
+
+        assert_eq!(library.all_tracks().len(), 3);
+        // Indexes stay consistent: one artist, one album, three tracks in it.
+        assert_eq!(library.all_artists().len(), 1);
+        assert_eq!(library.all_albums().len(), 1);
+        assert_eq!(
+            library.get_album_tracks("Mock Artist - Mock Album").len(),
+            3
+        );
+    }
+
+    #[test]
+    fn test_scan_of_unavailable_path_adds_nothing() {
+        // An unavailable (missing or removed) library path must degrade to
+        // "nothing scanned", not an error: the scanner skips the unreadable
+        // root entry and yields no files, and the manager indexes nothing.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let missing = temp_dir.path().join("does-not-exist");
+        assert!(!missing.exists());
+
+        let scanner = AudioFileScanner::new(Arc::new(AtomicBool::new(false)));
+        let files = scanner.scan(&missing);
+        assert!(files.is_empty());
+
+        let mut library = LibraryManager::new();
+        let reader = MockMetadataReader { fail: false };
+        let added = library.scan_and_add_tracks(files, &reader);
+        assert_eq!(added, 0);
+        assert!(library.all_tracks().is_empty());
+        assert!(library.all_artists().is_empty());
+        assert!(library.all_albums().is_empty());
+    }
+
+    #[test]
     fn test_smart_playlist_recently_added_orders_newest_first() {
         let mut library = LibraryManager::new();
         let now = SystemTime::now();

@@ -1,6 +1,6 @@
 pub mod app;
 pub mod fonts;
-pub mod tray;
 pub mod settings;
+pub mod tray;
 
 pub use app::RiffApp;

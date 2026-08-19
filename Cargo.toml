@@ -6,6 +6,15 @@ rust-version = "1.92"
 authors = ["riff contributors"]
 description = "A lightweight, offline-first music player built in Rust with egui"
 license = "MIT OR Apache-2.0"
+# The test suite is a single integration-test crate rooted at `tests/mod.rs`
+# (see `docs/engineering/testing-strategy.md`). Disable cargo's default
+# auto-discovery so each `tests/*_tests.rs` file is NOT compiled as its own
+# separate crate (they are modules of `tests/mod.rs`).
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/mod.rs"
 
 [dependencies]
 # UI

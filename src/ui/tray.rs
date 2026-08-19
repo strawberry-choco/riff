@@ -1,19 +1,19 @@
 //! System tray icon for riff music player (macOS/Windows only)
 
 #[cfg(not(target_os = "linux"))]
+use crate::domain::PlaybackCommand;
+#[cfg(not(target_os = "linux"))]
 use crossbeam_channel::Sender;
 #[cfg(not(target_os = "linux"))]
 use muda::{Menu, MenuId, MenuItem, PredefinedMenuItem};
 #[cfg(not(target_os = "linux"))]
-use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
-#[cfg(not(target_os = "linux"))]
-use tray_icon::Icon;
-#[cfg(not(target_os = "linux"))]
-use crate::domain::PlaybackCommand;
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(target_os = "linux"))]
 use std::sync::Arc;
 #[cfg(not(target_os = "linux"))]
-use std::sync::atomic::{AtomicBool, Ordering};
+use tray_icon::Icon;
+#[cfg(not(target_os = "linux"))]
+use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 /// Create a system tray icon with playback controls.
 /// On Linux this is a no-op (tray-icon requires GTK which isn't always available).
@@ -84,7 +84,11 @@ pub fn create_tray(
                 }
             }
 
-            if let Ok(TrayIconEvent::Click { button: tray_icon::MouseButton::Left, .. }) = tray_channel.try_recv() {
+            if let Ok(TrayIconEvent::Click {
+                button: tray_icon::MouseButton::Left,
+                ..
+            }) = tray_channel.try_recv()
+            {
                 let _ = cmd_tx.send(PlaybackCommand::ToggleVisibility);
             }
         }
@@ -101,17 +105,18 @@ pub fn update_tooltip(tray: &TrayIcon, text: &str) {
 
 #[cfg(not(target_os = "linux"))]
 fn build_default_icon() -> Result<Icon, Box<dyn std::error::Error>> {
-    let size = 32usize;
-    let mut rgba = vec![0u8; size * size * 4];
-    for y in 0..size {
-        for x in 0..size {
-            let idx = (y * size + x) * 4;
+    const SIZE: u32 = 32;
+    let side = SIZE as usize;
+    let mut rgba = vec![0u8; side * side * 4];
+    for y in 0..side {
+        for x in 0..side {
+            let idx = (y * side + x) * 4;
             rgba[idx] = 64;
             rgba[idx + 1] = 128;
             rgba[idx + 2] = 192;
             rgba[idx + 3] = 255;
         }
     }
-    let icon = Icon::from_rgba(rgba, size as u32, size as u32)?;
+    let icon = Icon::from_rgba(rgba, SIZE, SIZE)?;
     Ok(icon)
 }

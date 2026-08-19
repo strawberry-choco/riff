@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use walkdir::WalkDir;
-use crate::app::errors::AppError;
 
 const AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "aac", "opus", "ogg", "flac", "wav"];
 
@@ -15,7 +14,10 @@ impl AudioFileScanner {
         Self { cancel_flag }
     }
 
-    pub fn scan(&self, path: &Path) -> Result<Vec<PathBuf>, AppError> {
+    /// Recursively collect audio files under `path`. Directory entries that
+    /// cannot be read (permissions etc.) are logged and skipped, so a scan
+    /// never fails outright.
+    pub fn scan(&self, path: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
 
         for entry in WalkDir::new(path)
@@ -40,19 +42,23 @@ impl AudioFileScanner {
                 }
                 Err(e) => {
                     if let Some(path) = e.path() {
-                        tracing::warn!("Permission denied or error accessing {}: {}", path.display(), e);
+                        tracing::warn!(
+                            "Permission denied or error accessing {}: {}",
+                            path.display(),
+                            e
+                        );
                     }
                 }
             }
         }
 
-        Ok(files)
+        files
     }
 }
 
 fn is_hidden(entry: &walkdir::DirEntry) -> bool {
-    entry.file_name()
+    entry
+        .file_name()
         .to_str()
-        .map(|s| s.starts_with('.'))
-        .unwrap_or(false)
+        .is_some_and(|s| s.starts_with('.'))
 }

@@ -1,71 +1,590 @@
+// Bring the crate-root prelude (re-exported types) into this module so the
+// inner `use super::*` can see the bare type names used in the tests.
+use super::*;
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
+    // --- Playlists (Task 4.2) ---------------------------------------------------
+
+    #[test]
+    fn test_playlist_serde_roundtrip_preserves_order() {
+        let playlist = Playlist {
+            id: PlaylistId("mix-123".to_string()),
+            name: "Road Trip".to_string(),
+            tracks: vec![
+                TrackId("c.mp3".to_string()),
+                TrackId("a.mp3".to_string()),
+                TrackId("b.mp3".to_string()),
+            ],
+            created: None,
+        };
+
+        let json = serde_json::to_string(&playlist).unwrap();
+        let loaded: Playlist = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.id, playlist.id);
+        assert_eq!(loaded.name, "Road Trip");
+        // Track order is user-meaningful and must survive persistence.
+        assert_eq!(
+            loaded.tracks,
+            vec![
+                TrackId("c.mp3".to_string()),
+                TrackId("a.mp3".to_string()),
+                TrackId("b.mp3".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_playlist_id_new_slugs_name_and_differs_per_name() {
+        let a = PlaylistId::new("My Mix!");
+        let b = PlaylistId::new("Other Mix");
+        assert!(a.0.starts_with("my-mix"));
+        assert!(b.0.starts_with("other-mix"));
+        assert_ne!(a, b);
+        // A name with no alphanumerics falls back to a stable slug.
+        assert!(PlaylistId::new("!!!").0.starts_with("playlist"));
+    }
+
     #[test]
     fn test_app_state_new() {
         let state = AppState::new();
         assert_eq!(state.playback_state, PlaybackState::Stopped);
-        assert_eq!(state.current_volume, 1.0);
+        assert!(crate::test_utils::float_close(state.current_volume, 1.0));
         assert!(state.library_paths.is_empty());
         assert!(state.library_statuses.is_empty());
         assert!(state.watch_states.is_empty());
     }
-    
+
     #[test]
     fn test_playback_queue_operations() {
         let mut queue = PlaybackQueue::default();
-        let track1 = TrackId::from("track1.mp3");
-        let track2 = TrackId::from("track2.mp3");
-        
+        let track1 = TrackId("track1.mp3".to_string());
+        let track2 = TrackId("track2.mp3".to_string());
+
         // Test initial state
         assert!(queue.current_track().is_none());
-        assert!(queue.next().is_none());
+        assert!(queue.advance().is_none());
         assert!(queue.previous().is_none());
-        
+
         // Test adding tracks
         queue.append(track1.clone());
         queue.append(track2.clone());
-        
+
         assert_eq!(queue.tracks.len(), 2);
         assert_eq!(queue.current_index, None);
-        
-        // Test setting current track
-        queue.set_current_index(0);
+
+        // Test setting current track (`current_index` is a public field; the
+        // old `set_current_index` helper no longer exists).
+        queue.current_index = Some(0);
         assert_eq!(queue.current_index, Some(0));
         assert_eq!(queue.current_track(), Some(&track1));
-        
+
         // Test next track
-        assert_eq!(queue.next(), Some(&track2));
-        
+        assert_eq!(queue.advance(), Some(&track2));
+
         // Test previous track
-        queue.set_current_index(1);
+        queue.current_index = Some(1);
         assert_eq!(queue.previous(), Some(&track1));
     }
-    
+
     #[test]
     fn test_playback_state_display() {
-        assert_eq!(format!("{}", PlaybackState::Stopped), "Stopped");
-        assert_eq!(format!("{}", PlaybackState::Playing), "Playing");
-        assert_eq!(format!("{}", PlaybackState::Paused), "Paused");
+        // `PlaybackState` derives `Debug` (not `Display`); the Debug rendering
+        // of each unit variant is its name, which is what this test verifies.
+        assert_eq!(format!("{:?}", PlaybackState::Stopped), "Stopped");
+        assert_eq!(format!("{:?}", PlaybackState::Playing), "Playing");
+        assert_eq!(format!("{:?}", PlaybackState::Paused), "Paused");
     }
-    
+
     #[test]
     fn test_track_id_from_path() {
-        let track_id = TrackId::from("path/to/track.mp3");
+        let track_id = TrackId::from_path(&std::path::PathBuf::from("path/to/track.mp3"));
         assert_eq!(track_id.0, "path/to/track.mp3");
     }
-    
+
     #[test]
     fn test_track_display_methods() {
         let track = Track {
-            id: TrackId::from("test.mp3"),
+            id: TrackId("test.mp3".to_string()),
             file_path: std::path::PathBuf::from("test.mp3"),
             metadata: crate::domain::TrackMetadata::default(),
+            duration: None,
+            sample_rate: None,
+            channels: None,
+            play_count: 0,
+            last_played: None,
+            date_added: None,
         };
-        
+
         assert_eq!(track.metadata.display_artist(), "Unknown Artist");
-        assert_eq!(track.metadata.display_title(&track.file_path), "Unknown Title");
+        // With no title tag, `display_title` falls back to the file stem
+        // ("test" for "test.mp3").
+        assert_eq!(track.metadata.display_title(&track.file_path), "test");
         assert_eq!(track.metadata.display_album(), "Unknown Album");
+    }
+
+    // --- PlaybackQueue: empty / single-track behavior -----------------------
+
+    #[test]
+    fn test_empty_queue_returns_none_everywhere() {
+        let mut queue = PlaybackQueue::default();
+        assert!(queue.current_track().is_none());
+        assert!(queue.advance().is_none());
+        assert!(queue.previous().is_none());
+        assert!(queue.upcoming(5).is_empty());
+    }
+
+    #[test]
+    fn test_single_track_queue_navigation() {
+        let track = TrackId("only.mp3".to_string());
+        let mut queue = PlaybackQueue::new(vec![track.clone()]);
+        queue.current_index = Some(0);
+
+        assert_eq!(queue.current_track(), Some(&track));
+        // Without repeat, there is nowhere to advance to.
+        assert!(queue.advance().is_none());
+        // `previous` at the first track stays on it.
+        assert_eq!(queue.previous(), Some(&track));
+        assert_eq!(queue.current_index, Some(0));
+        // Nothing follows the only track.
+        assert!(queue.upcoming(3).is_empty());
+    }
+
+    #[test]
+    fn test_queue_new_constructor_defaults() {
+        let queue = PlaybackQueue::new(vec![
+            TrackId("a.mp3".to_string()),
+            TrackId("b.mp3".to_string()),
+        ]);
+        assert_eq!(queue.tracks.len(), 2);
+        assert_eq!(queue.current_index, None);
+        assert!(!queue.shuffle);
+        assert_eq!(queue.repeat, RepeatMode::None);
+        assert!(queue.shuffled_indices.is_empty());
+        assert!(queue.shuffle_history.is_empty());
+    }
+
+    // --- PlaybackQueue: append / insert / remove ----------------------------
+
+    #[test]
+    fn test_append_and_insert_next_ordering() {
+        let a = TrackId("a.mp3".to_string());
+        let b = TrackId("b.mp3".to_string());
+        let c = TrackId("c.mp3".to_string());
+        let d = TrackId("d.mp3".to_string());
+
+        let mut queue = PlaybackQueue::default();
+        queue.append(a.clone());
+        queue.append(b.clone());
+        // With no current track, `insert_next` inserts at index 0.
+        queue.insert_next(c.clone());
+        assert_eq!(queue.tracks, vec![c.clone(), a.clone(), b.clone()]);
+
+        queue.current_index = Some(0); // current = c
+        queue.insert_next(d.clone());
+        assert_eq!(queue.tracks, vec![c, d, a, b]);
+        // Inserting does not move the current index.
+        assert_eq!(queue.current_index, Some(0));
+    }
+
+    #[test]
+    fn test_remove_before_current_shifts_index() {
+        let mut queue = PlaybackQueue::new(vec![
+            TrackId("a.mp3".to_string()),
+            TrackId("b.mp3".to_string()),
+            TrackId("c.mp3".to_string()),
+        ]);
+        queue.current_index = Some(2); // current = c
+
+        queue.remove(0);
+        assert_eq!(queue.tracks.len(), 2);
+        assert_eq!(queue.current_index, Some(1));
+        assert_eq!(queue.current_track(), Some(&TrackId("c.mp3".to_string())));
+    }
+
+    #[test]
+    fn test_remove_current_clears_current() {
+        let mut queue = PlaybackQueue::new(vec![
+            TrackId("a.mp3".to_string()),
+            TrackId("b.mp3".to_string()),
+            TrackId("c.mp3".to_string()),
+        ]);
+        queue.current_index = Some(1); // current = b
+
+        queue.remove(1);
+        assert_eq!(queue.tracks.len(), 2);
+        assert_eq!(queue.current_index, None);
+        assert!(queue.current_track().is_none());
+    }
+
+    #[test]
+    fn test_remove_after_current_keeps_index() {
+        let mut queue = PlaybackQueue::new(vec![
+            TrackId("a.mp3".to_string()),
+            TrackId("b.mp3".to_string()),
+            TrackId("c.mp3".to_string()),
+        ]);
+        queue.current_index = Some(0); // current = a
+
+        queue.remove(2);
+        assert_eq!(queue.tracks.len(), 2);
+        assert_eq!(queue.current_index, Some(0));
+        assert_eq!(queue.current_track(), Some(&TrackId("a.mp3".to_string())));
+    }
+
+    #[test]
+    fn test_remove_out_of_bounds_is_noop() {
+        let mut queue = PlaybackQueue::new(vec![
+            TrackId("a.mp3".to_string()),
+            TrackId("b.mp3".to_string()),
+        ]);
+        queue.current_index = Some(1);
+
+        queue.remove(99);
+        assert_eq!(queue.tracks.len(), 2);
+        assert_eq!(queue.current_index, Some(1));
+    }
+
+    // --- PlaybackQueue: repeat / previous ------------------------------------
+
+    #[test]
+    fn test_next_wraps_at_end_with_repeat_all() {
+        let a = TrackId("a.mp3".to_string());
+        let mut queue = PlaybackQueue::new(vec![a.clone(), TrackId("b.mp3".to_string())]);
+        queue.current_index = Some(1); // at the end
+        queue.repeat = RepeatMode::All;
+
+        assert_eq!(queue.advance(), Some(&a));
+        assert_eq!(queue.current_index, Some(0));
+    }
+
+    #[test]
+    fn test_next_stops_at_end_without_repeat() {
+        let mut queue = PlaybackQueue::new(vec![
+            TrackId("a.mp3".to_string()),
+            TrackId("b.mp3".to_string()),
+        ]);
+        queue.current_index = Some(1); // at the end
+        assert_eq!(queue.repeat, RepeatMode::None);
+
+        assert!(queue.advance().is_none());
+        // Current position is left untouched.
+        assert_eq!(queue.current_index, Some(1));
+    }
+
+    #[test]
+    fn test_repeat_one_does_not_wrap_queue() {
+        // `RepeatMode::One` is honored by the playback engine, not by the
+        // queue: `next()` treats it like `None` and stops at the end.
+        let mut queue = PlaybackQueue::new(vec![
+            TrackId("a.mp3".to_string()),
+            TrackId("b.mp3".to_string()),
+        ]);
+        queue.current_index = Some(1);
+        queue.repeat = RepeatMode::One;
+
+        assert!(queue.advance().is_none());
+        assert_eq!(queue.repeat, RepeatMode::One);
+    }
+
+    #[test]
+    fn test_previous_at_index_zero_stays_put() {
+        let a = TrackId("a.mp3".to_string());
+        let mut queue = PlaybackQueue::new(vec![a.clone(), TrackId("b.mp3".to_string())]);
+        queue.current_index = Some(0);
+
+        assert_eq!(queue.previous(), Some(&a));
+        assert_eq!(queue.current_index, Some(0));
+    }
+
+    #[test]
+    fn test_previous_with_no_current_starts_at_first() {
+        let a = TrackId("a.mp3".to_string());
+        let mut queue = PlaybackQueue::new(vec![a.clone(), TrackId("b.mp3".to_string())]);
+        assert_eq!(queue.current_index, None);
+
+        assert_eq!(queue.previous(), Some(&a));
+        assert_eq!(queue.current_index, Some(0));
+    }
+
+    #[test]
+    fn test_toggle_repeat_cycles_none_all_one() {
+        let mut queue = PlaybackQueue::default();
+        assert_eq!(queue.repeat, RepeatMode::None);
+
+        queue.toggle_repeat();
+        assert_eq!(queue.repeat, RepeatMode::All);
+        queue.toggle_repeat();
+        assert_eq!(queue.repeat, RepeatMode::One);
+        queue.toggle_repeat();
+        assert_eq!(queue.repeat, RepeatMode::None);
+    }
+
+    // --- PlaybackQueue: shuffle / clear / upcoming ---------------------------
+
+    #[test]
+    fn test_set_shuffle_false_clears_shuffle_state() {
+        let mut queue = PlaybackQueue::new(vec![
+            TrackId("a.mp3".to_string()),
+            TrackId("b.mp3".to_string()),
+            TrackId("c.mp3".to_string()),
+        ]);
+        queue.current_index = Some(0);
+        queue.set_shuffle(true);
+        assert!(queue.shuffle);
+        assert_eq!(queue.shuffled_indices.len(), 2); // excludes current
+
+        queue.set_shuffle(false);
+        assert!(!queue.shuffle);
+        assert!(queue.shuffled_indices.is_empty());
+        assert!(queue.shuffle_history.is_empty());
+    }
+
+    #[test]
+    fn test_shuffle_excludes_current_from_shuffled_indices() {
+        let mut queue = PlaybackQueue::new((0..4).map(|i| TrackId(format!("t{i}.mp3"))).collect());
+        queue.current_index = Some(2);
+        queue.set_shuffle(true);
+
+        // Deterministic invariant (order itself is random): the current index
+        // is never queued, every other index appears exactly once.
+        assert_eq!(queue.shuffled_indices.len(), 3);
+        assert!(!queue.shuffled_indices.contains(&2));
+        let mut sorted = queue.shuffled_indices.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![0, 1, 3]);
+    }
+
+    #[test]
+    fn test_shuffle_preserves_multiset() {
+        // Shuffle must not drop or duplicate tracks. The exact order is random
+        // (never asserted), but starting track + everything `next()` yields
+        // must equal the original multiset.
+        let ids: Vec<TrackId> = (0..8).map(|i| TrackId(format!("track{i}.mp3"))).collect();
+        let mut queue = PlaybackQueue::new(ids.clone());
+        queue.current_index = Some(0);
+        let starting = queue.current_track().cloned().unwrap();
+
+        queue.set_shuffle(true);
+
+        let mut visited: Vec<TrackId> = Vec::new();
+        while let Some(t) = queue.advance() {
+            visited.push(t.clone());
+            // Safety valve: the loop must terminate after the 7 other tracks.
+            assert!(
+                visited.len() <= ids.len(),
+                "shuffle produced more tracks than the queue contains"
+            );
+        }
+
+        assert_eq!(visited.len(), ids.len() - 1);
+        let mut seen = visited;
+        seen.push(starting);
+        seen.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut expected = ids;
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn test_clear_resets_queue() {
+        let mut queue = PlaybackQueue::new((0..3).map(|i| TrackId(format!("t{i}.mp3"))).collect());
+        queue.current_index = Some(1);
+        queue.set_shuffle(true);
+
+        queue.clear();
+        assert!(queue.tracks.is_empty());
+        assert_eq!(queue.current_index, None);
+        assert!(queue.shuffled_indices.is_empty());
+        assert!(queue.shuffle_history.is_empty());
+    }
+
+    #[test]
+    fn test_upcoming_returns_following_tracks() {
+        let ids: Vec<TrackId> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|s| TrackId(format!("{s}.mp3")))
+            .collect();
+        let mut queue = PlaybackQueue::new(ids.clone());
+
+        // With no current track, upcoming starts at the front.
+        assert_eq!(queue.upcoming(2), vec![&ids[0], &ids[1]]);
+
+        queue.current_index = Some(1);
+        assert_eq!(queue.upcoming(2), vec![&ids[2], &ids[3]]);
+        // Requests past the end are clamped, not padded.
+        assert_eq!(queue.upcoming(10), vec![&ids[2], &ids[3]]);
+    }
+
+    // --- TrackId / PlaybackState / RepeatMode / PlaybackPosition -------------
+
+    #[test]
+    fn test_track_id_equality_and_hash() {
+        let path = std::path::PathBuf::from("music/song.mp3");
+        let id1 = TrackId::from_path(&path);
+        let id2 = TrackId::from_path(&path);
+        assert_eq!(id1, id2);
+
+        // Equal ids must hash identically to be usable as map keys.
+        let mut map = std::collections::HashMap::new();
+        map.insert(id1.clone(), 1);
+        assert_eq!(map.get(&id2), Some(&1));
+
+        let other = TrackId::from_path(&std::path::PathBuf::from("music/other.mp3"));
+        assert_ne!(id1, other);
+    }
+
+    #[test]
+    fn test_playback_state_variants_are_distinct() {
+        assert_ne!(PlaybackState::Stopped, PlaybackState::Playing);
+        assert_ne!(PlaybackState::Playing, PlaybackState::Paused);
+        assert_ne!(PlaybackState::Stopped, PlaybackState::Paused);
+
+        // `Copy` semantics: assigning does not move.
+        let state = PlaybackState::Playing;
+        let copied = state;
+        assert_eq!(state, copied);
+    }
+
+    #[test]
+    fn test_repeat_mode_default_is_none() {
+        assert_eq!(RepeatMode::default(), RepeatMode::None);
+    }
+
+    #[test]
+    fn test_playback_position_default() {
+        let position = PlaybackPosition::default();
+        assert_eq!(position.current, std::time::Duration::ZERO);
+        assert_eq!(position.total, None);
+    }
+
+    // --- TrackMetadata display / search --------------------------------------
+
+    #[test]
+    fn test_track_metadata_display_title_fallbacks() {
+        let mut metadata = TrackMetadata::default();
+
+        // No title, no usable file stem -> "Unknown".
+        assert_eq!(
+            metadata.display_title(&std::path::PathBuf::new()),
+            "Unknown"
+        );
+
+        // No title -> file stem with underscores replaced by spaces.
+        assert_eq!(
+            metadata.display_title(&std::path::PathBuf::from("my_song_title.mp3")),
+            "my song title"
+        );
+
+        // An explicit title always wins over the path fallback.
+        metadata.title = Some("Real Title".to_string());
+        assert_eq!(
+            metadata.display_title(&std::path::PathBuf::from("ignored.mp3")),
+            "Real Title"
+        );
+    }
+
+    #[test]
+    fn test_track_metadata_display_album_artist_fallback() {
+        let mut metadata = TrackMetadata::default();
+        // Nothing set -> falls through to "Unknown Artist".
+        assert_eq!(metadata.display_album_artist(), "Unknown Artist");
+
+        // No album artist -> falls back to the track artist.
+        metadata.artist = Some("Track Artist".to_string());
+        assert_eq!(metadata.display_album_artist(), "Track Artist");
+
+        // An explicit album artist wins.
+        metadata.album_artist = Some("Various Artists".to_string());
+        assert_eq!(metadata.display_album_artist(), "Various Artists");
+    }
+
+    // --- SmartPlaylistKind + Track play-history fields (REQ-ML-009) --------
+
+    #[test]
+    fn test_smart_playlist_kind_display_names() {
+        assert_eq!(
+            SmartPlaylistKind::RecentlyAdded.display_name(),
+            "Recently Added"
+        );
+        assert_eq!(SmartPlaylistKind::MostPlayed.display_name(), "Most Played");
+        assert_eq!(
+            SmartPlaylistKind::NeverPlayed.display_name(),
+            "Never Played"
+        );
+        assert_eq!(SmartPlaylistKind::LostGems.display_name(), "Lost Gems");
+    }
+
+    #[test]
+    fn test_smart_playlist_kind_all_enumerates_every_kind_exactly_once() {
+        let all = SmartPlaylistKind::ALL;
+        assert_eq!(all.len(), 4);
+        assert!(all.contains(&SmartPlaylistKind::RecentlyAdded));
+        assert!(all.contains(&SmartPlaylistKind::MostPlayed));
+        assert!(all.contains(&SmartPlaylistKind::NeverPlayed));
+        assert!(all.contains(&SmartPlaylistKind::LostGems));
+    }
+
+    #[test]
+    fn test_track_play_history_fields_default_when_absent_from_json() {
+        // A cache entry written before play tracking existed: no play_count,
+        // last_played or date_added keys at all. `#[serde(default)]` must
+        // fill them in so old caches keep deserializing.
+        let json = r#"{
+            "id": "old.mp3",
+            "file_path": "old.mp3",
+            "metadata": {
+                "title": null, "artist": null, "album": null,
+                "album_artist": null, "track_number": null, "disc_number": null,
+                "genre": null, "year": null, "composer": null, "comment": null
+            },
+            "duration": null,
+            "sample_rate": null,
+            "channels": null
+        }"#;
+
+        let track: Track = serde_json::from_str(json).unwrap();
+        assert_eq!(track.id.0, "old.mp3");
+        assert_eq!(track.play_count, 0);
+        assert!(track.last_played.is_none());
+        assert!(track.date_added.is_none());
+    }
+
+    #[test]
+    fn test_track_play_history_fields_roundtrip_through_serde() {
+        use std::time::SystemTime;
+
+        let mut track = crate::test_utils::create_test_track("t.mp3", "t.mp3");
+        track.play_count = 7;
+        track.last_played = Some(SystemTime::now());
+        track.date_added = Some(SystemTime::now());
+
+        let json = serde_json::to_string(&track).unwrap();
+        let loaded: Track = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.play_count, 7);
+        assert_eq!(loaded.last_played, track.last_played);
+        assert_eq!(loaded.date_added, track.date_added);
+    }
+
+    #[test]
+    fn test_track_metadata_search_text_is_lowercased() {
+        let metadata = TrackMetadata {
+            title: Some("My Song".to_string()),
+            artist: Some("The Artist".to_string()),
+            album: Some("Greatest Hits".to_string()),
+            album_artist: Some("Various".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            metadata.search_text(),
+            "my song the artist greatest hits various"
+        );
+
+        // Missing fields contribute empty segments.
+        assert_eq!(TrackMetadata::default().search_text(), "   ");
     }
 }

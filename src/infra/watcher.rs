@@ -1,14 +1,13 @@
-use std::path::{Path, PathBuf};
 use crossbeam_channel::Sender;
 use notify::Watcher;
+use std::path::{Path, PathBuf};
 
 const AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "aac", "opus", "ogg", "flac", "wav"];
 
 fn is_audio_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| AUDIO_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
-        .unwrap_or(false)
+        .is_some_and(|ext| AUDIO_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
 }
 
 pub struct FilesystemWatcher {
@@ -18,18 +17,16 @@ pub struct FilesystemWatcher {
 impl FilesystemWatcher {
     pub fn new(event_tx: Sender<PathBuf>) -> Result<Self, notify::Error> {
         let inner = notify::recommended_watcher(
-            move |res: Result<notify::Event, notify::Error>| {
-                match res {
-                    Ok(event) => {
-                        for path in &event.paths {
-                            if is_audio_file(path) {
-                                let _ = event_tx.send(path.clone());
-                            }
+            move |res: Result<notify::Event, notify::Error>| match res {
+                Ok(event) => {
+                    for path in &event.paths {
+                        if is_audio_file(path) {
+                            let _ = event_tx.send(path.clone());
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("Filesystem watcher error: {}", e);
-                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Filesystem watcher error: {}", e);
                 }
             },
         )?;

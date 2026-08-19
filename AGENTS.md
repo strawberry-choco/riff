@@ -47,16 +47,21 @@ Cross-thread communication: `crossbeam_channel::unbounded()` for all message pas
 
 | Crate | Use |
 |---|---|
-| `egui` 0.28 / `eframe` 0.28 | UI framework and windowing |
-| `egui_extras` 0.28 | Image loading in egui |
-| `symphonia` 0.5 (all features) | Audio decoding (mp3, flac, ogg, wav, etc.) |
-| `cpal` 0.15 | Cross-platform audio output |
-| `lofty` 0.19 | Metadata reading (tags, cover art) |
-| `image` 0.24 | JPEG/PNG decoding for cover art |
-| `walkdir` 2 | Filesystem scanning |
-| `crossbeam-channel` 0.5 | Thread-safe message passing |
+| `egui` 0.34.3 / `eframe` 0.34.3 | UI framework and windowing (persistence feature on) |
+| `egui_extras` 0.34.3 (aliased `epi`) | Image loading in egui |
+| `egui-elegance` 0.13 | Theming/styling |
+| `symphonia` 0.5 (all features) + `symphonia-adapter-libopus` 0.2 | Audio decoding (mp3, flac, ogg, wav, aac, opus, etc.) |
+| `cpal` 0.18 | Cross-platform audio output |
+| `lofty` 0.19 | Metadata reading and tag writing |
+| `image` 0.25 (jpeg+png only) | JPEG/PNG decoding for cover art |
+| `walkdir` 2 + `notify` 7 | Filesystem scanning and folder watching |
+| `crossbeam-channel` 0.5 / `crossbeam-queue` 0.3 / `parking_lot` 0.12 | Message passing and concurrency |
+| `thiserror` 1 / `tracing` 0.1 | Errors and structured logging |
+| `serde` 1 / `serde_json` 1 / `directories` 5 | Persistence |
+| `rand` 0.8 | Shuffle |
 | `tray-icon` 0.19 + `muda` 0.15 | System tray (non-Linux only) |
 | `rfd` 0.14 | Native file dialogs (non-Linux only) |
+| `tempfile` 3.8 (dev) | Scratch directories for tests |
 
 ## Commands (Dev Workflow)
 
@@ -68,20 +73,23 @@ cargo run                        # run in dev mode
 cargo build --release            # release build (LTO, stripped)
 ```
 
-There is **no CI pipeline**, **no test suite** (zero `#[test]` or `#[cfg(test)]` anywhere), and no pre-commit hooks.
+**Test suite**: ~151 tests in a single integration crate rooted at `tests/mod.rs` (`autotests = false`, one `[[test]]` target named `integration`), organized into `domain_tests`, `app_tests`, `infra_tests`, `ui_tests`, `integration_tests` with shared `test_utils`/`mocks`/`integration_helpers`. Run with `cargo test`. No inline `#[cfg(test)]` modules in `src/`. See `docs/engineering/testing-strategy.md`.
+
+**CI**: `.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy --all-targets`, `cargo test --all-targets` on push/PR to `main` (Linux + Windows matrix; macOS planned per `tasks/plan-v2.md`). No pre-commit hooks.
 
 ## State Persistence
 
-- Library cache: serialized to `directories::ProjectDirs` data local dir under `riff/library_cache.json`. Loaded on startup, saved after each scan completes.
+- Library cache: serialized to `directories::ProjectDirs` data local dir under `riff/library_cache.json`. Loaded on startup, saved after each scan completes. Carries a `schema_version`; incompatible versions fall back to an empty library. Includes per-track play history (`play_count`, `last_played`, `date_added`).
+- Playlists: `playlists.json` in the same data-local dir — user data, deliberately separate from the rebuildable cache.
 - Library paths: persisted via `eframe::Storage` (key `library_paths` as JSON string array).
 - TrackId: string key derived from `PathBuf::to_string_lossy()` — track identity is its full file path.
 
 ## Important Gotchas
 
-- **msrv**: 1.75. CI does not enforce it; `rust-version` in Cargo.toml is informational.
+- **msrv**: `rust-version = "1.92"` in Cargo.toml (edition 2021). CI uses the stable toolchain.
 - **Release profile**: LTO, codegen-units=1, strip=true. `cargo build --release` takes longer but produces smaller binaries.
 - **Audio device**: Falls back to device default sample rate if the track's rate is unsupported (common on Windows WASAPI shared mode at 48 kHz).
-- **No tests exist** — don't look for a test directory or test runner. Any test infrastructure must be created from scratch.
+- **Tests live in `tests/`** — one integration crate rooted at `tests/mod.rs` (per-suite files are modules of it, not separate crates). App-layer tests drive the port traits via the shared mocks module; settings tests use a `MockStorage` for `eframe::Storage`; persistence tests use `tempfile` scratch dirs.
 - **`AppState`** is a single large struct behind `Arc<Mutex<>>` — contains library, queue, playback, theme, UI state all together. Plan lock ordering carefully to avoid deadlocks (current code only uses one Mutex for AppState, no nested locking).
 - **Cover art LRU**: Max 50 cached textures in `cover_textures` HashMap with manual LRU eviction in `cover_lru_keys` Vec.
 - **No DI framework** — manual constructor injection in `main.rs` only.
@@ -89,7 +97,7 @@ There is **no CI pipeline**, **no test suite** (zero `#[test]` or `#[cfg(test)]`
 
 ## Config Files
 
-`clippy.toml` configures Clippy (msrv, tool-level options). Lint levels are set in `Cargo.toml` under `[lints.clippy]` (pedantic with selected allowances). No rustfmt or CI config files exist. Architecture rules live in `docs/technical/architecture.md`. Feature requirements live in `docs/product/features.md`. The full documentation index is in `docs/README.md`.
+`clippy.toml` configures Clippy (msrv, tool-level options). Lint levels are set in `Cargo.toml` under `[lints.clippy]` (pedantic with selected allowances). CI config is `.github/workflows/ci.yml`; no `rustfmt.toml` (defaults apply). Architecture rules live in `docs/technical/architecture.md`. Feature requirements live in `docs/product/requirements.md`, statuses in `docs/product/features.md`, per-surface specs in `docs/product/specs/`. The full documentation index is in `docs/README.md`.
 
 ## Agent Skills
 
@@ -125,3 +133,11 @@ Commands live in `.opencode/commands/`. Invoke by name; each loads a structured 
 | `/code-simplify` | code-simplification | Reduce complexity, preserve behavior |
 | `/ship` | shipping-and-launch | Parallel fan-out review + go/no-go decision |
 | `/webperf` | (web-performance-auditor) | Web performance audit (web apps only) |
+
+### Issue tracker
+
+Issues and specs are tracked as local markdown under `.scratch/` (no git remote configured yet). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Canonical five-label vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.

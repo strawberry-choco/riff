@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 /// Age threshold for "Lost Gems": tracks whose last play is older than this
-/// are considered forgotten gems worth resurfacing.
+/// are considered forgotten gems worth resurfacing. Tracks that were never
+/// played qualify unconditionally ("unheard" includes never-heard).
 const LOST_GEMS_THRESHOLD: Duration = Duration::from_hours(2160);
 
 /// Current on-disk library cache schema version. Bump when the serialized
@@ -373,8 +374,11 @@ impl LibraryManager {
                 unplayed
             }
             SmartPlaylistKind::LostGems => {
-                // Played before, but not within the last 90 days. Tracks that
-                // were never played are excluded (they belong to NeverPlayed).
+                // Unheard for 90+ days: last played older than the threshold
+                // OR never played at all. Once-played gems come first,
+                // longest-unheard first; never-played tracks fill the tail in
+                // path order (they also live in NeverPlayed, so here they act
+                // as yet-unheard bonus candidates).
                 let mut gems: Vec<(SystemTime, &Track)> = self
                     .tracks
                     .values()
@@ -388,10 +392,16 @@ impl LibraryManager {
                     .collect();
                 gems.sort_by(|(last_a, a), (last_b, b)| {
                     last_a
-                        .cmp(last_b) // longest-unplayed first
+                        .cmp(last_b) // longest-unheard first
                         .then_with(|| a.file_path.cmp(&b.file_path))
                 });
-                gems.into_iter().map(|(_, t)| t).collect()
+                let mut unheard: Vec<&Track> = self
+                    .tracks
+                    .values()
+                    .filter(|t| t.last_played.is_none())
+                    .collect();
+                unheard.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+                gems.into_iter().map(|(_, t)| t).chain(unheard).collect()
             }
         };
         selected.truncate(limit);

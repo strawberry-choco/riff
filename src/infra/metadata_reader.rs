@@ -17,6 +17,20 @@ pub fn parse_replaygain_gain(s: &str) -> Option<f32> {
     without_unit.trim().parse::<f32>().ok()
 }
 
+/// Extract a year from a tag text value: a bare `"1959"` parses directly,
+/// and date-style values (`"1959-08-17"`, full `ID3v2` timestamps) yield
+/// their leading four digits. Values without a plausible leading year give
+/// `None`.
+fn year_from_text(s: &str) -> Option<u32> {
+    let digits: String = s
+        .trim()
+        .chars()
+        .take(4)
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse::<u32>().ok()
+}
+
 pub struct LoftyMetadataReader;
 
 impl Default for LoftyMetadataReader {
@@ -70,9 +84,16 @@ impl LoftyMetadataReader {
         if let Some(item) = tag.get(&ItemKey::Genre) {
             metadata.genre = text_val(item);
         }
-        if let Some(item) = tag.get(&ItemKey::Year) {
-            metadata.year = text_val(item).and_then(|s| s.parse::<u32>().ok());
-        }
+        // Year: a dedicated `Year` item wins (APE); otherwise the year is
+        // the leading digits of a `RecordingDate` (ID3v2 `TDRC`, Vorbis
+        // `DATE`, RIFF `ICRD`, MP4 `©day`). This mirrors what
+        // `Accessor::set_year` writes, so tags written through
+        // `LoftyMetadataWriter` round-trip when the file is re-read.
+        metadata.year = tag
+            .get(&ItemKey::Year)
+            .or_else(|| tag.get(&ItemKey::RecordingDate))
+            .and_then(text_val)
+            .and_then(|s| year_from_text(&s));
         if let Some(item) = tag.get(&ItemKey::Comment) {
             metadata.comment = text_val(item);
         }

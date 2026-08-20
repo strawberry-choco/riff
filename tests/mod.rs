@@ -53,9 +53,9 @@ pub use riff::domain::{
 pub use riff::infra::metadata_reader::parse_replaygain_gain;
 pub use riff::infra::{
     AudioFileScanner, CpalAudioOutput, FilesystemWatcher, ImageCoverLoader, LoftyMetadataReader,
-    SymphoniaDecoder,
+    LoftyMetadataWriter, SymphoniaDecoder,
 };
-pub use riff::ui::app::{clamp_seek, format_duration, high_contrast_visuals};
+pub use riff::ui::app::{clamp_seek, format_duration, high_contrast_visuals, TagEditState};
 pub use riff::ui::settings::{
     expand_tilde, load_advanced_mode, load_high_contrast, load_library_paths, load_replaygain,
     load_volume, load_watch_states, restore_from_backup_if_corrupted, save_advanced_mode,
@@ -130,9 +130,11 @@ pub mod mocks {
     use riff::app::errors::AppError;
     use riff::app::traits::{
         AudioDecoder, AudioFormatInfo, AudioOutput, CoverImage, CoverLoader, MetadataReader,
+        MetadataWriter, TagEdit,
     };
     use riff::domain::{CoverSource, TrackMetadata};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
     use std::time::Duration;
 
     /// Scripted [`AudioDecoder`]: `open` returns a configured format (or an
@@ -380,6 +382,63 @@ pub mod mocks {
     impl CoverLoader for MockCoverLoader {
         fn load_cover(&self, _source: &CoverSource) -> Result<Option<CoverImage>, AppError> {
             self.result.clone().map_err(AppError::CoverLoad)
+        }
+    }
+
+    /// Recording [`MetadataWriter`]: successful writes are kept (path + edit)
+    /// for assertions; when `fail` is set every write returns an
+    /// `AppError::MetadataWrite`, simulating an unwritable file (permission
+    /// denied, disk full, etc.).
+    pub struct MockMetadataWriter {
+        pub fail: bool,
+        pub writes: Mutex<Vec<(PathBuf, TagEdit)>>,
+    }
+
+    impl Default for MockMetadataWriter {
+        fn default() -> Self {
+            Self::recording()
+        }
+    }
+
+    impl MockMetadataWriter {
+        /// A writer that records every write and never fails.
+        #[must_use]
+        pub fn recording() -> Self {
+            Self {
+                fail: false,
+                writes: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// A writer that fails every write with a `MetadataWrite` error.
+        #[must_use]
+        pub fn failing() -> Self {
+            Self {
+                fail: true,
+                writes: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Snapshot of every successfully written (path, edit) pair.
+        #[must_use]
+        pub fn recorded(&self) -> Vec<(PathBuf, TagEdit)> {
+            self.writes.lock().unwrap().clone()
+        }
+    }
+
+    impl MetadataWriter for MockMetadataWriter {
+        fn write_metadata(&self, path: &Path, edit: &TagEdit) -> Result<(), AppError> {
+            if self.fail {
+                return Err(AppError::MetadataWrite(format!(
+                    "permission denied: {}",
+                    path.display()
+                )));
+            }
+            self.writes
+                .lock()
+                .unwrap()
+                .push((path.to_path_buf(), edit.clone()));
+            Ok(())
         }
     }
 }

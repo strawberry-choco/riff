@@ -33,24 +33,25 @@ struct TagWriteResult {
 }
 
 /// Transient UI state for the "Edit Tags" modal. Lives on `RiffApp` (not
-/// `AppState`), following the `settings_text_input` precedent.
-struct TagEditState {
-    track_id: TrackId,
-    path: PathBuf,
-    title: String,
-    artist: String,
-    album: String,
-    album_artist: String,
-    genre: String,
-    year: String,
-    track_number: String,
-    error: Option<String>,
-    saving: bool,
+/// `AppState`), following the `settings_text_input` precedent. Public so the
+/// pre-fill contract (REQ-ML-008) is testable; only constructed by the UI.
+pub struct TagEditState {
+    pub track_id: TrackId,
+    pub path: PathBuf,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    pub genre: String,
+    pub year: String,
+    pub track_number: String,
+    pub error: Option<String>,
+    pub saving: bool,
 }
 
 impl TagEditState {
     /// Pre-populate the editable fields from the track's current metadata.
-    fn from_track(track: &Track) -> Self {
+    pub fn from_track(track: &Track) -> Self {
         Self {
             track_id: track.id.clone(),
             path: track.file_path.clone(),

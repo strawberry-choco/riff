@@ -338,6 +338,69 @@ mod tests {
         assert!(suggestions.is_empty());
     }
 
+    // --- "Edit Tags" modal state (REQ-ML-008) ---------------------------------
+
+    /// A track carrying every supported tag value.
+    fn fully_tagged_track() -> Track {
+        let mut track = crate::test_utils::create_test_track(
+            "music/artist/album/01.flac",
+            "music/artist/album/01.flac",
+        );
+        track.metadata = TrackMetadata {
+            title: Some("Original Title".to_string()),
+            artist: Some("Original Artist".to_string()),
+            album: Some("Original Album".to_string()),
+            album_artist: Some("Original Album Artist".to_string()),
+            genre: Some("Jazz".to_string()),
+            year: Some(1959),
+            track_number: Some(3),
+            ..Default::default()
+        };
+        track
+    }
+
+    #[test]
+    fn test_tag_edit_modal_opens_prefilled_with_current_track_tags() {
+        let track = fully_tagged_track();
+
+        let state = TagEditState::from_track(&track);
+
+        // Every supported tag is pre-filled with the track's current value,
+        // so the user edits in place instead of re-typing everything.
+        assert_eq!(state.title, "Original Title");
+        assert_eq!(state.artist, "Original Artist");
+        assert_eq!(state.album, "Original Album");
+        assert_eq!(state.album_artist, "Original Album Artist");
+        assert_eq!(state.genre, "Jazz");
+        assert_eq!(state.year, "1959");
+        assert_eq!(state.track_number, "3");
+        // The modal targets the clicked track's file.
+        assert_eq!(state.track_id, track.id);
+        assert_eq!(state.path, track.file_path);
+        // Freshly opened: no error, no save in flight.
+        assert!(state.error.is_none());
+        assert!(!state.saving);
+    }
+
+    #[test]
+    fn test_tag_edit_modal_prefill_starts_blank_for_untagged_track() {
+        let track = crate::test_utils::create_test_track("plain.mp3", "plain.mp3");
+
+        let state = TagEditState::from_track(&track);
+
+        // Missing tags surface as empty fields, never as errors or
+        // leftover placeholders.
+        assert_eq!(state.title, "");
+        assert_eq!(state.artist, "");
+        assert_eq!(state.album, "");
+        assert_eq!(state.album_artist, "");
+        assert_eq!(state.genre, "");
+        assert_eq!(state.year, "");
+        assert_eq!(state.track_number, "");
+        assert!(state.error.is_none());
+        assert!(!state.saving);
+    }
+
     // Mock storage for testing.
     //
     // The current `eframe::Storage` trait (egui/eframe 0.34) has exactly three

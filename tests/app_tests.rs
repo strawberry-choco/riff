@@ -1355,33 +1355,11 @@ mod tests {
 
     // --- metadata writing with a mock MetadataWriter --------------------------------
 
-    /// Minimal `MetadataWriter` for exercising the write port without real
-    /// audio files (none are checked in). `fail` simulates an unwritable
-    /// file; successful writes are recorded for assertions.
-    struct MockMetadataWriter {
-        fail: bool,
-        writes: Mutex<Vec<(PathBuf, TagEdit)>>,
-    }
-
-    impl MetadataWriter for MockMetadataWriter {
-        fn write_metadata(&self, path: &Path, edit: &TagEdit) -> Result<(), AppError> {
-            if self.fail {
-                return Err(AppError::MetadataWrite(format!("mock failure: {path:?}")));
-            }
-            self.writes
-                .lock()
-                .unwrap()
-                .push((path.to_path_buf(), edit.clone()));
-            Ok(())
-        }
-    }
+    use crate::mocks::MockMetadataWriter;
 
     #[test]
     fn test_metadata_writer_success_records_path_and_edit() {
-        let writer = MockMetadataWriter {
-            fail: false,
-            writes: Mutex::new(Vec::new()),
-        };
+        let writer = MockMetadataWriter::recording();
         let path = PathBuf::from("music/artist/album/song.flac");
         let edit = TagEdit {
             title: Some("New Title".to_string()),
@@ -1391,7 +1369,7 @@ mod tests {
 
         assert!(writer.write_metadata(&path, &edit).is_ok());
 
-        let recorded = writer.writes.lock().unwrap();
+        let recorded = writer.recorded();
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].0, path);
         assert_eq!(recorded[0].1.title.as_deref(), Some("New Title"));
@@ -1403,17 +1381,160 @@ mod tests {
 
     #[test]
     fn test_metadata_writer_failure_returns_metadata_write_error() {
-        let writer = MockMetadataWriter {
-            fail: true,
-            writes: Mutex::new(Vec::new()),
-        };
+        let writer = MockMetadataWriter::failing();
 
         let result = writer.write_metadata(&PathBuf::from("locked.mp3"), &TagEdit::default());
 
         let err = result.expect_err("failing writer must return an error");
         assert!(matches!(err, AppError::MetadataWrite(_)));
         assert!(err.to_string().contains("Failed to write tags"));
-        assert!(writer.writes.lock().unwrap().is_empty());
+        assert!(writer.recorded().is_empty());
+    }
+
+    /// The edit a user saves from the modal: every text field edited in
+    /// place is present, so all fields are `Some`.
+    fn saved_edit(title: &str) -> TagEdit {
+        TagEdit {
+            title: Some(title.to_string()),
+            artist: Some("Edited Artist".to_string()),
+            album: Some("Edited Album".to_string()),
+            album_artist: Some("Edited Album Artist".to_string()),
+            genre: Some("Edited Genre".to_string()),
+            year: Some(2001),
+            track_number: Some(4),
+        }
+    }
+
+    /// A cached library track with fully-populated tags, so a later edit has
+    /// concrete "before" values to be compared against.
+    fn cached_track(id: &str, title: &str, artist: &str, year: u32) -> Track {
+        let mut track =
+            crate::test_utils::create_test_track_with_metadata(id, id, artist, title, "Some Album");
+        track.metadata.album_artist = Some(format!("{artist} (AA)"));
+        track.metadata.genre = Some("Some Genre".to_string());
+        track.metadata.year = Some(year);
+        track.metadata.track_number = Some(1);
+        track
+    }
+
+    /// Successful-write handling as the app performs it
+    /// (`RiffApp::poll_tag_write_results`, UI layer, not headless-reachable):
+    /// the writer port's result decides, and on a successful write the cached
+    /// track's metadata picks up the edit — no rescan. This test drives that
+    /// state transition through the public seams: the `MetadataWriter` port
+    /// and `TagEdit::apply_to` against the live library cache.
+    #[test]
+    fn test_successful_write_refreshes_library_cache_immediately() {
+        let mut state = AppState::new();
+        let track_id = TrackId("music/song.mp3".to_string());
+        state.library.add_track(cached_track(
+            "music/song.mp3",
+            "Old Title",
+            "Old Artist",
+            1984,
+        ));
+        state.library.add_track(cached_track(
+            "music/other.mp3",
+            "Keep Me",
+            "Keep Artist",
+            1990,
+        ));
+
+        // The user saves through the modal; the background writer succeeds.
+        let writer = MockMetadataWriter::recording();
+        let edit = saved_edit("New Title");
+        writer
+            .write_metadata(&PathBuf::from("music/song.mp3"), &edit)
+            .expect("the write must succeed");
+        assert_eq!(writer.recorded().len(), 1);
+
+        // On a successful write the cache is refreshed in place (no rescan):
+        // every written field is immediately visible through the library's
+        // public queries.
+        edit.apply_to(
+            &mut state
+                .library
+                .tracks
+                .get_mut(&track_id)
+                .expect("edited track must still be cached")
+                .metadata,
+        );
+
+        let cached = state
+            .library
+            .get_track(&track_id)
+            .expect("track must stay in the library after a tag edit");
+        assert_eq!(cached.metadata.title.as_deref(), Some("New Title"));
+        assert_eq!(cached.metadata.artist.as_deref(), Some("Edited Artist"));
+        assert_eq!(cached.metadata.album.as_deref(), Some("Edited Album"));
+        assert_eq!(
+            cached.metadata.album_artist.as_deref(),
+            Some("Edited Album Artist")
+        );
+        assert_eq!(cached.metadata.genre.as_deref(), Some("Edited Genre"));
+        assert_eq!(cached.metadata.year, Some(2001));
+        assert_eq!(cached.metadata.track_number, Some(4));
+        // The change is discoverable, not just stored: the new title searches
+        // cleanly and the old one is gone, with no rescan.
+        assert_eq!(state.library.search("New Title").len(), 1);
+        assert!(state.library.search("Old Title").is_empty());
+
+        // Nothing else in the library is disturbed.
+        assert_eq!(state.library.all_tracks().len(), 2);
+        let untouched = state
+            .library
+            .get_track(&TrackId("music/other.mp3".to_string()))
+            .expect("a neighbouring track must survive the edit");
+        assert_eq!(untouched.metadata.title.as_deref(), Some("Keep Me"));
+        assert_eq!(untouched.metadata.year, Some(1990));
+    }
+
+    /// Failed-write handling as the app performs it
+    /// (`RiffApp::poll_tag_write_results`, UI layer, not headless-reachable):
+    /// the error must surface as a readable, user-visible message identifying
+    /// the file, and the library must be left exactly as it was — a write
+    /// that did not land applies nothing.
+    #[test]
+    fn test_failed_write_keeps_library_intact_and_surfaces_a_user_error() {
+        let mut state = AppState::new();
+        let track_id = TrackId("music/locked.mp3".to_string());
+        state.library.add_track(cached_track(
+            "music/locked.mp3",
+            "Original Title",
+            "Original Artist",
+            1999,
+        ));
+
+        // The write port fails (unwritable file).
+        let writer = MockMetadataWriter::failing();
+        let edit = saved_edit("Attempted Title");
+        let outcome = writer.write_metadata(&PathBuf::from("music/locked.mp3"), &edit);
+
+        // The failure surfaces as a readable, user-visible error...
+        let err = outcome.expect_err("failing writer must return an error");
+        assert!(matches!(err, AppError::MetadataWrite(_)));
+        let displayed = err.to_string();
+        assert!(displayed.starts_with("Failed to write tags"));
+        assert!(
+            displayed.contains("locked.mp3"),
+            "the error should identify the file: {displayed}"
+        );
+
+        // ...no write was recorded...
+        assert!(writer.recorded().is_empty());
+
+        // ...and the app keeps working with the library intact: the failed
+        // write applied nothing, so every field keeps its original value.
+        assert_eq!(state.library.all_tracks().len(), 1);
+        let cached = state
+            .library
+            .get_track(&track_id)
+            .expect("a failed write must not drop the track");
+        assert_eq!(cached.metadata.title.as_deref(), Some("Original Title"));
+        assert_eq!(cached.metadata.artist.as_deref(), Some("Original Artist"));
+        assert_eq!(cached.metadata.year, Some(1999));
+        // Lookup still works afterwards (the app keeps functioning).
+        assert_eq!(state.library.search("Original Title").len(), 1);
     }
 
     #[test]

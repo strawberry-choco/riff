@@ -862,6 +862,30 @@ mod tests {
     }
 
     #[test]
+    fn test_cache_roundtrip_preserves_play_history() {
+        // Play count, last-played stamp, and date-added stamp must survive
+        // the versioned cache round trip so play history persists across
+        // restarts (REQ-ML-009).
+        let mut library = LibraryManager::new();
+        let mut track = playlist_track("history.mp3");
+        track.play_count = 7;
+        track.last_played = Some(SystemTime::now() - Duration::from_hours(24) * 100);
+        track.date_added = Some(SystemTime::now() - Duration::from_hours(24) * 300);
+        let expected_last_played = track.last_played;
+        let expected_date_added = track.date_added;
+        library.add_track(track);
+
+        let loaded = LibraryManager::deserialize_cache(&library.serialize_cache());
+
+        let restored = loaded
+            .get_track(&TrackId("history.mp3".to_string()))
+            .expect("track should survive the cache round trip");
+        assert_eq!(restored.play_count, 7);
+        assert_eq!(restored.last_played, expected_last_played);
+        assert_eq!(restored.date_added, expected_date_added);
+    }
+
+    #[test]
     fn test_deserialize_cache_wrong_version_falls_back_to_empty() {
         let library = versioned_fixture_library();
         let json = library.serialize_cache();
@@ -1334,7 +1358,7 @@ mod tests {
         let now = SystemTime::now();
         let day = Duration::from_hours(24);
 
-        // Played 100 days ago -> qualifies as a lost gem.
+        // Played 100 days ago -> unheard for 90+ days -> qualifies.
         let mut ancient = playlist_track("ancient.mp3");
         ancient.play_count = 5;
         ancient.last_played = Some(now - day * 100);
@@ -1346,11 +1370,57 @@ mod tests {
         recent.last_played = Some(now - day * 10);
         library.add_track(recent);
 
-        // Never played -> excluded (Lost Gems requires a last_played stamp).
+        // Never played -> qualifies too: the Lost Gems rule is
+        // "last played older than 90 days OR never played".
         library.add_track(playlist_track("never.mp3"));
 
         let ids = library.smart_playlist(SmartPlaylistKind::LostGems, 10);
-        assert_eq!(ids, vec![TrackId("ancient.mp3".to_string())]);
+        assert_eq!(
+            ids,
+            vec![
+                TrackId("ancient.mp3".to_string()),
+                TrackId("never.mp3".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_smart_playlist_lost_gems_orders_longest_unheard_first_then_never_played() {
+        let mut library = LibraryManager::new();
+        let now = SystemTime::now();
+        let day = Duration::from_hours(24);
+
+        // Two gems with hand-worked play stamps: 200 and 95 days unheard.
+        let mut two_hundred = playlist_track("b_two_hundred.mp3");
+        two_hundred.play_count = 2;
+        two_hundred.last_played = Some(now - day * 200);
+        library.add_track(two_hundred);
+
+        let mut ninety_five = playlist_track("a_ninety_five.mp3");
+        ninety_five.play_count = 9;
+        ninety_five.last_played = Some(now - day * 95);
+        library.add_track(ninety_five);
+
+        // Fresh play (2 days ago): excluded regardless of play count.
+        let mut fresh = playlist_track("c_fresh.mp3");
+        fresh.play_count = 50;
+        fresh.last_played = Some(now - day * 2);
+        library.add_track(fresh);
+
+        // Never played: included after every once-played gem, in path order.
+        library.add_track(playlist_track("z_unplayed.mp3"));
+        library.add_track(playlist_track("d_unplayed.mp3"));
+
+        let ids = library.smart_playlist(SmartPlaylistKind::LostGems, 10);
+        assert_eq!(
+            ids,
+            vec![
+                TrackId("b_two_hundred.mp3".to_string()),
+                TrackId("a_ninety_five.mp3".to_string()),
+                TrackId("d_unplayed.mp3".to_string()),
+                TrackId("z_unplayed.mp3".to_string()),
+            ]
+        );
     }
 
     // --- metadata writing with a mock MetadataWriter --------------------------------

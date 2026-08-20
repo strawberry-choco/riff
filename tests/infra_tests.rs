@@ -9,6 +9,7 @@ mod tests {
     use riff::app::errors::AppError;
     use riff::app::traits::{
         AudioDecoder, AudioFormatInfo, AudioOutput, CoverImage, CoverLoader, MetadataReader,
+        MetadataWriter, TagEdit,
     };
     use riff::domain::CoverSource;
     use std::path::PathBuf;
@@ -252,6 +253,153 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, AppError::CoverLoad(_)));
         assert!(err.to_string().contains("decode failed"));
+    }
+
+    // --- Metadata tag writing on real files (REQ-ML-008) ------------------------
+    //
+    // The file on disk is the source of truth; these tests write tags with the
+    // real `LoftyMetadataWriter`, then re-read the same file (through the real
+    // `LoftyMetadataReader` in one case, raw lofty in another) to prove the new
+    // tags actually landed.
+
+    /// Write a tiny but fully valid PCM WAV file (0.1 s of mono 8 kHz audio)
+    /// so the tag writer/reader have a real audio file to work on.
+    fn write_minimal_wav(path: &std::path::Path) {
+        const SAMPLES: u32 = 800; // 0.1 s at 8 kHz
+        let data_size = SAMPLES * 2; // 16-bit mono
+        let mut bytes = Vec::with_capacity(44 + data_size as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // mono
+        bytes.extend_from_slice(&8000u32.to_le_bytes()); // sample rate
+        bytes.extend_from_slice(&16000u32.to_le_bytes()); // byte rate
+        bytes.extend_from_slice(&2u16.to_le_bytes()); // block align
+        bytes.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_size.to_le_bytes());
+        for i in 0..SAMPLES {
+            let sample = ((i % 100) as i16).wrapping_mul(64);
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(path, bytes).expect("temp WAV fixture must be writable");
+    }
+
+    #[test]
+    fn test_lofty_writer_full_edit_lands_on_disk_and_reads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("song.wav");
+        write_minimal_wav(&path);
+
+        let edit = TagEdit {
+            title: Some("Kind of Blue".to_string()),
+            artist: Some("Miles Davis".to_string()),
+            album: Some("Kind of Blue (Legacy Edition)".to_string()),
+            album_artist: Some("Miles Davis Sextet".to_string()),
+            genre: Some("Jazz".to_string()),
+            year: Some(1959),
+            track_number: Some(1),
+        };
+        LoftyMetadataWriter::new()
+            .write_metadata(&path, &edit)
+            .expect("writing tags to a valid audio file must succeed");
+
+        // Re-reading the file confirms the on-disk tags are the source of
+        // truth and carry exactly what was written.
+        let metadata = LoftyMetadataReader::new()
+            .read_metadata(&path)
+            .expect("re-reading the written file must succeed");
+        assert_eq!(metadata.title.as_deref(), Some("Kind of Blue"));
+        assert_eq!(metadata.artist.as_deref(), Some("Miles Davis"));
+        assert_eq!(
+            metadata.album.as_deref(),
+            Some("Kind of Blue (Legacy Edition)")
+        );
+        assert_eq!(metadata.album_artist.as_deref(), Some("Miles Davis Sextet"));
+        assert_eq!(metadata.genre.as_deref(), Some("Jazz"));
+        assert_eq!(metadata.year, Some(1959));
+        assert_eq!(metadata.track_number, Some(1));
+    }
+
+    #[test]
+    fn test_lofty_writer_partial_edit_preserves_untouched_tags_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("song.wav");
+        write_minimal_wav(&path);
+        let writer = LoftyMetadataWriter::new();
+
+        writer
+            .write_metadata(
+                &path,
+                &TagEdit {
+                    title: Some("Flamenco Sketches".to_string()),
+                    artist: Some("Miles Davis".to_string()),
+                    album: Some("Kind of Blue".to_string()),
+                    album_artist: None,
+                    genre: Some("Jazz".to_string()),
+                    year: Some(1959),
+                    track_number: Some(5),
+                },
+            )
+            .expect("initial tag write must succeed");
+
+        // A later edit touching only the title must not disturb the rest.
+        writer
+            .write_metadata(
+                &path,
+                &TagEdit {
+                    title: Some("So What".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("partial tag write must succeed");
+
+        let metadata = LoftyMetadataReader::new().read_metadata(&path).unwrap();
+        assert_eq!(metadata.title.as_deref(), Some("So What"));
+        // Untouched fields survive on disk.
+        assert_eq!(metadata.artist.as_deref(), Some("Miles Davis"));
+        assert_eq!(metadata.album.as_deref(), Some("Kind of Blue"));
+        assert_eq!(metadata.genre.as_deref(), Some("Jazz"));
+        assert_eq!(metadata.year, Some(1959));
+        assert_eq!(metadata.track_number, Some(5));
+    }
+
+    #[test]
+    fn test_lofty_writer_unsupported_file_returns_graceful_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, "this is definitely not an audio file").unwrap();
+
+        let result = LoftyMetadataWriter::new().write_metadata(
+            &path,
+            &TagEdit {
+                title: Some("Nope".to_string()),
+                ..Default::default()
+            },
+        );
+
+        // Unsupported/corrupt input is reported as a normal write error —
+        // no panic, no crash.
+        assert!(matches!(
+            result.expect_err("unsupported format must fail the write"),
+            AppError::MetadataWrite(_)
+        ));
+    }
+
+    #[test]
+    fn test_lofty_writer_missing_file_returns_graceful_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("never-existed.wav");
+
+        let result = LoftyMetadataWriter::new().write_metadata(&path, &TagEdit::default());
+
+        assert!(matches!(
+            result.expect_err("missing file must fail the write"),
+            AppError::MetadataWrite(_)
+        ));
     }
 
     // --- Construction smoke tests (kept: verify real infra types build) -------

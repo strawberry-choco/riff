@@ -4,7 +4,7 @@
 
 **Blocked by:** all tickets 02 through 12 (every landed feature must be verified and committed first).
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] The feature catalog statuses match shipped reality: player control bar (stop button, mute), Now Playing view (up-next play next, in-view progress), system tray (close-to-tray), and all new v0.2.0 features (tag writing, smart playlists, playlists, gapless, ReplayGain, progressive disclosure, accessibility, cache hardening) are marked as implemented with accurate summaries
 - [ ] The roadmap marks v0.2.0 items complete and still-deferred items remain explicitly deferred

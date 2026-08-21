@@ -1,55 +1,53 @@
 # Roadmap
 
-This document describes where riff is headed. It has two parts: the items that were considered during requirements work and deliberately deferred, each with the reason it was set aside; and a set of recommended near-term improvements, grounded in the current state of the codebase. The deferred list is a record of decisions; the recommendations are suggestions, not commitments. For what exists today, see [./features.md](./features.md); for the technical context behind the suggestions, see [../technical/architecture.md](../technical/architecture.md).
+This document describes where riff is headed. It has two parts: the items that were considered during requirements work and deliberately deferred, each with the reason it was set aside; and a review of the near-term improvements recommended at v0.1.0, all of which have now shipped in v0.2.0. The deferred list is a record of decisions; the delivery notes are a record of what landed. For what exists today, see [./features.md](./features.md); for the technical context, see [../technical/architecture.md](../technical/architecture.md).
 
-**Where things stand at v0.1.0.** The product surface is largely complete: every Music Library and Audio Engine feature is implemented, and the library explorer and cross-platform support are done. Five UI and integration features remain partial — the main window, the player control bar (missing only its Stop button), cover art display, the Now Playing view, and the system tray. Behind that surface, the engineering foundations are thinner than the feature list suggests: there is a real but small test suite (roughly twenty-five tests spanning the domain, app, infra, UI, and integration layers) and no continuous integration at all. That gap between feature completeness and engineering infrastructure shapes the recommendations below.
+**Where things stand at v0.2.0.** The product surface is complete: every feature in the catalog is implemented, including the surfaces that were partial at v0.1.0 — the main window with close-to-tray, the player control bar (now with mute, plus stop behind advanced mode), cover art display, the Now Playing view, and the system tray. Three items deferred at v0.1.0 shipped: playlist management (custom playlists plus locally generated smart playlists), gapless playback, and tag-based ReplayGain normalization. Behind the surface, the engineering foundations caught up with the feature list: the test suite grew from roughly twenty-five tests to about 165 across the domain, app, infra, UI, and integration layers, and continuous integration runs on GitHub Actions for Linux and Windows. What remains open is open on purpose: the macOS CI leg, the Linux system tray, ReplayGain loudness analysis, and the categories below.
 
 ## Deferred items
 
-These capabilities were explicitly scoped out of the initial release. None of them is accidental: each was weighed against the goal of shipping a solid offline player first, and each has a stated reason for waiting.
-
-**Playlist management.** Creating, saving, and loading custom playlists. Deferred because core playback and library features must be solid first. In the meantime, folder playback (double-click a folder to queue everything under it) and the queue operations — Play Next and Append to Queue — cover ad-hoc sequencing for most listening sessions.
+These capabilities were explicitly scoped out. None of them is accidental: each was weighed against the goal of shipping a solid offline player first, and each has a stated reason for waiting. Three items deferred at v0.1.0 — playlist management, gapless playback, and ReplayGain normalization — shipped in v0.2.0 and moved into the feature catalog; the list below is what is still out.
 
 **Equalizer and audio effects.** Per-band EQ, reverb, and similar processing. A nice-to-have, not essential for the first release, and out of keeping with riff's deliberately bounded feature surface.
 
-**Gapless playback.** Seamless transitions between consecutive album tracks, with no silence at track boundaries. Deferred because it requires complex cross-track buffering — the next track must be decoded and staged before the current one ends — which was judged too risky for the initial audio engine. This is the most-requested-feeling of the deferred items for continuous listening and is a strong candidate for future work (see below).
+**ReplayGain loudness analysis and album-gain mode.** What shipped in v0.2.0 is the read-only half: track gain and peak values are taken from existing tags where present. Computing loudness for untagged libraries — an analysis pass over every file — and album-based leveling remain deferred; that is a project of its own.
 
-**ReplayGain normalization.** Automatic volume leveling across tracks so albums and shuffled queues play at consistent loudness. Deferred because it requires a metadata analysis pass over the library — computing or reading loudness information for every track — which is a project of its own.
+**macOS continuous integration.** The CI matrix covers ubuntu-latest and windows-latest. A macOS runner is planned so the platform-conditional code (the tray, the native folder picker) gets the same automated scrutiny, but it is not part of the pipeline yet.
+
+**Linux system tray.** Still intentionally absent: the libayatana-appindicator dependency stack is not reliably present across distributions, so Linux builds run window-only. See [./decisions/002-no-tray-on-linux.md](./decisions/002-no-tray-on-linux.md).
 
 **Lyrics display.** Embedded or fetched lyrics. Not requested within the original scope, and fetching lyrics would conflict with the offline-first design unless limited to lyrics already embedded in file tags.
 
 **Internet-based features.** Streaming, online metadata lookup, and scrobbling. Explicitly out of scope: riff is an offline-only player by design. This is the one deferred category that is closer to a non-goal than a future goal — see the positioning in [./overview.md](./overview.md). Online artwork lookup and scrobbling would each require rethinking the privacy guarantees that define the product.
 
-## Recommended near-term improvements
+## Delivered: the v0.1.0 recommendations
 
-The following are **suggestions**, prioritized by the value they would add relative to their cost. Priorities use the same scale as the feature catalog: P1 is high value and should come soon, P2 is worthwhile but can wait. Effort is a rough estimate (small, medium, large).
+At v0.1.0 this document recommended seven improvements, sequenced infrastructure-first so the larger feature work could proceed safely. All seven shipped in v0.2.0.
 
-| Recommendation | Priority | Effort | Theme |
-|---|---|---|---|
-| Continuous integration pipeline | P1 | small | engineering infrastructure |
-| Expand test coverage | P1 | medium | engineering infrastructure |
-| Cache schema versioning | P2 | small | robustness |
-| A "Clear cache" control in settings | P2 | small | robustness / UX |
-| Gapless playback | P2 | large | listening experience |
-| Playlist management | P2 | medium–large | library / playback |
-| ReplayGain normalization | P2 | medium | listening experience |
+| Recommendation | Was | Shipped in v0.2.0 as |
+|---|---|---|
+| Continuous integration pipeline | P1 | GitHub Actions on ubuntu-latest + windows-latest: fmt, clippy, tests |
+| Expand test coverage | P1 | ~165 integration tests across domain, app, infra, ui, integration |
+| Cache schema versioning | P2 | `schema_version` in library_cache.json, safe fallback with notice |
+| A "Clear cache" control in settings | P2 | "Clear Library Cache" action with confirmation in Settings |
+| Gapless playback | P2 | Pre-decode 2s before EOF, up to 4s pre-buffer, seamless handoff |
+| Playlist management | P2 | Custom playlists plus smart/discovery playlists |
+| ReplayGain normalization | P2 | Tag-based track gain/peak, peak-capped, opt-in |
 
-The ordering is intentional: the two infrastructure items protect everything else, the two cache items harden a subsystem users already depend on, and the three feature items are the larger efforts that benefit most from that safety net.
+**Continuous integration pipeline.** Delivered. `.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy` with warnings denied, and the test suite on push and pull requests to main, on both ubuntu-latest and windows-latest. The macOS leg recommended here is the one piece still pending (see Deferred above).
 
-**Continuous integration pipeline.** Priority P1, effort small. The repository currently has no CI at all — no automated build, lint, or test runs on any platform. Given that riff ships on three operating systems with platform-conditional code (the tray and folder picker are compiled only on macOS and Windows), a pipeline that runs `cargo fmt --check`, `cargo clippy`, and `cargo test` on Linux, Windows, and macOS would catch platform regressions that no single developer machine can. This is the highest-leverage improvement available: it protects every other item on this list.
+**Expand test coverage.** Delivered. The suite grew from roughly twenty-five tests to about 165, organized as a single integration-test crate spanning domain, app, infra, UI, and integration suites with shared mocks and helpers. App-layer logic is exercised through the port traits via mock implementations, and filesystem-touching tests lean on the tempfile dev-dependency, exactly as suggested.
 
-**Expand test coverage.** Priority P1, effort medium. A test suite exists — roughly twenty-five tests across domain, app, infra, UI, and integration modules — which is a real foundation, but it is thin relative to the surface area. The pure domain layer (tracks, queue, playback state) and the app-layer logic (library indexing, cover resolution priority, search) are the cheapest places to add dense coverage, because they have no hardware dependencies. Infrastructure behavior that touches the file system can lean on the existing tempfile dev-dependency. Growing this suite alongside CI turns the test count from a fact into a safety net.
+**Cache schema versioning.** Delivered. The library cache now carries a schema version. A version mismatch or a corrupt file falls back to an empty library with a warning log and a user-visible notice — the deliberate, explainable behavior this recommendation asked for, rather than a silent reset.
 
-**Cache schema versioning.** Priority P2, effort small. The library cache is a JSON file with no schema version field. Today that is harmless, but the first time the track or library data model changes shape, older caches will fail to deserialize and fall back to an empty library — correct behavior, but a forced full rescan that a version field could avoid or at least explain. Adding a version marker now, before the format has ever changed, is cheap insurance and makes future migrations deliberate rather than accidental.
+**A "Clear cache" control in settings.** Delivered. Settings has a "Clear Library Cache" action behind a UI confirmation. It deletes the cache file, which rebuilds on the next scan, giving the stale-library case a discoverable remedy.
 
-**A "Clear cache" control in settings.** Priority P2, effort small. This was raised during the cache feature's design and deferred on the grounds that deleting the cache file manually, or simply running a scan, both work. That is true, but neither is discoverable. A button in the settings page would give users a visible remedy when the library looks stale, and it pairs naturally with cache schema versioning as part of making the cache a first-class, user-legible part of the product.
+**Gapless playback.** Delivered. The engine begins pre-decoding the next track about two seconds before the current one ends and stages up to four seconds of samples, so same-format transitions — including repeat-one — are seamless. Format mismatches and mid-transition shuffle changes fall back to the gapped path instead of glitching.
 
-**Gapless playback.** Priority P2, effort large. Of the deferred features, this is the one that most directly improves the core act of listening to an album. The audio engine already drains its shared buffer at track end before stopping the stream, which is a useful starting point, but true gaplessness means pre-buffering the next track's decoded samples before the current track finishes — a substantial change to the decode loop and track-transition logic. Worth doing, but it should land on top of a mature, well-tested engine, which is why CI and test coverage rank ahead of it.
+**Playlist management.** Delivered, twice over. Custom playlists support create, rename, delete, ordered tracks, and an add-to-playlist context menu with dedupe, persisted in `playlists.json` separate from the rebuildable library cache; entries whose files disappeared show struck-through as "(missing)" and are excluded from playback — the answer to the file-path identity question raised below at v0.1.0. Separately, four smart playlists (Recently Added, Most Played, Never Played, Lost Gems) generate discovery lists locally from play-count data that persists in the library cache.
 
-**Playlist management.** Priority P2, effort medium to large. The queue already supports the primitives playlists are made of — replace, insert-after, append — so persistent playlists are mostly a persistence and UI story: named, ordered track lists saved to disk and loadable back into the queue. The main design question is how playlists relate to the file-path-based track identity when files move or are deleted. A natural follow-on once the library features have settled.
-
-**ReplayGain normalization.** Priority P2, effort medium. Valuable for shuffled listening and unevenly-mastered collections. The practical path is reading existing ReplayGain tags where present (lofty can surface them) and applying the gain in the same volume-scaling step the engine already uses, deferring the much larger job of computing loudness for untagged libraries. Even the read-only version would be a meaningful improvement for the archivist audience described in [./personas.md](./personas.md).
+**ReplayGain normalization.** Delivered in the form this document sketched: existing REPLAYGAIN_TRACK_GAIN and REPLAYGAIN_TRACK_PEAK tags are read during scanning, and the gain is applied — capped by peak so boosts cannot clip — in the same volume-scaling step the engine already uses. It is opt-in, takes effect on the next track, and leaves untagged tracks untouched. Computing loudness for untagged libraries remains deferred.
 
 ## How to read this
 
-The deferred items define the product's edges and are unlikely to change soon — the internet-feature category especially, since offline-first is an identity, not a limitation. The recommendations are where the project should invest next, and they are deliberately sequenced: infrastructure first (CI, tests, cache robustness), so that the larger feature work (gapless, playlists, ReplayGain) can proceed without risking the stability the first release earned.
+The deferred items define the product's edges and are unlikely to change soon — the internet-feature category especially, since offline-first is an identity, not a limitation. The v0.1.0 sequencing played out as designed: infrastructure first (CI, tests, cache robustness), then the larger feature work (gapless, playlists, ReplayGain) landing on top of it. The natural next candidates are the leftovers above — the macOS CI leg and loudness analysis chief among them — plus whatever post-v0.2.0 planning surfaces.

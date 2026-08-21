@@ -46,6 +46,7 @@ What riff is, what it does, and how to use it.
 - [003: Track identity is the file path](product/decisions/003-track-identity-is-path.md) — why the full file path is the canonical track ID.
 - [004: Library cache as JSON](product/decisions/004-library-cache-as-json.md) — why the cache is a human-readable JSON file.
 - [005: Native picker on macOS/Windows, text input on Linux](product/decisions/005-native-picker-platform-split.md) — why the add-library dialog differs by platform.
+- [006: Local-only discovery and metadata strategy](product/decisions/006-local-only-discovery.md) — why discovery and metadata enrichment stay local: smart playlists from play history, no online lookups.
 
 ### Technical
 

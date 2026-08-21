@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — Baseline green gate.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Track and peak ReplayGain tags are read from audio metadata during scanning
 - [ ] When enabled in settings, tagged tracks play with the gain applied at the volume-scaling stage; gain is peak-capped so amplification cannot clip

@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — Baseline green gate; 04 — Land offline discovery playlists (establishes the library-explorer integration pattern).
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] User can create a named playlist containing an ordered list of tracks, accessible from the library explorer alongside smart playlists
 - [ ] Playlists persist in their own file, separate from the library cache — clearing the cache never destroys a playlist — and load on next launch

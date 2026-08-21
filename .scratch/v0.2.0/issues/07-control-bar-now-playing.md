@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — Baseline green gate.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Mute toggle sits in the control bar: muting silences output, unmuting restores the exact previous volume, and mute state survives track changes without fighting the volume slider
 - [ ] The Now Playing view shows large cover art and full metadata (album artist, year, genre, track number)

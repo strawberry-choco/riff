@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — Baseline green gate.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Right-click context menu on a track offers "Edit Tags" wherever tracks are listed
 - [ ] The modal opens pre-filled with the track's current title, artist, album, album artist, genre, year, and track number
@@ -13,3 +13,4 @@
 - [ ] Nothing is written without an explicit Save; Cancel and Escape close the modal unchanged
 - [ ] Write failures (permission denied, disk full, unsupported format) produce a graceful, user-visible error and the app keeps working
 - [ ] Tests cover the write path including at least one error case; feature committed
+

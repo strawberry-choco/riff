@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — Baseline green gate.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] All four smart playlists appear in the library explorer and are generated entirely from local metadata (no network access)
 - [ ] Finishing a track increments its play count and stamps its last-played time; both persist across restarts via the library cache
@@ -12,3 +12,4 @@
 - [ ] Play, Play Next, and Append to Queue all work from each smart playlist
 - [ ] Smart playlists are read-only (no rename/delete affordances) and never appear in search results
 - [ ] Tests cover ordering rules and play-count increment; feature committed
+

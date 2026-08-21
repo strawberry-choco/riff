@@ -16,7 +16,7 @@ use crate::app::commands::{LibraryCommand, LibraryUpdate};
 use crate::app::errors::AppError;
 use crate::app::gapless::{
     elapsed_from_samples, formats_gapless_compatible, is_gapless_eligible, pre_buffer_cap,
-    samples_from_duration, GaplessConditions, QueueConditions,
+    repeat_one_handoff_eligible, samples_from_duration, GaplessConditions, QueueConditions,
 };
 use crate::app::state::AppState;
 use crate::app::traits::{AudioDecoder, AudioFormatInfo, AudioOutput};
@@ -923,7 +923,12 @@ impl AudioEngine {
                     },
                     formats_compatible: compatible,
                     has_successor,
-                }) || (!s.queue.shuffle && repeat_one && compatible && has_successor)
+                }) || repeat_one_handoff_eligible(
+                    s.queue.shuffle,
+                    repeat_one,
+                    compatible,
+                    has_successor,
+                )
             };
 
             if eligible {

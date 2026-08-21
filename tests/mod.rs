@@ -41,9 +41,10 @@ pub use riff::ui;
 // Kept explicit (rather than glob re-exports) to avoid name collisions.
 pub use riff::app::gapless::{
     duration_from_frames, elapsed_from_samples, formats_gapless_compatible, frames_from_duration,
-    is_gapless_eligible, pre_buffer_cap, samples_from_duration, GaplessConditions, QueueConditions,
+    is_gapless_eligible, pre_buffer_cap, repeat_one_handoff_eligible, samples_from_duration,
+    GaplessConditions, QueueConditions,
 };
-pub use riff::app::library_manager::LibraryManager;
+pub use riff::app::library_manager::{CacheDiscardReason, LibraryManager};
 pub use riff::app::state::{replaygain_factor, AppState, LibraryStatus, WatchState};
 pub use riff::app::MutexExt;
 pub use riff::domain::{
@@ -55,7 +56,9 @@ pub use riff::infra::{
     AudioFileScanner, CpalAudioOutput, FilesystemWatcher, ImageCoverLoader, LoftyMetadataReader,
     LoftyMetadataWriter, SymphoniaDecoder,
 };
-pub use riff::ui::app::{clamp_seek, format_duration, high_contrast_visuals, TagEditState};
+pub use riff::ui::app::{
+    clamp_seek, format_duration, high_contrast_visuals, lru_insert, TagEditState,
+};
 pub use riff::ui::settings::{
     expand_tilde, load_advanced_mode, load_high_contrast, load_library_paths, load_replaygain,
     load_volume, load_watch_states, restore_from_backup_if_corrupted, save_advanced_mode,

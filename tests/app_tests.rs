@@ -312,6 +312,39 @@ mod tests {
         )));
     }
 
+    // --- repeat-one gapless handoff (engine EOF branch) -------------------------
+
+    #[test]
+    fn test_repeat_one_handoff_eligible_when_not_shuffled_compatible_with_successor() {
+        // The one fully eligible case: repeat-one, sequential order, same
+        // format, and a pre-buffered copy of the looping track exists.
+        assert!(repeat_one_handoff_eligible(false, true, true, true));
+    }
+
+    #[test]
+    fn test_repeat_one_handoff_ineligible_when_shuffling() {
+        // Shuffled: the looping track is not guaranteed to be up next.
+        assert!(!repeat_one_handoff_eligible(true, true, true, true));
+    }
+
+    #[test]
+    fn test_repeat_one_handoff_ineligible_when_formats_incompatible() {
+        // A format change requires the gapped path (stream reinit).
+        assert!(!repeat_one_handoff_eligible(false, true, false, true));
+    }
+
+    #[test]
+    fn test_repeat_one_handoff_ineligible_without_successor() {
+        // Nothing pre-buffered: the seamless restart has nothing to flush.
+        assert!(!repeat_one_handoff_eligible(false, true, true, false));
+    }
+
+    #[test]
+    fn test_repeat_one_handoff_ineligible_when_repeat_one_off() {
+        // Plain sequential playback is `is_gapless_eligible`'s job, not this.
+        assert!(!repeat_one_handoff_eligible(false, false, true, true));
+    }
+
     #[test]
     fn test_effective_volume_zeroed_while_muted_and_restored_on_unmute() {
         let mut state = AppState::new();
@@ -907,10 +940,12 @@ mod tests {
         // `schema_version` field. serde defaults it to 0, which mismatches
         // the current version, so the cache is discarded (one-time rescan).
         let json = r#"{"tracks":{},"artists":{},"albums":{}}"#;
-        let loaded = LibraryManager::deserialize_cache(json);
+        let (loaded, reason) = LibraryManager::deserialize_cache_with_reason(json);
         assert!(loaded.all_tracks().is_empty());
         assert!(loaded.all_artists().is_empty());
         assert!(loaded.albums.is_empty());
+        // Absent version defaults to 0 → a schema mismatch, not corruption.
+        assert_eq!(reason, Some(CacheDiscardReason::SchemaMismatch));
     }
 
     #[test]
@@ -919,6 +954,38 @@ mod tests {
         assert!(loaded.all_tracks().is_empty());
         assert!(loaded.all_artists().is_empty());
         assert!(loaded.albums.is_empty());
+    }
+
+    #[test]
+    fn test_deserialize_cache_reports_no_reason_on_clean_load() {
+        let library = versioned_fixture_library();
+        let (loaded, reason) =
+            LibraryManager::deserialize_cache_with_reason(&library.serialize_cache());
+        assert_eq!(loaded.all_tracks().len(), 1);
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn test_deserialize_cache_reports_schema_mismatch_reason_for_wrong_version() {
+        let library = versioned_fixture_library();
+        let json = library.serialize_cache();
+        let tampered = json.replace(
+            &format!("\"schema_version\":{CACHE_SCHEMA_VERSION}"),
+            "\"schema_version\":999",
+        );
+        assert_ne!(json, tampered, "tamper must actually change the version");
+
+        let (loaded, reason) = LibraryManager::deserialize_cache_with_reason(&tampered);
+        assert!(loaded.all_tracks().is_empty());
+        assert_eq!(reason, Some(CacheDiscardReason::SchemaMismatch));
+    }
+
+    #[test]
+    fn test_deserialize_cache_reports_unreadable_reason_for_malformed_json() {
+        let (loaded, reason) =
+            LibraryManager::deserialize_cache_with_reason("{{{ definitely not valid json");
+        assert!(loaded.all_tracks().is_empty());
+        assert_eq!(reason, Some(CacheDiscardReason::Unreadable));
     }
 
     // --- playlists: persistence helpers + CRUD (pure, no real files) --------------

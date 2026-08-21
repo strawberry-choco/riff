@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — Baseline green gate.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] The library cache file carries a schema version; loading checks it, and on mismatch the app logs a warning, falls back to an empty library, and surfaces a user-visible explanation
 - [ ] Settings offer a "Clear Library Cache" action that deletes the cache, confirms the outcome in the UI, and the cache rebuilds on the next scan

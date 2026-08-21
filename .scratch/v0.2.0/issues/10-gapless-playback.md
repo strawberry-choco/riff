@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — Baseline green gate; 07 — Land player control bar + Now Playing view (transport behavior must be settled first).
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Consecutive tracks from the same album transition with no audible silence; the successor is pre-decoded and buffered before the current track ends
 - [ ] Works across all supported formats (MP3, FLAC, AAC, Opus, WAV, OGG Vorbis); ineligible or mismatched handoffs fall back to the normal gapped path rather than glitching

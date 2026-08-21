@@ -4,10 +4,11 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `cargo fmt --check` passes with zero diffs
 - [ ] `cargo clippy --all-targets` passes with zero warnings (fix real issues, don't silence lints)
 - [ ] `cargo test --all-targets` passes — every test in the integration suite green
 - [ ] Any failures are fixed at root cause; no test was weakened, ignored, or deleted to achieve green
 - [ ] Baseline fixes committed as a single focused commit
+

@@ -20,6 +20,28 @@ const LOST_GEMS_THRESHOLD: Duration = Duration::from_hours(2160);
 /// safe and self-healing.
 pub const CACHE_SCHEMA_VERSION: u32 = 1;
 
+/// Why a previously written library cache was rejected at load time.
+/// Surfaced to the user (via the scan status line) so an empty library is
+/// explainable rather than silent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheDiscardReason {
+    /// The cache parsed but its `schema_version` differs from
+    /// [`CACHE_SCHEMA_VERSION`] — including pre-versioning caches, whose
+    /// absent version serde defaults to 0.
+    SchemaMismatch,
+    /// The cache file could not be read from disk or parsed as JSON.
+    Unreadable,
+}
+
+impl std::fmt::Display for CacheDiscardReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SchemaMismatch => write!(f, "incompatible schema version"),
+            Self::Unreadable => write!(f, "corrupted or unreadable"),
+        }
+    }
+}
+
 /// Manages the music library: scanning, indexing, metadata, and search.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct LibraryManager {
@@ -440,8 +462,19 @@ impl LibraryManager {
     /// defaults to 0. Both fallbacks are logged so they are explainable to
     /// users rather than silent. Never panics on malformed/old caches.
     pub fn deserialize_cache(json: &str) -> LibraryManager {
+        Self::deserialize_cache_with_reason(json).0
+    }
+
+    /// [`Self::deserialize_cache`] plus the [`CacheDiscardReason`] when the
+    /// cache was discarded, so callers can explain the empty library to the
+    /// user. `None` means the cache loaded cleanly.
+    pub fn deserialize_cache_with_reason(
+        json: &str,
+    ) -> (LibraryManager, Option<CacheDiscardReason>) {
         match serde_json::from_str::<CacheEnvelope>(json) {
-            Ok(envelope) if envelope.schema_version == CACHE_SCHEMA_VERSION => envelope.into(),
+            Ok(envelope) if envelope.schema_version == CACHE_SCHEMA_VERSION => {
+                (envelope.into(), None)
+            }
             Ok(envelope) => {
                 tracing::warn!(
                     "Library cache schema version mismatch: found {}, expected {}; \
@@ -449,11 +482,14 @@ impl LibraryManager {
                     envelope.schema_version,
                     CACHE_SCHEMA_VERSION
                 );
-                LibraryManager::new()
+                (
+                    LibraryManager::new(),
+                    Some(CacheDiscardReason::SchemaMismatch),
+                )
             }
             Err(e) => {
                 tracing::warn!("Failed to deserialize library cache: {e}");
-                LibraryManager::new()
+                (LibraryManager::new(), Some(CacheDiscardReason::Unreadable))
             }
         }
     }
@@ -478,21 +514,29 @@ impl LibraryManager {
         }
     }
 
-    pub fn load_cache() -> Self {
+    /// Load the library cache from disk, reporting why a previously written
+    /// cache was discarded so callers can surface the reason to the user.
+    /// `None` means either a clean load or simply no cache file (normal
+    /// first run); `Some` means an existing cache was rejected.
+    pub fn load_cache_with_reason() -> (Self, Option<CacheDiscardReason>) {
         let Some(path) = Self::cache_path() else {
-            return Self::new();
+            return (Self::new(), None);
         };
         if !path.exists() {
-            return Self::new();
+            return (Self::new(), None);
         }
         let json = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("Failed to read library cache: {e}");
-                return Self::new();
+                return (Self::new(), Some(CacheDiscardReason::Unreadable));
             }
         };
-        Self::deserialize_cache(&json)
+        Self::deserialize_cache_with_reason(&json)
+    }
+
+    pub fn load_cache() -> Self {
+        Self::load_cache_with_reason().0
     }
 
     /// Delete the library cache file if present. Returns whether a file was

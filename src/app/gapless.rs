@@ -67,6 +67,28 @@ pub fn is_gapless_eligible(conditions: GaplessConditions) -> bool {
         && conditions.has_successor
 }
 
+/// Whether the repeat-one loop may hand off to itself gaplessly at EOF: the
+/// same track restarts on the pre-buffered decoder only when it really is up
+/// next (not shuffled), the formats match so the running cpal stream can be
+/// reused, and a pre-buffered copy exists. This is the repeat-one counterpart
+/// of [`is_gapless_eligible`], which deliberately excludes `repeat_one`.
+///
+/// As with every helper in this module, the engine calls THIS function —
+/// the tested logic is the real logic.
+// The flat bool signature is deliberate: it mirrors the engine's local
+// variables one-to-one at the call site (the struct-qualified alternative
+// would just re-wrap them).
+#[allow(clippy::fn_params_excessive_bools)]
+#[must_use]
+pub fn repeat_one_handoff_eligible(
+    shuffle: bool,
+    repeat_one: bool,
+    format_compatible: bool,
+    has_successor: bool,
+) -> bool {
+    !shuffle && repeat_one && format_compatible && has_successor
+}
+
 /// Convert a frame count to a [`Duration`] at the given sample rate using
 /// exact integer arithmetic. Degenerate (zero) rates clamp to 1 Hz rather
 /// than dividing by zero.

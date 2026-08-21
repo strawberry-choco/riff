@@ -86,6 +86,24 @@ struct ThemeState {
     was_high_contrast: bool,
 }
 
+/// Max entries per cover cache (positive textures and negative results
+/// alike); the oldest entries are evicted LRU-style beyond this cap.
+const COVER_CACHE_CAP: usize = 50;
+
+/// Insert `key` at the most-recently-used end of an LRU key list: an already
+/// present entry is moved to the end (no duplicates), and keys evicted beyond
+/// `cap` are returned so the caller can drop their cached payloads. Shared by
+/// the positive (texture) and negative (artless-track) cover caches.
+pub fn lru_insert(keys: &mut Vec<String>, key: String, cap: usize) -> Vec<String> {
+    keys.retain(|k| k != &key);
+    keys.push(key);
+    let mut evicted = Vec::new();
+    while keys.len() > cap {
+        evicted.push(keys.remove(0));
+    }
+    evicted
+}
+
 pub struct RiffApp {
     pub state: Arc<Mutex<AppState>>,
     command_sender: Option<Sender<PlaybackCommand>>,
@@ -93,6 +111,10 @@ pub struct RiffApp {
     library_update_rx: Option<Receiver<LibraryUpdate>>,
     cover_textures: std::collections::HashMap<String, egui::TextureHandle>,
     cover_lru_keys: Vec<String>,
+    /// Tracks (by key) whose cover resolve came back empty, so
+    /// `request_cover` does not re-enqueue the same disk/tag I/O every
+    /// frame. Same LRU discipline as `cover_lru_keys`.
+    cover_negative_keys: Vec<String>,
     cover_request_tx: Option<Sender<(TrackId, PathBuf)>>,
     cover_response_rx: Receiver<(String, Option<CoverImage>)>,
     tag_write_request_tx: Option<Sender<TagWriteRequest>>,
@@ -193,6 +215,7 @@ impl RiffApp {
             library_update_rx: Some(library_update_rx),
             cover_textures: std::collections::HashMap::new(),
             cover_lru_keys: Vec::new(),
+            cover_negative_keys: Vec::new(),
             cover_request_tx: Some(cover_tx),
             cover_response_rx: response_rx,
             tag_write_request_tx: Some(tag_write_tx),
@@ -255,7 +278,8 @@ impl RiffApp {
     }
 
     fn request_cover(&self, track_id: &TrackId, file_path: &Path) {
-        if !self.cover_textures.contains_key(&track_id.0) {
+        let key = &track_id.0;
+        if !self.cover_textures.contains_key(key) && !self.cover_negative_keys.contains(key) {
             if let Some(ref tx) = self.cover_request_tx {
                 let _ = tx.send((track_id.clone(), file_path.to_path_buf()));
             }
@@ -349,15 +373,18 @@ impl RiffApp {
                 );
                 let texture = ctx.load_texture(&key, color_image, egui::TextureOptions::default());
                 self.cover_textures.insert(key.clone(), texture);
-                // Dedupe: remove any existing instance to avoid duplicates.
-                self.cover_lru_keys.retain(|k| k != &key);
-                self.cover_lru_keys.push(key.clone());
-                while self.cover_lru_keys.len() > 50 {
-                    if let Some(oldest) = self.cover_lru_keys.first().cloned() {
-                        self.cover_lru_keys.remove(0);
-                        self.cover_textures.remove(&oldest);
-                    }
+                for old in lru_insert(&mut self.cover_lru_keys, key.clone(), COVER_CACHE_CAP) {
+                    self.cover_textures.remove(&old);
                 }
+                // Art arrived after a negative result (or an eviction
+                // retry): drop any stale negative entry.
+                self.cover_negative_keys.retain(|k| k != &key);
+            } else {
+                // Negative cache: remember artless tracks so `request_cover`
+                // stops re-enqueueing a resolve request (disk/tag I/O) every
+                // frame. Eviction allows an eventual retry, e.g. once art is
+                // added and the cache cycles.
+                lru_insert(&mut self.cover_negative_keys, key, COVER_CACHE_CAP);
             }
         }
     }
@@ -711,7 +738,16 @@ fn load_persisted_state(
     frame: &mut eframe::Frame,
     cmd: Option<&Sender<PlaybackCommand>>,
 ) {
-    state.library = crate::app::library_manager::LibraryManager::load_cache();
+    let (library, discarded_reason) =
+        crate::app::library_manager::LibraryManager::load_cache_with_reason();
+    state.library = library;
+    // Surface WHY the cache was not used: an empty library with no
+    // explanation looks like data loss to the user.
+    if let Some(reason) = discarded_reason {
+        state.scan_status = Some(format!(
+            "Library cache discarded ({reason}) \u{2014} it will be rebuilt on the next scan."
+        ));
+    }
     // Playlists live in their own playlists.json (NOT the library
     // cache) so they survive a cache clear/rebuild.
     state.playlists = crate::app::playlist_manager::load_playlists();

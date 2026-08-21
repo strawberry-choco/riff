@@ -401,6 +401,37 @@ mod tests {
         assert!(!state.saving);
     }
 
+    // --- cover-cache LRU helper ---------------------------------------------------
+
+    #[test]
+    fn test_lru_insert_dedupes_by_moving_key_to_most_recent_end() {
+        let mut keys = Vec::new();
+        assert!(lru_insert(&mut keys, "a".to_string(), 3).is_empty());
+        assert!(lru_insert(&mut keys, "b".to_string(), 3).is_empty());
+        assert!(lru_insert(&mut keys, "c".to_string(), 3).is_empty());
+
+        // Re-inserting "a" moves it to the end instead of duplicating it.
+        assert!(lru_insert(&mut keys, "a".to_string(), 3).is_empty());
+        assert_eq!(
+            keys,
+            vec!["b".to_string(), "c".to_string(), "a".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_lru_insert_evicts_oldest_beyond_cap_in_fifo_order() {
+        let mut keys = Vec::new();
+        for k in ["a", "b", "c"] {
+            lru_insert(&mut keys, k.to_string(), 2);
+        }
+        // Cap 2 keeps only the two most recent keys...
+        assert_eq!(keys, vec!["b".to_string(), "c".to_string()]);
+        // ...and the next insert evicts the oldest survivor ("b").
+        let evicted = lru_insert(&mut keys, "d".to_string(), 2);
+        assert_eq!(evicted, vec!["b".to_string()]);
+        assert_eq!(keys, vec!["c".to_string(), "d".to_string()]);
+    }
+
     // Mock storage for testing.
     //
     // The current `eframe::Storage` trait (egui/eframe 0.34) has exactly three

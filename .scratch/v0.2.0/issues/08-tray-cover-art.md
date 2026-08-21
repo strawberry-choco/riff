@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — Baseline green gate.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] On macOS/Windows, closing the main window minimizes to the tray instead of quitting, and playback continues while hidden
 - [ ] Tray tooltip shows "Artist - Title" of the current track; left-click toggles window visibility

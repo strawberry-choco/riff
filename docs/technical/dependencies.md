@@ -56,24 +56,16 @@ The audio engine builds a `CodecRegistry`, registers symphonia's default codecs,
 | `thiserror` | 1 | Ergonomic error types | Defines the application-layer `AppError` enum with per-variant display messages. |
 
 ## Logging
-
 | Crate | Version | Purpose | Notes |
 |-------|---------|---------|-------|
-| `tracing` | 0.1 | Structured logging | Used throughout for warnings and errors (cache failures, cover decode failures, playback errors). |
+| `tracing` | 0.1 | Structured logging | Used throughout for warnings and errors (store failures, cover decode failures, playback errors). |
 | `tracing-subscriber` | 0.3 | Logging subscriber | Enables the `env-filter` feature; initialized in `main.rs` via `tracing_subscriber::fmt::init()`. |
-
-## Serialization
-
-| Crate | Version | Purpose | Notes |
-|-------|---------|---------|-------|
-| `serde` | 1 | Serialization framework | Enables the `derive` feature. Derived on the domain entities and `LibraryManager` for the cache. |
-| `serde_json` | 1 | JSON encoding/decoding | The library cache and the persisted path/watch-state lists are JSON. |
 
 ## Configuration directories
 
 | Crate | Version | Purpose | Notes |
 |-------|---------|---------|-------|
-| `directories` | 5 | OS-specific config/data paths | `ProjectDirs::from("", "", "riff")` resolves the platform-appropriate data directory for the library cache. |
+| `directories` | 5 | OS-specific config/data paths | `ProjectDirs::from("", "", "riff")` resolves the platform-appropriate data directory for the Application Store (`riff.sqlite3`). |
 
 ## Threading and synchronization
 

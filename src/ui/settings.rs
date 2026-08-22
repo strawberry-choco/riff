@@ -209,6 +209,9 @@ impl super::app::RiffApp {
                     &mut self.settings_path_error,
                 );
 
+                ui.add_space(8.0);
+                self.render_clear_library(ui, state);
+
                 ui.add_space(16.0);
 
                 // --- PREFERENCES ---
@@ -363,6 +366,15 @@ impl super::app::RiffApp {
                     .on_hover_text("Remove library")
                     .clicked()
                 {
+                    // One durable store transaction removes the root's tracks,
+                    // orphaned parents, and the path record; playlist entries
+                    // survive dangling so they recover when files return.
+                    match self.library_mutations.remove_library_path(path) {
+                        Ok(_) => {
+                            self.store_generation.bump();
+                        }
+                        Err(e) => tracing::error!("Failed to remove {path:?} from store: {e}"),
+                    }
                     state.library.remove_tracks_by_root(path);
                     state.library_paths.retain(|p| p != path);
                     state.library_statuses.remove(path);
@@ -443,6 +455,56 @@ impl super::app::RiffApp {
                 path_error,
             );
             render_scan_all(ui, state, lib_cmd);
+        });
+    }
+
+    /// The "Clear Library" maintenance action: wipes the indexed collection
+    /// (tracks with their play history, albums, artists) as one durable
+    /// store transaction while playlists and settings are untouched. Behind
+    /// an inline confirmation; on success the session generation bumps so
+    /// every projection refreshes immediately without a restart.
+    fn render_clear_library(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+        ui.separator();
+        ui.strong("Maintenance");
+        if !self.clear_library_confirm {
+            if ui
+                .button("Clear Library")
+                .on_hover_text("Wipe all indexed tracks and rebuild from scratch by rescanning.")
+                .clicked()
+            {
+                self.clear_library_confirm = true;
+            }
+            return;
+        }
+
+        ui.label(
+            egui::RichText::new("Remove every indexed track? Playlists and settings are kept.")
+                .color(ui.visuals().warn_fg_color),
+        );
+        ui.horizontal(|ui| {
+            if ui.button("Confirm").clicked() {
+                self.clear_library_confirm = false;
+                match self.library_mutations.clear_library() {
+                    Ok(removed) => {
+                        self.store_generation.bump();
+                        // The transitional mirror drops too, so any view not
+                        // yet migrated shows the cleared state immediately.
+                        state.library.clear();
+                        state.scan_status = Some(format!(
+                            "Library cleared ({removed} tracks removed). Rescan to rebuild."
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to clear the library: {e}");
+                        state.scan_status = Some(
+                            "Failed to clear the library \u{2014} nothing was changed.".to_string(),
+                        );
+                    }
+                }
+            }
+            if ui.button("Cancel").clicked() {
+                self.clear_library_confirm = false;
+            }
         });
     }
 }

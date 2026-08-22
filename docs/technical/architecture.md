@@ -1,6 +1,6 @@
 # Architecture
 
-riff is a lightweight, offline-first desktop music player written in Rust on top of the egui immediate-mode UI framework. It ships as a single Cargo crate with no code-generation step, no migrations, and no plugin system. The architecture is a conventional **layered desktop application**: pure business logic sits at the center, infrastructure adapters that wrap external crates sit at the edge, and a single composition root wires everything together at startup.
+riff is a lightweight, offline-first desktop music player written in Rust on top of the egui immediate-mode UI framework. It ships as a single Cargo crate with no code-generation step and no plugin system; persistence runs through ordered, checksummed SQLite migrations (see [./persistence.md](./persistence.md)). The architecture is a conventional **layered desktop application**: pure business logic sits at the center, infrastructure adapters that wrap external crates sit at the edge, and a single composition root wires everything together at startup.
 
 This document is the reference for how the crate is organized, how the layers are allowed to depend on one another, and what belongs where. For the runtime view of the system see [./threading-model.md](./threading-model.md) and [./data-flow.md](./data-flow.md); for the concrete types that flow between layers see [./data-model.md](./data-model.md).
 
@@ -34,16 +34,22 @@ src/
 │   ├── mod.rs               # Module root + MutexExt (poison-recovering lock helper)
 │   ├── state.rs             # AppState, ViewMode, LibraryStatus, BrowseMode, WatchState
 │   ├── traits.rs            # Port traits: AudioDecoder, AudioOutput, MetadataReader, CoverLoader
+│   ├── store.rs             # Application Store ports: SettingsStore, PlaylistStore, LibraryQueryStore, ...
+│   ├── projection.rs        # Session Projections over store query results (generation-invalidated)
 │   ├── commands.rs          # LibraryCommand, LibraryUpdate message enums
 │   ├── errors.rs            # AppError (thiserror)
-│   ├── library_manager.rs   # LibraryManager: indexing, search, cache save/load
+│   ├── library_manager.rs   # LibraryManager: transitional in-memory mirror (never persisted)
+│   ├── playlist_manager.rs  # Playlist entry validity helpers
+│   ├── gapless.rs           # Gapless playback eligibility and frame math
 │   ├── cover_resolver.rs    # CoverResolver: embedded > filesystem cover priority
 │   └── watcher_manager.rs   # WatcherManager: folder-watch lifecycle, debounce, rescan trigger
 ├── infra/                   # Trait implementations using external crates
 │   ├── mod.rs               # Re-exports the concrete adapters
+│   ├── store.rs             # SqliteStore + mutex-guarded port views (rusqlite)
 │   ├── decoder.rs           # SymphoniaDecoder (impl AudioDecoder)
 │   ├── audio_output.rs      # CpalAudioOutput (impl AudioOutput)
 │   ├── metadata_reader.rs   # LoftyMetadataReader (impl MetadataReader)
+│   ├── metadata_writer.rs   # LoftyMetadataWriter (impl MetadataWriter)
 │   ├── cover_loader.rs      # ImageCoverLoader (impl CoverLoader)
 │   ├── scanner.rs           # AudioFileScanner (walkdir)
 │   └── watcher.rs           # FilesystemWatcher (notify)
@@ -51,7 +57,7 @@ src/
     ├── mod.rs               # Re-exports RiffApp
     ├── app.rs               # Main window (RiffApp) — layout, views, cover LRU, cover thread
     ├── tray.rs              # System tray integration (non-Linux)
-    ├── settings.rs          # Settings view: library path management, persistence helpers
+    ├── settings.rs          # Settings view: library path management, preferences, Clear Library
     └── fonts.rs             # Font configuration for the egui context
 ```
 
@@ -72,7 +78,7 @@ The core rule is that dependencies point inward. Inner layers never know about o
 Specific rules:
 
 - `domain/` has zero external crate dependencies. No `symphonia`, no `cpal`, no `egui`, no `lofty`. It may use `std` and it may derive `serde` traits (serde is treated as a pure data-serialization concern), but it performs no I/O.
-- `app/` depends only on `domain/` and `std` (plus `serde`/`serde_json`/`directories`/`tracing` for persistence and logging, and `crossbeam-channel` for message types). It defines the port traits that `infra/` implements.
+- `app/` depends only on `domain/` and `std` (plus `tracing` for logging and `crossbeam-channel` for message types). It defines the port traits — including the Application Store ports in `store.rs` — that `infra/` implements.
 - `app/` defines traits — `AudioDecoder`, `AudioOutput`, `MetadataReader`, `CoverLoader` — that `infra/` implements. The application layer never names a concrete adapter type.
 - `infra/` depends on `app/` (for the traits and `AppError`), `domain/` (for the entity types), and the external crates it adapts.
 - `ui/` depends on `app/`, `domain/`, and `egui`/`eframe` (plus the platform-conditional tray crates). It reads application state and sends commands; it does not decode audio or scan files itself.
@@ -128,7 +134,7 @@ All thread-to-thread communication uses `crossbeam_channel`. See [./threading-mo
 
 ### Application (`src/app/`)
 
-**Belongs here**: use-case orchestration (`LibraryManager::scan_and_add_tracks`, search, cache save/load), the port traits (`AudioDecoder`, `AudioOutput`, `MetadataReader`, `CoverLoader`), shared state (`AppState` and its supporting enums), cross-thread message types (`LibraryCommand`, `LibraryUpdate`), cover resolution policy (`CoverResolver`), watcher orchestration (`WatcherManager`), and the application error type (`AppError`).
+**Belongs here**: use-case orchestration (`LibraryManager::scan_and_add_tracks`, search), the port traits (`AudioDecoder`, `AudioOutput`, `MetadataReader`, `CoverLoader`, and the Application Store ports in `store.rs`), Session Projections over store query results, shared state (`AppState` and its supporting enums), cross-thread message types (`LibraryCommand`, `LibraryUpdate`), cover resolution policy (`CoverResolver`), watcher orchestration (`WatcherManager`), and the application error type (`AppError`).
 
 **Does not belong here**: direct use of `symphonia`, `cpal`, `lofty`, or `image`; egui widget code; platform-specific system calls.
 
@@ -136,7 +142,7 @@ All thread-to-thread communication uses `crossbeam_channel`. See [./threading-mo
 
 ### Infrastructure (`src/infra/`)
 
-**Belongs here**: the `symphonia` decoder (`SymphoniaDecoder`), the `cpal` output (`CpalAudioOutput`), the `lofty` metadata reader (`LoftyMetadataReader`), the `image`-based cover loader (`ImageCoverLoader`), filesystem scanning with `walkdir` (`AudioFileScanner`), and filesystem watching with `notify` (`FilesystemWatcher`).
+**Belongs here**: the `symphonia` decoder (`SymphoniaDecoder`), the `cpal` output (`CpalAudioOutput`), the `lofty` metadata reader and writer, the `image`-based cover loader (`ImageCoverLoader`), filesystem scanning with `walkdir` (`AudioFileScanner`), filesystem watching with `notify` (`FilesystemWatcher`), and the Application Store implementation over `rusqlite` (`SqliteStore` in `store.rs`, including its migrations and corruption recovery).
 
 **Does not belong here**: business logic (play order, shuffle decisions), UI decisions, or domain entity construction policy.
 
@@ -182,14 +188,14 @@ These are decisions with more than one defensible answer. Surface them explicitl
 - **Where cover caching belongs.** The in-memory cover texture LRU currently lives in `ui/app.rs` because it stores egui-specific `TextureHandle`s. If caching policy (how long to keep covers) ever becomes a business rule, it may warrant an application-layer home.
 - **Shared state versus message passing for playback position.** Position currently flows as a `PlaybackUpdate::PositionChanged` channel message rather than a shared atomic. The channel approach is more explicit and easier to trace; an atomic would be marginally faster.
 - **Recovery from corrupted files.** Whether the decoder should skip a bad frame and continue or stop playback is a product decision with valid arguments on both sides.
-- **Library index structure.** The library uses `HashMap`s keyed by `TrackId`, artist name, and album key. This favors O(1) lookup and simple serialization over sorted iteration; sorted views are produced on demand.
+- **Library index structure.** The transitional in-memory mirror uses `HashMap`s keyed by `TrackId`, artist name, and album key for O(1) lookup; the authoritative collection lives in the Application Store, and views read through Session Projections over store queries.
 
 ## Error Handling Patterns
 
 - **Application errors**: `app::errors::AppError` is the single typed error enum, defined with `thiserror` and `Clone`. Variants carry a `String` message and cover decoding, audio output, metadata reading, cover loading, scanning, I/O, missing tracks, and invalid operations.
 - **Infrastructure mapping**: each adapter converts its crate's error type into the appropriate `AppError` variant at the boundary, typically with `map_err`, so external error types never cross into `app/` or `ui/`.
 - **UI display**: the UI matches on results and shows brief, user-facing messages. Technical detail goes to the log, not the screen.
-- **Logging**: the `tracing` crate provides structured logging, initialized in `main.rs` via `tracing_subscriber::fmt::init()` with env-filter support. Use ERROR for failures, WARN for recoverable issues (for example, a failed cache write or a failed cover decode), INFO for notable state changes, and DEBUG for detailed tracing.
+- **Logging**: the `tracing` crate provides structured logging, initialized in `main.rs` via `tracing_subscriber::fmt::init()` with env-filter support. Use ERROR for failures, WARN for recoverable issues (for example, a failed store write or a failed cover decode), INFO for notable state changes, and DEBUG for detailed tracing.
 - **Lock poisoning**: `MutexExt::lock_or_recover` recovers from a poisoned mutex instead of panicking, so an isolated thread panic does not take down the whole application.
 
 ## See also

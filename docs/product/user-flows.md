@@ -30,7 +30,7 @@ This document describes the end-to-end journeys a user takes through riff. Each 
    - New tracks appear in the library as the scan completes.
 
 6. **Scan completes.**
-   - The library cache is written to disk.
+   - Each scan batch commits durably to the Application Store.
    - The library panel now shows the indexed tracks, artists, and albums.
    - The user can browse and play immediately.
 
@@ -43,7 +43,7 @@ This document describes the end-to-end journeys a user takes through riff. Each 
 **Goal**: A user with an existing library browses by artist and album, then plays a track.
 
 1. **User launches riff.**
-   - The library cache loads on the first frame.
+   - The library hydrates from the Application Store on the first frame.
    - The library is browsable almost immediately.
 
 2. **User opens the Library view** (metadata tree).
@@ -126,7 +126,7 @@ This document describes the end-to-end journeys a user takes through riff. Each 
    - Metadata is extracted.
    - Cover art is resolved.
 
-6. **The library cache is updated.**
+6. **The Application Store is updated** — the batch commits as one durable transaction and the session generation bumps, so views refresh immediately.
 
 **Branch — Watch unavailable**: If the path cannot be watched (network mount, permission issue, inotify limit), the toggle shows a warning state with an explanation. The user can fall back to a manual "Scan" click.
 

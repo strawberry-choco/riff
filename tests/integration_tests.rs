@@ -93,28 +93,6 @@ mod tests {
     }
 
     #[test]
-    fn test_settings_persistence_simulation() {
-        // Simulate settings persistence across app restarts
-        let mut storage_data = std::collections::HashMap::new();
-
-        // Simulate saving settings
-        let paths = vec![std::path::PathBuf::from("music")];
-        let json = serde_json::to_string(&paths).unwrap();
-        storage_data.insert("library_paths".to_string(), json);
-
-        // Simulate loading settings
-        if let Some(json) = storage_data.get("library_paths") {
-            if let Ok(loaded_strings) = serde_json::from_str::<Vec<String>>(json) {
-                let loaded_paths: Vec<std::path::PathBuf> = loaded_strings
-                    .into_iter()
-                    .map(std::path::PathBuf::from)
-                    .collect();
-                assert_eq!(loaded_paths, paths);
-            }
-        }
-    }
-
-    #[test]
     fn test_audio_buffer_simulation() {
         // Simulate audio buffer operations (the real output buffer is
         // `Arc<Mutex<VecDeque<f32>>>`, so we mirror the element type here).

@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 /// Age threshold for "Lost Gems": tracks whose last play is older than this
 /// are considered forgotten gems worth resurfacing. Tracks that were never
 /// played qualify unconditionally ("unheard" includes never-heard).
-const LOST_GEMS_THRESHOLD: Duration = Duration::from_hours(2160);
+pub(crate) const LOST_GEMS_THRESHOLD: Duration = Duration::from_hours(2160);
 
 /// Manages the music library: scanning, indexing, metadata, and search.
 ///

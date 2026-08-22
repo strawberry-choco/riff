@@ -1,6 +1,9 @@
 use crate::app::commands::{LibraryCommand, LibraryUpdate};
 use crate::app::cover_resolver::CoverResolver;
-use crate::app::projection::{ProjectionKey, TrackListProjection, WINDOW_SIZE};
+use crate::app::projection::{
+    BrowsingProjection, FolderProjection, ProjectionKey, SmartPlaylistsProjection,
+    TrackListProjection, WINDOW_SIZE,
+};
 use crate::app::state::{AppState, BrowseMode, LibraryStatus, ViewMode};
 use crate::app::store::{
     LibraryMutationStore, LibraryQueryStore, PlaylistStore, SettingsStore, StoreGeneration,
@@ -9,8 +12,8 @@ use crate::app::traits::{CoverImage, MetadataWriter, TagEdit};
 use crate::app::watcher_manager::WatcherManager;
 use crate::app::MutexExt;
 use crate::domain::{
-    PlaybackCommand, PlaybackState, Playlist, PlaylistId, RepeatMode, SmartPlaylistKind, Track,
-    TrackId,
+    Album, Artist, PlaybackCommand, PlaybackState, Playlist, PlaylistId, RepeatMode,
+    SmartPlaylistKind, Track, TrackId,
 };
 use crate::infra::{ImageCoverLoader, LoftyMetadataReader, LoftyMetadataWriter};
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -134,12 +137,15 @@ pub struct RiffApp {
     playlist_create_name: Option<String>,
     /// Transient rename prompt: (playlist id, draft name).
     playlist_rename: Option<(PlaylistId, String)>,
+    /// Transient Clear Library confirmation (`true` = awaiting confirm).
+    /// Grouped with the other transient prompts on `RiffApp`.
+    pub(crate) clear_library_confirm: bool,
     search_focus: bool,
     first_frame: bool,
     pub(crate) watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
     /// The Application Store's settings section. The UI reads settings from
     /// it on the first frame and writes every preference change straight
-    /// back, so preferences survive restarts without eframe storage.
+    /// back, so preferences survive restarts through the store.
     pub(crate) settings_store: Box<dyn SettingsStore>,
     /// The Application Store's playlists section. Every playlist mutation
     /// commits through it as one immediate durable transaction; the in-memory
@@ -161,6 +167,21 @@ pub struct RiffApp {
     /// Bounded Session Projection serving the flat list and search box
     /// (ADR 0003). Never authoritative; invalidated by generation bumps.
     tracks_projection: TrackListProjection,
+    /// Session Projection serving the artist/album browsing views: artists
+    /// A–Z, per-artist albums, and per-album tracks, all fetched from the
+    /// store through [`Self::library_queries`] and invalidated by generation
+    /// bumps. Never authoritative.
+    browsing_projection: BrowsingProjection,
+    /// Session Projection serving the folder-tree views: subtree probes,
+    /// subtree search matches, subtree track ids, direct track listings,
+    /// and child directories, all fetched from the store through
+    /// [`Self::library_queries`] and invalidated by generation bumps.
+    folder_projection: FolderProjection,
+    /// Session Projection serving the read-only smart playlists: one
+    /// computed list per kind, fetched from the store through
+    /// [`Self::library_queries`] and invalidated by generation bumps, so a
+    /// finished play or scan regenerates them on the next frame.
+    smart_playlists_projection: SmartPlaylistsProjection,
     theme: ThemeState,
     /// Linux-only folder-picker input state (no native file dialog there).
     /// Grouped so the rest of the struct keeps its cross-platform shape.
@@ -261,6 +282,7 @@ impl RiffApp {
             playlist_view: None,
             playlist_create_name: None,
             playlist_rename: None,
+            clear_library_confirm: false,
             search_focus: false,
             first_frame: true,
             watcher_manager,
@@ -270,6 +292,9 @@ impl RiffApp {
             library_mutations,
             store_generation,
             tracks_projection: TrackListProjection::new(ProjectionKey::Flat),
+            browsing_projection: BrowsingProjection::new(),
+            folder_projection: FolderProjection::new(),
+            smart_playlists_projection: SmartPlaylistsProjection::new(),
             theme: ThemeState {
                 elegance_dark: true, // dark (slate) by default
                 was_high_contrast: false,
@@ -370,9 +395,9 @@ impl RiffApp {
 
     /// Drain completed tag writes from the background thread. On success the
     /// edited metadata lands in the mirror and persists through the store's
-    /// mutation port as one durable transaction (the upsert preserves play
-    /// history). On failure the error is surfaced in the open modal, which
-    /// stays open.
+    /// targeted tag-refresh flow as one durable transaction (history
+    /// preserved, album year/genre re-derived). On failure the error is
+    /// surfaced in the open modal, which stays open.
     fn poll_tag_write_results(&mut self, state: &mut AppState) {
         while let Ok(result) = self.tag_write_result_rx.try_recv() {
             match result.outcome {
@@ -383,11 +408,13 @@ impl RiffApp {
                         edited = Some(track.clone());
                     }
                     if let Some(track) = edited {
-                        if let Err(e) = self.library_mutations.apply_scan_batch(&[track]) {
+                        if let Err(e) = self.library_mutations.apply_tag_refresh(&track) {
                             tracing::error!(
                                 "Failed to persist tag edit for {:?}: {e}",
                                 result.path
                             );
+                        } else {
+                            self.store_generation.bump();
                         }
                     }
                     if self
@@ -1364,61 +1391,96 @@ impl RiffApp {
         cmd: Option<&Sender<PlaybackCommand>>,
         query: &str,
     ) {
-        // Clone data to avoid holding borrows across closures
-        let artists: Vec<_> = {
-            let mut all: Vec<_> = state.library.all_artists().into_iter().cloned().collect();
-            all.sort_by(|a, b| a.name.cmp(&b.name));
-            if query.is_empty() {
-                all
-            } else {
-                let q = query.to_lowercase();
-                all.into_iter()
-                    .filter(|a| a.name.to_lowercase().contains(&q))
-                    .collect()
+        // Browsing reads through the Session Projection over store queries
+        // (ADR 0002/0003): artists A–Z straight from the Application Store,
+        // each level cached until the next committed mutation bumps the
+        // generation. No in-memory mirror involved.
+        let generation = self.store_generation.current();
+        let artists: Vec<Artist> = match self
+            .browsing_projection
+            .artists(generation, &mut || self.library_queries.all_artists())
+        {
+            Ok(artists) => artists,
+            Err(e) => {
+                tracing::warn!("Failed to load artists from the store: {e}");
+                Vec::new()
             }
+        };
+        let artists: Vec<Artist> = if query.is_empty() {
+            artists
+        } else {
+            let q = query.to_lowercase();
+            artists
+                .into_iter()
+                .filter(|a| a.name.to_lowercase().contains(&q))
+                .collect()
         };
         let current_track = state.queue.current_track().cloned();
 
+        // Identity of the playing track's album, used to auto-open exactly
+        // the collapsed headers containing it — the same outcome as the
+        // former scan of every artist's albums, without loading closed
+        // artists' data.
+        let current_album: Option<(String, String)> = current_track.as_ref().and_then(|tid| {
+            self.library_queries.get_track(tid).ok().flatten().map(|t| {
+                (
+                    t.metadata.display_album_artist(),
+                    t.metadata.display_album(),
+                )
+            })
+        });
+
         egui::ScrollArea::vertical().show(ui, |ui| {
             for artist in &artists {
-                let artist_has_current = artist.albums.iter().any(|key| {
-                    state.library.albums.get(key).is_some_and(|album| {
-                        album
-                            .tracks
-                            .iter()
-                            .any(|tid| Some(tid) == current_track.as_ref())
-                    })
-                });
+                let artist_has_current = current_album
+                    .as_ref()
+                    .is_some_and(|(album_artist, _)| album_artist == &artist.name);
                 egui::CollapsingHeader::new(&artist.name)
                     .default_open(artist_has_current)
                     .show(ui, |ui| {
-                        let mut albums: Vec<_> = artist
-                            .albums
-                            .iter()
-                            .filter_map(|key| state.library.albums.get(key).cloned())
-                            .collect();
-                        albums.sort_by(|a, b| {
-                            b.year
-                                .unwrap_or(0)
-                                .cmp(&a.year.unwrap_or(0))
-                                .then_with(|| a.title.cmp(&b.title))
-                        });
+                        let albums: Vec<Album> = match self.browsing_projection.artist_albums(
+                            generation,
+                            &artist.name,
+                            &mut |a| self.library_queries.artist_albums(a),
+                        ) {
+                            Ok(albums) => albums,
+                            Err(e) => {
+                                tracing::warn!("Failed to load albums for {}: {e}", artist.name);
+                                return;
+                            }
+                        };
 
                         for album in &albums {
-                            let album_has_current = album
-                                .tracks
-                                .iter()
-                                .any(|tid| Some(tid) == current_track.as_ref());
+                            let album_has_current = current_album.as_ref().is_some_and(
+                                |(album_artist, album_title)| {
+                                    album_artist == &album.artist && album_title == &album.title
+                                },
+                            );
                             let year_str = album.year.map_or(String::new(), |y| format!(" ({y})"));
                             egui::CollapsingHeader::new(format!("{}{}", album.title, year_str))
                                 .default_open(album_has_current)
                                 .show(ui, |ui| {
-                                    let track_ids = album.tracks.clone();
+                                    let tracks: Vec<Track> =
+                                        match self.browsing_projection.album_tracks(
+                                            generation,
+                                            &album.artist,
+                                            &album.title,
+                                            &mut |a, t| self.library_queries.album_tracks(a, t),
+                                        ) {
+                                            Ok(tracks) => tracks,
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Failed to load tracks for {}: {e}",
+                                                    album.title
+                                                );
+                                                return;
+                                            }
+                                        };
                                     self.render_album_track_rows(
                                         ui,
                                         state,
                                         cmd,
-                                        &track_ids,
+                                        &tracks,
                                         current_track.as_ref(),
                                     );
                                 });
@@ -1428,30 +1490,20 @@ impl RiffApp {
         });
     }
 
-    /// Sorted track rows for one album in the Artists view.
+    /// Track rows for one album in the Artists view, rendered straight from
+    /// the store query results in their canonical order (track number then
+    /// filename, missing numbers first).
     fn render_album_track_rows(
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
         cmd: Option<&Sender<PlaybackCommand>>,
-        track_ids: &[TrackId],
+        tracks: &[Track],
         current_track: Option<&TrackId>,
     ) {
-        let mut track_ids = track_ids.to_vec();
-        track_ids.sort_by_key(|tid| {
-            state
-                .library
-                .get_track(tid)
-                .and_then(|t| t.metadata.track_number)
-                .unwrap_or(0)
-        });
-
-        for tid in &track_ids {
-            let Some(track) = state.library.get_track(tid).cloned() else {
-                continue;
-            };
-            let is_selected = state.selected_track.as_ref() == Some(tid);
-            let is_current = current_track == Some(tid);
+        for track in tracks {
+            let is_selected = state.selected_track.as_ref() == Some(&track.id);
+            let is_current = current_track == Some(&track.id);
 
             self.request_cover(&track.id, &track.file_path);
 
@@ -1475,7 +1527,7 @@ impl RiffApp {
                         let _ = s.send(PlaybackCommand::Play(track.id.clone()));
                     }
                 }
-                self.attach_track_menu(&resp, state, cmd, &track.id, Some(&track), None);
+                self.attach_track_menu(&resp, state, cmd, &track.id, Some(track), None);
             });
         }
     }
@@ -1564,9 +1616,34 @@ impl RiffApp {
         });
     }
 
-    /// Render the tracks of a read-only smart playlist. The list is computed
-    /// fresh from library data on every frame, so it auto-updates when play
-    /// counts change or tracks are added — no manual refresh needed.
+    /// Cached smart-playlist computation for one frame generation; failures
+    /// render as an empty list with a warning logged.
+    fn smart_list_cached(
+        &mut self,
+        generation: u64,
+        kind: SmartPlaylistKind,
+        limit: usize,
+    ) -> Vec<Track> {
+        match self
+            .smart_playlists_projection
+            .list(generation, kind, limit, &mut |k, l| {
+                self.library_queries.smart_playlist(k, l)
+            }) {
+            Ok(tracks) => tracks,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to compute smart playlist {}: {e}",
+                    kind.display_name()
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    /// Render the tracks of a read-only smart playlist. The list reads
+    /// through the Session Projection over store queries (ADR 0002): every
+    /// committed mutation bumps the generation, so the next frame
+    /// regenerates from committed state — no manual refresh needed.
     fn render_smart_playlist_view(
         &mut self,
         ui: &mut egui::Ui,
@@ -1579,12 +1656,8 @@ impl RiffApp {
             SmartPlaylistKind::RecentlyAdded | SmartPlaylistKind::MostPlayed => 50,
             SmartPlaylistKind::NeverPlayed | SmartPlaylistKind::LostGems => usize::MAX,
         };
-        let tracks: Vec<Track> = state
-            .library
-            .smart_playlist(kind, limit)
-            .into_iter()
-            .filter_map(|id| state.library.get_track(&id).cloned())
-            .collect();
+        let generation = self.store_generation.current();
+        let tracks = self.smart_list_cached(generation, kind, limit);
         let current_track = state.queue.current_track().cloned();
 
         // Header: name + count, clearly read-only (no edit/delete affordances),
@@ -1915,6 +1988,80 @@ impl RiffApp {
         });
     }
 
+    /// Cached [`LibraryQueryStore::folder_has_audio`] for one frame
+    /// generation; failures render as "no audio" with a warning logged.
+    fn folder_has_audio_cached(&mut self, generation: u64, path: &Path) -> bool {
+        match self
+            .folder_projection
+            .has_audio(generation, path, &mut |f| {
+                self.library_queries.folder_has_audio(f)
+            }) {
+            Ok(has) => has,
+            Err(e) => {
+                tracing::warn!("Failed to probe folder {}: {e}", path.display());
+                false
+            }
+        }
+    }
+
+    /// Cached subtree search match for one frame generation.
+    fn folder_search_match_cached(&mut self, generation: u64, path: &Path, query: &str) -> bool {
+        match self
+            .folder_projection
+            .has_search_match(generation, path, query, &mut |f, q| {
+                self.library_queries.folder_has_search_match(f, q)
+            }) {
+            Ok(has) => has,
+            Err(e) => {
+                tracing::warn!("Failed to search folder {}: {e}", path.display());
+                false
+            }
+        }
+    }
+
+    /// Cached subtree track ids for one frame generation.
+    fn folder_subtree_ids_cached(&mut self, generation: u64, path: &Path) -> Vec<TrackId> {
+        match self
+            .folder_projection
+            .subtree_ids(generation, path, &mut |f| {
+                self.library_queries.track_ids_in_folder_tree(f)
+            }) {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!("Failed to list folder tree {}: {e}", path.display());
+                Vec::new()
+            }
+        }
+    }
+
+    /// Cached child directories for one frame generation.
+    fn folder_children_cached(&mut self, generation: u64, path: &Path) -> Vec<PathBuf> {
+        match self.folder_projection.children(generation, path, &mut |f| {
+            self.library_queries.subdirs_with_audio(f)
+        }) {
+            Ok(children) => children,
+            Err(e) => {
+                tracing::warn!("Failed to list folder children {}: {e}", path.display());
+                Vec::new()
+            }
+        }
+    }
+
+    /// Cached direct-track listing for one frame generation.
+    fn folder_direct_tracks_cached(&mut self, generation: u64, path: &Path) -> Vec<Track> {
+        match self
+            .folder_projection
+            .direct_tracks(generation, path, &mut |f| {
+                self.library_queries.tracks_in_folder(f)
+            }) {
+            Ok(tracks) => tracks,
+            Err(e) => {
+                tracing::warn!("Failed to list folder tracks {}: {e}", path.display());
+                Vec::new()
+            }
+        }
+    }
+
     fn render_folder_tree(
         &mut self,
         ui: &mut egui::Ui,
@@ -1930,49 +2077,51 @@ impl RiffApp {
             return;
         }
 
+        // Folder views read through the Session Projection over store
+        // queries (ADR 0002/0003): escaped prefix matching over stored track
+        // paths, cached until the next committed mutation bumps the
+        // generation. No in-memory mirror involved.
+        let generation = self.store_generation.current();
         let lib_paths = state.library_paths.clone();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for lib_path in &lib_paths {
-                if !state.library.folder_has_audio(lib_path) {
+                if !self.folder_has_audio_cached(generation, lib_path) {
                     continue;
                 }
-                self.render_folder_node(ui, state, cmd, lib_path, 0.0, query);
+                self.render_folder_node(ui, state, cmd, generation, lib_path, 0.0, query);
             }
         });
     }
 
+    /// One folder node of the Folders tree. `generation` is passed down so
+    /// every node of one frame reads the same snapshot even if a mutation
+    /// commits mid-frame.
+    #[allow(clippy::too_many_arguments)]
     fn render_folder_node(
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
         cmd: Option<&Sender<PlaybackCommand>>,
+        generation: u64,
         path: &Path,
         indent: f32,
         query: &str,
     ) {
-        if !state.library.folder_has_audio(path) {
+        if !self.folder_has_audio_cached(generation, path) {
             return;
         }
 
-        if !query.is_empty() {
-            let q = query.to_lowercase();
-            let has_match =
-                state.library.all_tracks().iter().any(|t| {
-                    t.file_path.starts_with(path) && t.metadata.search_text().contains(&q)
-                });
-            if !has_match {
-                return;
-            }
+        if !query.is_empty() && !self.folder_search_match_cached(generation, path, query) {
+            return;
         }
 
         let current_track = state.queue.current_track().cloned();
 
-        let contains_current = current_track.as_ref().is_some_and(|tid| {
-            state
-                .library
-                .get_track(tid)
-                .is_some_and(|t| t.file_path.starts_with(path))
-        });
+        // The playing track's id IS its stored path, so containment is a
+        // plain component-wise prefix check — no store round-trip needed.
+        let contains_current = current_track
+            .as_ref()
+            .is_some_and(|tid| std::path::Path::new(&tid.0).starts_with(path));
 
         let is_selected = state.selected_folder.as_deref() == Some(path);
 
@@ -1986,18 +2135,27 @@ impl RiffApp {
             label
         };
 
-        let folder_track_ids: Vec<TrackId> = state.library.track_ids_in_folder_tree(path);
+        let folder_track_ids: Vec<TrackId> = self.folder_subtree_ids_cached(generation, path);
 
         let header =
             egui::CollapsingHeader::new(header_text).default_open(contains_current || is_selected);
 
         let header_response = header.show(ui, |ui| {
-            let children = state.library.subdirs_with_audio(path);
+            let children = self.folder_children_cached(generation, path);
             for child_path in &children {
-                self.render_folder_node(ui, state, cmd, child_path, indent + FOLDER_INDENT, query);
+                self.render_folder_node(
+                    ui,
+                    state,
+                    cmd,
+                    generation,
+                    child_path,
+                    indent + FOLDER_INDENT,
+                    query,
+                );
             }
 
-            let tracks = folder_tracks_filtered(state, path, query);
+            let tracks =
+                folder_tracks_filtered(self.folder_direct_tracks_cached(generation, path), query);
 
             for track in &tracks {
                 let is_track_selected = state.selected_track.as_ref() == Some(&track.id);
@@ -2038,7 +2196,7 @@ impl RiffApp {
         }
 
         if header_response.header_response.double_clicked() {
-            play_folder(state, path, cmd);
+            play_folder(&folder_track_ids, cmd);
         }
 
         if !folder_track_ids.is_empty() {
@@ -2060,9 +2218,10 @@ fn parse_number(label: &str, raw: &str) -> Result<Option<u32>, String> {
     }
 }
 
-/// Play a folder: start its first track and queue the rest.
-fn play_folder(state: &AppState, path: &Path, cmd: Option<&Sender<PlaybackCommand>>) {
-    let track_ids = state.library.track_ids_in_folder_tree(path);
+/// Play a folder: start its first track and queue the rest. The ids arrive
+/// in the store's path order — exactly what the former mirror listing
+/// produced.
+fn play_folder(track_ids: &[TrackId], cmd: Option<&Sender<PlaybackCommand>>) {
     let Some(s) = cmd else { return };
     if let Some(first) = track_ids.first() {
         let _ = s.send(PlaybackCommand::Play(first.clone()));
@@ -2072,17 +2231,17 @@ fn play_folder(state: &AppState, path: &Path, cmd: Option<&Sender<PlaybackComman
     }
 }
 
-/// Tracks directly in `path`, optionally filtered by search query.
-fn folder_tracks_filtered(state: &AppState, path: &Path, query: &str) -> Vec<Track> {
-    let tracks = state.library.tracks_in_folder(path);
+/// Tracks directly in a folder, optionally filtered by search query. The
+/// listing arrives from the store in canonical order; only the query filter
+/// applies here, like before.
+fn folder_tracks_filtered(tracks: Vec<Track>, query: &str) -> Vec<Track> {
     if query.is_empty() {
-        tracks.into_iter().cloned().collect()
+        tracks
     } else {
         let q = query.to_lowercase();
         tracks
             .into_iter()
             .filter(|t| t.metadata.search_text().contains(&q))
-            .cloned()
             .collect()
     }
 }

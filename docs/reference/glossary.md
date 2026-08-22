@@ -17,11 +17,13 @@ This glossary defines the recurring terms used across riff's documentation and s
 | **Cover Art** | An image associated with an album or track, typically embedded in audio file metadata or stored as `cover.jpg`/`cover.png` in the same directory. |
 | **cpal** | A cross-platform audio I/O library for Rust. riff uses it for audio output to the native device. |
 | **crossbeam channel** | The `crossbeam-channel` crate, providing multi-producer, multi-consumer channels. riff uses unbounded channels for all cross-thread message passing. |
-| **eframe** | The official application framework around egui, providing windowing, the event loop, and persistence. riff enables its `persistence` feature and stores settings via `eframe::Storage`. |
+| **eframe** | The official application framework around egui, providing windowing and the event loop. |
+| **Application Store** | The single authoritative persistent state of the application — Library, Playlists, and Settings — in one embedded SQLite database (`riff.sqlite3`). |
+| **Session Projection** | A bounded in-memory view of Application Store query results used while rendering; invalidated by a session-local generation counter after every committed mutation. |
 | **egui** | An immediate-mode GUI library written in pure Rust. It is the foundation of riff's user interface. |
 | **egui-elegance** | A theming and styling crate for egui used by riff to customize the appearance of the interface. |
 | **Library** | The complete set of audio files discovered and indexed by the application. |
-| **Library Cache** | A persistent on-disk JSON copy of scanned tracks, artists, and albums that avoids re-scanning on startup. |
+| **Library Cache** | Retired term for the former non-authoritative JSON copy of the Library. riff now persists everything in the Application Store; do not use this term for it. |
 | **lofty** | A pure-Rust audio metadata reading/writing library. riff uses it to extract tags and embedded cover art. |
 | **Metadata** | Descriptive information embedded in audio files (artist, album, title, genre, year, track number, etc.). |
 | **notify** | A cross-platform filesystem-watching crate. riff uses it (through its infrastructure watcher) to detect new and deleted files in library folders. |
@@ -40,7 +42,7 @@ The same terms grouped thematically, to help you find related concepts:
 - **Audio formats and decoding:** Codec, Container, Symphonia, symphonia-adapter-libopus, Metadata, Album Artist, Cover Art.
 - **Audio output backends:** cpal, WASAPI, ALSA, CoreAudio.
 - **UI framework:** egui, eframe, egui-elegance.
-- **Library and state:** Library, Library Cache, Playback Queue, TrackId, AppState.
+- **Library and state:** Application Store, Session Projection, Library, Clear Library, Playback Queue, TrackId, AppState.
 - **Architecture roles:** Composition Root, Port / Trait.
 - **Concurrency and messaging:** Arc/Mutex, crossbeam channel.
 - **System integration and files:** notify, rfd.
@@ -49,5 +51,5 @@ The same terms grouped thematically, to help you find related concepts:
 ## Related Reading
 
 - [../technical/architecture.md](../technical/architecture.md) — the layered architecture and threading model these terms describe.
-- [./configuration.md](./configuration.md) — where the Library Cache, settings, and cover-art cache live on disk.
-- [./troubleshooting.md](./troubleshooting.md) — common issues involving WASAPI, ALSA, and the Library Cache.
+- [./configuration.md](./configuration.md) - where the Application Store, settings, and cover-art cache live on disk.
+- [./troubleshooting.md](./troubleshooting.md) - common issues involving WASAPI, ALSA, and the Application Store.

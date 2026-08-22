@@ -1,140 +1,86 @@
 # Persistence
 
-riff is offline-first and keeps three distinct pieces of state on disk: the scanned music library (a JSON cache of tracks, artists, and albums), the list of registered library paths, and the per-path folder-watch state. The library cache is by far the most important — it lets the app show a full library instantly on startup without re-scanning. This document describes each mechanism, where the data lives, when it is written, and how errors are handled.
+riff is offline-first and keeps its authoritative persistent state in one embedded `SQLite` database: the **Application Store** (`riff.sqlite3`), which holds the Library, Playlists, and Settings. The store is the single authority — the UI never owns a second copy of persisted state; it reads through bounded **Session Projections** that are invalidated by a session-local generation counter after every committed mutation. This document describes where the data lives, when it is written, how the schema evolves, and how corruption is handled.
 
-For the types that are serialized, see [./data-model.md](./data-model.md). For the scan flow that populates the cache, see [./threading-model.md](./threading-model.md) and [./data-flow.md](./data-flow.md).
+For the port traits that define what the store provides see [`src/app/store.rs`](../../src/app/store.rs); for the `rusqlite` implementation see [`src/infra/store.rs`](../../src/infra/store.rs). For the serialized domain types see [./data-model.md](./data-model.md), and for the scan flow that populates the Library see [./threading-model.md](./threading-model.md).
 
-## The Library Cache (`library_cache.json`)
+## The Application Store (`riff.sqlite3`)
 
-The entire `LibraryManager` aggregate — its `tracks`, `artists`, and `albums` maps — is serialized as a single JSON object and written to one file. The cache is a full snapshot, not an incremental log; it is rewritten wholesale whenever it changes.
+One database file holds every authoritative table. The path is resolved at runtime with the `directories` crate, mirroring where the legacy files lived:
 
-### Path resolution
-
-The cache path is resolved at runtime with the `directories` crate, never hardcoded:
-
-```rust
-fn cache_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "riff")
-        .map(|d| d.data_local_dir().join("library_cache.json"))
-}
-```
-
-This maps to the platform-appropriate data directory:
-
-| Platform | Cache path |
+| Platform | Store path |
 |----------|------------|
-| Linux | `~/.local/share/riff/library_cache.json` (honors `$XDG_DATA_HOME`) |
-| macOS | `~/Library/Application Support/com.riff.riff/library_cache.json` |
-| Windows | `%LOCALAPPDATA%\riff\riff\library_cache.json` |
+| Linux | `~/.local/share/riff/riff.sqlite3` (honors `$XDG_DATA_HOME`) |
+| macOS | `~/Library/Application Support/com.riff.riff/riff.sqlite3` |
+| Windows | `%LOCALAPPDATA%\riff\riff\riff.sqlite3` |
 
-If the parent directory does not exist when saving, it is created with `create_dir_all`.
+### Schema shape
 
-### JSON format
+Natural keys throughout: track path, artist name, `(album_artist, title)` composite for albums, playlist ID string. UTC epoch-nanosecond integers for timestamps, nullable where unknown. Typed Settings tables (a single-row scalar settings table plus explicit library-path and watch-state tables). A derived Rust-lowercased `search_text` column on tracks carries exact substring-search parity. Strict foreign keys chain tracks → albums → artists inside the Library; playlist entries intentionally have no enforced link to tracks — dangling references are valid product behavior validated at read time.
 
-The file is a single JSON object with three top-level keys. An abbreviated example:
+### Connection setup
 
-```json
-{
-  "tracks": {
-    "/music/song.mp3": {
-      "id": "/music/song.mp3",
-      "file_path": "/music/song.mp3",
-      "metadata": {
-        "title": "Song Title",
-        "artist": "Artist Name",
-        "album": "Album Name",
-        "album_artist": "Artist Name",
-        "track_number": 1,
-        "disc_number": 1,
-        "genre": "Rock",
-        "year": 2024,
-        "composer": null,
-        "comment": null
-      },
-      "duration": { "secs": 240, "nanos": 0 },
-      "sample_rate": 44100,
-      "channels": 2
-    }
-  },
-  "artists": {
-    "Artist Name": { "name": "Artist Name", "albums": ["Artist Name - Album Name"] }
-  },
-  "albums": {
-    "Artist Name - Album Name": {
-      "title": "Album Name",
-      "artist": "Artist Name",
-      "tracks": ["/music/song.mp3"],
-      "year": 2024,
-      "genre": "Rock"
-    }
-  }
-}
-```
+The shared connection is configured for durability and determinism: WAL journal mode, `synchronous = NORMAL`, `foreign_keys = ON`, a ~5-second busy timeout, and case-sensitive `LIKE` so folder prefix queries match paths byte-for-byte. One mutex-guarded connection serves every store port for v1; WAL allows a future read/write split if profiling demands it.
 
-Because `TrackId` is a newtype over `String` and the album/artist keys are plain strings, the maps serialize as JSON objects keyed by those strings.
+## Save timing
 
-### When the cache is loaded
+Every logical change commits as one small durable transaction at the moment it happens — there is no whole-file rewrite, no debouncing, and no save-on-quit step:
 
-The cache is loaded once, on the first frame of the UI (`RiffApp::update` with `first_frame == true` in `src/ui/app.rs`):
+| Event | Transaction |
+|-------|-------------|
+| Finished play | One transaction bumps `play_count` and stamps `last_played` together |
+| Playlist create/rename/delete/add/remove | One immediate durable transaction per mutation |
+| Settings change (volume, toggles, paths, watch states) | One small durable transaction per change |
+| Tag edit | One transaction upserts metadata, preserves history, re-derives album year/genre |
+| Library-path removal | One transaction removes that root's tracks, orphaned parents, and the path record |
+| Scan batches | Adjacent chunk work (~10 tracks) commits per transaction, so an interrupted scan keeps everything already committed |
+| Clear Library | One transaction wipes all collection tables; playlists and settings are untouched |
 
-```rust
-state.library = LibraryManager::load_cache();
-```
+Because each event commits before it is reported done, a crash right afterward cannot lose it.
 
-`load_cache` returns an empty `LibraryManager` if the file is missing, unreadable, or contains invalid JSON. A successful load populates the library immediately, so the user sees their tracks without any scan and without any "loading" state. No scan is triggered on startup; the cache fully replaces the need for one.
+## Migrations
 
-### When the cache is saved
+Schema evolution uses ordered, checksummed migrations embedded in `src/infra/store.rs`. Each migration has a stable version number and a SHA-256 content checksum recorded in a `schema_migrations` table. On open, applied versions are verified against their embedded checksums and skipped; pending ones apply exactly once, each inside its own transaction. Editing a shipped migration (or its checksum) makes already-migrated stores fail to open with a clear error instead of silently diverging.
 
-The cache is written in exactly two situations, both from the UI layer:
+## Corruption recovery
 
-1. **Scan complete** — when `poll_library_updates` receives `LibraryUpdate::ScanComplete`, it calls `state.library.save_cache()`.
-2. **Library path removal** — when the user deletes a library path in settings, the handler removes the path's tracks (`remove_tracks_by_root`), then calls `state.library.save_cache()` so the cache no longer references them.
+Opening the store follows a deliberate sequence:
 
-`save_cache` creates the cache directory if needed, serializes the whole `LibraryManager` with `serde_json::to_string`, and writes the file with `std::fs::write`.
+1. **Probe read-only** and run `PRAGMA quick_check`. A missing file is a normal fresh start.
+2. **Healthy file**: open writable and run migrations.
+3. **Corrupt or unreadable**: rename the database plus its `-wal`/`-shm` siblings beside themselves with a Unix-nanosecond suffix (preserved for recovery tools), create a fresh database, and continue.
+4. **Recovery itself fails**: fatal startup error with a clear message — never silent data loss.
 
-### Error contract
+## Session Projections
 
-Every cache operation degrades gracefully. Failures are logged with `tracing::warn!` and never panic, never propagate to the user as an error dialog, and never disturb the in-memory library.
+The UI does not query SQLite arbitrarily while rendering. Views read through bounded **Session Projections** (`src/app/projection.rs`): small in-memory caches of store query results — visible row windows for the flat list and search, per-folder listings for the folder tree, per-kind lists for smart playlists — stamped with the value of a session-local generation counter. Every committed store mutation bumps that counter, so projections refetch on the next frame without any restart. Stale reads are possible only between a commit and the next refresh, which generation invalidation makes explicit.
 
-| Scenario | Behavior | Log |
-|----------|----------|-----|
-| Cache directory cannot be created | Save skipped; in-memory library unaffected | `Failed to create cache directory: {e}` |
-| Serialization fails | Save skipped; in-memory library unaffected | `Failed to serialize library cache: {e}` |
-| File write fails | Save skipped; in-memory library unaffected | `Failed to write library cache: {e}` |
-| Cache file does not exist | Returns empty library; no error | (none — silent) |
-| Cache file unreadable | Returns empty library | `Failed to read library cache: {e}` |
-| Cache file contains invalid JSON | Returns empty library | `Failed to deserialize library cache: {e}` |
+Startup hydrates a transitional in-memory mirror from the store through the `LibraryQueryStore` port for views not yet migrated to store queries; the mirror is never persisted itself.
 
-A missing cache (first launch) and a corrupt cache are handled identically: the app starts with an empty library, exactly like a fresh install, and the user can scan to repopulate it.
+## Clear Library
 
-## Library Path List
+The maintenance action wipes the Library collection section as one transaction: every track (with its play history), album, and artist. Playlists and Settings tables are untouched — playlist entries referencing wiped tracks survive dangling and stay listed until the files return via a rescan. See [Clear Library](../reference/glossary.md) in the glossary.
 
-The list of registered library root folders is persisted separately from the track cache, using `eframe::Storage` under the key `"library_paths"` as a JSON array of path strings:
+## Legacy JSON Files
 
-```json
-["/home/user/Music", "/mnt/external/Music"]
-```
-
-The helpers live in `src/ui/settings.rs` (`load_library_paths`, `load_library_paths_immutable`, `save_library_paths`). The list is loaded on the first frame and written whenever a path is added or removed. On load, each path's status is set to `Idle` if it exists on disk or `Unavailable` if it does not (for example, an ejected drive). This mechanism is independent of the track cache: the path list says *where* to scan, while the cache holds *what* was found.
-
-## Folder-Watch State
-
-Per-path folder-watch state is also persisted through `eframe::Storage`, as a JSON map keyed by path. The `WatchState` enum (`Disabled`, `Enabled`, `Warning(String)`) derives serde specifically for this. On startup, paths whose state was `Enabled` are re-registered with the filesystem watcher; if registration fails, the state transitions to `Warning(reason)`. See [./platform-support.md](./platform-support.md) for platform notes on watching.
+The former design persisted a non-authoritative Library Cache and Playlists as whole-file JSON snapshots rewritten on each save. Those Legacy JSON Files (`library_cache.json`, `playlists.json`) are ignored: never read, never written, never imported, never deleted. This decision is recorded in [ADR 0001](../adr/0001-sqlite-is-the-authoritative-application-store.md), which supersedes [decision 004](../product/decisions/004-library-cache-as-json.md).
 
 ## Cover Art LRU (in-memory only)
 
-Decoded cover art is cached in memory, not on disk. The UI (`src/ui/app.rs`) keeps a `cover_textures` map of egui `TextureHandle`s plus a `cover_lru_keys` vector that records recency. The cache holds at most **50** entries; when a 51st is inserted, the least-recently-used entry is evicted from both the map and the vector. Every access "touches" the key, moving it to the most-recently-used position. There is no disk cache for covers — cover bytes are re-read and re-decoded from the source file on a cache miss, which keeps the design simple and avoids persisting large binary blobs.
+Decoded cover art is cached in memory, not on disk. The UI keeps a `cover_textures` map of egui `TextureHandle`s plus a `cover_lru_keys` vector that records recency, capped at 50 entries with least-recently-used eviction. There is no disk cache for covers — cover bytes are re-read and re-decoded from the source file on a cache miss.
 
 ## Architectural Constraints
 
-- **No auto-scan on startup.** The cache is the sole persistence mechanism for track data. Scans remain user-triggered; the app never scans on launch.
-- **Single-file, atomic cache.** All three maps are written as one JSON file. There are no per-path cache files and no incremental updates, so there is no merge logic.
-- **Application-layer persistence.** The cache logic lives in `LibraryManager` (the application layer), not in infrastructure. It uses only general-purpose crates (`std::fs`, `serde_json`, `directories`) and operates on data the `LibraryManager` already owns.
-- **The cache is disposable.** Deleting `library_cache.json` loses nothing that a full re-scan cannot recover. There is no cache versioning or migration; a format mismatch simply falls back to an empty library.
-- **The cache is always authoritative.** There is no staleness detection based on file modification times. It is rewritten entirely after each scan and after each path removal.
+- **Single authority.** The Application Store is the only persisted application state. In-memory structures are caches or session state, never a second authority.
+- **Per-event durability.** One transaction per logical event; scans batch adjacent chunk work (~10 tracks).
+- **No auto-scan on startup.** Scans remain user-triggered; the app never scans on launch.
+- **Ports over drivers.** App-layer ports (`StoreMigrations`, `SettingsStore`, `PlaylistStore`, `LibraryQueryStore`, `LibraryMutationStore`) are implemented by infrastructure over the shared connection; the UI never imports `rusqlite`.
+- **Append-only migrations.** Shipped migrations are immutable; schema changes arrive as new versions.
 
 ## See also
 
-- [./data-model.md](./data-model.md) — the serialized types (`LibraryManager`, `Track`, `Album`, `Artist`, `WatchState`).
-- [./threading-model.md](./threading-model.md) — the scanner thread that produces the data the cache stores.
-- [./platform-support.md](./platform-support.md) — platform-specific cache paths and watch behavior.
+- [ADR 0001](../adr/0001-sqlite-is-the-authoritative-application-store.md) — why SQLite is the authoritative Application Store.
+- [ADR 0002](../adr/0002-ui-reads-the-store-through-session-projections.md) — the Session Projection model.
+- [ADR 0003](../adr/0003-store-query-model.md) — canonical query shapes and orderings.
+- [./data-model.md](./data-model.md) — the domain types and their on-disk encodings.
+- [./threading-model.md](./threading-model.md) — the scanner thread that feeds the store.

@@ -7,11 +7,12 @@
 
 use crate::app::errors::AppError;
 use crate::app::state::{ScalarSettings, WatchState};
-use crate::domain::{Album, Artist, Playlist, PlaylistId, Track, TrackId};
+use crate::domain::{Album, Artist, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 /// The user preferences the settings surface owns: single-row scalar values,
 /// library paths, and per-path watch states.
@@ -158,6 +159,44 @@ pub trait LibraryMutationStore {
     /// Also serves single-track metadata persistence (e.g. a tag edit): the
     /// same upsert semantics apply.
     fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, AppError>;
+
+    /// Record one completed play for `id` as ONE immediate durable
+    /// transaction: `play_count` increments and `last_played` moves to
+    /// `played_at` together or not at all, so a crash right after a finished
+    /// track cannot lose the play. Returns whether the track was known;
+    /// unknown ids change nothing.
+    fn record_track_played(
+        &mut self,
+        id: &TrackId,
+        played_at: SystemTime,
+    ) -> Result<bool, AppError>;
+
+    /// The targeted tag-edit refresh: upsert `track`'s metadata as ONE
+    /// immediate durable transaction without ever touching its play history
+    /// (`play_count`, `last_played`, `date_added`). Unlike a plain rescan,
+    /// this flow re-derives every affected album's year/genre from its
+    /// first-added remaining track and cleans up albums left empty (and
+    /// artists left with no albums) when the edit moves the track to another
+    /// album.
+    fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), AppError>;
+
+    /// Remove everything belonging to the library root `root` as ONE
+    /// immediate durable transaction: exactly that root's tracks (byte-prefix
+    /// match on the track path), albums left without tracks, artists left
+    /// without albums, and the root's own `library_paths` record. Playlist
+    /// entries referencing removed tracks survive as dangling references and
+    /// stay listed until the files return. Returns the number of tracks
+    /// removed; an unknown root removes nothing.
+    fn remove_library_path(&mut self, root: &std::path::Path) -> Result<usize, AppError>;
+
+    /// The maintenance wipe: delete the Library collection section's
+    /// contents — every track (with its play history), album, and artist —
+    /// as ONE immediate durable transaction, so a failure mid-clear cannot
+    /// leave partial deletion. Playlists and Settings tables are untouched:
+    /// playlist entries referencing wiped tracks survive dangling and stay
+    /// listed until the files return via a rescan. Returns the number of
+    /// tracks removed.
+    fn clear_library(&mut self) -> Result<usize, AppError>;
 }
 
 /// Port for reading the Library collection section of the Application Store.
@@ -194,7 +233,69 @@ pub trait LibraryQueryStore {
 
     /// Full collection snapshot for hydrating the transitional in-memory
     /// mirror that still serves views not yet migrated to store queries
-    /// (artist/album browsing, folder navigation, smart playlists land in
-    /// later tickets).
+    /// (folder navigation, smart playlists land in later tickets).
     fn load_collection(&self) -> Result<LibraryCollection, AppError>;
+
+    /// Every artist in the collection, name-ascending (byte-wise, matching
+    /// the former UI sort). Each artist's `albums` lists its composite keys
+    /// (`"album artist - title"`) in the canonical browsing order — year
+    /// descending with missing years last, then title ascending — so callers
+    /// never re-sort.
+    fn all_artists(&self) -> Result<Vec<Artist>, AppError>;
+
+    /// One artist's albums in canonical browsing order: year descending with
+    /// missing years last (treated as 0), then title ascending byte-wise.
+    /// Each album carries its track ids in album-track order (track number
+    /// ascending with missing numbers first, path tiebreak). Unknown artists
+    /// yield an empty `Vec`.
+    fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, AppError>;
+
+    /// One album's tracks in full, in canonical album-track order: track
+    /// number ascending with missing numbers first (the legacy
+    /// `unwrap_or(0)` slot), then path tiebreak. Unknown albums yield an
+    /// empty `Vec`.
+    fn album_tracks(&self, album_artist: &str, album_title: &str) -> Result<Vec<Track>, AppError>;
+
+    /// Whether any stored Track lives under `folder` (component-wise path
+    /// prefix, exactly like the former in-memory `Path::starts_with` checks:
+    /// case-sensitive, and a sibling sharing a byte-prefix — `a` vs `ab` —
+    /// never matches). Backed by escaped SQL prefix matching over stored
+    /// track paths; there is no folder table. Separators are matched
+    /// literally, so callers pass consistently separated paths — what scan
+    /// joins and `Path::join` always produce.
+    fn folder_has_audio(&self, folder: &std::path::Path) -> Result<bool, AppError>;
+
+    /// Whether any stored Track under `folder` matches the search query
+    /// (same substring semantics as [`Self::search_window`]: the query is
+    /// lowercased in Rust and matched literally against the derived
+    /// Rust-lowercased search text).
+    fn folder_has_search_match(
+        &self,
+        folder: &std::path::Path,
+        query: &str,
+    ) -> Result<bool, AppError>;
+
+    /// Every Track id under `folder`, ordered by full path exactly like the
+    /// former in-memory tree listing (component-wise `Path` order).
+    fn track_ids_in_folder_tree(&self, folder: &std::path::Path) -> Result<Vec<TrackId>, AppError>;
+
+    /// The Tracks directly inside `folder` (their parent is exactly
+    /// `folder`), ordered by track number ascending with missing numbers
+    /// first, then filename — the former in-memory direct-listing order.
+    fn tracks_in_folder(&self, folder: &std::path::Path) -> Result<Vec<Track>, AppError>;
+
+    /// The direct child directories of `folder` that contain at least one
+    /// stored Track anywhere beneath them, name-ascending (`PathBuf` order,
+    /// like the former in-memory tree walk). Derived purely from stored
+    /// track paths: a child counts as a directory when some stored track
+    /// lives deeper inside it.
+    fn subdirs_with_audio(&self, folder: &std::path::Path) -> Result<Vec<PathBuf>, AppError>;
+
+    /// Compute one read-only smart playlist as a store query, reproducing
+    /// the former in-memory semantics precisely: the same filters, ordering
+    /// tie-breaks (including display-title fallbacks), limits, and the
+    /// ninety-day Lost Gems threshold. Tracks arrive ready to render — the
+    /// former id list plus per-id resolution composed into one result.
+    fn smart_playlist(&self, kind: SmartPlaylistKind, limit: usize)
+        -> Result<Vec<Track>, AppError>;
 }

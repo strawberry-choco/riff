@@ -1,9 +1,8 @@
 use crate::domain::{RepeatMode, TrackId};
 use rand::seq::SliceRandom;
-use serde::{Deserialize, Serialize};
 
 /// Manages the playback queue and shuffle/repeat state.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct PlaybackQueue {
     pub tracks: Vec<TrackId>,
     pub current_index: Option<usize>,

@@ -60,9 +60,9 @@ cargo build --release            # release build (LTO, stripped)
 
 ## State Persistence
 
-- Library cache: serialized to `directories::ProjectDirs` data local dir under `riff/library_cache.json`. Loaded on startup. Carries a `schema_version`; incompatible versions fall back to an empty library. Includes per-track play history (`play_count`, `last_played`, `date_added`).
-- Playlists: `playlists.json` in the same data-local dir — user data, deliberately separate from the rebuildable cache.
-- Library paths: persisted via `eframe::Storage` (key `library_paths` as JSON string array).
+- Library: the authoritative indexed collection lives in the Application Store (`riff.sqlite3`, same data-local dir) — artists, albums identified by `(album artist, title)`, and tracks keyed by path, with strict foreign keys and a derived lowercased `search_text` column. Scans commit in ~10-track batches (an interrupted scan keeps committed batches). Startup hydrates a transitional in-memory mirror through the `LibraryQueryStore` port; the flat list and search box are served through bounded Session Projections invalidated by a session-local generation counter. Per-track play history (`play_count`, `last_played`, `date_added`) lives in the store's `tracks` table. The legacy `library_cache.json` is never read or written.
+- Playlists: user data in the Application Store (`riff.sqlite3`, same data-local dir) via the `PlaylistStore` port — every mutation commits as one immediate durable transaction. The legacy `playlists.json` is never read or written.
+- Library paths and watch states: persisted in the Application Store's typed settings tables (the former `eframe::Storage` path was removed).
 - TrackId: string key derived from `PathBuf::to_string_lossy()` — track identity is its full file path.
 
 ## Important Gotchas
@@ -70,7 +70,7 @@ cargo build --release            # release build (LTO, stripped)
 - **msrv**: `rust-version = "1.92"` in Cargo.toml (edition 2021). CI uses the stable toolchain.
 - **Release profile**: LTO, codegen-units=1, strip=true. `cargo build --release` takes longer but produces smaller binaries.
 - **Audio device**: Falls back to device default sample rate if the track's rate is unsupported (common on Windows WASAPI shared mode at 48 kHz).
-- **Tests live in `tests/`** — one integration crate rooted at `tests/mod.rs` (per-suite files are modules of it, not separate crates). App-layer tests drive the port traits via the shared mocks module; settings tests use a `MockStorage` for `eframe::Storage`; persistence tests use `tempfile` scratch dirs.
+- **Tests live in `tests/`** — one integration crate rooted at `tests/mod.rs` (per-suite files are modules of it, not separate crates). App-layer tests drive the port traits via the shared mocks module; store tests run against real SQLite in `tempfile` scratch dirs at the infra seam.
 - **`AppState`** is a single large struct behind `Arc<Mutex<>>` — contains library, queue, playback, theme, UI state all together. Plan lock ordering carefully to avoid deadlocks (current code only uses one Mutex for AppState, no nested locking).
 - **Cover art LRU**: Max 50 cached textures in `cover_textures` HashMap with manual LRU eviction in `cover_lru_keys` Vec.
 - **No DI framework** — manual constructor injection in `main.rs` only.
@@ -79,3 +79,50 @@ cargo build --release            # release build (LTO, stripped)
 ## Config Files
 
 `clippy.toml` configures Clippy (msrv, tool-level options). Lint levels are set in `Cargo.toml` under `[lints.clippy]` (pedantic with selected allowances). CI config is `.github/workflows/ci.yml`; no `rustfmt.toml` (defaults apply). Architecture rules live in `docs/technical/architecture.md`. Feature requirements live in `docs/product/requirements.md`, statuses in `docs/product/features.md`, per-surface specs in `docs/product/specs/`. The full documentation index is in `docs/README.md`.
+
+<!-- code-review-graph MCP tools -->
+## MCP Tools: code-review-graph
+
+**This project has a knowledge graph. Start with the code-review-graph
+MCP tools to narrow scope, then read the source.** The graph is cheaper than scanning files and
+gives you structural context (callers, dependents, test coverage) that file search cannot.
+
+### When to use graph tools FIRST
+
+- **Exploring code**: `semantic_search_nodes_tool` or `query_graph_tool` instead of Grep
+- **Understanding impact**: `get_impact_radius_tool` instead of manually tracing imports
+- **Code review**: `detect_changes_tool` + `get_review_context_tool` instead of reading entire files
+- **Finding relationships**: `query_graph_tool` with callers_of/callees_of/imports_of/tests_for
+- **Architecture questions**: `get_architecture_overview_tool` + `list_communities_tool`
+
+### Verify in the source
+
+- Narrow scope with the graph, then read the source. Do not change code from graph output alone.
+- For any non-trivial change, read the implementation and the relevant tests before concluding.
+- Verify the exact source when touching behavior, database logic, migrations, retries, fallbacks,
+  recovery, or compatibility code.
+- When the graph and the source disagree, the source wins. The graph may be stale or may not
+  model that relationship.
+- An empty graph result can mean "not indexed" or "not statically visible", not "does not exist".
+
+### Key Tools
+
+| Tool | Use when |
+| ------ | ---------- |
+| `detect_changes_tool` | Reviewing code changes — gives risk-scored analysis |
+| `get_review_context_tool` | Need source snippets for review — token-efficient |
+| `get_impact_radius_tool` | Understanding blast radius of a change |
+| `get_affected_flows_tool` | Finding which execution paths are impacted |
+| `query_graph_tool` | Tracing callers, callees, imports, tests, dependencies |
+| `semantic_search_nodes_tool` | Finding functions/classes by name or keyword |
+| `get_architecture_overview_tool` | Understanding high-level codebase structure |
+| `refactor_tool` | Planning renames, finding dead code |
+
+### Workflow
+
+1. The graph auto-updates on file changes (via hooks).
+2. Use `detect_changes_tool` for code review.
+3. Use `get_affected_flows_tool` to understand impact.
+4. Use `query_graph_tool` pattern="tests_for" to check coverage.
+<!-- /code-review-graph MCP tools -->
+>>>>>>> b8b0d6a (use sqlite)

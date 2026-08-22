@@ -1636,4 +1636,383 @@ mod tests {
             "only the missing window is fetched when fresh"
         );
     }
+
+    // --- Browsing Projection: artist/album views over store queries ---------
+
+    use riff::app::projection::BrowsingProjection;
+
+    /// Counting fake loaders standing in for the three browsing queries:
+    /// each level records its calls and returns deterministic canned data.
+    struct FakeBrowsingStore {
+        artists_loaded: usize,
+        albums_loaded_for: Vec<String>,
+        tracks_loaded_for: Vec<(String, String)>,
+    }
+
+    impl FakeBrowsingStore {
+        fn new() -> Self {
+            Self {
+                artists_loaded: 0,
+                albums_loaded_for: Vec::new(),
+                tracks_loaded_for: Vec::new(),
+            }
+        }
+
+        // The `Result` returns mirror the port signatures: these fakes are
+        // only ever invoked inside loader closures handed to the projection.
+        #[allow(clippy::unnecessary_wraps)]
+        fn artists(&mut self) -> Result<Vec<Artist>, AppError> {
+            self.artists_loaded += 1;
+            Ok(vec![Artist {
+                name: "Alpha".to_string(),
+                albums: vec!["Alpha - One".to_string()],
+            }])
+        }
+
+        #[allow(clippy::unnecessary_wraps)]
+        fn artist_albums(&mut self, artist: &str) -> Result<Vec<Album>, AppError> {
+            self.albums_loaded_for.push(artist.to_string());
+            Ok(vec![Album {
+                title: "One".to_string(),
+                artist: artist.to_string(),
+                tracks: vec![TrackId("f:\\a\\1.mp3".to_string())],
+                year: Some(1999),
+                genre: None,
+            }])
+        }
+
+        #[allow(clippy::unnecessary_wraps)]
+        fn album_tracks(&mut self, artist: &str, title: &str) -> Result<Vec<Track>, AppError> {
+            self.tracks_loaded_for
+                .push((artist.to_string(), title.to_string()));
+            Ok(vec![crate::test_utils::create_test_track_with_metadata(
+                "f:\\a\\1.mp3",
+                "f:\\a\\1.mp3",
+                artist,
+                "One",
+                title,
+            )])
+        }
+    }
+
+    #[test]
+    fn test_browsing_projection_fetches_each_level_once_per_generation() {
+        let mut projection = BrowsingProjection::new();
+        let mut store = FakeBrowsingStore::new();
+
+        // Every level queried twice at the same generation serves the cache.
+        let _ = projection
+            .artists(1, &mut || store.artists())
+            .expect("artists load");
+        let _ = projection
+            .artists(1, &mut || store.artists())
+            .expect("artists cached");
+        let _ = projection
+            .artist_albums(1, "Alpha", &mut |a| store.artist_albums(a))
+            .expect("albums load");
+        let _ = projection
+            .artist_albums(1, "Alpha", &mut |a| store.artist_albums(a))
+            .expect("albums cached");
+        let _ = projection
+            .album_tracks(1, "Alpha", "One", &mut |a, t| store.album_tracks(a, t))
+            .expect("tracks load");
+        let _ = projection
+            .album_tracks(1, "Alpha", "One", &mut |a, t| store.album_tracks(a, t))
+            .expect("tracks cached");
+
+        assert_eq!(store.artists_loaded, 1, "artists fetch once per generation");
+        assert_eq!(
+            store.albums_loaded_for,
+            vec!["Alpha".to_string()],
+            "one artist's albums fetch once per generation"
+        );
+        assert_eq!(
+            store.tracks_loaded_for,
+            vec![("Alpha".to_string(), "One".to_string())],
+            "one album's tracks fetch once per generation"
+        );
+    }
+
+    #[test]
+    fn test_browsing_projection_invalidates_everything_on_generation_bump() {
+        let mut projection = BrowsingProjection::new();
+        let mut store = FakeBrowsingStore::new();
+        let _ = projection.artists(1, &mut || store.artists()).unwrap();
+        let _ = projection
+            .artist_albums(1, "Alpha", &mut |a| store.artist_albums(a))
+            .unwrap();
+        let _ = projection
+            .album_tracks(1, "Alpha", "One", &mut |a, t| store.album_tracks(a, t))
+            .unwrap();
+
+        // A committed mutation bumps the generation; every level refetches.
+        let artists = projection
+            .artists(2, &mut || store.artists())
+            .expect("artists reload");
+        let albums = projection
+            .artist_albums(2, "Alpha", &mut |a| store.artist_albums(a))
+            .expect("albums reload");
+        let tracks = projection
+            .album_tracks(2, "Alpha", "One", &mut |a, t| store.album_tracks(a, t))
+            .expect("tracks reload");
+
+        assert_eq!(store.artists_loaded, 2);
+        assert_eq!(store.albums_loaded_for.len(), 2);
+        assert_eq!(store.tracks_loaded_for.len(), 2);
+        assert_eq!(artists[0].name, "Alpha");
+        assert_eq!(albums[0].title, "One");
+        assert_eq!(tracks[0].id.0, "f:\\a\\1.mp3");
+    }
+
+    #[test]
+    fn test_browsing_projection_error_keeps_stale_data_and_retries() {
+        let mut projection = BrowsingProjection::new();
+        let mut store = FakeBrowsingStore::new();
+        let first = projection
+            .artists(1, &mut || store.artists())
+            .expect("first load");
+
+        // The next load fails; the error propagates and the stale rows stay.
+        let err = projection.artists(2, &mut || {
+            Err(AppError::InvalidOperation("boom".to_string()))
+        });
+        assert!(err.is_err(), "loader errors propagate");
+        let stale = projection
+            .artists(2, &mut || store.artists())
+            .expect("retry loads");
+        assert_eq!(
+            stale.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
+            first.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
+            "the retry re-fetches and matches the prior shape"
+        );
+        assert_eq!(store.artists_loaded, 2, "the failed attempt fetched once");
+    }
+
+    // --- Folder Projection: folder-tree views over store queries ------------
+
+    use riff::app::projection::FolderProjection;
+
+    /// Counting fake loaders standing in for the five folder queries: each
+    /// level records its calls and returns deterministic canned data.
+    struct FakeFolderStore {
+        has_audio_probes: Vec<String>,
+        search_probes: Vec<(String, String)>,
+        tree_listings: Vec<String>,
+        direct_listings: Vec<String>,
+        children_listings: Vec<String>,
+    }
+
+    impl FakeFolderStore {
+        fn new() -> Self {
+            Self {
+                has_audio_probes: Vec::new(),
+                search_probes: Vec::new(),
+                tree_listings: Vec::new(),
+                direct_listings: Vec::new(),
+                children_listings: Vec::new(),
+            }
+        }
+
+        #[allow(clippy::unnecessary_wraps)]
+        fn has_audio(&mut self, folder: &std::path::Path) -> Result<bool, AppError> {
+            self.has_audio_probes
+                .push(folder.to_string_lossy().into_owned());
+            Ok(true)
+        }
+
+        #[allow(clippy::unnecessary_wraps)]
+        fn has_search_match(
+            &mut self,
+            folder: &std::path::Path,
+            query: &str,
+        ) -> Result<bool, AppError> {
+            self.search_probes
+                .push((folder.to_string_lossy().into_owned(), query.to_string()));
+            Ok(true)
+        }
+
+        #[allow(clippy::unnecessary_wraps)]
+        fn tree_ids(&mut self, folder: &std::path::Path) -> Result<Vec<TrackId>, AppError> {
+            self.tree_listings
+                .push(folder.to_string_lossy().into_owned());
+            Ok(vec![TrackId("f:\\lib\\a\\1.mp3".to_string())])
+        }
+
+        #[allow(clippy::unnecessary_wraps)]
+        fn direct_tracks(&mut self, folder: &std::path::Path) -> Result<Vec<Track>, AppError> {
+            self.direct_listings
+                .push(folder.to_string_lossy().into_owned());
+            Ok(vec![crate::test_utils::create_test_track(
+                "f:\\lib\\1.mp3",
+                "f:\\lib\\1.mp3",
+            )])
+        }
+
+        #[allow(clippy::unnecessary_wraps)]
+        fn children(&mut self, folder: &std::path::Path) -> Result<Vec<PathBuf>, AppError> {
+            self.children_listings
+                .push(folder.to_string_lossy().into_owned());
+            Ok(vec![folder.join("child")])
+        }
+    }
+
+    #[test]
+    fn test_folder_projection_fetches_each_level_once_per_generation() {
+        let mut projection = FolderProjection::new();
+        let mut store = FakeFolderStore::new();
+        let folder = std::path::Path::new("f:\\lib");
+
+        for _ in 0..2 {
+            let _ = projection
+                .has_audio(1, folder, &mut |f| store.has_audio(f))
+                .expect("has_audio");
+            let _ = projection
+                .has_search_match(1, folder, "q", &mut |f, q| store.has_search_match(f, q))
+                .expect("search match");
+            let _ = projection
+                .subtree_ids(1, folder, &mut |f| store.tree_ids(f))
+                .expect("tree ids");
+            let _ = projection
+                .direct_tracks(1, folder, &mut |f| store.direct_tracks(f))
+                .expect("direct tracks");
+            let _ = projection
+                .children(1, folder, &mut |f| store.children(f))
+                .expect("children");
+        }
+
+        assert_eq!(store.has_audio_probes.len(), 1);
+        assert_eq!(store.search_probes.len(), 1);
+        assert_eq!(store.tree_listings.len(), 1);
+        assert_eq!(store.direct_listings.len(), 1);
+        assert_eq!(store.children_listings.len(), 1);
+    }
+
+    #[test]
+    fn test_folder_projection_invalidates_everything_on_generation_bump() {
+        let mut projection = FolderProjection::new();
+        let mut store = FakeFolderStore::new();
+        let folder = std::path::Path::new("f:\\lib");
+        let _ = projection
+            .has_audio(1, folder, &mut |f| store.has_audio(f))
+            .unwrap();
+
+        // A committed mutation bumps the generation; every level refetches.
+        let fresh = projection
+            .has_audio(2, folder, &mut |f| store.has_audio(f))
+            .expect("reload");
+        assert!(fresh);
+        assert_eq!(store.has_audio_probes.len(), 2);
+
+        let ids = projection
+            .subtree_ids(2, folder, &mut |f| store.tree_ids(f))
+            .expect("tree reload");
+        assert_eq!(ids.len(), 1);
+        assert_eq!(store.tree_listings.len(), 1, "bump dropped the gen-1 cache");
+    }
+
+    // --- Smart Playlists Projection: read-only lists over store queries -----
+
+    use riff::app::projection::SmartPlaylistsProjection;
+    use riff::domain::SmartPlaylistKind;
+
+    /// Counting fake loader standing in for the smart-playlist query.
+    struct FakeSmartStore {
+        calls: Vec<(SmartPlaylistKind, usize)>,
+    }
+
+    impl FakeSmartStore {
+        fn new() -> Self {
+            Self { calls: Vec::new() }
+        }
+
+        #[allow(clippy::unnecessary_wraps)]
+        fn fetch(&mut self, kind: SmartPlaylistKind, limit: usize) -> Result<Vec<Track>, AppError> {
+            self.calls.push((kind, limit));
+            Ok(vec![crate::test_utils::create_test_track(
+                "f:\\sm\\1.mp3",
+                "f:\\sm\\1.mp3",
+            )])
+        }
+    }
+
+    #[test]
+    fn test_smart_projection_serves_cache_within_generation() {
+        let mut projection = SmartPlaylistsProjection::new();
+        let mut store = FakeSmartStore::new();
+
+        for _ in 0..2 {
+            let tracks = projection
+                .list(1, SmartPlaylistKind::MostPlayed, 50, &mut |k, l| {
+                    store.fetch(k, l)
+                })
+                .expect("most played loads");
+            assert_eq!(tracks.len(), 1);
+        }
+        assert_eq!(
+            store.calls.len(),
+            1,
+            "a fresh generation serves cached rows without refetching"
+        );
+
+        // A different kind is an independent cache slot.
+        let _ = projection
+            .list(1, SmartPlaylistKind::LostGems, usize::MAX, &mut |k, l| {
+                store.fetch(k, l)
+            })
+            .expect("lost gems loads");
+        assert_eq!(store.calls.len(), 2);
+    }
+
+    #[test]
+    fn test_smart_projection_refetches_after_generation_bump_and_limit_change() {
+        let mut projection = SmartPlaylistsProjection::new();
+        let mut store = FakeSmartStore::new();
+        let _ = projection
+            .list(1, SmartPlaylistKind::MostPlayed, 50, &mut |k, l| {
+                store.fetch(k, l)
+            })
+            .unwrap();
+
+        // A committed mutation bumps the generation: refetch.
+        let _ = projection
+            .list(2, SmartPlaylistKind::MostPlayed, 50, &mut |k, l| {
+                store.fetch(k, l)
+            })
+            .unwrap();
+
+        // A larger limit than the cache holds also refetches even when fresh.
+        let _ = projection
+            .list(2, SmartPlaylistKind::MostPlayed, 100, &mut |k, l| {
+                store.fetch(k, l)
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.calls,
+            vec![
+                (SmartPlaylistKind::MostPlayed, 50),
+                (SmartPlaylistKind::MostPlayed, 50),
+                (SmartPlaylistKind::MostPlayed, 100),
+            ],
+            "bumps and limit growth refetch; equal limits do not"
+        );
+    }
+
+    #[test]
+    fn test_smart_projection_error_propagates_and_retries() {
+        let mut projection = SmartPlaylistsProjection::new();
+        let mut store = FakeSmartStore::new();
+        let err = projection.list(1, SmartPlaylistKind::LostGems, 10, &mut |_, _| {
+            Err(AppError::InvalidOperation("boom".to_string()))
+        });
+        assert!(err.is_err(), "loader errors propagate");
+
+        let tracks = projection
+            .list(1, SmartPlaylistKind::LostGems, 10, &mut |k, l| {
+                store.fetch(k, l)
+            })
+            .expect("retry loads");
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(store.calls.len(), 1, "the failed attempt fetched nothing");
+    }
 }

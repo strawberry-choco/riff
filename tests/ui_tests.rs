@@ -6,79 +6,404 @@ use super::*;
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_load_save_library_paths() {
-        // Create a mock storage
-        let mut storage = MockStorage::new();
+    // --- Settings persist through the Application Store port -------------------
+    //
+    // The settings surface saves each preference change straight to the
+    // Application Store and hydrates from it on startup. These replacements
+    // for the former eframe-storage tests drive the same port object type the
+    // UI holds (`Box<dyn SettingsStore>`) over a real SQLite database,
+    // dropping and reopening it to simulate a restart.
 
-        // Test saving and loading library paths
+    use riff::app::store::{LibraryMutationStore, LibraryQueryStore, PlaylistStore, SettingsStore};
+    use std::path::PathBuf;
+
+    /// Open a real store-backed settings port at a fresh temp location,
+    /// exactly as the UI receives it: a boxed `SettingsStore`.
+    fn boxed_store(dir: &tempfile::TempDir) -> Box<dyn SettingsStore> {
+        let db_path = dir.path().join("riff.sqlite3");
+        Box::new(
+            riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+                .expect("opening a fresh store must work"),
+        )
+    }
+
+    /// Open a real store-backed playlists port at a fresh temp location,
+    /// exactly as the UI receives it: a boxed `PlaylistStore`.
+    fn boxed_playlist_store(dir: &tempfile::TempDir) -> Box<dyn PlaylistStore> {
+        let db_path = dir.path().join("riff.sqlite3");
+        Box::new(
+            riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+                .expect("opening a fresh store must work"),
+        )
+    }
+
+    /// Open a real store-backed library query port at a fresh temp location,
+    /// exactly as the UI receives it: a boxed `LibraryQueryStore`.
+    fn boxed_library_query_store(dir: &tempfile::TempDir) -> Box<dyn LibraryQueryStore> {
+        let db_path = dir.path().join("riff.sqlite3");
+        Box::new(
+            riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+                .expect("opening a fresh store must work"),
+        )
+    }
+
+    // --- Playlists persist through the Application Store port ------------------
+    //
+    // The playlists surface commits every mutation straight to the
+    // Application Store and hydrates from it on startup. This test drives the
+    // same port object type the UI holds (`Box<dyn PlaylistStore>`) over a
+    // real SQLite database, dropping and reopening it to simulate a restart.
+
+    #[test]
+    fn test_playlist_mutations_roundtrip_through_the_store_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Fresh store: no playlists.
+        assert!(boxed_playlist_store(&dir)
+            .load_playlists()
+            .unwrap()
+            .is_empty());
+
+        // Create + edit, then drop the connection (the "restart").
+        let pid;
+        {
+            let mut store = boxed_playlist_store(&dir);
+            pid = store.create_playlist("Gym", &[]).unwrap();
+            assert!(store
+                .add_playlist_entry(&pid, &TrackId("hype.mp3".to_string()))
+                .unwrap());
+            assert!(store.rename_playlist(&pid, "Workout").unwrap());
+        }
+
+        // Reopen: name, entries, and order all survived.
+        let reopened = boxed_playlist_store(&dir);
+        let playlists = reopened.load_playlists().unwrap();
+        assert_eq!(playlists.len(), 1);
+        assert_eq!(playlists[0].id, pid);
+        assert_eq!(playlists[0].name, "Workout");
+        assert_eq!(playlists[0].tracks, vec![TrackId("hype.mp3".to_string())]);
+
+        // Delete commits instantly too.
+        {
+            let mut store = boxed_playlist_store(&dir);
+            assert!(store.delete_playlist(&pid).unwrap());
+        }
+        assert!(boxed_playlist_store(&dir)
+            .load_playlists()
+            .unwrap()
+            .is_empty());
+    }
+
+    // --- Library collection cutover (ticket 05) --------------------------------
+    //
+    // The library hydrates from the Application Store through the
+    // `LibraryQueryStore` port on startup; the legacy JSON cache is never
+    // read or written and stays untouched on disk.
+
+    /// Seed a compilation album into the store at `dir`: one album credited
+    /// to "Various Artists" with two track-level artists.
+    fn seed_compilation(dir: &tempfile::TempDir) {
+        let mut store =
+            riff::infra::store::SqliteStore::open_and_migrate(&dir.path().join("riff.sqlite3"))
+                .expect("opening the store must work");
+        let make_track = |path: &str, artist: &str| Track {
+            id: TrackId(path.to_string()),
+            file_path: PathBuf::from(path),
+            metadata: crate::domain::TrackMetadata {
+                title: Some("Song".to_string()),
+                artist: Some(artist.to_string()),
+                album: Some("Comp".to_string()),
+                album_artist: Some("Various Artists".to_string()),
+                ..crate::domain::TrackMetadata::default()
+            },
+            duration: None,
+            sample_rate: None,
+            channels: None,
+            play_count: 0,
+            last_played: None,
+            date_added: None,
+        };
+        store
+            .apply_scan_batch(&[
+                make_track("m:\\comp\\01.mp3", "Artist A"),
+                make_track("m:\\comp\\02.mp3", "Artist B"),
+            ])
+            .expect("seeding the collection must work");
+    }
+
+    #[test]
+    fn test_startup_hydrates_the_mirror_from_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_compilation(&dir);
+
+        let mut state = AppState::new();
+        riff::ui::app::load_persisted_state(
+            &mut state,
+            boxed_store(&dir).as_ref(),
+            boxed_playlist_store(&dir).as_ref(),
+            boxed_library_query_store(&dir).as_ref(),
+            None,
+        );
+
+        assert_eq!(
+            state.library.all_tracks().len(),
+            2,
+            "both seeded tracks hydrate into the mirror"
+        );
+        assert!(
+            state.library.artists.contains_key("Various Artists"),
+            "the album-artist grouping hydrates"
+        );
+        assert!(
+            state.library.albums.contains_key("Various Artists - Comp"),
+            "the album hydrates under its composite key"
+        );
+    }
+
+    #[test]
+    fn test_legacy_json_cache_is_never_read_or_written() {
+        let dir = tempfile::tempdir().unwrap();
+        // A corrupt legacy cache sits next to the store; hydration must
+        // ignore it entirely and come from the store instead.
+        let legacy_path = dir.path().join("library_cache.json");
+        std::fs::write(&legacy_path, "{{{ corrupt legacy json").unwrap();
+        let legacy_bytes_before = std::fs::read(&legacy_path).unwrap();
+
+        seed_compilation(&dir);
+
+        let mut state = AppState::new();
+        riff::ui::app::load_persisted_state(
+            &mut state,
+            boxed_store(&dir).as_ref(),
+            boxed_playlist_store(&dir).as_ref(),
+            boxed_library_query_store(&dir).as_ref(),
+            None,
+        );
+
+        assert_eq!(
+            state.library.all_tracks().len(),
+            2,
+            "hydration comes from the store despite the corrupt legacy file"
+        );
+        assert_eq!(
+            std::fs::read(&legacy_path).unwrap(),
+            legacy_bytes_before,
+            "the legacy JSON file remains byte-for-byte untouched"
+        );
+    }
+
+    #[test]
+    fn test_volume_roundtrips_through_the_store_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Fresh store: volume unset.
+        assert_eq!(
+            boxed_store(&dir).load_settings().unwrap().scalars.volume,
+            None
+        );
+
+        // Change the volume, then drop the connection (the "restart").
+        {
+            let mut store = boxed_store(&dir);
+            store
+                .save_scalars(&riff::app::state::ScalarSettings {
+                    volume: Some(0.75),
+                    ..Default::default()
+                })
+                .expect("saving scalars must work");
+        }
+
+        // Reopen: the value survived in its typed column.
+        assert_eq!(
+            boxed_store(&dir).load_settings().unwrap().scalars.volume,
+            Some(0.75)
+        );
+    }
+
+    #[test]
+    fn test_advanced_mode_roundtrips_and_defaults_to_off() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Fresh store: advanced mode off.
+        assert!(
+            !boxed_store(&dir)
+                .load_settings()
+                .unwrap()
+                .scalars
+                .advanced_mode
+        );
+
+        // Turning it on survives a restart...
+        {
+            let mut store = boxed_store(&dir);
+            store
+                .save_scalars(&riff::app::state::ScalarSettings {
+                    advanced_mode: true,
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        assert!(
+            boxed_store(&dir)
+                .load_settings()
+                .unwrap()
+                .scalars
+                .advanced_mode
+        );
+
+        // ...and turning it back off does too.
+        {
+            let mut store = boxed_store(&dir);
+            store
+                .save_scalars(&riff::app::state::ScalarSettings {
+                    advanced_mode: false,
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        assert!(
+            !boxed_store(&dir)
+                .load_settings()
+                .unwrap()
+                .scalars
+                .advanced_mode
+        );
+    }
+
+    #[test]
+    fn test_high_contrast_roundtrips_and_defaults_to_off() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Fresh store: high contrast off.
+        assert!(
+            !boxed_store(&dir)
+                .load_settings()
+                .unwrap()
+                .scalars
+                .high_contrast
+        );
+
+        // Turning it on survives a restart...
+        {
+            let mut store = boxed_store(&dir);
+            store
+                .save_scalars(&riff::app::state::ScalarSettings {
+                    high_contrast: true,
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        assert!(
+            boxed_store(&dir)
+                .load_settings()
+                .unwrap()
+                .scalars
+                .high_contrast
+        );
+
+        // ...and turning it back off does too.
+        {
+            let mut store = boxed_store(&dir);
+            store
+                .save_scalars(&riff::app::state::ScalarSettings {
+                    high_contrast: false,
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        assert!(
+            !boxed_store(&dir)
+                .load_settings()
+                .unwrap()
+                .scalars
+                .high_contrast
+        );
+    }
+
+    #[test]
+    fn test_replaygain_roundtrips_and_defaults_to_off() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Fresh store: ReplayGain off.
+        assert!(
+            !boxed_store(&dir)
+                .load_settings()
+                .unwrap()
+                .scalars
+                .replaygain_enabled
+        );
+
+        // Turning it on survives a restart...
+        {
+            let mut store = boxed_store(&dir);
+            store
+                .save_scalars(&riff::app::state::ScalarSettings {
+                    replaygain_enabled: true,
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        assert!(
+            boxed_store(&dir)
+                .load_settings()
+                .unwrap()
+                .scalars
+                .replaygain_enabled
+        );
+
+        // ...and turning it back off does too.
+        {
+            let mut store = boxed_store(&dir);
+            store
+                .save_scalars(&riff::app::state::ScalarSettings {
+                    replaygain_enabled: false,
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        assert!(
+            !boxed_store(&dir)
+                .load_settings()
+                .unwrap()
+                .scalars
+                .replaygain_enabled
+        );
+    }
+
+    #[test]
+    fn test_library_paths_roundtrip_through_the_store_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
         let paths = vec![
             std::path::PathBuf::from("path1"),
             std::path::PathBuf::from("path2"),
         ];
 
-        save_library_paths(&mut storage, &paths);
-        let loaded_paths = load_library_paths(Some(&mut storage));
+        // Register the paths, then drop the connection (the "restart").
+        {
+            let mut store = boxed_store(&dir);
+            store.save_library_paths(&paths).unwrap();
+        }
 
-        assert_eq!(loaded_paths, paths);
+        // Reopen: the list survived in registration order.
+        let reloaded = boxed_store(&dir).load_settings().unwrap();
+        assert_eq!(reloaded.library_paths, paths);
     }
 
     #[test]
-    fn test_load_save_volume() {
-        let mut storage = MockStorage::new();
+    fn test_watch_states_roundtrip_through_the_store_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut states = std::collections::HashMap::new();
+        states.insert(std::path::PathBuf::from("path1"), WatchState::Enabled);
 
-        // Test saving and loading volume
-        let volume = 0.75;
-        save_volume(&mut storage, volume);
-        let loaded_volume = load_volume(Some(&mut storage));
+        // Persist the watch state, then drop the connection (the "restart").
+        {
+            let mut store = boxed_store(&dir);
+            store.save_watch_states(&states).unwrap();
+        }
 
-        assert_eq!(loaded_volume, Some(volume));
-    }
-
-    #[test]
-    fn test_load_save_advanced_mode_roundtrip() {
-        let mut storage = MockStorage::new();
-
-        // true round-trips
-        save_advanced_mode(&mut storage, true);
-        assert!(load_advanced_mode(Some(&mut storage)));
-
-        // false round-trips
-        save_advanced_mode(&mut storage, false);
-        assert!(!load_advanced_mode(Some(&mut storage)));
-    }
-
-    #[test]
-    fn test_load_advanced_mode_defaults_to_false_when_absent() {
-        // Empty storage: nothing stored under either key => default off.
-        let mut storage = MockStorage::new();
-        assert!(!load_advanced_mode(Some(&mut storage)));
-
-        // No storage at all => default off.
-        assert!(!load_advanced_mode(None));
-    }
-
-    #[test]
-    fn test_load_save_high_contrast_roundtrip() {
-        let mut storage = MockStorage::new();
-
-        // true round-trips
-        save_high_contrast(&mut storage, true);
-        assert!(load_high_contrast(Some(&mut storage)));
-
-        // false round-trips
-        save_high_contrast(&mut storage, false);
-        assert!(!load_high_contrast(Some(&mut storage)));
-    }
-
-    #[test]
-    fn test_load_high_contrast_defaults_to_false_when_absent() {
-        // Empty storage: nothing stored under either key => default off.
-        let mut storage = MockStorage::new();
-        assert!(!load_high_contrast(Some(&mut storage)));
-
-        // No storage at all => default off.
-        assert!(!load_high_contrast(None));
+        // Reopen: the state survived.
+        let reloaded = boxed_store(&dir).load_settings().unwrap();
+        assert_eq!(reloaded.watch_states, states);
     }
 
     #[test]
@@ -95,29 +420,6 @@ mod tests {
         // The focused widget (rendered with the `active` widget visuals) also
         // carries a visible border.
         assert!(visuals.widgets.active.bg_stroke.width > 1.0);
-    }
-
-    #[test]
-    fn test_load_save_replaygain_roundtrip() {
-        let mut storage = MockStorage::new();
-
-        // true round-trips
-        save_replaygain(&mut storage, true);
-        assert!(load_replaygain(Some(&mut storage)));
-
-        // false round-trips
-        save_replaygain(&mut storage, false);
-        assert!(!load_replaygain(Some(&mut storage)));
-    }
-
-    #[test]
-    fn test_load_replaygain_defaults_to_false_when_absent() {
-        // Empty storage: nothing stored under either key => default off.
-        let mut storage = MockStorage::new();
-        assert!(!load_replaygain(Some(&mut storage)));
-
-        // No storage at all => default off.
-        assert!(!load_replaygain(None));
     }
 
     // --- Pure UI helpers (seek clamp, duration formatting) -------------------
@@ -166,50 +468,6 @@ mod tests {
         assert_eq!(
             format_duration(std::time::Duration::from_secs(3723)),
             "62:03"
-        );
-    }
-
-    #[test]
-    fn test_load_save_watch_states() {
-        let mut storage = MockStorage::new();
-
-        // Test saving and loading watch states
-        let mut states = std::collections::HashMap::new();
-        states.insert(std::path::PathBuf::from("path1"), WatchState::Enabled);
-
-        save_watch_states(&mut storage, &states);
-        let loaded_states = load_watch_states(Some(&mut storage));
-
-        assert_eq!(loaded_states, states);
-    }
-
-    #[test]
-    fn test_restore_from_backup_if_corrupted() {
-        let mut storage = MockStorage::new();
-
-        // Set up corrupted primary storage
-        storage
-            .data
-            .insert("library_paths".to_string(), "invalid json".to_string());
-
-        // Set up valid backup storage
-        let valid_paths =
-            serde_json::to_string(&vec!["path1".to_string(), "path2".to_string()]).unwrap();
-        storage
-            .data
-            .insert("library_paths_backup".to_string(), valid_paths);
-
-        // Restore from backup
-        restore_from_backup_if_corrupted(&mut storage);
-
-        // Verify the primary storage was restored
-        let restored_paths = load_library_paths(Some(&mut storage));
-        assert_eq!(
-            restored_paths,
-            vec![
-                std::path::PathBuf::from("path1"),
-                std::path::PathBuf::from("path2"),
-            ]
         );
     }
 
@@ -430,37 +688,5 @@ mod tests {
         let evicted = lru_insert(&mut keys, "d".to_string(), 2);
         assert_eq!(evicted, vec!["b".to_string()]);
         assert_eq!(keys, vec!["c".to_string(), "d".to_string()]);
-    }
-
-    // Mock storage for testing.
-    //
-    // The current `eframe::Storage` trait (egui/eframe 0.34) has exactly three
-    // required methods: `get_string`, `set_string` (taking an owned `String`)
-    // and `flush`. The older `get_bool`/`set_bool`/`remove` methods no longer
-    // exist on the trait.
-    struct MockStorage {
-        data: std::collections::HashMap<String, String>,
-    }
-
-    impl MockStorage {
-        fn new() -> Self {
-            Self {
-                data: std::collections::HashMap::new(),
-            }
-        }
-    }
-
-    impl eframe::Storage for MockStorage {
-        fn get_string(&self, key: &str) -> Option<String> {
-            self.data.get(key).cloned()
-        }
-
-        fn set_string(&mut self, key: &str, value: String) {
-            self.data.insert(key.to_string(), value);
-        }
-
-        fn flush(&mut self) {
-            // In-memory storage: nothing to persist.
-        }
     }
 }

@@ -28,8 +28,8 @@ At v0.1.0 this document recommended seven improvements, sequenced infrastructure
 |---|---|---|
 | Continuous integration pipeline | P1 | GitHub Actions on ubuntu-latest + windows-latest: fmt, clippy, tests |
 | Expand test coverage | P1 | ~165 integration tests across domain, app, infra, ui, integration |
-| Cache schema versioning | P2 | `schema_version` in library_cache.json, safe fallback with notice |
-| A "Clear cache" control in settings | P2 | "Clear Library Cache" action with confirmation in Settings |
+| Robust persistence | P2 | Delivered as the Application Store: ordered checksummed migrations plus automatic corruption recovery (see ADR 0001) |
+| A maintenance wipe control in settings | P2 | "Clear Library" action with confirmation; wipes collection data, preserves playlists and settings |
 | Gapless playback | P2 | Pre-decode 2s before EOF, up to 4s pre-buffer, seamless handoff |
 | Playlist management | P2 | Custom playlists plus smart/discovery playlists |
 | ReplayGain normalization | P2 | Tag-based track gain/peak, peak-capped, opt-in |
@@ -38,13 +38,13 @@ At v0.1.0 this document recommended seven improvements, sequenced infrastructure
 
 **Expand test coverage.** Delivered. The suite grew from roughly twenty-five tests to about 165, organized as a single integration-test crate spanning domain, app, infra, UI, and integration suites with shared mocks and helpers. App-layer logic is exercised through the port traits via mock implementations, and filesystem-touching tests lean on the tempfile dev-dependency, exactly as suggested.
 
-**Cache schema versioning.** Delivered. The library cache now carries a schema version. A version mismatch or a corrupt file falls back to an empty library with a warning log and a user-visible notice — the deliberate, explainable behavior this recommendation asked for, rather than a silent reset.
+**Robust persistence.** Delivered, and then some. The JSON cache this recommendation targeted has been replaced outright by the Application Store (`riff.sqlite3`): ordered checksummed migrations guard schema evolution, a corrupt store is detected at startup and set aside automatically while a fresh one takes over, and every logical change commits as one durable transaction.
 
-**A "Clear cache" control in settings.** Delivered. Settings has a "Clear Library Cache" action behind a UI confirmation. It deletes the cache file, which rebuilds on the next scan, giving the stale-library case a discoverable remedy.
+**A maintenance wipe control in settings.** Delivered as **Clear Library**. Settings has a Clear Library action behind a UI confirmation. One transaction wipes the indexed collection — tracks, albums, artists, play history — while playlists and settings are untouched, giving the stale-library case a discoverable remedy without losing curation.
 
 **Gapless playback.** Delivered. The engine begins pre-decoding the next track about two seconds before the current one ends and stages up to four seconds of samples, so same-format transitions — including repeat-one — are seamless. Format mismatches and mid-transition shuffle changes fall back to the gapped path instead of glitching.
 
-**Playlist management.** Delivered, twice over. Custom playlists support create, rename, delete, ordered tracks, and an add-to-playlist context menu with dedupe, persisted in `playlists.json` separate from the rebuildable library cache; entries whose files disappeared show struck-through as "(missing)" and are excluded from playback — the answer to the file-path identity question raised below at v0.1.0. Separately, four smart playlists (Recently Added, Most Played, Never Played, Lost Gems) generate discovery lists locally from play-count data that persists in the library cache.
+**Playlist management.** Delivered, twice over. Custom playlists support create, rename, delete, ordered tracks, and an add-to-playlist context menu with dedupe, persisted in the Application Store; entries whose files disappeared show struck-through as "(missing)" and are excluded from playback — the answer to the file-path identity question raised below at v0.1.0. Separately, four smart playlists (Recently Added, Most Played, Never Played, Lost Gems) generate discovery lists locally from play-count data that persists in the Application Store.
 
 **ReplayGain normalization.** Delivered in the form this document sketched: existing REPLAYGAIN_TRACK_GAIN and REPLAYGAIN_TRACK_PEAK tags are read during scanning, and the gain is applied — capped by peak so boosts cannot clip — in the same volume-scaling step the engine already uses. It is opt-in, takes effect on the next track, and leaves untagged tracks untouched. Computing loudness for untagged libraries remains deferred.
 

@@ -1,6 +1,6 @@
 # Data Flow
 
-This document walks through the three primary runtime flows in riff — playing a track, scanning a library, and resolving cover art — as step-by-step sequences. Each flow crosses several threads and layers; the filenames referenced are the real ones in the source tree. For the threads involved and the constraints that govern them, see [./threading-model.md](./threading-model.md). For how the library and its cache are persisted, see [./persistence.md](./persistence.md).
+This document walks through the three primary runtime flows in riff — playing a track, scanning a library, and resolving cover art — as step-by-step sequences. Each flow crosses several threads and layers; the filenames referenced are the real ones in the source tree. For the threads involved and the constraints that govern them, see [./threading-model.md](./threading-model.md). For how state persists in the Application Store, see [./persistence.md](./persistence.md).
 
 ## Flow 1: Play a Track
 
@@ -10,7 +10,9 @@ This is the central flow. It begins with a click in the UI and ends with samples
 User clicks "Play" in the UI (src/ui/app.rs)
   -> UI sends PlaybackCommand::Play(track_id) over the command channel
   -> Audio engine thread (run_audio_engine in src/main.rs) receives the command
-  -> Engine locks AppState, looks up the Track in AppState.library, resolves its file_path
+   -> Engine locks AppState, resolves the Track through the LibraryQueryStore
+        port (the Application Store is the authority for track metadata),
+        and falls back to the queue's copy if the store lookup misses
        (if the queue is empty, it is populated from the whole library so Next/Previous work)
   -> SymphoniaDecoder::open(path) opens the file and returns AudioFormatInfo
        (sample_rate, channels, duration)
@@ -49,18 +51,24 @@ User clicks "Scan" (or "Scan All") in the settings view (src/ui/settings.rs)
   -> AudioFileScanner (src/infra/scanner.rs) walks the directory tree with walkdir
        and returns all audio file paths (honoring the AtomicBool cancel flag)
   -> For each chunk of 10 paths:
-       -> Engine locks AppState and calls
-          LibraryManager::scan_and_add_tracks(chunk, &LoftyMetadataReader)
-       -> LoftyMetadataReader::read_all(path) reads tags, duration, cover source, and format
-       -> LibraryManager constructs a domain Track and indexes it under its artist and album
-       -> LibraryUpdate::ScanProgress { path, files_found, current_dir } is sent to the UI
+       -> Paths the store already knows are skipped so rescans do not re-read
+          unchanged metadata
+       -> LibraryManager::build_tracks(chunk, &LoftyMetadataReader) reads tags,
+          duration, cover source, and format; per-file failures are logged and
+          skipped so a scan never aborts on one bad file
+       -> The chunk commits as ONE immediate durable transaction through the
+          LibraryMutationStore port (apply_scan_batch), preserving existing play
+          history for known tracks
+       -> On success the session generation counter bumps, so Session Projections
+          refetch on the next frame; the new tracks also land in the transitional
+          in-memory mirror
+       -> LibraryUpdate::Progress { path, files_found, current_dir } is sent to the UI
   -> When all chunks are processed:
-       LibraryUpdate::ScanComplete { path, total_files } is sent to the UI
-  -> UI (poll_library_updates in src/ui/app.rs) receives ScanComplete:
+       LibraryUpdate::Complete { path, total_files } is sent to the UI
+  -> UI (poll_library_updates in src/ui/app.rs) receives Complete:
        -> sets the path status to Scanned(total_files)
-       -> calls state.library.save_cache() to persist the updated library
        -> notifies the WatcherManager so any queued rescan can fire
-  -> UI re-renders the library view with the new tracks
+  -> UI re-renders the library view from its projections with the new tracks
 ```
 
 A `LibraryCommand::CancelScan` sets the shared cancel flag, which the scanner checks between chunks to stop early. If the scanner itself fails, it sends `LibraryUpdate::ScanError { path, message }`, the UI resets the path status to `Idle`, and the message is shown in the status line.
@@ -116,5 +124,5 @@ Embedded cover art always wins. Only when a track has no embedded art does the r
 ## See also
 
 - [./threading-model.md](./threading-model.md) — the threads and constraints behind these flows.
-- [./persistence.md](./persistence.md) — how the scanned library is cached to disk.
+- [./persistence.md](./persistence.md) — how state persists in the Application Store.
 - [./data-model.md](./data-model.md) — the types that flow through these sequences.

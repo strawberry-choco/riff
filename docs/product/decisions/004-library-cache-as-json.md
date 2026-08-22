@@ -1,7 +1,9 @@
 # 004: Library Cache as JSON File
 
-**Status**: Accepted
+**Status**: Superseded by [ADR 0001: SQLite is the authoritative Application Store](../../adr/0001-sqlite-is-the-authoritative-application-store.md), with the query model in [ADR 0003](../../../adr/0003-store-query-model.md)
 **Date**: 2026-07-31
+
+> **Superseded.** The JSON library cache described here no longer exists. riff persists the Library, Playlists, and Settings in the Application Store (`riff.sqlite3`); see [ADR 0001](../../adr/0001-sqlite-is-the-authoritative-application-store.md) and [Persistence](../technical/persistence.md). This document is kept for historical context only.
 
 ## Context
 
@@ -32,6 +34,6 @@ The library cache is a JSON file (`library_cache.json`) using serde serializatio
 
 ## Related Documents
 
-- [Features](./features.md) — Library Cache Persistence.
-- [Persistence](../technical/persistence.md).
-- [Roadmap](./roadmap.md) — Cache schema versioning recommendation.
+- [ADR 0001: SQLite is the authoritative Application Store](../../adr/0001-sqlite-is-the-authoritative-application-store.md) — the superseding decision.
+- [Persistence](../technical/persistence.md) — how persistence actually works today.
+

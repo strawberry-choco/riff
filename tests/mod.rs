@@ -44,7 +44,7 @@ pub use riff::app::gapless::{
     is_gapless_eligible, pre_buffer_cap, repeat_one_handoff_eligible, samples_from_duration,
     GaplessConditions, QueueConditions,
 };
-pub use riff::app::library_manager::{CacheDiscardReason, LibraryManager};
+pub use riff::app::library_manager::LibraryManager;
 pub use riff::app::state::{replaygain_factor, AppState, LibraryStatus, WatchState};
 pub use riff::app::MutexExt;
 pub use riff::domain::{
@@ -59,12 +59,7 @@ pub use riff::infra::{
 pub use riff::ui::app::{
     clamp_seek, format_duration, high_contrast_visuals, lru_insert, TagEditState,
 };
-pub use riff::ui::settings::{
-    expand_tilde, load_advanced_mode, load_high_contrast, load_library_paths, load_replaygain,
-    load_volume, load_watch_states, restore_from_backup_if_corrupted, save_advanced_mode,
-    save_high_contrast, save_library_paths, save_replaygain, save_volume, save_watch_states,
-    suggest_directories,
-};
+pub use riff::ui::settings::{expand_tilde, suggest_directories};
 
 // Standard-library names referenced unqualified in some suites.
 pub use std::sync::atomic::AtomicBool;
@@ -131,6 +126,7 @@ pub mod test_utils {
 /// tests) build on the same scripted decoder/output behavior.
 pub mod mocks {
     use riff::app::errors::AppError;
+    use riff::app::store::{Settings, SettingsStore};
     use riff::app::traits::{
         AudioDecoder, AudioFormatInfo, AudioOutput, CoverImage, CoverLoader, MetadataReader,
         MetadataWriter, TagEdit,
@@ -441,6 +437,76 @@ pub mod mocks {
                 .lock()
                 .unwrap()
                 .push((path.to_path_buf(), edit.clone()));
+            Ok(())
+        }
+    }
+
+    /// Which [`SettingsStore`] mutation a mock recorded.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum SettingsCall {
+        Scalars,
+        LibraryPaths,
+        WatchStates,
+    }
+
+    /// Recording [`SettingsStore`]: starts from defaults, applies every save
+    /// to in-memory state (so hydration round-trips), records the call
+    /// sequence, and can be switched to fail every mutation.
+    pub struct MockSettingsStore {
+        pub state: Settings,
+        pub calls: Vec<SettingsCall>,
+        pub fail: bool,
+    }
+
+    impl Default for MockSettingsStore {
+        fn default() -> Self {
+            Self {
+                state: Settings {
+                    scalars: riff::app::state::ScalarSettings::default(),
+                    library_paths: Vec::new(),
+                    watch_states: std::collections::HashMap::new(),
+                },
+                calls: Vec::new(),
+                fail: false,
+            }
+        }
+    }
+
+    impl SettingsStore for MockSettingsStore {
+        fn load_settings(&self) -> Result<Settings, AppError> {
+            Ok(self.state.clone())
+        }
+
+        fn save_scalars(
+            &mut self,
+            scalars: &riff::app::state::ScalarSettings,
+        ) -> Result<(), AppError> {
+            if self.fail {
+                return Err(AppError::InvalidOperation("mock settings failure".into()));
+            }
+            self.state.scalars = *scalars;
+            self.calls.push(SettingsCall::Scalars);
+            Ok(())
+        }
+
+        fn save_library_paths(&mut self, paths: &[std::path::PathBuf]) -> Result<(), AppError> {
+            if self.fail {
+                return Err(AppError::InvalidOperation("mock settings failure".into()));
+            }
+            self.state.library_paths = paths.to_vec();
+            self.calls.push(SettingsCall::LibraryPaths);
+            Ok(())
+        }
+
+        fn save_watch_states(
+            &mut self,
+            states: &std::collections::HashMap<std::path::PathBuf, riff::app::state::WatchState>,
+        ) -> Result<(), AppError> {
+            if self.fail {
+                return Err(AppError::InvalidOperation("mock settings failure".into()));
+            }
+            self.state.watch_states.clone_from(states);
+            self.calls.push(SettingsCall::WatchStates);
             Ok(())
         }
     }

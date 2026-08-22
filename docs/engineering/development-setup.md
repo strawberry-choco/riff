@@ -1,6 +1,6 @@
 # Development Setup
 
-This guide gets a new contributor from a fresh machine to a running build of riff. riff is a lightweight, offline-first desktop music player written in Rust on top of the egui immediate-mode GUI framework. It is a single Cargo crate with no code-generation step, no database migrations, and no feature flags, so the setup is deliberately minimal: install a recent Rust toolchain, clone the repository, and run `cargo`.
+This guide gets a new contributor from a fresh machine to a running build of riff. riff is a lightweight, offline-first desktop music player written in Rust on top of the egui immediate-mode GUI framework. It is a single Cargo crate with no code-generation step and no feature flags, so the setup is deliberately minimal: install a recent Rust toolchain, clone the repository, and run `cargo`.
 
 Everything on this page reflects the current state of the repository. Where this document offers guidance beyond what is wired up today, it is labeled as a recommendation.
 
@@ -77,8 +77,8 @@ A few facts about the project shape that simplify expectations:
 
 - **No feature flags.** There are no Cargo features to enable or disable. The only conditional compilation is per-target-OS (`#[cfg(target_os = "linux")]` and its negation) for platform-specific system integration such as the tray icon and native file dialogs.
 - **No codegen step.** There is no build script output, no schema generation, and no asset pipeline to run before compiling.
-- **No migrations.** State is persisted as plain JSON files at runtime; there is no database and no migration tooling.
-- **No CI pipeline or pre-commit hooks.** Quality gates (format, lint, test) are currently run manually by the developer. See [testing-strategy.md](./testing-strategy.md) for recommendations on adding CI.
+- **Embedded migrations.** State persists in the Application Store (`riff.sqlite3` via rusqlite, bundled). Schema evolution runs through ordered, checksummed migrations applied automatically on open — there is no external migration tooling to run.
+- **CI pipeline.** `.github/workflows/ci.yml` runs the quality gate (`cargo fmt --check`, `cargo clippy --all-targets`, `cargo test`) on push and pull requests to main, on Linux and Windows runners. There are no pre-commit hooks.
 - **MSRV is informational.** `rust-version = "1.92"` documents the intended minimum compiler but is not enforced by automation.
 
 For where the application stores its state and how logging is configured, see [../reference/configuration.md](../reference/configuration.md).

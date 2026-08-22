@@ -4,6 +4,7 @@ pub mod decoder;
 pub mod metadata_reader;
 pub mod metadata_writer;
 pub mod scanner;
+pub mod store;
 pub mod watcher;
 
 pub use audio_output::CpalAudioOutput;

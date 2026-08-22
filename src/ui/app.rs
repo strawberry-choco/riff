@@ -1,12 +1,19 @@
 use crate::app::commands::{LibraryCommand, LibraryUpdate};
 use crate::app::cover_resolver::CoverResolver;
+use crate::app::projection::{
+    BrowsingProjection, FolderProjection, ProjectionKey, SmartPlaylistsProjection,
+    TrackListProjection, WINDOW_SIZE,
+};
 use crate::app::state::{AppState, BrowseMode, LibraryStatus, ViewMode};
+use crate::app::store::{
+    LibraryMutationStore, LibraryQueryStore, PlaylistStore, SettingsStore, StoreGeneration,
+};
 use crate::app::traits::{CoverImage, MetadataWriter, TagEdit};
 use crate::app::watcher_manager::WatcherManager;
 use crate::app::MutexExt;
 use crate::domain::{
-    PlaybackCommand, PlaybackState, Playlist, PlaylistId, RepeatMode, SmartPlaylistKind, Track,
-    TrackId,
+    Album, Artist, PlaybackCommand, PlaybackState, Playlist, PlaylistId, RepeatMode,
+    SmartPlaylistKind, Track, TrackId,
 };
 use crate::infra::{ImageCoverLoader, LoftyMetadataReader, LoftyMetadataWriter};
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -130,9 +137,51 @@ pub struct RiffApp {
     playlist_create_name: Option<String>,
     /// Transient rename prompt: (playlist id, draft name).
     playlist_rename: Option<(PlaylistId, String)>,
+    /// Transient Clear Library confirmation (`true` = awaiting confirm).
+    /// Grouped with the other transient prompts on `RiffApp`.
+    pub(crate) clear_library_confirm: bool,
     search_focus: bool,
     first_frame: bool,
     pub(crate) watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
+    /// The Application Store's settings section. The UI reads settings from
+    /// it on the first frame and writes every preference change straight
+    /// back, so preferences survive restarts through the store.
+    pub(crate) settings_store: Box<dyn SettingsStore>,
+    /// The Application Store's playlists section. Every playlist mutation
+    /// commits through it as one immediate durable transaction; the in-memory
+    /// `state.playlists` list is only a Session Projection refreshed from the
+    /// store after each committed change.
+    pub(crate) playlist_store: Box<dyn PlaylistStore>,
+    /// The Application Store's Library collection query port: the flat list
+    /// and search box fetch bounded windows through it, and startup hydrates
+    /// the transitional in-memory mirror from it.
+    pub(crate) library_queries: Box<dyn LibraryQueryStore>,
+    /// The Application Store's Library collection mutation port: committed
+    /// metadata changes (e.g. tag edits) persist through it as one durable
+    /// transaction per batch.
+    pub(crate) library_mutations: Box<dyn LibraryMutationStore>,
+    /// Session-local generation counter bumped after each committed store
+    /// mutation; projections compare against it to know when to refetch
+    /// (ADR 0002).
+    pub(crate) store_generation: StoreGeneration,
+    /// Bounded Session Projection serving the flat list and search box
+    /// (ADR 0003). Never authoritative; invalidated by generation bumps.
+    tracks_projection: TrackListProjection,
+    /// Session Projection serving the artist/album browsing views: artists
+    /// A–Z, per-artist albums, and per-album tracks, all fetched from the
+    /// store through [`Self::library_queries`] and invalidated by generation
+    /// bumps. Never authoritative.
+    browsing_projection: BrowsingProjection,
+    /// Session Projection serving the folder-tree views: subtree probes,
+    /// subtree search matches, subtree track ids, direct track listings,
+    /// and child directories, all fetched from the store through
+    /// [`Self::library_queries`] and invalidated by generation bumps.
+    folder_projection: FolderProjection,
+    /// Session Projection serving the read-only smart playlists: one
+    /// computed list per kind, fetched from the store through
+    /// [`Self::library_queries`] and invalidated by generation bumps, so a
+    /// finished play or scan regenerates them on the next frame.
+    smart_playlists_projection: SmartPlaylistsProjection,
     theme: ThemeState,
     /// Linux-only folder-picker input state (no native file dialog there).
     /// Grouped so the rest of the struct keeps its cross-platform shape.
@@ -152,6 +201,9 @@ pub struct RiffApp {
 }
 
 impl RiffApp {
+    /// Composition-root constructor: the main thread wires every dependency
+    /// by hand, so the parameter count is the wiring surface itself.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         state: Arc<Mutex<AppState>>,
         command_sender: Sender<PlaybackCommand>,
@@ -160,6 +212,11 @@ impl RiffApp {
         watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
         #[cfg(not(target_os = "linux"))] tray_icon: Option<tray_icon::TrayIcon>,
         quit_flag: Arc<AtomicBool>,
+        settings_store: Box<dyn SettingsStore>,
+        playlist_store: Box<dyn PlaylistStore>,
+        library_queries: Box<dyn LibraryQueryStore>,
+        library_mutations: Box<dyn LibraryMutationStore>,
+        store_generation: StoreGeneration,
     ) -> Self {
         let resolver = CoverResolver::new(
             Box::new(LoftyMetadataReader::new()),
@@ -225,9 +282,19 @@ impl RiffApp {
             playlist_view: None,
             playlist_create_name: None,
             playlist_rename: None,
+            clear_library_confirm: false,
             search_focus: false,
             first_frame: true,
             watcher_manager,
+            settings_store,
+            playlist_store,
+            library_queries,
+            library_mutations,
+            store_generation,
+            tracks_projection: TrackListProjection::new(ProjectionKey::Flat),
+            browsing_projection: BrowsingProjection::new(),
+            folder_projection: FolderProjection::new(),
+            smart_playlists_projection: SmartPlaylistsProjection::new(),
             theme: ThemeState {
                 elegance_dark: true, // dark (slate) by default
                 was_high_contrast: false,
@@ -305,7 +372,8 @@ impl RiffApp {
                             .library_statuses
                             .insert(path.clone(), LibraryStatus::Scanned(total_files));
                         state.scan_status = Some(format!("Scan complete: {total_files} tracks"));
-                        state.library.save_cache();
+                        // Scan batches already committed through the store as
+                        // they progressed; nothing whole-file remains to save.
                         if let Some(ref mut mgr) = *self.watcher_manager.lock_or_recover() {
                             mgr.mark_scan_complete(&path);
                         }
@@ -326,17 +394,29 @@ impl RiffApp {
     }
 
     /// Drain completed tag writes from the background thread. On success the
-    /// (derived) library cache is refreshed from the edit and persisted — the
-    /// file tags are the source of truth and were written by the thread. On
-    /// failure the error is surfaced in the open modal, which stays open.
+    /// edited metadata lands in the mirror and persists through the store's
+    /// targeted tag-refresh flow as one durable transaction (history
+    /// preserved, album year/genre re-derived). On failure the error is
+    /// surfaced in the open modal, which stays open.
     fn poll_tag_write_results(&mut self, state: &mut AppState) {
         while let Ok(result) = self.tag_write_result_rx.try_recv() {
             match result.outcome {
                 Ok(()) => {
+                    let mut edited: Option<Track> = None;
                     if let Some(track) = state.library.tracks.get_mut(&result.track_id) {
                         result.edit.apply_to(&mut track.metadata);
+                        edited = Some(track.clone());
                     }
-                    state.library.save_cache();
+                    if let Some(track) = edited {
+                        if let Err(e) = self.library_mutations.apply_tag_refresh(&track) {
+                            tracing::error!(
+                                "Failed to persist tag edit for {:?}: {e}",
+                                result.path
+                            );
+                        } else {
+                            self.store_generation.bump();
+                        }
+                    }
                     if self
                         .tag_edit
                         .as_ref()
@@ -553,6 +633,7 @@ impl RiffApp {
         let advanced = state.ui_flags.advanced_mode;
         let playlists_slot = &mut state.playlists;
         let tag_edit_slot = &mut self.tag_edit;
+        let playlist_store_slot = self.playlist_store.as_mut();
         show_track_context_menu(
             response,
             TrackMenuArgs {
@@ -562,6 +643,7 @@ impl RiffApp {
                 tag_edit: tag_edit_slot,
                 advanced,
                 playlists: playlists_slot,
+                playlist_store: playlist_store_slot,
                 remove_from_playlist,
             },
         );
@@ -638,7 +720,6 @@ impl eframe::App for RiffApp {
         // Tray Quit while hidden: ui() cannot observe quit_flag, so initiate
         // the close here. (When visible, the same check in ui() does it.)
         if self.quit_flag.load(Ordering::Relaxed) {
-            self.state.lock_or_recover().library.save_cache();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
@@ -671,13 +752,18 @@ impl eframe::App for RiffApp {
         let mut state = state_arc.lock_or_recover();
 
         if self.quit_flag.load(Ordering::Relaxed) {
-            state.library.save_cache();
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
 
         if self.first_frame {
-            load_persisted_state(&mut state, frame, cmd.as_ref());
+            load_persisted_state(
+                &mut state,
+                self.settings_store.as_ref(),
+                self.playlist_store.as_ref(),
+                self.library_queries.as_ref(),
+                cmd.as_ref(),
+            );
             self.first_frame = false;
         }
 
@@ -710,8 +796,9 @@ impl eframe::App for RiffApp {
             update_window_title(ui.ctx(), &state);
         }
 
-        render_top_bar(ui, &mut state, frame, &mut self.theme);
-        render_control_bar(ui, &mut state, frame, cmd.as_ref());
+        let theme = &mut self.theme;
+        Self::render_top_bar(theme, ui, &mut state, self.settings_store.as_mut());
+        self.render_control_bar(ui, &mut state, cmd.as_ref());
 
         // --- MAIN CONTENT ---
         match state.view_mode {
@@ -732,29 +819,83 @@ impl eframe::App for RiffApp {
 
 // --- Per-frame helpers -------------------------------------------------------
 
-/// First-frame restore of everything persisted via eframe storage.
-fn load_persisted_state(
+/// Commit `state`'s scalar preferences as one small durable store
+/// transaction; failures are logged, the in-memory change stands.
+fn persist_scalars(store: &mut dyn SettingsStore, state: &AppState) {
+    let scalars = crate::app::state::ScalarSettings {
+        volume: Some(state.current_volume),
+        advanced_mode: state.ui_flags.advanced_mode,
+        high_contrast: state.ui_flags.high_contrast,
+        replaygain_enabled: state.replaygain_enabled,
+    };
+    if let Err(e) = store.save_scalars(&scalars) {
+        tracing::warn!("Failed to save settings: {e}");
+    }
+}
+
+/// Refresh the playlists Session Projection from the Application Store.
+/// Failures are logged; the previous projection stands until the next
+/// successful load.
+fn reload_playlists(store: &dyn PlaylistStore, state: &mut AppState) {
+    match store.load_playlists() {
+        Ok(playlists) => state.playlists = playlists,
+        Err(e) => tracing::warn!("Failed to load playlists from the store: {e}"),
+    }
+}
+
+/// First-frame restore. The library hydrates from the Application Store
+/// through the [`LibraryQueryStore`] port into the transitional in-memory
+/// mirror that still serves views not yet migrated to bounded store queries;
+/// playlists hydrate through the [`PlaylistStore`] port and every user
+/// preference from the typed settings tables via [`SettingsStore`]. The
+/// legacy JSON cache is never read or written. Public so the hydration
+/// contract is testable headlessly.
+pub fn load_persisted_state(
     state: &mut AppState,
-    frame: &mut eframe::Frame,
+    store: &dyn SettingsStore,
+    playlist_store: &dyn PlaylistStore,
+    library_queries: &dyn LibraryQueryStore,
     cmd: Option<&Sender<PlaybackCommand>>,
 ) {
-    let (library, discarded_reason) =
-        crate::app::library_manager::LibraryManager::load_cache_with_reason();
-    state.library = library;
-    // Surface WHY the cache was not used: an empty library with no
-    // explanation looks like data loss to the user.
-    if let Some(reason) = discarded_reason {
-        state.scan_status = Some(format!(
-            "Library cache discarded ({reason}) \u{2014} it will be rebuilt on the next scan."
-        ));
+    match library_queries.load_collection() {
+        Ok(collection) => {
+            let mut library = crate::app::library_manager::LibraryManager::new();
+            // The snapshot arrives in the exact shapes the former JSON cache
+            // carried: albums keyed by the "album artist - title" composite,
+            // artists listing their album keys in first-added order.
+            for artist in collection.artists {
+                library.artists.insert(artist.name.clone(), artist);
+            }
+            for album in collection.albums {
+                let key = format!("{} - {}", album.artist, album.title);
+                library.albums.insert(key, album);
+            }
+            for track in collection.tracks.into_values() {
+                library.tracks.insert(track.id.clone(), track);
+            }
+            state.library = library;
+        }
+        Err(e) => {
+            tracing::warn!("Failed to hydrate the library from the store: {e}");
+            // Surface WHY the library is empty: silence looks like data loss.
+            state.scan_status =
+                Some("Library could not be loaded from the store \u{2014} it will be rebuilt on the next scan.".to_string());
+        }
     }
-    // Playlists live in their own playlists.json (NOT the library
-    // cache) so they survive a cache clear/rebuild.
-    state.playlists = crate::app::playlist_manager::load_playlists();
-    let persisted_paths = crate::ui::settings::load_library_paths_immutable(frame.storage());
-    if !persisted_paths.is_empty() {
-        state.library_paths.clone_from(&persisted_paths);
-        for path in &persisted_paths {
+    // Playlists are user data in the Application Store, so they survive a
+    // Clear Library (which wipes collection data only).
+    reload_playlists(playlist_store, state);
+
+    let settings = match store.load_settings() {
+        Ok(settings) => settings,
+        Err(e) => {
+            tracing::warn!("Failed to load settings from the store: {e}");
+            crate::app::store::Settings::default()
+        }
+    };
+
+    if !settings.library_paths.is_empty() {
+        for path in &settings.library_paths {
             let status = if path.exists() {
                 LibraryStatus::Idle
             } else {
@@ -762,9 +903,12 @@ fn load_persisted_state(
             };
             state.library_statuses.insert(path.clone(), status);
         }
+        state.library_paths = settings.library_paths;
     }
 
-    if let Some(vol) = crate::ui::settings::load_volume_immutable(frame.storage()) {
+    state.watch_states = settings.watch_states;
+
+    if let Some(vol) = settings.scalars.volume {
         state.current_volume = vol;
         if let Some(s) = cmd {
             // Route through effective_volume so a muted app (once mute
@@ -773,15 +917,9 @@ fn load_persisted_state(
         }
     }
 
-    state.ui_flags.advanced_mode =
-        crate::ui::settings::load_advanced_mode_immutable(frame.storage());
-
-    state.ui_flags.high_contrast =
-        crate::ui::settings::load_high_contrast_immutable(frame.storage());
-
-    state.replaygain_enabled = crate::ui::settings::load_replaygain_immutable(frame.storage());
-
-    state.watch_states = crate::ui::settings::load_watch_states_immutable(frame.storage());
+    state.ui_flags.advanced_mode = settings.scalars.advanced_mode;
+    state.ui_flags.high_contrast = settings.scalars.high_contrast;
+    state.replaygain_enabled = settings.scalars.replaygain_enabled;
 }
 
 /// Global keyboard shortcuts: Ctrl+F focuses search, Space toggles playback.
@@ -827,249 +965,246 @@ fn update_window_title(ctx: &egui::Context, state: &AppState) -> String {
     tooltip
 }
 
-fn render_top_bar(
-    ui: &mut egui::Ui,
-    state: &mut AppState,
-    frame: &mut eframe::Frame,
-    theme: &mut ThemeState,
-) {
-    egui::Panel::top("top_bar").show_inside(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.heading("riff");
+impl RiffApp {
+    fn render_top_bar(
+        theme: &mut ThemeState,
+        ui: &mut egui::Ui,
+        state: &mut AppState,
+        settings_store: &mut dyn SettingsStore,
+    ) {
+        egui::Panel::top("top_bar").show_inside(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("riff");
 
-            if let Some(ref status) = state.scan_status {
-                ui.label(status);
-            }
+                if let Some(ref status) = state.scan_status {
+                    ui.label(status);
+                }
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let theme_icon = if theme.elegance_dark {
-                    "\u{2600}"
-                } else {
-                    "\u{1F319}"
-                };
-                if ui
-                    .button(theme_icon)
-                    .on_hover_text("Toggle light or dark theme")
-                    .clicked()
-                {
-                    theme.elegance_dark = !theme.elegance_dark;
-                }
-                if ui.button("\u{2699}").on_hover_text("Settings").clicked() {
-                    state.view_mode = ViewMode::Settings;
-                }
-                if ui
-                    .button("\u{1F3B5}")
-                    .on_hover_text("Now Playing")
-                    .clicked()
-                {
-                    state.view_mode = match state.view_mode {
-                        ViewMode::Library => ViewMode::NowPlaying,
-                        ViewMode::NowPlaying | ViewMode::Settings => ViewMode::Library,
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let theme_icon = if theme.elegance_dark {
+                        "\u{2600}"
+                    } else {
+                        "\u{1F319}"
                     };
-                }
-                // Progressive disclosure toggle (REQ-UI-006): the simple→
-                // advanced path. Persisted so the choice survives restarts.
-                let advanced_label = if state.ui_flags.advanced_mode {
-                    "Advanced: On"
-                } else {
-                    "Advanced: Off"
-                };
-                if ui
-                    .button(advanced_label)
-                    .on_hover_text(
-                        "Reveals power features: tag editing, smart playlists, \
-                         and extra transport controls (stop, repeat).",
-                    )
-                    .clicked()
-                {
-                    state.ui_flags.advanced_mode = !state.ui_flags.advanced_mode;
-                    if let Some(storage) = frame.storage_mut() {
-                        crate::ui::settings::save_advanced_mode(
-                            storage,
-                            state.ui_flags.advanced_mode,
-                        );
+                    if ui
+                        .button(theme_icon)
+                        .on_hover_text("Toggle light or dark theme")
+                        .clicked()
+                    {
+                        theme.elegance_dark = !theme.elegance_dark;
                     }
-                }
+                    if ui.button("\u{2699}").on_hover_text("Settings").clicked() {
+                        state.view_mode = ViewMode::Settings;
+                    }
+                    if ui
+                        .button("\u{1F3B5}")
+                        .on_hover_text("Now Playing")
+                        .clicked()
+                    {
+                        state.view_mode = match state.view_mode {
+                            ViewMode::Library => ViewMode::NowPlaying,
+                            ViewMode::NowPlaying | ViewMode::Settings => ViewMode::Library,
+                        };
+                    }
+                    // Progressive disclosure toggle (REQ-UI-006): the simple→
+                    // advanced path. Persisted so the choice survives restarts.
+                    let advanced_label = if state.ui_flags.advanced_mode {
+                        "Advanced: On"
+                    } else {
+                        "Advanced: Off"
+                    };
+                    if ui
+                        .button(advanced_label)
+                        .on_hover_text(
+                            "Reveals power features: tag editing, smart playlists, \
+                         and extra transport controls (stop, repeat).",
+                        )
+                        .clicked()
+                    {
+                        state.ui_flags.advanced_mode = !state.ui_flags.advanced_mode;
+                        persist_scalars(settings_store, state);
+                    }
+                });
             });
         });
-    });
+    }
 }
 
-fn render_control_bar(
-    ui: &mut egui::Ui,
-    state: &mut AppState,
-    frame: &mut eframe::Frame,
-    cmd: Option<&Sender<PlaybackCommand>>,
-) {
-    egui::Panel::bottom("control_bar").show_inside(ui, |ui| {
-        ui.horizontal(|ui| {
-            render_transport_buttons(ui, state, cmd);
-            ui.separator();
-            render_progress_row(ui, state, cmd);
-            ui.separator();
-            render_volume_and_mode(ui, state, frame, cmd);
+impl RiffApp {
+    fn render_control_bar(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &mut AppState,
+        cmd: Option<&Sender<PlaybackCommand>>,
+    ) {
+        egui::Panel::bottom("control_bar").show_inside(ui, |ui| {
+            ui.horizontal(|ui| {
+                Self::render_transport_buttons(ui, state, cmd);
+                ui.separator();
+                Self::render_progress_row(ui, state, cmd);
+                ui.separator();
+                self.render_volume_and_mode(ui, state, cmd);
+            });
         });
-    });
-}
-
-/// Previous / Stop / Play-Pause / Next buttons. Stop is an advanced
-/// affordance (REQ-UI-006); the minimal bar keeps only prev, play/pause,
-/// and next.
-fn render_transport_buttons(
-    ui: &mut egui::Ui,
-    state: &mut AppState,
-    cmd: Option<&Sender<PlaybackCommand>>,
-) {
-    let playing = state.playback_state == PlaybackState::Playing;
-    let paused = state.playback_state == PlaybackState::Paused;
-
-    if ui
-        .button("\u{23EE}")
-        .on_hover_text("Previous track")
-        .clicked()
-    {
-        if let Some(s) = cmd {
-            let _ = s.send(PlaybackCommand::Previous);
-        }
     }
-    if state.ui_flags.advanced_mode && ui.button("\u{23F9}").on_hover_text("Stop").clicked() {
-        if let Some(s) = cmd {
-            let _ = s.send(PlaybackCommand::Stop);
-        }
-    }
-    if playing {
-        if ui.button("\u{23F8}").on_hover_text("Pause").clicked() {
+
+    /// Previous / Stop / Play-Pause / Next buttons. Stop is an advanced
+    /// affordance (REQ-UI-006); the minimal bar keeps only prev, play/pause,
+    /// and next.
+    fn render_transport_buttons(
+        ui: &mut egui::Ui,
+        state: &mut AppState,
+        cmd: Option<&Sender<PlaybackCommand>>,
+    ) {
+        let playing = state.playback_state == PlaybackState::Playing;
+        let paused = state.playback_state == PlaybackState::Paused;
+
+        if ui
+            .button("\u{23EE}")
+            .on_hover_text("Previous track")
+            .clicked()
+        {
             if let Some(s) = cmd {
-                let _ = s.send(PlaybackCommand::Pause);
+                let _ = s.send(PlaybackCommand::Previous);
             }
         }
-    } else if paused {
-        if ui.button("\u{25B6}").on_hover_text("Play").clicked() {
+        if state.ui_flags.advanced_mode && ui.button("\u{23F9}").on_hover_text("Stop").clicked() {
             if let Some(s) = cmd {
-                let _ = s.send(PlaybackCommand::Resume);
+                let _ = s.send(PlaybackCommand::Stop);
             }
         }
-    } else if ui.button("\u{25B6}").on_hover_text("Play").clicked() {
-        if let Some(ref selected) = state.selected_track {
-            if let Some(s) = cmd {
-                let _ = s.send(PlaybackCommand::Play(selected.clone()));
-            }
-        }
-    }
-    if ui.button("\u{23ED}").on_hover_text("Next track").clicked() {
-        if let Some(s) = cmd {
-            let _ = s.send(PlaybackCommand::Next);
-        }
-    }
-}
-
-/// Position label + clickable/seekable progress bar.
-fn render_progress_row(
-    ui: &mut egui::Ui,
-    state: &mut AppState,
-    cmd: Option<&Sender<PlaybackCommand>>,
-) {
-    let progress = state.current_position.total.map_or(0.0, |t| {
-        if t.as_secs() > 0 {
-            state.current_position.current.as_secs_f32() / t.as_secs_f32()
-        } else {
-            0.0
-        }
-    });
-    let current_str = format_duration(state.current_position.current);
-    let total_str = state
-        .current_position
-        .total
-        .map_or_else(|| "--:--".to_string(), format_duration);
-    ui.label(format!("{current_str} / {total_str}"));
-
-    let pr = ui.add(
-        egui::ProgressBar::new(progress.clamp(0.0, 1.0))
-            .show_percentage()
-            .desired_width(200.0),
-    );
-    if pr.clicked() {
-        if let Some(total) = state.current_position.total {
-            if let Some(pos) = pr.interact_pointer_pos() {
-                let frac = ((pos.x - pr.rect.min.x) / pr.rect.width()).clamp(0.0, 1.0);
+        if playing {
+            if ui.button("\u{23F8}").on_hover_text("Pause").clicked() {
                 if let Some(s) = cmd {
-                    let _ = s.send(PlaybackCommand::Seek(std::time::Duration::from_secs_f32(
-                        frac * total.as_secs_f32(),
-                    )));
+                    let _ = s.send(PlaybackCommand::Pause);
+                }
+            }
+        } else if paused {
+            if ui.button("\u{25B6}").on_hover_text("Play").clicked() {
+                if let Some(s) = cmd {
+                    let _ = s.send(PlaybackCommand::Resume);
+                }
+            }
+        } else if ui.button("\u{25B6}").on_hover_text("Play").clicked() {
+            if let Some(ref selected) = state.selected_track {
+                if let Some(s) = cmd {
+                    let _ = s.send(PlaybackCommand::Play(selected.clone()));
+                }
+            }
+        }
+        if ui.button("\u{23ED}").on_hover_text("Next track").clicked() {
+            if let Some(s) = cmd {
+                let _ = s.send(PlaybackCommand::Next);
+            }
+        }
+    }
+
+    /// Position label + clickable/seekable progress bar.
+    fn render_progress_row(
+        ui: &mut egui::Ui,
+        state: &mut AppState,
+        cmd: Option<&Sender<PlaybackCommand>>,
+    ) {
+        let progress = state.current_position.total.map_or(0.0, |t| {
+            if t.as_secs() > 0 {
+                state.current_position.current.as_secs_f32() / t.as_secs_f32()
+            } else {
+                0.0
+            }
+        });
+        let current_str = format_duration(state.current_position.current);
+        let total_str = state
+            .current_position
+            .total
+            .map_or_else(|| "--:--".to_string(), format_duration);
+        ui.label(format!("{current_str} / {total_str}"));
+
+        let pr = ui.add(
+            egui::ProgressBar::new(progress.clamp(0.0, 1.0))
+                .show_percentage()
+                .desired_width(200.0),
+        );
+        if pr.clicked() {
+            if let Some(total) = state.current_position.total {
+                if let Some(pos) = pr.interact_pointer_pos() {
+                    let frac = ((pos.x - pr.rect.min.x) / pr.rect.width()).clamp(0.0, 1.0);
+                    if let Some(s) = cmd {
+                        let _ = s.send(PlaybackCommand::Seek(std::time::Duration::from_secs_f32(
+                            frac * total.as_secs_f32(),
+                        )));
+                    }
                 }
             }
         }
     }
-}
 
-/// Mute, volume slider, queue position, shuffle and (advanced) repeat.
-fn render_volume_and_mode(
-    ui: &mut egui::Ui,
-    state: &mut AppState,
-    frame: &mut eframe::Frame,
-    cmd: Option<&Sender<PlaybackCommand>>,
-) {
-    // Mute toggle (REQ-UI-003-08): a core control, always visible
-    // (not gated behind advanced mode). Muting never moves the
-    // volume slider — it only zeroes the effective volume sent to
-    // the engine; unmuting restores the slider's value.
-    let (mute_icon, mute_tip) = if state.muted {
-        ("\u{1F507}", "Unmute")
-    } else {
-        ("\u{1F50A}", "Mute")
-    };
-    if ui.button(mute_icon).on_hover_text(mute_tip).clicked() {
-        state.muted = !state.muted;
-        if let Some(s) = cmd {
-            let _ = s.send(PlaybackCommand::SetVolume(state.effective_volume()));
-        }
-    }
-    let mut vol = state.current_volume;
-    if ui
-        .add(egui::Slider::new(&mut vol, 0.0..=1.0))
-        .on_hover_text("Volume")
-        .changed()
-    {
-        state.current_volume = vol;
-        if let Some(storage) = frame.storage_mut() {
-            crate::ui::settings::save_volume(storage, vol);
-        }
-        if let Some(s) = cmd {
-            // While muted the slider still edits current_volume,
-            // but the engine keeps receiving 0 until unmuted.
-            let _ = s.send(PlaybackCommand::SetVolume(state.effective_volume()));
-        }
-    }
-    ui.separator();
-
-    let cidx = state.queue.current_index.map_or(0, |i| i + 1);
-    ui.label(format!("{}/{}", cidx, state.queue.tracks.len()));
-
-    let shuff = state.queue.shuffle;
-    if ui
-        .button(if shuff {
-            "\u{1F500}"
+    /// Mute, volume slider, queue position, shuffle and (advanced) repeat.
+    fn render_volume_and_mode(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &mut AppState,
+        cmd: Option<&Sender<PlaybackCommand>>,
+    ) {
+        // Mute toggle (REQ-UI-003-08): a core control, always visible
+        // (not gated behind advanced mode). Muting never moves the
+        // volume slider — it only zeroes the effective volume sent to
+        // the engine; unmuting restores the slider's value.
+        let (mute_icon, mute_tip) = if state.muted {
+            ("\u{1F507}", "Unmute")
         } else {
-            "\u{27A1}\u{FE0F}"
-        })
-        .on_hover_text("Toggle shuffle")
-        .clicked()
-    {
-        state.queue.set_shuffle(!shuff);
-    }
-    // Repeat is an advanced affordance (REQ-UI-006).
-    if state.ui_flags.advanced_mode {
-        let rep = match state.queue.repeat {
-            RepeatMode::None => "\u{23F9}",
-            RepeatMode::All => "\u{1F501}",
-            RepeatMode::One => "\u{1F502}",
+            ("\u{1F50A}", "Mute")
         };
+        if ui.button(mute_icon).on_hover_text(mute_tip).clicked() {
+            state.muted = !state.muted;
+            if let Some(s) = cmd {
+                let _ = s.send(PlaybackCommand::SetVolume(state.effective_volume()));
+            }
+        }
+        let mut vol = state.current_volume;
         if ui
-            .button(rep)
-            .on_hover_text("Cycles repeat mode: off, repeat all, repeat one.")
+            .add(egui::Slider::new(&mut vol, 0.0..=1.0))
+            .on_hover_text("Volume")
+            .changed()
+        {
+            state.current_volume = vol;
+            persist_scalars(self.settings_store.as_mut(), state);
+            if let Some(s) = cmd {
+                // While muted the slider still edits current_volume,
+                // but the engine keeps receiving 0 until unmuted.
+                let _ = s.send(PlaybackCommand::SetVolume(state.effective_volume()));
+            }
+        }
+        ui.separator();
+
+        let cidx = state.queue.current_index.map_or(0, |i| i + 1);
+        ui.label(format!("{}/{}", cidx, state.queue.tracks.len()));
+
+        let shuff = state.queue.shuffle;
+        if ui
+            .button(if shuff {
+                "\u{1F500}"
+            } else {
+                "\u{27A1}\u{FE0F}"
+            })
+            .on_hover_text("Toggle shuffle")
             .clicked()
         {
-            state.queue.toggle_repeat();
+            state.queue.set_shuffle(!shuff);
+        }
+        // Repeat is an advanced affordance (REQ-UI-006).
+        if state.ui_flags.advanced_mode {
+            let rep = match state.queue.repeat {
+                RepeatMode::None => "\u{23F9}",
+                RepeatMode::All => "\u{1F501}",
+                RepeatMode::One => "\u{1F502}",
+            };
+            if ui
+                .button(rep)
+                .on_hover_text("Cycles repeat mode: off, repeat all, repeat one.")
+                .clicked()
+            {
+                state.queue.toggle_repeat();
+            }
         }
     }
 }
@@ -1186,8 +1321,8 @@ impl RiffApp {
             ui.separator();
         }
 
-        // User playlists (Task 4.2): named, editable lists persisted
-        // to playlists.json. A core feature — always visible (NOT
+        // User playlists (Task 4.2): named, editable lists persisted in the
+        // Application Store. A core feature — always visible (NOT
         // gated behind advanced mode). Hidden while searching, like
         // smart playlists.
         if query.is_empty() {
@@ -1256,61 +1391,96 @@ impl RiffApp {
         cmd: Option<&Sender<PlaybackCommand>>,
         query: &str,
     ) {
-        // Clone data to avoid holding borrows across closures
-        let artists: Vec<_> = {
-            let mut all: Vec<_> = state.library.all_artists().into_iter().cloned().collect();
-            all.sort_by(|a, b| a.name.cmp(&b.name));
-            if query.is_empty() {
-                all
-            } else {
-                let q = query.to_lowercase();
-                all.into_iter()
-                    .filter(|a| a.name.to_lowercase().contains(&q))
-                    .collect()
+        // Browsing reads through the Session Projection over store queries
+        // (ADR 0002/0003): artists A–Z straight from the Application Store,
+        // each level cached until the next committed mutation bumps the
+        // generation. No in-memory mirror involved.
+        let generation = self.store_generation.current();
+        let artists: Vec<Artist> = match self
+            .browsing_projection
+            .artists(generation, &mut || self.library_queries.all_artists())
+        {
+            Ok(artists) => artists,
+            Err(e) => {
+                tracing::warn!("Failed to load artists from the store: {e}");
+                Vec::new()
             }
+        };
+        let artists: Vec<Artist> = if query.is_empty() {
+            artists
+        } else {
+            let q = query.to_lowercase();
+            artists
+                .into_iter()
+                .filter(|a| a.name.to_lowercase().contains(&q))
+                .collect()
         };
         let current_track = state.queue.current_track().cloned();
 
+        // Identity of the playing track's album, used to auto-open exactly
+        // the collapsed headers containing it — the same outcome as the
+        // former scan of every artist's albums, without loading closed
+        // artists' data.
+        let current_album: Option<(String, String)> = current_track.as_ref().and_then(|tid| {
+            self.library_queries.get_track(tid).ok().flatten().map(|t| {
+                (
+                    t.metadata.display_album_artist(),
+                    t.metadata.display_album(),
+                )
+            })
+        });
+
         egui::ScrollArea::vertical().show(ui, |ui| {
             for artist in &artists {
-                let artist_has_current = artist.albums.iter().any(|key| {
-                    state.library.albums.get(key).is_some_and(|album| {
-                        album
-                            .tracks
-                            .iter()
-                            .any(|tid| Some(tid) == current_track.as_ref())
-                    })
-                });
+                let artist_has_current = current_album
+                    .as_ref()
+                    .is_some_and(|(album_artist, _)| album_artist == &artist.name);
                 egui::CollapsingHeader::new(&artist.name)
                     .default_open(artist_has_current)
                     .show(ui, |ui| {
-                        let mut albums: Vec<_> = artist
-                            .albums
-                            .iter()
-                            .filter_map(|key| state.library.albums.get(key).cloned())
-                            .collect();
-                        albums.sort_by(|a, b| {
-                            b.year
-                                .unwrap_or(0)
-                                .cmp(&a.year.unwrap_or(0))
-                                .then_with(|| a.title.cmp(&b.title))
-                        });
+                        let albums: Vec<Album> = match self.browsing_projection.artist_albums(
+                            generation,
+                            &artist.name,
+                            &mut |a| self.library_queries.artist_albums(a),
+                        ) {
+                            Ok(albums) => albums,
+                            Err(e) => {
+                                tracing::warn!("Failed to load albums for {}: {e}", artist.name);
+                                return;
+                            }
+                        };
 
                         for album in &albums {
-                            let album_has_current = album
-                                .tracks
-                                .iter()
-                                .any(|tid| Some(tid) == current_track.as_ref());
+                            let album_has_current = current_album.as_ref().is_some_and(
+                                |(album_artist, album_title)| {
+                                    album_artist == &album.artist && album_title == &album.title
+                                },
+                            );
                             let year_str = album.year.map_or(String::new(), |y| format!(" ({y})"));
                             egui::CollapsingHeader::new(format!("{}{}", album.title, year_str))
                                 .default_open(album_has_current)
                                 .show(ui, |ui| {
-                                    let track_ids = album.tracks.clone();
+                                    let tracks: Vec<Track> =
+                                        match self.browsing_projection.album_tracks(
+                                            generation,
+                                            &album.artist,
+                                            &album.title,
+                                            &mut |a, t| self.library_queries.album_tracks(a, t),
+                                        ) {
+                                            Ok(tracks) => tracks,
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Failed to load tracks for {}: {e}",
+                                                    album.title
+                                                );
+                                                return;
+                                            }
+                                        };
                                     self.render_album_track_rows(
                                         ui,
                                         state,
                                         cmd,
-                                        &track_ids,
+                                        &tracks,
                                         current_track.as_ref(),
                                     );
                                 });
@@ -1320,30 +1490,20 @@ impl RiffApp {
         });
     }
 
-    /// Sorted track rows for one album in the Artists view.
+    /// Track rows for one album in the Artists view, rendered straight from
+    /// the store query results in their canonical order (track number then
+    /// filename, missing numbers first).
     fn render_album_track_rows(
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
         cmd: Option<&Sender<PlaybackCommand>>,
-        track_ids: &[TrackId],
+        tracks: &[Track],
         current_track: Option<&TrackId>,
     ) {
-        let mut track_ids = track_ids.to_vec();
-        track_ids.sort_by_key(|tid| {
-            state
-                .library
-                .get_track(tid)
-                .and_then(|t| t.metadata.track_number)
-                .unwrap_or(0)
-        });
-
-        for tid in &track_ids {
-            let Some(track) = state.library.get_track(tid).cloned() else {
-                continue;
-            };
-            let is_selected = state.selected_track.as_ref() == Some(tid);
-            let is_current = current_track == Some(tid);
+        for track in tracks {
+            let is_selected = state.selected_track.as_ref() == Some(&track.id);
+            let is_current = current_track == Some(&track.id);
 
             self.request_cover(&track.id, &track.file_path);
 
@@ -1367,7 +1527,7 @@ impl RiffApp {
                         let _ = s.send(PlaybackCommand::Play(track.id.clone()));
                     }
                 }
-                self.attach_track_menu(&resp, state, cmd, &track.id, Some(&track), None);
+                self.attach_track_menu(&resp, state, cmd, &track.id, Some(track), None);
             });
         }
     }
@@ -1379,26 +1539,111 @@ impl RiffApp {
         cmd: Option<&Sender<PlaybackCommand>>,
         query: &str,
     ) {
-        let tracks: Vec<Track> = if query.is_empty() {
-            state.library.all_tracks().into_iter().cloned().collect()
+        // The flat list and search box are served through the bounded
+        // Session Projection over store queries (ADR 0003): only visible row
+        // windows fetch, invalidated by generation bumps after committed
+        // mutations.
+        let key = if query.is_empty() {
+            ProjectionKey::Flat
         } else {
-            state.library.search(query).into_iter().cloned().collect()
+            ProjectionKey::Search(query.to_string())
+        };
+        if self.tracks_projection.key() != &key {
+            self.tracks_projection.set_key(key);
+        }
+
+        // The authoritative total comes from the store whenever the
+        // projection is invalidated; fresh frames reuse the cached count.
+        // `total_generation` records when that count was read so the refresh
+        // below can detect a mutation landing mid-frame.
+        let total_generation = self.store_generation.current();
+        let total = if self.tracks_projection.is_fresh(total_generation) {
+            self.tracks_projection.total()
+        } else if query.is_empty() {
+            self.library_queries.track_count().unwrap_or(0)
+        } else {
+            self.library_queries.search_count(query).unwrap_or(0)
         };
 
         let current_track = state.queue.current_track().cloned();
 
-        egui::ScrollArea::vertical().show_rows(ui, 22.0, tracks.len(), |ui, row_range| {
+        egui::ScrollArea::vertical().show_rows(ui, 22.0, total, |ui, row_range| {
+            // Declare exactly the visible windows, then refresh the
+            // projection from the store before painting rows.
+            let start_window = (row_range.start / WINDOW_SIZE) * WINDOW_SIZE;
+            let end_window = (row_range.end / WINDOW_SIZE) * WINDOW_SIZE;
+            let mut window = start_window;
+            while window <= end_window {
+                self.tracks_projection.request_window(window);
+                window += WINDOW_SIZE;
+            }
+            let generation = self.store_generation.current();
+            // If a mutation committed between the outer count read and here,
+            // recount so the cached total agrees with the refreshed rows;
+            // otherwise reuse the outer read (one COUNT query per frame max).
+            let effective_total = if generation == total_generation {
+                total
+            } else if query.is_empty() {
+                self.library_queries.track_count().unwrap_or(0)
+            } else {
+                self.library_queries.search_count(query).unwrap_or(0)
+            };
+            let _ = self.tracks_projection.refresh(
+                generation,
+                effective_total,
+                &mut |offset, limit| {
+                    if query.is_empty() {
+                        self.library_queries.tracks_window(offset, limit)
+                    } else {
+                        self.library_queries.search_window(query, offset, limit)
+                    }
+                },
+            );
+
             for i in row_range {
-                if let Some(track) = tracks.get(i) {
-                    self.render_track_row(ui, state, cmd, track, current_track.as_ref(), None);
+                let window_start = (i / WINDOW_SIZE) * WINDOW_SIZE;
+                // Clone the row so the projection's shared borrow ends before
+                // the mutable render call (one small clone per visible row).
+                let row = self
+                    .tracks_projection
+                    .window(window_start)
+                    .and_then(|rows| rows.get(i - window_start))
+                    .cloned();
+                if let Some(track) = row {
+                    self.render_track_row(ui, state, cmd, &track, current_track.as_ref(), None);
                 }
             }
         });
     }
 
-    /// Render the tracks of a read-only smart playlist. The list is computed
-    /// fresh from library data on every frame, so it auto-updates when play
-    /// counts change or tracks are added — no manual refresh needed.
+    /// Cached smart-playlist computation for one frame generation; failures
+    /// render as an empty list with a warning logged.
+    fn smart_list_cached(
+        &mut self,
+        generation: u64,
+        kind: SmartPlaylistKind,
+        limit: usize,
+    ) -> Vec<Track> {
+        match self
+            .smart_playlists_projection
+            .list(generation, kind, limit, &mut |k, l| {
+                self.library_queries.smart_playlist(k, l)
+            }) {
+            Ok(tracks) => tracks,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to compute smart playlist {}: {e}",
+                    kind.display_name()
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    /// Render the tracks of a read-only smart playlist. The list reads
+    /// through the Session Projection over store queries (ADR 0002): every
+    /// committed mutation bumps the generation, so the next frame
+    /// regenerates from committed state — no manual refresh needed.
     fn render_smart_playlist_view(
         &mut self,
         ui: &mut egui::Ui,
@@ -1411,12 +1656,8 @@ impl RiffApp {
             SmartPlaylistKind::RecentlyAdded | SmartPlaylistKind::MostPlayed => 50,
             SmartPlaylistKind::NeverPlayed | SmartPlaylistKind::LostGems => usize::MAX,
         };
-        let tracks: Vec<Track> = state
-            .library
-            .smart_playlist(kind, limit)
-            .into_iter()
-            .filter_map(|id| state.library.get_track(&id).cloned())
-            .collect();
+        let generation = self.store_generation.current();
+        let tracks = self.smart_list_cached(generation, kind, limit);
         let current_track = state.queue.current_track().cloned();
 
         // Header: name + count, clearly read-only (no edit/delete affordances),
@@ -1449,7 +1690,8 @@ impl RiffApp {
 
     /// Render the "Playlists" section of the library explorer: the user's
     /// playlists with select / rename / delete affordances, plus the create
-    /// and rename prompts. Every mutation persists via `save_playlists`.
+    /// and rename prompts. Every mutation commits through the
+    /// [`PlaylistStore`] port as one immediate durable transaction.
     fn render_playlists_section(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         ui.horizontal(|ui| {
             ui.label("Playlists")
@@ -1495,8 +1737,10 @@ impl RiffApp {
                     .on_hover_text("Delete playlist")
                     .clicked()
                 {
-                    crate::app::playlist_manager::delete_playlist(&mut state.playlists, &id);
-                    crate::app::playlist_manager::save_playlists(&state.playlists);
+                    match self.playlist_store.delete_playlist(&id) {
+                        Ok(_) => reload_playlists(self.playlist_store.as_ref(), state),
+                        Err(e) => tracing::warn!("Failed to delete playlist: {e}"),
+                    }
                     if self.playlist_view.as_ref() == Some(&id) {
                         self.playlist_view = None;
                     }
@@ -1530,13 +1774,13 @@ impl RiffApp {
             let name = self.playlist_create_name.take().unwrap_or_default();
             let name = name.trim().to_string();
             if !name.is_empty() {
-                let id = crate::app::playlist_manager::create_playlist(
-                    &mut state.playlists,
-                    &name,
-                    Vec::new(),
-                );
-                crate::app::playlist_manager::save_playlists(&state.playlists);
-                self.playlist_view = Some(id);
+                match self.playlist_store.create_playlist(&name, &[]) {
+                    Ok(id) => {
+                        reload_playlists(self.playlist_store.as_ref(), state);
+                        self.playlist_view = Some(id);
+                    }
+                    Err(e) => tracing::warn!("Failed to create playlist: {e}"),
+                }
             }
         } else if cancel {
             self.playlist_create_name = None;
@@ -1574,12 +1818,10 @@ impl RiffApp {
             if let Some((rid, draft)) = self.playlist_rename.take() {
                 let draft = draft.trim().to_string();
                 if !draft.is_empty() {
-                    crate::app::playlist_manager::rename_playlist(
-                        &mut state.playlists,
-                        &rid,
-                        &draft,
-                    );
-                    crate::app::playlist_manager::save_playlists(&state.playlists);
+                    match self.playlist_store.rename_playlist(&rid, &draft) {
+                        Ok(_) => reload_playlists(self.playlist_store.as_ref(), state),
+                        Err(e) => tracing::warn!("Failed to rename playlist: {e}"),
+                    }
                 }
             }
         } else if cancel {
@@ -1746,6 +1988,80 @@ impl RiffApp {
         });
     }
 
+    /// Cached [`LibraryQueryStore::folder_has_audio`] for one frame
+    /// generation; failures render as "no audio" with a warning logged.
+    fn folder_has_audio_cached(&mut self, generation: u64, path: &Path) -> bool {
+        match self
+            .folder_projection
+            .has_audio(generation, path, &mut |f| {
+                self.library_queries.folder_has_audio(f)
+            }) {
+            Ok(has) => has,
+            Err(e) => {
+                tracing::warn!("Failed to probe folder {}: {e}", path.display());
+                false
+            }
+        }
+    }
+
+    /// Cached subtree search match for one frame generation.
+    fn folder_search_match_cached(&mut self, generation: u64, path: &Path, query: &str) -> bool {
+        match self
+            .folder_projection
+            .has_search_match(generation, path, query, &mut |f, q| {
+                self.library_queries.folder_has_search_match(f, q)
+            }) {
+            Ok(has) => has,
+            Err(e) => {
+                tracing::warn!("Failed to search folder {}: {e}", path.display());
+                false
+            }
+        }
+    }
+
+    /// Cached subtree track ids for one frame generation.
+    fn folder_subtree_ids_cached(&mut self, generation: u64, path: &Path) -> Vec<TrackId> {
+        match self
+            .folder_projection
+            .subtree_ids(generation, path, &mut |f| {
+                self.library_queries.track_ids_in_folder_tree(f)
+            }) {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!("Failed to list folder tree {}: {e}", path.display());
+                Vec::new()
+            }
+        }
+    }
+
+    /// Cached child directories for one frame generation.
+    fn folder_children_cached(&mut self, generation: u64, path: &Path) -> Vec<PathBuf> {
+        match self.folder_projection.children(generation, path, &mut |f| {
+            self.library_queries.subdirs_with_audio(f)
+        }) {
+            Ok(children) => children,
+            Err(e) => {
+                tracing::warn!("Failed to list folder children {}: {e}", path.display());
+                Vec::new()
+            }
+        }
+    }
+
+    /// Cached direct-track listing for one frame generation.
+    fn folder_direct_tracks_cached(&mut self, generation: u64, path: &Path) -> Vec<Track> {
+        match self
+            .folder_projection
+            .direct_tracks(generation, path, &mut |f| {
+                self.library_queries.tracks_in_folder(f)
+            }) {
+            Ok(tracks) => tracks,
+            Err(e) => {
+                tracing::warn!("Failed to list folder tracks {}: {e}", path.display());
+                Vec::new()
+            }
+        }
+    }
+
     fn render_folder_tree(
         &mut self,
         ui: &mut egui::Ui,
@@ -1761,49 +2077,51 @@ impl RiffApp {
             return;
         }
 
+        // Folder views read through the Session Projection over store
+        // queries (ADR 0002/0003): escaped prefix matching over stored track
+        // paths, cached until the next committed mutation bumps the
+        // generation. No in-memory mirror involved.
+        let generation = self.store_generation.current();
         let lib_paths = state.library_paths.clone();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for lib_path in &lib_paths {
-                if !state.library.folder_has_audio(lib_path) {
+                if !self.folder_has_audio_cached(generation, lib_path) {
                     continue;
                 }
-                self.render_folder_node(ui, state, cmd, lib_path, 0.0, query);
+                self.render_folder_node(ui, state, cmd, generation, lib_path, 0.0, query);
             }
         });
     }
 
+    /// One folder node of the Folders tree. `generation` is passed down so
+    /// every node of one frame reads the same snapshot even if a mutation
+    /// commits mid-frame.
+    #[allow(clippy::too_many_arguments)]
     fn render_folder_node(
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
         cmd: Option<&Sender<PlaybackCommand>>,
+        generation: u64,
         path: &Path,
         indent: f32,
         query: &str,
     ) {
-        if !state.library.folder_has_audio(path) {
+        if !self.folder_has_audio_cached(generation, path) {
             return;
         }
 
-        if !query.is_empty() {
-            let q = query.to_lowercase();
-            let has_match =
-                state.library.all_tracks().iter().any(|t| {
-                    t.file_path.starts_with(path) && t.metadata.search_text().contains(&q)
-                });
-            if !has_match {
-                return;
-            }
+        if !query.is_empty() && !self.folder_search_match_cached(generation, path, query) {
+            return;
         }
 
         let current_track = state.queue.current_track().cloned();
 
-        let contains_current = current_track.as_ref().is_some_and(|tid| {
-            state
-                .library
-                .get_track(tid)
-                .is_some_and(|t| t.file_path.starts_with(path))
-        });
+        // The playing track's id IS its stored path, so containment is a
+        // plain component-wise prefix check — no store round-trip needed.
+        let contains_current = current_track
+            .as_ref()
+            .is_some_and(|tid| std::path::Path::new(&tid.0).starts_with(path));
 
         let is_selected = state.selected_folder.as_deref() == Some(path);
 
@@ -1817,18 +2135,27 @@ impl RiffApp {
             label
         };
 
-        let folder_track_ids: Vec<TrackId> = state.library.track_ids_in_folder_tree(path);
+        let folder_track_ids: Vec<TrackId> = self.folder_subtree_ids_cached(generation, path);
 
         let header =
             egui::CollapsingHeader::new(header_text).default_open(contains_current || is_selected);
 
         let header_response = header.show(ui, |ui| {
-            let children = state.library.subdirs_with_audio(path);
+            let children = self.folder_children_cached(generation, path);
             for child_path in &children {
-                self.render_folder_node(ui, state, cmd, child_path, indent + FOLDER_INDENT, query);
+                self.render_folder_node(
+                    ui,
+                    state,
+                    cmd,
+                    generation,
+                    child_path,
+                    indent + FOLDER_INDENT,
+                    query,
+                );
             }
 
-            let tracks = folder_tracks_filtered(state, path, query);
+            let tracks =
+                folder_tracks_filtered(self.folder_direct_tracks_cached(generation, path), query);
 
             for track in &tracks {
                 let is_track_selected = state.selected_track.as_ref() == Some(&track.id);
@@ -1869,7 +2196,7 @@ impl RiffApp {
         }
 
         if header_response.header_response.double_clicked() {
-            play_folder(state, path, cmd);
+            play_folder(&folder_track_ids, cmd);
         }
 
         if !folder_track_ids.is_empty() {
@@ -1891,9 +2218,10 @@ fn parse_number(label: &str, raw: &str) -> Result<Option<u32>, String> {
     }
 }
 
-/// Play a folder: start its first track and queue the rest.
-fn play_folder(state: &AppState, path: &Path, cmd: Option<&Sender<PlaybackCommand>>) {
-    let track_ids = state.library.track_ids_in_folder_tree(path);
+/// Play a folder: start its first track and queue the rest. The ids arrive
+/// in the store's path order — exactly what the former mirror listing
+/// produced.
+fn play_folder(track_ids: &[TrackId], cmd: Option<&Sender<PlaybackCommand>>) {
     let Some(s) = cmd else { return };
     if let Some(first) = track_ids.first() {
         let _ = s.send(PlaybackCommand::Play(first.clone()));
@@ -1903,17 +2231,17 @@ fn play_folder(state: &AppState, path: &Path, cmd: Option<&Sender<PlaybackComman
     }
 }
 
-/// Tracks directly in `path`, optionally filtered by search query.
-fn folder_tracks_filtered(state: &AppState, path: &Path, query: &str) -> Vec<Track> {
-    let tracks = state.library.tracks_in_folder(path);
+/// Tracks directly in a folder, optionally filtered by search query. The
+/// listing arrives from the store in canonical order; only the query filter
+/// applies here, like before.
+fn folder_tracks_filtered(tracks: Vec<Track>, query: &str) -> Vec<Track> {
     if query.is_empty() {
-        tracks.into_iter().cloned().collect()
+        tracks
     } else {
         let q = query.to_lowercase();
         tracks
             .into_iter()
             .filter(|t| t.metadata.search_text().contains(&q))
-            .cloned()
             .collect()
     }
 }
@@ -2008,6 +2336,9 @@ struct TrackMenuArgs<'a> {
     tag_edit: &'a mut Option<TagEditState>,
     advanced: bool,
     playlists: &'a mut Vec<Playlist>,
+    /// The Application Store's playlists section: entry mutations commit
+    /// through it as one immediate durable transaction.
+    playlist_store: &'a mut dyn PlaylistStore,
     /// When `Some`, adds a "Remove from Playlist" action for that playlist.
     remove_from_playlist: Option<&'a PlaylistId>,
 }
@@ -2024,6 +2355,7 @@ fn show_track_context_menu(response: &egui::Response, args: TrackMenuArgs<'_>) {
         tag_edit,
         advanced,
         playlists,
+        playlist_store,
         remove_from_playlist,
     } = args;
     let cmd = cmd.cloned();
@@ -2055,12 +2387,23 @@ fn show_track_context_menu(response: &egui::Response, args: TrackMenuArgs<'_>) {
                 }
                 ui.close();
             }
-            add_to_playlist_menu(ui, &playlist_options, playlists, &tid);
+            add_to_playlist_menu(ui, &playlist_options, playlists, playlist_store, &tid);
         }
         if let Some(ref pid) = remove_pid {
             if ui.button("Remove from Playlist").clicked() {
-                crate::app::playlist_manager::remove_track_from_playlist(playlists, pid, &tid);
-                crate::app::playlist_manager::save_playlists(playlists);
+                // One immediate durable transaction; the projection patch
+                // mirrors the committed change until the next reload.
+                match playlist_store.remove_playlist_entries(pid, &tid) {
+                    Ok(true) => {
+                        if let Some(playlist) =
+                            playlists.iter_mut().find(|p| &p.id == pid)
+                        {
+                            playlist.tracks.retain(|t| t != &tid);
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!("Failed to remove playlist entry: {e}"),
+                }
                 ui.close();
             }
         }
@@ -2151,14 +2494,15 @@ fn cover_art_ui(ui: &mut egui::Ui, texture: Option<egui::TextureHandle>, size: f
 }
 
 /// "Add to Playlist" submenu shared by the track context menus (Task 4.2).
-/// Clicking a playlist appends the track (exact duplicates ignored) and
-/// persists immediately, so the change survives a restart. Takes the
+/// Clicking a playlist appends the track (exact duplicates ignored) as one
+/// immediate durable transaction, so the change survives a restart. Takes the
 /// playlists slice (not the whole `AppState`) so callers can capture a
 /// disjoint field and avoid whole-state borrow conflicts.
 fn add_to_playlist_menu(
     ui: &mut egui::Ui,
     playlist_options: &[(PlaylistId, String)],
     playlists: &mut [Playlist],
+    store: &mut dyn PlaylistStore,
     track_id: &TrackId,
 ) {
     ui.menu_button("Add to Playlist", |ui| {
@@ -2168,12 +2512,16 @@ fn add_to_playlist_menu(
         }
         for (pid, pname) in playlist_options {
             if ui.button(pname).clicked() {
-                crate::app::playlist_manager::add_track_to_playlist(
-                    playlists,
-                    pid,
-                    track_id.clone(),
-                );
-                crate::app::playlist_manager::save_playlists(playlists);
+                match store.add_playlist_entry(pid, track_id) {
+                    Ok(true) => {
+                        // Projection patch mirroring the committed append.
+                        if let Some(playlist) = playlists.iter_mut().find(|p| &p.id == pid) {
+                            playlist.tracks.push(track_id.clone());
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!("Failed to add playlist entry: {e}"),
+                }
                 ui.close();
             }
         }

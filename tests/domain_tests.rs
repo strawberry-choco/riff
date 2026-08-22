@@ -9,35 +9,6 @@ mod tests {
     // --- Playlists (Task 4.2) ---------------------------------------------------
 
     #[test]
-    fn test_playlist_serde_roundtrip_preserves_order() {
-        let playlist = Playlist {
-            id: PlaylistId("mix-123".to_string()),
-            name: "Road Trip".to_string(),
-            tracks: vec![
-                TrackId("c.mp3".to_string()),
-                TrackId("a.mp3".to_string()),
-                TrackId("b.mp3".to_string()),
-            ],
-            created: None,
-        };
-
-        let json = serde_json::to_string(&playlist).unwrap();
-        let loaded: Playlist = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(loaded.id, playlist.id);
-        assert_eq!(loaded.name, "Road Trip");
-        // Track order is user-meaningful and must survive persistence.
-        assert_eq!(
-            loaded.tracks,
-            vec![
-                TrackId("c.mp3".to_string()),
-                TrackId("a.mp3".to_string()),
-                TrackId("b.mp3".to_string()),
-            ]
-        );
-    }
-
-    #[test]
     fn test_playlist_id_new_slugs_name_and_differs_per_name() {
         let a = PlaylistId::new("My Mix!");
         let b = PlaylistId::new("Other Mix");
@@ -560,48 +531,6 @@ mod tests {
         assert!(all.contains(&SmartPlaylistKind::MostPlayed));
         assert!(all.contains(&SmartPlaylistKind::NeverPlayed));
         assert!(all.contains(&SmartPlaylistKind::LostGems));
-    }
-
-    #[test]
-    fn test_track_play_history_fields_default_when_absent_from_json() {
-        // A cache entry written before play tracking existed: no play_count,
-        // last_played or date_added keys at all. `#[serde(default)]` must
-        // fill them in so old caches keep deserializing.
-        let json = r#"{
-            "id": "old.mp3",
-            "file_path": "old.mp3",
-            "metadata": {
-                "title": null, "artist": null, "album": null,
-                "album_artist": null, "track_number": null, "disc_number": null,
-                "genre": null, "year": null, "composer": null, "comment": null
-            },
-            "duration": null,
-            "sample_rate": null,
-            "channels": null
-        }"#;
-
-        let track: Track = serde_json::from_str(json).unwrap();
-        assert_eq!(track.id.0, "old.mp3");
-        assert_eq!(track.play_count, 0);
-        assert!(track.last_played.is_none());
-        assert!(track.date_added.is_none());
-    }
-
-    #[test]
-    fn test_track_play_history_fields_roundtrip_through_serde() {
-        use std::time::SystemTime;
-
-        let mut track = crate::test_utils::create_test_track("t.mp3", "t.mp3");
-        track.play_count = 7;
-        track.last_played = Some(SystemTime::now());
-        track.date_added = Some(SystemTime::now());
-
-        let json = serde_json::to_string(&track).unwrap();
-        let loaded: Track = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(loaded.play_count, 7);
-        assert_eq!(loaded.last_played, track.last_played);
-        assert_eq!(loaded.date_added, track.date_added);
     }
 
     #[test]

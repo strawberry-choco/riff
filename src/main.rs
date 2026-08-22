@@ -83,7 +83,13 @@ fn main() {
         run_audio_engine(cmd_rx, update_tx, app_state, engine_cmd_tx, engine_queries);
     });
 
-    spawn_update_processor(state.clone(), update_rx, cmd_tx.clone());
+    spawn_update_processor(
+        state.clone(),
+        update_rx,
+        cmd_tx.clone(),
+        library_mutation_store.clone(),
+        store_generation.clone(),
+    );
 
     // Library scan thread
     let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -169,6 +175,8 @@ fn spawn_update_processor(
     state: Arc<Mutex<AppState>>,
     update_rx: crossbeam_channel::Receiver<PlaybackUpdate>,
     cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
+    mut mutation_store: riff::infra::store::MutexLibraryMutationStore,
+    generation: StoreGeneration,
 ) {
     let _handle = thread::spawn(move || {
         while let Ok(update) = update_rx.recv() {
@@ -186,7 +194,7 @@ fn spawn_update_processor(
                 }
                 PlaybackUpdate::TrackEnded => {
                     drop(locked);
-                    handle_track_ended(&state, &cmd_tx);
+                    handle_track_ended(&state, &cmd_tx, &mut mutation_store, &generation);
                 }
                 PlaybackUpdate::Error(msg) => {
                     tracing::error!("Playback error: {}", msg);
@@ -200,16 +208,33 @@ fn spawn_update_processor(
 
 /// Record play history for the track that just finished — the queue's current
 /// track at this moment, before the auto-advance below moves the index — and
-/// advance the queue (or stop when nothing follows). The mirror-only history
-/// bump becomes its own single-transaction store event in ticket 06.
+/// advance the queue (or stop when nothing follows).
+///
+/// The play commits to the Application Store FIRST as its own single durable
+/// transaction (ticket 06), so a crash right after the track ends cannot lose
+/// it; only then does the transitional in-memory mirror catch up and the
+/// session generation bump so Session Projections refetch.
 fn handle_track_ended(
     state: &Arc<Mutex<AppState>>,
     cmd_tx: &crossbeam_channel::Sender<PlaybackCommand>,
+    mutation_store: &mut riff::infra::store::MutexLibraryMutationStore,
+    generation: &StoreGeneration,
 ) {
-    {
-        let mut locked = state.lock_or_recover();
-        if let Some(finished_id) = locked.queue.current_track().cloned() {
-            locked.library.increment_play_count(&finished_id);
+    let finished_id = {
+        let locked = state.lock_or_recover();
+        locked.queue.current_track().cloned()
+    };
+    if let Some(finished_id) = finished_id {
+        match mutation_store.record_track_played(&finished_id, std::time::SystemTime::now()) {
+            Ok(true) => {
+                generation.bump();
+                state
+                    .lock_or_recover()
+                    .library
+                    .increment_play_count(&finished_id);
+            }
+            Ok(false) => tracing::debug!(?finished_id, "finished track is not in the store"),
+            Err(e) => tracing::error!("Failed to persist play history for {finished_id:?}: {e}"),
         }
     }
     let next_track = {

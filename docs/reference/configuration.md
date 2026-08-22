@@ -1,32 +1,28 @@
 # Configuration
 
-riff has no traditional configuration file that you edit by hand. There is no `riff.toml`, no JSON settings file to author, and no command-line flags for configuration. Instead, state is persisted automatically at runtime in a small number of well-defined locations, and user-facing settings are driven through the UI and stored by the application framework. This page documents exactly where each piece of state and configuration lives. For the data flows that read and write this state, see [../technical/persistence.md](../technical/persistence.md); for problems involving the cache, see [./troubleshooting.md](./troubleshooting.md).
+riff has no traditional configuration file that you edit by hand. There is no `riff.toml`, no JSON settings file to author, and no command-line flags for configuration. Instead, state persists automatically at runtime in the **Application Store** (`riff.sqlite3`), and user-facing settings are driven through the UI. This page documents exactly where each piece of state lives. For how the store works, see [../technical/persistence.md](../technical/persistence.md); for problems involving the store, see [./troubleshooting.md](./troubleshooting.md).
 
-## Library Cache
+## Application Store
 
-The scanned library (tracks, artists, and albums) is serialized to a JSON file named `library_cache.json` so that the library loads instantly on startup without a rescan. It is loaded on startup and saved after each scan completes.
+The authoritative persistent state — the Library (tracks, artists, albums, play history), Playlists, and Settings — lives in one embedded SQLite database named `riff.sqlite3`, resolved by the `directories` crate (`ProjectDirs` data-local dir):
 
-The file lives under the platform's per-user local data directory, resolved by the `directories` crate (`ProjectDirs` data-local dir):
-
-| Platform | Library cache location |
+| Platform | Application Store location |
 |---|---|
-| Linux | `~/.local/share/riff/library_cache.json` |
-| macOS | `~/Library/Application Support/com.riff.riff/library_cache.json` |
-| Windows | `%LOCALAPPDATA%\riff\riff\library_cache.json` |
+| Linux | `~/.local/share/riff/riff.sqlite3` |
+| macOS | `~/Library/Application Support/com.riff.riff/riff.sqlite3` |
+| Windows | `%LOCALAPPDATA%\riff\riff\riff.sqlite3` |
 
-If this file is missing or corrupted, riff recovers automatically by starting from an empty library; you then rescan your folders to rebuild it. See [./troubleshooting.md](./troubleshooting.md) for details.
+Every logical change commits as one small durable transaction; scan batches (~10 tracks) commit incrementally. If the file is missing, riff starts fresh; if it is corrupted, riff renames it aside (preserved beside a fresh copy) and starts over automatically. Schema evolution runs through ordered, checksummed migrations.
 
-## Settings Persistence
+## Settings
 
-User-facing settings are UI-driven and persisted through `eframe::Storage`, the storage abstraction provided by the egui application framework. There is no settings file you are expected to edit; changing a setting in the UI writes it to this storage automatically.
+User-facing settings are UI-driven and persisted in the Application Store's typed settings tables. There is nothing you are expected to edit by hand; changing a setting in the UI commits it immediately as its own small transaction.
 
-The primary documented key is:
-
-| Key | Type | Meaning |
-|---|---|---|
-| `library_paths` | JSON string array | The list of library folder paths the user has added. |
-
-Additional UI state is persisted through the same mechanism — for example the playback volume and the per-path folder-watching enable/disable state — and the storage layer keeps a backup copy (for example a `library_paths_backup` key) that it can restore from if the primary value becomes corrupted. The exact on-disk location of `eframe::Storage` is managed by eframe per platform; treat it as framework-managed rather than as a file to edit directly.
+| Table | Contents |
+|---|---|
+| `app_settings` | Single-row scalars: volume, advanced mode, high contrast, ReplayGain enabled |
+| `library_paths` | The list of library folder paths the user has added |
+| `watch_states` | Per-path watch choice: disabled, enabled, or warning with a diagnostic message |
 
 ## Cover Art Cache
 
@@ -49,16 +45,15 @@ Configuration for the development tooling lives in the repository, not in a user
 
 - **Clippy** — Lint levels are set in `Cargo.toml` under `[lints.clippy]` (pedantic as warnings, nursery allowed, plus a few individual allowances). Tool-level options live in `clippy.toml` (`msrv`, `avoid-breaking-exported-api`, `upper-case-acronyms-aggressive`). See [../engineering/coding-standards.md](../engineering/coding-standards.md) for the full listing.
 - **rustfmt** — There is no `rustfmt.toml` or `.rustfmt.toml`; riff uses rustfmt's default style. Run `cargo fmt` before committing.
-- **CI** — There is no CI configuration file. Quality gates (format, lint, test) are run manually. See [../engineering/testing-strategy.md](../engineering/testing-strategy.md) for recommendations on adding CI.
+- **CI** — `.github/workflows/ci.yml` runs the quality gate (`cargo fmt --check`, `cargo clippy --all-targets`, `cargo test`) on push and pull requests to main, on Linux and Windows runners.
 
 ## Summary
 
 | Concern | Where it lives | Editable by hand? |
 |---|---|---|
-| Library cache | `library_cache.json` (per-OS data dir) | Not intended; rebuilt by scanning |
-| Settings | `eframe::Storage` (framework-managed) | No — driven through the UI |
+| Library, playlists, settings | `riff.sqlite3` (per-OS data dir) | Not intended; driven through the UI |
 | Cover art cache | In-memory only (LRU, max 50) | No |
 | Logging | `RUST_LOG` environment variable | Yes, at runtime |
 | Lint config | `Cargo.toml` `[lints.clippy]` + `clippy.toml` | Yes, by developers |
 | Formatting | Default rustfmt (no config file) | N/A |
-| CI | None | N/A |
+| CI | `.github/workflows/ci.yml` | Yes, by developers |

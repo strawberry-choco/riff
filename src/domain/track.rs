@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 /// Unique identifier for a track in the library.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TrackId(pub String);
 
 impl TrackId {
@@ -12,7 +12,7 @@ impl TrackId {
 }
 
 /// A track in the music library.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Track {
     pub id: TrackId,
     pub file_path: PathBuf,
@@ -21,23 +21,21 @@ pub struct Track {
     pub sample_rate: Option<u32>,
     pub channels: Option<u16>,
     /// How many times this track has finished playing. Persisted in the
-    /// library cache; incremented when playback reaches `TrackEnded`.
-    #[serde(default)]
+    /// Application Store's tracks table; incremented when playback reaches
+    /// `TrackEnded`.
     pub play_count: u32,
     /// When this track last finished playing (`None` = never played).
-    #[serde(default)]
     pub last_played: Option<SystemTime>,
     /// When this track was first added to the library. Set once at scan time
     /// and never refreshed — it drives the "Recently Added" smart playlist.
     /// Deliberately NOT the filesystem mtime, which changes on tag edits.
-    #[serde(default)]
     pub date_added: Option<SystemTime>,
 }
 
 /// The four auto-generated, read-only smart playlists (REQ-ML-009). Each is
 /// computed on demand from local library metadata and play history — purely
 /// offline, no network access, and never persisted as its own entity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SmartPlaylistKind {
     RecentlyAdded,
     MostPlayed,
@@ -69,7 +67,7 @@ impl SmartPlaylistKind {
 ///
 /// Note: derives `PartialEq` but not `Eq` — the `ReplayGain` fields are
 /// `f32`, which has no total equality.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TrackMetadata {
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -132,7 +130,7 @@ impl TrackMetadata {
 }
 
 /// An album in the music library (aggregate of tracks).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Album {
     pub title: String,
     pub artist: String,
@@ -142,7 +140,7 @@ pub struct Album {
 }
 
 /// An artist in the music library.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Artist {
     pub name: String,
     pub albums: Vec<String>,

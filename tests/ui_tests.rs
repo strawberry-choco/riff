@@ -689,4 +689,56 @@ mod tests {
         assert_eq!(evicted, vec!["b".to_string()]);
         assert_eq!(keys, vec!["c".to_string(), "d".to_string()]);
     }
+
+    // --- Clear Library (ticket 10) -------------------------------------------
+    //
+    // After the maintenance wipe, startup hydration sees an empty collection
+    // while playlists and settings hydrate exactly as before — no special
+    // casing anywhere in the UI layer.
+
+    #[test]
+    fn test_hydration_after_clear_library_sees_empty_collection_and_kept_curation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+
+        // Seed a full store: collection + playlist + settings.
+        {
+            let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+            store
+                .apply_scan_batch(&[crate::test_utils::create_test_track_with_metadata(
+                    "f:\\cl\\a.mp3",
+                    "f:\\cl\\a.mp3",
+                    "Artist",
+                    "Title",
+                    "Album",
+                )])
+                .unwrap();
+            store.create_playlist("Keep Me", &[]).unwrap();
+            store
+                .save_scalars(&riff::app::state::ScalarSettings {
+                    volume: Some(0.5),
+                    ..Default::default()
+                })
+                .unwrap();
+            store.clear_library().expect("clear works");
+        }
+
+        // Hydrate like the UI's first frame: the mirror comes up empty and
+        // curation comes back intact.
+        let mut state = AppState::new();
+        riff::ui::app::load_persisted_state(
+            &mut state,
+            boxed_store(&dir).as_ref(),
+            boxed_playlist_store(&dir).as_ref(),
+            boxed_library_query_store(&dir).as_ref(),
+            None,
+        );
+
+        assert!(
+            state.library.all_tracks().is_empty(),
+            "the hydrated library is empty after a clear"
+        );
+        assert_eq!(state.playlists.len(), 1, "playlists hydrate as usual");
+        assert_eq!(state.playlists[0].name, "Keep Me");
+    }
 }

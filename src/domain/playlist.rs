@@ -2,7 +2,7 @@ use crate::domain::track::TrackId;
 use std::time::SystemTime;
 
 /// Unique identifier for a user playlist.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PlaylistId(pub String);
 
 impl PlaylistId {
@@ -45,15 +45,14 @@ fn slugify(name: &str) -> String {
 /// carry no enforced link to tracks — dangling references stay listed and
 /// resolve again once the referenced files return; validity is checked on
 /// use, never assumed.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Playlist {
     pub id: PlaylistId,
     pub name: String,
     /// Ordered track references. `Vec` preserves user ordering; exact
     /// duplicates are prevented at insertion time.
     pub tracks: Vec<TrackId>,
-    /// When the playlist was created (`None` only for legacy data).
-    #[serde(default)]
+    /// When the playlist was created.
     pub created: Option<SystemTime>,
 }
 

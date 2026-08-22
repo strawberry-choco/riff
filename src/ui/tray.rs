@@ -77,8 +77,9 @@ pub fn create_tray(
                 } else if id == show_window_id {
                     let _ = cmd_tx.send(PlaybackCommand::ToggleVisibility);
                 } else if id == quit_id {
-                    // Graceful shutdown: stop playback and signal the UI to close
-                    // so eframe can persist storage and the library cache is saved.
+                    // Graceful shutdown: stop playback and signal the UI to
+                    // close; the Application Store has already committed
+                    // every change durably as it happened.
                     let _ = cmd_tx.send(PlaybackCommand::Stop);
                     quit_flag.store(true, Ordering::Relaxed);
                 }

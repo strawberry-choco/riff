@@ -1,8 +1,7 @@
 //! Playlist entry validity helpers. User playlists themselves are user data
 //! in the Application Store: every mutation commits through the
 //! [`crate::app::store::PlaylistStore`] port as one immediate durable
-//! transaction, and the legacy `playlists.json` file is never read or
-//! written.
+//! transaction.
 //!
 //! These helpers decide, at read time, which entries can play: an entry is
 //! valid when its track is known to the library AND its file still exists.

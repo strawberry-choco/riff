@@ -9,8 +9,9 @@
 //! refresh, which generation invalidation makes explicit.
 
 use crate::app::errors::AppError;
-use crate::domain::Track;
+use crate::domain::{Album, Artist, SmartPlaylistKind, Track, TrackId};
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 
 /// Rows fetched per window. The projection owns the window-size policy so
 /// callers declare visible offsets without duplicating page math.
@@ -163,5 +164,334 @@ impl TrackListProjection {
                 .expect("eviction order tracks cached windows");
             self.windows.remove(&oldest);
         }
+    }
+}
+
+/// Session Projection for the artist/album browsing views (ADR 0002).
+///
+/// Caches the artist list plus per-artist album lists and per-album track
+/// lists, each fetched from the store only when missing at the current
+/// generation. A generation bump (a committed store mutation) drops every
+/// level at once so a frame never mixes rows from two generations; each
+/// level then refetches lazily as its view expands again. Loader errors
+/// propagate and leave the cache untouched — the next call retries.
+///
+/// Unlike [`TrackListProjection`] this is not windowed: browsing is
+/// hierarchical, so each query returns one artist's or one album's worth of
+/// rows rather than one screen's.
+pub struct BrowsingProjection {
+    loaded_generation: Option<u64>,
+    artists: Option<Vec<Artist>>,
+    albums: HashMap<String, Vec<Album>>,
+    tracks: HashMap<(String, String), Vec<Track>>,
+}
+
+/// Loader signature for one album's tracks (factored out for readability).
+type AlbumTracksLoader<'a> = &'a mut dyn FnMut(&str, &str) -> Result<Vec<Track>, AppError>;
+
+impl Default for BrowsingProjection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BrowsingProjection {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            loaded_generation: None,
+            artists: None,
+            albums: HashMap::new(),
+            tracks: HashMap::new(),
+        }
+    }
+
+    /// Drop every cached level when `generation` moved since the last load.
+    /// The failed-generation case stays stale: `loaded_generation` is only
+    /// stamped after a successful fetch, so the next call retries.
+    fn ensure_generation(&mut self, generation: u64) {
+        if self.loaded_generation == Some(generation) {
+            return;
+        }
+        self.artists = None;
+        self.albums.clear();
+        self.tracks.clear();
+    }
+
+    /// Every artist name-ascending, cached per generation.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn artists(
+        &mut self,
+        generation: u64,
+        loader: &mut dyn FnMut() -> Result<Vec<Artist>, AppError>,
+    ) -> Result<Vec<Artist>, AppError> {
+        if self.loaded_generation != Some(generation) || self.artists.is_none() {
+            let fresh = loader()?;
+            self.ensure_generation(generation);
+            self.loaded_generation = Some(generation);
+            self.artists = Some(fresh);
+        }
+        Ok(self.artists.as_ref().expect("just loaded").clone())
+    }
+
+    /// One artist's albums in canonical order, cached per generation.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn artist_albums(
+        &mut self,
+        generation: u64,
+        artist: &str,
+        loader: &mut dyn FnMut(&str) -> Result<Vec<Album>, AppError>,
+    ) -> Result<Vec<Album>, AppError> {
+        if self.loaded_generation != Some(generation) || !self.albums.contains_key(artist) {
+            let fresh = loader(artist)?;
+            self.ensure_generation(generation);
+            self.loaded_generation = Some(generation);
+            self.albums.insert(artist.to_string(), fresh.clone());
+            return Ok(fresh);
+        }
+        Ok(self.albums.get(artist).expect("checked above").clone())
+    }
+
+    /// One album's tracks in canonical order, cached per generation.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn album_tracks(
+        &mut self,
+        generation: u64,
+        album_artist: &str,
+        album_title: &str,
+        loader: AlbumTracksLoader<'_>,
+    ) -> Result<Vec<Track>, AppError> {
+        let key = (album_artist.to_string(), album_title.to_string());
+        if self.loaded_generation != Some(generation) || !self.tracks.contains_key(&key) {
+            let fresh = loader(album_artist, album_title)?;
+            self.ensure_generation(generation);
+            self.loaded_generation = Some(generation);
+            self.tracks.insert(key, fresh.clone());
+            return Ok(fresh);
+        }
+        Ok(self.tracks.get(&key).expect("checked above").clone())
+    }
+}
+
+/// Session Projection for the folder-tree views (ADR 0002).
+///
+/// Caches the five folder query shapes — subtree existence, subtree search
+/// matches, subtree track ids, direct tracks, and child directories — keyed
+/// by folder, each fetched from the store only when missing at the current
+/// generation. A generation bump drops every level at once so a frame never
+/// mixes rows from two generations; levels then refetch lazily as the tree
+/// renders again. Loader errors propagate and leave the cache untouched.
+pub struct FolderProjection {
+    loaded_generation: Option<u64>,
+    has_audio: HashMap<String, bool>,
+    search_matches: HashMap<(String, String), bool>,
+    subtree_ids: HashMap<String, Vec<TrackId>>,
+    direct_tracks: HashMap<String, Vec<Track>>,
+    children: HashMap<String, Vec<PathBuf>>,
+}
+
+impl Default for FolderProjection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FolderProjection {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            loaded_generation: None,
+            has_audio: HashMap::new(),
+            search_matches: HashMap::new(),
+            subtree_ids: HashMap::new(),
+            direct_tracks: HashMap::new(),
+            children: HashMap::new(),
+        }
+    }
+
+    /// Drop every cached level when `generation` moved since the last load.
+    /// The failed-generation case stays stale: `loaded_generation` is only
+    /// stamped after a successful fetch, so the next call retries.
+    fn ensure_generation(&mut self, generation: u64) {
+        if self.loaded_generation == Some(generation) {
+            return;
+        }
+        self.has_audio.clear();
+        self.search_matches.clear();
+        self.subtree_ids.clear();
+        self.direct_tracks.clear();
+        self.children.clear();
+    }
+
+    /// Whether `folder` contains any audio, cached per generation.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn has_audio(
+        &mut self,
+        generation: u64,
+        folder: &std::path::Path,
+        loader: &mut dyn FnMut(&std::path::Path) -> Result<bool, AppError>,
+    ) -> Result<bool, AppError> {
+        let key = folder.to_string_lossy().into_owned();
+        if self.loaded_generation != Some(generation) || !self.has_audio.contains_key(&key) {
+            let fresh = loader(folder)?;
+            self.ensure_generation(generation);
+            self.loaded_generation = Some(generation);
+            self.has_audio.insert(key.clone(), fresh);
+            return Ok(fresh);
+        }
+        Ok(self.has_audio[&key])
+    }
+
+    /// Whether any track under `folder` matches the search query, cached
+    /// per (folder, query) per generation.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn has_search_match(
+        &mut self,
+        generation: u64,
+        folder: &std::path::Path,
+        query: &str,
+        loader: &mut dyn FnMut(&std::path::Path, &str) -> Result<bool, AppError>,
+    ) -> Result<bool, AppError> {
+        let key = (folder.to_string_lossy().into_owned(), query.to_string());
+        if self.loaded_generation != Some(generation) || !self.search_matches.contains_key(&key) {
+            let fresh = loader(folder, query)?;
+            self.ensure_generation(generation);
+            self.loaded_generation = Some(generation);
+            self.search_matches.insert(key.clone(), fresh);
+            return Ok(fresh);
+        }
+        Ok(self.search_matches[&key])
+    }
+
+    /// Every track id under `folder`, path-ordered, cached per generation.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn subtree_ids(
+        &mut self,
+        generation: u64,
+        folder: &std::path::Path,
+        loader: &mut dyn FnMut(&std::path::Path) -> Result<Vec<TrackId>, AppError>,
+    ) -> Result<Vec<TrackId>, AppError> {
+        let key = folder.to_string_lossy().into_owned();
+        if self.loaded_generation != Some(generation) || !self.subtree_ids.contains_key(&key) {
+            let fresh = loader(folder)?;
+            self.ensure_generation(generation);
+            self.loaded_generation = Some(generation);
+            self.subtree_ids.insert(key.clone(), fresh.clone());
+            return Ok(fresh);
+        }
+        Ok(self.subtree_ids[&key].clone())
+    }
+
+    /// The tracks directly inside `folder`, cached per generation.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn direct_tracks(
+        &mut self,
+        generation: u64,
+        folder: &std::path::Path,
+        loader: &mut dyn FnMut(&std::path::Path) -> Result<Vec<Track>, AppError>,
+    ) -> Result<Vec<Track>, AppError> {
+        let key = folder.to_string_lossy().into_owned();
+        if self.loaded_generation != Some(generation) || !self.direct_tracks.contains_key(&key) {
+            let fresh = loader(folder)?;
+            self.ensure_generation(generation);
+            self.loaded_generation = Some(generation);
+            self.direct_tracks.insert(key.clone(), fresh.clone());
+            return Ok(fresh);
+        }
+        Ok(self.direct_tracks[&key].clone())
+    }
+
+    /// The child directories of `folder` holding audio, cached per
+    /// generation.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn children(
+        &mut self,
+        generation: u64,
+        folder: &std::path::Path,
+        loader: &mut dyn FnMut(&std::path::Path) -> Result<Vec<PathBuf>, AppError>,
+    ) -> Result<Vec<PathBuf>, AppError> {
+        let key = folder.to_string_lossy().into_owned();
+        if self.loaded_generation != Some(generation) || !self.children.contains_key(&key) {
+            let fresh = loader(folder)?;
+            self.ensure_generation(generation);
+            self.loaded_generation = Some(generation);
+            self.children.insert(key.clone(), fresh.clone());
+            return Ok(fresh);
+        }
+        Ok(self.children[&key].clone())
+    }
+}
+
+/// Session Projection for the read-only smart playlists (ADR 0002).
+///
+/// Caches one computed list per [`SmartPlaylistKind`], stamped with the
+/// generation it was loaded at. A generation bump (any committed store
+/// mutation — a finished play, a scan batch, a tag edit) drops every list so
+/// the next frame regenerates from committed state; within a generation the
+/// cache serves repeat frames without touching the store. A request whose
+/// limit exceeds what the cache holds also refetches, so callers can never
+/// see a truncated-as-cached list where they asked for more.
+pub struct SmartPlaylistsProjection {
+    loaded_generation: Option<u64>,
+    lists: HashMap<SmartPlaylistKind, (usize, Vec<Track>)>,
+}
+
+impl Default for SmartPlaylistsProjection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SmartPlaylistsProjection {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            loaded_generation: None,
+            lists: HashMap::new(),
+        }
+    }
+
+    /// The computed list for `kind`, cached per generation and limit.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn list(
+        &mut self,
+        generation: u64,
+        kind: SmartPlaylistKind,
+        limit: usize,
+        loader: &mut dyn FnMut(SmartPlaylistKind, usize) -> Result<Vec<Track>, AppError>,
+    ) -> Result<Vec<Track>, AppError> {
+        if self.loaded_generation != Some(generation)
+            || self
+                .lists
+                .get(&kind)
+                .is_none_or(|(cached_limit, _)| *cached_limit < limit)
+        {
+            let fresh = loader(kind, limit)?;
+            if self.loaded_generation != Some(generation) {
+                self.lists.clear();
+                self.loaded_generation = Some(generation);
+            }
+            self.lists.insert(kind, (limit, fresh.clone()));
+            return Ok(fresh);
+        }
+        Ok(self.lists[&kind].1.clone())
     }
 }

@@ -43,7 +43,7 @@ pub enum BrowseMode {
     Folders,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum WatchState {
     #[default]
     Disabled,

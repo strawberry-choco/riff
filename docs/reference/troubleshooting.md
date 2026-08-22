@@ -36,7 +36,7 @@ This page collects common issues reported while building or running riff, each b
 
 **Cause:** Scanning walks the directory tree, reads metadata from every audio file, and builds the in-memory index. This is genuinely I/O- and CPU-bound work proportional to library size, and it happens in full on the first scan.
 
-**Fix:** This is expected. Subsequent launches load the persisted library cache instead of re-scanning, so startup is fast. You only pay the full scan cost again if the cache is missing or you add new library paths. See [./configuration.md](./configuration.md) for the cache location.
+**Fix:** This is expected. Subsequent launches load the persisted library from the Application Store instead of re-scanning, so startup is fast. You only pay the full scan cost again if the store is missing or you add new library paths. See [./configuration.md](./configuration.md) for the store location.
 
 ### Duplicate tracks after a rescan
 
@@ -44,15 +44,15 @@ This page collects common issues reported while building or running riff, each b
 
 **Cause:** A track's identity (`TrackId`) is its full file path as a string. When you rename or move a file, its path changes, so riff treats it as a brand-new track rather than the same track at a new location. The old path entry and the new path entry coexist.
 
-**Fix:** This is inherent to path-based identity. Remove the stale entries for the old paths, or clear the library cache and rescan from scratch so only the current paths are indexed. Be aware that any operation changing file paths will reproduce the effect.
+**Fix:** This is inherent to path-based identity. Remove the stale entries for the old paths, or use Clear Library (Settings → Maintenance) and rescan from scratch so only the current paths are indexed. Be aware that any operation changing file paths will reproduce the effect.
 
-### Corrupt or missing library cache
+### Corrupt or missing Application Store
 
 **Symptom:** The library appears empty on startup even though you have scanned folders before, or a previously populated library resets.
 
-**Cause:** The library cache is a JSON file on disk. If it is missing, unreadable, or corrupted, riff recovers by starting from an empty library rather than failing.
+**Cause:** The Application Store (`riff.sqlite3`) is an SQLite database on disk. If it is missing, riff starts fresh; if it fails its integrity check, riff renames the damaged file aside (preserved beside the fresh copy) and creates a new one rather than failing.
 
-**Fix:** This auto-recovery is by design. Add your library folders and rescan; the cache is rebuilt and saved after the scan completes. If corruption recurs, check that the cache location (see [./configuration.md](./configuration.md)) is on a healthy, writable filesystem.
+**Fix:** This auto-recovery is by design. Add your library folders and rescan; each scan batch commits durably as it progresses. If corruption recurs, check that the store location (see [./configuration.md](./configuration.md)) is on a healthy, writable filesystem — and keep the renamed-aside copy, since recovery tools may be able to extract your playlists and settings from it.
 
 ## Platform Behavior
 

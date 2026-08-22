@@ -1,5 +1,5 @@
 /// Playback state machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackState {
     Stopped,
     Playing,
@@ -7,7 +7,7 @@ pub enum PlaybackState {
 }
 
 /// Repeat mode for the queue.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RepeatMode {
     #[default]
     None,

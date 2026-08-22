@@ -18,29 +18,29 @@ This document consolidates every error condition that a user can encounter in ri
 
 ---
 
-## 2. Missing or Corrupt Library Cache
+## 2. Missing or Corrupt Application Store
 
-**Condition**: The library_cache.json file is missing (deleted by user, not yet written) or contains malformed JSON.
+**Condition**: The `riff.sqlite3` store file is missing (first launch, deleted by user) or fails its integrity check (corruption).
 
-**User-visible**: No error message. The library is empty on launch.
+**User-visible**: No error message for a missing file — the library is empty on launch. For a corrupt file, a brief notice explains that the library will be rebuilt; the broken file is preserved beside the fresh one.
 
-**System behavior**: riff starts with an empty library. The library cache is not partially loaded.
+**System behavior**: A missing store is created fresh. A corrupt store is renamed aside with a nanosecond suffix (kept for recovery tools) and a fresh store takes its place. The store is never partially loaded.
 
-**Recovery**: The user adds library paths and triggers a scan. The cache is rebuilt from scratch.
+**Recovery**: The user adds library paths and triggers a scan. The collection is rebuilt from scratch. Playlists and settings live in the same store, so they are lost only if the corrupt file itself held them — which is why the damaged copy is preserved.
 
 **Status**: Implemented.
 
 ---
 
-## 3. Failed Cache Write
+## 3. Failed Store Write
 
-**Condition**: The cache file cannot be written — disk full, permissions error, or filesystem error.
+**Condition**: The store cannot be written — disk full, permissions error, or filesystem error.
 
 **User-visible**: No error shown to the user. The UI is not affected.
 
-**System behavior**: The failure is logged at WARN level. The current library state in memory continues to function. The cache is simply not updated.
+**System behavior**: The failure is logged at ERROR/WARN level. The current in-memory state continues to function. The transaction that failed is rolled back, so the store keeps its last committed state — never a partial one.
 
-**Recovery**: Fix the underlying issue (free disk space, fix permissions). The next successful scan or path removal will write the cache again.
+**Recovery**: Fix the underlying issue (free disk space, fix permissions). Subsequent changes commit again as new transactions.
 
 **Status**: Implemented.
 
@@ -136,7 +136,7 @@ This document consolidates every error condition that a user can encounter in ri
 
 **User-visible**: The scan for that path stops. Other paths continue scanning. A status indicator shows the interrupted path.
 
-**System behavior**: The scan thread detects the I/O error and stops processing that path. Already-indexed entries are preserved. The cache is not rewritten until a scan completes successfully.
+**System behavior**: The scan thread detects the I/O error and stops processing that path. Already-indexed entries are preserved; committed scan batches survive an interrupted scan.
 
 **Recovery**: Reconnect the drive and click "Scan" on the path. Or remove the path from settings.
 
@@ -146,7 +146,7 @@ This document consolidates every error condition that a user can encounter in ri
 
 ## 11. Empty Library State
 
-**Condition**: No tracks are indexed — first launch, all paths removed, or cache was deleted.
+**Condition**: No tracks are indexed - first launch, all paths removed, or the collection was wiped via Clear Library.
 
 **User-visible**: The library explorer shows an empty state (e.g. "No music found — add a library folder"). The control bar shows no track.
 

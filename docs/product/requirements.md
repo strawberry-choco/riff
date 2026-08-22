@@ -146,19 +146,20 @@ This document defines the atomic, testable acceptance criteria for every riff fe
 | REQ-ML-005-10 | The user shall be able to trigger a scan of a single library path. | P0 |
 | REQ-ML-005-11 | The user shall be able to trigger a scan of all registered library paths. | P0 |
 
-### REQ-ML-006: Library Cache Persistence
+### REQ-ML-006: Library Persistence (Application Store)
 
 | # | Criterion | Priority |
 |---|-----------|----------|
-| REQ-ML-006-01 | The full scanned library (tracks, artists, albums) shall be serialized to library_cache.json. | P1 |
-| REQ-ML-006-02 | The cache file shall be stored in the platform's data-local directory via the directories crate. | P1 |
-| REQ-ML-006-03 | The cache shall be loaded on the first frame of the first launch. | P1 |
-| REQ-ML-006-04 | A large collection (50,000+ tracks) shall be browsable almost instantly after cache load, without waiting for a disk walk. | P1 |
-| REQ-ML-006-05 | The cache shall be rewritten after every completed scan. | P1 |
-| REQ-ML-006-06 | The cache shall be rewritten whenever a library path is removed. | P1 |
-| REQ-ML-006-07 | If the cache file is missing, riff shall start with an empty library silently. | P1 |
-| REQ-ML-006-08 | If the cache file is corrupt (malformed JSON), riff shall start with an empty library silently. | P1 |
-| REQ-ML-006-09 | A failed cache write shall log a warning but shall not disturb the UI. | P1 |
+| REQ-ML-006-01 | The full scanned library (tracks, artists, albums, play history) shall persist in the Application Store (`riff.sqlite3`), the single authoritative store. | P1 |
+| REQ-ML-006-02 | The store file shall live in the platform's data-local directory via the directories crate. | P1 |
+| REQ-ML-006-03 | The library shall be available on the first frame of a launch, read from the store through Session Projections and startup hydration. | P1 |
+| REQ-ML-006-04 | A large collection (50,000+ tracks) shall be browsable almost instantly after startup, without waiting for a disk walk. | P1 |
+| REQ-ML-006-05 | Each scan batch (~10 tracks) shall commit as one durable transaction, so an interrupted scan keeps every committed batch. | P1 |
+| REQ-ML-006-06 | Removing a library path shall remove its index entries in one durable transaction. | P1 |
+| REQ-ML-006-07 | If the store file is missing, riff shall start with an empty library and create a fresh store. | P1 |
+| REQ-ML-006-08 | If the store is corrupt, riff shall set the broken file aside automatically (preserved beside a fresh copy) and start fresh. | P1 |
+| REQ-ML-006-09 | A failed store write shall log an error but shall not disturb the UI. | P1 |
+| REQ-ML-006-10 | Schema evolution shall use ordered, checksummed migrations; a tampered migration is a fatal startup error. | P1 |
 
 ### REQ-ML-007: Folder Watching
 

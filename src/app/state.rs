@@ -43,7 +43,7 @@ pub enum BrowseMode {
     Folders,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum WatchState {
     #[default]
     Disabled,
@@ -78,10 +78,22 @@ pub struct AppState {
     /// `true`, the engine applies each track's `REPLAYGAIN_TRACK_GAIN`
     /// (peak-capped) in the audio output's volume-scaling step.
     pub replaygain_enabled: bool,
-    /// User playlists (Task 4.2). NOT part of the library cache: loaded from
-    /// and saved to a separate `playlists.json` via `playlist_manager`, so
-    /// playlists survive a cache clear/rebuild.
+    /// User playlists (Task 4.2). Session Projection of the Application
+    /// Store's Playlists section: refreshed from the store through the
+    /// `PlaylistStore` port, never authoritative. Playlists survive a Clear
+    /// Library (which wipes collection data only).
     pub playlists: Vec<Playlist>,
+}
+
+/// The single-row scalar preferences persisted in the Application Store's
+/// typed settings table. Volume is `None` while the user has not yet moved
+/// the slider, so the caller applies its own default.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ScalarSettings {
+    pub volume: Option<f32>,
+    pub advanced_mode: bool,
+    pub high_contrast: bool,
+    pub replaygain_enabled: bool,
 }
 
 /// UI display flags grouped out of [`AppState`] so the top-level state struct

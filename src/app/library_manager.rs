@@ -7,82 +7,18 @@ use std::time::{Duration, SystemTime};
 /// Age threshold for "Lost Gems": tracks whose last play is older than this
 /// are considered forgotten gems worth resurfacing. Tracks that were never
 /// played qualify unconditionally ("unheard" includes never-heard).
-const LOST_GEMS_THRESHOLD: Duration = Duration::from_hours(2160);
-
-/// Current on-disk library cache schema version. Bump when the serialized
-/// shape changes incompatibly; caches with any other version are discarded
-/// (with a logged warning) and rebuilt on the next scan.
-///
-/// NOTE: the first versioned release triggers a one-time rescan: caches
-/// written before versioning lack `schema_version`, which serde defaults to
-/// 0, so they are rejected by [`LibraryManager::deserialize_cache`]. The
-/// cache is a derived, fully rebuildable view of the music files, so this is
-/// safe and self-healing.
-pub const CACHE_SCHEMA_VERSION: u32 = 1;
-
-/// Why a previously written library cache was rejected at load time.
-/// Surfaced to the user (via the scan status line) so an empty library is
-/// explainable rather than silent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CacheDiscardReason {
-    /// The cache parsed but its `schema_version` differs from
-    /// [`CACHE_SCHEMA_VERSION`] — including pre-versioning caches, whose
-    /// absent version serde defaults to 0.
-    SchemaMismatch,
-    /// The cache file could not be read from disk or parsed as JSON.
-    Unreadable,
-}
-
-impl std::fmt::Display for CacheDiscardReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SchemaMismatch => write!(f, "incompatible schema version"),
-            Self::Unreadable => write!(f, "corrupted or unreadable"),
-        }
-    }
-}
+pub(crate) const LOST_GEMS_THRESHOLD: Duration = Duration::from_hours(2160);
 
 /// Manages the music library: scanning, indexing, metadata, and search.
-#[derive(serde::Serialize, serde::Deserialize)]
+///
+/// Since the Application Store cutover this struct is a transitional
+/// in-memory mirror hydrated from the store at startup and written through
+/// during scans; it serves views not yet migrated to bounded store queries
+/// and is never persisted itself.
 pub struct LibraryManager {
     pub tracks: HashMap<TrackId, Track>,
     pub artists: HashMap<String, Artist>,
     pub albums: HashMap<String, Album>,
-}
-
-/// Versioned serialization envelope for the library cache. Keeps
-/// `schema_version` in the JSON without polluting `LibraryManager`'s logical
-/// fields.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CacheEnvelope {
-    /// Absent field deserializes to 0 (serde default), so pre-versioning
-    /// caches are recognized as "old" and rejected deliberately.
-    #[serde(default)]
-    schema_version: u32,
-    tracks: HashMap<TrackId, Track>,
-    artists: HashMap<String, Artist>,
-    albums: HashMap<String, Album>,
-}
-
-impl From<&LibraryManager> for CacheEnvelope {
-    fn from(lib: &LibraryManager) -> Self {
-        Self {
-            schema_version: CACHE_SCHEMA_VERSION,
-            tracks: lib.tracks.clone(),
-            artists: lib.artists.clone(),
-            albums: lib.albums.clone(),
-        }
-    }
-}
-
-impl From<CacheEnvelope> for LibraryManager {
-    fn from(envelope: CacheEnvelope) -> Self {
-        Self {
-            tracks: envelope.tracks,
-            artists: envelope.artists,
-            albums: envelope.albums,
-        }
-    }
 }
 
 impl Default for LibraryManager {
@@ -98,6 +34,38 @@ impl LibraryManager {
             artists: HashMap::new(),
             albums: HashMap::new(),
         }
+    }
+
+    /// Read metadata for `paths` into Track values, skipping (and logging)
+    /// per-file failures so a scan never aborts on one bad file. Shared by
+    /// the store-backed scan flow, which commits the resulting batch as one
+    /// durable transaction.
+    pub fn build_tracks(paths: Vec<PathBuf>, reader: &dyn MetadataReader) -> Vec<Track> {
+        let mut tracks = Vec::new();
+        for path in paths {
+            match reader.read_all(&path) {
+                Ok((metadata, duration, _cover_source, audio_format)) => {
+                    let id = TrackId::from_path(&path);
+                    tracks.push(Track {
+                        id,
+                        file_path: path,
+                        metadata,
+                        duration,
+                        sample_rate: Some(audio_format.sample_rate),
+                        channels: Some(audio_format.channels),
+                        play_count: 0,
+                        last_played: None,
+                        // Stamp first-add time once, at scan time. This (not
+                        // the file mtime) drives "Recently Added".
+                        date_added: Some(SystemTime::now()),
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Failed to read metadata for {:?}: {}", path, e);
+                }
+            }
+        }
+        tracks
     }
 
     /// Scan the given paths and add any new tracks. Per-file metadata read
@@ -434,125 +402,5 @@ impl LibraryManager {
         self.tracks.clear();
         self.artists.clear();
         self.albums.clear();
-    }
-
-    /// Location of the library cache file, if the platform provides a local
-    /// data directory.
-    pub fn cache_path() -> Option<std::path::PathBuf> {
-        directories::ProjectDirs::from("", "", "riff")
-            .map(|d| d.data_local_dir().join("library_cache.json"))
-    }
-
-    /// Serialize this library into the versioned cache JSON format (an
-    /// envelope carrying `schema_version`). Returns an empty string if
-    /// serialization fails (logged); callers must not write that result.
-    pub fn serialize_cache(&self) -> String {
-        match serde_json::to_string(&CacheEnvelope::from(self)) {
-            Ok(json) => json,
-            Err(e) => {
-                tracing::warn!("Failed to serialize library cache: {e}");
-                String::new()
-            }
-        }
-    }
-
-    /// Parse versioned cache JSON into a `LibraryManager`. Falls back to an
-    /// empty library on malformed JSON or on a schema version mismatch —
-    /// including pre-versioning caches, whose absent `schema_version` serde
-    /// defaults to 0. Both fallbacks are logged so they are explainable to
-    /// users rather than silent. Never panics on malformed/old caches.
-    pub fn deserialize_cache(json: &str) -> LibraryManager {
-        Self::deserialize_cache_with_reason(json).0
-    }
-
-    /// [`Self::deserialize_cache`] plus the [`CacheDiscardReason`] when the
-    /// cache was discarded, so callers can explain the empty library to the
-    /// user. `None` means the cache loaded cleanly.
-    pub fn deserialize_cache_with_reason(
-        json: &str,
-    ) -> (LibraryManager, Option<CacheDiscardReason>) {
-        match serde_json::from_str::<CacheEnvelope>(json) {
-            Ok(envelope) if envelope.schema_version == CACHE_SCHEMA_VERSION => {
-                (envelope.into(), None)
-            }
-            Ok(envelope) => {
-                tracing::warn!(
-                    "Library cache schema version mismatch: found {}, expected {}; \
-                     discarding the cache (it will be rebuilt on the next scan)",
-                    envelope.schema_version,
-                    CACHE_SCHEMA_VERSION
-                );
-                (
-                    LibraryManager::new(),
-                    Some(CacheDiscardReason::SchemaMismatch),
-                )
-            }
-            Err(e) => {
-                tracing::warn!("Failed to deserialize library cache: {e}");
-                (LibraryManager::new(), Some(CacheDiscardReason::Unreadable))
-            }
-        }
-    }
-
-    pub fn save_cache(&self) {
-        let Some(path) = Self::cache_path() else {
-            return;
-        };
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                tracing::warn!("Failed to create cache directory: {e}");
-                return;
-            }
-        }
-        let json = self.serialize_cache();
-        if json.is_empty() {
-            // Serialization failed (already logged); don't clobber the cache.
-            return;
-        }
-        if let Err(e) = std::fs::write(&path, json) {
-            tracing::warn!("Failed to write library cache: {e}");
-        }
-    }
-
-    /// Load the library cache from disk, reporting why a previously written
-    /// cache was discarded so callers can surface the reason to the user.
-    /// `None` means either a clean load or simply no cache file (normal
-    /// first run); `Some` means an existing cache was rejected.
-    pub fn load_cache_with_reason() -> (Self, Option<CacheDiscardReason>) {
-        let Some(path) = Self::cache_path() else {
-            return (Self::new(), None);
-        };
-        if !path.exists() {
-            return (Self::new(), None);
-        }
-        let json = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("Failed to read library cache: {e}");
-                return (Self::new(), Some(CacheDiscardReason::Unreadable));
-            }
-        };
-        Self::deserialize_cache_with_reason(&json)
-    }
-
-    pub fn load_cache() -> Self {
-        Self::load_cache_with_reason().0
-    }
-
-    /// Delete the library cache file if present. Returns whether a file was
-    /// removed; a missing file is not an error. The cache is rebuildable, so
-    /// deletion is always safe.
-    pub fn delete_cache_file() -> bool {
-        let Some(path) = Self::cache_path() else {
-            return false;
-        };
-        match std::fs::remove_file(&path) {
-            Ok(()) => true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => {
-                tracing::warn!("Failed to delete library cache {:?}: {e}", path);
-                false
-            }
-        }
     }
 }

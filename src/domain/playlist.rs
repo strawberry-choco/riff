@@ -40,10 +40,11 @@ fn slugify(name: &str) -> String {
 
 /// A user-managed playlist: a named, ordered list of track references.
 ///
-/// Persisted to its own `playlists.json` — deliberately NOT inside the
-/// library cache, which can be cleared and rebuilt (Task 3.2). User
-/// playlists must survive that. Entries may become invalid when files are
-/// moved or deleted; validity is checked on use, never assumed.
+/// User data in the Application Store (see `app::store::PlaylistStore`):
+/// every mutation commits as one immediate durable transaction. Entries
+/// carry no enforced link to tracks — dangling references stay listed and
+/// resolve again once the referenced files return; validity is checked on
+/// use, never assumed.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Playlist {
     pub id: PlaylistId,

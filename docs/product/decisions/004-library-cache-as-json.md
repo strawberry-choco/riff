@@ -1,6 +1,6 @@
 # 004: Library Cache as JSON File
 
-**Status**: Accepted
+**Status**: Superseded by [ADR 0001](../../adr/0001-sqlite-is-the-authoritative-application-store.md)
 **Date**: 2026-07-31
 
 ## Context
@@ -35,3 +35,4 @@ The library cache is a JSON file (`library_cache.json`) using serde serializatio
 - [Features](./features.md) — Library Cache Persistence.
 - [Persistence](../technical/persistence.md).
 - [Roadmap](./roadmap.md) — Cache schema versioning recommendation.
+

@@ -4,7 +4,9 @@ pub mod errors;
 pub mod gapless;
 pub mod library_manager;
 pub mod playlist_manager;
+pub mod projection;
 pub mod state;
+pub mod store;
 pub mod traits;
 pub mod watcher_manager;
 

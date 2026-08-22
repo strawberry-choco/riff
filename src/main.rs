@@ -18,7 +18,9 @@ use crate::app::gapless::{
     elapsed_from_samples, formats_gapless_compatible, is_gapless_eligible, pre_buffer_cap,
     repeat_one_handoff_eligible, samples_from_duration, GaplessConditions, QueueConditions,
 };
+use crate::app::library_manager::LibraryManager;
 use crate::app::state::AppState;
+use crate::app::store::{LibraryMutationStore, LibraryQueryStore, StoreGeneration};
 use crate::app::traits::{AudioDecoder, AudioFormatInfo, AudioOutput};
 use crate::app::watcher_manager::WatcherManager;
 use crate::app::MutexExt;
@@ -41,6 +43,29 @@ const PRE_BUFFER_SECONDS: f32 = 4.0;
 fn main() {
     tracing_subscriber::fmt::init();
 
+    // Open the Application Store before anything else. Open or migration
+    // failures are fatal startup errors with a clear message — never silent
+    // fallbacks to empty state.
+    let store_path = riff::infra::store::default_store_path().expect(
+        "fatal: could not resolve the Application Store location \
+         (no data-local directory available)",
+    );
+    // One shared connection behind a mutex serves every store port; settings
+    // reads/writes go through the `SettingsStore` implementation below.
+    let store = std::sync::Arc::new(std::sync::Mutex::new(
+        riff::infra::store::SqliteStore::open_and_migrate(&store_path)
+            .unwrap_or_else(|e| panic!("fatal: {e}")),
+    ));
+    let settings_store = riff::infra::store::MutexSettingsStore::new(store.clone());
+    let playlist_store = riff::infra::store::MutexPlaylistStore::new(store.clone());
+    // Library collection ports over the same shared connection: scans write
+    // through the mutation port, playback resolves through the query port,
+    // and every committed mutation bumps this session-local generation so
+    // Session Projections know to refetch (ADR 0002).
+    let library_mutation_store = riff::infra::store::MutexLibraryMutationStore::new(store.clone());
+    let library_query_store = riff::infra::store::MutexLibraryQueryStore::new(store.clone());
+    let store_generation = riff::app::store::StoreGeneration::new();
+
     let state = Arc::new(Mutex::new(AppState::new()));
     let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
     let (update_tx, update_rx) = unbounded::<PlaybackUpdate>();
@@ -53,8 +78,9 @@ fn main() {
     let ui_library_cmd_tx = library_cmd_tx.clone();
 
     let app_state = state.clone();
+    let engine_queries = library_query_store.clone();
     let _audio_thread = thread::spawn(move || {
-        run_audio_engine(cmd_rx, update_tx, app_state, engine_cmd_tx);
+        run_audio_engine(cmd_rx, update_tx, app_state, engine_cmd_tx, engine_queries);
     });
 
     spawn_update_processor(state.clone(), update_rx, cmd_tx.clone());
@@ -66,6 +92,8 @@ fn main() {
         library_cmd_rx,
         library_update_tx,
         cancel_flag.clone(),
+        library_mutation_store.clone(),
+        store_generation.clone(),
     );
 
     let watcher_manager = spawn_fs_watcher(library_cmd_tx);
@@ -102,6 +130,11 @@ fn main() {
         watcher_manager,
         tray_icon,
         quit_flag.clone(),
+        Box::new(settings_store),
+        Box::new(playlist_store),
+        Box::new(library_query_store),
+        Box::new(library_mutation_store),
+        store_generation,
     );
 
     #[cfg(target_os = "linux")]
@@ -112,6 +145,11 @@ fn main() {
         library_update_rx,
         watcher_manager,
         quit_flag.clone(),
+        Box::new(settings_store),
+        Box::new(playlist_store),
+        Box::new(library_query_store),
+        Box::new(library_mutation_store),
+        store_generation,
     );
 
     eframe::run_native(
@@ -162,8 +200,8 @@ fn spawn_update_processor(
 
 /// Record play history for the track that just finished — the queue's current
 /// track at this moment, before the auto-advance below moves the index — and
-/// persist it so play counts survive restarts (REQ-ML-009). Then advance the
-/// queue (or stop when nothing follows).
+/// advance the queue (or stop when nothing follows). The mirror-only history
+/// bump becomes its own single-transaction store event in ticket 06.
 fn handle_track_ended(
     state: &Arc<Mutex<AppState>>,
     cmd_tx: &crossbeam_channel::Sender<PlaybackCommand>,
@@ -172,7 +210,6 @@ fn handle_track_ended(
         let mut locked = state.lock_or_recover();
         if let Some(finished_id) = locked.queue.current_track().cloned() {
             locked.library.increment_play_count(&finished_id);
-            locked.library.save_cache();
         }
     }
     let next_track = {
@@ -201,6 +238,8 @@ fn spawn_library_scanner(
     library_cmd_rx: crossbeam_channel::Receiver<LibraryCommand>,
     library_update_tx: crossbeam_channel::Sender<LibraryUpdate>,
     cancel_flag: Arc<AtomicBool>,
+    mut mutation_store: riff::infra::store::MutexLibraryMutationStore,
+    generation: StoreGeneration,
 ) {
     let _handle = thread::spawn(move || {
         let reader = LoftyMetadataReader::new();
@@ -216,6 +255,8 @@ fn spawn_library_scanner(
                         &path,
                         &library_update_tx,
                         &cancel_flag,
+                        &mut mutation_store,
+                        &generation,
                     );
                 }
                 LibraryCommand::CancelScan => {
@@ -226,9 +267,12 @@ fn spawn_library_scanner(
     });
 }
 
-/// Scan one directory in chunks, adding tracks to the shared library and
-/// reporting progress. Per-file read failures are skipped inside
-/// `scan_and_add_tracks`, so a scan never aborts on one bad file.
+/// Scan one directory in ~10-track batches. Every batch commits to the
+/// Application Store as ONE durable transaction first — an interrupted scan
+/// keeps all committed batches — then mirrors into the shared in-memory
+/// library that still serves views not yet migrated to store queries, and
+/// bumps the session generation so Session Projections refetch.
+#[allow(clippy::too_many_arguments)]
 fn scan_directory(
     state: &Arc<Mutex<AppState>>,
     reader: &LoftyMetadataReader,
@@ -236,6 +280,8 @@ fn scan_directory(
     path: &std::path::Path,
     library_update_tx: &crossbeam_channel::Sender<LibraryUpdate>,
     cancel_flag: &Arc<AtomicBool>,
+    mutation_store: &mut riff::infra::store::MutexLibraryMutationStore,
+    generation: &StoreGeneration,
 ) {
     let files = scanner.scan(path);
     let total = files.len();
@@ -246,12 +292,35 @@ fn scan_directory(
             break;
         }
 
-        let chunk_paths: Vec<_> = chunk.to_vec();
         let processed = i * chunk_size + chunk.len();
 
-        {
-            let mut locked = state.lock_or_recover();
-            locked.library.scan_and_add_tracks(chunk_paths, reader);
+        // Skip paths the store already knows so rescans don't re-read
+        // unchanged metadata.
+        let fresh_paths: Vec<PathBuf> = {
+            let locked = state.lock_or_recover();
+            chunk
+                .iter()
+                .filter(|p| locked.library.get_track(&TrackId::from_path(p)).is_none())
+                .cloned()
+                .collect()
+        };
+
+        if !fresh_paths.is_empty() {
+            // Per-file read failures are skipped inside `build_tracks`, so a
+            // scan never aborts on one bad file.
+            let tracks = LibraryManager::build_tracks(fresh_paths, reader);
+            if !tracks.is_empty() {
+                match mutation_store.apply_scan_batch(&tracks) {
+                    Ok(_) => {
+                        generation.bump();
+                        let mut locked = state.lock_or_recover();
+                        for track in tracks {
+                            locked.library.add_track(track);
+                        }
+                    }
+                    Err(e) => tracing::error!("Scan batch failed to commit: {e}"),
+                }
+            }
         }
 
         let _ = library_update_tx.send(LibraryUpdate::Progress {
@@ -314,6 +383,10 @@ struct AudioEngine {
     update_tx: crossbeam_channel::Sender<PlaybackUpdate>,
     cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
     state: Arc<Mutex<AppState>>,
+    /// Store query port for playback-time track resolution: playing a track
+    /// resolves it by `TrackId` from the Application Store, never from an
+    /// in-memory copy.
+    library_queries: riff::infra::store::MutexLibraryQueryStore,
     decoder: SymphoniaDecoder,
     next_decoder: SymphoniaDecoder,
     audio_output: CpalAudioOutput,
@@ -364,12 +437,14 @@ fn run_audio_engine(
     update_tx: crossbeam_channel::Sender<PlaybackUpdate>,
     state: Arc<Mutex<AppState>>,
     cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
+    library_queries: riff::infra::store::MutexLibraryQueryStore,
 ) {
     let engine = AudioEngine {
         cmd_rx,
         update_tx,
         cmd_tx,
         state,
+        library_queries,
         decoder: SymphoniaDecoder::new(build_codec_registry()),
         next_decoder: SymphoniaDecoder::new(build_codec_registry()),
         audio_output: CpalAudioOutput::new(),
@@ -576,20 +651,25 @@ impl AudioEngine {
                 state.queue.shuffle_history.clear();
             }
         }
+        // Playback resolves the track by TrackId from the Application Store.
+        let stored = match self.library_queries.get_track(track_id) {
+            Ok(track) => track,
+            Err(e) => {
+                tracing::error!("Failed to resolve track {track_id:?} from the store: {e}");
+                None
+            }
+        };
         // ReplayGain (Task 4.3): compute the peak-capped factor from the
         // track's tags and the user preference. Untagged tracks (or the
         // disabled setting) yield 1.0 — no adjustment.
-        let (gain_db, peak) = state.library.get_track(track_id).map_or((None, None), |t| {
+        let (gain_db, peak) = stored.as_ref().map_or((None, None), |t| {
             (
                 t.metadata.replaygain_track_gain,
                 t.metadata.replaygain_track_peak,
             )
         });
         let factor = crate::app::state::replaygain_factor(state.replaygain_enabled, gain_db, peak);
-        state
-            .library
-            .get_track(track_id)
-            .map(|t| (t.file_path.clone(), factor))
+        stored.map(|t| (t.file_path.clone(), factor))
     }
 
     /// The decode loop for the currently open track: decode + write with
@@ -837,7 +917,15 @@ impl AudioEngine {
             } else {
                 s.queue.upcoming(1).into_iter().next().cloned()
             };
-            next_id.and_then(|id| s.library.get_track(&id).map(|t| (id, t.file_path.clone())))
+            // The successor's path resolves from the Application Store.
+            next_id.and_then(|id| match self.library_queries.get_track(&id) {
+                Ok(Some(t)) => Some((id, t.file_path)),
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::error!("Failed to resolve successor {id:?}: {e}");
+                    None
+                }
+            })
         };
         let Some((next_id, path)) = successor else {
             return;
@@ -955,10 +1043,11 @@ impl AudioEngine {
                 self.pre_decode.buffer.clear();
                 self.pre_decode.attempted = false;
                 // ReplayGain (Task 4.3): apply the promoted track's factor at
-                // the boundary.
+                // the boundary; its tags resolve from the Application Store.
                 let rg = {
                     let s = self.state.lock_or_recover();
-                    let (g, p) = s.library.get_track(&promoted_id).map_or((None, None), |t| {
+                    let stored = self.library_queries.get_track(&promoted_id).ok().flatten();
+                    let (g, p) = stored.map_or((None, None), |t| {
                         (
                             t.metadata.replaygain_track_gain,
                             t.metadata.replaygain_track_peak,

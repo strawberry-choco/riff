@@ -22,7 +22,7 @@ The resulting `riff` executable (in `target/release/`) is self-contained; you ca
 
 The first time you open riff, the library is empty — no tracks, no artists, no albums — and the settings page shows no library paths. This is expected: riff has nothing indexed yet and, by design, does not assume where your music lives. There are no error messages on a fresh start; an empty state simply invites you to add a music folder.
 
-On every subsequent launch, riff loads your previously scanned library from an on-disk cache before the first frame is drawn, so a large collection is browsable almost immediately rather than re-scanning the disk each time. The cache is refreshed automatically whenever a scan completes.
+On every subsequent launch, riff loads your previously scanned library from the Application Store before the first frame is drawn, so a large collection is browsable almost immediately rather than re-scanning the disk each time. Every scan batch commits to the store as it completes.
 
 ## Adding a music library
 
@@ -42,7 +42,7 @@ If a registered path disappears — an ejected external drive, an unmounted shar
 
 ## Scanning your library
 
-After adding paths, trigger a scan to index the files. Each library row in settings has its own **Scan** button, and there is a **Scan All** button that scans every registered path. Scanning runs in the background; the interface stays responsive while it works, and new tracks appear as the scan completes. When a scan finishes, the library cache is rewritten so the next launch is instant.
+After adding paths, trigger a scan to index the files. Each library row in settings has its own **Scan** button, and there is a **Scan All** button that scans every registered path. Scanning runs in the background; the interface stays responsive while it works, and new tracks appear as the scan completes. Each scan batch commits durably as it progresses, so the next launch is instant even if a scan is interrupted.
 
 You do not need to rescan manually every time your collection changes. Each library path has a **Watch** toggle: with it enabled, riff monitors the folder and automatically rescans when files appear or disappear. Rapid changes are coalesced — copying an album of a dozen tracks triggers a single rescan after a short quiet period, not twelve. Deleted files are removed from the index, so search results never point at tracks that no longer exist. Watch state is remembered across restarts.
 
@@ -116,10 +116,9 @@ Window size and position, your library paths, and watch preferences are all pers
 
 riff stores nothing in your music folders. Its own data lives in the standard per-user locations for your operating system:
 
-- **Library cache** (`library_cache.json` — the scanned index of tracks, artists, and albums):
-  - Linux: `~/.local/share/riff/library_cache.json`
-  - macOS: `~/Library/Application Support/com.riff.riff/library_cache.json`
-  - Windows: `C:\Users\<user>\AppData\Local\riff\riff\library_cache.json`
-- **Library paths and window state:** stored through the egui/eframe persistence mechanism alongside the application's saved state.
+- **Application Store** (`riff.sqlite3` — the scanned library, your playlists, and your settings):
+  - Linux: `~/.local/share/riff/riff.sqlite3`
+  - macOS: `~/Library/Application Support/com.riff.riff/riff.sqlite3`
+  - Windows: `C:\Users\<user>\AppData\Local\riff\riff\riff.sqlite3`
 
-If the cache is ever missing or unreadable, riff simply starts with an empty library and a scan rebuilds it — nothing is lost, because your music was never in the cache to begin with.
+If the store is ever missing, riff simply starts with an empty library and a scan rebuilds it — nothing is lost, because your music was never in the store to begin with. If the store file is damaged, riff sets it aside automatically (keeping it next to the fresh copy for recovery tools) and starts fresh; playlists and settings live in the same store, so a forced rebuild via Clear Library is the only action that intentionally wipes the collection while keeping them.

@@ -44,9 +44,15 @@ What riff is, what it does, and how to use it.
 - [001: Offline-first design](product/decisions/001-offline-first.md) — why riff never connects to the internet.
 - [002: No system tray on Linux](product/decisions/002-no-tray-on-linux.md) — why Linux builds run window-only.
 - [003: Track identity is the file path](product/decisions/003-track-identity-is-path.md) — why the full file path is the canonical track ID.
-- [004: Library cache as JSON](product/decisions/004-library-cache-as-json.md) — why the cache is a human-readable JSON file.
+- [004: Library cache as JSON](product/decisions/004-library-cache-as-json.md) — superseded by ADR 0001; kept for historical context.
 - [005: Native picker on macOS/Windows, text input on Linux](product/decisions/005-native-picker-platform-split.md) — why the add-library dialog differs by platform.
 - [006: Local-only discovery and metadata strategy](product/decisions/006-local-only-discovery.md) — why discovery and metadata enrichment stay local: smart playlists from play history, no online lookups.
+
+**Architecture decisions (ADRs)**
+
+- [ADR 0001: SQLite is the authoritative Application Store](adr/0001-sqlite-is-the-authoritative-application-store.md) — supersedes decision 004.
+- [ADR 0002: The UI reads the store through Session Projections](adr/0002-ui-reads-the-store-through-session-projections.md).
+- [ADR 0003: Store query model](adr/0003-store-query-model.md).
 
 ### Technical
 
@@ -55,9 +61,9 @@ How riff is built and how it works at runtime.
 - [Architecture](technical/architecture.md) — the four-layer structure, dependency rules, boundary rules, per-layer rules, validation checklist, and anti-patterns.
 - [Threading model](technical/threading-model.md) — the seven threads, the crossbeam channels between them, shared state, and real-time constraints.
 - [Data flow](technical/data-flow.md) — step-by-step sequences for the three primary flows: play a track, scan a library, resolve cover art.
-- [Data model](technical/data-model.md) — the domain entities, `AppState`, `LibraryManager`, and the port traits, with serde annotations.
+- [Data model](technical/data-model.md) — the domain entities, `AppState`, `LibraryManager`, and the port traits.
 - [Dependencies](technical/dependencies.md) — every crate in `Cargo.toml` grouped by concern, with versions and purpose.
-- [Persistence](technical/persistence.md) — the library cache, library-path persistence, watch state, and the in-memory cover-art LRU.
+- [Persistence](technical/persistence.md) — the Application Store (`riff.sqlite3`): schema, migrations, corruption recovery, save timing, Session Projections, Clear Library, and the in-memory cover-art LRU.
 - [Platform support](technical/platform-support.md) — the macOS/Windows/Linux feature matrix, conditional compilation, and why Linux omits the tray.
 
 ### Engineering

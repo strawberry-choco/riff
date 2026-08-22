@@ -6,7 +6,7 @@ riff is a lightweight, offline-first desktop music player written in Rust. It pl
 
 riff is a player for local music collections. You point it at one or more folders — your main music directory, an external SSD, a mounted NAS share — and it scans them, reads the tags, resolves the cover art, and gives you a fast, searchable library. Playback runs on a dedicated audio thread with standard transport controls, a queue, shuffle and repeat, and cover art display. A system tray icon (on macOS and Windows) lets it keep playing while the window is hidden.
 
-Everything happens on your machine. The library index is a JSON cache file in your local data directory; your library paths and window state are stored through the standard egui/eframe persistence mechanism. Nothing is uploaded, nothing is fetched, and nothing phones home. If you disconnect the network cable, riff behaves exactly the same as it did before.
+Everything happens on your machine. The library, playlists, and settings live in one embedded SQLite database — the Application Store (iff.sqlite3) — in your local data directory. Nothing is uploaded, nothing is fetched, and nothing phones home. If you disconnect the network cable, riff behaves exactly the same as it did before.
 
 The project is a single Rust crate with a four-layer architecture: a pure domain layer (tracks, queue, playback state), an application layer that defines the use cases and port traits, an infrastructure layer that implements those traits with real crates (symphonia for decoding, cpal for output, lofty for tags), and an egui-based UI layer. `src/main.rs` is the composition root that wires the layers together with channels and threads. See [../technical/architecture.md](../technical/architecture.md) for the full technical picture, and [./features.md](./features.md) for the complete feature catalog.
 
@@ -14,9 +14,9 @@ The project is a single Rust crate with a four-layer architecture: a pure domain
 
 **Offline-first, by definition.** riff is not "cloud-capable but works offline" — it is offline, full stop. There is no streaming, no online metadata lookup, no telemetry, and no synchronization service. Your collection, your tags, and your cover art are the entire data model. This keeps the app simple, predictable, and private: there is no server to depend on, no API to break, and no account to leak.
 
-**Your files are the library.** riff does not import, copy, or reorganize your music. It indexes what is on disk and remembers that index in a cache file so the next launch is instant. Remove a library path and the index entries go away; your files are never touched. Edit your tags or drop a new album into a watched folder, and riff picks the change up on the next scan.
+**Your files are the library.** riff does not import, copy, or reorganize your music. It indexes what is on disk and remembers that index in the Application Store so the next launch is instant. Remove a library path and the index entries go away; your files are never touched. Edit your tags or drop a new album into a watched folder, and riff picks the change up on the next scan.
 
-**Lightweight by construction.** One crate, one binary, immediate-mode UI. The library cache means large collections (tens of thousands of tracks) load in well under a second instead of re-walking the disk on every start. Decoding streams packet by packet rather than loading whole files into memory, and cover art is decoded on a background thread and held in a small LRU cache.
+**Lightweight by construction.** One crate, one binary, immediate-mode UI. The Application Store means large collections (tens of thousands of tracks) load in well under a second instead of re-walking the disk on every start. Decoding streams packet by packet rather than loading whole files into memory, and cover art is decoded on a background thread and held in a small LRU cache.
 
 **Cross-platform without lowest-common-denominator.** The core experience — scanning, browsing, playing — is identical everywhere. Platform integration is adapted rather than faked: macOS and Windows get a native folder picker and a system tray icon; Linux gets a plain text path input and runs window-only, because the tray dependency stack is not reliably available there.
 
@@ -53,7 +53,7 @@ riff is built from well-established Rust crates, chosen so that the core audio p
 | Library scanning | walkdir 2, with notify 7 for folder watching |
 | Concurrency | std threads, crossbeam-channel, parking_lot |
 | System integration | tray-icon + muda (tray menu) and rfd (native folder picker) on macOS/Windows only |
-| Persistence | serde / serde_json, directories 5, eframe storage |
+| Persistence | rusqlite (embedded SQLite), directories 5 |
 
 The architecture keeps these crates out of the domain layer entirely: business logic (tracks, queues, playback state) has zero external imports, and the UI talks to hardware only through trait boundaries defined in the app layer. Details are in [../technical/architecture.md](../technical/architecture.md).
 
@@ -61,7 +61,7 @@ The architecture keeps these crates out of the domain layer entirely: business l
 
 riff is at **v0.1.0** and is dual-licensed under **MIT OR Apache-2.0**.
 
-The core is in place: multi-format decoding, playback control, the playback queue, library scanning, metadata extraction, cover art resolution, search, multi-library management, library cache persistence, folder watching, the dual-view library explorer, and cross-platform audio all work today and meet their specifications.
+The core is in place: multi-format decoding, playback control, the playback queue, library scanning, metadata extraction, cover art resolution, search, multi-library management, library persistence in the Application Store, folder watching, the dual-view library explorer, and cross-platform audio all work today and meet their specifications.
 
 Several UI surfaces are functional but still marked **partial** against their full specifications. The known gaps are specific and modest:
 

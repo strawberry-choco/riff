@@ -1,8 +1,8 @@
 # Platform Support
 
-riff targets the three major desktop platforms — macOS, Windows, and Linux — from a single codebase. Most of the application is platform-independent: the domain, application, and infrastructure layers behave identically everywhere, and audio output is abstracted by cpal. The platform differences are confined to a few UI-level integrations — the system tray and the folder picker — which are conditionally compiled, and to the OS-specific location of the on-disk cache. This document captures the feature matrix, the conditional-compilation strategy, and the platform-specific behaviors worth knowing.
+riff targets the three major desktop platforms — macOS, Windows, and Linux — from a single codebase. Most of the application is platform-independent: the domain, application, and infrastructure layers behave identically everywhere, and audio output is abstracted by cpal. The platform differences are confined to a few UI-level integrations — the system tray and the folder picker — which are conditionally compiled, and to the OS-specific location of the Application Store. This document captures the feature matrix, the conditional-compilation strategy, and the platform-specific behaviors worth knowing.
 
-For the crates behind each feature, see [./dependencies.md](./dependencies.md). For where the cache file is written, see [./persistence.md](./persistence.md).
+For the crates behind each feature, see [./dependencies.md](./dependencies.md). For where state is persisted, see [./persistence.md](./persistence.md).
 
 ## Feature Matrix
 
@@ -12,7 +12,7 @@ For the crates behind each feature, see [./dependencies.md](./dependencies.md). 
 | Folder picker | Native (`rfd`) | Native (`rfd`) | Plain text input |
 | Audio backend | CoreAudio via cpal | WASAPI via cpal | ALSA via cpal |
 | Filesystem watching | FSEvents via `notify` | ReadDirectoryChangesW via `notify` | inotify via `notify` |
-| Library cache path | `~/Library/Application Support/com.riff.riff/library_cache.json` | `%LOCALAPPDATA%\riff\riff\library_cache.json` | `~/.local/share/riff/library_cache.json` |
+| Application Store path | `~/Library/Application Support/com.riff.riff/riff.sqlite3` | `%LOCALAPPDATA%\riff\riff\riff.sqlite3` | `~/.local/share/riff/riff.sqlite3` |
 | Window / UI | egui via eframe | egui via eframe | egui via eframe |
 
 Playback, library scanning, metadata reading, cover art, search, the queue, and persistence all work the same on every platform. Only the tray and the folder-picker affordance differ.
@@ -76,14 +76,14 @@ A few issues recur often enough to note here; full diagnostics are in the troubl
 - **No tray icon on Linux.** This is by design, not a bug. Use the main window; see the "Why Linux Has No Tray" section above.
 - **Wrong sample rate / no audio on Windows.** Usually WASAPI shared mode locked to 48 kHz. riff falls back to the device default rate automatically, but if another application has exclusive control of the device, cpal may fail to open a stream; closing the other application frees the device.
 - **Watch warning on Linux.** A `Warning` watch state typically means the inotify watch limit was hit or the path is a network mount. Watching degrades gracefully to manual scanning.
-- **Cache location confusion.** The cache lives in the OS data directory, not next to the binary or in the working directory. See the path table above and [./persistence.md](./persistence.md).
+- **Store location confusion.** The Application Store lives in the OS data directory, not next to the binary or in the working directory. See the path table above and [./persistence.md](./persistence.md).
 
 ## Troubleshooting
 
-For platform-specific diagnostics — missing GTK libraries on Linux, audio device selection on Windows, or locating the cache file — see the troubleshooting guide at [../reference/troubleshooting.md](../reference/troubleshooting.md).
+For platform-specific diagnostics - missing GTK libraries on Linux, audio device selection on Windows, or locating the store file - see the troubleshooting guide at [../reference/troubleshooting.md](../reference/troubleshooting.md).
 
 ## See also
 
 - [./dependencies.md](./dependencies.md) — the platform-conditional dependency declarations.
-- [./persistence.md](./persistence.md) — platform-specific cache path resolution.
+- [./persistence.md](./persistence.md) - platform-specific store path resolution.
 - [./architecture.md](./architecture.md) — how platform-specific code is kept in the presentation layer.

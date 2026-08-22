@@ -2,7 +2,7 @@ use crate::domain::track::TrackId;
 use std::time::SystemTime;
 
 /// Unique identifier for a user playlist.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PlaylistId(pub String);
 
 impl PlaylistId {
@@ -40,19 +40,19 @@ fn slugify(name: &str) -> String {
 
 /// A user-managed playlist: a named, ordered list of track references.
 ///
-/// Persisted to its own `playlists.json` — deliberately NOT inside the
-/// library cache, which can be cleared and rebuilt (Task 3.2). User
-/// playlists must survive that. Entries may become invalid when files are
-/// moved or deleted; validity is checked on use, never assumed.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// User data in the Application Store (see `app::store::PlaylistStore`):
+/// every mutation commits as one immediate durable transaction. Entries
+/// carry no enforced link to tracks — dangling references stay listed and
+/// resolve again once the referenced files return; validity is checked on
+/// use, never assumed.
+#[derive(Debug, Clone)]
 pub struct Playlist {
     pub id: PlaylistId,
     pub name: String,
     /// Ordered track references. `Vec` preserves user ordering; exact
     /// duplicates are prevented at insertion time.
     pub tracks: Vec<TrackId>,
-    /// When the playlist was created (`None` only for legacy data).
-    #[serde(default)]
+    /// When the playlist was created.
     pub created: Option<SystemTime>,
 }
 

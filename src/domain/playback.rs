@@ -23,7 +23,7 @@ pub struct PlaybackPosition {
 }
 
 /// Commands sent to the playback engine.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PlaybackCommand {
     Play(crate::domain::TrackId),
     Pause,

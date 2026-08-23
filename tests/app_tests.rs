@@ -59,7 +59,7 @@ mod tests {
     #[test]
     fn test_app_state_high_contrast_defaults_to_false() {
         // Accessibility (REQ-UI-007): the high-contrast theme is opt-in; the
-        // app starts with the regular elegance light/dark theme.
+        // app starts with the regular light/dark palette.
         let state = AppState::new();
         assert!(!state.ui_flags.high_contrast);
     }
@@ -2014,5 +2014,60 @@ mod tests {
             .expect("retry loads");
         assert_eq!(tracks.len(), 1);
         assert_eq!(store.calls.len(), 1, "the failed attempt fetched nothing");
+    }
+
+    // --- Playlist drag-reorder math (Issue 12) ---------------------------------
+    //
+    // The pure move semantics behind the playlist view's drag-and-drop:
+    // removing the dragged entry and reinserting it at the drop index, with
+    // everything else shifting to close/open the gaps.
+
+    use riff::app::playlist_manager::reorder_tracks;
+
+    fn ids<const N: usize>(paths: [&str; N]) -> Vec<TrackId> {
+        paths.iter().map(|p| TrackId(p.to_string())).collect()
+    }
+
+    #[test]
+    fn test_reorder_tracks_moves_an_entry_down_between_others() {
+        let tracks = ids(["a", "b", "c", "d"]);
+        assert_eq!(
+            reorder_tracks(&tracks, 0, 2),
+            Some(ids(["b", "c", "a", "d"])),
+            "dragging A onto C's slot shifts B and C up"
+        );
+    }
+
+    #[test]
+    fn test_reorder_tracks_moves_an_entry_up() {
+        let tracks = ids(["a", "b", "c", "d"]);
+        assert_eq!(
+            reorder_tracks(&tracks, 3, 0),
+            Some(ids(["d", "a", "b", "c"])),
+            "dragging the last entry to the top shifts the rest down"
+        );
+    }
+
+    #[test]
+    fn test_reorder_tracks_adjacent_swap_and_noop() {
+        let tracks = ids(["a", "b", "c"]);
+        assert_eq!(
+            reorder_tracks(&tracks, 1, 2),
+            Some(ids(["a", "c", "b"])),
+            "dropping on the next row swaps the pair"
+        );
+        assert_eq!(
+            reorder_tracks(&tracks, 1, 1),
+            None,
+            "dropping an entry back onto itself is a no-op"
+        );
+    }
+
+    #[test]
+    fn test_reorder_tracks_rejects_out_of_bounds_indices() {
+        let tracks = ids(["a", "b"]);
+        assert_eq!(reorder_tracks(&tracks, 2, 0), None, "from out of range");
+        assert_eq!(reorder_tracks(&tracks, 0, 2), None, "to out of range");
+        assert_eq!(reorder_tracks(&[], 0, 0), None, "empty list has no rows");
     }
 }

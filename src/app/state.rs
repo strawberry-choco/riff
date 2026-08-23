@@ -108,8 +108,8 @@ pub struct UiFlags {
     /// stop/repeat transport controls) behind an explicit, persisted toggle.
     pub advanced_mode: bool,
     /// Accessibility flag (REQ-UI-007): when `true` the UI uses a persisted
-    /// high-contrast theme (near-black background, white text, bright focus
-    /// outlines) instead of the elegance light/dark theme.
+    /// high-contrast theme (extreme text, strong borders, bright focus
+    /// outlines) as a variant over the regular light/dark palette.
     pub high_contrast: bool,
 }
 

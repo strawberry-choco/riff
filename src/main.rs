@@ -105,9 +105,9 @@ fn main() {
     let watcher_manager = spawn_fs_watcher(library_cmd_tx);
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([800.0, 600.0]),
+        // Frameless launch (Issue 04, ADR 0005): OS decorations are replaced
+        // by riff's custom titlebar with a drag region and window controls.
+        viewport: crate::ui::chrome::viewport_builder(),
         ..Default::default()
     };
 

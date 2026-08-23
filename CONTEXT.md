@@ -4,6 +4,14 @@ riff is an offline-first desktop music player. This context covers the language 
 
 ## Language
 
+**View**:
+One of the primary content areas selectable from the shared chrome — Library, Folders, or Settings; exactly one is visible at a time.
+_Avoid_: page, stage, screen, tab
+
+**Now Playing**:
+A presentation mode that temporarily replaces the active View with the current Track's details; closing it always returns to the Library View.
+_Avoid_: now-playing page, player view
+
 **Application Store**:
 The single authoritative persistent state of the application: the Library, Playlists, and Settings.
 _Avoid_: database file, cache store
@@ -63,6 +71,10 @@ _Avoid_: config, options
 **Watch State**:
 The persisted watcher choice for a Library Path: Disabled, Enabled, or Warning carrying a diagnostic message.
 _Avoid_: watcher status
+
+**Readiness**:
+The per-Library-Path health shown as a status dot in Settings: whether the path is present on disk and indexed into the Library; independent of its Watch State.
+_Avoid_: watch status, Ready state
 
 **Session Projection**:
 A bounded in-memory view of Application Store query results used while rendering the UI; it is never authoritative.

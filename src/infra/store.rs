@@ -629,6 +629,54 @@ impl PlaylistStore for SqliteStore {
         .map(|rows| rows > 0)
         .map_err(|e| AppError::InvalidOperation(format!("failed to remove playlist entries: {e}")))
     }
+
+    /// One immediate durable transaction rewriting the playlist's entries to
+    /// exactly `ordered` (positions 0..n): the delete and every reinsert
+    /// commit together or not at all, so a crash mid-reorder can never leave
+    /// a truncated or duplicated entry list.
+    fn reorder_playlist_entries(
+        &mut self,
+        id: &PlaylistId,
+        ordered: &[TrackId],
+    ) -> Result<bool, AppError> {
+        self.with_connection(|conn| {
+            conn.execute_batch("BEGIN IMMEDIATE;")?;
+            let outcome = (|| -> rusqlite::Result<bool> {
+                let known: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM playlists WHERE id = ?1",
+                    [&id.0],
+                    |row| row.get(0),
+                )?;
+                if known == 0 {
+                    return Ok(false);
+                }
+                conn.execute(
+                    "DELETE FROM playlist_entries WHERE playlist_id = ?1",
+                    [&id.0],
+                )?;
+                for (position, track) in ordered.iter().enumerate() {
+                    conn.execute(
+                        "INSERT INTO playlist_entries(playlist_id, position, track_id)
+                         VALUES (?1, ?2, ?3)",
+                        rusqlite::params![
+                            id.0,
+                            i64::try_from(position).unwrap_or(i64::MAX),
+                            track.0
+                        ],
+                    )?;
+                }
+                Ok(true)
+            })();
+            match outcome {
+                Ok(committed) => conn.execute_batch("COMMIT;").map(|()| committed),
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    Err(e)
+                }
+            }
+        })
+        .map_err(|e| AppError::InvalidOperation(format!("failed to reorder playlist entries: {e}")))
+    }
 }
 
 impl LibraryMutationStore for SqliteStore {
@@ -1807,6 +1855,17 @@ impl PlaylistStore for MutexPlaylistStore {
         self.store
             .lock_or_recover()
             .remove_playlist_entries(id, track)
+    }
+
+    /// Reorder entries through the shared connection.
+    fn reorder_playlist_entries(
+        &mut self,
+        id: &PlaylistId,
+        ordered: &[TrackId],
+    ) -> Result<bool, AppError> {
+        self.store
+            .lock_or_recover()
+            .reorder_playlist_entries(id, ordered)
     }
 }
 

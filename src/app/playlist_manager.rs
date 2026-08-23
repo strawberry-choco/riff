@@ -32,3 +32,21 @@ pub fn valid_tracks(library: &LibraryManager, playlist: &Playlist) -> Vec<TrackI
         .cloned()
         .collect()
 }
+
+// --- Drag-reorder math ----------------------------------------------------------
+
+/// The new entry order after a drag-and-drop gesture: remove the entry at
+/// `from` and reinsert it at `to`, shifting everything between to close and
+/// open the gaps. Returns `None` when either index is out of bounds or the
+/// entry was dropped back onto its own slot (a no-op), so callers never
+/// commit an empty gesture.
+#[must_use]
+pub fn reorder_tracks(tracks: &[TrackId], from: usize, to: usize) -> Option<Vec<TrackId>> {
+    if from == to || from >= tracks.len() || to >= tracks.len() {
+        return None;
+    }
+    let mut reordered = tracks.to_vec();
+    let dragged = reordered.remove(from);
+    reordered.insert(to, dragged);
+    Some(reordered)
+}

@@ -74,7 +74,11 @@ How to work on riff correctly.
 - [Coding standards](engineering/coding-standards.md) — layering rules, clippy and formatting configuration, the error-handling pattern, and the implementation gotchas.
 - [Contributing](engineering/contributing.md) — how to orient yourself and the pull-request checklist.
 - [Testing strategy](engineering/testing-strategy.md) — the current test suite (and the known build issue), plus prioritized recommendations including CI.
+- [Golden-image testing](engineering/golden-image-testing.md) — the snapshot-test harness for visual parity: authoring goldens, re-baselining, and reviewing image diffs.
 - [Release and packaging](engineering/release-and-packaging.md) — the release profile, the manual release process today, and recommendations for release automation.
+
+**Spikes**
+- [Frameless window chrome](engineering/spikes/frameless-window-chrome-spike.md) — Issue 04 spike findings: go/no-go, the validated Windows implementation approach, and macOS/Linux risk with fallback plans.
 
 ### Reference
 

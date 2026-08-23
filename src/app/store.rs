@@ -104,6 +104,18 @@ pub trait PlaylistStore {
         id: &PlaylistId,
         track: &TrackId,
     ) -> Result<bool, AppError>;
+
+    /// Persist a new entry order for the Playlist with `id` as ONE immediate
+    /// durable transaction: the entries are rewritten to exactly `ordered`
+    /// (position 0..n). `ordered` must be a permutation of the playlist's
+    /// current entries — callers derive it from loaded state (e.g. the UI's
+    /// drag-reorder math), never invent ids. Returns whether the playlist
+    /// was found; unknown ids change nothing.
+    fn reorder_playlist_entries(
+        &mut self,
+        id: &PlaylistId,
+        ordered: &[TrackId],
+    ) -> Result<bool, AppError>;
 }
 
 /// Session-local monotonically increasing counter bumped after each committed

@@ -10,12 +10,13 @@ For the crates behind each feature, see [./dependencies.md](./dependencies.md). 
 |---------|-------|---------|-------|
 | System tray icon | Yes | Yes | No (no-op) |
 | Folder picker | Native (`rfd`) | Native (`rfd`) | Plain text input |
+| Window chrome | Custom titlebar (frameless) | Custom titlebar (frameless) | Custom titlebar (frameless) |
 | Audio backend | CoreAudio via cpal | WASAPI via cpal | ALSA via cpal |
 | Filesystem watching | FSEvents via `notify` | ReadDirectoryChangesW via `notify` | inotify via `notify` |
 | Application Store path | `~/Library/Application Support/com.riff.riff/riff.sqlite3` | `%LOCALAPPDATA%\riff\riff\riff.sqlite3` | `~/.local/share/riff/riff.sqlite3` |
 | Window / UI | egui via eframe | egui via eframe | egui via eframe |
 
-Playback, library scanning, metadata reading, cover art, search, the queue, and persistence all work the same on every platform. Only the tray and the folder-picker affordance differ.
+Playback, library scanning, metadata reading, cover art, search, the queue, and persistence all work the same on every platform. Only the tray and the folder-picker affordance differ, plus the frameless window's platform-specific caveats: the custom titlebar ships everywhere from one code path (`src/ui/chrome.rs`), validated end-to-end on Windows; macOS and Linux carry documented risk with a per-platform native-decorations fallback — see the [spike findings](../engineering/spikes/frameless-window-chrome-spike.md).
 
 ## Conditional Compilation
 

@@ -18,3 +18,8 @@ target/
 .scratch
 # Added by code-review-graph
 .code-review-graph/
+
+# Golden-image diff artifacts (transient; see docs/engineering/golden-image-testing.md)
+tests/snapshots/**/*.diff.png
+tests/snapshots/**/*.new.png
+tests/snapshots/**/*.old.png

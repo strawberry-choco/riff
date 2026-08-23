@@ -1063,6 +1063,104 @@ fn test_store_duplicate_names_allowed_with_unique_ids() {
     assert!(playlists.iter().all(|p| p.name == "Mix"));
 }
 
+// --- Application Store: playlist drag-reorder persistence (Issue 12) --------
+
+#[test]
+fn test_store_reorder_playlist_entries_persists_the_new_order_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let pid;
+
+    {
+        let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+        pid = store
+            .create_playlist(
+                "Gym",
+                &[
+                    TrackId("a.mp3".to_string()),
+                    TrackId("b.mp3".to_string()),
+                    TrackId("c.mp3".to_string()),
+                ],
+            )
+            .unwrap();
+
+        // Drag the first entry down between the others: A,B,C → B,A,C.
+        // One immediate durable transaction rewrites the positions.
+        let reordered = store
+            .reorder_playlist_entries(
+                &pid,
+                &[
+                    TrackId("b.mp3".to_string()),
+                    TrackId("a.mp3".to_string()),
+                    TrackId("c.mp3".to_string()),
+                ],
+            )
+            .expect("reordering a known playlist must work");
+        assert!(reordered, "reordering a known playlist returns true");
+        drop(store);
+    }
+
+    // Reopen: the new order survived the restart.
+    let reopened = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let playlists = reopened.load_playlists().unwrap();
+    assert_eq!(
+        playlists[0].tracks,
+        vec![
+            TrackId("b.mp3".to_string()),
+            TrackId("a.mp3".to_string()),
+            TrackId("c.mp3".to_string())
+        ],
+        "the dragged order persisted through the PlaylistStore"
+    );
+
+    // Reordering again (C first) keeps working on the persisted data.
+    let mut store = reopened;
+    assert!(store
+        .reorder_playlist_entries(
+            &pid,
+            &[
+                TrackId("c.mp3".to_string()),
+                TrackId("b.mp3".to_string()),
+                TrackId("a.mp3".to_string())
+            ]
+        )
+        .unwrap());
+    assert_eq!(
+        store.load_playlists().unwrap()[0].tracks[0],
+        TrackId("c.mp3".to_string()),
+        "re-reordering rewrites the persisted order"
+    );
+}
+
+#[test]
+fn test_store_reorder_unknown_playlist_is_a_noop_and_other_playlists_are_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+
+    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let keep = store
+        .create_playlist(
+            "Keep",
+            &[TrackId("k1.mp3".to_string()), TrackId("k2.mp3".to_string())],
+        )
+        .unwrap();
+
+    let unknown = PlaylistId("never-created".to_string());
+    let reordered = store
+        .reorder_playlist_entries(&unknown, &[TrackId("x.mp3".to_string())])
+        .expect("reordering an unknown playlist must not error");
+    assert!(!reordered, "unknown ids report false");
+
+    // The unrelated playlist's entries are untouched.
+    let playlists = store.load_playlists().unwrap();
+    assert_eq!(
+        playlists[0].tracks,
+        vec![TrackId("k1.mp3".to_string()), TrackId("k2.mp3".to_string())],
+        "an unknown-id reorder never touches other playlists"
+    );
+    let _ = keep;
+}
+
 // --- Application Store: Library collection (ticket 05) ---------------------
 
 use riff::app::store::{LibraryMutationStore, LibraryQueryStore};

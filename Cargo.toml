@@ -20,7 +20,6 @@ path = "tests/mod.rs"
 # UI
 egui = "0.34.3"
 eframe = { version = "0.34.3", features = ["default", "persistence"] }
-egui-elegance = "0.13"
 
 # Audio decoding (pure Rust)
 symphonia = { version = "0.5", features = ["all"] }
@@ -64,9 +63,17 @@ rand = "0.8"
 epi = { package = "egui_extras", version = "0.34.3", features = ["image"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 
+# Lucide icon glyph rasterization for the shell chrome (Issue 06)
+resvg = "0.48"
+
 # Testing dependencies
 [dev-dependencies]
 tempfile = "3.8"
+# The integration tests assert theme tokens against egui color values.
+egui = "0.34.3"
+# Golden-image snapshot tests render real egui frames headlessly (Issue 05);
+# wgpu provides the offscreen renderer, snapshot the image comparison.
+egui_kittest = { version = "0.34.3", features = ["wgpu", "snapshot"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 # System tray (macOS/Windows only — requires GTK dev libs on Linux)

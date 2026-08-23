@@ -11,6 +11,7 @@
 //! - `app_tests.rs`: Tests for application logic like `AppState`, `LibraryManager`, etc.
 //! - `infra_tests.rs`: Tests for infrastructure components like audio decoders, metadata readers, etc.
 //! - `ui_tests.rs`: Tests for UI-related functionality like settings storage, etc.
+//! - `golden_tests.rs`: Golden-image snapshot tests rendering real egui frames headlessly.
 //! - `integration_tests.rs`: End-to-end integration tests that test multiple components together.
 //!
 //! # Running Tests
@@ -23,6 +24,7 @@
 
 pub mod app_tests;
 pub mod domain_tests;
+pub mod golden_tests;
 pub mod infra_tests;
 pub mod integration_tests;
 pub mod ui_tests;
@@ -56,9 +58,7 @@ pub use riff::infra::{
     AudioFileScanner, CpalAudioOutput, FilesystemWatcher, ImageCoverLoader, LoftyMetadataReader,
     LoftyMetadataWriter, SymphoniaDecoder,
 };
-pub use riff::ui::app::{
-    clamp_seek, format_duration, high_contrast_visuals, lru_insert, TagEditState,
-};
+pub use riff::ui::app::{clamp_seek, format_duration, lru_insert, TagEditState};
 pub use riff::ui::settings::{expand_tilde, suggest_directories};
 
 // Standard-library names referenced unqualified in some suites.

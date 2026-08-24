@@ -49,19 +49,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         // Fresh store: no playlists.
-        assert!(boxed_playlist_store(&dir)
-            .load_playlists()
-            .unwrap()
-            .is_empty());
+        assert!(
+            boxed_playlist_store(&dir)
+                .load_playlists()
+                .unwrap()
+                .is_empty()
+        );
 
         // Create + edit, then drop the connection (the "restart").
         let pid;
         {
             let mut store = boxed_playlist_store(&dir);
             pid = store.create_playlist("Gym", &[]).unwrap();
-            assert!(store
-                .add_playlist_entry(&pid, &TrackId("hype.mp3".to_string()))
-                .unwrap());
+            assert!(
+                store
+                    .add_playlist_entry(&pid, &TrackId("hype.mp3".to_string()))
+                    .unwrap()
+            );
             assert!(store.rename_playlist(&pid, "Workout").unwrap());
         }
 
@@ -78,10 +82,12 @@ mod tests {
             let mut store = boxed_playlist_store(&dir);
             assert!(store.delete_playlist(&pid).unwrap());
         }
-        assert!(boxed_playlist_store(&dir)
-            .load_playlists()
-            .unwrap()
-            .is_empty());
+        assert!(
+            boxed_playlist_store(&dir)
+                .load_playlists()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // --- Library collection cutover (ticket 05) --------------------------------
@@ -392,13 +398,17 @@ mod tests {
     fn with_home(value: Option<&str>, body: impl FnOnce()) {
         let original = std::env::var("HOME").ok();
         match value {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            None => unsafe { std::env::remove_var("HOME") },
         }
         body();
         match original {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            None => unsafe { std::env::remove_var("HOME") },
         }
     }
 
@@ -1139,7 +1149,7 @@ mod tests {
 
     #[test]
     fn test_drag_region_gestures_decide_between_drag_and_maximize_toggle() {
-        use riff::ui::chrome::{drag_region_action, DragRegionAction};
+        use riff::ui::chrome::{DragRegionAction, drag_region_action};
 
         // A primary-button press-and-move starts an OS window move.
         assert_eq!(
@@ -1423,7 +1433,7 @@ mod tests {
 
     #[test]
     fn test_titlebar_clicks_report_window_and_nav_actions() {
-        use riff::ui::chrome::{show_titlebar, TitleBarAction, TitleBarContent};
+        use riff::ui::chrome::{TitleBarAction, TitleBarContent, show_titlebar};
         use riff::ui::icons::IconCache;
 
         // Harness label queries resolve through kittest's accessibility tree.

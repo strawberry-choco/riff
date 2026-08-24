@@ -389,14 +389,13 @@ fn show_seek_row(
         egui::Id::new("Seek"),
         egui::Sense::click_and_drag(),
     );
-    if seek_response.clicked() || seek_response.dragged() {
-        if let Some(pos) = seek_response.interact_pointer_pos() {
-            if let Some(total) = content.total {
-                actions.push(PlayerBarAction::Seek(Duration::from_secs_f32(
-                    fraction_at(seek_hit, pos) * total.as_secs_f32(),
-                )));
-            }
-        }
+    if (seek_response.clicked() || seek_response.dragged())
+        && let Some(pos) = seek_response.interact_pointer_pos()
+        && let Some(total) = content.total
+    {
+        actions.push(PlayerBarAction::Seek(Duration::from_secs_f32(
+            fraction_at(seek_hit, pos) * total.as_secs_f32(),
+        )));
     }
     seek_response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, "Seek"));
 }
@@ -542,10 +541,10 @@ fn paint_slider(
     actions: &mut Vec<PlayerBarAction>,
 ) {
     let response = ui.interact(hit, egui::Id::new(label), egui::Sense::click_and_drag());
-    if response.clicked() || response.dragged() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            actions.push(PlayerBarAction::SetVolume(fraction_at(hit, pos)));
-        }
+    if (response.clicked() || response.dragged())
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        actions.push(PlayerBarAction::SetVolume(fraction_at(hit, pos)));
     }
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, label));
 

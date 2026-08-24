@@ -16,7 +16,7 @@
 //! decision, and the nav routing. The pixels are covered by the golden-image
 //! harness (`tests/golden_tests.rs`, `shell_chrome_dark`).
 
-use super::icons::{icon_button, Icon, IconCache};
+use super::icons::{Icon, IconCache, icon_button};
 use super::theme::{self, Palette};
 use crate::app::state::{BrowseMode, ViewMode};
 use eframe::egui;

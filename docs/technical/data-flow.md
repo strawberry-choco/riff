@@ -10,10 +10,12 @@ This is the central flow. It begins with a click in the UI and ends with samples
 User clicks "Play" in the UI (src/ui/app.rs)
   -> UI sends PlaybackCommand::Play(track_id) over the command channel
   -> Audio engine thread (run_audio_engine in src/main.rs) receives the command
-   -> Engine locks AppState, resolves the Track through the LibraryQueryStore
-        port (the Application Store is the authority for track metadata),
-        and falls back to the queue's copy if the store lookup misses
-       (if the queue is empty, it is populated from the whole library so Next/Previous work)
+   -> Engine locks AppState and resolves the Track through the LibraryQueryStore
+        port (the Application Store is the sole authority for track metadata;
+        a store miss drops the play request)
+        (if the queue is empty, Queue Fill populates it from the whole library
+        via all_track_ids() in canonical path order, makes the requested track
+        current, and resets shuffle)
   -> SymphoniaDecoder::open(path) opens the file and returns AudioFormatInfo
        (sample_rate, channels, duration)
   -> CpalAudioOutput::initialize(sample_rate, channels) configures the stream
@@ -50,19 +52,19 @@ User clicks "Scan" (or "Scan All") in the settings view (src/ui/settings.rs)
   -> Library scanner thread (src/main.rs) receives the command
   -> AudioFileScanner (src/infra/scanner.rs) walks the directory tree with walkdir
        and returns all audio file paths (honoring the AtomicBool cancel flag)
-  -> For each chunk of 10 paths:
-       -> Paths the store already knows are skipped so rescans do not re-read
-          unchanged metadata
-       -> LibraryManager::build_tracks(chunk, &LoftyMetadataReader) reads tags,
-          duration, cover source, and format; per-file failures are logged and
-          skipped so a scan never aborts on one bad file
-       -> The chunk commits as ONE immediate durable transaction through the
-          LibraryMutationStore port (apply_scan_batch), preserving existing play
-          history for known tracks
-       -> On success the session generation counter bumps, so Session Projections
-          refetch on the next frame; the new tracks also land in the transitional
-          in-memory mirror
-       -> LibraryUpdate::Progress { path, files_found, current_dir } is sent to the UI
+   -> For each chunk of 10 paths:
+        -> Paths the store already knows are skipped (one indexed lookup per
+           path through the LibraryQueryStore) so rescans do not re-read
+           unchanged metadata; if the check errors, the path is scanned anyway
+        -> build_tracks(chunk, &LoftyMetadataReader) from src/app/scan.rs reads
+           tags, duration, cover source, and format; per-file failures are
+           logged and skipped so a scan never aborts on one bad file
+        -> The chunk commits as ONE immediate durable transaction through the
+           LibraryMutationStore port (apply_scan_batch), preserving existing play
+           history for known tracks
+        -> On success the mutation adapter bumps the session generation counter,
+           so Session Projections refetch on the next frame
+        -> LibraryUpdate::Progress { path, files_found, current_dir } is sent to the UI
   -> When all chunks are processed:
        LibraryUpdate::Complete { path, total_files } is sent to the UI
   -> UI (poll_library_updates in src/ui/app.rs) receives Complete:
@@ -71,7 +73,7 @@ User clicks "Scan" (or "Scan All") in the settings view (src/ui/settings.rs)
   -> UI re-renders the library view from its projections with the new tracks
 ```
 
-A `LibraryCommand::CancelScan` sets the shared cancel flag, which the scanner checks between chunks to stop early. If the scanner itself fails, it sends `LibraryUpdate::ScanError { path, message }`, the UI resets the path status to `Idle`, and the message is shown in the status line.
+A `LibraryCommand::CancelScan` sets the shared cancel flag, which the scanner checks between chunks to stop early. If the scanner itself fails, it sends `LibraryUpdate::Error { path, message }`, the UI resets the path status to `Idle`, and the message is shown in the status line. The scan thread never touches `AppState`: it reads the store through the query port and commits through the mutation port.
 
 ## Flow 3: Resolve Cover Art
 

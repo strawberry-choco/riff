@@ -64,6 +64,10 @@ _Avoid_: saved search
 The transient ordered set of Tracks scheduled for playback; it is not part of persisted state.
 _Avoid_: Playlist
 
+**Queue Fill**:
+When playback starts on a Track while the Playback Queue is empty, the whole Library becomes the queue with that Track current.
+_Avoid_: auto-fill, auto-populate
+
 **Settings**:
 Persisted user preferences that are not music-collection data, such as Library Paths, volume, Watch States, and display toggles.
 _Avoid_: config, options

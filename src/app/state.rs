@@ -1,4 +1,3 @@
-use crate::app::library_manager::LibraryManager;
 use crate::domain::{PlaybackPosition, PlaybackQueue, PlaybackState, Playlist, TrackId};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -52,7 +51,6 @@ pub enum WatchState {
 }
 
 pub struct AppState {
-    pub library: LibraryManager,
     pub queue: PlaybackQueue,
     pub playback_state: PlaybackState,
     pub current_position: PlaybackPosition,
@@ -129,7 +127,6 @@ impl Default for AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            library: LibraryManager::new(),
             queue: PlaybackQueue::default(),
             playback_state: PlaybackState::Stopped,
             current_position: PlaybackPosition::default(),

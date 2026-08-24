@@ -1,8 +1,8 @@
 use crate::app::commands::{LibraryCommand, LibraryUpdate};
 use crate::app::cover_resolver::CoverResolver;
 use crate::app::projection::{
-    BrowsingProjection, FolderProjection, ProjectionKey, SmartPlaylistsProjection,
-    TrackListProjection, WINDOW_SIZE,
+    BrowsingProjection, FolderProjection, PlaybackProjection, ProjectionKey,
+    SmartPlaylistsProjection, TrackListProjection, WINDOW_SIZE,
 };
 use crate::app::state::{AppState, BrowseMode, LibraryStatus, ViewMode};
 use crate::app::store::{
@@ -181,12 +181,18 @@ pub struct RiffApp {
     /// subtree search matches, subtree track ids, direct track listings,
     /// and child directories, all fetched from the store through
     /// [`Self::library_queries`] and invalidated by generation bumps.
-    folder_projection: FolderProjection,
+    pub(crate) folder_projection: FolderProjection,
     /// Session Projection serving the read-only smart playlists: one
     /// computed list per kind, fetched from the store through
     /// [`Self::library_queries`] and invalidated by generation bumps, so a
     /// finished play or scan regenerates them on the next frame.
     smart_playlists_projection: SmartPlaylistsProjection,
+    /// Session Projection serving the playback-side reads (ADR 0002): the
+    /// current Track, the Now Playing Up Next window, and the track-details
+    /// panel's selected Track — all fetched from the store through
+    /// [`Self::library_queries`] and invalidated by generation bumps and
+    /// Playback Queue changes. Never authoritative.
+    playback_projection: PlaybackProjection,
     pub(crate) theme: ThemeState,
     /// Vendored-glyph texture cache for the shell's icon controls (Issue 06).
     pub(crate) icons: crate::ui::icons::IconCache,
@@ -302,6 +308,7 @@ impl RiffApp {
             browsing_projection: BrowsingProjection::new(),
             folder_projection: FolderProjection::new(),
             smart_playlists_projection: SmartPlaylistsProjection::new(),
+            playback_projection: PlaybackProjection::new(),
             theme: ThemeState {
                 dark: true, // dark (mockup palette) by default
                 active: theme::Palette::dark(),
@@ -391,30 +398,54 @@ impl RiffApp {
     }
 
     /// Drain completed tag writes from the background thread. On success the
-    /// edited metadata lands in the mirror and persists through the store's
-    /// targeted tag-refresh flow as one durable transaction (history
-    /// preserved, album year/genre re-derived). On failure the error is
-    /// surfaced in the open modal, which stays open.
+    /// edit persists through the store's targeted tag-refresh flow as one
+    /// durable transaction (history preserved, album year/genre re-derived);
+    /// the mutation adapter bumps the session generation so projections
+    /// refetch. The edited Track resolves from the Application Store — the
+    /// sole authority — and an unknown track surfaces like any other save
+    /// failure. On failure the error is surfaced in the open modal, which
+    /// stays open.
     fn poll_tag_write_results(&mut self, state: &mut AppState) {
         while let Ok(result) = self.tag_write_result_rx.try_recv() {
             match result.outcome {
                 Ok(()) => {
-                    let mut edited: Option<Track> = None;
-                    if let Some(track) = state.library.tracks.get_mut(&result.track_id) {
-                        result.edit.apply_to(&mut track.metadata);
-                        edited = Some(track.clone());
-                    }
-                    if let Some(track) = edited {
-                        if let Err(e) = self.library_mutations.apply_tag_refresh(&track) {
+                    // Resolve the edited Track from the store, apply the edit
+                    // to the fresh copy, and persist it.
+                    let resolved = match self.library_queries.get_track(&result.track_id) {
+                        Ok(track) => track,
+                        Err(e) => {
                             tracing::error!(
-                                "Failed to persist tag edit for {:?}: {e}",
+                                "Failed to resolve {:?} from the store for its tag edit: {e}",
                                 result.path
                             );
-                        } else {
-                            self.store_generation.bump();
+                            None
+                        }
+                    };
+                    let mut failure: Option<String> = None;
+                    match resolved {
+                        Some(mut track) => {
+                            result.edit.apply_to(&mut track.metadata);
+                            if let Err(e) = self.library_mutations.apply_tag_refresh(&track) {
+                                tracing::error!(
+                                    "Failed to persist tag edit for {:?}: {e}",
+                                    result.path
+                                );
+                            }
+                        }
+                        None => {
+                            // Unknown to the store (removed mid-edit, or the
+                            // read failed): nothing to persist.
+                            failure = Some("Track is no longer in the library".to_string());
                         }
                     }
-                    if self
+                    if let Some(message) = failure {
+                        if let Some(ref mut tag_edit) = self.tag_edit {
+                            if tag_edit.track_id == result.track_id {
+                                tag_edit.error = Some(message);
+                                tag_edit.saving = false;
+                            }
+                        }
+                    } else if self
                         .tag_edit
                         .as_ref()
                         .is_some_and(|te| te.track_id == result.track_id)
@@ -799,7 +830,6 @@ impl eframe::App for RiffApp {
                 &mut state,
                 self.settings_store.as_ref(),
                 self.playlist_store.as_ref(),
-                self.library_queries.as_ref(),
                 cmd.as_ref(),
             );
             self.first_frame = false;
@@ -822,7 +852,7 @@ impl eframe::App for RiffApp {
         // "Artist - Title" for the current track, else "riff".
         #[cfg(not(target_os = "linux"))]
         {
-            let tray_tooltip = update_window_title(ui.ctx(), &state);
+            let tray_tooltip = self.update_window_title(ui.ctx(), &state);
             if self.last_tray_tooltip != tray_tooltip {
                 if let Some(ref tray) = self.tray_icon {
                     crate::ui::tray::update_tooltip(tray, &tray_tooltip);
@@ -832,7 +862,7 @@ impl eframe::App for RiffApp {
         }
         #[cfg(target_os = "linux")]
         {
-            update_window_title(ui.ctx(), &state);
+            self.update_window_title(ui.ctx(), &state);
         }
 
         // --- SHELL (Issue 06): unified Panel API at exact token dimensions ---
@@ -1153,45 +1183,18 @@ pub fn apply_player_bar_action(
     }
 }
 
-/// First-frame restore. The library hydrates from the Application Store
-/// through the [`LibraryQueryStore`] port into the transitional in-memory
-/// mirror that still serves views not yet migrated to bounded store queries;
-/// playlists hydrate through the [`PlaylistStore`] port and every user
-/// preference from the typed settings tables via [`SettingsStore`]. The
-/// legacy JSON cache is never read or written. Public so the hydration
-/// contract is testable headlessly.
+/// First-frame restore. Playlists hydrate through the [`PlaylistStore`]
+/// port and every user preference from the typed settings tables via
+/// [`SettingsStore`]; the Library collection needs no hydration — every
+/// view reads it live through the [`LibraryQueryStore`] port. The legacy
+/// JSON cache is never read or written. Public so the restore contract is
+/// testable headlessly.
 pub fn load_persisted_state(
     state: &mut AppState,
     store: &dyn SettingsStore,
     playlist_store: &dyn PlaylistStore,
-    library_queries: &dyn LibraryQueryStore,
     cmd: Option<&Sender<PlaybackCommand>>,
 ) {
-    match library_queries.load_collection() {
-        Ok(collection) => {
-            let mut library = crate::app::library_manager::LibraryManager::new();
-            // The snapshot arrives in the exact shapes the former JSON cache
-            // carried: albums keyed by the "album artist - title" composite,
-            // artists listing their album keys in first-added order.
-            for artist in collection.artists {
-                library.artists.insert(artist.name.clone(), artist);
-            }
-            for album in collection.albums {
-                let key = format!("{} - {}", album.artist, album.title);
-                library.albums.insert(key, album);
-            }
-            for track in collection.tracks.into_values() {
-                library.tracks.insert(track.id.clone(), track);
-            }
-            state.library = library;
-        }
-        Err(e) => {
-            tracing::warn!("Failed to hydrate the library from the store: {e}");
-            // Surface WHY the library is empty: silence looks like data loss.
-            state.scan_status =
-                Some("Library could not be loaded from the store \u{2014} it will be rebuilt on the next scan.".to_string());
-        }
-    }
     // Playlists are user data in the Application Store, so they survive a
     // Clear Library (which wipes collection data only).
     reload_playlists(playlist_store, state);
@@ -1257,25 +1260,43 @@ fn handle_keyboard_shortcuts(
 }
 
 /// Send the window title for the current track and return the tray tooltip
-/// text (REQ-SI-001).
-fn update_window_title(ctx: &egui::Context, state: &AppState) -> String {
-    let mut tooltip = "riff".to_owned();
-    if let Some(track_id) = state.queue.current_track() {
-        if let Some(track) = state.library.get_track(track_id) {
+/// text (REQ-SI-001). The current Track resolves through the playback-side
+/// Session Projection over the store's `get_track` query — never the
+/// transitional in-memory mirror.
+impl RiffApp {
+    fn update_window_title(&mut self, ctx: &egui::Context, state: &AppState) -> String {
+        let mut tooltip = "riff".to_owned();
+        self.refresh_playback_projection(state);
+        if let Some(track) = self.playback_projection.current() {
             let artist = track.metadata.display_artist();
             let title = track.metadata.display_title(&track.file_path);
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
                 "{artist} - {title} \u{2014} riff"
             )));
             tooltip = format!("{artist} - {title}");
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title("riff".to_owned()));
         }
-    } else {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title("riff".to_owned()));
+        tooltip
     }
-    tooltip
-}
 
-impl RiffApp {
+    /// Refresh the playback-side Session Projection against the current
+    /// store generation and queue shape. Cheap when nothing moved (a stamp
+    /// comparison); otherwise refetches the current Track plus the Up Next
+    /// window through [`Self::library_queries`]. Failures degrade to the
+    /// previous cache with a warning, like every other projection.
+    fn refresh_playback_projection(&mut self, state: &AppState) {
+        let generation = self.store_generation.current();
+        if let Err(e) = self.playback_projection.refresh(
+            generation,
+            &state.queue,
+            crate::ui::now_playing::UP_NEXT_LIMIT,
+            &mut |id| self.library_queries.get_track(id),
+        ) {
+            tracing::warn!("Failed to refresh the playback projection from the store: {e}");
+        }
+    }
+
     /// Bottom shell strip (Issues 06 + 08): transport, seek row, and volume
     /// at the exact 88px playerbar token height, drawn by the restyled
     /// playerbar widgets. Every reported [`crate::ui::playerbar::
@@ -1289,12 +1310,15 @@ impl RiffApp {
     ) {
         // Cover for the current track, served from the LRU texture cache;
         // misses enqueue a background resolve exactly like the other views.
+        // The current Track comes from the playback-side Session Projection
+        // over the store's `get_track` query — never the in-memory mirror.
         let mut cover = None;
-        if let Some(track_id) = state.queue.current_track().cloned() {
-            if let Some(track) = state.library.get_track(&track_id) {
-                self.request_cover(&track.id, &track.file_path);
-                cover = self.get_cover_texture(&track.id.0);
-            }
+        self.refresh_playback_projection(state);
+        if let Some(track) = self.playback_projection.current() {
+            let id = track.id.clone();
+            let file_path = track.file_path.clone();
+            self.request_cover(&id, &file_path);
+            cover = self.get_cover_texture(&id.0);
         }
 
         let queue_position = format!(
@@ -1486,7 +1510,10 @@ impl RiffApp {
             self.render_playlists_section(ui, state);
         }
 
-        let has_results = query.is_empty() || !state.library.search(query).is_empty();
+        // Search gating reads the store's match count (the same query the
+        // flat view's projection totals use) — never the in-memory mirror.
+        let has_results =
+            query.is_empty() || self.library_queries.search_count(query).unwrap_or(0) > 0;
         // A playlist only renders when not searching; search shows
         // matching tracks only. Turning advanced mode off closes
         // any open smart playlist.
@@ -1519,9 +1546,24 @@ impl RiffApp {
             crate::ui::library::empty_state_hero(ui, &mut self.icons, &palette);
             return;
         };
-        let Some(track) = state.library.get_track(&track_id) else {
-            crate::ui::library::empty_state_hero(ui, &mut self.icons, &palette);
-            return;
+        // The selected Track resolves through the playback-side Session
+        // Projection over the store's `get_track` query (cached until the
+        // selection or the generation moves) — never the in-memory mirror.
+        let track = match self.playback_projection.selected_track(
+            self.store_generation.current(),
+            &track_id,
+            &mut |id| self.library_queries.get_track(id),
+        ) {
+            Ok(Some(track)) => track,
+            Ok(None) => {
+                crate::ui::library::empty_state_hero(ui, &mut self.icons, &palette);
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to resolve selected track from the store: {e}");
+                crate::ui::library::empty_state_hero(ui, &mut self.icons, &palette);
+                return;
+            }
         };
         self.request_cover(&track.id, &track.file_path);
         ui.horizontal(|ui| {
@@ -2108,7 +2150,22 @@ impl RiffApp {
         };
 
         let current_track = state.queue.current_track().cloned();
-        let valid_ids = crate::app::playlist_manager::valid_tracks(&state.library, &playlist);
+
+        // Resolve every entry against the Application Store in one query:
+        // each entry rides its Library validity flag (SQL LEFT JOIN against
+        // tracks; dangling references stay listed, flagged invalid). Whether
+        // an otherwise known file still exists on disk remains a read-time
+        // filesystem check — the former mirror-based rule with the Store as
+        // the sole authority on what the library knows.
+        let resolved: Vec<crate::app::store::PlaylistEntry> =
+            match self.playlist_store.load_playlist_entries(playlist_id) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::warn!("Failed to load playlist entries from the store: {e}");
+                    Vec::new()
+                }
+            };
+        let valid_ids = crate::app::playlist_manager::valid_tracks(&resolved);
 
         // Header: name + count, with whole-list actions (valid tracks only),
         // mirroring the smart-playlist header menu.
@@ -2129,15 +2186,13 @@ impl RiffApp {
             return;
         }
 
-        // Resolve each entry once per frame: the track (if still in the
-        // library) and whether its file still exists on disk.
-        let entries: Vec<(TrackId, Option<Track>, bool)> = playlist
-            .tracks
-            .iter()
-            .map(|tid| {
-                let track = state.library.get_track(tid).cloned();
-                let valid = crate::app::playlist_manager::track_is_valid(&state.library, tid);
-                (tid.clone(), track, valid)
+        // One row per entry: the store-resolved track (if any) plus the
+        // final playability verdict (Library-known AND file exists on disk).
+        let entries: Vec<(TrackId, Option<Track>, bool)> = resolved
+            .into_iter()
+            .map(|entry| {
+                let valid = crate::app::playlist_manager::track_is_valid(&entry);
+                (entry.id, entry.track, valid)
             })
             .collect();
 
@@ -2304,9 +2359,11 @@ impl RiffApp {
         let palette = self.theme.active;
 
         // Current track + cover from the LRU texture cache; misses enqueue a
-        // background resolve exactly like the other views.
-        let current = state.queue.current_track().cloned();
-        let track = current.and_then(|tid| state.library.get_track(&tid).cloned());
+        // background resolve exactly like the other views. Both the current
+        // Track and the Up Next window come from the playback-side Session
+        // Projection over the store's `get_track` query — never the mirror.
+        self.refresh_playback_projection(state);
+        let track = self.playback_projection.current().cloned();
         let cover = track.as_ref().and_then(|track| {
             self.request_cover(&track.id, &track.file_path);
             self.get_cover_texture(&track.id.0)
@@ -2330,8 +2387,7 @@ impl RiffApp {
             position: state.current_position.current,
             total: state.current_position.total,
             up_next: crate::ui::now_playing::up_next_entries(
-                &state.queue,
-                &state.library,
+                self.playback_projection.up_next(),
                 crate::ui::now_playing::UP_NEXT_LIMIT,
             ),
         };

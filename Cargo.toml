@@ -1,7 +1,7 @@
 [package]
 name = "riff"
 version = "0.2.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.95"
 authors = ["riff contributors"]
 description = "A lightweight, offline-first music player built in Rust with egui"

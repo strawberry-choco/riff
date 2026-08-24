@@ -60,12 +60,11 @@ impl CoverResolver {
         if let Ok(entries) = std::fs::read_dir(parent) {
             let mut found_files: Vec<(String, std::fs::DirEntry)> = Vec::new();
             for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
-                        if let Some(name) = entry.file_name().to_str() {
-                            found_files.push((name.to_lowercase(), entry));
-                        }
-                    }
+                if let Ok(metadata) = entry.metadata()
+                    && metadata.is_file()
+                    && let Some(name) = entry.file_name().to_str()
+                {
+                    found_files.push((name.to_lowercase(), entry));
                 }
             }
 

@@ -177,10 +177,9 @@ impl AudioOutput for CpalAudioOutput {
     }
 
     fn buffer_len(&self) -> usize {
-        if let Ok(buf) = self.buffer.lock() {
-            buf.len()
-        } else {
-            0
+        match self.buffer.lock() {
+            Ok(buf) => buf.len(),
+            Err(_) => 0,
         }
     }
 
@@ -191,13 +190,14 @@ impl AudioOutput for CpalAudioOutput {
     }
 
     fn write_samples(&mut self, samples: &[f32]) -> Result<usize, AppError> {
-        if let Ok(mut buf) = self.buffer.lock() {
-            buf.extend(samples.iter());
-            Ok(samples.len())
-        } else {
-            Err(AppError::AudioOutput(
+        match self.buffer.lock() {
+            Ok(mut buf) => {
+                buf.extend(samples.iter());
+                Ok(samples.len())
+            }
+            Err(_) => Err(AppError::AudioOutput(
                 "Failed to acquire audio buffer lock".to_string(),
-            ))
+            )),
         }
     }
 
@@ -231,14 +231,14 @@ fn build_stream_config(
     // Only change channels if requested and supported
     if requested_channels != config.channels {
         // Check if the requested channels are supported
-        if let Ok(mut supported_configs) = device.supported_output_configs() {
-            if supported_configs.any(|range| {
+        if let Ok(mut supported_configs) = device.supported_output_configs()
+            && supported_configs.any(|range| {
                 let channels_min = range.channels().min(2); // Use a reasonable default
                 let channels_max = range.channels().max(2); // Use a reasonable default
                 channels_min <= requested_channels && channels_max >= requested_channels
-            }) {
-                config.channels = requested_channels;
-            }
+            })
+        {
+            config.channels = requested_channels;
         }
     }
 

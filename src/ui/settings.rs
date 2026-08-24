@@ -1,7 +1,7 @@
+use crate::app::MutexExt;
 use crate::app::commands::LibraryCommand;
 use crate::app::state::{AppState, LibraryStatus, ViewMode, WatchState};
 use crate::app::store::SettingsStore;
-use crate::app::MutexExt;
 use crate::ui::icons::{Icon, IconCache};
 use crate::ui::theme::{self, Palette};
 use crossbeam_channel::Sender;
@@ -16,10 +16,10 @@ pub fn expand_tilde(input: &str) -> PathBuf {
         if let Ok(home) = std::env::var("HOME") {
             return PathBuf::from(home);
         }
-    } else if let Some(rest) = input.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
+    } else if let Some(rest) = input.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(rest);
     }
     PathBuf::from(input)
 }

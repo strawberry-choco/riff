@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use walkdir::WalkDir;
 
 const AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "aac", "opus", "ogg", "flac", "wav"];
@@ -31,12 +31,12 @@ impl AudioFileScanner {
 
             match entry {
                 Ok(entry) => {
-                    if entry.file_type().is_file() {
-                        if let Some(ext) = entry.path().extension() {
-                            let ext_lower = ext.to_string_lossy().to_lowercase();
-                            if AUDIO_EXTENSIONS.contains(&ext_lower.as_str()) {
-                                files.push(entry.path().to_path_buf());
-                            }
+                    if entry.file_type().is_file()
+                        && let Some(ext) = entry.path().extension()
+                    {
+                        let ext_lower = ext.to_string_lossy().to_lowercase();
+                        if AUDIO_EXTENSIONS.contains(&ext_lower.as_str()) {
+                            files.push(entry.path().to_path_buf());
                         }
                     }
                 }

@@ -614,10 +614,11 @@ impl PlaybackProjection {
         id: &TrackId,
         loader: &mut dyn FnMut(&TrackId) -> Result<Option<Track>, AppError>,
     ) -> Result<Option<Track>, AppError> {
-        if let Some((cached_generation, cached_id, track)) = &self.selected {
-            if *cached_generation == generation && cached_id == id {
-                return Ok(track.clone());
-            }
+        if let Some((cached_generation, cached_id, track)) = &self.selected
+            && *cached_generation == generation
+            && cached_id == id
+        {
+            return Ok(track.clone());
         }
         let fresh = loader(id)?;
         self.selected = Some((generation, id.clone(), fresh.clone()));

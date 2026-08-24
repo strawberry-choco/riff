@@ -19,7 +19,7 @@ use eframe::egui;
 use std::time::Duration;
 
 use super::icons::{Icon, IconCache};
-use super::library::{glow_color, GLOW_LAYERS};
+use super::library::{GLOW_LAYERS, glow_color};
 use super::playerbar;
 use super::sidebar::{self, TreeRow};
 use super::theme::{self, Palette};

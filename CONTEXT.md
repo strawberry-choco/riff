@@ -84,7 +84,15 @@ _Avoid_: watch status, Ready state
 A bounded in-memory view of Application Store query results used while rendering the UI; it is never authoritative.
 _Avoid_: cache, AppState snapshot
 
+**SessionViews**:
+The single read interface over all Session Projections; UI code asks it for ready-to-render data and never touches the generation counter, loader wiring, staleness handling, or store-error fallbacks itself.
+_Avoid_: projection manager, view cache
+
 **Audio Engine**:
 The module that turns Playback Commands into decoded audio and Playback Updates, owning decode scheduling, output startup, and gapless handoff; it decides nothing about queue order beyond filling an empty Playback Queue.
 _Avoid_: playback thread, sound server
+
+**Tag Edit**:
+The user action of editing a Track's Metadata through the edit dialog; saving commits the file tags and the Store facts as one durable change, and a failure leaves the dialog open with the reason.
+_Avoid_: metadata editor, tag writer
 

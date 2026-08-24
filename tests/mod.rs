@@ -42,13 +42,13 @@ pub use riff::ui;
 
 // Prelude of bare names used inside the test bodies through `use super::*`.
 // Kept explicit (rather than glob re-exports) to avoid name collisions.
-pub use riff::app::gapless::{
-    duration_from_frames, elapsed_from_samples, formats_gapless_compatible, frames_from_duration,
-    is_gapless_eligible, pre_buffer_cap, repeat_one_handoff_eligible, samples_from_duration,
-    GaplessConditions, QueueConditions,
-};
-pub use riff::app::state::{replaygain_factor, AppState, LibraryStatus, WatchState};
 pub use riff::app::MutexExt;
+pub use riff::app::gapless::{
+    GaplessConditions, QueueConditions, duration_from_frames, elapsed_from_samples,
+    formats_gapless_compatible, frames_from_duration, is_gapless_eligible, pre_buffer_cap,
+    repeat_one_handoff_eligible, samples_from_duration,
+};
+pub use riff::app::state::{AppState, LibraryStatus, WatchState, replaygain_factor};
 pub use riff::domain::{
     Album, Artist, PlaybackCommand, PlaybackPosition, PlaybackQueue, PlaybackState, PlaybackUpdate,
     Playlist, PlaylistId, RepeatMode, SmartPlaylistKind, Track, TrackId, TrackMetadata,
@@ -58,7 +58,7 @@ pub use riff::infra::{
     AudioFileScanner, CpalAudioOutput, FilesystemWatcher, ImageCoverLoader, LoftyMetadataReader,
     LoftyMetadataWriter, SymphoniaDecoder,
 };
-pub use riff::ui::app::{clamp_seek, format_duration, lru_insert, TagEditState};
+pub use riff::ui::app::{TagEditState, clamp_seek, format_duration, lru_insert};
 pub use riff::ui::settings::{expand_tilde, suggest_directories};
 
 // Standard-library names referenced unqualified in some suites.

@@ -119,7 +119,7 @@ mod tests {
     }
 
     fn draw_shell_chrome(ui: &mut egui::Ui) {
-        use riff::ui::chrome::{show_titlebar, TitleBarContent};
+        use riff::ui::chrome::{TitleBarContent, show_titlebar};
         use riff::ui::icons::IconCache;
         use riff::ui::theme::{self, Palette, SURFACE_BG};
 

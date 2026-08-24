@@ -1,3 +1,4 @@
+use crate::app::MutexExt;
 use crate::app::commands::{LibraryCommand, LibraryUpdate};
 use crate::app::cover_resolver::CoverResolver;
 use crate::app::projection::{
@@ -10,14 +11,13 @@ use crate::app::store::{
 };
 use crate::app::traits::{CoverImage, MetadataWriter, TagEdit};
 use crate::app::watcher_manager::WatcherManager;
-use crate::app::MutexExt;
 use crate::domain::{
     Album, Artist, PlaybackCommand, PlaybackState, Playlist, PlaylistId, SmartPlaylistKind, Track,
     TrackId,
 };
 use crate::infra::{ImageCoverLoader, LoftyMetadataReader, LoftyMetadataWriter};
 use crate::ui::theme;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -350,10 +350,11 @@ impl RiffApp {
 
     fn request_cover(&self, track_id: &TrackId, file_path: &Path) {
         let key = &track_id.0;
-        if !self.cover_textures.contains_key(key) && !self.cover_negative_keys.contains(key) {
-            if let Some(ref tx) = self.cover_request_tx {
-                let _ = tx.send((track_id.clone(), file_path.to_path_buf()));
-            }
+        if !self.cover_textures.contains_key(key)
+            && !self.cover_negative_keys.contains(key)
+            && let Some(ref tx) = self.cover_request_tx
+        {
+            let _ = tx.send((track_id.clone(), file_path.to_path_buf()));
         }
     }
 
@@ -439,11 +440,11 @@ impl RiffApp {
                         }
                     }
                     if let Some(message) = failure {
-                        if let Some(ref mut tag_edit) = self.tag_edit {
-                            if tag_edit.track_id == result.track_id {
-                                tag_edit.error = Some(message);
-                                tag_edit.saving = false;
-                            }
+                        if let Some(ref mut tag_edit) = self.tag_edit
+                            && tag_edit.track_id == result.track_id
+                        {
+                            tag_edit.error = Some(message);
+                            tag_edit.saving = false;
                         }
                     } else if self
                         .tag_edit
@@ -461,11 +462,11 @@ impl RiffApp {
                 }
                 Err(message) => {
                     tracing::warn!("Tag write failed for {:?}: {}", result.path, message);
-                    if let Some(ref mut tag_edit) = self.tag_edit {
-                        if tag_edit.track_id == result.track_id {
-                            tag_edit.error = Some(message);
-                            tag_edit.saving = false;
-                        }
+                    if let Some(ref mut tag_edit) = self.tag_edit
+                        && tag_edit.track_id == result.track_id
+                    {
+                        tag_edit.error = Some(message);
+                        tag_edit.saving = false;
                     }
                 }
             }
@@ -631,10 +632,10 @@ impl RiffApp {
             }
         };
 
-        if let Some(request) = request {
-            if let Some(ref tx) = self.tag_write_request_tx {
-                let _ = tx.send(request);
-            }
+        if let Some(request) = request
+            && let Some(ref tx) = self.tag_write_request_tx
+        {
+            let _ = tx.send(request);
         }
     }
 
@@ -2232,19 +2233,17 @@ impl RiffApp {
         index: usize,
     ) {
         let (tid, track, valid) = entry;
-        if *valid {
-            if let Some(t) = track {
-                self.render_reorderable_playlist_row(
-                    ui,
-                    state,
-                    cmd,
-                    t,
-                    current_track,
-                    playlist_id,
-                    index,
-                );
-                return;
-            }
+        if *valid && let Some(t) = track {
+            self.render_reorderable_playlist_row(
+                ui,
+                state,
+                cmd,
+                t,
+                current_track,
+                playlist_id,
+                index,
+            );
+            return;
         }
 
         // Invalid entry: file moved or deleted. Flag it and exclude it from
@@ -2668,10 +2667,10 @@ fn render_track_meta_labels(
     metadata: &crate::domain::TrackMetadata,
     show_disc: bool,
 ) {
-    if let Some(ref aa) = metadata.album_artist {
-        if *aa != metadata.display_artist() {
-            ui.label(format!("Album Artist: {aa}"));
-        }
+    if let Some(ref aa) = metadata.album_artist
+        && *aa != metadata.display_artist()
+    {
+        ui.label(format!("Album Artist: {aa}"));
     }
     if let Some(y) = metadata.year {
         ui.label(format!("Year: {y}"));
@@ -2756,8 +2755,8 @@ fn show_track_context_menu(response: &egui::Response, args: TrackMenuArgs<'_>) {
             }
             add_to_playlist_menu(ui, &playlist_options, playlists, playlist_store, &tid);
         }
-        if let Some(ref pid) = remove_pid {
-            if ui.button("Remove from Playlist").clicked() {
+        if let Some(ref pid) = remove_pid
+            && ui.button("Remove from Playlist").clicked() {
                 // One immediate durable transaction; the projection patch
                 // mirrors the committed change until the next reload.
                 match playlist_store.remove_playlist_entries(pid, &tid) {
@@ -2773,10 +2772,9 @@ fn show_track_context_menu(response: &egui::Response, args: TrackMenuArgs<'_>) {
                 }
                 ui.close();
             }
-        }
         // Edit Tags is advanced-only (REQ-UI-006).
-        if let Some(ref t) = edit_track {
-            if ui
+        if let Some(ref t) = edit_track
+            && ui
                 .button("Edit Tags")
                 .on_hover_text(
                     "Edit this track's tags (title, artist, album, and more). Changes are written to the file on Save.",
@@ -2786,7 +2784,6 @@ fn show_track_context_menu(response: &egui::Response, args: TrackMenuArgs<'_>) {
                 *tag_edit = Some(TagEditState::from_track(t));
                 ui.close();
             }
-        }
     });
 }
 
@@ -2801,12 +2798,12 @@ fn show_list_context_menu(
     let tids = track_ids.to_vec();
     response.context_menu(move |ui| {
         if ui.button("Play").clicked() {
-            if let Some(ref s) = cmd {
-                if let Some(first) = tids.first() {
-                    let _ = s.send(PlaybackCommand::Play(first.clone()));
-                    for tid in &tids[1..] {
-                        let _ = s.send(PlaybackCommand::AddToQueue(tid.clone()));
-                    }
+            if let Some(ref s) = cmd
+                && let Some(first) = tids.first()
+            {
+                let _ = s.send(PlaybackCommand::Play(first.clone()));
+                for tid in &tids[1..] {
+                    let _ = s.send(PlaybackCommand::AddToQueue(tid.clone()));
                 }
             }
             ui.close();

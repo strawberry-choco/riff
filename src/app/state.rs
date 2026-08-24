@@ -16,10 +16,10 @@ pub fn replaygain_factor(enabled: bool, gain_db: Option<f32>, peak: Option<f32>)
         return 1.0;
     };
     let mut linear = 10f32.powf(g / 20.0);
-    if let Some(p) = peak {
-        if p > 0.0 {
-            linear = linear.min(1.0 / p);
-        }
+    if let Some(p) = peak
+        && p > 0.0
+    {
+        linear = linear.min(1.0 / p);
     }
     linear
 }
@@ -151,10 +151,6 @@ impl AppState {
     /// The volume the audio engine should apply: `0.0` while muted, otherwise
     /// `current_volume`. Muting never moves the slider; unmuting restores it.
     pub fn effective_volume(&self) -> f32 {
-        if self.muted {
-            0.0
-        } else {
-            self.current_volume
-        }
+        if self.muted { 0.0 } else { self.current_volume }
     }
 }

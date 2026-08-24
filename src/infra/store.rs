@@ -6,13 +6,13 @@
 //! set. Open or migrate failures are fatal startup errors surfaced as clear
 //! [`AppError`]s rather than silent fallbacks.
 
+use crate::app::MutexExt;
 use crate::app::errors::AppError;
 use crate::app::state::{ScalarSettings, WatchState};
 use crate::app::store::{
-    LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings, SettingsStore,
-    StoreGeneration, StoreMigrations, LOST_GEMS_THRESHOLD,
+    LOST_GEMS_THRESHOLD, LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings,
+    SettingsStore, StoreGeneration, StoreMigrations,
 };
-use crate::app::MutexExt;
 use crate::domain::{
     Album, Artist, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId, TrackMetadata,
 };
@@ -293,7 +293,7 @@ impl SqliteStore {
                     return Err(AppError::InvalidOperation(format!(
                         "fatal: failed to inspect corrupted store file {}: {e}",
                         sibling.to_string_lossy()
-                    )))
+                    )));
                 }
             };
             if existed {
@@ -953,10 +953,10 @@ impl SqliteStore {
             track.metadata.display_album(),
         );
         let mut affected: Vec<(String, String)> = Vec::with_capacity(2);
-        if let Some(old) = previous_keys {
-            if old != new_key {
-                affected.push(old);
-            }
+        if let Some(old) = previous_keys
+            && old != new_key
+        {
+            affected.push(old);
         }
         affected.push(new_key);
 

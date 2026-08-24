@@ -140,18 +140,19 @@ impl PlaybackQueue {
             return None;
         }
 
-        if self.shuffle && !self.shuffle_history.is_empty() {
-            if let Some(idx) = self.shuffle_history.pop() {
-                self.current_index = Some(idx);
-                return self.tracks.get(idx);
-            }
+        if self.shuffle
+            && !self.shuffle_history.is_empty()
+            && let Some(idx) = self.shuffle_history.pop()
+        {
+            self.current_index = Some(idx);
+            return self.tracks.get(idx);
         }
 
-        if let Some(current) = self.current_index {
-            if current > 0 {
-                self.current_index = Some(current - 1);
-                return self.tracks.get(current - 1);
-            }
+        if let Some(current) = self.current_index
+            && current > 0
+        {
+            self.current_index = Some(current - 1);
+            return self.tracks.get(current - 1);
         }
 
         self.current_index = Some(0);

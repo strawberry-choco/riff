@@ -12,18 +12,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use crate::app::MutexExt;
 use crate::app::commands::{LibraryCommand, LibraryUpdate};
 use crate::app::errors::AppError;
 use crate::app::gapless::{
-    elapsed_from_samples, formats_gapless_compatible, is_gapless_eligible, pre_buffer_cap,
-    repeat_one_handoff_eligible, samples_from_duration, GaplessConditions, QueueConditions,
+    GaplessConditions, QueueConditions, elapsed_from_samples, formats_gapless_compatible,
+    is_gapless_eligible, pre_buffer_cap, repeat_one_handoff_eligible, samples_from_duration,
 };
 use crate::app::scan::build_tracks;
 use crate::app::state::AppState;
 use crate::app::store::{LibraryMutationStore, LibraryQueryStore};
 use crate::app::traits::{AudioDecoder, AudioFormatInfo, AudioOutput};
 use crate::app::watcher_manager::WatcherManager;
-use crate::app::MutexExt;
 use crate::domain::{PlaybackCommand, PlaybackState, PlaybackUpdate, RepeatMode, TrackId};
 use crate::infra::{
     AudioFileScanner, CpalAudioOutput, FilesystemWatcher, LoftyMetadataReader, SymphoniaDecoder,
@@ -619,10 +619,8 @@ impl AudioEngine {
                 return;
             }
         };
-        if is_resuming {
-            if let Some(pos) = self.paused_position.take() {
-                let _ = self.decoder.seek(pos);
-            }
+        if is_resuming && let Some(pos) = self.paused_position.take() {
+            let _ = self.decoder.seek(pos);
         }
         let _ = self.update_tx.send(PlaybackUpdate::TrackChanged(track_id));
 
@@ -772,16 +770,16 @@ impl AudioEngine {
 
             self.maybe_pre_encode(info, accumulated_samples);
 
-            if let Ok(cmd) = self.cmd_rx.try_recv() {
-                if self.handle_loop_command(
+            if let Ok(cmd) = self.cmd_rx.try_recv()
+                && self.handle_loop_command(
                     cmd,
                     &mut is_playing,
                     &mut should_stop_audio,
                     &mut accumulated_samples,
                     info,
-                ) {
-                    break;
-                }
+                )
+            {
+                break;
             }
         }
 
@@ -807,16 +805,16 @@ impl AudioEngine {
         info: &AudioFormatInfo,
     ) {
         while self.audio_output.buffer_len() >= max_buffer_samples {
-            if let Ok(cmd) = self.cmd_rx.try_recv() {
-                if self.handle_loop_command(
+            if let Ok(cmd) = self.cmd_rx.try_recv()
+                && self.handle_loop_command(
                     cmd,
                     is_playing,
                     should_stop_audio,
                     accumulated_samples,
                     info,
-                ) {
-                    break;
-                }
+                )
+            {
+                break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }

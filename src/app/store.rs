@@ -10,8 +10,8 @@ use crate::app::state::{ScalarSettings, WatchState};
 use crate::domain::{Album, Artist, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 /// Age threshold for the Lost Gems smart playlist: tracks whose last play is
@@ -335,5 +335,5 @@ pub trait LibraryQueryStore {
     /// ninety-day Lost Gems threshold. Tracks arrive ready to render — the
     /// former id list plus per-id resolution composed into one result.
     fn smart_playlist(&self, kind: SmartPlaylistKind, limit: usize)
-        -> Result<Vec<Track>, AppError>;
+    -> Result<Vec<Track>, AppError>;
 }

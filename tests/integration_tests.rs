@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::app::state::AppState;
     use crate::app::MutexExt;
+    use crate::app::state::AppState;
     use crate::domain::{PlaybackCommand, PlaybackState, TrackId};
     use crossbeam_channel::unbounded;
     use std::sync::{Arc, Mutex};

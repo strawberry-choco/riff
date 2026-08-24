@@ -1001,34 +1001,48 @@ fn test_store_entry_add_remove_semantics_and_dangling_survival() {
         pid = store.create_playlist("P", &[]).unwrap();
 
         // Appends land at the end, in call order.
-        assert!(store
-            .add_playlist_entry(&pid, &TrackId("a.mp3".to_string()))
-            .unwrap());
-        assert!(store
-            .add_playlist_entry(&pid, &TrackId("b.mp3".to_string()))
-            .unwrap());
+        assert!(
+            store
+                .add_playlist_entry(&pid, &TrackId("a.mp3".to_string()))
+                .unwrap()
+        );
+        assert!(
+            store
+                .add_playlist_entry(&pid, &TrackId("b.mp3".to_string()))
+                .unwrap()
+        );
         // Exact duplicates are rejected.
-        assert!(!store
-            .add_playlist_entry(&pid, &TrackId("a.mp3".to_string()))
-            .unwrap());
+        assert!(
+            !store
+                .add_playlist_entry(&pid, &TrackId("a.mp3".to_string()))
+                .unwrap()
+        );
         // Unknown playlist ids are no-ops.
-        assert!(!store
-            .add_playlist_entry(&PlaylistId("x".to_string()), &TrackId("c.mp3".to_string()))
-            .unwrap());
+        assert!(
+            !store
+                .add_playlist_entry(&PlaylistId("x".to_string()), &TrackId("c.mp3".to_string()))
+                .unwrap()
+        );
 
         // Removal reports whether anything was removed.
-        assert!(store
-            .remove_playlist_entries(&pid, &TrackId("a.mp3".to_string()))
-            .unwrap());
-        assert!(!store
-            .remove_playlist_entries(&pid, &TrackId("zzz.mp3".to_string()))
-            .unwrap());
+        assert!(
+            store
+                .remove_playlist_entries(&pid, &TrackId("a.mp3".to_string()))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .remove_playlist_entries(&pid, &TrackId("zzz.mp3".to_string()))
+                .unwrap()
+        );
 
         // A dangling reference (no tracks table exists at all) commits like
         // any other entry.
-        assert!(store
-            .add_playlist_entry(&pid, &TrackId("vanished\\file.flac".to_string()))
-            .unwrap());
+        assert!(
+            store
+                .add_playlist_entry(&pid, &TrackId("vanished\\file.flac".to_string()))
+                .unwrap()
+        );
         drop(store);
     }
 
@@ -1115,16 +1129,18 @@ fn test_store_reorder_playlist_entries_persists_the_new_order_across_restart() {
 
     // Reordering again (C first) keeps working on the persisted data.
     let mut store = reopened;
-    assert!(store
-        .reorder_playlist_entries(
-            &pid,
-            &[
-                TrackId("c.mp3".to_string()),
-                TrackId("b.mp3".to_string()),
-                TrackId("a.mp3".to_string())
-            ]
-        )
-        .unwrap());
+    assert!(
+        store
+            .reorder_playlist_entries(
+                &pid,
+                &[
+                    TrackId("c.mp3".to_string()),
+                    TrackId("b.mp3".to_string()),
+                    TrackId("a.mp3".to_string())
+                ]
+            )
+            .unwrap()
+    );
     assert_eq!(
         store.load_playlists().unwrap()[0].tracks[0],
         TrackId("c.mp3".to_string()),
@@ -1206,10 +1222,12 @@ fn test_store_playlist_entries_report_library_validity_via_left_join() {
 
     // An unknown playlist id yields an empty entry list.
     let unknown = PlaylistId("never-created".to_string());
-    assert!(store
-        .load_playlist_entries(&unknown)
-        .expect("unknown playlist loads")
-        .is_empty());
+    assert!(
+        store
+            .load_playlist_entries(&unknown)
+            .expect("unknown playlist loads")
+            .is_empty()
+    );
 
     // Validity is read-time: removing a track from the Library flips its
     // entry to invalid on the next query while the entry itself survives.
@@ -1541,10 +1559,12 @@ fn test_all_track_ids_are_canonically_path_ordered() {
     let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
 
     // A fresh store has no ids to fill a queue with.
-    assert!(store
-        .all_track_ids()
-        .expect("empty store lists no ids")
-        .is_empty());
+    assert!(
+        store
+            .all_track_ids()
+            .expect("empty store lists no ids")
+            .is_empty()
+    );
 
     let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
     // Shuffled insertion order with byte-ordering traps: Queue Fill must see

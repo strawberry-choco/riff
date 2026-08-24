@@ -7,9 +7,9 @@ use crossbeam_channel::Sender;
 #[cfg(not(target_os = "linux"))]
 use muda::{Menu, MenuId, MenuItem, PredefinedMenuItem};
 #[cfg(not(target_os = "linux"))]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(not(target_os = "linux"))]
 use std::sync::Arc;
+#[cfg(not(target_os = "linux"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(target_os = "linux"))]
 use tray_icon::Icon;
 #[cfg(not(target_os = "linux"))]

@@ -633,9 +633,10 @@ mod tests {
 
         // A failing port surfaces its error instead of being swallowed.
         mock.fail = true;
-        assert!(mock
-            .save_scalars(&riff::app::state::ScalarSettings::default())
-            .is_err());
+        assert!(
+            mock.save_scalars(&riff::app::state::ScalarSettings::default())
+                .is_err()
+        );
         assert!(mock.save_library_paths(&[]).is_err());
         assert!(mock.save_watch_states(&HashMap::new()).is_err());
     }

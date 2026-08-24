@@ -14,7 +14,7 @@ mod tests {
     // UI holds (`Box<dyn SettingsStore>`) over a real SQLite database,
     // dropping and reopening it to simulate a restart.
 
-    use riff::app::store::{LibraryMutationStore, LibraryQueryStore, PlaylistStore, SettingsStore};
+    use riff::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
     use std::path::PathBuf;
 
     /// Open a real store-backed settings port at a fresh temp location,
@@ -30,16 +30,6 @@ mod tests {
     /// Open a real store-backed playlists port at a fresh temp location,
     /// exactly as the UI receives it: a boxed `PlaylistStore`.
     fn boxed_playlist_store(dir: &tempfile::TempDir) -> Box<dyn PlaylistStore> {
-        let db_path = dir.path().join("riff.sqlite3");
-        Box::new(
-            riff::infra::store::SqliteStore::open_and_migrate(&db_path)
-                .expect("opening a fresh store must work"),
-        )
-    }
-
-    /// Open a real store-backed library query port at a fresh temp location,
-    /// exactly as the UI receives it: a boxed `LibraryQueryStore`.
-    fn boxed_library_query_store(dir: &tempfile::TempDir) -> Box<dyn LibraryQueryStore> {
         let db_path = dir.path().join("riff.sqlite3");
         Box::new(
             riff::infra::store::SqliteStore::open_and_migrate(&db_path)
@@ -96,95 +86,27 @@ mod tests {
 
     // --- Library collection cutover (ticket 05) --------------------------------
     //
-    // The library hydrates from the Application Store through the
-    // `LibraryQueryStore` port on startup; the legacy JSON cache is never
-    // read or written and stays untouched on disk.
-
-    /// Seed a compilation album into the store at `dir`: one album credited
-    /// to "Various Artists" with two track-level artists.
-    fn seed_compilation(dir: &tempfile::TempDir) {
-        let mut store =
-            riff::infra::store::SqliteStore::open_and_migrate(&dir.path().join("riff.sqlite3"))
-                .expect("opening the store must work");
-        let make_track = |path: &str, artist: &str| Track {
-            id: TrackId(path.to_string()),
-            file_path: PathBuf::from(path),
-            metadata: crate::domain::TrackMetadata {
-                title: Some("Song".to_string()),
-                artist: Some(artist.to_string()),
-                album: Some("Comp".to_string()),
-                album_artist: Some("Various Artists".to_string()),
-                ..crate::domain::TrackMetadata::default()
-            },
-            duration: None,
-            sample_rate: None,
-            channels: None,
-            play_count: 0,
-            last_played: None,
-            date_added: None,
-        };
-        store
-            .apply_scan_batch(&[
-                make_track("m:\\comp\\01.mp3", "Artist A"),
-                make_track("m:\\comp\\02.mp3", "Artist B"),
-            ])
-            .expect("seeding the collection must work");
-    }
-
-    #[test]
-    fn test_startup_hydrates_the_mirror_from_the_store() {
-        let dir = tempfile::tempdir().unwrap();
-        seed_compilation(&dir);
-
-        let mut state = AppState::new();
-        riff::ui::app::load_persisted_state(
-            &mut state,
-            boxed_store(&dir).as_ref(),
-            boxed_playlist_store(&dir).as_ref(),
-            boxed_library_query_store(&dir).as_ref(),
-            None,
-        );
-
-        assert_eq!(
-            state.library.all_tracks().len(),
-            2,
-            "both seeded tracks hydrate into the mirror"
-        );
-        assert!(
-            state.library.artists.contains_key("Various Artists"),
-            "the album-artist grouping hydrates"
-        );
-        assert!(
-            state.library.albums.contains_key("Various Artists - Comp"),
-            "the album hydrates under its composite key"
-        );
-    }
+    // The Library collection lives solely in the Application Store and is
+    // read live through the `LibraryQueryStore` port; there is no startup
+    // hydration of an in-memory copy. The legacy JSON cache is never read
+    // or written and stays untouched on disk.
 
     #[test]
     fn test_legacy_json_cache_is_never_read_or_written() {
         let dir = tempfile::tempdir().unwrap();
-        // A corrupt legacy cache sits next to the store; hydration must
-        // ignore it entirely and come from the store instead.
+        // A corrupt legacy cache sits next to the store; first-frame restore
+        // must ignore it entirely — the store is the only source.
         let legacy_path = dir.path().join("library_cache.json");
         std::fs::write(&legacy_path, "{{{ corrupt legacy json").unwrap();
         let legacy_bytes_before = std::fs::read(&legacy_path).unwrap();
 
-        seed_compilation(&dir);
-
-        let mut state = AppState::new();
         riff::ui::app::load_persisted_state(
-            &mut state,
+            &mut AppState::new(),
             boxed_store(&dir).as_ref(),
             boxed_playlist_store(&dir).as_ref(),
-            boxed_library_query_store(&dir).as_ref(),
             None,
         );
 
-        assert_eq!(
-            state.library.all_tracks().len(),
-            2,
-            "hydration comes from the store despite the corrupt legacy file"
-        );
         assert_eq!(
             std::fs::read(&legacy_path).unwrap(),
             legacy_bytes_before,
@@ -680,12 +602,12 @@ mod tests {
 
     // --- Clear Library (ticket 10) -------------------------------------------
     //
-    // After the maintenance wipe, startup hydration sees an empty collection
-    // while playlists and settings hydrate exactly as before — no special
-    // casing anywhere in the UI layer.
+    // After the maintenance wipe, the collection section is empty while
+    // playlists and settings restore exactly as before — no special casing
+    // anywhere in the UI layer.
 
     #[test]
-    fn test_hydration_after_clear_library_sees_empty_collection_and_kept_curation() {
+    fn test_restore_after_clear_library_sees_empty_collection_and_kept_curation() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("riff.sqlite3");
 
@@ -711,21 +633,15 @@ mod tests {
             store.clear_library().expect("clear works");
         }
 
-        // Hydrate like the UI's first frame: the mirror comes up empty and
-        // curation comes back intact.
+        // Restore like the UI's first frame: curation comes back intact.
         let mut state = AppState::new();
         riff::ui::app::load_persisted_state(
             &mut state,
             boxed_store(&dir).as_ref(),
             boxed_playlist_store(&dir).as_ref(),
-            boxed_library_query_store(&dir).as_ref(),
             None,
         );
 
-        assert!(
-            state.library.all_tracks().is_empty(),
-            "the hydrated library is empty after a clear"
-        );
         assert_eq!(state.playlists.len(), 1, "playlists hydrate as usual");
         assert_eq!(state.playlists[0].name, "Keep Me");
     }
@@ -2632,74 +2548,47 @@ mod tests {
         );
     }
 
-    /// A library of four tagged tracks plus a queue playing the first.
-    fn queue_fixture() -> (LibraryManager, PlaybackQueue) {
-        let mut library = LibraryManager::new();
-        for i in 1..=4 {
-            library.add_track(crate::test_utils::create_test_track_with_metadata(
-                &format!("t{i}.mp3"),
-                &format!("music/t{i}.mp3"),
-                "Artist",
-                &format!("Song {i}"),
-                "Album",
-            ));
-        }
-        let mut queue = PlaybackQueue::default();
-        for i in 1..=4 {
-            queue.append(TrackId(format!("t{i}.mp3")));
-        }
-        queue.current_index = Some(0);
-        (library, queue)
+    /// A resolved Up Next window of three tagged tracks — what the playback
+    /// projection hands over for a four-track queue playing the first. The
+    /// queue-to-window mapping itself is covered by the app-layer
+    /// `PlaybackProjection` tests.
+    fn up_next_window_fixture() -> Vec<Track> {
+        (2..=4)
+            .map(|i| {
+                crate::test_utils::create_test_track_with_metadata(
+                    &format!("t{i}.mp3"),
+                    &format!("music/t{i}.mp3"),
+                    "Artist",
+                    &format!("Song {i}"),
+                    "Album",
+                )
+            })
+            .collect()
     }
 
     #[test]
-    fn test_up_next_entries_reflect_playback_queue_order() {
-        let (library, queue) = queue_fixture();
+    fn test_up_next_entries_format_the_resolved_window_in_order() {
+        let window = up_next_window_fixture();
 
-        let rows = now_playing::up_next_entries(&queue, &library, 5);
+        let rows = now_playing::up_next_entries(&window, 5);
         let ids: Vec<&str> = rows.iter().map(|r| r.id.0.as_str()).collect();
         assert_eq!(
             ids,
             vec!["t2.mp3", "t3.mp3", "t4.mp3"],
-            "Up Next lists the tracks after the current one, in queue order"
+            "Up Next rows keep the resolved window's order"
+        );
+        assert_eq!(
+            rows[0].label, "Artist - Song 2",
+            "each row is preformatted as \"Artist - Title\""
         );
 
         // The limit caps how many rows are built.
-        assert_eq!(now_playing::up_next_entries(&queue, &library, 2).len(), 2);
+        assert_eq!(now_playing::up_next_entries(&window, 2).len(), 2);
     }
 
     #[test]
-    fn test_up_next_entries_follow_the_queue_shuffle_order() {
-        let (library, mut queue) = queue_fixture();
-        queue.shuffle = true;
-        // A hand-seeded shuffle order (indices into tracks): t4 then t2 —
-        // the rows must mirror the QUEUE's order, not the append order.
-        queue.shuffled_indices = vec![3, 1];
-
-        let rows = now_playing::up_next_entries(&queue, &library, 5);
-        let ids: Vec<&str> = rows.iter().map(|r| r.id.0.as_str()).collect();
-        assert_eq!(ids, vec!["t4.mp3", "t2.mp3"]);
-    }
-
-    #[test]
-    fn test_up_next_entries_skip_tracks_missing_from_the_library() {
-        let (mut library, queue) = queue_fixture();
-        library.remove_track(&TrackId("t3.mp3".to_string()));
-
-        let rows = now_playing::up_next_entries(&queue, &library, 5);
-        let ids: Vec<&str> = rows.iter().map(|r| r.id.0.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec!["t2.mp3", "t4.mp3"],
-            "entries whose files left the library are skipped, not rendered blank"
-        );
-    }
-
-    #[test]
-    fn test_up_next_entries_empty_without_a_queue() {
-        let library = LibraryManager::new();
-        let queue = PlaybackQueue::default();
-        assert!(now_playing::up_next_entries(&queue, &library, 5).is_empty());
+    fn test_up_next_entries_empty_for_an_empty_window() {
+        assert!(now_playing::up_next_entries(&[], 5).is_empty());
     }
 
     #[test]

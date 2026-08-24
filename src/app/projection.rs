@@ -9,7 +9,7 @@
 //! refresh, which generation invalidation makes explicit.
 
 use crate::app::errors::AppError;
-use crate::domain::{Album, Artist, SmartPlaylistKind, Track, TrackId};
+use crate::domain::{Album, Artist, PlaybackQueue, SmartPlaylistKind, Track, TrackId};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
@@ -493,5 +493,134 @@ impl SmartPlaylistsProjection {
             return Ok(fresh);
         }
         Ok(self.lists[&kind].1.clone())
+    }
+}
+
+/// Session Projection for the playback-side reads (ADR 0002): the current
+/// Track, the Up Next window, and the track-details panel's selected Track.
+///
+/// These are per-frame UI reads that resolve through the Application Store's
+/// `get_track` query only when something they depend on moved — the Store
+/// generation (a committed mutation) or the Playback Queue's shape (a
+/// `TrackChanged` advance, Next/Previous/PlayNext/AddToQueue). Between such
+/// moves every frame is served from cache without touching the store. Loader
+/// errors propagate and leave the previous cache untouched — the next call
+/// retries.
+pub struct PlaybackProjection {
+    loaded_generation: Option<u64>,
+    /// Queue shape the playback slots were loaded for: `(current_index,
+    /// upcoming ids at the window limit)`. Recomputing this cheap stamp per
+    /// frame detects every queue mutation (advance, previous, insert-next,
+    /// append, shuffle regeneration) without hooking each mutator.
+    queue_stamp: Option<(Option<usize>, Vec<TrackId>)>,
+    current: Option<Track>,
+    up_next: Vec<Track>,
+    /// The details-panel slot: generation, selected id, and the resolution
+    /// (`None` = known absent from the store). Stamped separately from the
+    /// playback slots because selection is independent of the queue.
+    selected: Option<(u64, TrackId, Option<Track>)>,
+}
+
+impl Default for PlaybackProjection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PlaybackProjection {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            loaded_generation: None,
+            queue_stamp: None,
+            current: None,
+            up_next: Vec::new(),
+            selected: None,
+        }
+    }
+
+    /// The resolved current Track, when one is playing and it still resolves.
+    #[must_use]
+    pub fn current(&self) -> Option<&Track> {
+        self.current.as_ref()
+    }
+
+    /// The resolved Up Next window in Playback Queue order. Ids whose files
+    /// left the library are skipped (the former mirror-reader behavior), so
+    /// this can be shorter than the requested window.
+    #[must_use]
+    pub fn up_next(&self) -> &[Track] {
+        &self.up_next
+    }
+
+    /// Bring the playback slots up to date with `generation` and `queue`.
+    ///
+    /// Fresh inputs (same generation, same queue shape) are served entirely
+    /// from cache; moved inputs refetch the current Track plus the first
+    /// `limit` upcoming ids through `loader`. On a loader error the error
+    /// propagates and the previous cache is left untouched — stale-but-present
+    /// beats blank while the UI retries.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn refresh(
+        &mut self,
+        generation: u64,
+        queue: &PlaybackQueue,
+        limit: usize,
+        loader: &mut dyn FnMut(&TrackId) -> Result<Option<Track>, AppError>,
+    ) -> Result<(), AppError> {
+        let stamp = (
+            queue.current_index,
+            queue
+                .upcoming(limit)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        if self.loaded_generation == Some(generation) && self.queue_stamp.as_ref() == Some(&stamp) {
+            return Ok(());
+        }
+
+        // Fetch first, swap later: a failure anywhere leaves the previous
+        // cache completely untouched.
+        let fetched_current = match queue.current_track() {
+            Some(id) => loader(id)?,
+            None => None,
+        };
+        let mut fetched_up_next = Vec::with_capacity(stamp.1.len());
+        for id in &stamp.1 {
+            if let Some(track) = loader(id)? {
+                fetched_up_next.push(track);
+            }
+        }
+
+        self.current = fetched_current;
+        self.up_next = fetched_up_next;
+        self.loaded_generation = Some(generation);
+        self.queue_stamp = Some(stamp);
+        Ok(())
+    }
+
+    /// The track-details panel's selected Track, cached until the selection
+    /// or the generation moves. A cached `None` means the id is known absent
+    /// from the store, so a dangling selection does not requery per frame.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn selected_track(
+        &mut self,
+        generation: u64,
+        id: &TrackId,
+        loader: &mut dyn FnMut(&TrackId) -> Result<Option<Track>, AppError>,
+    ) -> Result<Option<Track>, AppError> {
+        if let Some((cached_generation, cached_id, track)) = &self.selected {
+            if *cached_generation == generation && cached_id == id {
+                return Ok(track.clone());
+            }
+        }
+        let fresh = loader(id)?;
+        self.selected = Some((generation, id.clone(), fresh.clone()));
+        Ok(fresh)
     }
 }

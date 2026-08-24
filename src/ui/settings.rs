@@ -1224,24 +1224,31 @@ impl super::app::RiffApp {
         state: &mut AppState,
         lib_cmd: Option<&Sender<LibraryCommand>>,
     ) {
+        // Per-root indexed-track counts come from the store through the
+        // cached folder projection (component-wise subtree ids, invalidated
+        // by generation bumps) — never the former in-memory mirror.
+        let generation = self.store_generation.current();
         let content = SettingsContent {
             libraries: state
                 .library_paths
                 .iter()
-                .map(|path| LibraryRow {
-                    path: path.clone(),
-                    status: state
-                        .library_statuses
-                        .get(path)
-                        .cloned()
-                        .unwrap_or_default(),
-                    watch: state.watch_states.get(path).cloned().unwrap_or_default(),
-                    indexed_tracks: state
-                        .library
-                        .tracks
-                        .values()
-                        .filter(|t| t.file_path.starts_with(path))
-                        .count(),
+                .map(|path| {
+                    let indexed_tracks = self
+                        .folder_projection
+                        .subtree_ids(generation, path, &mut |f| {
+                            self.library_queries.track_ids_in_folder_tree(f)
+                        })
+                        .map_or(0, |ids| ids.len());
+                    LibraryRow {
+                        path: path.clone(),
+                        status: state
+                            .library_statuses
+                            .get(path)
+                            .cloned()
+                            .unwrap_or_default(),
+                        watch: state.watch_states.get(path).cloned().unwrap_or_default(),
+                        indexed_tracks,
+                    }
                 })
                 .collect(),
             advanced_mode: state.ui_flags.advanced_mode,
@@ -1337,16 +1344,13 @@ impl super::app::RiffApp {
 
     /// Remove one library root: one durable store transaction drops the
     /// root's tracks, orphaned parents, and the path record (playlist entries
-    /// survive dangling so they recover when files return), then the session
-    /// state catches up.
+    /// survive dangling so they recover when files return); the mutation
+    /// adapter bumps the session generation so projections refetch, then the
+    /// session state catches up.
     fn remove_library_path(&mut self, path: &PathBuf, state: &mut AppState) {
-        match self.library_mutations.remove_library_path(path) {
-            Ok(_) => {
-                self.store_generation.bump();
-            }
-            Err(e) => tracing::error!("Failed to remove {path:?} from store: {e}"),
+        if let Err(e) = self.library_mutations.remove_library_path(path) {
+            tracing::error!("Failed to remove {path:?} from store: {e}");
         }
-        state.library.remove_tracks_by_root(path);
         state.library_paths.retain(|p| p != path);
         state.library_statuses.remove(path);
         if let Err(e) = self.settings_store.save_library_paths(&state.library_paths) {
@@ -1404,10 +1408,8 @@ impl super::app::RiffApp {
                 self.clear_library_confirm = false;
                 match self.library_mutations.clear_library() {
                     Ok(removed) => {
-                        self.store_generation.bump();
-                        // The transitional mirror drops too, so any view not
-                        // yet migrated shows the cleared state immediately.
-                        state.library.clear();
+                        // The mutation adapter bumps the session generation;
+                        // the mirror no longer tracks collection data.
                         state.scan_status = Some(format!(
                             "Library cleared ({removed} tracks removed). Rescan to rebuild."
                         ));

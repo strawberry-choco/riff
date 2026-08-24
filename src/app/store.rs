@@ -12,7 +12,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+
+/// Age threshold for the Lost Gems smart playlist: tracks whose last play is
+/// older than this are considered forgotten gems worth resurfacing. Tracks
+/// that were never played qualify unconditionally ("unheard" includes
+/// never-heard). Lives beside the [`LibraryQueryStore::smart_playlist`] port
+/// because it parameterizes that query's semantics; the SQL implementation
+/// in infrastructure reads it from here.
+pub const LOST_GEMS_THRESHOLD: Duration = Duration::from_hours(2160);
 
 /// The user preferences the settings surface owns: single-row scalar values,
 /// library paths, and per-path watch states.
@@ -60,6 +68,26 @@ pub trait SettingsStore {
     fn save_watch_states(&mut self, states: &HashMap<PathBuf, WatchState>) -> Result<(), AppError>;
 }
 
+/// One user-playlist entry together with its Library validity: `valid` is
+/// true exactly when the referenced Track is still present in the
+/// Application Store's Library collection, computed by a SQL LEFT JOIN
+/// against tracks. A dangling reference — an entry whose file left the
+/// library — stays listed with `valid == false` and its `track` unset;
+/// that is product behavior per ADR 0001, not corruption, and it resolves
+/// again once the file returns via a rescan. Whether an otherwise known
+/// track's file still exists on disk is a filesystem concern no store query
+/// can answer: callers apply that check on top of `valid` where playback
+/// semantics require it (see [`crate::app::playlist_manager`]).
+#[derive(Debug, Clone)]
+pub struct PlaylistEntry {
+    /// The referenced [`TrackId`](crate::domain::TrackId) (its full file path).
+    pub id: TrackId,
+    /// The resolved Track when the Library knows it, `None` when dangling.
+    pub track: Option<Track>,
+    /// Whether the Library collection still contains this entry's track.
+    pub valid: bool,
+}
+
 /// Port for reading and writing the Playlists section of the `Application
 /// Store`.
 ///
@@ -73,6 +101,13 @@ pub trait PlaylistStore {
     /// Load every Playlist in creation order, each with its entries in
     /// playlist order. A fresh store yields an empty `Vec`.
     fn load_playlists(&self) -> Result<Vec<Playlist>, AppError>;
+
+    /// Load one Playlist's entries in playlist order, each with its Library
+    /// validity flag computed by a SQL LEFT JOIN against tracks (see
+    /// [`PlaylistEntry`]). Dangling references stay listed with
+    /// `valid == false` — ADR 0001 product behavior, never silently
+    /// dropped. Unknown playlist ids yield an empty `Vec`.
+    fn load_playlist_entries(&self, id: &PlaylistId) -> Result<Vec<PlaylistEntry>, AppError>;
 
     /// Create a Playlist named `name` (trimmed) with optional initial Track
     /// references (exact duplicates dropped, order preserved). The generated
@@ -141,16 +176,6 @@ impl StoreGeneration {
     pub fn current(&self) -> u64 {
         self.0.load(Ordering::SeqCst)
     }
-}
-
-/// A full snapshot of the Library collection section of the Application
-/// Store, used to hydrate the transitional in-memory mirror at startup.
-/// Albums are keyed by `"album artist - title"` (the same composite identity
-/// the store uses); artists list their album keys in first-added order.
-pub struct LibraryCollection {
-    pub tracks: HashMap<TrackId, Track>,
-    pub artists: Vec<Artist>,
-    pub albums: Vec<Album>,
 }
 
 /// Port for writing the Library collection section of the Application Store.
@@ -230,6 +255,12 @@ pub trait LibraryQueryStore {
     /// Total number of stored Tracks (for the flat list projection).
     fn track_count(&self) -> Result<usize, AppError>;
 
+    /// Every Track id in the collection, ordered by full path ascending —
+    /// the canonical flat ordering (ADR 0003). Serves Queue Fill: the whole
+    /// Library loads into the Playback Queue in this order when playback
+    /// starts from an empty queue.
+    fn all_track_ids(&self) -> Result<Vec<TrackId>, AppError>;
+
     /// One bounded window of case-insensitive substring matches over title,
     /// artist, album, and album artist, path-ascending. The query is
     /// lowercased in Rust before matching.
@@ -242,11 +273,6 @@ pub trait LibraryQueryStore {
 
     /// Total number of matches for [`Self::search_window`] semantics.
     fn search_count(&self, query: &str) -> Result<usize, AppError>;
-
-    /// Full collection snapshot for hydrating the transitional in-memory
-    /// mirror that still serves views not yet migrated to store queries
-    /// (folder navigation, smart playlists land in later tickets).
-    fn load_collection(&self) -> Result<LibraryCollection, AppError>;
 
     /// Every artist in the collection, name-ascending (byte-wise, matching
     /// the former UI sort). Each artist's `albums` lists its composite keys

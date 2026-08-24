@@ -1,3 +1,4 @@
+pub mod audio_engine;
 pub mod commands;
 pub mod cover_resolver;
 pub mod errors;

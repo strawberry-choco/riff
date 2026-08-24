@@ -107,9 +107,9 @@ mod tests {
 
     // --- Gapless-playback helpers (Task 4.1) ----------------------------------
     //
-    // The engine (`run_audio_engine`) cannot run headlessly, so every gapless
-    // decision it makes is delegated to these pure helpers — testing them IS
-    // testing the engine's decision logic.
+    // The engine's gapless DECISIONS are delegated to these pure helpers —
+    // testing them IS testing that decision logic. The engine loop itself is
+    // exercised through its ports in the `audio_engine_tests` module below.
 
     #[test]
     fn test_gapless_formats_compatible_same_rate_and_channels() {
@@ -1559,5 +1559,646 @@ mod tests {
         assert_eq!(reorder_tracks(&tracks, 2, 0), None, "from out of range");
         assert_eq!(reorder_tracks(&tracks, 0, 2), None, "to out of range");
         assert_eq!(reorder_tracks(&[], 0, 0), None, "empty list has no rows");
+    }
+}
+
+// --- Audio Engine loop tests -------------------------------------------------
+//
+// The extracted engine (`src/app/audio_engine.rs`) is exercised through its
+// ports only: a scripted [`MockAudioDecoder`] factory, the recording
+// [`MockAudioOutput`], and an in-memory `LibraryQueryStore` fake. A helper
+// thread runs `AudioEngine::new(..).run()` over unbounded crossbeam channels;
+// every receive uses a timeout so a wedged engine fails an assertion instead
+// of hanging CI.
+//
+// The shared-handle adapters below exist because the engine takes ownership
+// of its ports: they delegate every call to the real mocks behind a mutex so
+// the mocks' recording counters remain inspectable after (and while) the
+// engine runs — the counters are what prove the substitutes were driven.
+mod audio_engine_tests {
+    use super::*;
+    use crossbeam_channel::{Receiver, unbounded};
+    use riff::app::audio_engine::AudioEngine;
+    use riff::app::errors::AppError;
+    use riff::app::store::LibraryQueryStore;
+    use riff::app::traits::{AudioDecoder, AudioFormatInfo, AudioOutput, DecoderFactory};
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    // The shared mocks under test (crate-root mocks module).
+    use crate::mocks::{MockAudioDecoder, MockAudioOutput};
+
+    /// How long any single wait on the engine may take before the test
+    /// declares it wedged.
+    const TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// The one format every scripted decoder in these tests reports.
+    const RATE: u32 = 48_000;
+    const CHANNELS: u16 = 2;
+
+    fn format_with_duration(duration: Option<Duration>) -> AudioFormatInfo {
+        AudioFormatInfo {
+            sample_rate: RATE,
+            channels: CHANNELS,
+            duration,
+        }
+    }
+
+    /// One decode batch: `frames` stereo frames of interleaved silence.
+    fn batch(frames: usize) -> Vec<f32> {
+        vec![0.0; frames * usize::from(CHANNELS)]
+    }
+
+    // --- Shared-handle port adapters -----------------------------------------
+
+    /// [`AudioDecoder`] view over one scripted [`MockAudioDecoder`] owned by
+    /// the engine; the test keeps the other handle for counter checks.
+    struct SharedDecoder(Arc<Mutex<MockAudioDecoder>>);
+
+    impl AudioDecoder for SharedDecoder {
+        fn open(&mut self, path: &Path) -> Result<AudioFormatInfo, AppError> {
+            self.0.lock().unwrap().open(path)
+        }
+
+        fn next_frames(&mut self, samples: usize) -> Result<Option<Vec<f32>>, AppError> {
+            self.0.lock().unwrap().next_frames(samples)
+        }
+
+        fn seek(&mut self, position: Duration) -> Result<(), AppError> {
+            self.0.lock().unwrap().seek(position)
+        }
+
+        fn duration(&self) -> Option<Duration> {
+            self.0.lock().unwrap().duration()
+        }
+
+        fn close(&mut self) {
+            self.0.lock().unwrap().close();
+        }
+    }
+
+    /// [`AudioOutput`] view over one recording [`MockAudioOutput`] owned by
+    /// the engine; the test keeps the other handle for counter checks.
+    struct SharedOutput(Arc<Mutex<MockAudioOutput>>);
+
+    impl AudioOutput for SharedOutput {
+        fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), AppError> {
+            self.0.lock().unwrap().initialize(sample_rate, channels)
+        }
+
+        fn start(&mut self) -> Result<(), AppError> {
+            self.0.lock().unwrap().start()
+        }
+
+        fn stop(&mut self) -> Result<(), AppError> {
+            self.0.lock().unwrap().stop()
+        }
+
+        fn write_samples(&mut self, samples: &[f32]) -> Result<usize, AppError> {
+            self.0.lock().unwrap().write_samples(samples)
+        }
+
+        fn set_volume(&mut self, volume: f32) {
+            self.0.lock().unwrap().set_volume(volume);
+        }
+
+        fn buffer_len(&self) -> usize {
+            self.0.lock().unwrap().buffer_len()
+        }
+
+        fn clear_buffer(&mut self) {
+            self.0.lock().unwrap().clear_buffer();
+        }
+
+        fn effective_sample_rate(&self) -> u32 {
+            self.0.lock().unwrap().effective_sample_rate()
+        }
+    }
+
+    /// Every decoder the factory mints, in mint order (primary first,
+    /// gapless pre-decode second). Shared handles keep the mocks' counters
+    /// readable after the engine has taken ownership.
+    type DecoderLog = Arc<Mutex<Vec<Arc<Mutex<MockAudioDecoder>>>>>;
+
+    /// Scripted [`DecoderFactory`]: mints fresh [`MockAudioDecoder`]s that
+    /// report `format`, registering each in `log`. The first mint (the
+    /// primary slot) replays `primary`; every later mint (the gapless
+    /// pre-decode slot) replays `successor` — mirroring reality, where the
+    /// successor is a different track.
+    fn scripted_factory(
+        primary: Vec<Vec<f32>>,
+        successor: Vec<Vec<f32>>,
+        format: AudioFormatInfo,
+        log: DecoderLog,
+    ) -> DecoderFactory {
+        let call_index = AtomicUsize::new(0);
+        Box::new(move || {
+            let script = if call_index.fetch_add(1, Ordering::Relaxed) == 0 {
+                primary.clone()
+            } else {
+                successor.clone()
+            };
+            let mock = Arc::new(Mutex::new(
+                MockAudioDecoder::new(format.clone()).with_batches(script),
+            ));
+            log.lock().unwrap().push(Arc::clone(&mock));
+            Box::new(SharedDecoder(mock))
+        })
+    }
+
+    /// In-memory [`LibraryQueryStore`] fake serving a canned track map. The
+    /// engine only ever calls `get_track` and `all_track_ids`; the remaining
+    /// queries return empty results.
+    struct FakeLibraryStore {
+        tracks: HashMap<TrackId, Track>,
+    }
+
+    impl LibraryQueryStore for FakeLibraryStore {
+        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, AppError> {
+            Ok(self.tracks.get(id).cloned())
+        }
+
+        fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn track_count(&self) -> Result<usize, AppError> {
+            Ok(self.tracks.len())
+        }
+
+        fn all_track_ids(&self) -> Result<Vec<TrackId>, AppError> {
+            let mut ids: Vec<TrackId> = self.tracks.keys().cloned().collect();
+            ids.sort_by(|a, b| a.0.cmp(&b.0));
+            Ok(ids)
+        }
+
+        fn search_window(
+            &self,
+            _query: &str,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<Vec<Track>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn search_count(&self, _query: &str) -> Result<usize, AppError> {
+            Ok(0)
+        }
+
+        fn all_artists(&self) -> Result<Vec<Artist>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn artist_albums(&self, _artist: &str) -> Result<Vec<Album>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn album_tracks(
+            &self,
+            _album_artist: &str,
+            _album_title: &str,
+        ) -> Result<Vec<Track>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn folder_has_audio(&self, _folder: &Path) -> Result<bool, AppError> {
+            Ok(false)
+        }
+
+        fn folder_has_search_match(&self, _folder: &Path, _query: &str) -> Result<bool, AppError> {
+            Ok(false)
+        }
+
+        fn track_ids_in_folder_tree(&self, _folder: &Path) -> Result<Vec<TrackId>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn tracks_in_folder(&self, _folder: &Path) -> Result<Vec<Track>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn smart_playlist(
+            &self,
+            _kind: SmartPlaylistKind,
+            _limit: usize,
+        ) -> Result<Vec<Track>, AppError> {
+            Ok(Vec::new())
+        }
+    }
+
+    // --- Harness --------------------------------------------------------------
+
+    /// A running engine plus every handle the tests need to observe it.
+    struct Harness {
+        cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
+        updates: Receiver<PlaybackUpdate>,
+        state: Arc<Mutex<AppState>>,
+        output: Arc<Mutex<MockAudioOutput>>,
+        decoders: DecoderLog,
+    }
+
+    /// Spawn the engine exactly like `main.rs` does (blocking `run()` on its
+    /// own thread, ports boxed inside the closure) over mock ports.
+    fn spawn_engine(
+        state: Arc<Mutex<AppState>>,
+        library: FakeLibraryStore,
+        primary_script: Vec<Vec<f32>>,
+        successor_script: Vec<Vec<f32>>,
+        format: AudioFormatInfo,
+    ) -> Harness {
+        let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
+        let (update_tx, update_rx) = unbounded::<PlaybackUpdate>();
+
+        let output = Arc::new(Mutex::new(MockAudioOutput::new()));
+        output.lock().unwrap().set_effective_sample_rate(RATE);
+        let decoders: DecoderLog = Arc::new(Mutex::new(Vec::new()));
+
+        let engine_cmd_tx = cmd_tx.clone();
+        let out_handle = Arc::clone(&output);
+        let dec_handle = Arc::clone(&decoders);
+        let thread_state = Arc::clone(&state);
+        std::thread::spawn(move || {
+            let factory = scripted_factory(primary_script, successor_script, format, dec_handle);
+            let engine = AudioEngine::new(
+                cmd_rx,
+                engine_cmd_tx,
+                update_tx,
+                thread_state,
+                Box::new(library),
+                factory,
+                Box::new(SharedOutput(out_handle)),
+            );
+            engine.run();
+        });
+        Harness {
+            cmd_tx,
+            updates: update_rx,
+            state,
+            output,
+            decoders,
+        }
+    }
+
+    /// End the test's involvement with the engine. `run()` is a daemon loop
+    /// by design — the engine holds its own `cmd_tx` re-dispatch handle, so
+    /// its `recv()` never disconnects (in production the process lifetime
+    /// bounds the thread) — hence the thread is intentionally left parked
+    /// rather than joined.
+    fn release(_h: Harness) {}
+
+    /// Receive one update, mirroring main.rs's update processor along the
+    /// way: on `TrackEnded` it advances the queue and re-dispatches
+    /// `Play(new current)` — the exact duplicate the gapless dedup guard
+    /// must swallow — or marks playback stopped when nothing follows.
+    fn next_update(h: &Harness) -> PlaybackUpdate {
+        let update = h.updates.recv_timeout(TIMEOUT).expect("update in time");
+        if matches!(update, PlaybackUpdate::TrackEnded) {
+            let next = {
+                let mut s = h.state.lock_or_recover();
+                if s.queue.repeat == RepeatMode::One {
+                    s.queue.current_track().cloned()
+                } else {
+                    s.queue.advance().cloned()
+                }
+            };
+            match next {
+                Some(track_id) => {
+                    let _ = h.cmd_tx.send(PlaybackCommand::Play(track_id));
+                }
+                None => {
+                    h.state.lock_or_recover().playback_state = PlaybackState::Stopped;
+                }
+            }
+        }
+        update
+    }
+
+    /// Collect updates until one satisfies `want` (inclusive).
+    fn collect_until(h: &Harness, want: impl Fn(&PlaybackUpdate) -> bool) -> Vec<PlaybackUpdate> {
+        let mut collected = Vec::new();
+        loop {
+            let update = next_update(h);
+            let done = want(&update);
+            collected.push(update);
+            if done {
+                return collected;
+            }
+        }
+    }
+
+    fn count(updates: &[PlaybackUpdate], want: impl Fn(&PlaybackUpdate) -> bool) -> usize {
+        updates.iter().filter(|u| want(u)).count()
+    }
+
+    /// Poll until `pred` holds (commands that produce no update — volume,
+    /// seek — need this to prove the engine consumed them).
+    fn wait_until(pred: impl Fn() -> bool) {
+        let deadline = Instant::now() + TIMEOUT;
+        while !pred() {
+            assert!(Instant::now() < deadline, "condition not reached in time");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn is_track_changed(u: &PlaybackUpdate, id: &TrackId) -> bool {
+        matches!(u, PlaybackUpdate::TrackChanged(t) if t == id)
+    }
+
+    fn is_state(u: &PlaybackUpdate, s: PlaybackState) -> bool {
+        matches!(u, PlaybackUpdate::StateChanged(x) if *x == s)
+    }
+
+    /// Pre-populate the queue so Queue Fill never fires, and register the
+    /// matching canned library entries.
+    fn queued_state_and_library(paths: &[&str]) -> (Arc<Mutex<AppState>>, FakeLibraryStore) {
+        let mut state = AppState::new();
+        let mut tracks = HashMap::new();
+        for path in paths {
+            let track = crate::test_utils::create_test_track(path, path);
+            state.queue.append(track.id.clone());
+            tracks.insert(track.id.clone(), track);
+        }
+        state.queue.current_index = Some(0);
+        (Arc::new(Mutex::new(state)), FakeLibraryStore { tracks })
+    }
+
+    // --- Red 1 tests -----------------------------------------------------------
+
+    /// Play(track) → `TrackChanged` + `StateChanged(Playing)` + position
+    /// updates as the script decodes, then the gapped EOF path emits
+    /// `TrackEnded`.
+    #[test]
+    fn engine_plays_track_and_emits_updates() {
+        let (state, library) = queued_state_and_library(&["music/t1.wav"]);
+        // Two small batches: well under the backpressure threshold, so the
+        // decode loop writes both and then hits EOF. No successor is
+        // scripted, so the pre-decode slot stays silent.
+        let script = vec![batch(2_400), batch(2_400)];
+        let format = format_with_duration(Some(Duration::from_secs(1)));
+        let h = spawn_engine(state.clone(), library, script, Vec::new(), format);
+
+        h.cmd_tx
+            .send(PlaybackCommand::Play(TrackId("music/t1.wav".into())))
+            .unwrap();
+
+        let updates = collect_until(&h, |u| matches!(u, PlaybackUpdate::TrackEnded));
+
+        assert!(
+            updates
+                .iter()
+                .any(|u| is_track_changed(u, &TrackId("music/t1.wav".into()))),
+            "expected TrackChanged(t1), got {updates:?}"
+        );
+        assert!(
+            updates.iter().any(|u| is_state(u, PlaybackState::Playing)),
+            "expected StateChanged(Playing), got {updates:?}"
+        );
+        assert!(
+            updates
+                .iter()
+                .any(|u| matches!(u, PlaybackUpdate::PositionChanged(_))),
+            "expected position updates while decoding, got {updates:?}"
+        );
+
+        // Mock substitution proof: the primary decoder was opened for the
+        // requested track and the output mock recorded the writes. (The
+        // constructor always mints two decoders — primary + gapless
+        // pre-decode slot — but only the primary is ever opened here.)
+        let decoders = h.decoders.lock().unwrap();
+        assert_eq!(decoders.len(), 2, "primary + pre-decode slot, no more");
+        let d = decoders[0].lock().unwrap();
+        assert_eq!(d.opened, vec![PathBuf::from("music/t1.wav")]);
+        assert_eq!(d.seeks.len(), 0, "no seek without Resume/Seek commands");
+        drop(d);
+        assert!(
+            decoders[1].lock().unwrap().opened.is_empty(),
+            "no gapless pre-decode without a successor"
+        );
+        drop(decoders);
+        let out = h.output.lock().unwrap();
+        assert_eq!(out.initialized, vec![(RATE, CHANNELS)]);
+        assert_eq!(out.start_count, 1, "the stream started exactly once");
+        assert_eq!(out.written.len(), 2, "both scripted batches were written");
+
+        // Release the gapped EOF drain (samples sit in the mock buffer): the
+        // drain loop swallows this Stop without dispatching it, which is the
+        // documented gapped-path behavior.
+        h.cmd_tx.send(PlaybackCommand::Stop).unwrap();
+        drop(out);
+        release(h);
+        assert_eq!(
+            state.lock_or_recover().playback_state,
+            PlaybackState::Stopped
+        );
+    }
+
+    /// The hardest invariant: when a compatible successor was pre-decoded,
+    /// EOF hands off WITHOUT stopping/restarting the stream, and the update
+    /// processor's automatic `Play(successor)` is swallowed — exactly one
+    /// decode/start of the successor survives the handoff.
+    #[test]
+    fn engine_survives_gapless_handoff_with_single_play() {
+        let (state, library) = queued_state_and_library(&["music/t1.wav", "music/t2.wav"]);
+        // Primary script: 30 × 2400-frame batches = 144k interleaved samples
+        // (~1.5 s @48 kHz stereo) — enough to trigger pre-encode early and,
+        // together with the flushed successor pre-buffer, strictly under the
+        // 192k-sample backpressure threshold, so the loop always reaches EOF
+        // instead of parking.
+        let primary: Vec<Vec<f32>> = (0..30).map(|_| batch(2_400)).collect();
+        // Successor script: 5 batches = 24k samples fully pre-buffered at
+        // pre-encode time, then flushed at the handoff.
+        let successor: Vec<Vec<f32>> = (0..5).map(|_| batch(2_400)).collect();
+        let format = format_with_duration(Some(Duration::from_secs(1)));
+        let h = spawn_engine(state.clone(), library, primary, successor, format);
+
+        h.cmd_tx
+            .send(PlaybackCommand::Play(TrackId("music/t1.wav".into())))
+            .unwrap();
+
+        // Through the handoff: TrackEnded #1 triggers the simulated
+        // processor's Play(t2) re-dispatch, which the engine must swallow.
+        let mut updates =
+            collect_until(&h, |u| is_track_changed(u, &TrackId("music/t2.wav".into())));
+        // Then ride out the successor's (script-exhausted) tail to EOF #2.
+        let tail = collect_until(&h, |u| matches!(u, PlaybackUpdate::TrackEnded));
+        updates.extend(tail);
+
+        // Snapshot BEFORE releasing the drain: through the whole handoff the
+        // cpal stream must never have been torn down. One start total (a
+        // teardown+restart would need a second), and exactly one stop — the
+        // pre-play stop every handle_play issues before opening. Any stop
+        // across the handoff itself would push this to 2+.
+        {
+            let out = h.output.lock().unwrap();
+            assert_eq!(
+                out.start_count, 1,
+                "gapless handoff never restarts the stream"
+            );
+            assert_eq!(
+                out.stop_count, 1,
+                "only the pre-play stop; none across the handoff"
+            );
+            let total_written: usize = out.written.iter().map(Vec::len).sum();
+            assert_eq!(
+                total_written,
+                30 * 4_800 + 5 * 4_800,
+                "primary script + flushed pre-buffer, nothing re-decoded"
+            );
+        }
+
+        // Exactly one announcement per track: the auto-Play(t2) duplicate
+        // must not produce a second TrackChanged(t2) or a reopen.
+        assert_eq!(
+            count(&updates, |u| is_track_changed(
+                u,
+                &TrackId("music/t1.wav".into())
+            )),
+            1
+        );
+        assert_eq!(
+            count(&updates, |u| is_track_changed(
+                u,
+                &TrackId("music/t2.wav".into())
+            )),
+            1,
+            "the post-handoff auto-Play duplicate is swallowed"
+        );
+        assert_eq!(
+            count(&updates, |u| matches!(u, PlaybackUpdate::TrackEnded)),
+            2,
+            "handoff TrackEnded + successor-tail TrackEnded"
+        );
+
+        // Exactly two decoders were ever minted: primary + pre-decode slot.
+        // A third mint would mean the dup tore down and re-opened the track;
+        // the open logs prove which decoder served which track.
+        let decoders = h.decoders.lock().unwrap();
+        assert_eq!(decoders.len(), 2, "no decoder is minted across the handoff");
+        assert_eq!(
+            decoders[0].lock().unwrap().opened,
+            vec![PathBuf::from("music/t1.wav")]
+        );
+        assert_eq!(
+            decoders[1].lock().unwrap().opened,
+            vec![PathBuf::from("music/t2.wav")],
+            "the successor opened exactly once (during pre-decode)"
+        );
+        drop(decoders);
+
+        h.cmd_tx.send(PlaybackCommand::Stop).unwrap();
+        release(h);
+    }
+
+    /// Command→update contract: Pause/Resume round-trip through the decode
+    /// loop (Resume re-opens and seeks back to the pause point), `Seek` and
+    /// `SetVolume` apply mid-session and while idle.
+    #[test]
+    fn engine_pause_resume_seek_volume_contract() {
+        let (state, library) = queued_state_and_library(&["music/t1.wav"]);
+        // A long script so the first session parks in backpressure (buffer
+        // full) instead of hitting EOF — that parked loop is where mid-
+        // session commands are consumed deterministically. No successor is
+        // scripted.
+        let script: Vec<Vec<f32>> = (0..4_000).map(|_| batch(480)).collect();
+        let format = format_with_duration(Some(Duration::from_secs(80)));
+        let h = spawn_engine(state.clone(), library, script, Vec::new(), format);
+
+        h.cmd_tx
+            .send(PlaybackCommand::Play(TrackId("music/t1.wav".into())))
+            .unwrap();
+        collect_until(&h, |u| is_state(u, PlaybackState::Playing));
+
+        // Mid-session contract, consumed by the decode loop's polling:
+        h.cmd_tx.send(PlaybackCommand::SetVolume(0.5)).unwrap();
+        h.cmd_tx
+            .send(PlaybackCommand::Seek(Duration::from_secs(1)))
+            .unwrap();
+        h.cmd_tx.send(PlaybackCommand::Pause).unwrap();
+        let paused = collect_until(&h, |u| is_state(u, PlaybackState::Paused));
+        assert!(
+            !paused
+                .iter()
+                .any(|u| matches!(u, PlaybackUpdate::TrackEnded)),
+            "pause itself ends the session — no track-end may precede it"
+        );
+
+        // Resume re-dispatches Play(current): a second open+start of the
+        // SAME track, seeking back to the recorded pause position.
+        h.cmd_tx.send(PlaybackCommand::Resume).unwrap();
+        let resumed = collect_until(&h, |u| is_state(u, PlaybackState::Playing));
+        assert_eq!(
+            count(&resumed, |u| is_track_changed(
+                u,
+                &TrackId("music/t1.wav".into())
+            )),
+            1,
+            "resume announces the same track again"
+        );
+
+        // Idle-command contract after stopping the resumed session. Neither
+        // command produces an update, so poll for their observable effects.
+        h.cmd_tx.send(PlaybackCommand::Stop).unwrap();
+        collect_until(&h, |u| is_state(u, PlaybackState::Stopped));
+        h.cmd_tx.send(PlaybackCommand::SetVolume(0.25)).unwrap();
+        h.cmd_tx
+            .send(PlaybackCommand::Seek(Duration::from_secs(2)))
+            .unwrap();
+        wait_until(|| {
+            let out = h.output.lock().unwrap();
+            out.volumes.last() == Some(&0.25)
+        });
+        wait_until(|| {
+            let decoders = h.decoders.lock().unwrap();
+            decoders[0]
+                .lock()
+                .unwrap()
+                .seeks
+                .contains(&Duration::from_secs(2))
+        });
+
+        let out = h.output.lock().unwrap();
+        assert_eq!(
+            out.initialized,
+            vec![(RATE, CHANNELS), (RATE, CHANNELS)],
+            "initial start + resume restart"
+        );
+        assert_eq!(out.start_count, 2);
+        assert!(
+            out.volumes.contains(&0.5),
+            "mid-session SetVolume reached the output"
+        );
+        assert_eq!(
+            out.volumes.last(),
+            Some(&0.25),
+            "idle SetVolume reached the output"
+        );
+        drop(out);
+
+        let decoders = h.decoders.lock().unwrap();
+        assert_eq!(decoders.len(), 2, "primary + pre-decode slot");
+        let d = decoders[0].lock().unwrap();
+        assert_eq!(d.opened.len(), 2, "initial open + resume re-open");
+        assert!(
+            d.seeks.contains(&Duration::from_secs(1)),
+            "mid-session Seek reached the decoder"
+        );
+        assert!(
+            d.seeks.contains(&Duration::from_secs(2)),
+            "idle Seek reached the decoder"
+        );
+        assert!(
+            d.seeks.len() >= 3,
+            "resume also re-seeked to the recorded pause position"
+        );
+        drop(d);
+        drop(decoders);
+
+        release(h);
     }
 }

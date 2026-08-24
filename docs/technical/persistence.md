@@ -53,9 +53,7 @@ Opening the store follows a deliberate sequence:
 
 ## Session Projections
 
-The UI does not query SQLite arbitrarily while rendering. Views read through bounded **Session Projections** (`src/app/projection.rs`): small in-memory caches of store query results — visible row windows for the flat list and search, per-folder listings for the folder tree, per-kind lists for smart playlists — stamped with the value of a session-local generation counter. Every committed store mutation bumps that counter, so projections refetch on the next frame without any restart. Stale reads are possible only between a commit and the next refresh, which generation invalidation makes explicit.
-
-Startup hydrates a transitional in-memory mirror from the store through the `LibraryQueryStore` port for views not yet migrated to store queries; the mirror is never persisted itself.
+The UI does not query SQLite arbitrarily while rendering. Views read through bounded **Session Projections** (`src/app/projection.rs`): small in-memory caches of store query results — visible row windows for the flat list and search, per-folder listings for the folder tree, per-kind lists for smart playlists, and the playback-side projection (current Track, Up Next window, details-panel selection) — stamped with the value of a session-local generation counter. Every committed store mutation bumps that counter inside the mutation adapter, so projections refetch on the next frame without any restart. Stale reads are possible only between a commit and the next refresh, which generation invalidation makes explicit. There is no other in-memory copy of the library: the Application Store is the single implementation of collection semantics.
 
 ## Clear Library
 

@@ -38,7 +38,7 @@ src/
 │   ├── projection.rs        # Session Projections over store query results (generation-invalidated)
 │   ├── commands.rs          # LibraryCommand, LibraryUpdate message enums
 │   ├── errors.rs            # AppError (thiserror)
-│   ├── library_manager.rs   # LibraryManager: transitional in-memory mirror (never persisted)
+│   ├── scan.rs              # build_tracks: scan-side Track construction over the MetadataReader port
 │   ├── playlist_manager.rs  # Playlist entry validity helpers
 │   ├── gapless.rs           # Gapless playback eligibility and frame math
 │   ├── cover_resolver.rs    # CoverResolver: embedded > filesystem cover priority
@@ -134,7 +134,7 @@ All thread-to-thread communication uses `crossbeam_channel`. See [./threading-mo
 
 ### Application (`src/app/`)
 
-**Belongs here**: use-case orchestration (`LibraryManager::scan_and_add_tracks`, search), the port traits (`AudioDecoder`, `AudioOutput`, `MetadataReader`, `CoverLoader`, and the Application Store ports in `store.rs`), Session Projections over store query results, shared state (`AppState` and its supporting enums), cross-thread message types (`LibraryCommand`, `LibraryUpdate`), cover resolution policy (`CoverResolver`), watcher orchestration (`WatcherManager`), and the application error type (`AppError`).
+**Belongs here**: use-case orchestration (scan-side Track construction in `scan.rs`, playlist entry validity in `playlist_manager.rs`), the port traits (`AudioDecoder`, `AudioOutput`, `MetadataReader`, `CoverLoader`, and the Application Store ports in `store.rs`), Session Projections over store query results, shared state (`AppState` and its supporting enums), cross-thread message types (`LibraryCommand`, `LibraryUpdate`), cover resolution policy (`CoverResolver`), watcher orchestration (`WatcherManager`), and the application error type (`AppError`).
 
 **Does not belong here**: direct use of `symphonia`, `cpal`, `lofty`, or `image`; egui widget code; platform-specific system calls.
 
@@ -188,7 +188,7 @@ These are decisions with more than one defensible answer. Surface them explicitl
 - **Where cover caching belongs.** The in-memory cover texture LRU currently lives in `ui/app.rs` because it stores egui-specific `TextureHandle`s. If caching policy (how long to keep covers) ever becomes a business rule, it may warrant an application-layer home.
 - **Shared state versus message passing for playback position.** Position currently flows as a `PlaybackUpdate::PositionChanged` channel message rather than a shared atomic. The channel approach is more explicit and easier to trace; an atomic would be marginally faster.
 - **Recovery from corrupted files.** Whether the decoder should skip a bad frame and continue or stop playback is a product decision with valid arguments on both sides.
-- **Library index structure.** The transitional in-memory mirror uses `HashMap`s keyed by `TrackId`, artist name, and album key for O(1) lookup; the authoritative collection lives in the Application Store, and views read through Session Projections over store queries.
+- **Library index structure.** The Application Store is the single implementation of collection semantics: tracks, albums, and artists live in SQLite, and every view reads them through Session Projections over store queries or direct port calls. There is no second in-memory copy to keep consistent; if a future feature needs a different index shape, the decision is which store query (and projection) serves it.
 
 ## Error Handling Patterns
 

@@ -8,7 +8,8 @@
 //! # Test Organization
 //!
 //! - `domain_tests.rs`: Tests for domain objects like Track, `TrackId`, `PlaybackState`, etc.
-//! - `app_tests.rs`: Tests for application logic like `AppState`, `LibraryManager`, etc.
+//! - `app_tests.rs`: Tests for application logic like `AppState`, the Session
+//!   Projections, and scan-side Track construction.
 //! - `infra_tests.rs`: Tests for infrastructure components like audio decoders, metadata readers, etc.
 //! - `ui_tests.rs`: Tests for UI-related functionality like settings storage, etc.
 //! - `golden_tests.rs`: Golden-image snapshot tests rendering real egui frames headlessly.
@@ -46,7 +47,6 @@ pub use riff::app::gapless::{
     is_gapless_eligible, pre_buffer_cap, repeat_one_handoff_eligible, samples_from_duration,
     GaplessConditions, QueueConditions,
 };
-pub use riff::app::library_manager::LibraryManager;
 pub use riff::app::state::{replaygain_factor, AppState, LibraryStatus, WatchState};
 pub use riff::app::MutexExt;
 pub use riff::domain::{
@@ -521,32 +521,5 @@ pub mod integration_helpers {
     pub fn create_test_app_state() -> Arc<Mutex<AppState>> {
         let state = AppState::new();
         Arc::new(Mutex::new(state))
-    }
-
-    /// Create a mock library with some test tracks
-    pub fn create_mock_library() -> crate::app::library_manager::LibraryManager {
-        let mut library = crate::app::library_manager::LibraryManager::new();
-
-        // Add some test tracks
-        let track1 = super::test_utils::create_test_track_with_metadata(
-            "track1.mp3",
-            "music/artist1/album1/track1.mp3",
-            "Artist 1",
-            "Track 1",
-            "Album 1",
-        );
-
-        let track2 = super::test_utils::create_test_track_with_metadata(
-            "track2.mp3",
-            "music/artist1/album1/track2.mp3",
-            "Artist 1",
-            "Track 2",
-            "Album 1",
-        );
-
-        library.add_track(track1);
-        library.add_track(track2);
-
-        library
     }
 }

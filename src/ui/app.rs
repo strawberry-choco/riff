@@ -1,43 +1,26 @@
 use crate::app::MutexExt;
 use crate::app::commands::{LibraryCommand, LibraryUpdate};
-use crate::app::cover_resolver::CoverResolver;
-use crate::app::projection::{
-    BrowsingProjection, FolderProjection, PlaybackProjection, ProjectionKey,
-    SmartPlaylistsProjection, TrackListProjection, WINDOW_SIZE,
-};
+// The cover-cache capacity discipline lives in the app layer next to the
+// Cover Service's negative cache, so both caches share ONE constant and ONE
+// LRU implementation (spec: no second constant scheme).
+use crate::app::cover_service::Covers;
+pub use crate::app::cover_service::{COVER_CACHE_CAP, lru_insert};
 use crate::app::state::{AppState, BrowseMode, LibraryStatus, ViewMode};
-use crate::app::store::{
-    LibraryMutationStore, LibraryQueryStore, PlaylistStore, SettingsStore, StoreGeneration,
-};
-use crate::app::traits::{CoverImage, MetadataWriter, TagEdit};
+use crate::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
+use crate::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
+use crate::app::traits::TagEdit;
+use crate::app::views::SessionViews;
 use crate::app::watcher_manager::WatcherManager;
 use crate::domain::{
     Album, Artist, PlaybackCommand, PlaybackState, Playlist, PlaylistId, SmartPlaylistKind, Track,
     TrackId,
 };
-use crate::infra::{ImageCoverLoader, LoftyMetadataReader, LoftyMetadataWriter};
 use crate::ui::theme;
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-
-/// Request to write metadata tags to a track's file, sent from the UI thread
-/// to the background tag-write thread.
-struct TagWriteRequest {
-    path: PathBuf,
-    edit: TagEdit,
-    track_id: TrackId,
-}
-
-/// Outcome of a background tag write, sent back to the UI thread.
-struct TagWriteResult {
-    track_id: TrackId,
-    path: PathBuf,
-    edit: TagEdit,
-    outcome: Result<(), String>,
-}
 
 /// Transient UI state for the "Edit Tags" modal. Lives on `RiffApp` (not
 /// `AppState`), following the `settings_text_input` precedent. Public so the
@@ -98,24 +81,6 @@ pub(crate) struct ThemeState {
     last_applied: Option<(bool, bool)>,
 }
 
-/// Max entries per cover cache (positive textures and negative results
-/// alike); the oldest entries are evicted LRU-style beyond this cap.
-const COVER_CACHE_CAP: usize = 50;
-
-/// Insert `key` at the most-recently-used end of an LRU key list: an already
-/// present entry is moved to the end (no duplicates), and keys evicted beyond
-/// `cap` are returned so the caller can drop their cached payloads. Shared by
-/// the positive (texture) and negative (artless-track) cover caches.
-pub fn lru_insert(keys: &mut Vec<String>, key: String, cap: usize) -> Vec<String> {
-    keys.retain(|k| k != &key);
-    keys.push(key);
-    let mut evicted = Vec::new();
-    while keys.len() > cap {
-        evicted.push(keys.remove(0));
-    }
-    evicted
-}
-
 pub struct RiffApp {
     pub state: Arc<Mutex<AppState>>,
     command_sender: Option<Sender<PlaybackCommand>>,
@@ -123,14 +88,16 @@ pub struct RiffApp {
     library_update_rx: Option<Receiver<LibraryUpdate>>,
     cover_textures: std::collections::HashMap<String, egui::TextureHandle>,
     cover_lru_keys: Vec<String>,
-    /// Tracks (by key) whose cover resolve came back empty, so
-    /// `request_cover` does not re-enqueue the same disk/tag I/O every
-    /// frame. Same LRU discipline as `cover_lru_keys`.
-    cover_negative_keys: Vec<String>,
-    cover_request_tx: Option<Sender<(TrackId, PathBuf)>>,
-    cover_response_rx: Receiver<(String, Option<CoverImage>)>,
-    tag_write_request_tx: Option<Sender<TagWriteRequest>>,
-    tag_write_result_rx: Receiver<TagWriteResult>,
+    /// The Cover Service front end (ADR 0006): sends resolve intent and
+    /// yields drained results; dedup and the negative cache live behind it.
+    covers: Box<dyn Covers>,
+    /// The Tag Edit Service front end (ADR 0006): submits save intent and
+    /// yields polled outcomes; the whole save flow lives behind it.
+    tag_edits: Box<dyn TagEdits>,
+    /// The one Tag Edit currently outstanding, recorded at submit time so a
+    /// polled outcome can be matched back to its modal (and its file name
+    /// shown in the status line) — outcomes themselves carry no identity.
+    tag_edit_in_flight: Option<(TrackId, PathBuf)>,
     tag_edit: Option<TagEditState>,
     /// Which read-only smart playlist is open in the library explorer, if any.
     /// Transient UI state (precedent: `tag_edit`); the playlist contents are
@@ -157,42 +124,17 @@ pub struct RiffApp {
     /// `state.playlists` list is only a Session Projection refreshed from the
     /// store after each committed change.
     pub(crate) playlist_store: Box<dyn PlaylistStore>,
-    /// The Application Store's Library collection query port: the flat list
-    /// and search box fetch bounded windows through it, and startup hydrates
-    /// the transitional in-memory mirror from it.
-    pub(crate) library_queries: Box<dyn LibraryQueryStore>,
     /// The Application Store's Library collection mutation port: committed
     /// metadata changes (e.g. tag edits) persist through it as one durable
     /// transaction per batch.
     pub(crate) library_mutations: Box<dyn LibraryMutationStore>,
-    /// Session-local generation counter bumped after each committed store
-    /// mutation; projections compare against it to know when to refetch
-    /// (ADR 0002).
-    pub(crate) store_generation: StoreGeneration,
-    /// Bounded Session Projection serving the flat list and search box
-    /// (ADR 0003). Never authoritative; invalidated by generation bumps.
-    tracks_projection: TrackListProjection,
-    /// Session Projection serving the artist/album browsing views: artists
-    /// A–Z, per-artist albums, and per-album tracks, all fetched from the
-    /// store through [`Self::library_queries`] and invalidated by generation
-    /// bumps. Never authoritative.
-    browsing_projection: BrowsingProjection,
-    /// Session Projection serving the folder-tree views: subtree probes,
-    /// subtree search matches, subtree track ids, direct track listings,
-    /// and child directories, all fetched from the store through
-    /// [`Self::library_queries`] and invalidated by generation bumps.
-    pub(crate) folder_projection: FolderProjection,
-    /// Session Projection serving the read-only smart playlists: one
-    /// computed list per kind, fetched from the store through
-    /// [`Self::library_queries`] and invalidated by generation bumps, so a
-    /// finished play or scan regenerates them on the next frame.
-    smart_playlists_projection: SmartPlaylistsProjection,
-    /// Session Projection serving the playback-side reads (ADR 0002): the
-    /// current Track, the Now Playing Up Next window, and the track-details
-    /// panel's selected Track — all fetched from the store through
-    /// [`Self::library_queries`] and invalidated by generation bumps and
-    /// Playback Queue changes. Never authoritative.
-    playback_projection: PlaybackProjection,
+    /// The Session Views facade (ADR 0002): every store-backed read the UI
+    /// renders — flat list, search, browsing, folders, smart playlists, and
+    /// the playback-side slots — goes through it. It owns the five bounded
+    /// Session Projections, the Library query port, and the session-local
+    /// generation counter, so view code never touches staleness handling or
+    /// store-error fallbacks.
+    pub(crate) views: SessionViews,
     pub(crate) theme: ThemeState,
     /// Vendored-glyph texture cache for the shell's icon controls (Issue 06).
     pub(crate) icons: crate::ui::icons::IconCache,
@@ -227,57 +169,11 @@ impl RiffApp {
         quit_flag: Arc<AtomicBool>,
         settings_store: Box<dyn SettingsStore>,
         playlist_store: Box<dyn PlaylistStore>,
-        library_queries: Box<dyn LibraryQueryStore>,
         library_mutations: Box<dyn LibraryMutationStore>,
-        store_generation: StoreGeneration,
+        views: SessionViews,
+        tag_edits: Box<dyn TagEdits>,
+        covers: Box<dyn Covers>,
     ) -> Self {
-        let resolver = CoverResolver::new(
-            Box::new(LoftyMetadataReader::new()),
-            Box::new(ImageCoverLoader::new()),
-        );
-
-        let (cover_tx, cover_rx_inner): (Sender<(TrackId, PathBuf)>, _) = unbounded();
-        let (response_tx, response_rx): (Sender<(String, Option<CoverImage>)>, _) = unbounded();
-
-        std::thread::spawn(move || {
-            while let Ok((track_id, path)) = cover_rx_inner.recv() {
-                let result = match resolver.resolve(&path) {
-                    Ok(val) => val,
-                    Err(e) => {
-                        tracing::warn!("Cover resolution failed for {:?}: {}", path, e);
-                        None
-                    }
-                };
-                let _ = response_tx.send((track_id.0.clone(), result));
-            }
-        });
-
-        // Tag-write background thread: owns the lofty-based writer, processes
-        // write requests off the UI thread, and reports outcomes back.
-        let writer = Box::new(LoftyMetadataWriter::new());
-        let (tag_write_tx, tag_write_rx): (Sender<TagWriteRequest>, Receiver<TagWriteRequest>) =
-            unbounded();
-        let (tag_result_tx, tag_result_rx): (Sender<TagWriteResult>, Receiver<TagWriteResult>) =
-            unbounded();
-
-        std::thread::spawn(move || {
-            while let Ok(request) = tag_write_rx.recv() {
-                let outcome = match writer.write_metadata(&request.path, &request.edit) {
-                    Ok(()) => Ok(()),
-                    Err(e) => {
-                        tracing::warn!("Tag write failed for {:?}: {}", request.path, e);
-                        Err(e.to_string())
-                    }
-                };
-                let _ = tag_result_tx.send(TagWriteResult {
-                    track_id: request.track_id,
-                    path: request.path,
-                    edit: request.edit,
-                    outcome,
-                });
-            }
-        });
-
         Self {
             state,
             command_sender: Some(command_sender),
@@ -285,11 +181,9 @@ impl RiffApp {
             library_update_rx: Some(library_update_rx),
             cover_textures: std::collections::HashMap::new(),
             cover_lru_keys: Vec::new(),
-            cover_negative_keys: Vec::new(),
-            cover_request_tx: Some(cover_tx),
-            cover_response_rx: response_rx,
-            tag_write_request_tx: Some(tag_write_tx),
-            tag_write_result_rx: tag_result_rx,
+            covers,
+            tag_edits,
+            tag_edit_in_flight: None,
             tag_edit: None,
             smart_playlist_view: None,
             playlist_view: None,
@@ -301,14 +195,8 @@ impl RiffApp {
             watcher_manager,
             settings_store,
             playlist_store,
-            library_queries,
             library_mutations,
-            store_generation,
-            tracks_projection: TrackListProjection::new(ProjectionKey::Flat),
-            browsing_projection: BrowsingProjection::new(),
-            folder_projection: FolderProjection::new(),
-            smart_playlists_projection: SmartPlaylistsProjection::new(),
-            playback_projection: PlaybackProjection::new(),
+            views,
             theme: ThemeState {
                 dark: true, // dark (mockup palette) by default
                 active: theme::Palette::dark(),
@@ -348,14 +236,17 @@ impl RiffApp {
         self.theme.last_applied = Some((dark, high_contrast));
     }
 
+    /// Send cover intent for one track to the Cover Service. The only
+    /// UI-side check left is the texture cache (the texture LRU is
+    /// UI-owned per the texture boundary); request deduplication and the
+    /// negative cache live behind the service seam.
     fn request_cover(&self, track_id: &TrackId, file_path: &Path) {
-        let key = &track_id.0;
-        if !self.cover_textures.contains_key(key)
-            && !self.cover_negative_keys.contains(key)
-            && let Some(ref tx) = self.cover_request_tx
-        {
-            let _ = tx.send((track_id.clone(), file_path.to_path_buf()));
-        }
+        request_cover_intent(
+            self.cover_textures.contains_key(&track_id.0),
+            self.covers.as_ref(),
+            track_id.clone(),
+            file_path.to_path_buf(),
+        );
     }
 
     fn poll_library_updates(&self, state: &mut AppState) {
@@ -398,104 +289,32 @@ impl RiffApp {
         }
     }
 
-    /// Drain completed tag writes from the background thread. On success the
-    /// edit persists through the store's targeted tag-refresh flow as one
-    /// durable transaction (history preserved, album year/genre re-derived);
-    /// the mutation adapter bumps the session generation so projections
-    /// refetch. The edited Track resolves from the Application Store — the
-    /// sole authority — and an unknown track surfaces like any other save
-    /// failure. On failure the error is surfaced in the open modal, which
-    /// stays open.
-    fn poll_tag_write_results(&mut self, state: &mut AppState) {
-        while let Ok(result) = self.tag_write_result_rx.try_recv() {
-            match result.outcome {
-                Ok(()) => {
-                    // Resolve the edited Track from the store, apply the edit
-                    // to the fresh copy, and persist it.
-                    let resolved = match self.library_queries.get_track(&result.track_id) {
-                        Ok(track) => track,
-                        Err(e) => {
-                            tracing::error!(
-                                "Failed to resolve {:?} from the store for its tag edit: {e}",
-                                result.path
-                            );
-                            None
-                        }
-                    };
-                    let mut failure: Option<String> = None;
-                    match resolved {
-                        Some(mut track) => {
-                            result.edit.apply_to(&mut track.metadata);
-                            if let Err(e) = self.library_mutations.apply_tag_refresh(&track) {
-                                tracing::error!(
-                                    "Failed to persist tag edit for {:?}: {e}",
-                                    result.path
-                                );
-                            }
-                        }
-                        None => {
-                            // Unknown to the store (removed mid-edit, or the
-                            // read failed): nothing to persist.
-                            failure = Some("Track is no longer in the library".to_string());
-                        }
-                    }
-                    if let Some(message) = failure {
-                        if let Some(ref mut tag_edit) = self.tag_edit
-                            && tag_edit.track_id == result.track_id
-                        {
-                            tag_edit.error = Some(message);
-                            tag_edit.saving = false;
-                        }
-                    } else if self
-                        .tag_edit
-                        .as_ref()
-                        .is_some_and(|te| te.track_id == result.track_id)
-                    {
-                        self.tag_edit = None;
-                    }
-                    let name = result.path.file_name().map_or_else(
-                        || result.path.to_string_lossy().to_string(),
-                        |n| n.to_string_lossy().to_string(),
-                    );
-                    state.scan_status = Some(format!("Tags saved for {name}"));
-                    tracing::info!("Tags written for {:?}", result.path);
-                }
-                Err(message) => {
-                    tracing::warn!("Tag write failed for {:?}: {}", result.path, message);
-                    if let Some(ref mut tag_edit) = self.tag_edit
-                        && tag_edit.track_id == result.track_id
-                    {
-                        tag_edit.error = Some(message);
-                        tag_edit.saving = false;
-                    }
-                }
-            }
+    /// Drain polled Tag Edit outcomes from the service. On [`Saved`] the
+    /// matching open modal closes and the status line reports the saved
+    /// file; on `Failed` the dialog stays open with the reason — there is
+    /// no silent-success path. All outcome application lives in the free
+    /// [`apply_tag_edit_outcome`], which is what tests drive.
+    fn poll_tag_edit_outcomes(&mut self, state: &mut AppState) {
+        while let Some(outcome) = self.tag_edits.poll() {
+            apply_tag_edit_outcome(
+                outcome,
+                &mut self.tag_edit,
+                &mut self.tag_edit_in_flight,
+                &mut state.scan_status,
+            );
         }
     }
 
+    /// Consume polled cover results into the UI texture cache: rgba→texture
+    /// conversion is the egui-bound work that stays on the main thread;
+    /// every other caching concern lives in the service.
     fn update_cover_cache(&mut self, ctx: &egui::Context) {
-        while let Ok((key, cover)) = self.cover_response_rx.try_recv() {
-            if let Some(cover_image) = cover {
-                let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                    [cover_image.width as usize, cover_image.height as usize],
-                    &cover_image.rgba,
-                );
-                let texture = ctx.load_texture(&key, color_image, egui::TextureOptions::default());
-                self.cover_textures.insert(key.clone(), texture);
-                for old in lru_insert(&mut self.cover_lru_keys, key.clone(), COVER_CACHE_CAP) {
-                    self.cover_textures.remove(&old);
-                }
-                // Art arrived after a negative result (or an eviction
-                // retry): drop any stale negative entry.
-                self.cover_negative_keys.retain(|k| k != &key);
-            } else {
-                // Negative cache: remember artless tracks so `request_cover`
-                // stops re-enqueueing a resolve request (disk/tag I/O) every
-                // frame. Eviction allows an eventual retry, e.g. once art is
-                // added and the cache cycles.
-                lru_insert(&mut self.cover_negative_keys, key, COVER_CACHE_CAP);
-            }
-        }
+        cache_polled_covers(
+            self.covers.as_ref(),
+            &mut self.cover_textures,
+            &mut self.cover_lru_keys,
+            ctx,
+        );
     }
 
     /// Render the "Edit Tags" modal while `self.tag_edit` is open. Writing
@@ -597,45 +416,18 @@ impl RiffApp {
         }
     }
 
-    /// Validate the modal fields and send a [`TagWriteRequest`] to the
-    /// background tag-write thread. Invalid numeric fields keep the modal
-    /// open with an error; nothing is ever written without an explicit Save.
+    /// Validate the modal fields and submit a [`TagEditRequest`] to the Tag
+    /// Edit Service. Invalid numeric fields keep the modal open with an
+    /// error; nothing is ever written without an explicit Save. The whole
+    /// flow lives in the free [`submit_tag_edit_fields`], which is what
+    /// tests drive.
     fn submit_tag_edit(&mut self) {
-        let Some(tag_edit) = self.tag_edit.as_mut() else {
-            return;
-        };
-
-        let request = match (
-            parse_number("Year", &tag_edit.year),
-            parse_number("Track number", &tag_edit.track_number),
-        ) {
-            (Ok(year), Ok(track_number)) => {
-                tag_edit.error = None;
-                tag_edit.saving = true;
-                Some(TagWriteRequest {
-                    path: tag_edit.path.clone(),
-                    track_id: tag_edit.track_id.clone(),
-                    edit: TagEdit {
-                        title: Some(tag_edit.title.clone()),
-                        artist: Some(tag_edit.artist.clone()),
-                        album: Some(tag_edit.album.clone()),
-                        album_artist: Some(tag_edit.album_artist.clone()),
-                        genre: Some(tag_edit.genre.clone()),
-                        year,
-                        track_number,
-                    },
-                })
-            }
-            (Err(error), _) | (_, Err(error)) => {
-                tag_edit.error = Some(error);
-                None
-            }
-        };
-
-        if let Some(request) = request
-            && let Some(ref tx) = self.tag_write_request_tx
-        {
-            let _ = tx.send(request);
+        if let Some(ref mut tag_edit) = self.tag_edit {
+            submit_tag_edit_fields(
+                tag_edit,
+                self.tag_edits.as_ref(),
+                &mut self.tag_edit_in_flight,
+            );
         }
     }
 
@@ -843,7 +635,7 @@ impl eframe::App for RiffApp {
         self.apply_theme(ui.ctx(), state.ui_flags.high_contrast);
 
         self.poll_library_updates(&mut state);
-        self.poll_tag_write_results(&mut state);
+        self.poll_tag_edit_outcomes(&mut state);
         self.update_cover_cache(ui.ctx());
         self.poll_watchers();
 
@@ -876,7 +668,7 @@ impl eframe::App for RiffApp {
         egui::Panel::top("titlebar")
             .exact_size(theme::TITLEBAR_H)
             .frame(egui::Frame::NONE)
-            .show(ui, |ui| {
+            .show_inside(ui, |ui| {
                 let content = crate::ui::chrome::TitleBarContent {
                     scan_status: scan_status.as_deref(),
                     theme_dark: self.theme.dark,
@@ -910,7 +702,7 @@ impl eframe::App for RiffApp {
             .exact_size(theme::SIDEBAR_W)
             .resizable(false)
             .frame(egui::Frame::new().inner_margin(egui::Margin::same(12)))
-            .show(ui, |ui| {
+            .show_inside(ui, |ui| {
                 self.render_library_sidebar(ui, &mut state, cmd.as_ref());
             });
 
@@ -920,7 +712,7 @@ impl eframe::App for RiffApp {
         // --- MAIN STAGE: exactly one View visible at a time ---
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(self.theme.active.background))
-            .show(ui, |ui| match state.view_mode {
+            .show_inside(ui, |ui| match state.view_mode {
                 ViewMode::Library => self.render_track_details_panel(ui, &mut state),
                 ViewMode::NowPlaying => self.show_now_playing_view(ui, &mut state, cmd.as_ref()),
                 ViewMode::Settings => {
@@ -1261,14 +1053,14 @@ fn handle_keyboard_shortcuts(
 }
 
 /// Send the window title for the current track and return the tray tooltip
-/// text (REQ-SI-001). The current Track resolves through the playback-side
-/// Session Projection over the store's `get_track` query — never the
-/// transitional in-memory mirror.
+/// text (REQ-SI-001). The current Track resolves through the Session Views
+/// facade over the store's `get_track` query — never the in-memory mirror.
 impl RiffApp {
     fn update_window_title(&mut self, ctx: &egui::Context, state: &AppState) -> String {
         let mut tooltip = "riff".to_owned();
-        self.refresh_playback_projection(state);
-        if let Some(track) = self.playback_projection.current() {
+        self.views
+            .sync_playback(&state.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
+        if let Some(track) = self.views.playback_current() {
             let artist = track.metadata.display_artist();
             let title = track.metadata.display_title(&track.file_path);
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
@@ -1279,23 +1071,6 @@ impl RiffApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title("riff".to_owned()));
         }
         tooltip
-    }
-
-    /// Refresh the playback-side Session Projection against the current
-    /// store generation and queue shape. Cheap when nothing moved (a stamp
-    /// comparison); otherwise refetches the current Track plus the Up Next
-    /// window through [`Self::library_queries`]. Failures degrade to the
-    /// previous cache with a warning, like every other projection.
-    fn refresh_playback_projection(&mut self, state: &AppState) {
-        let generation = self.store_generation.current();
-        if let Err(e) = self.playback_projection.refresh(
-            generation,
-            &state.queue,
-            crate::ui::now_playing::UP_NEXT_LIMIT,
-            &mut |id| self.library_queries.get_track(id),
-        ) {
-            tracing::warn!("Failed to refresh the playback projection from the store: {e}");
-        }
     }
 
     /// Bottom shell strip (Issues 06 + 08): transport, seek row, and volume
@@ -1311,11 +1086,12 @@ impl RiffApp {
     ) {
         // Cover for the current track, served from the LRU texture cache;
         // misses enqueue a background resolve exactly like the other views.
-        // The current Track comes from the playback-side Session Projection
-        // over the store's `get_track` query — never the in-memory mirror.
+        // The current Track comes from the Session Views facade over the
+        // store's `get_track` query — never the in-memory mirror.
         let mut cover = None;
-        self.refresh_playback_projection(state);
-        if let Some(track) = self.playback_projection.current() {
+        self.views
+            .sync_playback(&state.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
+        if let Some(track) = self.views.playback_current() {
             let id = track.id.clone();
             let file_path = track.file_path.clone();
             self.request_cover(&id, &file_path);
@@ -1342,7 +1118,7 @@ impl RiffApp {
 
         egui::Panel::bottom("playerbar")
             .exact_size(theme::PLAYERBAR_H)
-            .show(ui, |ui| {
+            .show_inside(ui, |ui| {
                 for action in crate::ui::playerbar::show_player_bar(
                     ui,
                     &mut self.icons,
@@ -1513,8 +1289,7 @@ impl RiffApp {
 
         // Search gating reads the store's match count (the same query the
         // flat view's projection totals use) — never the in-memory mirror.
-        let has_results =
-            query.is_empty() || self.library_queries.search_count(query).unwrap_or(0) > 0;
+        let has_results = query.is_empty() || self.views.search_has_matches(query);
         // A playlist only renders when not searching; search shows
         // matching tracks only. Turning advanced mode off closes
         // any open smart playlist.
@@ -1547,24 +1322,14 @@ impl RiffApp {
             crate::ui::library::empty_state_hero(ui, &mut self.icons, &palette);
             return;
         };
-        // The selected Track resolves through the playback-side Session
-        // Projection over the store's `get_track` query (cached until the
-        // selection or the generation moves) — never the in-memory mirror.
-        let track = match self.playback_projection.selected_track(
-            self.store_generation.current(),
-            &track_id,
-            &mut |id| self.library_queries.get_track(id),
-        ) {
-            Ok(Some(track)) => track,
-            Ok(None) => {
-                crate::ui::library::empty_state_hero(ui, &mut self.icons, &palette);
-                return;
-            }
-            Err(e) => {
-                tracing::warn!("Failed to resolve selected track from the store: {e}");
-                crate::ui::library::empty_state_hero(ui, &mut self.icons, &palette);
-                return;
-            }
+        // The selected Track resolves through the Session Views facade over
+        // the store's `get_track` query (cached until the selection or the
+        // generation moves) — never the in-memory mirror. An absent track —
+        // unknown to the store, or unreadable right now — renders the empty
+        // state.
+        let Some(track) = self.views.selected_track(&track_id) else {
+            crate::ui::library::empty_state_hero(ui, &mut self.icons, &palette);
+            return;
         };
         self.request_cover(&track.id, &track.file_path);
         ui.horizontal(|ui| {
@@ -1591,21 +1356,11 @@ impl RiffApp {
         cmd: Option<&Sender<PlaybackCommand>>,
         query: &str,
     ) {
-        // Browsing reads through the Session Projection over store queries
+        // Browsing reads through the Session Views facade over store queries
         // (ADR 0002/0003): artists A–Z straight from the Application Store,
         // each level cached until the next committed mutation bumps the
         // generation. No in-memory mirror involved.
-        let generation = self.store_generation.current();
-        let artists: Vec<Artist> = match self
-            .browsing_projection
-            .artists(generation, &mut || self.library_queries.all_artists())
-        {
-            Ok(artists) => artists,
-            Err(e) => {
-                tracing::warn!("Failed to load artists from the store: {e}");
-                Vec::new()
-            }
-        };
+        let artists: Vec<Artist> = self.views.artists();
         let artists: Vec<Artist> = if query.is_empty() {
             artists
         } else {
@@ -1621,14 +1376,15 @@ impl RiffApp {
         // the collapsed headers containing it — the same outcome as the
         // former scan of every artist's albums, without loading closed
         // artists' data.
-        let current_album: Option<(String, String)> = current_track.as_ref().and_then(|tid| {
-            self.library_queries.get_track(tid).ok().flatten().map(|t| {
+        let current_album: Option<(String, String)> = current_track
+            .as_ref()
+            .and_then(|tid| self.views.resolve_track(tid))
+            .map(|t| {
                 (
                     t.metadata.display_album_artist(),
                     t.metadata.display_album(),
                 )
-            })
-        });
+            });
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             for artist in &artists {
@@ -1639,7 +1395,6 @@ impl RiffApp {
                     ui,
                     state,
                     cmd,
-                    generation,
                     artist,
                     current_album.as_ref(),
                     current_track.as_ref(),
@@ -1660,7 +1415,6 @@ impl RiffApp {
         ui: &mut egui::Ui,
         state: &mut AppState,
         cmd: Option<&Sender<PlaybackCommand>>,
-        generation: u64,
         artist: &Artist,
         current_album: Option<&(String, String)>,
         current_track: Option<&TrackId>,
@@ -1696,18 +1450,7 @@ impl RiffApp {
         collapsing.store(ui.ctx());
 
         if let Some(body) = collapsing.show_body_unindented(ui, |ui| {
-            let albums: Vec<Album> =
-                match self
-                    .browsing_projection
-                    .artist_albums(generation, &artist.name, &mut |a| {
-                        self.library_queries.artist_albums(a)
-                    }) {
-                    Ok(albums) => albums,
-                    Err(e) => {
-                        tracing::warn!("Failed to load albums for {}: {e}", artist.name);
-                        return;
-                    }
-                };
+            let albums: Vec<Album> = self.views.artist_albums(&artist.name);
 
             for album in &albums {
                 let album_has_current = current_album.is_some_and(|(album_artist, album_title)| {
@@ -1717,7 +1460,6 @@ impl RiffApp {
                     ui,
                     state,
                     cmd,
-                    generation,
                     album,
                     current_track,
                     album_has_current,
@@ -1737,7 +1479,6 @@ impl RiffApp {
         ui: &mut egui::Ui,
         state: &mut AppState,
         cmd: Option<&Sender<PlaybackCommand>>,
-        generation: u64,
         album: &Album,
         current_track: Option<&TrackId>,
         album_has_current: bool,
@@ -1775,18 +1516,7 @@ impl RiffApp {
         collapsing.store(ui.ctx());
 
         collapsing.show_body_unindented(ui, |ui| {
-            let tracks: Vec<Track> = match self.browsing_projection.album_tracks(
-                generation,
-                &album.artist,
-                &album.title,
-                &mut |a, t| self.library_queries.album_tracks(a, t),
-            ) {
-                Ok(tracks) => tracks,
-                Err(e) => {
-                    tracing::warn!("Failed to load tracks for {}: {e}", album.title);
-                    return;
-                }
-            };
+            let tracks: Vec<Track> = self.views.album_tracks(&album.artist, &album.title);
             self.render_album_track_rows(ui, state, cmd, &tracks, current_track);
         });
     }
@@ -1822,8 +1552,8 @@ impl RiffApp {
     ) {
         // Row-virtualization audit (Issue 12): every UNBOUNDED track listing
         // culls through `ScrollArea::show_rows` — this flat list and search
-        // (bounded store windows via `TrackListProjection`), smart playlists
-        // and user playlists (`render_smart_playlist_view` /
+        // (bounded store windows via `SessionViews::track_list`), smart
+        // playlists and user playlists (`render_smart_playlist_view` /
         // `render_playlist_view`), and the Up Next queue
         // (`now_playing::show_now_playing`). The artist/album and folder
         // trees render per-node loops instead, but each loop is bounded by
@@ -1832,113 +1562,39 @@ impl RiffApp {
         // `test_large_library_fixture_culls_rows_to_the_visible_window`.
         //
         // The flat list and search box are served through the bounded
-        // Session Projection over store queries (ADR 0003): only visible row
-        // windows fetch, invalidated by generation bumps after committed
-        // mutations.
-        let key = if query.is_empty() {
-            ProjectionKey::Flat
-        } else {
-            ProjectionKey::Search(query.to_string())
-        };
-        if self.tracks_projection.key() != &key {
-            self.tracks_projection.set_key(key);
-        }
-
-        // The authoritative total comes from the store whenever the
-        // projection is invalidated; fresh frames reuse the cached count.
-        // `total_generation` records when that count was read so the refresh
-        // below can detect a mutation landing mid-frame.
-        let total_generation = self.store_generation.current();
-        let total = if self.tracks_projection.is_fresh(total_generation) {
-            self.tracks_projection.total()
-        } else if query.is_empty() {
-            self.library_queries.track_count().unwrap_or(0)
-        } else {
-            self.library_queries.search_count(query).unwrap_or(0)
-        };
-
+        // Session Projection behind the Session Views facade (ADR 0003):
+        // only visible row windows fetch, invalidated by generation bumps
+        // after committed mutations. The facade owns the window math, the
+        // count reads, and the torn-count recount; this view only maps row
+        // indices to pages.
         let current_track = state.queue.current_track().cloned();
+
+        // Anchor read: sizes the row range with the authoritative total.
+        let first_page = self.views.track_list(query, 0);
 
         egui::ScrollArea::vertical().show_rows(
             ui,
             crate::ui::sidebar::ROW_H,
-            total,
+            first_page.total,
             |ui, row_range| {
-                // Declare exactly the visible windows, then refresh the
-                // projection from the store before painting rows.
-                let start_window = (row_range.start / WINDOW_SIZE) * WINDOW_SIZE;
-                let end_window = (row_range.end / WINDOW_SIZE) * WINDOW_SIZE;
-                let mut window = start_window;
-                while window <= end_window {
-                    self.tracks_projection.request_window(window);
-                    window += WINDOW_SIZE;
-                }
-                let generation = self.store_generation.current();
-                // If a mutation committed between the outer count read and here,
-                // recount so the cached total agrees with the refreshed rows;
-                // otherwise reuse the outer read (one COUNT query per frame max).
-                let effective_total = if generation == total_generation {
-                    total
-                } else if query.is_empty() {
-                    self.library_queries.track_count().unwrap_or(0)
-                } else {
-                    self.library_queries.search_count(query).unwrap_or(0)
-                };
-                let _ = self.tracks_projection.refresh(
-                    generation,
-                    effective_total,
-                    &mut |offset, limit| {
-                        if query.is_empty() {
-                            self.library_queries.tracks_window(offset, limit)
-                        } else {
-                            self.library_queries.search_window(query, offset, limit)
-                        }
-                    },
-                );
-
+                let mut page: Option<crate::app::views::TrackListPage> = None;
                 for i in row_range {
-                    let window_start = (i / WINDOW_SIZE) * WINDOW_SIZE;
-                    // Clone the row so the projection's shared borrow ends before
-                    // the mutable render call (one small clone per visible row).
-                    let row = self
-                        .tracks_projection
-                        .window(window_start)
-                        .and_then(|rows| rows.get(i - window_start))
-                        .cloned();
-                    if let Some(track) = row {
-                        self.render_track_row(ui, state, cmd, &track, current_track.as_ref(), None);
+                    // Refetch only when the row leaves the page in hand; the
+                    // facade serves repeat windows from cache.
+                    if page.as_ref().is_none_or(|p| p.start + p.rows.len() <= i) {
+                        page = Some(self.views.track_list(query, i));
+                    }
+                    let page = page.as_ref().expect("page fetched above");
+                    if let Some(track) = page.rows.get(i - page.start) {
+                        self.render_track_row(ui, state, cmd, track, current_track.as_ref(), None);
                     }
                 }
             },
         );
     }
 
-    /// Cached smart-playlist computation for one frame generation; failures
-    /// render as an empty list with a warning logged.
-    fn smart_list_cached(
-        &mut self,
-        generation: u64,
-        kind: SmartPlaylistKind,
-        limit: usize,
-    ) -> Vec<Track> {
-        match self
-            .smart_playlists_projection
-            .list(generation, kind, limit, &mut |k, l| {
-                self.library_queries.smart_playlist(k, l)
-            }) {
-            Ok(tracks) => tracks,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to compute smart playlist {}: {e}",
-                    kind.display_name()
-                );
-                Vec::new()
-            }
-        }
-    }
-
     /// Render the tracks of a read-only smart playlist. The list reads
-    /// through the Session Projection over store queries (ADR 0002): every
+    /// through the Session Views facade over store queries (ADR 0002): every
     /// committed mutation bumps the generation, so the next frame
     /// regenerates from committed state — no manual refresh needed.
     fn render_smart_playlist_view(
@@ -1953,8 +1609,7 @@ impl RiffApp {
             SmartPlaylistKind::RecentlyAdded | SmartPlaylistKind::MostPlayed => 50,
             SmartPlaylistKind::NeverPlayed | SmartPlaylistKind::LostGems => usize::MAX,
         };
-        let generation = self.store_generation.current();
-        let tracks = self.smart_list_cached(generation, kind, limit);
+        let tracks = self.views.smart_list(kind, limit);
         let current_track = state.queue.current_track().cloned();
 
         // Header: name + count, clearly read-only (no edit/delete affordances),
@@ -2359,10 +2014,11 @@ impl RiffApp {
 
         // Current track + cover from the LRU texture cache; misses enqueue a
         // background resolve exactly like the other views. Both the current
-        // Track and the Up Next window come from the playback-side Session
-        // Projection over the store's `get_track` query — never the mirror.
-        self.refresh_playback_projection(state);
-        let track = self.playback_projection.current().cloned();
+        // Track and the Up Next window come from the Session Views facade
+        // over the store's `get_track` query — never the mirror.
+        self.views
+            .sync_playback(&state.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
+        let track = self.views.playback_current().cloned();
         let cover = track.as_ref().and_then(|track| {
             self.request_cover(&track.id, &track.file_path);
             self.get_cover_texture(&track.id.0)
@@ -2386,7 +2042,7 @@ impl RiffApp {
             position: state.current_position.current,
             total: state.current_position.total,
             up_next: crate::ui::now_playing::up_next_entries(
-                self.playback_projection.up_next(),
+                self.views.playback_up_next(),
                 crate::ui::now_playing::UP_NEXT_LIMIT,
             ),
         };
@@ -2395,80 +2051,6 @@ impl RiffApp {
             crate::ui::now_playing::show_now_playing(ui, &mut self.icons, &palette, &content)
         {
             apply_now_playing_action(action, state, cmd);
-        }
-    }
-
-    /// Cached [`LibraryQueryStore::folder_has_audio`] for one frame
-    /// generation; failures render as "no audio" with a warning logged.
-    fn folder_has_audio_cached(&mut self, generation: u64, path: &Path) -> bool {
-        match self
-            .folder_projection
-            .has_audio(generation, path, &mut |f| {
-                self.library_queries.folder_has_audio(f)
-            }) {
-            Ok(has) => has,
-            Err(e) => {
-                tracing::warn!("Failed to probe folder {}: {e}", path.display());
-                false
-            }
-        }
-    }
-
-    /// Cached subtree search match for one frame generation.
-    fn folder_search_match_cached(&mut self, generation: u64, path: &Path, query: &str) -> bool {
-        match self
-            .folder_projection
-            .has_search_match(generation, path, query, &mut |f, q| {
-                self.library_queries.folder_has_search_match(f, q)
-            }) {
-            Ok(has) => has,
-            Err(e) => {
-                tracing::warn!("Failed to search folder {}: {e}", path.display());
-                false
-            }
-        }
-    }
-
-    /// Cached subtree track ids for one frame generation.
-    fn folder_subtree_ids_cached(&mut self, generation: u64, path: &Path) -> Vec<TrackId> {
-        match self
-            .folder_projection
-            .subtree_ids(generation, path, &mut |f| {
-                self.library_queries.track_ids_in_folder_tree(f)
-            }) {
-            Ok(ids) => ids,
-            Err(e) => {
-                tracing::warn!("Failed to list folder tree {}: {e}", path.display());
-                Vec::new()
-            }
-        }
-    }
-
-    /// Cached child directories for one frame generation.
-    fn folder_children_cached(&mut self, generation: u64, path: &Path) -> Vec<PathBuf> {
-        match self.folder_projection.children(generation, path, &mut |f| {
-            self.library_queries.subdirs_with_audio(f)
-        }) {
-            Ok(children) => children,
-            Err(e) => {
-                tracing::warn!("Failed to list folder children {}: {e}", path.display());
-                Vec::new()
-            }
-        }
-    }
-
-    /// Cached direct-track listing for one frame generation.
-    fn folder_direct_tracks_cached(&mut self, generation: u64, path: &Path) -> Vec<Track> {
-        match self
-            .folder_projection
-            .direct_tracks(generation, path, &mut |f| {
-                self.library_queries.tracks_in_folder(f)
-            }) {
-            Ok(tracks) => tracks,
-            Err(e) => {
-                tracing::warn!("Failed to list folder tracks {}: {e}", path.display());
-                Vec::new()
-            }
         }
     }
 
@@ -2487,18 +2069,17 @@ impl RiffApp {
             return;
         }
 
-        // Folder views read through the Session Projection over store
+        // Folder views read through the Session Views facade over store
         // queries (ADR 0002/0003): escaped prefix matching over stored track
         // paths, cached until the next committed mutation bumps the
         // generation. No in-memory mirror involved.
-        let generation = self.store_generation.current();
         let lib_paths = state.library_paths.clone();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for lib_path in &lib_paths {
-                if !self.folder_has_audio_cached(generation, lib_path) {
+                if !self.views.folder_has_audio(lib_path) {
                     continue;
                 }
-                self.render_folder_node(ui, state, cmd, generation, lib_path, 0, query);
+                self.render_folder_node(ui, state, cmd, lib_path, 0, query);
             }
         });
     }
@@ -2506,15 +2087,12 @@ impl RiffApp {
     /// One folder node of the Folders tree (Issue 07): a restyled 40px
     /// collapsible row on the indent scale whose click toggles AND selects —
     /// the exact gesture set of the former `CollapsingHeader` header.
-    /// `generation` is passed down so every node of one frame reads the same
-    /// snapshot even if a mutation commits mid-frame.
     #[allow(clippy::too_many_arguments)]
     fn render_folder_node(
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
         cmd: Option<&Sender<PlaybackCommand>>,
-        generation: u64,
         path: &Path,
         level: usize,
         query: &str,
@@ -2523,11 +2101,11 @@ impl RiffApp {
         use crate::ui::sidebar::{self, TreeRow};
         use egui::collapsing_header::CollapsingState;
 
-        if !self.folder_has_audio_cached(generation, path) {
+        if !self.views.folder_has_audio(path) {
             return;
         }
 
-        if !query.is_empty() && !self.folder_search_match_cached(generation, path, query) {
+        if !query.is_empty() && !self.views.folder_search_match(path, query) {
             return;
         }
 
@@ -2547,7 +2125,7 @@ impl RiffApp {
             |n| n.to_string_lossy().to_string(),
         );
 
-        let folder_track_ids: Vec<TrackId> = self.folder_subtree_ids_cached(generation, path);
+        let folder_track_ids: Vec<TrackId> = self.views.folder_subtree_ids(path);
 
         // Collapse state persists per path in egui memory, exactly like the
         // former CollapsingHeader; roots open when they contain the playing
@@ -2591,13 +2169,12 @@ impl RiffApp {
         collapsing.store(ui.ctx());
 
         collapsing.show_body_unindented(ui, |ui| {
-            let children = self.folder_children_cached(generation, path);
+            let children = self.views.folder_children(path);
             for child_path in &children {
-                self.render_folder_node(ui, state, cmd, generation, child_path, level + 1, query);
+                self.render_folder_node(ui, state, cmd, child_path, level + 1, query);
             }
 
-            let tracks =
-                folder_tracks_filtered(self.folder_direct_tracks_cached(generation, path), query);
+            let tracks = folder_tracks_filtered(self.views.folder_direct_tracks(path), query);
 
             for track in &tracks {
                 let display = format!(
@@ -2630,6 +2207,126 @@ fn parse_number(label: &str, raw: &str) -> Result<Option<u32>, String> {
             .parse::<u32>()
             .map(Some)
             .map_err(|_| format!("{label} must be a whole number"))
+    }
+}
+
+/// The UI's whole remaining cover responsibility (ADR 0006): ask the Cover
+/// Service for art unless the texture is already in the UI-owned cache.
+/// Free function so tests drive the exact production path without a window.
+pub fn request_cover_intent(
+    texture_cached: bool,
+    covers: &dyn Covers,
+    track_id: TrackId,
+    path: PathBuf,
+) {
+    if !texture_cached {
+        covers.request(track_id, path);
+    }
+}
+
+/// Apply one polled Tag Edit outcome to the modal state, the outstanding
+/// request record, and the status line — the same code path
+/// `poll_tag_edit_outcomes` runs per outcome. `Saved` closes the matching
+/// open modal and reports the saved file; `Failed` keeps the dialog open
+/// with the reason. Outcomes carry no identity, so the record captured at
+/// submit time supplies both the match key and the file name; an outcome
+/// with no matching outstanding request is ignored.
+pub fn apply_tag_edit_outcome(
+    outcome: TagEditOutcome,
+    tag_edit: &mut Option<TagEditState>,
+    in_flight: &mut Option<(TrackId, PathBuf)>,
+    scan_status: &mut Option<String>,
+) {
+    let Some((track_id, path)) = in_flight.take() else {
+        return;
+    };
+    match outcome {
+        TagEditOutcome::Saved => {
+            let name = path.file_name().map_or_else(
+                || path.to_string_lossy().to_string(),
+                |n| n.to_string_lossy().to_string(),
+            );
+            *scan_status = Some(format!("Tags saved for {name}"));
+            tracing::info!("Tags written for {:?}", path);
+            if tag_edit.as_ref().is_some_and(|te| te.track_id == track_id) {
+                *tag_edit = None;
+            }
+        }
+        TagEditOutcome::Failed { reason } => {
+            tracing::warn!("Tag edit failed for {:?}: {}", path, reason);
+            if let Some(modal) = tag_edit.as_mut()
+                && modal.track_id == track_id
+            {
+                modal.error = Some(reason);
+                modal.saving = false;
+            }
+        }
+    }
+}
+
+/// Validate the "Edit Tags" modal fields and submit one [`TagEditRequest`]
+/// through the service seam. Invalid numeric fields keep the modal open
+/// with an error and submit nothing; valid fields clear the error, flip the
+/// modal into its saving state, and record the outstanding request so its
+/// outcome can be matched later. Nothing is ever written without an
+/// explicit Save upstream.
+pub fn submit_tag_edit_fields(
+    tag_edit: &mut TagEditState,
+    tag_edits: &dyn TagEdits,
+    in_flight: &mut Option<(TrackId, PathBuf)>,
+) {
+    match (
+        parse_number("Year", &tag_edit.year),
+        parse_number("Track number", &tag_edit.track_number),
+    ) {
+        (Ok(year), Ok(track_number)) => {
+            tag_edit.error = None;
+            tag_edit.saving = true;
+            let request = TagEditRequest {
+                track_id: tag_edit.track_id.clone(),
+                path: tag_edit.path.clone(),
+                edit: TagEdit {
+                    title: Some(tag_edit.title.clone()),
+                    artist: Some(tag_edit.artist.clone()),
+                    album: Some(tag_edit.album.clone()),
+                    album_artist: Some(tag_edit.album_artist.clone()),
+                    genre: Some(tag_edit.genre.clone()),
+                    year,
+                    track_number,
+                },
+            };
+            *in_flight = Some((request.track_id.clone(), request.path.clone()));
+            tag_edits.submit(request);
+        }
+        (Err(error), _) | (_, Err(error)) => {
+            tag_edit.error = Some(error);
+        }
+    }
+}
+
+/// Consume polled cover results into the UI texture cache: rgba→texture
+/// conversion is the egui-bound work that stays on the main thread (the
+/// texture boundary, ADR 0006); dedup and negative caching live behind the
+/// service seam, so artless results are simply dropped here.
+pub fn cache_polled_covers<S: std::hash::BuildHasher>(
+    covers: &dyn Covers,
+    textures: &mut std::collections::HashMap<String, egui::TextureHandle, S>,
+    lru_keys: &mut Vec<String>,
+    ctx: &egui::Context,
+) {
+    for (track_id, cover_image) in covers.poll() {
+        let Some(cover_image) = cover_image else {
+            continue; // artless: the service negative-caches it
+        };
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            [cover_image.width as usize, cover_image.height as usize],
+            &cover_image.rgba,
+        );
+        let texture = ctx.load_texture(&track_id.0, color_image, egui::TextureOptions::default());
+        textures.insert(track_id.0.clone(), texture);
+        for old in lru_insert(lru_keys, track_id.0, COVER_CACHE_CAP) {
+            textures.remove(&old);
+        }
     }
 }
 

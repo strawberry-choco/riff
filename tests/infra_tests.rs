@@ -1161,6 +1161,69 @@ fn test_store_reorder_unknown_playlist_is_a_noop_and_other_playlists_are_untouch
     let _ = keep;
 }
 
+#[test]
+fn test_store_playlist_entries_report_library_validity_via_left_join() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+
+    // Two scanned tracks plus a dangling reference that was never scanned.
+    store
+        .apply_scan_batch(&[
+            library_track("m:\\lib\\a.mp3", "A", None, "One", None),
+            library_track("m:\\lib\\b.mp3", "B", None, "One", None),
+        ])
+        .expect("batch applies");
+    let pid = store
+        .create_playlist(
+            "Mix",
+            &[
+                TrackId("m:\\lib\\a.mp3".to_string()),
+                TrackId("m:\\gone\\deleted.mp3".to_string()),
+                TrackId("m:\\lib\\b.mp3".to_string()),
+            ],
+        )
+        .unwrap();
+
+    // Entries come back in playlist order; known tracks ride their full
+    // row (valid=true), the dangling reference stays listed with its track
+    // unset and valid=false — product behavior, never dropped.
+    let entries = store.load_playlist_entries(&pid).expect("entries load");
+    assert_eq!(entries.len(), 3, "dangling references stay listed");
+    assert_eq!(entries[0].id.0, "m:\\lib\\a.mp3");
+    assert!(entries[0].valid, "a scanned track is Library-valid");
+    let track = entries[0].track.as_ref().expect("known track resolves");
+    assert_eq!(track.metadata.title.as_deref(), Some("A"));
+    assert_eq!(track.file_path, PathBuf::from("m:\\lib\\a.mp3"));
+    assert!(!entries[1].valid, "dangling reference is flagged invalid");
+    assert!(
+        entries[1].track.is_none(),
+        "dangling reference has no track"
+    );
+    assert_eq!(entries[1].id.0, "m:\\gone\\deleted.mp3");
+    assert!(entries[2].valid);
+    assert_eq!(entries[2].id.0, "m:\\lib\\b.mp3");
+
+    // An unknown playlist id yields an empty entry list.
+    let unknown = PlaylistId("never-created".to_string());
+    assert!(store
+        .load_playlist_entries(&unknown)
+        .expect("unknown playlist loads")
+        .is_empty());
+
+    // Validity is read-time: removing a track from the Library flips its
+    // entry to invalid on the next query while the entry itself survives.
+    store
+        .remove_library_path(std::path::Path::new("m:\\lib\\a.mp3"))
+        .expect("removal works");
+    let entries = store.load_playlist_entries(&pid).expect("reload works");
+    assert_eq!(entries.len(), 3, "the entry is not silently dropped");
+    assert!(
+        !entries[0].valid && entries[0].track.is_none(),
+        "a track removed from the Library turns its entry dangling"
+    );
+}
+
 // --- Application Store: Library collection (ticket 05) ---------------------
 
 use riff::app::store::{LibraryMutationStore, LibraryQueryStore};
@@ -1472,6 +1535,50 @@ fn test_flat_list_windows_are_path_ordered_and_bounded() {
 }
 
 #[test]
+fn test_all_track_ids_are_canonically_path_ordered() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+
+    // A fresh store has no ids to fill a queue with.
+    assert!(store
+        .all_track_ids()
+        .expect("empty store lists no ids")
+        .is_empty());
+
+    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    // Shuffled insertion order with byte-ordering traps: Queue Fill must see
+    // the canonical flat ordering (path ascending, ADR 0003), not insertion
+    // or HashMap luck.
+    let paths = [
+        "m:\\z.mp3",
+        "M:\\A\\B.mp3",
+        "m:\\a.mp3",
+        "m:\\1.mp3",
+        "M:\\A\\a.mp3",
+    ];
+    let batch: Vec<Track> = paths
+        .iter()
+        .map(|p| library_track(p, "T", Some("Artist"), "Album", None))
+        .collect();
+    store.apply_scan_batch(&batch).expect("batch applies");
+
+    let mut expected: Vec<String> = paths.iter().map(std::string::ToString::to_string).collect();
+    expected.sort(); // Rust byte-wise sort = SQLite BINARY collation
+
+    assert_eq!(
+        store
+            .all_track_ids()
+            .expect("ids list works")
+            .iter()
+            .map(|id| id.0.clone())
+            .collect::<Vec<_>>(),
+        expected,
+        "Queue Fill's data source is deterministically path-ordered"
+    );
+}
+
+#[test]
 fn test_search_parity_with_legacy_semantics() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
@@ -1642,72 +1749,6 @@ fn test_get_track_roundtrips_all_fields() {
         .get_track(&TrackId("f:\\missing.mp3".to_string()))
         .expect("get_track works");
     assert!(unknown.is_none(), "unknown ids resolve to None");
-}
-
-#[test]
-fn test_load_collection_rebuilds_mirror_compatible_snapshot() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
-
-    let mut t_two = library_track("f:\\first\\c.mp3", "Two", Some("Alpha"), "First", None);
-    t_two.metadata.track_number = Some(2);
-    let t_no_number = library_track(
-        "f:\\first\\b.mp3",
-        "No Number",
-        Some("Alpha"),
-        "First",
-        None,
-    );
-    let mut t_one = library_track("f:\\first\\a.mp3", "One", Some("Alpha"), "First", None);
-    t_one.metadata.track_number = Some(1);
-    let second = library_track("f:\\second\\x.mp3", "X", Some("Alpha"), "Second", None);
-    let beta = library_track("f:\\beta\\y.mp3", "Y", Some("Beta"), "Only", None);
-
-    // Insertion order deliberately differs from track-number order.
-    store
-        .apply_scan_batch(&[t_two.clone(), t_no_number.clone(), beta.clone()])
-        .expect("batch 1 applies");
-    store
-        .apply_scan_batch(&[second.clone(), t_one.clone()])
-        .expect("batch 2 applies");
-
-    let collection = store.load_collection().expect("collection loads");
-
-    assert_eq!(collection.tracks.len(), 5, "all tracks hydrate by path key");
-    assert!(collection.tracks.contains_key(&t_one.id));
-
-    // Albums keyed by the legacy composite format; album tracks ordered by
-    // number with missing numbers first (legacy unwrap_or(0) behavior),
-    // path tiebreak.
-    let first = collection
-        .albums
-        .iter()
-        .find(|a| a.artist == "Alpha" && a.title == "First")
-        .expect("Alpha - First exists");
-    assert_eq!(
-        first.tracks,
-        vec![t_no_number.id.clone(), t_one.id.clone(), t_two.id.clone()],
-        "album tracks ordered by number, missing numbers first, path tiebreak"
-    );
-
-    // Artists list their albums as composite keys in first-added order.
-    let alpha = collection
-        .artists
-        .iter()
-        .find(|a| a.name == "Alpha")
-        .expect("Alpha exists");
-    assert_eq!(
-        alpha.albums,
-        vec!["Alpha - First".to_string(), "Alpha - Second".to_string()],
-        "artist's album keys follow first-added order"
-    );
-    let beta = collection
-        .artists
-        .iter()
-        .find(|a| a.name == "Beta")
-        .expect("Beta exists");
-    assert_eq!(beta.albums, vec!["Beta - Only".to_string()]);
 }
 
 // --- Application Store: collection event transactions (ticket 06) -----------
@@ -2089,72 +2130,6 @@ fn browsing_track(
     }
 }
 
-/// The former in-memory rendering pipeline, replicated exactly as the UI
-/// computed it after startup hydration: artists sorted A–Z by name, an
-/// artist's albums newest-first (missing year as 0) then title, and album
-/// tracks stably re-sorted by track number with missing numbers as 0.
-///
-/// The mirror is hydrated from a [`LibraryCollection`] exactly the way
-/// `load_persisted_state` did it, because that hydrated shape — not the
-/// mid-scan accumulation state — is the authoritative state users browsed
-/// across restarts (`add_track`'s transient sort-before-insert quirk only
-/// ever affected freshly scanned sessions and self-healed at next launch).
-mod prior_logic {
-    use super::*;
-
-    /// Hydrate the transitional mirror exactly like `load_persisted_state`.
-    pub fn hydrate(collection: riff::app::store::LibraryCollection) -> LibraryManager {
-        let mut library = LibraryManager::new();
-        for artist in collection.artists {
-            library.artists.insert(artist.name.clone(), artist);
-        }
-        for album in collection.albums {
-            let key = format!("{} - {}", album.artist, album.title);
-            library.albums.insert(key, album);
-        }
-        for track in collection.tracks.into_values() {
-            library.tracks.insert(track.id.clone(), track);
-        }
-        library
-    }
-
-    pub fn artists_az(library: &LibraryManager) -> Vec<String> {
-        let mut all: Vec<_> = library.all_artists().into_iter().cloned().collect();
-        all.sort_by(|a, b| a.name.cmp(&b.name));
-        all.into_iter().map(|a| a.name).collect()
-    }
-
-    pub fn artist_albums(library: &LibraryManager, artist: &str) -> Vec<(String, Option<u32>)> {
-        let mut albums: Vec<_> = library
-            .get_artist_albums(artist)
-            .into_iter()
-            .cloned()
-            .collect();
-        albums.sort_by(|a, b| {
-            b.year
-                .unwrap_or(0)
-                .cmp(&a.year.unwrap_or(0))
-                .then_with(|| a.title.cmp(&b.title))
-        });
-        albums.into_iter().map(|a| (a.title, a.year)).collect()
-    }
-
-    pub fn album_tracks(library: &LibraryManager, album_key: &str) -> Vec<TrackId> {
-        let mut ids: Vec<TrackId> = library
-            .get_album_tracks(album_key)
-            .into_iter()
-            .map(|t| t.id.clone())
-            .collect();
-        ids.sort_by_key(|tid| {
-            library
-                .get_track(tid)
-                .and_then(|t| t.metadata.track_number)
-                .unwrap_or(0)
-        });
-        ids
-    }
-}
-
 /// An independent Rust-only restatement of the three browsing orderings,
 /// computed straight from the fixture list with the former comparators. The
 /// SQL queries must agree with this without going through any shared code.
@@ -2308,9 +2283,10 @@ fn browsing_fixtures() -> Vec<Track> {
 }
 
 #[test]
-fn test_browsing_queries_match_prior_in_memory_orderings() {
+fn test_browsing_queries_match_independent_reference_orderings() {
     // Both sides receive the identical fixtures in the identical insertion
-    // order; only the ordering pipelines differ (SQL vs former Rust sorts).
+    // order; only the ordering pipelines differ (SQL vs an independent Rust
+    // restatement of the former comparators).
     let fixtures = browsing_fixtures();
 
     // Store side: the whole fixture set through one scan commit.
@@ -2319,21 +2295,7 @@ fn test_browsing_queries_match_prior_in_memory_orderings() {
     let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
     store.apply_scan_batch(&fixtures).expect("batch applies");
 
-    // Prior side: the hydrated mirror, built exactly as startup hydration
-    // built it, then read through the former getters + UI comparators.
-    let library = prior_logic::hydrate(store.load_collection().expect("collection loads"));
-
     // Artists A–Z.
-    assert_eq!(
-        store
-            .all_artists()
-            .expect("artists query")
-            .iter()
-            .map(|a| a.name.clone())
-            .collect::<Vec<_>>(),
-        prior_logic::artists_az(&library),
-        "SQL artist order must match the former in-memory rendering"
-    );
     assert_eq!(
         store
             .all_artists()
@@ -2353,31 +2315,11 @@ fn test_browsing_queries_match_prior_in_memory_orderings() {
             .iter()
             .map(|a| (a.title.clone(), a.year))
             .collect::<Vec<_>>(),
-        prior_logic::artist_albums(&library, "Zeta"),
-        "SQL album order must match the former in-memory rendering"
-    );
-    assert_eq!(
-        store
-            .artist_albums("Zeta")
-            .expect("albums query")
-            .iter()
-            .map(|a| (a.title.clone(), a.year))
-            .collect::<Vec<_>>(),
         reference_order::artist_albums(&fixtures, "Zeta"),
         "SQL album order must match the independent reference ordering"
     );
 
     // Album tracks: number then filename, missing numbers first, ties by path.
-    assert_eq!(
-        store
-            .album_tracks("Zeta", "New Wave")
-            .expect("album tracks query")
-            .iter()
-            .map(|t| t.id.clone())
-            .collect::<Vec<_>>(),
-        prior_logic::album_tracks(&library, "Zeta - New Wave"),
-        "SQL album-track order must match the former in-memory rendering"
-    );
     assert_eq!(
         store
             .album_tracks("Zeta", "New Wave")
@@ -2521,7 +2463,7 @@ fn test_browsing_works_straight_from_a_freshly_reopened_store() {
             .expect("batch applies");
     } // store dropped: connection closed like an app restart.
 
-    // Reopened cold — no load_collection hydration, no warm-up of any kind.
+    // Reopened cold — no hydration, no warm-up of any kind.
     let reopened = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
     let artists = reopened.all_artists().expect("artists query");
     assert_eq!(artists.len(), 1);
@@ -2596,14 +2538,74 @@ fn seeded_folder_store(dir: &tempfile::TempDir) -> riff::infra::store::SqliteSto
     store
 }
 
+/// An independent Rust-only restatement of the former in-memory folder
+/// logic, computed straight from the fixture list with pure `Path` ops
+/// (including the `is_dir()` stats the original performed). The SQL queries
+/// must agree with this without going through any shared code.
+mod folder_reference {
+    use super::*;
+    use std::path::Path;
+
+    pub fn has_audio(tracks: &[Track], folder: &Path) -> bool {
+        tracks.iter().any(|t| t.file_path.starts_with(folder))
+    }
+
+    pub fn tree_ids(tracks: &[Track], folder: &Path) -> Vec<TrackId> {
+        let mut ids: Vec<TrackId> = tracks
+            .iter()
+            .filter(|t| t.file_path.starts_with(folder))
+            .map(|t| t.id.clone())
+            .collect();
+        ids.sort_by(|a, b| {
+            let path_of = |id: &TrackId| tracks.iter().find(|t| &t.id == id).map(|t| &t.file_path);
+            path_of(a).cmp(&path_of(b))
+        });
+        ids
+    }
+
+    pub fn direct_ids(tracks: &[Track], folder: &Path) -> Vec<TrackId> {
+        let mut direct: Vec<&Track> = tracks
+            .iter()
+            .filter(|t| t.file_path.parent() == Some(folder))
+            .collect();
+        direct.sort_by(|a, b| {
+            a.metadata
+                .track_number
+                .unwrap_or(0)
+                .cmp(&b.metadata.track_number.unwrap_or(0))
+                .then_with(|| a.file_path.file_name().cmp(&b.file_path.file_name()))
+        });
+        direct.into_iter().map(|t| t.id.clone()).collect()
+    }
+
+    pub fn subdirs(tracks: &[Track], folder: &Path) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for track in tracks {
+            let track_path = &track.file_path;
+            if !track_path.starts_with(folder) {
+                continue;
+            }
+            let Ok(relative) = track_path.strip_prefix(folder) else {
+                continue;
+            };
+            if let Some(first_component) = relative.iter().next() {
+                let child_dir = folder.join(first_component);
+                if child_dir.is_dir() && seen.insert(child_dir.clone()) {
+                    dirs.push(child_dir);
+                }
+            }
+        }
+        dirs.sort();
+        dirs
+    }
+}
+
 #[test]
-fn test_folder_queries_match_prior_in_memory_logic() {
+fn test_folder_queries_match_independent_reference_logic() {
     let dir = tempfile::tempdir().unwrap();
     let store = seeded_folder_store(&dir);
-
-    // Prior side: the hydrated mirror read through the former in-memory
-    // implementations verbatim (including its is_dir() stats).
-    let library = prior_logic::hydrate(store.load_collection().expect("collection loads"));
+    let fixtures = folder_fixtures(dir.path());
 
     // Probe folders: roots, mid-level, leaves, special-char names, the
     // sibling-prefix trap pair, a file path used as a folder, and a folder
@@ -2631,21 +2633,16 @@ fn test_folder_queries_match_prior_in_memory_logic() {
 
         assert_eq!(
             store.folder_has_audio(&probe).expect("has_audio"),
-            library.folder_has_audio(&probe),
-            "folder_has_audio({label}) must match prior logic"
+            folder_reference::has_audio(&fixtures, &probe),
+            "folder_has_audio({label}) must match the reference logic"
         );
 
         assert_eq!(
             store.track_ids_in_folder_tree(&probe).expect("tree ids"),
-            library.track_ids_in_folder_tree(&probe),
-            "track_ids_in_folder_tree({label}) must match prior logic"
+            folder_reference::tree_ids(&fixtures, &probe),
+            "track_ids_in_folder_tree({label}) must match the reference logic"
         );
 
-        let prior_direct: Vec<TrackId> = library
-            .tracks_in_folder(&probe)
-            .into_iter()
-            .map(|t| t.id.clone())
-            .collect();
         assert_eq!(
             store
                 .tracks_in_folder(&probe)
@@ -2653,14 +2650,14 @@ fn test_folder_queries_match_prior_in_memory_logic() {
                 .iter()
                 .map(|t| t.id.clone())
                 .collect::<Vec<_>>(),
-            prior_direct,
-            "tracks_in_folder({label}) must match prior order and membership"
+            folder_reference::direct_ids(&fixtures, &probe),
+            "tracks_in_folder({label}) must match the reference order and membership"
         );
 
         assert_eq!(
             store.subdirs_with_audio(&probe).expect("subdirs"),
-            library.subdirs_with_audio(&probe),
-            "subdirs_with_audio({label}) must match prior logic"
+            folder_reference::subdirs(&fixtures, &probe),
+            "subdirs_with_audio({label}) must match the reference logic"
         );
     }
 }
@@ -2883,19 +2880,14 @@ fn smart_track(
     }
 }
 
-/// Seed the fixture library: scan batches persist metadata + `date_added`;
-/// play history is written through direct updates exactly like the
-/// tag-refresh tests do (the scan upsert deliberately never touches
-/// history columns).
-fn seeded_smart_store(db_path: &std::path::Path) -> riff::infra::store::SqliteStore {
+/// The fixture library, shared by the store seeding and the independent
+/// smart-playlist reference oracle.
+fn smart_fixtures() -> Vec<Track> {
     let now = SystemTime::now();
     let days_ago = |days: u64| now - Duration::from_secs(days * 86_400);
     let epoch_plus = |secs: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
 
-    let mut store =
-        riff::infra::store::SqliteStore::open_and_migrate(db_path).expect("fresh store must open");
-
-    let fixtures = vec![
+    vec![
         smart_track(
             "f:\\sm\\zebra.mp3",
             Some("Zebra"),
@@ -2975,7 +2967,18 @@ fn seeded_smart_store(db_path: &std::path::Path) -> riff::infra::store::SqliteSt
             Some(days_ago(30)),
             Some(epoch_plus(3_000)),
         ),
-    ];
+    ]
+}
+
+/// Seed the fixture library: scan batches persist metadata + `date_added`;
+/// play history is written through direct updates exactly like the
+/// tag-refresh tests do (the scan upsert deliberately never touches
+/// history columns).
+fn seeded_smart_store(db_path: &std::path::Path) -> riff::infra::store::SqliteStore {
+    let mut store =
+        riff::infra::store::SqliteStore::open_and_migrate(db_path).expect("fresh store must open");
+
+    let fixtures = smart_fixtures();
 
     store.apply_scan_batch(&fixtures).expect("fixtures apply");
 
@@ -2999,14 +3002,88 @@ fn seeded_smart_store(db_path: &std::path::Path) -> riff::infra::store::SqliteSt
     store
 }
 
+/// An independent Rust-only restatement of the four smart-playlist
+/// computations, straight from the fixture list with the former comparators.
+/// The SQL implementations must agree with this without going through any
+/// shared code. Exercising [`LOST_GEMS_THRESHOLD`] here also pins the
+/// relocated constant to the semantics it parameterizes.
+mod smart_reference {
+    use super::*;
+    use riff::app::store::LOST_GEMS_THRESHOLD;
+
+    pub fn playlist(tracks: &[Track], kind: SmartPlaylistKind, limit: usize) -> Vec<TrackId> {
+        let mut selected: Vec<&Track> = match kind {
+            SmartPlaylistKind::RecentlyAdded => {
+                // Sorted by the stored `date_added`, deliberately NOT the
+                // filesystem mtime; newest first, path tiebreak.
+                let mut dated: Vec<(SystemTime, &Track)> = tracks
+                    .iter()
+                    .filter_map(|t| t.date_added.map(|added| (added, t)))
+                    .collect();
+                dated.sort_by(|(added_a, a), (added_b, b)| {
+                    added_b
+                        .cmp(added_a)
+                        .then_with(|| a.file_path.cmp(&b.file_path))
+                });
+                dated.into_iter().map(|(_, t)| t).collect()
+            }
+            SmartPlaylistKind::MostPlayed => {
+                let mut played: Vec<&Track> = tracks.iter().filter(|t| t.play_count > 0).collect();
+                played.sort_by(|a, b| {
+                    b.play_count
+                        .cmp(&a.play_count)
+                        .then_with(|| {
+                            a.metadata
+                                .display_title(&a.file_path)
+                                .cmp(&b.metadata.display_title(&b.file_path))
+                        })
+                        .then_with(|| a.file_path.cmp(&b.file_path))
+                });
+                played
+            }
+            SmartPlaylistKind::NeverPlayed => {
+                let mut unplayed: Vec<&Track> =
+                    tracks.iter().filter(|t| t.play_count == 0).collect();
+                unplayed.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+                unplayed
+            }
+            SmartPlaylistKind::LostGems => {
+                // Unheard for 90+ days: last played older than the threshold
+                // OR never played at all. Once-played gems come first,
+                // longest-unheard first; never-played tracks fill the tail in
+                // path order.
+                let mut gems: Vec<(SystemTime, &Track)> = tracks
+                    .iter()
+                    .filter_map(|t| t.last_played.map(|last| (last, t)))
+                    .filter(|(last, _)| match last.elapsed() {
+                        Ok(age) => age > LOST_GEMS_THRESHOLD,
+                        // A clock anomaly (last_played in the future) counts
+                        // as "very old" rather than excluding the track.
+                        Err(_) => true,
+                    })
+                    .collect();
+                gems.sort_by(|(last_a, a), (last_b, b)| {
+                    last_a
+                        .cmp(last_b)
+                        .then_with(|| a.file_path.cmp(&b.file_path))
+                });
+                let mut unheard: Vec<&Track> =
+                    tracks.iter().filter(|t| t.last_played.is_none()).collect();
+                unheard.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+                gems.into_iter().map(|(_, t)| t).chain(unheard).collect()
+            }
+        };
+        selected.truncate(limit);
+        selected.into_iter().map(|t| t.id.clone()).collect()
+    }
+}
+
 #[test]
-fn test_smart_playlists_match_prior_in_memory_logic() {
+fn test_smart_playlists_match_independent_reference_logic() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
     let store = seeded_smart_store(&db_path);
-
-    // Prior side: the hydrated mirror running the original implementation.
-    let library = prior_logic::hydrate(store.load_collection().expect("collection loads"));
+    let fixtures = smart_fixtures();
 
     for kind in [
         SmartPlaylistKind::MostPlayed,
@@ -3022,8 +3099,8 @@ fn test_smart_playlists_match_prior_in_memory_logic() {
                     .iter()
                     .map(|t| t.id.clone())
                     .collect::<Vec<_>>(),
-                library.smart_playlist(kind, limit),
-                "smart_playlist({kind:?}, {limit}) must match prior logic"
+                smart_reference::playlist(&fixtures, kind, limit),
+                "smart_playlist({kind:?}, {limit}) must match the reference logic"
             );
         }
     }

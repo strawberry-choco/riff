@@ -11,7 +11,7 @@ The table below lists the threads that make up a running instance. Four are spaw
 | Thread | Responsibility | Spawned in |
 |--------|----------------|------------|
 | Main / egui event loop | Runs the eframe event loop, renders the UI, handles user input, reads `AppState` each frame, polls incoming channels. Must never block. | `main.rs` (`eframe::run_native`) |
-| Audio engine | Owns the decoder and the audio output. Drives the decode loop, writes samples into the shared buffer, handles every `PlaybackCommand`, and emits `PlaybackUpdate` messages. | `main.rs` (`run_audio_engine`) |
+| Audio engine | Owns the decoder and the audio output. Drives the decode loop, writes samples into the shared buffer, handles every `PlaybackCommand`, and emits `PlaybackUpdate` messages. | `main.rs` (spawns the thread; engine loop is `AudioEngine::run` in `src/app/audio_engine.rs`) |
 | Update processor | Receives `PlaybackUpdate` messages and mutates `Arc<Mutex<AppState>>`. Auto-advances the queue on `TrackEnded`. | `main.rs` |
 | cpal callback | OS real-time audio thread. Pops samples from the shared buffer via `try_lock` and writes them to the audio device. Never blocks. | Owned by cpal / OS |
 | Library scanner | Receives `LibraryCommand`s, walks the filesystem with `walkdir`, reads metadata in chunks, and emits `LibraryUpdate`s. | `main.rs` |

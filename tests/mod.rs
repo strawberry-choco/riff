@@ -226,6 +226,10 @@ pub mod mocks {
         pub written: Vec<Vec<f32>>,
         pub volumes: Vec<f32>,
         pub clear_count: usize,
+        /// The rate reported by the `AudioOutput::effective_sample_rate`
+        /// trait method — what a real output's stream was actually built
+        /// with. Defaults to 44.1 kHz like `CpalAudioOutput::new`.
+        effective_sample_rate: u32,
         buffer: Vec<f32>,
     }
 
@@ -240,8 +244,15 @@ pub mod mocks {
                 written: Vec::new(),
                 volumes: Vec::new(),
                 clear_count: 0,
+                effective_sample_rate: 44_100,
                 buffer: Vec::new(),
             }
+        }
+
+        /// Set the value reported by
+        /// [`effective_sample_rate`](riff::app::traits::AudioOutput::effective_sample_rate).
+        pub fn set_effective_sample_rate(&mut self, rate: u32) {
+            self.effective_sample_rate = rate;
         }
     }
 
@@ -281,6 +292,10 @@ pub mod mocks {
 
         fn set_volume(&mut self, volume: f32) {
             self.volumes.push(volume);
+        }
+
+        fn effective_sample_rate(&self) -> u32 {
+            self.effective_sample_rate
         }
 
         fn buffer_len(&self) -> usize {

@@ -3,6 +3,11 @@ use crate::domain::{CoverSource, TrackMetadata};
 use std::path::Path;
 use std::time::Duration;
 
+/// Factory for audio decoders: mints a fresh [`AudioDecoder`] on every call.
+/// The audio engine uses it for both its primary decoder and the gapless
+/// pre-decode decoder, so each owns independent codec state.
+pub type DecoderFactory = Box<dyn Fn() -> Box<dyn AudioDecoder> + Send>;
+
 /// Trait for audio decoders (implemented by infrastructure).
 pub trait AudioDecoder: Send {
     fn open(&mut self, path: &Path) -> Result<AudioFormatInfo, AppError>;
@@ -34,6 +39,15 @@ pub trait AudioOutput: Send {
     /// in the sample-scaling step. Default no-op so mocks/simple outputs need
     /// not implement it; `1.0` means no adjustment.
     fn set_replaygain(&mut self, _factor: f32) {}
+    /// The sample rate the output stream was ACTUALLY built with (Task 4.1).
+    /// On Windows WASAPI shared mode the device often locks to its default
+    /// rate (commonly 48 kHz) regardless of the requested rate, so this can
+    /// differ from the rate passed to [`Self::initialize`]. The gapless
+    /// format-compatibility gate compares against it. Defaults to the 44.1
+    /// kHz startup value.
+    fn effective_sample_rate(&self) -> u32 {
+        44_100
+    }
     /// Number of samples currently queued in the output buffer.
     fn buffer_len(&self) -> usize;
     /// Discard all queued samples without playing them.

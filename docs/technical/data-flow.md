@@ -9,7 +9,7 @@ This is the central flow. It begins with a click in the UI and ends with samples
 ```
 User clicks "Play" in the UI (src/ui/app.rs)
   -> UI sends PlaybackCommand::Play(track_id) over the command channel
-  -> Audio engine thread (run_audio_engine in src/main.rs) receives the command
+  -> Audio engine thread (AudioEngine::run in src/app/audio_engine.rs) receives the command
    -> Engine locks AppState and resolves the Track through the LibraryQueryStore
         port (the Application Store is the sole authority for track metadata;
         a store miss drops the play request)

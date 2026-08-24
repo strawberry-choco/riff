@@ -35,13 +35,6 @@ pub struct CpalAudioOutput {
 }
 
 impl CpalAudioOutput {
-    /// The sample rate the running (or last built) cpal stream actually uses.
-    /// See the `effective_sample_rate` field — this is what the gapless
-    /// format-compatibility gate in the engine compares against (Task 4.1).
-    pub fn effective_sample_rate(&self) -> u32 {
-        self.effective_sample_rate
-    }
-
     pub fn new() -> Self {
         Self {
             host: cpal::default_host(),
@@ -208,6 +201,10 @@ impl AudioOutput for CpalAudioOutput {
     fn set_replaygain(&mut self, factor: f32) {
         self.replaygain
             .store(f32::to_bits(factor), Ordering::Relaxed);
+    }
+
+    fn effective_sample_rate(&self) -> u32 {
+        self.effective_sample_rate
     }
 }
 

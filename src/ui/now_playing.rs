@@ -23,8 +23,7 @@ use super::library::{glow_color, GLOW_LAYERS};
 use super::playerbar;
 use super::sidebar::{self, TreeRow};
 use super::theme::{self, Palette};
-use crate::app::library_manager::LibraryManager;
-use crate::domain::{PlaybackQueue, TrackId, TrackMetadata};
+use crate::domain::{Track, TrackId, TrackMetadata};
 
 // --- Mockup dimensions ---------------------------------------------------------
 
@@ -121,27 +120,24 @@ pub struct NowPlayingContent {
 
 // --- Pure helpers -------------------------------------------------------------------
 
-/// Build the Up Next rows from the Playback Queue: the tracks after the
-/// current one, in the QUEUE's own order (shuffle included), capped at
-/// `limit`, skipping entries whose files have left the library.
+/// Build the Up Next rows from the playback projection's resolved window:
+/// the tracks after the current one, in the QUEUE's own order (shuffle
+/// included), capped at `limit`. The queue-to-window mapping and the skip of
+/// entries whose files have left the library live in
+/// [`crate::app::projection::PlaybackProjection`]; this is the pure label
+/// formatting over its result.
 #[must_use]
-pub fn up_next_entries(
-    queue: &PlaybackQueue,
-    library: &LibraryManager,
-    limit: usize,
-) -> Vec<UpNextEntry> {
-    queue
-        .upcoming(limit)
-        .into_iter()
-        .filter_map(|tid| {
-            library.get_track(tid).map(|t| UpNextEntry {
-                id: tid.clone(),
-                label: format!(
-                    "{} - {}",
-                    t.metadata.display_artist(),
-                    t.metadata.display_title(&t.file_path)
-                ),
-            })
+pub fn up_next_entries(up_next: &[Track], limit: usize) -> Vec<UpNextEntry> {
+    up_next
+        .iter()
+        .take(limit)
+        .map(|t| UpNextEntry {
+            id: t.id.clone(),
+            label: format!(
+                "{} - {}",
+                t.metadata.display_artist(),
+                t.metadata.display_title(&t.file_path)
+            ),
         })
         .collect()
 }

@@ -141,7 +141,7 @@ mod tests {
         egui::Panel::top("titlebar")
             .exact_size(theme::TITLEBAR_H)
             .frame(egui::Frame::NONE)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 show_titlebar(ui, &mut cache, &palette, &content);
             });
 
@@ -151,7 +151,7 @@ mod tests {
         egui::Panel::left("sidebar")
             .exact_size(theme::SIDEBAR_W)
             .resizable(false)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.add_space(12.0);
                 ui.heading("Library");
                 ui.add_space(8.0);
@@ -165,7 +165,7 @@ mod tests {
         // lands with issue 08; the shell pins the strip itself).
         egui::Panel::bottom("playerbar")
             .exact_size(theme::PLAYERBAR_H)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.centered_and_justified(|ui| {
                     ui.weak("player bar");
                 });
@@ -174,7 +174,7 @@ mod tests {
         // Main stage: the active View's surface over the window background.
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(palette.background))
-            .show_inside(ui, |_| {});
+            .show(ui, |_| {});
     }
 
     // --- Sidebar baseline (Issue 07) ---------------------------------------------
@@ -213,7 +213,7 @@ mod tests {
             .exact_size(SIDEBAR_W)
             .resizable(false)
             .frame(egui::Frame::new().inner_margin(egui::Margin::same(12)))
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 let mut query = String::from("beeth");
                 sidebar::search_box(ui, &mut cache, &palette, &mut query);
                 ui.add_space(10.0);

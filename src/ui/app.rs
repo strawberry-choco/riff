@@ -875,7 +875,7 @@ impl eframe::App for RiffApp {
         egui::Panel::top("titlebar")
             .exact_size(theme::TITLEBAR_H)
             .frame(egui::Frame::NONE)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 let content = crate::ui::chrome::TitleBarContent {
                     scan_status: scan_status.as_deref(),
                     theme_dark: self.theme.dark,
@@ -909,7 +909,7 @@ impl eframe::App for RiffApp {
             .exact_size(theme::SIDEBAR_W)
             .resizable(false)
             .frame(egui::Frame::new().inner_margin(egui::Margin::same(12)))
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 self.render_library_sidebar(ui, &mut state, cmd.as_ref());
             });
 
@@ -919,7 +919,7 @@ impl eframe::App for RiffApp {
         // --- MAIN STAGE: exactly one View visible at a time ---
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(self.theme.active.background))
-            .show_inside(ui, |ui| match state.view_mode {
+            .show(ui, |ui| match state.view_mode {
                 ViewMode::Library => self.render_track_details_panel(ui, &mut state),
                 ViewMode::NowPlaying => self.show_now_playing_view(ui, &mut state, cmd.as_ref()),
                 ViewMode::Settings => {
@@ -1341,7 +1341,7 @@ impl RiffApp {
 
         egui::Panel::bottom("playerbar")
             .exact_size(theme::PLAYERBAR_H)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 for action in crate::ui::playerbar::show_player_bar(
                     ui,
                     &mut self.icons,

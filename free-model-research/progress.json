@@ -1,0 +1,58 @@
+{
+  "generated": "2026-08-23T00:00:00Z",
+  "phases": {
+    "setup": "done",
+    "research": "done",
+    "scoring": "done",
+    "deliver": "done"
+  },
+  "inventory": {
+    "opencode_free": [
+      "big-pickle",
+      "x-preview-f-free",
+      "mimo-v2.5-free",
+      "hy3-free",
+      "nemotron-3-ultra-free",
+      "nemotron-3.5-lightning-free",
+      "muse-spark-1.2-contributor-free"
+    ],
+    "sensenova": [
+      "sensenova-6.7-flash-lite",
+      "sensenova-u1-fast"
+    ],
+    "openrouter_free_candidates": [
+      "xiaomi/mimo-v2.5:free",
+      "nvidia/nemotron-3-5-lightning:free",
+      "meta/muse-spark-1.2:free",
+      "google/gemma-4-31b:free",
+      "deepseek-v4-flash:free",
+      "qwen/qwen3.5-plus:free"
+    ]
+  },
+  "rankings_overall_top5": [
+    "opencode/muse-spark-1.2-contributor-free",
+    "opencode/x-preview-f-free",
+    "opencode/mimo-v2.5-free",
+    "opencode/big-pickle",
+    "opencode/nemotron-3.5-lightning-free"
+  ],
+  "role_assignments": {
+    "default":  {"primary": "opencode/muse-spark-1.2-contributor-free",  "fallback": "opencode/mimo-v2.5-free"},
+    "task":     {"primary": "opencode/muse-spark-1.2-contributor-free",  "fallback": "opencode/big-pickle"},
+    "slow":     {"primary": "opencode/muse-spark-1.2-contributor-free",  "fallback": "opencode/big-pickle"},
+    "smol":     {"primary": "opencode/nemotron-3.5-lightning-free",      "fallback": "opencode/nemotron-3-ultra-free"},
+    "plan":     {"primary": "opencode/big-pickle",                       "fallback": "opencode/mimo-v2.5-free"},
+    "designer": {"primary": "opencode/mimo-v2.5-free",                   "fallback": "sensenova/sensenova-u1-fast"},
+    "vision":   {"primary": "opencode/mimo-v2.5-free",                   "fallback": "sensenova/sensenova-u1-fast"},
+    "commit":   {"primary": "opencode/nemotron-3.5-lightning-free",      "fallback": "opencode/nemotron-3-ultra-free"},
+    "tiny":     {"primary": "local (omp tiny-models)",                   "fallback": "opencode/nemotron-3.5-lightning-free"},
+    "advisor":  {"primary": "opencode/nemotron-3.5-lightning-free",      "fallback": "opencode/nemotron-3-ultra-free"}
+  },
+  "evidence": {
+    "muse_spark_12": { "intelligence_index": 54, "gdval_aa_v2_rank": 5, "terminal_bench_pct": 80, "source": "artificialanalysis.ai/articles/muse-spark-1-2" },
+    "mimo_v25": { "intelligence_index": 38.0, "coding_index": 56.8, "tau2_agentic_pct": 91, "gpqa_diamond_pct": 85, "source": "modelgrep.com/models/xiaomi/mimo-v2.5" },
+    "nemotron_35_lightning": { "intelligence_index": 24, "tok_per_sec": 670, "source": "artificialanalysis.ai/articles/nemotron-3-5-lightning-launch" },
+    "big_pickle": { "swe_atlas_qa_pct": 50.8, "trial_count": 1, "source": "news.lavx.hu (Aug 2026, single self-reported trial)" },
+    "ox_alpha": { "context": "1M", "modalities": ["text","image","video"], "source": "oxalpha.io" }
+  }
+}

@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn test_symphonia_decoder_new() {
-        let mut codec_registry = symphonia::core::codecs::CodecRegistry::new();
+        let mut codec_registry = symphonia::core::codecs::registry::CodecRegistry::new();
         symphonia::default::register_enabled_codecs(&mut codec_registry);
         let _decoder = SymphoniaDecoder::new(codec_registry);
         // Decoder creation test - we can't test much more without actual audio files

@@ -67,7 +67,7 @@ cargo build --release            # release build (LTO, stripped)
 
 ## Important Gotchas
 
-- **msrv**: `rust-version = "1.92"` in Cargo.toml (edition 2021). CI uses the stable toolchain.
+- **msrv**: `rust-version = "1.95"` in Cargo.toml (edition 2021; raised for egui 0.36). CI uses the stable toolchain.
 - **Release profile**: LTO, codegen-units=1, strip=true. `cargo build --release` takes longer but produces smaller binaries.
 - **Audio device**: Falls back to device default sample rate if the track's rate is unsupported (common on Windows WASAPI shared mode at 48 kHz).
 - **Tests live in `tests/`** — one integration crate rooted at `tests/mod.rs` (per-suite files are modules of it, not separate crates). App-layer tests drive the port traits via the shared mocks module; store tests run against real SQLite in `tempfile` scratch dirs at the infra seam.

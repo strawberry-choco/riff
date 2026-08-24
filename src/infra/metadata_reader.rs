@@ -63,51 +63,51 @@ impl LoftyMetadataReader {
             |item: &lofty::tag::TagItem| -> Option<String> { item.value().clone().into_string() };
 
         let mut metadata = TrackMetadata::default();
-        if let Some(item) = tag.get(&ItemKey::TrackTitle) {
+        if let Some(item) = tag.get(ItemKey::TrackTitle) {
             metadata.title = text_val(item);
         }
-        if let Some(item) = tag.get(&ItemKey::TrackArtist) {
+        if let Some(item) = tag.get(ItemKey::TrackArtist) {
             metadata.artist = text_val(item);
         }
-        if let Some(item) = tag.get(&ItemKey::AlbumTitle) {
+        if let Some(item) = tag.get(ItemKey::AlbumTitle) {
             metadata.album = text_val(item);
         }
-        if let Some(item) = tag.get(&ItemKey::AlbumArtist) {
+        if let Some(item) = tag.get(ItemKey::AlbumArtist) {
             metadata.album_artist = text_val(item);
         }
-        if let Some(item) = tag.get(&ItemKey::TrackNumber) {
+        if let Some(item) = tag.get(ItemKey::TrackNumber) {
             metadata.track_number = text_val(item).and_then(|s| s.parse::<u32>().ok());
         }
-        if let Some(item) = tag.get(&ItemKey::DiscNumber) {
+        if let Some(item) = tag.get(ItemKey::DiscNumber) {
             metadata.disc_number = text_val(item).and_then(|s| s.parse::<u32>().ok());
         }
-        if let Some(item) = tag.get(&ItemKey::Genre) {
+        if let Some(item) = tag.get(ItemKey::Genre) {
             metadata.genre = text_val(item);
         }
         // Year: a dedicated `Year` item wins (APE); otherwise the year is
         // the leading digits of a `RecordingDate` (ID3v2 `TDRC`, Vorbis
         // `DATE`, RIFF `ICRD`, MP4 `©day`). This mirrors what
-        // `Accessor::set_year` writes, so tags written through
-        // `LoftyMetadataWriter` round-trip when the file is re-read.
+        // `LoftyMetadataWriter` writes for years, so tags written through
+        // it round-trip when the file is re-read.
         metadata.year = tag
-            .get(&ItemKey::Year)
-            .or_else(|| tag.get(&ItemKey::RecordingDate))
+            .get(ItemKey::Year)
+            .or_else(|| tag.get(ItemKey::RecordingDate))
             .and_then(text_val)
             .and_then(|s| year_from_text(&s));
-        if let Some(item) = tag.get(&ItemKey::Comment) {
+        if let Some(item) = tag.get(ItemKey::Comment) {
             metadata.comment = text_val(item);
         }
-        if let Some(item) = tag.get(&ItemKey::Composer) {
+        if let Some(item) = tag.get(ItemKey::Composer) {
             metadata.composer = text_val(item);
         }
 
-        // ReplayGain (Task 4.3): `ItemKey` is not `Copy` in lofty 0.19, so the
-        // dedicated variants are passed by reference.
+        // ReplayGain (Task 4.3): the dedicated `ItemKey` variants are passed
+        // by value (`ItemKey` is `Copy` as of lofty 0.25).
         metadata.replaygain_track_gain = tag
-            .get_string(&ItemKey::ReplayGainTrackGain)
+            .get_string(ItemKey::ReplayGainTrackGain)
             .and_then(parse_replaygain_gain);
         metadata.replaygain_track_peak = tag
-            .get_string(&ItemKey::ReplayGainTrackPeak)
+            .get_string(ItemKey::ReplayGainTrackPeak)
             .and_then(|s| s.trim().parse::<f32>().ok());
 
         metadata

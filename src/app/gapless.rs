@@ -1,8 +1,8 @@
 //! Pure helpers for gapless playback (Task 4.1) and sample-exact position
 //! tracking.
 //!
-//! The audio engine lives in the binary (`src/main.rs`) and cannot be
-//! unit-tested headlessly (no audio device in CI), so every decision the
+//! The audio engine (`src/app/audio_engine.rs`) is too hardware-bound to
+//! exercise headlessly in CI (no audio device), so every decision the
 //! engine makes about gapless handoffs is factored into pure functions here
 //! and the engine calls THESE — the tested logic is the real logic.
 //!

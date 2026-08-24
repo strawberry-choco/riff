@@ -84,3 +84,7 @@ _Avoid_: watch status, Ready state
 A bounded in-memory view of Application Store query results used while rendering the UI; it is never authoritative.
 _Avoid_: cache, AppState snapshot
 
+**Audio Engine**:
+The module that turns Playback Commands into decoded audio and Playback Updates, owning decode scheduling, output startup, and gapless handoff; it decides nothing about queue order beyond filling an empty Playback Queue.
+_Avoid_: playback thread, sound server
+

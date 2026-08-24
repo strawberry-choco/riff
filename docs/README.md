@@ -59,9 +59,10 @@ What riff is, what it does, and how to use it.
 How riff is built and how it works at runtime.
 
 - [Architecture](technical/architecture.md) — the four-layer structure, dependency rules, boundary rules, per-layer rules, validation checklist, and anti-patterns.
+- [Deepening plan](technical/deepening-plan.md) — the settled two-part refactor plan from the 2026-08-23 architecture review (One Library, playback engine seam) with per-step status tracking for resumability.
 - [Threading model](technical/threading-model.md) — the seven threads, the crossbeam channels between them, shared state, and real-time constraints.
 - [Data flow](technical/data-flow.md) — step-by-step sequences for the three primary flows: play a track, scan a library, resolve cover art.
-- [Data model](technical/data-model.md) — the domain entities, `AppState`, `LibraryManager`, and the port traits.
+- [Data model](technical/data-model.md) — the domain entities, `AppState`, the Application Store ports, and the port traits.
 - [Dependencies](technical/dependencies.md) — every crate in `Cargo.toml` grouped by concern, with versions and purpose.
 - [Persistence](technical/persistence.md) — the Application Store (`riff.sqlite3`): schema, migrations, corruption recovery, save timing, Session Projections, Clear Library, and the in-memory cover-art LRU.
 - [Platform support](technical/platform-support.md) — the macOS/Windows/Linux feature matrix, conditional compilation, and why Linux omits the tray.

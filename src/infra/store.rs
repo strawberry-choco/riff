@@ -7,11 +7,10 @@
 //! [`AppError`]s rather than silent fallbacks.
 
 use crate::app::errors::AppError;
-use crate::app::library_manager::LOST_GEMS_THRESHOLD;
 use crate::app::state::{ScalarSettings, WatchState};
 use crate::app::store::{
-    LibraryCollection, LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings,
-    SettingsStore, StoreMigrations,
+    LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings, SettingsStore,
+    StoreGeneration, StoreMigrations, LOST_GEMS_THRESHOLD,
 };
 use crate::app::MutexExt;
 use crate::domain::{
@@ -498,6 +497,47 @@ impl PlaylistStore for SqliteStore {
             Ok(playlists)
         })
         .map_err(|e| AppError::InvalidOperation(format!("failed to load playlists: {e}")))
+    }
+
+    /// One Playlist's entries in playlist order, each with its Library
+    /// validity from a LEFT JOIN against tracks: `valid` is true exactly
+    /// when the referenced track row exists. Dangling references stay
+    /// listed with their track unset (ADR 0001); unknown playlist ids yield
+    /// an empty `Vec`.
+    fn load_playlist_entries(
+        &self,
+        id: &PlaylistId,
+    ) -> Result<Vec<crate::app::store::PlaylistEntry>, AppError> {
+        self.with_connection(|conn| {
+            // The two tables share no column names, so the unqualified
+            // [`TRACK_COLUMNS`] resolve to `tracks`; the trailing
+            // `e.track_id` (index [`TRACK_COLUMN_COUNT`]) is the entry's own
+            // reference, which survives the join even when dangling. A
+            // dangling row has NULL in every tracks column, so `path`
+            // (index 0) being NULL is the validity bit.
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {TRACK_COLUMNS}, e.track_id
+                 FROM playlist_entries e
+                 LEFT JOIN tracks ON tracks.path = e.track_id
+                 WHERE e.playlist_id = ?1
+                 ORDER BY e.position"
+            ))?;
+            let rows = stmt.query_map([&id.0], |row| {
+                let entry_id: String = row.get(TRACK_COLUMN_COUNT)?;
+                let track = if row.get::<_, Option<String>>(0)?.is_some() {
+                    Some(track_from_row(row)?)
+                } else {
+                    None
+                };
+                Ok(crate::app::store::PlaylistEntry {
+                    valid: track.is_some(),
+                    id: TrackId(entry_id),
+                    track,
+                })
+            })?;
+            rows.collect()
+        })
+        .map_err(|e| AppError::InvalidOperation(format!("failed to load playlist entries: {e}")))
     }
 
     /// One immediate durable transaction: the playlist row plus its initial
@@ -999,6 +1039,11 @@ const TRACK_COLUMNS: &str = "path, title, artist, album, album_artist,
             duration_nanos, sample_rate, channels,
             play_count, last_played_nanos, date_added_nanos";
 
+/// How many columns [`TRACK_COLUMNS`] expands to; result rows that append
+/// extra columns after them (e.g. the playlist-entries LEFT JOIN) index
+/// past this.
+const TRACK_COLUMN_COUNT: usize = 19;
+
 /// Escape SQL-LIKE wildcards and the escape character itself so a path
 /// component matches literally under `LIKE ... ESCAPE '#'`: `%` and `_`
 /// lose their wildcard meaning and a literal `#` cannot start an escape
@@ -1122,6 +1167,17 @@ impl LibraryQueryStore for SqliteStore {
         .map_err(|e| AppError::InvalidOperation(format!("failed to count tracks: {e}")))
     }
 
+    /// Every Track id, path-ascending — the canonical flat ordering
+    /// (ADR 0003) Queue Fill loads into the Playback Queue.
+    fn all_track_ids(&self) -> Result<Vec<TrackId>, AppError> {
+        self.with_connection(|conn| {
+            let mut stmt = conn.prepare("SELECT path FROM tracks ORDER BY path ASC")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0).map(TrackId))?;
+            rows.collect()
+        })
+        .map_err(|e| AppError::InvalidOperation(format!("failed to list track ids: {e}")))
+    }
+
     /// One bounded window of case-insensitive substring matches over title,
     /// artist, album, and album artist, path-ascending. The query is
     /// lowercased in Rust so `SQLite` never applies its own case folding
@@ -1164,91 +1220,6 @@ impl LibraryQueryStore for SqliteStore {
             .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
         })
         .map_err(|e| AppError::InvalidOperation(format!("failed to count matches: {e}")))
-    }
-
-    /// Full collection snapshot hydrating the transitional in-memory mirror:
-    /// albums keyed by the legacy `"album artist - title"` composite format,
-    /// artists listing their album keys in first-added order.
-    fn load_collection(&self) -> Result<LibraryCollection, AppError> {
-        self.with_connection(|conn| {
-            // Tracks in deterministic path order.
-            let mut stmt = conn.prepare(&format!(
-                "SELECT {TRACK_COLUMNS} FROM tracks ORDER BY path ASC"
-            ))?;
-            let tracks: Vec<Track> = stmt
-                .query_map([], track_from_row)?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            // Albums in first-added order; year/genre already carry the
-            // first-added-track derivation from write time.
-            let mut stmt =
-                conn.prepare("SELECT album_artist, title, year, genre FROM albums ORDER BY rowid")?;
-            let mut albums: Vec<Album> = stmt
-                .query_map([], |row| {
-                    Ok(Album {
-                        artist: row.get(0)?,
-                        title: row.get(1)?,
-                        year: narrow_u32(row.get(2)?),
-                        genre: row.get(3)?,
-                        tracks: Vec::new(),
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            // Album membership ordered by number with missing numbers first
-            // (legacy `unwrap_or(0)` sort) and a path tiebreak.
-            let mut stmt = conn.prepare(
-                "SELECT album_artist_key, album_title_key, path FROM tracks
-                 ORDER BY COALESCE(track_number, 0) ASC, path ASC",
-            )?;
-            let members = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?;
-            let mut membership: HashMap<(String, String), Vec<TrackId>> = HashMap::new();
-            for member in members {
-                let (artist, title, path) = member?;
-                membership
-                    .entry((artist, title))
-                    .or_default()
-                    .push(TrackId(path));
-            }
-            for album in &mut albums {
-                if let Some(ids) = membership.get(&(album.artist.clone(), album.title.clone())) {
-                    album.tracks.clone_from(ids);
-                }
-            }
-
-            // Artists A–Z with their album keys in first-added order.
-            let mut album_keys: HashMap<String, Vec<String>> = HashMap::new();
-            for album in &albums {
-                album_keys
-                    .entry(album.artist.clone())
-                    .or_default()
-                    .push(format!("{} - {}", album.artist, album.title));
-            }
-            let mut stmt = conn.prepare("SELECT name FROM artists ORDER BY name ASC")?;
-            let names: Vec<String> = stmt
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            let artists = names
-                .into_iter()
-                .map(|name| Artist {
-                    albums: album_keys.remove(&name).unwrap_or_default(),
-                    name,
-                })
-                .collect();
-
-            Ok(LibraryCollection {
-                tracks: tracks.into_iter().map(|t| (t.id.clone(), t)).collect(),
-                artists,
-                albums,
-            })
-        })
-        .map_err(|e| AppError::InvalidOperation(format!("failed to load collection: {e}")))
     }
 
     /// Every artist name-ascending (byte-wise, matching the former UI sort
@@ -1340,8 +1311,7 @@ impl LibraryQueryStore for SqliteStore {
     }
 
     /// One album's tracks in full: track number ascending with missing
-    /// numbers first (the legacy `unwrap_or(0)` slot), path tiebreak — the
-    /// same ordering `load_collection` uses for album membership.
+    /// numbers first (the legacy `unwrap_or(0)` slot), path tiebreak.
     fn album_tracks(&self, album_artist: &str, album_title: &str) -> Result<Vec<Track>, AppError> {
         self.with_connection(|conn| {
             let mut stmt = conn.prepare(&format!(
@@ -1820,6 +1790,15 @@ impl PlaylistStore for MutexPlaylistStore {
         self.store.lock_or_recover().load_playlists()
     }
 
+    /// Load one Playlist's entries with validity through the shared
+    /// connection.
+    fn load_playlist_entries(
+        &self,
+        id: &PlaylistId,
+    ) -> Result<Vec<crate::app::store::PlaylistEntry>, AppError> {
+        self.store.lock_or_recover().load_playlist_entries(id)
+    }
+
     /// Create a Playlist through the shared connection.
     fn create_playlist(
         &mut self,
@@ -1872,49 +1851,84 @@ impl PlaylistStore for MutexPlaylistStore {
 /// `LibraryMutationStore` view of the shared store handle. One `SQLite`
 /// connection serves every store port, so every call locks the shared
 /// connection for the duration of its transaction.
+///
+/// The adapter owns the session [`StoreGeneration`]: every successfully
+/// committed mutation bumps it, so callers cannot forget to invalidate
+/// Session Projections (ADR 0002).
 #[derive(Clone)]
 pub struct MutexLibraryMutationStore {
     store: std::sync::Arc<std::sync::Mutex<SqliteStore>>,
+    generation: StoreGeneration,
 }
 
 impl MutexLibraryMutationStore {
-    /// Wrap the shared store handle.
+    /// Wrap the shared store handle together with the session generation
+    /// this adapter bumps after each committed mutation.
     #[must_use]
-    pub fn new(store: std::sync::Arc<std::sync::Mutex<SqliteStore>>) -> Self {
-        Self { store }
+    pub fn new(
+        store: std::sync::Arc<std::sync::Mutex<SqliteStore>>,
+        generation: StoreGeneration,
+    ) -> Self {
+        Self { store, generation }
     }
 }
 
 impl LibraryMutationStore for MutexLibraryMutationStore {
-    /// Apply one scan batch through the shared connection.
+    /// Apply one scan batch through the shared connection; bumps the
+    /// generation on commit.
     fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, AppError> {
-        self.store.lock_or_recover().apply_scan_batch(tracks)
+        let written = self.store.lock_or_recover().apply_scan_batch(tracks);
+        if written.is_ok() {
+            self.generation.bump();
+        }
+        written
     }
 
-    /// Record a finished play through the shared connection.
+    /// Record a finished play through the shared connection; bumps the
+    /// generation when the play was recorded.
     fn record_track_played(
         &mut self,
         id: &TrackId,
         played_at: SystemTime,
     ) -> Result<bool, AppError> {
-        self.store
+        let recorded = self
+            .store
             .lock_or_recover()
-            .record_track_played(id, played_at)
+            .record_track_played(id, played_at);
+        if matches!(recorded, Ok(true)) {
+            self.generation.bump();
+        }
+        recorded
     }
 
-    /// Apply a tag refresh through the shared connection.
+    /// Apply a tag refresh through the shared connection; bumps the
+    /// generation on commit.
     fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), AppError> {
-        self.store.lock_or_recover().apply_tag_refresh(track)
+        let applied = self.store.lock_or_recover().apply_tag_refresh(track);
+        if applied.is_ok() {
+            self.generation.bump();
+        }
+        applied
     }
 
-    /// Remove a library root through the shared connection.
+    /// Remove a library root through the shared connection; bumps the
+    /// generation on commit.
     fn remove_library_path(&mut self, root: &std::path::Path) -> Result<usize, AppError> {
-        self.store.lock_or_recover().remove_library_path(root)
+        let removed = self.store.lock_or_recover().remove_library_path(root);
+        if removed.is_ok() {
+            self.generation.bump();
+        }
+        removed
     }
 
-    /// Wipe the Library collection through the shared connection.
+    /// Wipe the Library collection through the shared connection; bumps the
+    /// generation on commit.
     fn clear_library(&mut self) -> Result<usize, AppError> {
-        self.store.lock_or_recover().clear_library()
+        let cleared = self.store.lock_or_recover().clear_library();
+        if cleared.is_ok() {
+            self.generation.bump();
+        }
+        cleared
     }
 }
 
@@ -1950,6 +1964,11 @@ impl LibraryQueryStore for MutexLibraryQueryStore {
         self.store.lock_or_recover().track_count()
     }
 
+    /// List every Track id through the shared connection.
+    fn all_track_ids(&self) -> Result<Vec<TrackId>, AppError> {
+        self.store.lock_or_recover().all_track_ids()
+    }
+
     /// Fetch one search window through the shared connection.
     fn search_window(
         &self,
@@ -1965,11 +1984,6 @@ impl LibraryQueryStore for MutexLibraryQueryStore {
     /// Count matches through the shared connection.
     fn search_count(&self, query: &str) -> Result<usize, AppError> {
         self.store.lock_or_recover().search_count(query)
-    }
-
-    /// Load the full collection snapshot through the shared connection.
-    fn load_collection(&self) -> Result<LibraryCollection, AppError> {
-        self.store.lock_or_recover().load_collection()
     }
 
     /// List every artist through the shared connection.

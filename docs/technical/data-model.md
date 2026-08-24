@@ -1,6 +1,6 @@
 # Data Model
 
-This document describes the concrete types that make up riff's state: the pure domain entities in `src/domain/`, the application-layer `AppState` and `LibraryManager`, and the port traits that define the boundary to infrastructure. The authoritative copy of persisted state lives in the Application Store (`riff.sqlite3`); see [./persistence.md](./persistence.md) for how each type is stored. For where these types live and how layers may use them, see [./architecture.md](./architecture.md).
+This document describes the concrete types that make up riff's state: the pure domain entities in `src/domain/`, the application-layer `AppState`, and the port traits that define the boundary to infrastructure. The Application Store (`riff.sqlite3`) is the single authoritative — and single — implementation of collection semantics: there is no second in-memory copy of the library, and views read the store through port queries and Session Projections. See [./persistence.md](./persistence.md) for how each type is stored and [./architecture.md](./architecture.md) for where these types live and how layers may use them.
 
 ## Domain Entities (`src/domain/`)
 
@@ -13,7 +13,7 @@ The domain layer has no external crate dependencies — no serde, no I/O. Its ty
 pub struct TrackId(pub String);
 ```
 
-A newtype wrapper around a `String`. A track's identity is its full file path: `TrackId::from_path` builds the id from `PathBuf::to_string_lossy()`. `TrackId` is `Hash` and `Eq` so it can key the library's `HashMap`s.
+A newtype wrapper around a `String`. A track's identity is its full file path: `TrackId::from_path` builds the id from `PathBuf::to_string_lossy()`. `TrackId` is `Hash` and `Eq`, and it keys the store's `tracks` table (primary key `path`) and playlist entries.
 
 ### Track
 
@@ -67,7 +67,7 @@ pub struct Album {
 }
 ```
 
-An aggregate of tracks grouped by album. In the library index it is keyed by a composite string of the form `"album_artist - album"`. `tracks` is kept sorted by track number.
+An aggregate of tracks grouped by album. The store keys albums by the composite `(album_artist, title)` pair, surfaced in queries as the `"album_artist - album"` string. `tracks` is kept sorted by track number (missing numbers first, path tiebreak).
 
 ### Artist
 
@@ -149,15 +149,15 @@ The playback queue and its shuffle/repeat state. `next()` and `previous()` imple
 
 ## Application State (`src/app/state.rs`)
 
-`AppState` is the single struct that holds all runtime state. It lives behind `Arc<Mutex<_>>`, is read by the UI every frame, and is written mostly by the update processor thread. It is never persisted as a whole: authoritative state lives in the Application Store, and views render from Session Projections over store queries.
+`AppState` is the single struct that holds all runtime state. It lives behind `Arc<Mutex<_>>`, is read by the UI every frame, and is written mostly by the update processor thread. It is never persisted as a whole: the library collection lives only in the Application Store and is read through port queries and Session Projections; playlists are a Session Projection refreshed from the store after each committed change.
 
 ```rust
 pub struct AppState {
-    pub library: LibraryManager,
     pub queue: PlaybackQueue,
     pub playback_state: PlaybackState,
     pub current_position: PlaybackPosition,
     pub current_volume: f32,
+    pub muted: bool,
     pub selected_track: Option<TrackId>,
     pub view_mode: ViewMode,
     pub window_visible: bool,
@@ -167,8 +167,10 @@ pub struct AppState {
     pub scan_status: Option<String>,
     pub browse_mode: BrowseMode,
     pub selected_folder: Option<PathBuf>,
-    pub show_artists_view: bool,
+    pub ui_flags: UiFlags,
     pub watch_states: HashMap<PathBuf, WatchState>,
+    pub replaygain_enabled: bool,
+    pub playlists: Vec<Playlist>,
 }
 ```
 
@@ -176,11 +178,11 @@ Field by field:
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `library` | `LibraryManager` | Transitional in-memory mirror of the indexed library; hydrated from the Application Store at startup, never persisted itself. |
 | `queue` | `PlaybackQueue` | Current playback queue and shuffle/repeat state. |
 | `playback_state` | `PlaybackState` | Stopped, Playing, or Paused. |
 | `current_position` | `PlaybackPosition` | Elapsed and total time for the current track. |
 | `current_volume` | `f32` | Playback volume (default `1.0`). |
+| `muted` | `bool` | Mute flag; independent of `current_volume` — the engine receives `effective_volume()`, so muting never moves the slider. |
 | `selected_track` | `Option<TrackId>` | The track selected in the UI details panel (view-independent). |
 | `view_mode` | `ViewMode` | Which top-level view is showing: `Library`, `NowPlaying`, or `Settings`. |
 | `window_visible` | `bool` | Whether the main window is visible (toggled from the tray). |
@@ -190,8 +192,10 @@ Field by field:
 | `scan_status` | `String` (optional) | A human-readable status/error line for the most recent scan or playback error. |
 | `browse_mode` | `BrowseMode` | Whether the sidebar shows the metadata hierarchy (`Library`) or the folder tree (`Folders`). |
 | `selected_folder` | `Option<PathBuf>` | The selected folder in Folders browse mode. |
-| `show_artists_view` | `bool` | Within Library browse mode, whether to show the artist/album hierarchy or a flat track list. |
+| `ui_flags` | `UiFlags` | Library-browser and accessibility flags: `show_artists_view`, `advanced_mode`, `high_contrast`. |
 | `watch_states` | `HashMap<PathBuf, WatchState>` | Per-path folder-watch state. |
+| `replaygain_enabled` | `bool` | Opt-in ReplayGain loudness normalization. |
+| `playlists` | `Vec<Playlist>` | Session Projection of the store's Playlists section; refreshed after each committed change, never authoritative. Playlists survive a Clear Library. |
 
 ### Supporting enums
 
@@ -204,19 +208,16 @@ pub enum WatchState { Disabled, Enabled, Warning(String) }  // default: Disabled
 
 `LibraryStatus` tracks a path through its scan lifecycle. `BrowseMode` and `ViewMode` select which UI is rendered. `WatchState` records whether folder watching is active, disabled by the user, or unavailable for a system reason (the `Warning` variant carries a human-readable reason); it persists in the Application Store's watch-state table.
 
-## LibraryManager (`src/app/library_manager.rs`)
+## Application Store Ports (`src/app/store.rs`)
 
-`LibraryManager` is the transitional in-memory mirror of the library index: hydrated from the Application Store at startup and written through during scans, but never persisted itself.
+The Application Store is riff's single authoritative persistent state — Library collection, Playlists, and Settings in one SQLite database. The app layer defines one port per section, and infrastructure (`SqliteStore` in `src/infra/store.rs`) implements them over a shared connection:
 
-```rust
-pub struct LibraryManager {
-    pub tracks: HashMap<TrackId, Track>,
-    pub artists: HashMap<String, Artist>,
-    pub albums: HashMap<String, Album>,
-}
-```
+- `SettingsStore` — load/save preferences: scalar settings, library paths, watch states.
+- `PlaylistStore` — playlist CRUD plus `load_playlist_entries`, which returns each entry as a `PlaylistEntry { id, track, valid }` with its Library validity computed by a SQL LEFT JOIN against tracks (dangling references stay listed with `valid == false`).
+- `LibraryMutationStore` — scan batches, play-history recording, targeted tag refresh, removal by root, and Clear Library. Every committed mutation bumps the session generation inside the mutation adapter, so Session Projections refetch.
+- `LibraryQueryStore` — all library reads: single-track lookup, bounded flat/search windows, canonical `all_track_ids()` ordering (path ascending) for Queue Fill, artist/album browsing, folder queries, smart playlists (parameterized by the relocated `LOST_GEMS_THRESHOLD`), and search counts.
 
-Beyond indexing, it provides search (`search`), lookup (`get_track`, `get_album_tracks`, `get_artist_albums`, `all_tracks`, `all_artists`, `all_albums`), folder-oriented helpers retained for parity reference (`tracks_in_folder`, `subdirs_with_audio`, `folder_has_audio`, `track_ids_in_folder_tree`), removal (`remove_track`, `remove_tracks_by_root`), and smart-playlist computation used as the parity baseline for the store's SQL implementations. Album keys are the composite `"album_artist - album"` string; artist keys are the album-artist name.
+Views never query SQLite directly: per-frame reads go through the Session Projections in `src/app/projection.rs` — bounded windows for the flat list and search, browsing/folder/smart-playlist caches, and the playback-side projection holding the current Track, the Up Next window, and the details panel's selected Track. All projections invalidate on generation bumps.
 
 ## Port Traits (`src/app/traits.rs`)
 

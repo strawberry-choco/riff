@@ -18,9 +18,9 @@ use crate::app::gapless::{
     elapsed_from_samples, formats_gapless_compatible, is_gapless_eligible, pre_buffer_cap,
     repeat_one_handoff_eligible, samples_from_duration, GaplessConditions, QueueConditions,
 };
-use crate::app::library_manager::LibraryManager;
+use crate::app::scan::build_tracks;
 use crate::app::state::AppState;
-use crate::app::store::{LibraryMutationStore, LibraryQueryStore, StoreGeneration};
+use crate::app::store::{LibraryMutationStore, LibraryQueryStore};
 use crate::app::traits::{AudioDecoder, AudioFormatInfo, AudioOutput};
 use crate::app::watcher_manager::WatcherManager;
 use crate::app::MutexExt;
@@ -61,10 +61,12 @@ fn main() {
     // Library collection ports over the same shared connection: scans write
     // through the mutation port, playback resolves through the query port,
     // and every committed mutation bumps this session-local generation so
-    // Session Projections know to refetch (ADR 0002).
-    let library_mutation_store = riff::infra::store::MutexLibraryMutationStore::new(store.clone());
-    let library_query_store = riff::infra::store::MutexLibraryQueryStore::new(store.clone());
+    // Session Projections know to refetch (ADR 0002). The mutation adapter
+    // owns the bump — callers cannot forget it.
     let store_generation = riff::app::store::StoreGeneration::new();
+    let library_mutation_store =
+        riff::infra::store::MutexLibraryMutationStore::new(store.clone(), store_generation.clone());
+    let library_query_store = riff::infra::store::MutexLibraryQueryStore::new(store.clone());
 
     let state = Arc::new(Mutex::new(AppState::new()));
     let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
@@ -88,18 +90,16 @@ fn main() {
         update_rx,
         cmd_tx.clone(),
         library_mutation_store.clone(),
-        store_generation.clone(),
     );
 
     // Library scan thread
     let cancel_flag = Arc::new(AtomicBool::new(false));
     spawn_library_scanner(
-        state.clone(),
         library_cmd_rx,
         library_update_tx,
         cancel_flag.clone(),
         library_mutation_store.clone(),
-        store_generation.clone(),
+        library_query_store.clone(),
     );
 
     let watcher_manager = spawn_fs_watcher(library_cmd_tx);
@@ -176,7 +176,6 @@ fn spawn_update_processor(
     update_rx: crossbeam_channel::Receiver<PlaybackUpdate>,
     cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
     mut mutation_store: riff::infra::store::MutexLibraryMutationStore,
-    generation: StoreGeneration,
 ) {
     let _handle = thread::spawn(move || {
         while let Ok(update) = update_rx.recv() {
@@ -194,7 +193,7 @@ fn spawn_update_processor(
                 }
                 PlaybackUpdate::TrackEnded => {
                     drop(locked);
-                    handle_track_ended(&state, &cmd_tx, &mut mutation_store, &generation);
+                    handle_track_ended(&state, &cmd_tx, &mut mutation_store);
                 }
                 PlaybackUpdate::Error(msg) => {
                     tracing::error!("Playback error: {}", msg);
@@ -212,27 +211,22 @@ fn spawn_update_processor(
 ///
 /// The play commits to the Application Store FIRST as its own single durable
 /// transaction (ticket 06), so a crash right after the track ends cannot lose
-/// it; only then does the transitional in-memory mirror catch up and the
-/// session generation bump so Session Projections refetch.
+/// it; the mutation adapter bumps the session generation so Session
+/// Projections refetch.
 fn handle_track_ended(
     state: &Arc<Mutex<AppState>>,
     cmd_tx: &crossbeam_channel::Sender<PlaybackCommand>,
     mutation_store: &mut riff::infra::store::MutexLibraryMutationStore,
-    generation: &StoreGeneration,
 ) {
     let finished_id = {
         let locked = state.lock_or_recover();
         locked.queue.current_track().cloned()
     };
     if let Some(finished_id) = finished_id {
+        // The mutation adapter bumps the session generation when the play
+        // commits; the mirror no longer tracks play history.
         match mutation_store.record_track_played(&finished_id, std::time::SystemTime::now()) {
-            Ok(true) => {
-                generation.bump();
-                state
-                    .lock_or_recover()
-                    .library
-                    .increment_play_count(&finished_id);
-            }
+            Ok(true) => {}
             Ok(false) => tracing::debug!(?finished_id, "finished track is not in the store"),
             Err(e) => tracing::error!("Failed to persist play history for {finished_id:?}: {e}"),
         }
@@ -257,14 +251,15 @@ fn handle_track_ended(
     }
 }
 
-/// Thread that receives [`LibraryCommand`]s and runs directory scans.
+/// Thread that receives [`LibraryCommand`]s and runs directory scans. The
+/// scan thread never touches `AppState`: it reads the store through the
+/// query port and commits through the mutation port.
 fn spawn_library_scanner(
-    state: Arc<Mutex<AppState>>,
     library_cmd_rx: crossbeam_channel::Receiver<LibraryCommand>,
     library_update_tx: crossbeam_channel::Sender<LibraryUpdate>,
     cancel_flag: Arc<AtomicBool>,
     mut mutation_store: riff::infra::store::MutexLibraryMutationStore,
-    generation: StoreGeneration,
+    query_store: riff::infra::store::MutexLibraryQueryStore,
 ) {
     let _handle = thread::spawn(move || {
         let reader = LoftyMetadataReader::new();
@@ -274,14 +269,13 @@ fn spawn_library_scanner(
                     cancel_flag.store(false, Ordering::Relaxed);
                     let scanner = AudioFileScanner::new(cancel_flag.clone());
                     scan_directory(
-                        &state,
                         &reader,
                         &scanner,
                         &path,
                         &library_update_tx,
                         &cancel_flag,
                         &mut mutation_store,
-                        &generation,
+                        &query_store,
                     );
                 }
                 LibraryCommand::CancelScan => {
@@ -294,19 +288,17 @@ fn spawn_library_scanner(
 
 /// Scan one directory in ~10-track batches. Every batch commits to the
 /// Application Store as ONE durable transaction first — an interrupted scan
-/// keeps all committed batches — then mirrors into the shared in-memory
-/// library that still serves views not yet migrated to store queries, and
-/// bumps the session generation so Session Projections refetch.
+/// keeps all committed batches — and the mutation adapter bumps the session
+/// generation so Session Projections refetch.
 #[allow(clippy::too_many_arguments)]
 fn scan_directory(
-    state: &Arc<Mutex<AppState>>,
     reader: &LoftyMetadataReader,
     scanner: &AudioFileScanner,
     path: &std::path::Path,
     library_update_tx: &crossbeam_channel::Sender<LibraryUpdate>,
     cancel_flag: &Arc<AtomicBool>,
     mutation_store: &mut riff::infra::store::MutexLibraryMutationStore,
-    generation: &StoreGeneration,
+    query_store: &riff::infra::store::MutexLibraryQueryStore,
 ) {
     let files = scanner.scan(path);
     let total = files.len();
@@ -320,30 +312,32 @@ fn scan_directory(
         let processed = i * chunk_size + chunk.len();
 
         // Skip paths the store already knows so rescans don't re-read
-        // unchanged metadata.
-        let fresh_paths: Vec<PathBuf> = {
-            let locked = state.lock_or_recover();
-            chunk
-                .iter()
-                .filter(|p| locked.library.get_track(&TrackId::from_path(p)).is_none())
-                .cloned()
-                .collect()
-        };
+        // unchanged metadata. One indexed primary-key lookup per path —
+        // cheap next to the tag I/O it saves, and the scan thread stays
+        // off `AppState` entirely.
+        let mut fresh_paths: Vec<PathBuf> = Vec::with_capacity(chunk.len());
+        for p in chunk {
+            match query_store.get_track(&TrackId::from_path(p)) {
+                Ok(None) => fresh_paths.push(p.clone()),
+                Ok(Some(_)) => {}
+                Err(e) => {
+                    // When the check fails, scan the path anyway: the store
+                    // upsert is idempotent and preserves play history.
+                    tracing::warn!("Freshness check failed for {p:?}: {e}");
+                    fresh_paths.push(p.clone());
+                }
+            }
+        }
 
         if !fresh_paths.is_empty() {
             // Per-file read failures are skipped inside `build_tracks`, so a
             // scan never aborts on one bad file.
-            let tracks = LibraryManager::build_tracks(fresh_paths, reader);
+            let tracks = build_tracks(fresh_paths, reader);
             if !tracks.is_empty() {
-                match mutation_store.apply_scan_batch(&tracks) {
-                    Ok(_) => {
-                        generation.bump();
-                        let mut locked = state.lock_or_recover();
-                        for track in tracks {
-                            locked.library.add_track(track);
-                        }
-                    }
-                    Err(e) => tracing::error!("Scan batch failed to commit: {e}"),
+                // The mutation adapter bumps the session generation on each
+                // committed batch.
+                if let Err(e) = mutation_store.apply_scan_batch(&tracks) {
+                    tracing::error!("Scan batch failed to commit: {e}");
                 }
             }
         }
@@ -661,19 +655,26 @@ impl AudioEngine {
     fn resolve_track(&mut self, track_id: &TrackId) -> Option<(PathBuf, f32)> {
         let mut state = self.state.lock_or_recover();
         if state.queue.tracks.is_empty() {
-            let all_ids: Vec<TrackId> = state
-                .library
-                .all_tracks()
-                .iter()
-                .map(|t| t.id.clone())
-                .collect();
-            if !all_ids.is_empty() {
-                state.queue.tracks = all_ids;
-                state.queue.current_index = state.queue.tracks.iter().position(|id| id == track_id);
-                // Reset shuffle state since the queue was replaced
-                state.queue.shuffle = false;
-                state.queue.shuffled_indices.clear();
-                state.queue.shuffle_history.clear();
+            // Queue Fill (glossary): the whole Library loads into the empty
+            // Playback Queue in canonical flat ordering (path ascending,
+            // ADR 0003 — deliberately replacing the mirror's HashMap-luck
+            // order), the requested TrackId becomes current, and shuffle
+            // resets. The data source is the Application Store; extraction
+            // of this use case above the engine seam is Part 2 step 2.
+            match self.library_queries.all_track_ids() {
+                Ok(all_ids) if !all_ids.is_empty() => {
+                    state.queue.tracks = all_ids;
+                    state.queue.current_index =
+                        state.queue.tracks.iter().position(|id| id == track_id);
+                    // Reset shuffle state since the queue was replaced
+                    state.queue.shuffle = false;
+                    state.queue.shuffled_indices.clear();
+                    state.queue.shuffle_history.clear();
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!("Failed to fill the queue from the store: {e}");
+                }
             }
         }
         // Playback resolves the track by TrackId from the Application Store.

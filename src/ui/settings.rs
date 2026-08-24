@@ -1225,20 +1225,14 @@ impl super::app::RiffApp {
         lib_cmd: Option<&Sender<LibraryCommand>>,
     ) {
         // Per-root indexed-track counts come from the store through the
-        // cached folder projection (component-wise subtree ids, invalidated
-        // by generation bumps) — never the former in-memory mirror.
-        let generation = self.store_generation.current();
+        // Session Views facade (component-wise subtree ids, invalidated by
+        // generation bumps) — never the former in-memory mirror.
         let content = SettingsContent {
             libraries: state
                 .library_paths
                 .iter()
                 .map(|path| {
-                    let indexed_tracks = self
-                        .folder_projection
-                        .subtree_ids(generation, path, &mut |f| {
-                            self.library_queries.track_ids_in_folder_tree(f)
-                        })
-                        .map_or(0, |ids| ids.len());
+                    let indexed_tracks = self.views.folder_subtree_ids(path).len();
                     LibraryRow {
                         path: path.clone(),
                         status: state

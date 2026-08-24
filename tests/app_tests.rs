@@ -641,632 +641,714 @@ mod tests {
         assert!(mock.save_watch_states(&HashMap::new()).is_err());
     }
 
-    // --- Session Projection: bounded views with generation invalidation -----
+    // --- Session Views facade: bounded views with generation invalidation ---
+    //
+    // The UI's single read seam over the Application Store (ADR 0002). Every
+    // scenario drives `SessionViews` through its public interface: a shared
+    // [`MockLibraryQueryStore`] stands in for the store port and a real
+    // `StoreGeneration` handle plays the mutation adapter's bumps.
 
-    use riff::app::projection::{ProjectionKey, TrackListProjection};
+    use crate::mocks::{FailingQuery, LibraryQueryCall, MockLibraryQueryStore};
+    use riff::app::store::{LibraryQueryStore, StoreGeneration};
+    use riff::app::views::SessionViews;
 
     /// Deterministic fixture row for a window slot.
     fn projection_track(n: usize) -> Track {
         crate::test_utils::create_test_track(&n.to_string(), &format!("f:\\{n}.mp3"))
     }
 
-    /// Counting fake loader standing in for the store query port: records
-    /// every (offset, limit) call and can fail exactly once on demand.
-    struct FakeLoader {
-        calls: Vec<(usize, usize)>,
-        fail_next: bool,
+    /// A flat fixture library of `rows` deterministic tracks.
+    fn flat_library(rows: usize) -> Vec<Track> {
+        (0..rows).map(projection_track).collect()
     }
 
-    impl FakeLoader {
-        fn new() -> Self {
-            Self {
-                calls: Vec::new(),
-                fail_next: false,
-            }
+    /// [`LibraryQueryStore`] view over one shared [`MockLibraryQueryStore`]
+    /// behind a mutex: the facade takes ownership of the port, so the test
+    /// keeps the other handle for assertions and post-wire configuration
+    /// changes (failure flags, mutated canned data).
+    #[derive(Clone)]
+    struct SharedMock(Arc<Mutex<MockLibraryQueryStore>>);
+
+    impl LibraryQueryStore for SharedMock {
+        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, AppError> {
+            self.0.lock().unwrap().get_track(id)
         }
 
-        fn fetch(&mut self, offset: usize, limit: usize) -> Result<Vec<Track>, AppError> {
-            self.calls.push((offset, limit));
-            if std::mem::take(&mut self.fail_next) {
-                return Err(AppError::InvalidOperation("loader boom".to_string()));
-            }
-            Ok((0..limit).map(|i| projection_track(offset + i)).collect())
+        fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, AppError> {
+            self.0.lock().unwrap().tracks_window(offset, limit)
         }
+
+        fn track_count(&self) -> Result<usize, AppError> {
+            self.0.lock().unwrap().track_count()
+        }
+
+        fn all_track_ids(&self) -> Result<Vec<TrackId>, AppError> {
+            self.0.lock().unwrap().all_track_ids()
+        }
+
+        fn search_window(
+            &self,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Track>, AppError> {
+            self.0.lock().unwrap().search_window(query, offset, limit)
+        }
+
+        fn search_count(&self, query: &str) -> Result<usize, AppError> {
+            self.0.lock().unwrap().search_count(query)
+        }
+
+        fn all_artists(&self) -> Result<Vec<Artist>, AppError> {
+            self.0.lock().unwrap().all_artists()
+        }
+
+        fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, AppError> {
+            self.0.lock().unwrap().artist_albums(artist)
+        }
+
+        fn album_tracks(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+        ) -> Result<Vec<Track>, AppError> {
+            self.0
+                .lock()
+                .unwrap()
+                .album_tracks(album_artist, album_title)
+        }
+
+        fn folder_has_audio(&self, folder: &std::path::Path) -> Result<bool, AppError> {
+            self.0.lock().unwrap().folder_has_audio(folder)
+        }
+
+        fn folder_has_search_match(
+            &self,
+            folder: &std::path::Path,
+            query: &str,
+        ) -> Result<bool, AppError> {
+            self.0
+                .lock()
+                .unwrap()
+                .folder_has_search_match(folder, query)
+        }
+
+        fn track_ids_in_folder_tree(
+            &self,
+            folder: &std::path::Path,
+        ) -> Result<Vec<TrackId>, AppError> {
+            self.0.lock().unwrap().track_ids_in_folder_tree(folder)
+        }
+
+        fn tracks_in_folder(&self, folder: &std::path::Path) -> Result<Vec<Track>, AppError> {
+            self.0.lock().unwrap().tracks_in_folder(folder)
+        }
+
+        fn subdirs_with_audio(&self, folder: &std::path::Path) -> Result<Vec<PathBuf>, AppError> {
+            self.0.lock().unwrap().subdirs_with_audio(folder)
+        }
+
+        fn smart_playlist(
+            &self,
+            kind: SmartPlaylistKind,
+            limit: usize,
+        ) -> Result<Vec<Track>, AppError> {
+            self.0.lock().unwrap().smart_playlist(kind, limit)
+        }
+    }
+
+    /// Test-side handle to the shared mock: locks on every access so
+    /// assertions read recordings and configuration tweaks mutate the canned
+    /// data behind the facade's back.
+    struct MockHandle(Arc<Mutex<MockLibraryQueryStore>>);
+
+    impl MockHandle {
+        fn lock(&self) -> std::sync::MutexGuard<'_, MockLibraryQueryStore> {
+            self.0.lock().unwrap()
+        }
+
+        /// Every bounded-window fetch as `(offset, limit)` pairs.
+        fn window_calls(&self) -> Vec<(usize, usize)> {
+            self.lock().window_calls()
+        }
+
+        /// Every `get_track` id, in call order.
+        fn get_track_calls(&self) -> Vec<TrackId> {
+            self.lock().get_track_calls()
+        }
+
+        /// How often one exact query shape fired.
+        fn count_of(&self, call: &LibraryQueryCall) -> usize {
+            self.lock().count_of(call)
+        }
+
+        /// Snapshot of every recorded query, in call order.
+        fn calls(&self) -> Vec<LibraryQueryCall> {
+            self.lock().calls()
+        }
+    }
+
+    /// Wire a facade to `mock`; returns the facade, the shared mock handle
+    /// for assertions and configuration, and the generation handle that
+    /// stands in for the mutation adapter's bumps.
+    fn wire(mock: MockLibraryQueryStore) -> (SessionViews, MockHandle, StoreGeneration) {
+        let mock = Arc::new(Mutex::new(mock));
+        let generation = StoreGeneration::new();
+        let views = SessionViews::new(Box::new(SharedMock(Arc::clone(&mock))), generation.clone());
+        (views, MockHandle(mock), generation)
     }
 
     #[test]
-    fn test_first_refresh_loads_requested_windows_and_total() {
-        let mut projection = TrackListProjection::new(ProjectionKey::Flat);
-        projection.request_window(0);
-        projection.request_window(50);
+    fn test_first_track_list_load_fetches_the_visible_windows_and_total() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            flat: flat_library(120),
+            ..Default::default()
+        });
 
-        let mut loader = FakeLoader::new();
-        projection
-            .refresh(1, 120, &mut |o, l| loader.fetch(o, l))
-            .expect("first refresh loads");
+        let page = views.track_list("", 0);
+        assert_eq!(page.total, 120);
+        assert_eq!(page.start, 0);
+        assert_eq!(page.rows.len(), 50);
+        assert_eq!(page.rows[0].id.0, "0");
 
-        assert_eq!(projection.total(), 120);
-        assert_eq!(projection.window(0).expect("window cached").len(), 50);
-        assert_eq!(projection.window(50).expect("window cached").len(), 50);
-        assert!(
-            projection.window(100).is_none(),
-            "unrequested windows stay unloaded"
-        );
+        let page = views.track_list("", 50);
+        assert_eq!(page.start, 50);
+        assert_eq!(page.rows.len(), 50);
+        assert_eq!(page.rows[49].id.0, "99");
+
         assert_eq!(
-            loader.calls,
+            mock.window_calls(),
             vec![(0, 50), (50, 50)],
             "each requested window is fetched once at the projection's window size"
         );
     }
 
     #[test]
-    fn test_same_generation_refresh_serves_cache_without_refetching() {
-        let mut projection = TrackListProjection::new(ProjectionKey::Flat);
-        projection.request_window(0);
-        let mut loader = FakeLoader::new();
-        projection
-            .refresh(1, 120, &mut |o, l| loader.fetch(o, l))
-            .unwrap();
+    fn test_same_generation_track_list_serves_cache_without_refetching() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            flat: flat_library(120),
+            ..Default::default()
+        });
 
-        projection.request_window(0);
-        projection
-            .refresh(1, 120, &mut |o, l| loader.fetch(o, l))
-            .unwrap();
+        for _ in 0..2 {
+            let page = views.track_list("", 0);
+            assert_eq!(page.rows.len(), 50);
+        }
 
         assert_eq!(
-            loader.calls.len(),
+            mock.window_calls().len(),
             1,
             "a fresh projection must serve cached rows without refetching"
         );
-        assert_eq!(projection.window(0).expect("still cached").len(), 50);
     }
 
     #[test]
     fn test_bumped_generation_invalidates_all_windows() {
-        let mut projection = TrackListProjection::new(ProjectionKey::Flat);
-        projection.request_window(0);
-        projection.request_window(50);
-        let mut loader = FakeLoader::new();
-        projection
-            .refresh(1, 120, &mut |o, l| loader.fetch(o, l))
-            .unwrap();
-        let calls_after_load = loader.calls.len();
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            flat: flat_library(120),
+            ..Default::default()
+        });
+        views.track_list("", 0);
+        views.track_list("", 50);
+        let calls_after_load = mock.window_calls().len();
 
         // A committed mutation bumps the generation; every visible window
         // refetches even though the offsets are unchanged.
-        projection.request_window(0);
-        projection.request_window(50);
-        projection
-            .refresh(2, 120, &mut |o, l| loader.fetch(o, l))
-            .unwrap();
+        generation.bump();
+        views.track_list("", 0);
+        views.track_list("", 50);
 
         assert_eq!(
-            loader.calls.len(),
+            mock.window_calls().len(),
             calls_after_load * 2,
             "generation bump invalidates every cached window"
         );
-        assert_eq!(loader.calls.last(), Some(&(50, 50)));
+        assert_eq!(mock.window_calls().last(), Some(&(50, 50)));
     }
 
     #[test]
-    fn test_key_change_invalidates_even_at_same_generation() {
-        let mut projection = TrackListProjection::new(ProjectionKey::Flat);
-        projection.request_window(0);
-        let mut loader = FakeLoader::new();
-        projection
-            .refresh(1, 120, &mut |o, l| loader.fetch(o, l))
-            .unwrap();
+    fn test_query_change_retargets_even_at_same_generation() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            flat: flat_library(120),
+            search: flat_library(3),
+            ..Default::default()
+        });
+        let page = views.track_list("", 0);
+        assert_eq!(page.total, 120);
+        assert_eq!(mock.window_calls(), vec![(0, 50)]);
 
-        // Retargeting the projection to a different query signature (the
-        // search box changed) must drop the cache even at the same
-        // generation.
-        projection.set_key(ProjectionKey::Search("x".to_string()));
-        assert!(
-            projection.window(0).is_none(),
+        // Retargeting to a search query (the search box changed) must drop
+        // the cache even at the same generation.
+        let page = views.track_list("x", 0);
+        assert_eq!(page.total, 3, "the retargeted view recounts its own query");
+        assert_eq!(
+            page.rows.len(),
+            3,
             "retargeted projections never serve rows from the old signature"
         );
-
-        projection.request_window(0);
-        projection
-            .refresh(1, 3, &mut |o, l| loader.fetch(o, l))
-            .unwrap();
         assert_eq!(
-            loader.calls.last(),
-            Some(&(0, 50)),
+            mock.window_calls(),
+            vec![(0, 50), (0, 50)],
             "refetch happens despite unchanged generation"
         );
-        assert_eq!(projection.total(), 3);
+
+        // And back to the flat list refetches that signature too.
+        views.track_list("", 0);
+        assert_eq!(mock.window_calls().len(), 3);
     }
 
     #[test]
     fn test_cache_is_bounded_fifo() {
-        let mut projection = TrackListProjection::new(ProjectionKey::Flat);
-        for offset in [0, 50, 100, 150, 200, 250, 300, 350, 400] {
-            projection.request_window(offset);
-        }
-        let mut loader = FakeLoader::new();
-        projection
-            .refresh(1, 500, &mut |o, l| loader.fetch(o, l))
-            .unwrap();
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            flat: flat_library(500),
+            ..Default::default()
+        });
 
-        assert_eq!(loader.calls.len(), 9, "all requested windows load");
-        assert!(
-            projection.window(0).is_none(),
-            "the oldest window is evicted once the bound is exceeded"
+        for offset in [0, 50, 100, 150, 200, 250, 300, 350, 400] {
+            views.track_list("", offset);
+        }
+
+        assert_eq!(mock.window_calls().len(), 9, "all requested windows load");
+
+        // Asking for the oldest window again must fetch it anew: it was
+        // evicted once the bound was exceeded.
+        views.track_list("", 0);
+        assert_eq!(
+            mock.window_calls().last(),
+            Some(&(0, 50)),
+            "the oldest window was evicted once the bound was exceeded"
         );
-        assert!(
-            projection.window(400).expect("newest window stays").len() == 50,
+
+        // The newest window remains cached.
+        let calls_before = mock.window_calls().len();
+        views.track_list("", 400);
+        assert_eq!(
+            mock.window_calls().len(),
+            calls_before,
             "the newest window remains cached"
         );
     }
 
     #[test]
-    fn test_loader_error_preserves_existing_cache() {
-        let mut projection = TrackListProjection::new(ProjectionKey::Flat);
-        projection.request_window(0);
-        let mut loader = FakeLoader::new();
-        projection
-            .refresh(1, 120, &mut |o, l| loader.fetch(o, l))
-            .unwrap();
-        let cached_rows = projection.window(0).expect("cached").len();
+    fn test_loader_error_keeps_stale_rows_and_retries() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            flat: flat_library(120),
+            ..Default::default()
+        });
+        let first = views.track_list("", 0);
+        assert_eq!(first.rows.len(), 50);
 
-        // The next refresh fails mid-flight; stale-but-present beats blank.
-        loader.fail_next = true;
-        projection.request_window(0);
-        let err = projection.refresh(2, 120, &mut |o, l| loader.fetch(o, l));
-        assert!(err.is_err(), "loader errors propagate");
-
+        // The next refresh fails mid-flight; stale-but-present beats blank
+        // while the UI retries.
+        mock.lock().failing = vec![FailingQuery::TracksWindow];
+        generation.bump();
+        let stale = views.track_list("", 0);
         assert_eq!(
-            projection.window(0).expect("prior cache survives").len(),
-            cached_rows,
+            stale.rows.len(),
+            50,
             "a failed refresh leaves the previous windows untouched"
         );
-        assert!(
-            !projection.is_fresh(2),
-            "the failed generation still counts as stale"
-        );
-        assert!(
-            projection.is_fresh(1),
-            "the loaded generation is remembered"
+        assert_eq!(stale.total, 120);
+
+        mock.lock().failing.clear();
+        let retried = views.track_list("", 0);
+        assert_eq!(retried.rows.len(), 50, "the next frame retries and reloads");
+        assert_eq!(retried.rows[0].id.0, "0");
+        assert_eq!(
+            mock.window_calls().len(),
+            3,
+            "the initial load, the failed attempt, and the retry each fetched once"
         );
     }
 
     #[test]
-    fn test_missing_window_fetches_only_that_window_when_fresh() {
-        let mut projection = TrackListProjection::new(ProjectionKey::Flat);
-        projection.request_window(0);
-        let mut loader = FakeLoader::new();
-        projection
-            .refresh(1, 200, &mut |o, l| loader.fetch(o, l))
-            .unwrap();
-        let calls_after_load = loader.calls.len();
+    fn test_scrolling_fetches_only_the_missing_window_when_fresh() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            flat: flat_library(200),
+            ..Default::default()
+        });
+        views.track_list("", 0);
+        let calls_after_load = mock.window_calls().len();
 
         // Scrolling brings one new window into view while staying fresh.
-        projection.request_window(100);
-        projection
-            .refresh(1, 200, &mut |o, l| loader.fetch(o, l))
-            .unwrap();
+        views.track_list("", 100);
 
         assert_eq!(
-            &loader.calls[calls_after_load..],
+            &mock.window_calls()[calls_after_load..],
             &[(100, 50)],
             "only the missing window is fetched when fresh"
         );
     }
 
-    // --- Browsing Projection: artist/album views over store queries ---------
+    #[test]
+    fn test_mutation_recounts_so_total_and_rows_agree() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            flat: flat_library(120),
+            ..Default::default()
+        });
+        assert_eq!(views.track_list("", 0).total, 120);
 
-    use riff::app::projection::BrowsingProjection;
-
-    /// Counting fake loaders standing in for the three browsing queries:
-    /// each level records its calls and returns deterministic canned data.
-    struct FakeBrowsingStore {
-        artists_loaded: usize,
-        albums_loaded_for: Vec<String>,
-        tracks_loaded_for: Vec<(String, String)>,
-    }
-
-    impl FakeBrowsingStore {
-        fn new() -> Self {
-            Self {
-                artists_loaded: 0,
-                albums_loaded_for: Vec::new(),
-                tracks_loaded_for: Vec::new(),
+        // A committed mutation adds ten tracks and bumps the generation.
+        // The invalidated frame must recount instead of trusting the stale
+        // count, so the returned total agrees with the refreshed rows (the
+        // torn-count guarantee the facade owns).
+        {
+            let mut mock = mock.lock();
+            for n in 120..130 {
+                mock.flat.push(projection_track(n));
             }
         }
+        generation.bump();
 
-        // The `Result` returns mirror the port signatures: these fakes are
-        // only ever invoked inside loader closures handed to the projection.
-        #[allow(clippy::unnecessary_wraps)]
-        fn artists(&mut self) -> Result<Vec<Artist>, AppError> {
-            self.artists_loaded += 1;
-            Ok(vec![Artist {
-                name: "Alpha".to_string(),
-                albums: vec!["Alpha - One".to_string()],
-            }])
-        }
-
-        #[allow(clippy::unnecessary_wraps)]
-        fn artist_albums(&mut self, artist: &str) -> Result<Vec<Album>, AppError> {
-            self.albums_loaded_for.push(artist.to_string());
-            Ok(vec![Album {
-                title: "One".to_string(),
-                artist: artist.to_string(),
-                tracks: vec![TrackId("f:\\a\\1.mp3".to_string())],
-                year: Some(1999),
-                genre: None,
-            }])
-        }
-
-        #[allow(clippy::unnecessary_wraps)]
-        fn album_tracks(&mut self, artist: &str, title: &str) -> Result<Vec<Track>, AppError> {
-            self.tracks_loaded_for
-                .push((artist.to_string(), title.to_string()));
-            Ok(vec![crate::test_utils::create_test_track_with_metadata(
-                "f:\\a\\1.mp3",
-                "f:\\a\\1.mp3",
-                artist,
-                "One",
-                title,
-            )])
-        }
+        let page = views.track_list("", 0);
+        assert_eq!(page.total, 130, "the invalidated frame recounts");
+        assert_eq!(page.rows.len(), 50);
+        assert_eq!(
+            page.rows[49].id.0, "49",
+            "rows come back refreshed alongside the recounted total"
+        );
+        assert!(
+            mock.count_of(&LibraryQueryCall::TrackCount) >= 2,
+            "the recount issued a fresh COUNT query"
+        );
     }
 
     #[test]
-    fn test_browsing_projection_fetches_each_level_once_per_generation() {
-        let mut projection = BrowsingProjection::new();
-        let mut store = FakeBrowsingStore::new();
+    fn test_search_gate_reports_whether_a_query_matches_anything() {
+        let (views, mock, _gen) = wire(MockLibraryQueryStore {
+            search: flat_library(2),
+            matching_searches: vec!["q".to_string()],
+            ..Default::default()
+        });
+
+        assert!(views.search_has_matches("q"));
+        assert!(
+            !views.search_has_matches("nothing"),
+            "an empty result set gates rendering off"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::SearchCount),
+            2,
+            "one store count per gate check"
+        );
+    }
+
+    // --- Browsing views: artist/album levels over store queries --------------
+
+    /// Canned browsing fixture: one artist with one album.
+    fn browsing_fixtures() -> (Vec<Artist>, Vec<Album>, Vec<Track>) {
+        (
+            vec![Artist {
+                name: "Alpha".to_string(),
+                albums: vec!["Alpha - One".to_string()],
+            }],
+            vec![Album {
+                title: "One".to_string(),
+                artist: "Alpha".to_string(),
+                tracks: vec![TrackId("f:\\a\\1.mp3".to_string())],
+                year: Some(1999),
+                genre: None,
+            }],
+            vec![crate::test_utils::create_test_track_with_metadata(
+                "f:\\a\\1.mp3",
+                "f:\\a\\1.mp3",
+                "Alpha",
+                "One",
+                "Song",
+            )],
+        )
+    }
+
+    #[test]
+    fn test_browsing_views_fetch_each_level_once_per_generation() {
+        let (artists, albums, tracks) = browsing_fixtures();
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            artists,
+            albums,
+            album_tracks: tracks,
+            ..Default::default()
+        });
 
         // Every level queried twice at the same generation serves the cache.
-        let _ = projection
-            .artists(1, &mut || store.artists())
-            .expect("artists load");
-        let _ = projection
-            .artists(1, &mut || store.artists())
-            .expect("artists cached");
-        let _ = projection
-            .artist_albums(1, "Alpha", &mut |a| store.artist_albums(a))
-            .expect("albums load");
-        let _ = projection
-            .artist_albums(1, "Alpha", &mut |a| store.artist_albums(a))
-            .expect("albums cached");
-        let _ = projection
-            .album_tracks(1, "Alpha", "One", &mut |a, t| store.album_tracks(a, t))
-            .expect("tracks load");
-        let _ = projection
-            .album_tracks(1, "Alpha", "One", &mut |a, t| store.album_tracks(a, t))
-            .expect("tracks cached");
+        assert_eq!(views.artists()[0].name, "Alpha");
+        assert_eq!(views.artists().len(), 1);
+        assert_eq!(views.artist_albums("Alpha")[0].title, "One");
+        assert_eq!(views.artist_albums("Alpha").len(), 1);
+        assert_eq!(views.album_tracks("Alpha", "One").len(), 1);
+        assert_eq!(views.album_tracks("Alpha", "One").len(), 1);
 
-        assert_eq!(store.artists_loaded, 1, "artists fetch once per generation");
         assert_eq!(
-            store.albums_loaded_for,
-            vec!["Alpha".to_string()],
+            mock.count_of(&LibraryQueryCall::AllArtists),
+            1,
+            "artists fetch once per generation"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::ArtistAlbums("Alpha".to_string())),
+            1,
             "one artist's albums fetch once per generation"
         );
         assert_eq!(
-            store.tracks_loaded_for,
-            vec![("Alpha".to_string(), "One".to_string())],
+            mock.count_of(&LibraryQueryCall::AlbumTracks(
+                "Alpha".to_string(),
+                "One".to_string()
+            )),
+            1,
             "one album's tracks fetch once per generation"
         );
     }
 
     #[test]
-    fn test_browsing_projection_invalidates_everything_on_generation_bump() {
-        let mut projection = BrowsingProjection::new();
-        let mut store = FakeBrowsingStore::new();
-        let _ = projection.artists(1, &mut || store.artists()).unwrap();
-        let _ = projection
-            .artist_albums(1, "Alpha", &mut |a| store.artist_albums(a))
-            .unwrap();
-        let _ = projection
-            .album_tracks(1, "Alpha", "One", &mut |a, t| store.album_tracks(a, t))
-            .unwrap();
+    fn test_browsing_views_invalidate_everything_on_generation_bump() {
+        let (artists, albums, tracks) = browsing_fixtures();
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            artists,
+            albums,
+            album_tracks: tracks,
+            ..Default::default()
+        });
+        let _ = views.artists();
+        let _ = views.artist_albums("Alpha");
+        let _ = views.album_tracks("Alpha", "One");
 
         // A committed mutation bumps the generation; every level refetches.
-        let artists = projection
-            .artists(2, &mut || store.artists())
-            .expect("artists reload");
-        let albums = projection
-            .artist_albums(2, "Alpha", &mut |a| store.artist_albums(a))
-            .expect("albums reload");
-        let tracks = projection
-            .album_tracks(2, "Alpha", "One", &mut |a, t| store.album_tracks(a, t))
-            .expect("tracks reload");
+        generation.bump();
+        let artists = views.artists();
+        let albums = views.artist_albums("Alpha");
+        let album_tracks = views.album_tracks("Alpha", "One");
 
-        assert_eq!(store.artists_loaded, 2);
-        assert_eq!(store.albums_loaded_for.len(), 2);
-        assert_eq!(store.tracks_loaded_for.len(), 2);
+        assert_eq!(mock.count_of(&LibraryQueryCall::AllArtists), 2);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::ArtistAlbums("Alpha".to_string())),
+            2
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::AlbumTracks(
+                "Alpha".to_string(),
+                "One".to_string()
+            )),
+            2
+        );
         assert_eq!(artists[0].name, "Alpha");
         assert_eq!(albums[0].title, "One");
-        assert_eq!(tracks[0].id.0, "f:\\a\\1.mp3");
+        assert_eq!(album_tracks[0].id.0, "f:\\a\\1.mp3");
     }
 
     #[test]
-    fn test_browsing_projection_error_keeps_stale_data_and_retries() {
-        let mut projection = BrowsingProjection::new();
-        let mut store = FakeBrowsingStore::new();
-        let first = projection
-            .artists(1, &mut || store.artists())
-            .expect("first load");
-
-        // The next load fails; the error propagates and the stale rows stay.
-        let err = projection.artists(2, &mut || {
-            Err(AppError::InvalidOperation("boom".to_string()))
+    fn test_browsing_view_error_renders_empty_then_retries() {
+        let (artists, _albums, _tracks) = browsing_fixtures();
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            artists,
+            ..Default::default()
         });
-        assert!(err.is_err(), "loader errors propagate");
-        let stale = projection
-            .artists(2, &mut || store.artists())
-            .expect("retry loads");
+        let first = views.artists();
+
+        // The next load fails; the facade renders it as an empty list…
+        mock.lock().failing = vec![FailingQuery::AllArtists];
+        generation.bump();
+        assert!(
+            views.artists().is_empty(),
+            "store errors render as an empty list, never propagate"
+        );
+
+        // …and the retry reloads committed state.
+        mock.lock().failing.clear();
+        let retried = views.artists();
         assert_eq!(
-            stale.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
+            retried.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
             first.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
             "the retry re-fetches and matches the prior shape"
         );
-        assert_eq!(store.artists_loaded, 2, "the failed attempt fetched once");
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::AllArtists),
+            3,
+            "the failed attempt fetched once, then the retry fetched again"
+        );
     }
 
-    // --- Folder Projection: folder-tree views over store queries ------------
-
-    use riff::app::projection::FolderProjection;
-
-    /// Counting fake loaders standing in for the five folder queries: each
-    /// level records its calls and returns deterministic canned data.
-    struct FakeFolderStore {
-        has_audio_probes: Vec<String>,
-        search_probes: Vec<(String, String)>,
-        tree_listings: Vec<String>,
-        direct_listings: Vec<String>,
-        children_listings: Vec<String>,
-    }
-
-    impl FakeFolderStore {
-        fn new() -> Self {
-            Self {
-                has_audio_probes: Vec::new(),
-                search_probes: Vec::new(),
-                tree_listings: Vec::new(),
-                direct_listings: Vec::new(),
-                children_listings: Vec::new(),
-            }
-        }
-
-        #[allow(clippy::unnecessary_wraps)]
-        fn has_audio(&mut self, folder: &std::path::Path) -> Result<bool, AppError> {
-            self.has_audio_probes
-                .push(folder.to_string_lossy().into_owned());
-            Ok(true)
-        }
-
-        #[allow(clippy::unnecessary_wraps)]
-        fn has_search_match(
-            &mut self,
-            folder: &std::path::Path,
-            query: &str,
-        ) -> Result<bool, AppError> {
-            self.search_probes
-                .push((folder.to_string_lossy().into_owned(), query.to_string()));
-            Ok(true)
-        }
-
-        #[allow(clippy::unnecessary_wraps)]
-        fn tree_ids(&mut self, folder: &std::path::Path) -> Result<Vec<TrackId>, AppError> {
-            self.tree_listings
-                .push(folder.to_string_lossy().into_owned());
-            Ok(vec![TrackId("f:\\lib\\a\\1.mp3".to_string())])
-        }
-
-        #[allow(clippy::unnecessary_wraps)]
-        fn direct_tracks(&mut self, folder: &std::path::Path) -> Result<Vec<Track>, AppError> {
-            self.direct_listings
-                .push(folder.to_string_lossy().into_owned());
-            Ok(vec![crate::test_utils::create_test_track(
-                "f:\\lib\\1.mp3",
-                "f:\\lib\\1.mp3",
-            )])
-        }
-
-        #[allow(clippy::unnecessary_wraps)]
-        fn children(&mut self, folder: &std::path::Path) -> Result<Vec<PathBuf>, AppError> {
-            self.children_listings
-                .push(folder.to_string_lossy().into_owned());
-            Ok(vec![folder.join("child")])
-        }
-    }
+    // --- Folder views: five folder query shapes over store queries -----------
 
     #[test]
-    fn test_folder_projection_fetches_each_level_once_per_generation() {
-        let mut projection = FolderProjection::new();
-        let mut store = FakeFolderStore::new();
-        let folder = std::path::Path::new("f:\\lib");
+    fn test_folder_views_fetch_each_level_once_per_generation() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            folder_tree_ids: vec![TrackId("f:\\lib\\a\\1.mp3".to_string())],
+            folder_direct_tracks: vec![crate::test_utils::create_test_track(
+                "f:\\lib\\1.mp3",
+                "f:\\lib\\1.mp3",
+            )],
+            folder_children: vec![PathBuf::from("f:\\lib\\child")],
+            ..Default::default()
+        });
+        let folder = Path::new("f:\\lib");
 
         for _ in 0..2 {
-            let _ = projection
-                .has_audio(1, folder, &mut |f| store.has_audio(f))
-                .expect("has_audio");
-            let _ = projection
-                .has_search_match(1, folder, "q", &mut |f, q| store.has_search_match(f, q))
-                .expect("search match");
-            let _ = projection
-                .subtree_ids(1, folder, &mut |f| store.tree_ids(f))
-                .expect("tree ids");
-            let _ = projection
-                .direct_tracks(1, folder, &mut |f| store.direct_tracks(f))
-                .expect("direct tracks");
-            let _ = projection
-                .children(1, folder, &mut |f| store.children(f))
-                .expect("children");
+            assert!(views.folder_has_audio(folder));
+            assert!(views.folder_search_match(folder, "q"));
+            assert_eq!(views.folder_subtree_ids(folder).len(), 1);
+            assert_eq!(views.folder_direct_tracks(folder).len(), 1);
+            assert_eq!(
+                views.folder_children(folder),
+                vec![PathBuf::from("f:\\lib\\child")]
+            );
         }
 
-        assert_eq!(store.has_audio_probes.len(), 1);
-        assert_eq!(store.search_probes.len(), 1);
-        assert_eq!(store.tree_listings.len(), 1);
-        assert_eq!(store.direct_listings.len(), 1);
-        assert_eq!(store.children_listings.len(), 1);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::FolderHasAudio(folder.to_path_buf())),
+            1
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::FolderHasSearchMatch(
+                folder.to_path_buf(),
+                "q".to_string()
+            )),
+            1
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::TrackIdsInFolderTree(
+                folder.to_path_buf()
+            )),
+            1
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::TracksInFolder(folder.to_path_buf())),
+            1
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::SubdirsWithAudio(folder.to_path_buf())),
+            1
+        );
     }
 
     #[test]
-    fn test_folder_projection_invalidates_everything_on_generation_bump() {
-        let mut projection = FolderProjection::new();
-        let mut store = FakeFolderStore::new();
-        let folder = std::path::Path::new("f:\\lib");
-        let _ = projection
-            .has_audio(1, folder, &mut |f| store.has_audio(f))
-            .unwrap();
+    fn test_folder_views_invalidate_everything_on_generation_bump() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            folder_tree_ids: vec![TrackId("f:\\lib\\a\\1.mp3".to_string())],
+            ..Default::default()
+        });
+        let folder = Path::new("f:\\lib");
+        assert!(views.folder_has_audio(folder));
 
         // A committed mutation bumps the generation; every level refetches.
-        let fresh = projection
-            .has_audio(2, folder, &mut |f| store.has_audio(f))
-            .expect("reload");
-        assert!(fresh);
-        assert_eq!(store.has_audio_probes.len(), 2);
+        generation.bump();
+        assert!(
+            views.folder_has_audio(folder),
+            "the probe reloads from the store"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::FolderHasAudio(folder.to_path_buf())),
+            2
+        );
 
-        let ids = projection
-            .subtree_ids(2, folder, &mut |f| store.tree_ids(f))
-            .expect("tree reload");
+        let ids = views.folder_subtree_ids(folder);
         assert_eq!(ids.len(), 1);
-        assert_eq!(store.tree_listings.len(), 1, "bump dropped the gen-1 cache");
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::TrackIdsInFolderTree(
+                folder.to_path_buf()
+            )),
+            1,
+            "bump dropped the gen-1 cache"
+        );
     }
 
-    // --- Smart Playlists Projection: read-only lists over store queries -----
-
-    use riff::app::projection::SmartPlaylistsProjection;
-    use riff::domain::SmartPlaylistKind;
-
-    /// Counting fake loader standing in for the smart-playlist query.
-    struct FakeSmartStore {
-        calls: Vec<(SmartPlaylistKind, usize)>,
-    }
-
-    impl FakeSmartStore {
-        fn new() -> Self {
-            Self { calls: Vec::new() }
-        }
-
-        #[allow(clippy::unnecessary_wraps)]
-        fn fetch(&mut self, kind: SmartPlaylistKind, limit: usize) -> Result<Vec<Track>, AppError> {
-            self.calls.push((kind, limit));
-            Ok(vec![crate::test_utils::create_test_track(
-                "f:\\sm\\1.mp3",
-                "f:\\sm\\1.mp3",
-            )])
-        }
-    }
+    // --- Smart playlist views: read-only lists over store queries ------------
 
     #[test]
-    fn test_smart_projection_serves_cache_within_generation() {
-        let mut projection = SmartPlaylistsProjection::new();
-        let mut store = FakeSmartStore::new();
+    fn test_smart_list_serves_cache_within_generation() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            smart: vec![crate::test_utils::create_test_track(
+                "f:\\sm\\1.mp3",
+                "f:\\sm\\1.mp3",
+            )],
+            ..Default::default()
+        });
 
         for _ in 0..2 {
-            let tracks = projection
-                .list(1, SmartPlaylistKind::MostPlayed, 50, &mut |k, l| {
-                    store.fetch(k, l)
-                })
-                .expect("most played loads");
+            let tracks = views.smart_list(SmartPlaylistKind::MostPlayed, 50);
             assert_eq!(tracks.len(), 1);
         }
         assert_eq!(
-            store.calls.len(),
+            mock.count_of(&LibraryQueryCall::SmartPlaylist(
+                SmartPlaylistKind::MostPlayed,
+                50
+            )),
             1,
             "a fresh generation serves cached rows without refetching"
         );
 
         // A different kind is an independent cache slot.
-        let _ = projection
-            .list(1, SmartPlaylistKind::LostGems, usize::MAX, &mut |k, l| {
-                store.fetch(k, l)
-            })
-            .expect("lost gems loads");
-        assert_eq!(store.calls.len(), 2);
+        let _ = views.smart_list(SmartPlaylistKind::LostGems, usize::MAX);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::SmartPlaylist(
+                SmartPlaylistKind::LostGems,
+                usize::MAX
+            )),
+            1
+        );
     }
 
     #[test]
-    fn test_smart_projection_refetches_after_generation_bump_and_limit_change() {
-        let mut projection = SmartPlaylistsProjection::new();
-        let mut store = FakeSmartStore::new();
-        let _ = projection
-            .list(1, SmartPlaylistKind::MostPlayed, 50, &mut |k, l| {
-                store.fetch(k, l)
-            })
-            .unwrap();
+    fn test_smart_list_refetches_after_generation_bump_and_limit_increase() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            smart: vec![crate::test_utils::create_test_track(
+                "f:\\sm\\1.mp3",
+                "f:\\sm\\1.mp3",
+            )],
+            ..Default::default()
+        });
+        let _ = views.smart_list(SmartPlaylistKind::MostPlayed, 50);
 
         // A committed mutation bumps the generation: refetch.
-        let _ = projection
-            .list(2, SmartPlaylistKind::MostPlayed, 50, &mut |k, l| {
-                store.fetch(k, l)
-            })
-            .unwrap();
+        generation.bump();
+        let _ = views.smart_list(SmartPlaylistKind::MostPlayed, 50);
 
         // A larger limit than the cache holds also refetches even when fresh.
-        let _ = projection
-            .list(2, SmartPlaylistKind::MostPlayed, 100, &mut |k, l| {
-                store.fetch(k, l)
-            })
-            .unwrap();
+        let _ = views.smart_list(SmartPlaylistKind::MostPlayed, 100);
 
         assert_eq!(
-            store.calls,
+            mock.calls(),
             vec![
-                (SmartPlaylistKind::MostPlayed, 50),
-                (SmartPlaylistKind::MostPlayed, 50),
-                (SmartPlaylistKind::MostPlayed, 100),
+                LibraryQueryCall::SmartPlaylist(SmartPlaylistKind::MostPlayed, 50),
+                LibraryQueryCall::SmartPlaylist(SmartPlaylistKind::MostPlayed, 50),
+                LibraryQueryCall::SmartPlaylist(SmartPlaylistKind::MostPlayed, 100),
             ],
             "bumps and limit growth refetch; equal limits do not"
         );
     }
 
     #[test]
-    fn test_smart_projection_error_propagates_and_retries() {
-        let mut projection = SmartPlaylistsProjection::new();
-        let mut store = FakeSmartStore::new();
-        let err = projection.list(1, SmartPlaylistKind::LostGems, 10, &mut |_, _| {
-            Err(AppError::InvalidOperation("boom".to_string()))
+    fn test_smart_list_error_renders_empty_then_retries() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            smart: vec![crate::test_utils::create_test_track(
+                "f:\\sm\\1.mp3",
+                "f:\\sm\\1.mp3",
+            )],
+            ..Default::default()
         });
-        assert!(err.is_err(), "loader errors propagate");
 
-        let tracks = projection
-            .list(1, SmartPlaylistKind::LostGems, 10, &mut |k, l| {
-                store.fetch(k, l)
-            })
-            .expect("retry loads");
-        assert_eq!(tracks.len(), 1);
-        assert_eq!(store.calls.len(), 1, "the failed attempt fetched nothing");
+        mock.lock().failing = vec![FailingQuery::SmartPlaylist];
+        assert!(
+            views.smart_list(SmartPlaylistKind::LostGems, 10).is_empty(),
+            "store errors render as an empty list, never propagate"
+        );
+
+        mock.lock().failing.clear();
+        let tracks = views.smart_list(SmartPlaylistKind::LostGems, 10);
+        assert_eq!(tracks.len(), 1, "the retry loads");
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::SmartPlaylist(
+                SmartPlaylistKind::LostGems,
+                10
+            )),
+            2,
+            "the failed attempt fetched once, then the retry fetched again"
+        );
     }
 
-    // --- Playback Projection: current track + Up Next window ----------------
+    // --- Playback-side reads: current track + Up Next window -----------------
     //
     // Serves the window title, the playerbar cover, the Now Playing stage,
     // and the track-details panel off cached store rows. Invalidated by
     // generation bumps AND Playback Queue changes (a TrackChanged advance,
     // Next/Previous/PlayNext/AddToQueue).
-
-    use riff::app::projection::PlaybackProjection;
-
-    /// Counting fake resolver standing in for the store's `get_track`
-    /// query: serves a canned library, records every call, fails on demand.
-    struct FakePlaybackStore {
-        tracks: HashMap<TrackId, Track>,
-        calls: Vec<TrackId>,
-        fail_next: bool,
-    }
-
-    impl FakePlaybackStore {
-        fn new(tracks: HashMap<TrackId, Track>) -> Self {
-            Self {
-                tracks,
-                calls: Vec::new(),
-                fail_next: false,
-            }
-        }
-
-        fn get(&mut self, id: &TrackId) -> Result<Option<Track>, AppError> {
-            self.calls.push(id.clone());
-            if std::mem::take(&mut self.fail_next) {
-                return Err(AppError::InvalidOperation("store boom".to_string()));
-            }
-            Ok(self.tracks.get(id).cloned())
-        }
-    }
 
     /// A four-track queue playing the first entry.
     fn playback_queue() -> PlaybackQueue {
@@ -1295,23 +1377,23 @@ mod tests {
     }
 
     #[test]
-    fn test_playback_projection_loads_current_and_up_next_once_per_inputs() {
-        let mut projection = PlaybackProjection::new();
-        let mut store = FakePlaybackStore::new(playback_library());
+    fn test_playback_slots_load_current_and_up_next_once_per_inputs() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            library: playback_library(),
+            ..Default::default()
+        });
         let queue = playback_queue();
 
         for _ in 0..2 {
-            projection
-                .refresh(1, &queue, 5, &mut |id| store.get(id))
-                .expect("first refresh loads");
+            views.sync_playback(&queue, 5);
         }
 
         assert_eq!(
-            projection.current().map(|t| t.id.0.as_str()),
+            views.playback_current().map(|t| t.id.0.as_str()),
             Some("t1.mp3")
         );
-        let up_next: Vec<&str> = projection
-            .up_next()
+        let up_next: Vec<&str> = views
+            .playback_up_next()
             .iter()
             .map(|t| t.id.0.as_str())
             .collect();
@@ -1321,75 +1403,72 @@ mod tests {
             "Up Next lists the tracks after the current one, in queue order"
         );
         assert_eq!(
-            store.calls.len(),
+            mock.get_track_calls().len(),
             4,
             "one load per distinct id (current + window); the fresh frame refetches nothing"
         );
     }
 
     #[test]
-    fn test_playback_projection_refetches_when_the_queue_advances() {
-        let mut projection = PlaybackProjection::new();
-        let mut store = FakePlaybackStore::new(playback_library());
+    fn test_playback_slots_refetch_when_the_queue_advances() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            library: playback_library(),
+            ..Default::default()
+        });
         let mut queue = playback_queue();
-        projection
-            .refresh(1, &queue, 5, &mut |id| store.get(id))
-            .unwrap();
-        let calls_after_load = store.calls.len();
+        views.sync_playback(&queue, 5);
+        let calls_after_load = mock.get_track_calls().len();
 
         // A TrackChanged advance moves the queue: same generation, but the
-        // stamp moved, so the projection reloads.
+        // stamp moved, so the slots reload.
         queue.advance();
-        projection
-            .refresh(1, &queue, 5, &mut |id| store.get(id))
-            .expect("reload after advance");
+        views.sync_playback(&queue, 5);
 
         assert!(
-            store.calls.len() > calls_after_load,
+            mock.get_track_calls().len() > calls_after_load,
             "a queue change invalidates the playback slots even at the same generation"
         );
         assert_eq!(
-            projection.current().map(|t| t.id.0.as_str()),
+            views.playback_current().map(|t| t.id.0.as_str()),
             Some("t2.mp3")
         );
     }
 
     #[test]
-    fn test_playback_projection_refetches_on_generation_bump() {
-        let mut projection = PlaybackProjection::new();
-        let mut store = FakePlaybackStore::new(playback_library());
+    fn test_playback_slots_refetch_on_generation_bump() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            library: playback_library(),
+            ..Default::default()
+        });
         let queue = playback_queue();
-        projection
-            .refresh(1, &queue, 5, &mut |id| store.get(id))
-            .unwrap();
-        let calls_after_load = store.calls.len();
+        views.sync_playback(&queue, 5);
+        let calls_after_load = mock.get_track_calls().len();
 
-        projection
-            .refresh(2, &queue, 5, &mut |id| store.get(id))
-            .expect("reload after bump");
+        generation.bump();
+        views.sync_playback(&queue, 5);
 
         assert!(
-            store.calls.len() > calls_after_load,
+            mock.get_track_calls().len() > calls_after_load,
             "a committed mutation invalidates the playback slots"
         );
     }
 
     #[test]
-    fn test_playback_projection_follows_the_queue_shuffle_order() {
-        let mut projection = PlaybackProjection::new();
-        let mut store = FakePlaybackStore::new(playback_library());
+    fn test_playback_slots_follow_the_queue_shuffle_order() {
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
+            library: playback_library(),
+            ..Default::default()
+        });
         let mut queue = playback_queue();
         queue.shuffle = true;
         // A hand-seeded shuffle order (indices into tracks): t4 then t2 —
         // the window must mirror the QUEUE's order, not the append order.
         queue.shuffled_indices = vec![3, 1];
 
-        projection
-            .refresh(1, &queue, 5, &mut |id| store.get(id))
-            .unwrap();
+        views.sync_playback(&queue, 5);
 
-        let up_next: Vec<&str> = projection
-            .up_next()
+        let up_next: Vec<&str> = views
+            .playback_up_next()
             .iter()
             .map(|t| t.id.0.as_str())
             .collect();
@@ -1397,19 +1476,19 @@ mod tests {
     }
 
     #[test]
-    fn test_playback_projection_skips_ids_missing_from_the_store() {
+    fn test_playback_slots_skip_ids_missing_from_the_store() {
         let mut library = playback_library();
         library.remove(&TrackId("t3.mp3".to_string()));
-        let mut projection = PlaybackProjection::new();
-        let mut store = FakePlaybackStore::new(library);
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
+            library,
+            ..Default::default()
+        });
         let queue = playback_queue();
 
-        projection
-            .refresh(1, &queue, 5, &mut |id| store.get(id))
-            .unwrap();
+        views.sync_playback(&queue, 5);
 
-        let up_next: Vec<&str> = projection
-            .up_next()
+        let up_next: Vec<&str> = views
+            .playback_up_next()
             .iter()
             .map(|t| t.id.0.as_str())
             .collect();
@@ -1421,89 +1500,89 @@ mod tests {
     }
 
     #[test]
-    fn test_playback_projection_empty_queue_loads_nothing() {
-        let mut projection = PlaybackProjection::new();
-        let mut store = FakePlaybackStore::new(playback_library());
+    fn test_playback_slots_empty_queue_load_nothing() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            library: playback_library(),
+            ..Default::default()
+        });
         let queue = PlaybackQueue::default();
 
-        projection
-            .refresh(1, &queue, 5, &mut |id| store.get(id))
-            .unwrap();
+        views.sync_playback(&queue, 5);
 
-        assert!(projection.current().is_none());
-        assert!(projection.up_next().is_empty());
-        assert_eq!(store.calls, Vec::new(), "nothing to resolve, nothing asked");
+        assert!(views.playback_current().is_none());
+        assert!(views.playback_up_next().is_empty());
+        assert!(
+            mock.get_track_calls().is_empty(),
+            "nothing to resolve, nothing asked"
+        );
     }
 
     #[test]
-    fn test_playback_projection_error_keeps_stale_cache_and_retries() {
-        let mut projection = PlaybackProjection::new();
-        let mut store = FakePlaybackStore::new(playback_library());
+    fn test_playback_slot_error_keeps_stale_cache_and_retries() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            library: playback_library(),
+            ..Default::default()
+        });
         let mut queue = playback_queue();
-        projection
-            .refresh(1, &queue, 5, &mut |id| store.get(id))
-            .unwrap();
+        views.sync_playback(&queue, 5);
 
-        // A failing reload (mid-scan store hiccup) propagates and leaves the
-        // previous cache completely untouched.
+        // A failing reload (mid-scan store hiccup) keeps the previous cache
+        // completely untouched — stale-but-present beats blank.
         queue.advance();
-        store.fail_next = true;
-        let err = projection.refresh(1, &queue, 5, &mut |id| store.get(id));
-        assert!(err.is_err(), "loader errors propagate");
+        mock.lock().failing = vec![FailingQuery::GetTrack];
+        views.sync_playback(&queue, 5);
         assert_eq!(
-            projection.current().map(|t| t.id.0.as_str()),
+            views.playback_current().map(|t| t.id.0.as_str()),
             Some("t1.mp3"),
             "stale-but-present beats blank while the UI retries"
         );
 
-        projection
-            .refresh(1, &queue, 5, &mut |id| store.get(id))
-            .expect("the next frame retries");
+        mock.lock().failing.clear();
+        views.sync_playback(&queue, 5);
         assert_eq!(
-            projection.current().map(|t| t.id.0.as_str()),
-            Some("t2.mp3")
+            views.playback_current().map(|t| t.id.0.as_str()),
+            Some("t2.mp3"),
+            "the next frame retries"
         );
     }
 
     #[test]
-    fn test_playback_projection_selected_track_caches_until_selection_or_generation_moves() {
-        let mut projection = PlaybackProjection::new();
-        let mut store = FakePlaybackStore::new(playback_library());
-        let t9 = TrackId("t9.mp3".to_string());
+    fn test_selected_track_caches_until_selection_or_generation_moves() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            library: playback_library(),
+            ..Default::default()
+        });
+        let t1 = TrackId("t1.mp3".to_string());
 
         for _ in 0..2 {
-            let _ = projection
-                .selected_track(1, &t9, &mut |id| store.get(id))
-                .expect("selection resolves");
+            assert!(views.selected_track(&t1).is_some(), "selection resolves");
         }
         assert_eq!(
-            store.calls.len(),
+            mock.get_track_calls().len(),
             1,
             "an unchanged selection at an unchanged generation never requeries"
         );
 
         // A different selection refetches…
         let other = TrackId("t2.mp3".to_string());
-        let _ = projection
-            .selected_track(1, &other, &mut |id| store.get(id))
-            .unwrap();
-        assert_eq!(store.calls.len(), 2);
+        let _ = views.selected_track(&other);
+        assert_eq!(mock.get_track_calls().len(), 2);
 
         // …and so does the same selection after a committed mutation.
-        let _ = projection
-            .selected_track(2, &other, &mut |id| store.get(id))
-            .unwrap();
-        assert_eq!(store.calls.len(), 3);
+        generation.bump();
+        let _ = views.selected_track(&other);
+        assert_eq!(mock.get_track_calls().len(), 3);
 
         // An absent track caches its negative result too.
         let missing = TrackId("gone.mp3".to_string());
         for _ in 0..2 {
-            let resolved = projection
-                .selected_track(2, &missing, &mut |id| store.get(id))
-                .expect("absence resolves");
-            assert!(resolved.is_none());
+            assert!(views.selected_track(&missing).is_none(), "absence resolves");
         }
-        assert_eq!(store.calls.len(), 4, "a dangling selection is asked once");
+        assert_eq!(
+            mock.get_track_calls().len(),
+            4,
+            "a dangling selection is asked once"
+        );
     }
 
     // --- Playlist drag-reorder math (Issue 12) ---------------------------------
@@ -2200,5 +2279,824 @@ mod audio_engine_tests {
         drop(decoders);
 
         release(h);
+    }
+}
+
+// --- Tag Edit Service tests ---------------------------------------------------
+//
+// The extracted service (`src/app/tag_edit_service.rs`) is exercised through
+// its public interface only: `submit` a [`TagEditRequest`], `poll` for the
+// combined [`TagEditOutcome`], and assert on the mocks' recordings. A helper
+// thread runs the blocking `TagEditWorker::run()` over the paired channels —
+// exactly how the composition root will spawn it (ADR 0006); every wait uses
+// a deadline so a wedged worker fails an assertion instead of hanging CI.
+//
+// The shared-handle adapters below exist because the worker takes ownership
+// of its ports: they delegate every call to the real mocks behind a mutex so
+// the mocks' recordings remain inspectable after the worker has run — the
+// recordings are what prove the substitutes were driven.
+mod tag_edit_service_tests {
+    use super::*;
+    use crate::mocks::{MockLibraryMutationStore, MockLibraryQueryStore, MockMetadataWriter};
+    use riff::app::errors::AppError;
+    use riff::app::store::LibraryQueryStore;
+    use riff::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEditService, TagEdits};
+    use riff::app::traits::{MetadataWriter, TagEdit};
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// How long any single wait on the worker may take before the test
+    /// declares it wedged.
+    const TIMEOUT: Duration = Duration::from_secs(10);
+
+    // --- Shared-handle port adapters -----------------------------------------
+
+    /// [`MetadataWriter`] view over one recording [`MockMetadataWriter`]
+    /// owned by the worker; the test keeps the other handle.
+    struct SharedWriter(Arc<Mutex<MockMetadataWriter>>);
+
+    impl MetadataWriter for SharedWriter {
+        fn write_metadata(&self, path: &Path, edit: &TagEdit) -> Result<(), AppError> {
+            self.0.lock().unwrap().write_metadata(path, edit)
+        }
+    }
+
+    /// [`LibraryQueryStore`] view over one canned
+    /// [`MockLibraryQueryStore`] owned by the worker; the test keeps the
+    /// other handle. Only `get_track` is delegated with its real behavior —
+    /// it is the only query the save flow issues; every other query answers
+    /// empty without touching the mock.
+    struct SharedQueries(Arc<Mutex<MockLibraryQueryStore>>);
+
+    impl LibraryQueryStore for SharedQueries {
+        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, AppError> {
+            self.0.lock().unwrap().get_track(id)
+        }
+
+        fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn track_count(&self) -> Result<usize, AppError> {
+            Ok(0)
+        }
+
+        fn all_track_ids(&self) -> Result<Vec<TrackId>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn search_window(
+            &self,
+            _query: &str,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<Vec<Track>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn search_count(&self, _query: &str) -> Result<usize, AppError> {
+            Ok(0)
+        }
+
+        fn all_artists(&self) -> Result<Vec<Artist>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn artist_albums(&self, _artist: &str) -> Result<Vec<Album>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn album_tracks(
+            &self,
+            _album_artist: &str,
+            _album_title: &str,
+        ) -> Result<Vec<Track>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn folder_has_audio(&self, _folder: &Path) -> Result<bool, AppError> {
+            Ok(false)
+        }
+
+        fn folder_has_search_match(&self, _folder: &Path, _query: &str) -> Result<bool, AppError> {
+            Ok(false)
+        }
+
+        fn track_ids_in_folder_tree(&self, _folder: &Path) -> Result<Vec<TrackId>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn tracks_in_folder(&self, _folder: &Path) -> Result<Vec<Track>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn smart_playlist(
+            &self,
+            _kind: SmartPlaylistKind,
+            _limit: usize,
+        ) -> Result<Vec<Track>, AppError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// [`riff::app::store::LibraryMutationStore`] view over one recording
+    /// [`MockLibraryMutationStore`] owned by the worker; the test keeps the
+    /// other handle. Only `apply_tag_refresh` is delegated with its real
+    /// behavior — it is the only mutation the save flow issues.
+    struct SharedMutations(Arc<Mutex<MockLibraryMutationStore>>);
+
+    impl riff::app::store::LibraryMutationStore for SharedMutations {
+        fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, AppError> {
+            self.0.lock().unwrap().apply_scan_batch(tracks)
+        }
+
+        fn record_track_played(
+            &mut self,
+            id: &TrackId,
+            played_at: std::time::SystemTime,
+        ) -> Result<bool, AppError> {
+            self.0.lock().unwrap().record_track_played(id, played_at)
+        }
+
+        fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), AppError> {
+            self.0.lock().unwrap().apply_tag_refresh(track)
+        }
+
+        fn remove_library_path(&mut self, root: &Path) -> Result<usize, AppError> {
+            self.0.lock().unwrap().remove_library_path(root)
+        }
+
+        fn clear_library(&mut self) -> Result<usize, AppError> {
+            self.0.lock().unwrap().clear_library()
+        }
+    }
+
+    // --- Harness ---------------------------------------------------------------
+
+    /// Ports under test plus the front-end handle to drive them with.
+    struct Harness {
+        service: TagEditService,
+        writer: Arc<Mutex<MockMetadataWriter>>,
+        queries: Arc<Mutex<MockLibraryQueryStore>>,
+        mutations: Arc<Mutex<MockLibraryMutationStore>>,
+    }
+
+    /// Wire a real service/worker pair over injected mocks and run the
+    /// blocking worker on its own thread, exactly like the composition root
+    /// will (ADR 0006). Dropping `Harness.service` ends the thread.
+    fn spawn_service(
+        writer: MockMetadataWriter,
+        library: HashMap<TrackId, Track>,
+        mutations: MockLibraryMutationStore,
+    ) -> Harness {
+        let writer = Arc::new(Mutex::new(writer));
+        let queries = Arc::new(Mutex::new(MockLibraryQueryStore {
+            library,
+            ..Default::default()
+        }));
+        let mutations = Arc::new(Mutex::new(mutations));
+        let (service, worker) = TagEditService::new(
+            Box::new(SharedWriter(Arc::clone(&writer))),
+            Box::new(SharedQueries(Arc::clone(&queries))),
+            Box::new(SharedMutations(Arc::clone(&mutations))),
+        );
+        std::thread::spawn(move || worker.run());
+        Harness {
+            service,
+            writer,
+            queries,
+            mutations,
+        }
+    }
+
+    /// Poll until an outcome arrives or `TIMEOUT` elapses. Spins on the
+    /// public interface only — the worker is fast and the deadline exists so
+    /// a missing outcome fails instead of hanging.
+    fn poll_outcome(service: &dyn TagEdits) -> Option<TagEditOutcome> {
+        let start = Instant::now();
+        while start.elapsed() < TIMEOUT {
+            if let Some(outcome) = service.poll() {
+                return Some(outcome);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        None
+    }
+
+    /// A store Track at `/music/t1.mp3` with artist/title/album set.
+    fn stored_track() -> Track {
+        crate::test_utils::create_test_track_with_metadata(
+            "/music/t1.mp3",
+            "/music/t1.mp3",
+            "Artist",
+            "Old Title",
+            "Album",
+        )
+    }
+
+    /// An edit that only renames the title.
+    fn title_edit(new_title: &str) -> TagEdit {
+        TagEdit {
+            title: Some(new_title.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_tag_edit_success_reports_saved_and_commits_edited_track() {
+        let track = stored_track();
+        let h = spawn_service(
+            MockMetadataWriter::recording(),
+            HashMap::from([(track.id.clone(), track)]),
+            MockLibraryMutationStore::new(),
+        );
+
+        let path = PathBuf::from("/music/t1.mp3");
+        h.service.submit(TagEditRequest {
+            track_id: TrackId::from_path(&path),
+            path: path.clone(),
+            edit: title_edit("New Title"),
+        });
+
+        let outcome = poll_outcome(&h.service);
+        assert_eq!(outcome, Some(TagEditOutcome::Saved));
+
+        // The file write reached the Metadata Writer port with path + edit.
+        let writes = h.writer.lock().unwrap().recorded();
+        assert_eq!(writes.len(), 1, "exactly one file write");
+        assert_eq!(writes[0].0, path);
+        assert_eq!(writes[0].1.title.as_deref(), Some("New Title"));
+
+        // The store commit received a Track whose metadata carries the
+        // applied edit; untouched fields stay as resolved from the store.
+        let refreshed = h.mutations.lock().unwrap().refreshed();
+        assert_eq!(refreshed.len(), 1, "exactly one tag refresh commit");
+        assert_eq!(refreshed[0].metadata.title.as_deref(), Some("New Title"));
+        assert_eq!(refreshed[0].metadata.artist.as_deref(), Some("Artist"));
+        assert_eq!(refreshed[0].metadata.album.as_deref(), Some("Album"));
+    }
+
+    #[test]
+    fn test_tag_edit_writer_failure_fails_without_store_interaction() {
+        let track = stored_track();
+        let h = spawn_service(
+            MockMetadataWriter::failing(),
+            HashMap::from([(track.id.clone(), track)]),
+            MockLibraryMutationStore::new(),
+        );
+
+        let path = PathBuf::from("/music/t1.mp3");
+        h.service.submit(TagEditRequest {
+            track_id: TrackId::from_path(&path),
+            path,
+            edit: title_edit("New Title"),
+        });
+
+        match poll_outcome(&h.service) {
+            Some(TagEditOutcome::Failed { reason }) => {
+                assert!(
+                    reason.contains("permission denied"),
+                    "unexpected failure reason: {reason}"
+                );
+            }
+            other => panic!("expected Failed with a reason, got {other:?}"),
+        }
+
+        // A failed file write must not touch the store at all: no resolve,
+        // no commit.
+        assert!(
+            h.queries.lock().unwrap().get_track_calls().is_empty(),
+            "the store was queried despite the write failing"
+        );
+        assert!(
+            h.mutations.lock().unwrap().refreshed().is_empty(),
+            "the store was committed despite the write failing"
+        );
+    }
+
+    #[test]
+    fn test_tag_edit_vanished_track_fails_without_commit() {
+        // Empty library: the track was removed from the store mid-edit, so
+        // the resolve comes back empty even though the file write succeeded.
+        let h = spawn_service(
+            MockMetadataWriter::recording(),
+            HashMap::new(),
+            MockLibraryMutationStore::new(),
+        );
+
+        let path = PathBuf::from("/music/t1.mp3");
+        let track_id = TrackId::from_path(&path);
+        h.service.submit(TagEditRequest {
+            track_id: track_id.clone(),
+            path,
+            edit: title_edit("New Title"),
+        });
+
+        assert_eq!(
+            poll_outcome(&h.service),
+            Some(TagEditOutcome::Failed {
+                reason: "Track is no longer in the library".to_string()
+            }),
+            "exact product-wording for an unknown track"
+        );
+
+        // The file write happened and the store WAS consulted, but nothing
+        // was persisted for a track the store no longer knows.
+        assert_eq!(h.writer.lock().unwrap().recorded().len(), 1);
+        assert_eq!(h.queries.lock().unwrap().get_track_calls(), vec![track_id]);
+        assert!(
+            h.mutations.lock().unwrap().refreshed().is_empty(),
+            "the store was committed for a vanished track"
+        );
+    }
+
+    #[test]
+    fn test_tag_edit_commit_failure_fails_despite_successful_write() {
+        // The file write succeeds and the track resolves, but the store
+        // commit fails: the combined outcome must be a failure, never a
+        // silent success (spec testing decisions).
+        let track = stored_track();
+        let mutations = MockLibraryMutationStore::failing_refresh();
+        let h = spawn_service(
+            MockMetadataWriter::recording(),
+            HashMap::from([(track.id.clone(), track)]),
+            mutations,
+        );
+
+        let path = PathBuf::from("/music/t1.mp3");
+        h.service.submit(TagEditRequest {
+            track_id: TrackId::from_path(&path),
+            path,
+            edit: title_edit("New Title"),
+        });
+
+        match poll_outcome(&h.service) {
+            Some(TagEditOutcome::Failed { reason }) => {
+                assert!(
+                    reason.contains("mock tag refresh failure"),
+                    "unexpected failure reason: {reason}"
+                );
+            }
+            other => panic!("expected Failed despite successful file write, got {other:?}"),
+        }
+
+        // The file write DID happen (it succeeded); only the commit failed.
+        assert_eq!(h.writer.lock().unwrap().recorded().len(), 1);
+    }
+
+    #[test]
+    fn test_tag_edit_preserves_play_history_in_committed_track() {
+        // The Track handed to the commit must be the store's fresh copy with
+        // only metadata edited: play history (play_count, last_played,
+        // date_added) survives so Most Played-style smart playlists keep
+        // working (spec user story 5).
+        let mut track = stored_track();
+        track.play_count = 7;
+        track.last_played = Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000));
+        track.date_added = Some(std::time::SystemTime::UNIX_EPOCH);
+        let h = spawn_service(
+            MockMetadataWriter::recording(),
+            HashMap::from([(track.id.clone(), track)]),
+            MockLibraryMutationStore::new(),
+        );
+
+        let path = PathBuf::from("/music/t1.mp3");
+        h.service.submit(TagEditRequest {
+            track_id: TrackId::from_path(&path),
+            path,
+            edit: title_edit("New Title"),
+        });
+
+        assert_eq!(poll_outcome(&h.service), Some(TagEditOutcome::Saved));
+
+        let refreshed = h.mutations.lock().unwrap().refreshed();
+        assert_eq!(refreshed.len(), 1, "exactly one tag refresh commit");
+        let committed = &refreshed[0];
+        assert_eq!(committed.metadata.title.as_deref(), Some("New Title"));
+        assert_eq!(committed.play_count, 7, "play_count must survive the edit");
+        assert_eq!(
+            committed.last_played,
+            Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000)),
+            "last_played must survive the edit"
+        );
+        assert_eq!(
+            committed.date_added,
+            Some(std::time::SystemTime::UNIX_EPOCH),
+            "date_added must survive the edit"
+        );
+    }
+
+    #[test]
+    fn test_tag_edit_poll_returns_none_when_idle_and_delivers_each_outcome_once() {
+        // First write succeeds, second fails: the two outcomes are
+        // distinguishable, so exactly-once delivery is observable.
+        let track = stored_track();
+        let h = spawn_service(
+            MockMetadataWriter::failing_after(1),
+            HashMap::from([(track.id.clone(), track)]),
+            MockLibraryMutationStore::new(),
+        );
+
+        // Nothing submitted yet: polling is a non-blocking `None`.
+        assert!(h.service.poll().is_none(), "idle service must not yield");
+
+        // Two edits with distinguishable fates: the first saves, the second
+        // fails its file write. Outcomes come back exactly once each, oldest
+        // first.
+        let path = PathBuf::from("/music/t1.mp3");
+        h.service.submit(TagEditRequest {
+            track_id: TrackId::from_path(&path),
+            path: path.clone(),
+            edit: title_edit("New Title"),
+        });
+        h.service.submit(TagEditRequest {
+            track_id: TrackId::from_path(&path),
+            path,
+            edit: title_edit("Doomed"),
+        });
+
+        let first = poll_outcome(&h.service);
+        assert_eq!(first, Some(TagEditOutcome::Saved), "first edit saved");
+        let second = poll_outcome(&h.service);
+        match second {
+            Some(TagEditOutcome::Failed { .. }) => {}
+            other => panic!("expected the second outcome to be Failed, got {other:?}"),
+        }
+
+        // Both submitted edits were delivered; nothing else exists to poll.
+        assert!(
+            h.service.poll().is_none(),
+            "each completed edit is delivered exactly once"
+        );
+    }
+}
+
+// --- Cover Service tests -------------------------------------------------------
+//
+// The extracted service (`src/app/cover_service.rs`) is exercised through
+// its public interface only: `request` a cover, `poll` for drained results,
+// and assert on the resolver mocks' interaction counts. A helper thread runs
+// the blocking `CoverWorker::run()` over the paired channels — exactly how
+// the composition root will spawn it (ADR 0006); every wait uses a deadline
+// so a wedged worker fails an assertion instead of hanging CI.
+//
+// The counting port fakes below are local to this module (precedent:
+// `FakeLibraryStore` in the audio-engine tests) because the shared mocks in
+// `tests/mod.rs` carry no call counters; the counters are what prove the
+// dedup/negative-cache discipline actually suppressed disk I/O.
+mod cover_service_tests {
+    use super::*;
+    use riff::app::cover_service::{CoverService, Covers};
+    use riff::app::errors::AppError;
+    use riff::app::traits::{AudioFormatInfo, CoverImage, CoverLoader, MetadataReader};
+    use riff::domain::CoverSource;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// How long any single wait on the worker may take before the test
+    /// declares it wedged.
+    const TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// One decoded cover image, distinct enough to assert identity.
+    fn test_image() -> CoverImage {
+        CoverImage {
+            width: 4,
+            height: 4,
+            rgba: vec![7; 4 * 4 * 4],
+        }
+    }
+
+    /// [`MetadataReader`] fake whose only live query is `read_cover_source`
+    /// (the only one `CoverResolver` issues): it counts invocations and
+    /// serves a canned [`CoverSource`].
+    struct SharedReader {
+        source: CoverSource,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl MetadataReader for SharedReader {
+        fn read_cover_source(&self, _path: &Path) -> Result<CoverSource, AppError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.source.clone())
+        }
+
+        fn read_metadata(&self, _path: &Path) -> Result<TrackMetadata, AppError> {
+            Err(AppError::InvalidOperation(
+                "not exercised by CoverResolver".to_string(),
+            ))
+        }
+
+        fn read_duration(&self, _path: &Path) -> Result<Option<Duration>, AppError> {
+            Err(AppError::InvalidOperation(
+                "not exercised by CoverResolver".to_string(),
+            ))
+        }
+
+        fn read_audio_format(&self, _path: &Path) -> Result<AudioFormatInfo, AppError> {
+            Err(AppError::InvalidOperation(
+                "not exercised by CoverResolver".to_string(),
+            ))
+        }
+
+        fn read_all(
+            &self,
+            _path: &Path,
+        ) -> Result<
+            (
+                TrackMetadata,
+                Option<Duration>,
+                CoverSource,
+                AudioFormatInfo,
+            ),
+            AppError,
+        > {
+            Err(AppError::InvalidOperation(
+                "not exercised by CoverResolver".to_string(),
+            ))
+        }
+    }
+
+    /// [`CoverLoader`] fake serving one canned result and counting every
+    /// load. When `gate` is set, each call blocks until a token arrives on
+    /// the paired sender — a deterministic in-flight window for the dedup
+    /// test (the test observes `calls == 1` before releasing).
+    struct SharedLoader {
+        result: Result<Option<CoverImage>, String>,
+        calls: Arc<AtomicUsize>,
+        gate: Option<Mutex<crossbeam_channel::Receiver<()>>>,
+    }
+
+    impl CoverLoader for SharedLoader {
+        fn load_cover(&self, _source: &CoverSource) -> Result<Option<CoverImage>, AppError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(ref gate) = self.gate {
+                let _ = gate.lock().unwrap().recv();
+            }
+            self.result.clone().map_err(AppError::CoverLoad)
+        }
+    }
+
+    // --- Harness ---------------------------------------------------------------
+
+    /// Counters plus the front-end handle to drive them with.
+    struct Harness {
+        service: CoverService,
+        reader_calls: Arc<AtomicUsize>,
+        loader_calls: Arc<AtomicUsize>,
+    }
+
+    /// Wire a real service/worker pair over the counting fakes and run the
+    /// blocking worker on its own thread, exactly like the composition root
+    /// will (ADR 0006). Dropping `Harness.service` ends the thread.
+    fn spawn_service(
+        source: CoverSource,
+        loader_result: Result<Option<CoverImage>, String>,
+    ) -> Harness {
+        spawn_with_gate(source, loader_result, None)
+    }
+
+    /// Like [`spawn_service`], but with an optional load gate for tests that
+    /// must hold a resolve open mid-flight.
+    fn spawn_with_gate(
+        source: CoverSource,
+        loader_result: Result<Option<CoverImage>, String>,
+        gate: Option<crossbeam_channel::Receiver<()>>,
+    ) -> Harness {
+        let reader_calls = Arc::new(AtomicUsize::new(0));
+        let loader_calls = Arc::new(AtomicUsize::new(0));
+        let (service, worker) = CoverService::new(
+            Box::new(SharedReader {
+                source,
+                calls: Arc::clone(&reader_calls),
+            }),
+            Box::new(SharedLoader {
+                result: loader_result,
+                calls: Arc::clone(&loader_calls),
+                gate: gate.map(Mutex::new),
+            }),
+        );
+        std::thread::spawn(move || worker.run());
+        Harness {
+            service,
+            reader_calls,
+            loader_calls,
+        }
+    }
+
+    /// Poll until at least `expected` results have drained or `TIMEOUT`
+    /// elapses, accumulating across polls (results are delivered once, so
+    /// accumulation cannot double-count). Spins on the public interface
+    /// only; returning short of `expected` fails the caller's assertion
+    /// instead of hanging CI.
+    fn poll_until(service: &dyn Covers, expected: usize) -> Vec<(TrackId, Option<CoverImage>)> {
+        let mut collected: Vec<(TrackId, Option<CoverImage>)> = Vec::new();
+        let start = Instant::now();
+        while collected.len() < expected && start.elapsed() < TIMEOUT {
+            collected.extend(service.poll());
+            if collected.len() < expected {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        collected
+    }
+
+    #[test]
+    fn test_cover_request_resolves_and_poll_yields_image() {
+        let image = test_image();
+        let h = spawn_service(
+            CoverSource::Embedded(vec![1, 2, 3]),
+            Ok(Some(image.clone())),
+        );
+
+        let path = PathBuf::from("/music/t1.mp3");
+        h.service.request(TrackId::from_path(&path), path);
+
+        let results = poll_until(&h.service, 1);
+        assert_eq!(results.len(), 1, "exactly one resolved result");
+        assert_eq!(results[0].0, TrackId::from_path(Path::new("/music/t1.mp3")));
+        let delivered = results[0].1.as_ref().expect("cover should resolve");
+        assert_eq!(
+            (delivered.width, delivered.height),
+            (image.width, image.height)
+        );
+        assert_eq!(delivered.rgba, image.rgba);
+
+        // The resolver chain drove the real ports: one tag read, one load.
+        assert_eq!(h.reader_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(h.loader_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_cover_artless_track_negative_cached_until_eviction() {
+        // No embedded art, no filesystem fallback hit: the resolve comes
+        // back None and the track must be negative-cached — a repeat
+        // request triggers no further resolver I/O.
+        let h = spawn_service(CoverSource::None, Ok(None));
+
+        let path = PathBuf::from("/music/t1.mp3");
+        h.service.request(TrackId::from_path(&path), path.clone());
+
+        let results = poll_until(&h.service, 1);
+        assert_eq!(results.len(), 1, "the artless resolve is still delivered");
+        assert!(results[0].1.is_none(), "no cover found");
+        assert_eq!(h.reader_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(h.loader_calls.load(Ordering::SeqCst), 1);
+
+        // Repeat request for the same artless track: suppressed at intake.
+        h.service.request(TrackId::from_path(&path), path);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            h.reader_calls.load(Ordering::SeqCst),
+            1,
+            "negative cache did not suppress the tag read"
+        );
+        assert_eq!(
+            h.loader_calls.load(Ordering::SeqCst),
+            1,
+            "negative cache did not suppress the cover load"
+        );
+        assert!(
+            h.service.poll().is_empty(),
+            "a suppressed request must not produce a second result"
+        );
+    }
+
+    #[test]
+    fn test_cover_duplicate_requests_while_unresolved_yield_one_resolve() {
+        // Gate the loader so the first resolve is observably in-flight while
+        // the duplicates arrive: this makes the dedup window deterministic
+        // instead of racing thread scheduling.
+        let (gate_tx, gate_rx) = crossbeam_channel::unbounded();
+        let image = test_image();
+        let h = spawn_with_gate(
+            CoverSource::Embedded(vec![1, 2, 3]),
+            Ok(Some(image)),
+            Some(gate_rx),
+        );
+
+        let path = PathBuf::from("/music/t1.mp3");
+        h.service.request(TrackId::from_path(&path), path.clone());
+
+        // Wait until the resolve is definitively mid-flight...
+        let start = Instant::now();
+        while h.loader_calls.load(Ordering::SeqCst) < 1 && start.elapsed() < TIMEOUT {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            h.loader_calls.load(Ordering::SeqCst),
+            1,
+            "the first resolve never started"
+        );
+
+        // ...then fire rapid duplicates for the same track.
+        for _ in 0..3 {
+            h.service.request(TrackId::from_path(&path), path.clone());
+        }
+
+        // Release the gate and let the worker settle completely.
+        let _ = gate_tx.send(());
+        std::thread::sleep(Duration::from_millis(100));
+
+        let mut results = poll_until(&h.service, 1);
+        results.extend(h.service.poll());
+        assert_eq!(results.len(), 1, "one in-flight resolve, one polled result");
+        assert!(results[0].1.is_some());
+        assert_eq!(
+            h.reader_calls.load(Ordering::SeqCst),
+            1,
+            "duplicates of an in-flight resolve must not re-read tags"
+        );
+        assert_eq!(
+            h.loader_calls.load(Ordering::SeqCst),
+            1,
+            "duplicates of an in-flight resolve must not re-load"
+        );
+    }
+
+    #[test]
+    fn test_cover_negative_cache_evicts_oldest_and_allows_retry() {
+        // Fill the bounded negative cache past capacity with distinct
+        // artless tracks: the oldest entry must fall out, making THAT track
+        // resolvable again while newer entries stay cached.
+        let h = spawn_service(CoverSource::None, Ok(None));
+
+        let track_path = |i: usize| PathBuf::from(format!("/music/t{i:02}.mp3"));
+        for i in 0..=50 {
+            let path = track_path(i);
+            h.service.request(TrackId::from_path(&path), path);
+        }
+        let first_round = poll_until(&h.service, 51);
+        assert_eq!(first_round.len(), 51, "every artless resolve is delivered");
+        assert_eq!(
+            h.reader_calls.load(Ordering::SeqCst),
+            51,
+            "each distinct track resolved exactly once"
+        );
+
+        // The oldest entry (t00) was evicted by the 51st insert: requesting
+        // it again must re-resolve.
+        let evicted_path = track_path(0);
+        h.service
+            .request(TrackId::from_path(&evicted_path), evicted_path);
+        let retry = poll_until(&h.service, 1);
+        assert_eq!(retry.len(), 1, "the evicted track re-resolves");
+        assert!(retry[0].1.is_none());
+        assert_eq!(
+            h.reader_calls.load(Ordering::SeqCst),
+            52,
+            "exactly one retry after eviction"
+        );
+
+        // A still-cached track remains suppressed. (The retry above pushed
+        // t00 back in at the MRU end, which evicted the NEXT-oldest entry,
+        // t01 — so t02 is the neighbor asserted here.)
+        let cached_path = track_path(2);
+        h.service
+            .request(TrackId::from_path(&cached_path), cached_path);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            h.reader_calls.load(Ordering::SeqCst),
+            52,
+            "non-evicted entries keep suppressing disk I/O"
+        );
+        assert!(h.service.poll().is_empty());
+    }
+
+    #[test]
+    fn test_cover_poll_drains_all_completed_results_then_stays_empty() {
+        let h = spawn_service(CoverSource::Embedded(vec![9, 9, 9]), Ok(Some(test_image())));
+
+        // Three distinct tracks, all resolvable.
+        for i in 0..3 {
+            let path = PathBuf::from(format!("/music/t{i}.mp3"));
+            h.service.request(TrackId::from_path(&path), path);
+        }
+
+        // Accumulate across polls until all three have drained.
+        let results = poll_until(&h.service, 3);
+        assert_eq!(results.len(), 3, "all three resolutions delivered");
+        let mut ids: Vec<String> = results.iter().map(|(id, _)| id.0.clone()).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["/music/t0.mp3", "/music/t1.mp3", "/music/t2.mp3"],
+            "one result per track, keyed by TrackId"
+        );
+        assert!(results.iter().all(|(_, cover)| cover.is_some()));
+
+        // Everything was delivered exactly once; nothing remains to poll.
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            h.service.poll().is_empty(),
+            "poll must be empty once everything drained"
+        );
     }
 }

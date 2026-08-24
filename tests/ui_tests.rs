@@ -3357,3 +3357,325 @@ mod tests {
         );
     }
 }
+
+// --- Background service seams in the UI ----------------------------------------
+//
+// The UI no longer owns worker threads or channel protocols (ADR 0006): it
+// submits intent and polls outcomes through the boxed `TagEdits`/`Covers`
+// handles. These tests drive the exact production code paths — the free
+// functions `submit_tag_edit_fields`, `apply_tag_edit_outcome`,
+// `request_cover_intent`, and `cache_polled_covers` that the RiffApp
+// methods delegate to — over recording fakes, with no threads and no disk
+// I/O.
+#[cfg(test)]
+mod background_service_ui_tests {
+    use super::*;
+    use riff::app::cover_service::Covers;
+    use riff::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
+    use riff::app::traits::CoverImage;
+    use riff::ui::app::{
+        apply_tag_edit_outcome, cache_polled_covers, request_cover_intent, submit_tag_edit_fields,
+    };
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// Recording [`TagEdits`] fake: captures every submitted request and
+    /// never yields outcomes (outcomes are injected through
+    /// [`apply_tag_edit_outcome`] directly).
+    struct RecordingTagEdits {
+        submitted: Mutex<Vec<TagEditRequest>>,
+    }
+
+    impl RecordingTagEdits {
+        fn new() -> Self {
+            Self {
+                submitted: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<TagEditRequest> {
+            self.submitted.lock().unwrap().clone()
+        }
+    }
+
+    impl TagEdits for RecordingTagEdits {
+        fn submit(&self, request: TagEditRequest) {
+            self.submitted.lock().unwrap().push(request);
+        }
+
+        fn poll(&self) -> Option<TagEditOutcome> {
+            None
+        }
+    }
+
+    /// Recording [`Covers`] fake: counts request intent, serves nothing.
+    struct RecordingCovers {
+        requested: Mutex<Vec<(TrackId, PathBuf)>>,
+    }
+
+    impl RecordingCovers {
+        fn new() -> Self {
+            Self {
+                requested: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requested(&self) -> Vec<(TrackId, PathBuf)> {
+            self.requested.lock().unwrap().clone()
+        }
+    }
+
+    impl Covers for RecordingCovers {
+        fn request(&self, track_id: TrackId, path: PathBuf) {
+            self.requested.lock().unwrap().push((track_id, path));
+        }
+
+        fn poll(&self) -> Vec<(TrackId, Option<CoverImage>)> {
+            Vec::new()
+        }
+    }
+
+    /// Canned [`Covers`] fake whose single poll drains scripted results.
+    struct CannedCovers(Vec<(TrackId, Option<CoverImage>)>);
+
+    impl Covers for CannedCovers {
+        fn request(&self, _track_id: TrackId, _path: PathBuf) {}
+
+        fn poll(&self) -> Vec<(TrackId, Option<CoverImage>)> {
+            self.0.clone()
+        }
+    }
+
+    /// An open "Edit Tags" modal mid-save for `/music/t1.mp3`.
+    fn saving_modal() -> TagEditState {
+        TagEditState {
+            track_id: TrackId("/music/t1.mp3".to_string()),
+            path: PathBuf::from("/music/t1.mp3"),
+            title: "Old Title".to_string(),
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            album_artist: "Album Artist".to_string(),
+            genre: "Genre".to_string(),
+            year: "1999".to_string(),
+            track_number: "7".to_string(),
+            error: None,
+            saving: true,
+        }
+    }
+
+    #[test]
+    fn test_saved_outcome_closes_dialog_and_sets_status_line() {
+        let mut modal = Some(saving_modal());
+        let mut in_flight = Some((
+            TrackId("/music/t1.mp3".to_string()),
+            PathBuf::from("/music/t1.mp3"),
+        ));
+        let mut status = None;
+
+        apply_tag_edit_outcome(
+            TagEditOutcome::Saved,
+            &mut modal,
+            &mut in_flight,
+            &mut status,
+        );
+
+        assert!(modal.is_none(), "a saved edit closes the dialog");
+        assert_eq!(
+            status.as_deref(),
+            Some("Tags saved for t1.mp3"),
+            "the status line names the saved file"
+        );
+        assert!(in_flight.is_none(), "the outstanding record is consumed");
+    }
+
+    #[test]
+    fn test_failed_outcome_keeps_dialog_open_with_reason() {
+        let mut modal = Some(saving_modal());
+        let mut in_flight = Some((
+            TrackId("/music/t1.mp3".to_string()),
+            PathBuf::from("/music/t1.mp3"),
+        ));
+        let mut status = Some("earlier message".to_string());
+
+        apply_tag_edit_outcome(
+            TagEditOutcome::Failed {
+                reason: "permission denied".to_string(),
+            },
+            &mut modal,
+            &mut in_flight,
+            &mut status,
+        );
+
+        let modal = modal.expect("a failed edit keeps the dialog open");
+        assert_eq!(modal.error.as_deref(), Some("permission denied"));
+        assert!(!modal.saving, "the save spinner stops");
+        // No silent success: the previous status line is left untouched.
+        assert_eq!(status.as_deref(), Some("earlier message"));
+    }
+
+    #[test]
+    fn test_outcome_for_another_track_leaves_modal_untouched() {
+        // The user opened a different track's editor while a save was in
+        // flight: its outcome must not close or alter the new dialog.
+        let mut modal = Some(saving_modal());
+        let mut in_flight = Some((
+            TrackId("/music/other.mp3".to_string()),
+            PathBuf::from("/music/other.mp3"),
+        ));
+        let mut status = None;
+
+        apply_tag_edit_outcome(
+            TagEditOutcome::Failed {
+                reason: "stale failure".to_string(),
+            },
+            &mut modal,
+            &mut in_flight,
+            &mut status,
+        );
+
+        let untouched = modal
+            .as_ref()
+            .expect("an unrelated outcome leaves the dialog open");
+        assert!(untouched.error.is_none());
+        assert!(untouched.saving);
+
+        apply_tag_edit_outcome(
+            TagEditOutcome::Saved,
+            &mut modal,
+            &mut in_flight,
+            &mut status,
+        );
+        assert!(
+            modal.is_some(),
+            "an unrelated save must not close the open dialog"
+        );
+    }
+
+    #[test]
+    fn test_outcome_without_outstanding_request_is_ignored() {
+        let mut modal = Some(saving_modal());
+        let mut in_flight = None;
+        let mut status = None;
+
+        apply_tag_edit_outcome(
+            TagEditOutcome::Saved,
+            &mut modal,
+            &mut in_flight,
+            &mut status,
+        );
+
+        assert!(
+            modal.is_some(),
+            "nothing outstanding means nothing to close"
+        );
+        assert!(status.is_none());
+    }
+
+    #[test]
+    fn test_parse_invalid_submit_keeps_dialog_open_without_submitting() {
+        let mut modal = saving_modal();
+        modal.year = "not a number".to_string();
+        modal.saving = false;
+        let edits = RecordingTagEdits::new();
+        let mut in_flight = None;
+
+        submit_tag_edit_fields(&mut modal, &edits, &mut in_flight);
+
+        assert!(
+            edits.requests().is_empty(),
+            "invalid fields must not reach the service"
+        );
+        assert!(modal.error.is_some(), "the parse error surfaces");
+        assert!(!modal.saving, "the modal stays open, not saving");
+        assert!(in_flight.is_none());
+    }
+
+    #[test]
+    fn test_valid_submit_sends_request_and_marks_saving() {
+        let mut modal = saving_modal();
+        modal.year = "2001".to_string();
+        modal.track_number = String::new(); // empty means "leave unset"
+        let edits = RecordingTagEdits::new();
+        let mut in_flight = None;
+
+        submit_tag_edit_fields(&mut modal, &edits, &mut in_flight);
+
+        let requests = edits.requests();
+        assert_eq!(requests.len(), 1, "exactly one request submitted");
+        let request = &requests[0];
+        assert_eq!(request.track_id.0, "/music/t1.mp3");
+        assert_eq!(request.path, PathBuf::from("/music/t1.mp3"));
+        assert_eq!(
+            request.edit.title.as_deref(),
+            Some("Old Title"),
+            "the edited field values travel with the request"
+        );
+        assert_eq!(request.edit.year, Some(2001));
+        assert_eq!(request.edit.track_number, None);
+        assert!(modal.saving, "the modal flips into its saving state");
+        assert!(modal.error.is_none());
+        assert_eq!(
+            in_flight,
+            Some((
+                TrackId("/music/t1.mp3".to_string()),
+                PathBuf::from("/music/t1.mp3")
+            )),
+            "the outstanding record enables outcome matching"
+        );
+    }
+
+    #[test]
+    fn test_cover_intent_skips_cached_texture_but_requests_uncached() {
+        let covers = RecordingCovers::new();
+        let id = TrackId("/music/t1.mp3".to_string());
+        let path = PathBuf::from("/music/t1.mp3");
+
+        request_cover_intent(true, &covers, id.clone(), path.clone());
+        assert!(
+            covers.requested().is_empty(),
+            "a cached texture suppresses the request"
+        );
+
+        request_cover_intent(false, &covers, id.clone(), path.clone());
+        assert_eq!(
+            covers.requested(),
+            vec![(id.clone(), path)],
+            "an uncached track sends intent to the service"
+        );
+    }
+
+    #[test]
+    fn test_cache_polled_covers_inserts_textures_and_skips_artless() {
+        let ctx = egui::Context::default();
+        let image = CoverImage {
+            width: 2,
+            height: 2,
+            rgba: vec![9; 2 * 2 * 4],
+        };
+        let covers = CannedCovers(vec![
+            (
+                TrackId("/music/art.mp3".to_string()),
+                Some(CoverImage {
+                    width: 2,
+                    height: 2,
+                    rgba: image.rgba.clone(),
+                }),
+            ),
+            (TrackId("/music/artless.mp3".to_string()), None),
+        ]);
+        let mut textures = std::collections::HashMap::new();
+        let mut lru_keys = Vec::new();
+
+        cache_polled_covers(&covers, &mut textures, &mut lru_keys, &ctx);
+
+        assert!(
+            textures.contains_key("/music/art.mp3"),
+            "resolved art becomes a texture keyed by track id"
+        );
+        assert!(
+            !textures.contains_key("/music/artless.mp3"),
+            "artless results create no texture (the service negative-caches them)"
+        );
+        assert_eq!(lru_keys, vec!["/music/art.mp3".to_string()]);
+    }
+}

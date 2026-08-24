@@ -22,7 +22,8 @@ use crate::app::traits::DecoderFactory;
 use crate::app::watcher_manager::WatcherManager;
 use crate::domain::{PlaybackCommand, PlaybackState, PlaybackUpdate, RepeatMode, TrackId};
 use crate::infra::{
-    AudioFileScanner, CpalAudioOutput, FilesystemWatcher, LoftyMetadataReader, SymphoniaDecoder,
+    AudioFileScanner, CpalAudioOutput, FilesystemWatcher, ImageCoverLoader, LoftyMetadataReader,
+    LoftyMetadataWriter, SymphoniaDecoder,
 };
 use crate::ui::RiffApp;
 use std::path::PathBuf;
@@ -30,30 +31,14 @@ use std::path::PathBuf;
 fn main() {
     tracing_subscriber::fmt::init();
 
-    // Open the Application Store before anything else. Open or migration
-    // failures are fatal startup errors with a clear message — never silent
-    // fallbacks to empty state.
-    let store_path = riff::infra::store::default_store_path().expect(
-        "fatal: could not resolve the Application Store location \
-         (no data-local directory available)",
-    );
-    // One shared connection behind a mutex serves every store port; settings
-    // reads/writes go through the `SettingsStore` implementation below.
-    let store = std::sync::Arc::new(std::sync::Mutex::new(
-        riff::infra::store::SqliteStore::open_and_migrate(&store_path)
-            .unwrap_or_else(|e| panic!("fatal: {e}")),
-    ));
-    let settings_store = riff::infra::store::MutexSettingsStore::new(store.clone());
-    let playlist_store = riff::infra::store::MutexPlaylistStore::new(store.clone());
-    // Library collection ports over the same shared connection: scans write
-    // through the mutation port, playback resolves through the query port,
-    // and every committed mutation bumps this session-local generation so
-    // Session Projections know to refetch (ADR 0002). The mutation adapter
-    // owns the bump — callers cannot forget it.
-    let store_generation = riff::app::store::StoreGeneration::new();
-    let library_mutation_store =
-        riff::infra::store::MutexLibraryMutationStore::new(store.clone(), store_generation.clone());
-    let library_query_store = riff::infra::store::MutexLibraryQueryStore::new(store.clone());
+    // Open the Application Store and wire every port over its shared
+    // connection (fatal on open/migration failure — never silent fallbacks).
+    let (settings_store, playlist_store, library_mutation_store, library_query_store, generation) =
+        open_application_store();
+    // The UI's single read seam over the Library collection (ADR 0002): owns
+    // the five Session Projections, the query port, and the generation.
+    let session_views =
+        riff::app::views::SessionViews::new(Box::new(library_query_store.clone()), generation);
 
     let state = Arc::new(Mutex::new(AppState::new()));
     let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
@@ -91,6 +76,11 @@ fn main() {
 
     let watcher_manager = spawn_fs_watcher(library_cmd_tx);
 
+    // Background services (ADR 0006): real adapters, dedicated worker
+    // threads — spawned here exactly like the Audio Engine, nowhere else.
+    let (tag_edits, covers) =
+        spawn_background_services(library_query_store.clone(), library_mutation_store.clone());
+
     let options = eframe::NativeOptions {
         // Frameless launch (Issue 04, ADR 0005): OS decorations are replaced
         // by riff's custom titlebar with a drag region and window controls.
@@ -125,9 +115,10 @@ fn main() {
         quit_flag.clone(),
         Box::new(settings_store),
         Box::new(playlist_store),
-        Box::new(library_query_store),
         Box::new(library_mutation_store),
-        store_generation,
+        session_views,
+        Box::new(tag_edits),
+        Box::new(covers),
     );
 
     #[cfg(target_os = "linux")]
@@ -140,9 +131,10 @@ fn main() {
         quit_flag.clone(),
         Box::new(settings_store),
         Box::new(playlist_store),
-        Box::new(library_query_store),
         Box::new(library_mutation_store),
-        store_generation,
+        session_views,
+        Box::new(tag_edits),
+        Box::new(covers),
     );
 
     eframe::run_native(
@@ -371,6 +363,76 @@ fn spawn_fs_watcher(
     });
 
     watcher_manager
+}
+
+/// Open the Application Store before anything else and wire every store port
+/// over its one shared connection. Open or migration failures are fatal
+/// startup errors with a clear message — never silent fallbacks to empty
+/// state. Returns the ports in their UI/thread wiring order plus the session
+/// generation the mutation adapter bumps (ADR 0002).
+#[allow(clippy::type_complexity)]
+fn open_application_store() -> (
+    riff::infra::store::MutexSettingsStore,
+    riff::infra::store::MutexPlaylistStore,
+    riff::infra::store::MutexLibraryMutationStore,
+    riff::infra::store::MutexLibraryQueryStore,
+    riff::app::store::StoreGeneration,
+) {
+    let store_path = riff::infra::store::default_store_path().expect(
+        "fatal: could not resolve the Application Store location \
+         (no data-local directory available)",
+    );
+    // One shared connection behind a mutex serves every store port.
+    let store = std::sync::Arc::new(std::sync::Mutex::new(
+        riff::infra::store::SqliteStore::open_and_migrate(&store_path)
+            .unwrap_or_else(|e| panic!("fatal: {e}")),
+    ));
+    let settings_store = riff::infra::store::MutexSettingsStore::new(store.clone());
+    let playlist_store = riff::infra::store::MutexPlaylistStore::new(store.clone());
+    // Library collection ports over the same shared connection: scans write
+    // through the mutation port, playback resolves through the query port,
+    // and every committed mutation bumps this session-local generation so
+    // Session Projections know to refetch (ADR 0002). The mutation adapter
+    // owns the bump — callers cannot forget it.
+    let generation = riff::app::store::StoreGeneration::new();
+    let library_mutation_store =
+        riff::infra::store::MutexLibraryMutationStore::new(store.clone(), generation.clone());
+    let library_query_store = riff::infra::store::MutexLibraryQueryStore::new(store.clone());
+    (
+        settings_store,
+        playlist_store,
+        library_mutation_store,
+        library_query_store,
+        generation,
+    )
+}
+
+/// Composition-root wiring for the background services (ADR 0006): construct
+/// the real Tag Edit and Cover service pairs over real adapters and run each
+/// blocking worker on its dedicated thread — exactly like the Audio Engine.
+/// Returns the front-end handles the UI holds boxed (`Box<dyn TagEdits>`,
+/// `Box<dyn Covers>`).
+fn spawn_background_services(
+    library_queries: riff::infra::store::MutexLibraryQueryStore,
+    library_mutations: riff::infra::store::MutexLibraryMutationStore,
+) -> (
+    riff::app::tag_edit_service::TagEditService,
+    riff::app::cover_service::CoverService,
+) {
+    let (tag_edits, tag_worker) = riff::app::tag_edit_service::TagEditService::new(
+        Box::new(LoftyMetadataWriter::new()),
+        Box::new(library_queries),
+        Box::new(library_mutations),
+    );
+    let _handle = thread::spawn(move || tag_worker.run());
+
+    let (covers, cover_worker) = riff::app::cover_service::CoverService::new(
+        Box::new(LoftyMetadataReader::new()),
+        Box::new(ImageCoverLoader::new()),
+    );
+    let _handle = thread::spawn(move || cover_worker.run());
+
+    (tag_edits, covers)
 }
 
 /// Build the shared codec registry (symphonia defaults + the Opus adapter).

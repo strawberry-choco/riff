@@ -126,12 +126,14 @@ pub mod test_utils {
 /// tests) build on the same scripted decoder/output behavior.
 pub mod mocks {
     use riff::app::errors::AppError;
-    use riff::app::store::{Settings, SettingsStore};
+    use riff::app::store::{LibraryMutationStore, LibraryQueryStore, Settings, SettingsStore};
     use riff::app::traits::{
         AudioDecoder, AudioFormatInfo, AudioOutput, CoverImage, CoverLoader, MetadataReader,
         MetadataWriter, TagEdit,
     };
-    use riff::domain::{CoverSource, TrackMetadata};
+    use riff::domain::{
+        Album, Artist, CoverSource, SmartPlaylistKind, Track, TrackId, TrackMetadata,
+    };
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use std::time::Duration;
@@ -405,6 +407,10 @@ pub mod mocks {
     /// denied, disk full, etc.).
     pub struct MockMetadataWriter {
         pub fail: bool,
+        /// When set, the first `n` writes succeed and every later write
+        /// fails — lets one test script per-call fates deterministically
+        /// (the worker processes requests sequentially).
+        pub fail_after_writes: Option<usize>,
         pub writes: Mutex<Vec<(PathBuf, TagEdit)>>,
     }
 
@@ -420,6 +426,7 @@ pub mod mocks {
         pub fn recording() -> Self {
             Self {
                 fail: false,
+                fail_after_writes: None,
                 writes: Mutex::new(Vec::new()),
             }
         }
@@ -429,6 +436,18 @@ pub mod mocks {
         pub fn failing() -> Self {
             Self {
                 fail: true,
+                fail_after_writes: None,
+                writes: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// A writer whose first `n` writes succeed (and are recorded) and
+        /// every subsequent write fails.
+        #[must_use]
+        pub fn failing_after(n: usize) -> Self {
+            Self {
+                fail: false,
+                fail_after_writes: Some(n),
                 writes: Mutex::new(Vec::new()),
             }
         }
@@ -442,7 +461,8 @@ pub mod mocks {
 
     impl MetadataWriter for MockMetadataWriter {
         fn write_metadata(&self, path: &Path, edit: &TagEdit) -> Result<(), AppError> {
-            if self.fail {
+            let spent = self.writes.lock().unwrap().len();
+            if self.fail || self.fail_after_writes.is_some_and(|n| spent >= n) {
                 return Err(AppError::MetadataWrite(format!(
                     "permission denied: {}",
                     path.display()
@@ -523,6 +543,372 @@ pub mod mocks {
             self.state.watch_states.clone_from(states);
             self.calls.push(SettingsCall::WatchStates);
             Ok(())
+        }
+    }
+
+    /// Recording [`LibraryMutationStore`] fake: `apply_tag_refresh` snapshots
+    /// every Track it was handed (so tests can pin the refreshed metadata AND
+    /// the untouched play history) and can be switched to fail, simulating a
+    /// failed store commit. The remaining mutations are no-ops returning
+    /// benign defaults; the tag-edit service exercises only the refresh.
+    pub struct MockLibraryMutationStore {
+        /// When set, `apply_tag_refresh` fails with an `InvalidOperation`
+        /// error and records nothing.
+        pub fail_tag_refresh: bool,
+        refreshed: Mutex<Vec<Track>>,
+    }
+
+    impl Default for MockLibraryMutationStore {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl MockLibraryMutationStore {
+        /// A mutation store that records every tag refresh and never fails.
+        #[must_use]
+        pub fn new() -> Self {
+            Self {
+                fail_tag_refresh: false,
+                refreshed: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// A mutation store whose every tag refresh fails with an
+        /// `InvalidOperation` error and records nothing, simulating a failed
+        /// store commit.
+        #[must_use]
+        pub fn failing_refresh() -> Self {
+            Self {
+                fail_tag_refresh: true,
+                refreshed: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Snapshot of every Track passed to `apply_tag_refresh`, in call
+        /// order. Failed commits record nothing.
+        #[must_use]
+        pub fn refreshed(&self) -> Vec<Track> {
+            self.refreshed.lock().unwrap().clone()
+        }
+    }
+
+    impl LibraryMutationStore for MockLibraryMutationStore {
+        fn apply_scan_batch(&mut self, _tracks: &[Track]) -> Result<usize, AppError> {
+            Ok(0)
+        }
+
+        fn record_track_played(
+            &mut self,
+            _id: &TrackId,
+            _played_at: std::time::SystemTime,
+        ) -> Result<bool, AppError> {
+            Ok(false)
+        }
+
+        fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), AppError> {
+            if self.fail_tag_refresh {
+                return Err(AppError::InvalidOperation(
+                    "mock tag refresh failure".to_string(),
+                ));
+            }
+            self.refreshed.lock().unwrap().push(track.clone());
+            Ok(())
+        }
+
+        fn remove_library_path(&mut self, _root: &Path) -> Result<usize, AppError> {
+            Ok(0)
+        }
+
+        fn clear_library(&mut self) -> Result<usize, AppError> {
+            Ok(0)
+        }
+    }
+
+    /// Which [`LibraryQueryStore`] query a [`MockLibraryQueryStore`]
+    /// recorded. Arguments are kept so assertions can pin both call counts
+    /// and the exact query shapes the Session Views facade issues.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum LibraryQueryCall {
+        GetTrack(TrackId),
+        TracksWindow(usize, usize),
+        TrackCount,
+        AllTrackIds,
+        SearchWindow(usize, usize),
+        SearchCount,
+        AllArtists,
+        ArtistAlbums(String),
+        AlbumTracks(String, String),
+        FolderHasAudio(PathBuf),
+        FolderHasSearchMatch(PathBuf, String),
+        TrackIdsInFolderTree(PathBuf),
+        TracksInFolder(PathBuf),
+        SubdirsWithAudio(PathBuf),
+        SmartPlaylist(SmartPlaylistKind, usize),
+    }
+
+    /// Which [`LibraryQueryStore`] query fails while listed in
+    /// [`MockLibraryQueryStore::failing`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum FailingQuery {
+        GetTrack,
+        TracksWindow,
+        AllArtists,
+        SmartPlaylist,
+    }
+
+    /// Canned [`LibraryQueryStore`] fake standing in for the Application
+    /// Store's Library collection in `SessionViews` facade tests: every
+    /// query serves its configured field, records one
+    /// [`LibraryQueryCall`], and fails on demand while listed in
+    /// `failing`.
+    ///
+    /// Configuration happens before wiring; recordings accumulate behind an
+    /// internal mutex because the port takes `&self`. Tests that must hand
+    /// ownership to the facade keep a shared handle (see
+    /// `SharedMock` in the app tests) or lock through the `Arc`.
+    pub struct MockLibraryQueryStore {
+        // --- canned answers -------------------------------------------------
+        /// `get_track` answers keyed by id.
+        pub library: std::collections::HashMap<TrackId, Track>,
+        /// Rows served by `tracks_window`, in canonical order.
+        pub flat: Vec<Track>,
+        /// Rows served by `search_window`, in canonical order.
+        pub search: Vec<Track>,
+        /// Queries that `search_count`/`search_window` treat as matching.
+        /// An empty list matches every query (permissive default); once
+        /// populated, only listed queries return the canned rows/count.
+        pub matching_searches: Vec<String>,
+        /// Artists served by `all_artists`.
+        pub artists: Vec<Artist>,
+        /// Albums served by `artist_albums`.
+        pub albums: Vec<Album>,
+        /// Tracks served by `album_tracks`.
+        pub album_tracks: Vec<Track>,
+        /// Tracks served by `smart_playlist`.
+        pub smart: Vec<Track>,
+        /// Answer served by `folder_has_audio`.
+        pub folder_has_audio: bool,
+        /// Answer served by `folder_has_search_match`.
+        pub folder_search_match: bool,
+        /// Ids served by `track_ids_in_folder_tree`.
+        pub folder_tree_ids: Vec<TrackId>,
+        /// Tracks served by `tracks_in_folder`.
+        pub folder_direct_tracks: Vec<Track>,
+        /// Children served by `subdirs_with_audio`.
+        pub folder_children: Vec<PathBuf>,
+
+        // --- failure injection -------------------------------------------------
+        /// Queries that fail while listed here.
+        pub failing: Vec<FailingQuery>,
+
+        // --- recordings ---------------------------------------------------------
+        /// Recorded queries, in call order. Internal: read through the
+        /// accessors (`calls`, `window_calls`, `get_track_calls`,
+        /// `count_of`) instead of touching this directly; it is `pub` only
+        /// so test constructors can use `..Default::default()`.
+        pub calls: Mutex<Vec<LibraryQueryCall>>,
+    }
+
+    impl Default for MockLibraryQueryStore {
+        fn default() -> Self {
+            Self {
+                library: std::collections::HashMap::new(),
+                flat: Vec::new(),
+                search: Vec::new(),
+                matching_searches: Vec::new(),
+                artists: Vec::new(),
+                albums: Vec::new(),
+                album_tracks: Vec::new(),
+                smart: Vec::new(),
+                folder_has_audio: true,
+                folder_search_match: true,
+                folder_tree_ids: Vec::new(),
+                folder_direct_tracks: Vec::new(),
+                folder_children: Vec::new(),
+                failing: Vec::new(),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl MockLibraryQueryStore {
+        /// Snapshot of every recorded query, in call order.
+        #[must_use]
+        pub fn calls(&self) -> Vec<LibraryQueryCall> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        /// Every bounded-window fetch as `(offset, limit)` pairs — flat and
+        /// search windows alike — in call order.
+        #[must_use]
+        pub fn window_calls(&self) -> Vec<(usize, usize)> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|call| match call {
+                    LibraryQueryCall::TracksWindow(offset, limit)
+                    | LibraryQueryCall::SearchWindow(offset, limit) => Some((*offset, *limit)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Every `get_track` id, in call order.
+        #[must_use]
+        pub fn get_track_calls(&self) -> Vec<TrackId> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|call| match call {
+                    LibraryQueryCall::GetTrack(id) => Some(id.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// How often each single-call query kind fired (counts only).
+        #[must_use]
+        pub fn count_of(&self, call: &LibraryQueryCall) -> usize {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|recorded| recorded == &call)
+                .count()
+        }
+
+        fn record(&self, call: LibraryQueryCall) {
+            self.calls.lock().unwrap().push(call);
+        }
+
+        /// Whether `query` counts as a match against the canned search rows.
+        fn search_matches(&self, query: &str) -> bool {
+            self.matching_searches.is_empty() || self.matching_searches.iter().any(|q| q == query)
+        }
+    }
+
+    impl LibraryQueryStore for MockLibraryQueryStore {
+        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, AppError> {
+            self.record(LibraryQueryCall::GetTrack(id.clone()));
+            if self.failing.contains(&FailingQuery::GetTrack) {
+                return Err(AppError::InvalidOperation("store boom".to_string()));
+            }
+            Ok(self.library.get(id).cloned())
+        }
+
+        fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, AppError> {
+            self.record(LibraryQueryCall::TracksWindow(offset, limit));
+            if self.failing.contains(&FailingQuery::TracksWindow) {
+                return Err(AppError::InvalidOperation("loader boom".to_string()));
+            }
+            Ok(self.flat.iter().skip(offset).take(limit).cloned().collect())
+        }
+
+        fn track_count(&self) -> Result<usize, AppError> {
+            self.record(LibraryQueryCall::TrackCount);
+            Ok(self.flat.len())
+        }
+
+        fn all_track_ids(&self) -> Result<Vec<TrackId>, AppError> {
+            self.record(LibraryQueryCall::AllTrackIds);
+            Ok(self.flat.iter().map(|t| t.id.clone()).collect())
+        }
+
+        fn search_window(
+            &self,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Track>, AppError> {
+            self.record(LibraryQueryCall::SearchWindow(offset, limit));
+            if !self.search_matches(query) {
+                return Ok(Vec::new());
+            }
+            Ok(self
+                .search
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
+        fn search_count(&self, query: &str) -> Result<usize, AppError> {
+            self.record(LibraryQueryCall::SearchCount);
+            if !self.search_matches(query) {
+                return Ok(0);
+            }
+            Ok(self.search.len())
+        }
+
+        fn all_artists(&self) -> Result<Vec<Artist>, AppError> {
+            self.record(LibraryQueryCall::AllArtists);
+            if self.failing.contains(&FailingQuery::AllArtists) {
+                return Err(AppError::InvalidOperation("artists boom".to_string()));
+            }
+            Ok(self.artists.clone())
+        }
+
+        fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, AppError> {
+            self.record(LibraryQueryCall::ArtistAlbums(artist.to_string()));
+            Ok(self.albums.clone())
+        }
+
+        fn album_tracks(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+        ) -> Result<Vec<Track>, AppError> {
+            self.record(LibraryQueryCall::AlbumTracks(
+                album_artist.to_string(),
+                album_title.to_string(),
+            ));
+            Ok(self.album_tracks.clone())
+        }
+
+        fn folder_has_audio(&self, folder: &Path) -> Result<bool, AppError> {
+            self.record(LibraryQueryCall::FolderHasAudio(folder.to_path_buf()));
+            Ok(self.folder_has_audio)
+        }
+
+        fn folder_has_search_match(&self, folder: &Path, query: &str) -> Result<bool, AppError> {
+            self.record(LibraryQueryCall::FolderHasSearchMatch(
+                folder.to_path_buf(),
+                query.to_string(),
+            ));
+            Ok(self.folder_search_match)
+        }
+
+        fn track_ids_in_folder_tree(&self, folder: &Path) -> Result<Vec<TrackId>, AppError> {
+            self.record(LibraryQueryCall::TrackIdsInFolderTree(folder.to_path_buf()));
+            Ok(self.folder_tree_ids.clone())
+        }
+
+        fn tracks_in_folder(&self, folder: &Path) -> Result<Vec<Track>, AppError> {
+            self.record(LibraryQueryCall::TracksInFolder(folder.to_path_buf()));
+            Ok(self.folder_direct_tracks.clone())
+        }
+
+        fn subdirs_with_audio(&self, folder: &Path) -> Result<Vec<PathBuf>, AppError> {
+            self.record(LibraryQueryCall::SubdirsWithAudio(folder.to_path_buf()));
+            Ok(self.folder_children.clone())
+        }
+
+        fn smart_playlist(
+            &self,
+            kind: SmartPlaylistKind,
+            limit: usize,
+        ) -> Result<Vec<Track>, AppError> {
+            self.record(LibraryQueryCall::SmartPlaylist(kind, limit));
+            if self.failing.contains(&FailingQuery::SmartPlaylist) {
+                return Err(AppError::InvalidOperation(
+                    "smart playlist boom".to_string(),
+                ));
+            }
+            Ok(self.smart.clone())
         }
     }
 }

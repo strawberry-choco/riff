@@ -388,10 +388,10 @@ fn spawn_fs_watcher(
 
 /// Build the shared codec registry (symphonia defaults + the Opus adapter).
 /// Used for both the primary decoder and the gapless pre-decode decoder.
-fn build_codec_registry() -> symphonia::core::codecs::CodecRegistry {
-    let mut registry = symphonia::core::codecs::CodecRegistry::new();
+fn build_codec_registry() -> symphonia::core::codecs::registry::CodecRegistry {
+    let mut registry = symphonia::core::codecs::registry::CodecRegistry::new();
     symphonia::default::register_enabled_codecs(&mut registry);
-    registry.register_all::<symphonia_adapter_libopus::OpusDecoder>();
+    registry.register_audio_decoder::<symphonia_adapter_libopus::OpusDecoder>();
     registry
 }
 

@@ -3,20 +3,23 @@ use crate::app::gapless::{duration_from_frames, frames_from_duration};
 use crate::app::traits::{AudioDecoder, AudioFormatInfo};
 use std::path::Path;
 use std::time::Duration;
-use symphonia::core::audio::{SampleBuffer, SignalSpec};
-use symphonia::core::codecs::{CodecRegistry, DecoderOptions, CODEC_TYPE_NULL};
-use symphonia::core::formats::{FormatOptions, FormatReader};
+use symphonia::core::audio::layouts::CHANNEL_LAYOUT_STEREO;
+use symphonia::core::audio::AudioSpec;
+use symphonia::core::codecs::audio::{AudioDecoderOptions, CODEC_ID_NULL_AUDIO};
+use symphonia::core::codecs::registry::CodecRegistry;
+use symphonia::core::codecs::CodecParameters;
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
+use symphonia::core::units::Timestamp;
 use symphonia::default::get_probe;
 
 pub struct SymphoniaDecoder {
     codec_registry: CodecRegistry,
     format_reader: Option<Box<dyn FormatReader>>,
-    decoder: Option<Box<dyn symphonia::core::codecs::Decoder>>,
+    decoder: Option<Box<dyn symphonia::core::codecs::audio::AudioDecoder>>,
     track_id: u32,
-    sample_buffer: Option<SampleBuffer<f32>>,
-    spec: Option<SignalSpec>,
+    spec: Option<AudioSpec>,
     duration: Option<Duration>,
     pending_samples: Vec<f32>,
 }
@@ -28,7 +31,6 @@ impl SymphoniaDecoder {
             format_reader: None,
             decoder: None,
             track_id: 0,
-            sample_buffer: None,
             spec: None,
             duration: None,
             pending_samples: Vec::new(),
@@ -49,51 +51,54 @@ impl AudioDecoder for SymphoniaDecoder {
         let hint = Hint::new();
         let format_opts = FormatOptions::default();
         let metadata_opts = MetadataOptions::default();
-        let decoder_opts = DecoderOptions::default();
+        let decoder_opts = AudioDecoderOptions::default();
 
-        let probed = get_probe()
-            .format(&hint, mss, &format_opts, &metadata_opts)
+        // In symphonia 0.6 the probe returns the format reader directly.
+        let format: Box<dyn FormatReader> = get_probe()
+            .probe(&hint, mss, format_opts, metadata_opts)
             .map_err(|e| AppError::Decode(format!("Probe error: {e}")))?;
 
-        let format = probed.format;
         let tracks = format.tracks();
 
         let track = tracks
             .iter()
-            .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+            .find(|t| {
+                matches!(
+                    t.codec_params,
+                    Some(CodecParameters::Audio(ref p)) if p.codec != CODEC_ID_NULL_AUDIO
+                )
+            })
             .ok_or_else(|| AppError::Decode("No audio track found".to_string()))?;
 
         let track_id = track.id;
-        let sample_rate = track
-            .codec_params
+        let audio_params = match track.codec_params.as_ref() {
+            Some(CodecParameters::Audio(p)) => p.clone(),
+            _ => return Err(AppError::Decode("No audio track found".to_string())),
+        };
+        let track_channels = audio_params.channels.clone();
+        let sample_rate = audio_params
             .sample_rate
             .ok_or_else(|| AppError::Decode("Unknown sample rate".to_string()))?;
-        let channels = track
-            .codec_params
-            .channels
+        let channels = track_channels
+            .as_ref()
             .map_or(2, |c| u16::try_from(c.count()).unwrap_or(u16::MAX));
 
         let duration = track
-            .codec_params
-            .n_frames
+            .num_frames
             .map(|frames| duration_from_frames(frames, sample_rate));
 
         let decoder = self
             .codec_registry
-            .make(&track.codec_params, &decoder_opts)
+            .make_audio_decoder(&audio_params, &decoder_opts)
             .map_err(|e| AppError::Decode(format!("Decoder creation failed: {e}")))?;
 
         self.track_id = track_id;
         self.duration = duration;
-        self.spec = Some(SignalSpec::new(
+        self.spec = Some(AudioSpec::new(
             sample_rate,
-            track.codec_params.channels.unwrap_or(
-                symphonia::core::audio::Channels::FRONT_LEFT
-                    | symphonia::core::audio::Channels::FRONT_RIGHT,
-            ),
+            track_channels.unwrap_or(CHANNEL_LAYOUT_STEREO),
         ));
 
-        self.sample_buffer = None;
         self.pending_samples.clear();
         self.decoder = Some(decoder);
         self.format_reader = Some(format);
@@ -124,16 +129,13 @@ impl AudioDecoder for SymphoniaDecoder {
             .ok_or_else(|| AppError::Decode("Decoder not initialized".to_string()))?;
 
         let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            Err(symphonia::core::errors::Error::IoError(e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                return Ok(None);
-            }
+            Ok(Some(packet)) => packet,
+            // In symphonia 0.6 end-of-stream is signalled with `Ok(None)`.
+            Ok(None) => return Ok(None),
             Err(e) => return Err(AppError::Decode(format!("Packet read error: {e}"))),
         };
 
-        if packet.track_id() != self.track_id {
+        if packet.track_id != self.track_id {
             return self.next_frames(max_samples);
         }
 
@@ -141,19 +143,14 @@ impl AudioDecoder for SymphoniaDecoder {
             .decode(&packet)
             .map_err(|e| AppError::Decode(format!("Decode error: {e}")))?;
 
-        let spec = *decoded_audio.spec();
-        let spec_changed = self.spec.as_ref() != Some(&spec);
-        if spec_changed || self.sample_buffer.is_none() {
-            let duration = decoded_audio.capacity() as u64;
-            self.sample_buffer = Some(SampleBuffer::<f32>::new(duration, spec));
-            if spec_changed {
-                self.spec = Some(spec);
-            }
+        let spec = decoded_audio.spec().clone();
+        if self.spec.as_ref() != Some(&spec) {
+            self.spec = Some(spec);
         }
 
-        let sample_buffer = self.sample_buffer.as_mut().unwrap();
-        sample_buffer.copy_interleaved_ref(decoded_audio);
-        let samples = sample_buffer.samples().to_vec();
+        // Copy the decoded (any sample format) audio into interleaved f32 samples.
+        let mut samples: Vec<f32> = Vec::with_capacity(decoded_audio.samples_interleaved());
+        decoded_audio.copy_to_vec_interleaved::<f32>(&mut samples);
 
         let total = samples.len();
         if total <= max_samples {
@@ -171,15 +168,18 @@ impl AudioDecoder for SymphoniaDecoder {
             .as_mut()
             .ok_or_else(|| AppError::Decode("Decoder not open".to_string()))?;
 
-        let sample_rate = self.spec.as_ref().map_or(44100, |s| s.rate);
+        let sample_rate = self
+            .spec
+            .as_ref()
+            .map_or(44100, symphonia::core::audio::AudioSpec::rate);
         let sample = frames_from_duration(position, sample_rate);
 
         let _ = format
             .seek(
-                symphonia::core::formats::SeekMode::Accurate,
-                symphonia::core::formats::SeekTo::TimeStamp {
+                SeekMode::Accurate,
+                SeekTo::Timestamp {
                     track_id: self.track_id,
-                    ts: sample,
+                    ts: Timestamp::new(sample.cast_signed()),
                 },
             )
             .map_err(|e| AppError::Decode(format!("Seek error: {e}")))?;
@@ -200,7 +200,6 @@ impl AudioDecoder for SymphoniaDecoder {
     fn close(&mut self) {
         self.format_reader = None;
         self.decoder = None;
-        self.sample_buffer = None;
         self.spec = None;
         self.duration = None;
         self.pending_samples.clear();

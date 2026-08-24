@@ -1038,7 +1038,10 @@ mod tests {
 
         // The font view only exists after a pass has begun, so tick one
         // headless frame before reading back what got installed.
-        let _ = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+        // egui 0.36 asserts on drop if texture deltas are never applied;
+        // a real backend would upload them, so clear them here instead.
+        output.textures_delta.clear();
         let installed = ctx.fonts(|view| view.definitions().clone());
         assert_eq!(
             installed.families[&egui::FontFamily::Proportional]

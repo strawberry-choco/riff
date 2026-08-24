@@ -60,7 +60,12 @@ impl MetadataWriter for LoftyMetadataWriter {
             tag.set_genre(genre.clone());
         }
         if let Some(year) = edit.year {
-            tag.set_year(year);
+            // `Accessor::set_year` was removed in lofty 0.25; write the keyed
+            // item directly (replaces any same-key item, preserves the rest).
+            // `RecordingDate` is what the old setter mapped to per format
+            // (RIFF `ICRD`, ID3v2 `TDRC`, Vorbis `DATE`) — a bare `Year`
+            // item has no RIFF INFO key and would be dropped on save.
+            tag.insert_text(ItemKey::RecordingDate, year.to_string());
         }
         if let Some(track_number) = edit.track_number {
             tag.set_track(track_number);

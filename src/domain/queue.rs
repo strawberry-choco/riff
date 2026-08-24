@@ -192,7 +192,7 @@ impl PlaybackQueue {
         if let Some(current) = self.current_index {
             indices.retain(|&i| i != current);
         }
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         indices.shuffle(&mut rng);
         self.shuffled_indices = indices;
     }

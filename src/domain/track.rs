@@ -1,4 +1,6 @@
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 /// Unique identifier for a track in the library.
@@ -30,6 +32,13 @@ pub struct Track {
     /// and never refreshed — it drives the "Recently Added" smart playlist.
     /// Deliberately NOT the filesystem mtime, which changes on tag edits.
     pub date_added: Option<SystemTime>,
+    /// The track's precomputed lowercase search blob — the same value the
+    /// Application Store derives into its `search_text` column at write
+    /// time (`title artist album album_artist`, lowercased). Surfaced on
+    /// every read so view-side filtering matches against the stored column
+    /// without re-formatting per frame. Empty for freshly scanned (not yet
+    /// committed) tracks; the store recomputes it on write.
+    pub search_text: String,
 }
 
 /// The four auto-generated, read-only smart playlists (REQ-ML-009). Each is
@@ -105,27 +114,41 @@ impl TrackMetadata {
             .unwrap_or_else(|| "Unknown Artist".to_string())
     }
 
-    pub fn display_album(&self) -> String {
-        self.album
-            .clone()
-            .unwrap_or_else(|| "Unknown Album".to_string())
+    pub fn display_album(&self) -> Cow<'_, str> {
+        match &self.album {
+            Some(album) => Cow::Borrowed(album),
+            None => Cow::Borrowed("Unknown Album"),
+        }
     }
 
-    pub fn display_album_artist(&self) -> String {
-        self.album_artist
-            .clone()
-            .unwrap_or_else(|| self.display_artist())
+    pub fn display_album_artist(&self) -> Cow<'_, str> {
+        match &self.album_artist {
+            Some(album_artist) => Cow::Borrowed(album_artist),
+            None => Cow::Owned(self.display_artist()),
+        }
     }
 
+    /// The lowercased `title artist album album_artist` blob the store
+    /// derives into its `search_text` column. Built with an exact-capacity
+    /// buffer; the separator layout (three spaces, always present) matches
+    /// the former `format!` byte-for-byte so stored and recomputed values
+    /// agree.
     pub fn search_text(&self) -> String {
-        format!(
-            "{} {} {} {}",
-            self.title.as_deref().unwrap_or(""),
-            self.artist.as_deref().unwrap_or(""),
-            self.album.as_deref().unwrap_or(""),
-            self.album_artist.as_deref().unwrap_or(""),
-        )
-        .to_lowercase()
+        let title = self.title.as_deref().unwrap_or("");
+        let artist = self.artist.as_deref().unwrap_or("");
+        let album = self.album.as_deref().unwrap_or("");
+        let album_artist = self.album_artist.as_deref().unwrap_or("");
+        let mut text = String::with_capacity(
+            title.len() + artist.len() + album.len() + album_artist.len() + 3,
+        );
+        text.push_str(title);
+        text.push(' ');
+        text.push_str(artist);
+        text.push(' ');
+        text.push_str(album);
+        text.push(' ');
+        text.push_str(album_artist);
+        text.to_lowercase()
     }
 }
 
@@ -146,10 +169,12 @@ pub struct Artist {
     pub albums: Vec<String>,
 }
 
-/// Cover art source for a track.
+/// Cover art source for a track. Embedded art shares its bytes behind an
+/// `Arc`, so handing the source between threads (reader → cover service →
+/// loader) bumps a refcount instead of copying megapixel payloads.
 #[derive(Debug, Clone)]
 pub enum CoverSource {
-    Embedded(Vec<u8>),
+    Embedded(Arc<[u8]>),
     Filesystem(PathBuf),
     None,
 }

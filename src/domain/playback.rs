@@ -36,6 +36,10 @@ pub enum PlaybackCommand {
     ToggleVisibility,
     PlayNext(crate::domain::TrackId),
     AddToQueue(crate::domain::TrackId),
+    /// Append a batch of tracks in one command, so the queue mutates once
+    /// under one lock (folder "play all" enqueues N tracks without N lock
+    /// round-trips and N shuffle regenerations).
+    AddMany(Vec<crate::domain::TrackId>),
     PlayPause,
 }
 

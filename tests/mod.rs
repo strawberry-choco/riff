@@ -90,6 +90,7 @@ pub mod test_utils {
             play_count: 0,
             last_played: None,
             date_added: None,
+            search_text: String::new(),
         }
     }
 
@@ -116,6 +117,7 @@ pub mod test_utils {
             play_count: 0,
             last_played: None,
             date_added: None,
+            search_text: String::new(),
         }
     }
 }
@@ -126,13 +128,16 @@ pub mod test_utils {
 /// tests) build on the same scripted decoder/output behavior.
 pub mod mocks {
     use riff::app::errors::AppError;
-    use riff::app::store::{LibraryMutationStore, LibraryQueryStore, Settings, SettingsStore};
+    use riff::app::store::{
+        LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings, SettingsStore,
+    };
     use riff::app::traits::{
         AudioDecoder, AudioFormatInfo, AudioOutput, CoverImage, CoverLoader, MetadataReader,
         MetadataWriter, TagEdit,
     };
     use riff::domain::{
-        Album, Artist, CoverSource, SmartPlaylistKind, Track, TrackId, TrackMetadata,
+        Album, Artist, CoverSource, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
+        TrackMetadata,
     };
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
@@ -631,6 +636,77 @@ pub mod mocks {
 
         fn clear_library(&mut self) -> Result<usize, AppError> {
             Ok(0)
+        }
+    }
+
+    /// Empty [`PlaylistStore`] fake standing in for the Playlists section
+    /// of the Application Store in `SessionViews` facade tests that exercise
+    /// Library-side views: every read serves an empty result and every
+    /// mutation reports "nothing changed". The playlist projection's own
+    /// behavior is pinned against real `SQLite` scratch stores in the app
+    /// tests, not against this stub.
+    #[derive(Default)]
+    pub struct MockPlaylistStore {
+        /// When set, every read fails with an `InvalidOperation` error.
+        pub fail_loads: bool,
+    }
+
+    impl PlaylistStore for MockPlaylistStore {
+        fn load_playlists(&self) -> Result<Vec<Playlist>, AppError> {
+            if self.fail_loads {
+                return Err(AppError::InvalidOperation("playlists boom".to_string()));
+            }
+            Ok(Vec::new())
+        }
+
+        fn load_playlist_entries(
+            &self,
+            _id: &PlaylistId,
+        ) -> Result<Vec<riff::app::store::PlaylistEntry>, AppError> {
+            if self.fail_loads {
+                return Err(AppError::InvalidOperation("entries boom".to_string()));
+            }
+            Ok(Vec::new())
+        }
+
+        fn create_playlist(
+            &mut self,
+            _name: &str,
+            _initial_tracks: &[TrackId],
+        ) -> Result<PlaylistId, AppError> {
+            Ok(PlaylistId::new("mock"))
+        }
+
+        fn rename_playlist(&mut self, _id: &PlaylistId, _new_name: &str) -> Result<bool, AppError> {
+            Ok(false)
+        }
+
+        fn delete_playlist(&mut self, _id: &PlaylistId) -> Result<bool, AppError> {
+            Ok(false)
+        }
+
+        fn add_playlist_entry(
+            &mut self,
+            _id: &PlaylistId,
+            _track: &TrackId,
+        ) -> Result<bool, AppError> {
+            Ok(false)
+        }
+
+        fn remove_playlist_entries(
+            &mut self,
+            _id: &PlaylistId,
+            _track: &TrackId,
+        ) -> Result<bool, AppError> {
+            Ok(false)
+        }
+
+        fn reorder_playlist_entries(
+            &mut self,
+            _id: &PlaylistId,
+            _ordered: &[TrackId],
+        ) -> Result<bool, AppError> {
+            Ok(false)
         }
     }
 

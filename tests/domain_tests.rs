@@ -88,6 +88,7 @@ mod tests {
             play_count: 0,
             last_played: None,
             date_added: None,
+            search_text: String::new(),
         };
 
         assert_eq!(track.metadata.display_artist(), "Unknown Artist");
@@ -358,7 +359,7 @@ mod tests {
         // is never queued, every other index appears exactly once.
         assert_eq!(queue.shuffled_indices.len(), 3);
         assert!(!queue.shuffled_indices.contains(&2));
-        let mut sorted = queue.shuffled_indices.clone();
+        let mut sorted: Vec<usize> = queue.shuffled_indices.iter().copied().collect();
         sorted.sort_unstable();
         assert_eq!(sorted, vec![0, 1, 3]);
     }
@@ -392,6 +393,122 @@ mod tests {
         let mut expected = ids;
         expected.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn test_advance_follows_seeded_order_front_to_back() {
+        // The shuffle order is consumed strictly front-to-back (O(1)
+        // `pop_front`, allocation plan 4.4): a hand-seeded order pins exact
+        // navigation without any randomness.
+        let mut queue = PlaybackQueue::new((1..=4).map(|i| TrackId(format!("t{i}.mp3"))).collect());
+        queue.current_index = Some(0);
+        queue.shuffle = true;
+        queue.shuffled_indices = std::collections::VecDeque::from(vec![3, 1, 2]);
+
+        assert_eq!(queue.advance(), Some(&TrackId("t4.mp3".to_string())));
+        assert_eq!(queue.advance(), Some(&TrackId("t2.mp3".to_string())));
+        assert_eq!(queue.advance(), Some(&TrackId("t3.mp3".to_string())));
+        // Exhausted with repeat off: no further advance.
+        assert_eq!(queue.advance(), None);
+    }
+
+    #[test]
+    fn test_append_under_shuffle_defers_regeneration_until_advance() {
+        // Lazy regeneration (allocation plan 4.4): a mutation marks the
+        // order dirty instead of reshuffling immediately; the next advance
+        // rebuilds it once. The rebuilt order must be a valid permutation
+        // of every non-current track — including the just-appended one.
+        let mut queue = PlaybackQueue::new((0..3).map(|i| TrackId(format!("t{i}.mp3"))).collect());
+        queue.current_index = Some(0);
+        queue.set_shuffle(true);
+        let stale_len = queue.shuffled_indices.len();
+
+        queue.append(TrackId("t3.mp3".to_string()));
+        // The stale order survives until the rebuild (upcoming may briefly
+        // reflect it); the dirty flag deferred the work.
+        assert_eq!(queue.shuffled_indices.len(), stale_len);
+
+        let mut visited: Vec<TrackId> = Vec::new();
+        while let Some(t) = queue.advance() {
+            visited.push(t.clone());
+            assert!(visited.len() <= 3, "shuffle yielded more tracks than exist");
+        }
+        visited.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            visited,
+            vec![
+                TrackId("t1.mp3".to_string()),
+                TrackId("t2.mp3".to_string()),
+                TrackId("t3.mp3".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_remove_under_shuffle_rebuilds_on_next_advance() {
+        let mut queue = PlaybackQueue::new((0..4).map(|i| TrackId(format!("t{i}.mp3"))).collect());
+        queue.current_index = Some(0);
+        queue.set_shuffle(true);
+
+        queue.remove(1); // drop t1
+
+        let mut visited: Vec<TrackId> = Vec::new();
+        while let Some(t) = queue.advance() {
+            visited.push(t.clone());
+            assert!(visited.len() <= 2, "removed track resurrected in shuffle");
+        }
+        visited.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            visited,
+            vec![TrackId("t2.mp3".to_string()), TrackId("t3.mp3".to_string()),]
+        );
+    }
+
+    #[test]
+    fn test_shuffle_repeat_all_wraps_with_a_fresh_order() {
+        let mut queue = PlaybackQueue::new((0..4).map(|i| TrackId(format!("t{i}.mp3"))).collect());
+        queue.current_index = Some(0);
+        queue.repeat = RepeatMode::All;
+        queue.set_shuffle(true);
+
+        for _ in 0..3 {
+            assert!(queue.advance().is_some());
+        }
+        // Exhausted with repeat-all: the order regenerates and playback
+        // continues instead of stopping.
+        assert!(queue.advance().is_some());
+    }
+
+    #[test]
+    fn test_append_many_matches_repeated_append() {
+        // Batch enqueue (allocation plan 4.3) must be behaviorally
+        // equivalent to appending one-by-one: identical final track list,
+        // and under shuffle both drain the identical multiset.
+        let ids: Vec<TrackId> = (0..6).map(|i| TrackId(format!("t{i}.mp3"))).collect();
+
+        let mut batched = PlaybackQueue::new(vec![ids[0].clone()]);
+        batched.current_index = Some(0);
+        batched.set_shuffle(true);
+        batched.append_many(ids[1..].to_vec());
+
+        let mut looped = PlaybackQueue::new(vec![ids[0].clone()]);
+        looped.current_index = Some(0);
+        looped.set_shuffle(true);
+        for id in &ids[1..] {
+            looped.append(id.clone());
+        }
+
+        assert_eq!(batched.tracks, looped.tracks);
+
+        let drain = |queue: &mut PlaybackQueue| {
+            let mut visited: Vec<TrackId> = Vec::new();
+            while let Some(t) = queue.advance() {
+                visited.push(t.clone());
+            }
+            visited.sort_by(|a, b| a.0.cmp(&b.0));
+            visited
+        };
+        assert_eq!(drain(&mut batched), drain(&mut looped));
     }
 
     #[test]

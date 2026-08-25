@@ -22,6 +22,7 @@ use crate::app::projection::{
 use crate::app::store::{LibraryQueryStore, StoreGeneration};
 use crate::domain::{Album, Artist, PlaybackQueue, SmartPlaylistKind, Track, TrackId};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// One page of the flat/search track list: the authoritative total plus the
 /// cached rows of one window.
@@ -31,8 +32,10 @@ pub struct TrackListPage {
     pub total: usize,
     /// Row index `rows` starts at (the projection's window-aligned offset).
     pub start: usize,
-    /// The cached rows of this window, in store order.
-    pub rows: Vec<Track>,
+    /// The cached rows of this window, in store order. Shared with the
+    /// projection's cache — handing a page out bumps a refcount instead of
+    /// deep-copying the window's tracks.
+    pub rows: Arc<[Track]>,
 }
 
 /// Flat facade over the Session Projections and the Library query port
@@ -62,6 +65,15 @@ impl SessionViews {
             smart_playlists: SmartPlaylistsProjection::new(),
             playback: PlaybackProjection::new(),
         }
+    }
+
+    /// The session store generation's current value — the epoch every
+    /// committed Library mutation advances. UI-local caches key on it so
+    /// they re-resolve when the Library moves, exactly like the projections
+    /// do.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.current()
     }
 
     // --- Flat list / search -------------------------------------------------
@@ -126,7 +138,7 @@ impl SessionViews {
         TrackListPage {
             total: effective_total,
             start: window_start,
-            rows: self.tracks.window(window_start).unwrap_or(&[]).to_vec(),
+            rows: self.tracks.window(window_start).unwrap_or_default(),
         }
     }
 
@@ -156,30 +168,33 @@ impl SessionViews {
 
     // --- Artist / album browsing ---------------------------------------------
 
-    /// Every artist name-ascending, cached per generation.
-    pub fn artists(&mut self) -> Vec<Artist> {
+    /// Every artist name-ascending, cached per generation. Fresh frames
+    /// hand out an `Arc` clone of the cached list — no per-frame copy.
+    pub fn artists(&mut self) -> Arc<[Artist]> {
         let generation = self.generation.current();
         self.browsing
             .artists(generation, &mut || self.queries.all_artists())
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to load artists from the store: {e}");
-                Vec::new()
+                Arc::from([])
             })
     }
 
     /// One artist's albums in canonical order, cached per generation.
-    pub fn artist_albums(&mut self, artist: &str) -> Vec<Album> {
+    /// Fresh frames hand out an `Arc` clone of the cached list.
+    pub fn artist_albums(&mut self, artist: &str) -> Arc<[Album]> {
         let generation = self.generation.current();
         self.browsing
             .artist_albums(generation, artist, &mut |a| self.queries.artist_albums(a))
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to load albums for {artist}: {e}");
-                Vec::new()
+                Arc::from([])
             })
     }
 
-    /// One album's tracks in canonical order, cached per generation.
-    pub fn album_tracks(&mut self, album_artist: &str, album_title: &str) -> Vec<Track> {
+    /// One album's tracks in canonical order, cached per generation. Fresh
+    /// frames hand out an `Arc` clone of the cached list.
+    pub fn album_tracks(&mut self, album_artist: &str, album_title: &str) -> Arc<[Track]> {
         let generation = self.generation.current();
         self.browsing
             .album_tracks(generation, album_artist, album_title, &mut |a, t| {
@@ -187,7 +202,7 @@ impl SessionViews {
             })
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to load tracks for {album_title}: {e}");
-                Vec::new()
+                Arc::from([])
             })
     }
 
@@ -221,7 +236,9 @@ impl SessionViews {
     }
 
     /// Every track id under `folder`, path-ordered, cached per generation.
-    pub fn folder_subtree_ids(&mut self, folder: &Path) -> Vec<TrackId> {
+    /// Fresh frames hand out an `Arc` clone of the cached list — no
+    /// per-frame copy of one id per track.
+    pub fn folder_subtree_ids(&mut self, folder: &Path) -> Arc<[TrackId]> {
         let generation = self.generation.current();
         self.folders
             .subtree_ids(generation, folder, &mut |f| {
@@ -229,13 +246,13 @@ impl SessionViews {
             })
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to list folder tree {}: {e}", folder.display());
-                Vec::new()
+                Arc::from([])
             })
     }
 
     /// The child directories of `folder` holding audio, cached per
-    /// generation.
-    pub fn folder_children(&mut self, folder: &Path) -> Vec<PathBuf> {
+    /// generation. Fresh frames hand out an `Arc` clone of the cached list.
+    pub fn folder_children(&mut self, folder: &Path) -> Arc<[PathBuf]> {
         let generation = self.generation.current();
         self.folders
             .children(generation, folder, &mut |f| {
@@ -243,12 +260,13 @@ impl SessionViews {
             })
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to list folder children {}: {e}", folder.display());
-                Vec::new()
+                Arc::from([])
             })
     }
 
-    /// The tracks directly inside `folder`, cached per generation.
-    pub fn folder_direct_tracks(&mut self, folder: &Path) -> Vec<Track> {
+    /// The tracks directly inside `folder`, cached per generation. Fresh
+    /// frames hand out an `Arc` clone of the cached list.
+    pub fn folder_direct_tracks(&mut self, folder: &Path) -> Arc<[Track]> {
         let generation = self.generation.current();
         self.folders
             .direct_tracks(generation, folder, &mut |f| {
@@ -256,15 +274,16 @@ impl SessionViews {
             })
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to list folder tracks {}: {e}", folder.display());
-                Vec::new()
+                Arc::from([])
             })
     }
 
     // --- Smart playlists --------------------------------------------------------
 
     /// The computed read-only smart playlist for `kind`, cached per
-    /// generation and limit.
-    pub fn smart_list(&mut self, kind: SmartPlaylistKind, limit: usize) -> Vec<Track> {
+    /// generation and limit. Fresh frames hand out an `Arc` clone of the
+    /// cached list.
+    pub fn smart_list(&mut self, kind: SmartPlaylistKind, limit: usize) -> Arc<[Track]> {
         let generation = self.generation.current();
         self.smart_playlists
             .list(generation, kind, limit, &mut |k, l| {
@@ -275,7 +294,7 @@ impl SessionViews {
                     "Failed to compute smart playlist {}: {e}",
                     kind.display_name()
                 );
-                Vec::new()
+                Arc::from([])
             })
     }
 

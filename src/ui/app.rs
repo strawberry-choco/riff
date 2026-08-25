@@ -81,6 +81,30 @@ pub(crate) struct ThemeState {
     last_applied: Option<(bool, bool)>,
 }
 
+/// The resolved rows behind the open user playlist's view, cached across
+/// frames ([`RiffApp::render_playlist_view`]): steady-state frames serve
+/// this instead of re-querying the store and re-mapping entries per frame.
+///
+/// Keyed by `(playlist id, store generation)`: Library mutations bump the
+/// generation and re-resolve entry validity through the same seam the
+/// Session Projections use. Playlist-entry mutations do NOT move the
+/// Library generation, so their commit sites in this module clear the cache
+/// explicitly — the same places that already patch the `state.playlists`
+/// projection by hand.
+struct PlaylistViewCache {
+    playlist_id: PlaylistId,
+    generation: u64,
+    /// One row per entry, in playlist order: the id, its store-resolved
+    /// Track when the Library knows it, and the playability verdict.
+    entries: Arc<[PlaylistEntryRow]>,
+    /// The playable ids (valid verdicts only), for the header context menu.
+    valid_ids: Arc<[TrackId]>,
+}
+
+/// One resolved row of an open user playlist: the entry id, its
+/// store-resolved Track when known, and whether it can play.
+type PlaylistEntryRow = (TrackId, Option<Track>, bool);
+
 pub struct RiffApp {
     pub state: Arc<Mutex<AppState>>,
     command_sender: Option<Sender<PlaybackCommand>>,
@@ -105,6 +129,10 @@ pub struct RiffApp {
     smart_playlist_view: Option<SmartPlaylistKind>,
     /// Which user playlist is open in the library explorer, if any.
     playlist_view: Option<PlaylistId>,
+    /// Resolved rows for the open playlist, cached per (id, generation) —
+    /// see [`PlaylistViewCache`]. `None` when nothing is cached or the last
+    /// store read failed (so the next frame retries).
+    playlist_cache: Option<PlaylistViewCache>,
     /// Transient "New Playlist" name prompt (`Some` = open, holds the draft).
     playlist_create_name: Option<String>,
     /// Transient rename prompt: (playlist id, draft name).
@@ -187,6 +215,7 @@ impl RiffApp {
             tag_edit: None,
             smart_playlist_view: None,
             playlist_view: None,
+            playlist_cache: None,
             playlist_create_name: None,
             playlist_rename: None,
             clear_library_confirm: false,
@@ -458,6 +487,7 @@ impl RiffApp {
         let playlists_slot = &mut state.playlists;
         let tag_edit_slot = &mut self.tag_edit;
         let playlist_store_slot = self.playlist_store.as_mut();
+        let playlist_cache_slot = &mut self.playlist_cache;
         show_track_context_menu(
             response,
             TrackMenuArgs {
@@ -468,6 +498,7 @@ impl RiffApp {
                 advanced,
                 playlists: playlists_slot,
                 playlist_store: playlist_store_slot,
+                playlist_cache: playlist_cache_slot,
                 remove_from_playlist,
             },
         );
@@ -1360,13 +1391,18 @@ impl RiffApp {
         // (ADR 0002/0003): artists A–Z straight from the Application Store,
         // each level cached until the next committed mutation bumps the
         // generation. No in-memory mirror involved.
-        let artists: Vec<Artist> = self.views.artists();
-        let artists: Vec<Artist> = if query.is_empty() {
-            artists
+        //
+        // Single pass over the borrowed cache: the projection hands back an
+        // Arc-shared list, so filtering collects lightweight references
+        // instead of cloning Artists, and the lowercased query is hoisted
+        // out of the per-item work.
+        let artists = self.views.artists();
+        let visible: Vec<&Artist> = if query.is_empty() {
+            artists.iter().collect()
         } else {
             let q = query.to_lowercase();
             artists
-                .into_iter()
+                .iter()
                 .filter(|a| a.name.to_lowercase().contains(&q))
                 .collect()
         };
@@ -1387,7 +1423,7 @@ impl RiffApp {
             });
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for artist in &artists {
+            for &artist in &visible {
                 let artist_has_current = current_album
                     .as_ref()
                     .is_some_and(|(album_artist, _)| album_artist == &artist.name);
@@ -1450,9 +1486,9 @@ impl RiffApp {
         collapsing.store(ui.ctx());
 
         if let Some(body) = collapsing.show_body_unindented(ui, |ui| {
-            let albums: Vec<Album> = self.views.artist_albums(&artist.name);
+            let albums = self.views.artist_albums(&artist.name);
 
-            for album in &albums {
+            for album in albums.iter() {
                 let album_has_current = current_album.is_some_and(|(album_artist, album_title)| {
                     album_artist == &album.artist && album_title == &album.title
                 });
@@ -1516,7 +1552,7 @@ impl RiffApp {
         collapsing.store(ui.ctx());
 
         collapsing.show_body_unindented(ui, |ui| {
-            let tracks: Vec<Track> = self.views.album_tracks(&album.artist, &album.title);
+            let tracks = self.views.album_tracks(&album.artist, &album.title);
             self.render_album_track_rows(ui, state, cmd, &tracks, current_track);
         });
     }
@@ -1784,28 +1820,22 @@ impl RiffApp {
         }
     }
 
-    /// Render the tracks of a user playlist, in order. Entries whose files
-    /// have been moved or deleted are flagged invalid (dimmed, strikethrough,
-    /// "missing" hint) and excluded from playback; valid entries get the
-    /// standard track context menu plus "Remove from Playlist".
-    fn render_playlist_view(
+    /// The cached-or-fresh resolved rows for one user playlist, keyed by
+    /// `(playlist id, store generation)` — see [`PlaylistViewCache`]. Fresh
+    /// frames hand out `Arc` clones of the cached rows; a failed store read
+    /// caches nothing so the next frame retries (the projections' error
+    /// policy).
+    fn playlist_rows(
         &mut self,
-        ui: &mut egui::Ui,
-        state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
         playlist_id: &PlaylistId,
-    ) {
-        let Some(playlist) = state
-            .playlists
-            .iter()
-            .find(|p| &p.id == playlist_id)
-            .cloned()
-        else {
-            ui.label("Playlist not found");
-            return;
-        };
-
-        let current_track = state.queue.current_track().cloned();
+    ) -> (Arc<[PlaylistEntryRow]>, Arc<[TrackId]>) {
+        let generation = self.views.generation();
+        if let Some(cache) = &self.playlist_cache
+            && cache.playlist_id == *playlist_id
+            && cache.generation == generation
+        {
+            return (Arc::clone(&cache.entries), Arc::clone(&cache.valid_ids));
+        }
 
         // Resolve every entry against the Application Store in one query:
         // each entry rides its Library validity flag (SQL LEFT JOIN against
@@ -1813,28 +1843,72 @@ impl RiffApp {
         // an otherwise known file still exists on disk remains a read-time
         // filesystem check — the former mirror-based rule with the Store as
         // the sole authority on what the library knows.
-        let resolved: Vec<crate::app::store::PlaylistEntry> =
-            match self.playlist_store.load_playlist_entries(playlist_id) {
-                Ok(entries) => entries,
-                Err(e) => {
-                    tracing::warn!("Failed to load playlist entries from the store: {e}");
-                    Vec::new()
-                }
-            };
-        let valid_ids = crate::app::playlist_manager::valid_tracks(&resolved);
+        match self.playlist_store.load_playlist_entries(playlist_id) {
+            Ok(resolved) => {
+                let valid_ids: Vec<TrackId> = crate::app::playlist_manager::valid_tracks(&resolved);
+                let entries: Vec<PlaylistEntryRow> = resolved
+                    .into_iter()
+                    .map(|entry| {
+                        let valid = crate::app::playlist_manager::track_is_valid(&entry);
+                        (entry.id, entry.track, valid)
+                    })
+                    .collect();
+                self.playlist_cache = Some(PlaylistViewCache {
+                    playlist_id: playlist_id.clone(),
+                    generation,
+                    entries: entries.into(),
+                    valid_ids: valid_ids.into(),
+                });
+                let cache = self.playlist_cache.as_ref().expect("cache just stored");
+                (Arc::clone(&cache.entries), Arc::clone(&cache.valid_ids))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load playlist entries from the store: {e}");
+                self.playlist_cache = None;
+                (Arc::default(), Arc::default())
+            }
+        }
+    }
+
+    /// Render the tracks of a user playlist, in order. Entries whose files
+    /// have been moved or deleted are flagged invalid (dimmed, strikethrough,
+    /// "missing" hint) and excluded from playback; valid entries get the
+    /// standard track context menu plus "Remove from Playlist".
+    ///
+    /// Nothing here clones per frame in steady state: the header facts are
+    /// read from the `state.playlists` projection by reference (the borrow
+    /// ends before the render loops take `state` mutably), and the resolved
+    /// rows come from [`Self::playlist_rows`] as `Arc` clones.
+    fn render_playlist_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &mut AppState,
+        cmd: Option<&Sender<PlaybackCommand>>,
+        playlist_id: &PlaylistId,
+    ) {
+        let Some(playlist) = state.playlists.iter().find(|p| &p.id == playlist_id) else {
+            ui.label("Playlist not found");
+            return;
+        };
+        let playlist_name = &playlist.name;
+        let track_count = playlist.tracks.len();
+
+        let current_track = state.queue.current_track().cloned();
+
+        let (entries, valid_ids) = self.playlist_rows(playlist_id);
 
         // Header: name + count, with whole-list actions (valid tracks only),
         // mirroring the smart-playlist header menu.
         let header = ui.horizontal(|ui| {
-            ui.heading(&playlist.name);
-            ui.weak(format!("({} tracks)", playlist.tracks.len()));
+            ui.heading(playlist_name);
+            ui.weak(format!("({track_count} tracks)"));
         });
         if !valid_ids.is_empty() {
             show_list_context_menu(&header.response, cmd, &valid_ids);
         }
         ui.separator();
 
-        if playlist.tracks.is_empty() {
+        if track_count == 0 {
             ui.vertical_centered(|ui| {
                 ui.label("No tracks in this playlist");
                 ui.weak("Use a track's context menu \u{2192} Add to Playlist to add tracks.");
@@ -1844,14 +1918,6 @@ impl RiffApp {
 
         // One row per entry: the store-resolved track (if any) plus the
         // final playability verdict (Library-known AND file exists on disk).
-        let entries: Vec<(TrackId, Option<Track>, bool)> = resolved
-            .into_iter()
-            .map(|entry| {
-                let valid = crate::app::playlist_manager::track_is_valid(&entry);
-                (entry.id, entry.track, valid)
-            })
-            .collect();
-
         egui::ScrollArea::vertical().show_rows(
             ui,
             crate::ui::sidebar::ROW_H,
@@ -1986,6 +2052,9 @@ impl RiffApp {
                 from,
                 index,
             );
+            // The committed reorder does not move the Library generation,
+            // so drop the row cache explicitly.
+            self.playlist_cache = None;
         }
         self.attach_track_menu(
             &response,
@@ -2125,7 +2194,7 @@ impl RiffApp {
             |n| n.to_string_lossy().to_string(),
         );
 
-        let folder_track_ids: Vec<TrackId> = self.views.folder_subtree_ids(path);
+        let folder_track_ids = self.views.folder_subtree_ids(path);
 
         // Collapse state persists per path in egui memory, exactly like the
         // former CollapsingHeader; roots open when they contain the playing
@@ -2170,11 +2239,12 @@ impl RiffApp {
 
         collapsing.show_body_unindented(ui, |ui| {
             let children = self.views.folder_children(path);
-            for child_path in &children {
+            for child_path in children.iter() {
                 self.render_folder_node(ui, state, cmd, child_path, level + 1, query);
             }
 
-            let tracks = folder_tracks_filtered(self.views.folder_direct_tracks(path), query);
+            let direct = self.views.folder_direct_tracks(path);
+            let tracks = folder_tracks_filtered(&direct, query);
 
             for track in &tracks {
                 let display = format!(
@@ -2344,15 +2414,17 @@ fn play_folder(track_ids: &[TrackId], cmd: Option<&Sender<PlaybackCommand>>) {
 }
 
 /// Tracks directly in a folder, optionally filtered by search query. The
-/// listing arrives from the store in canonical order; only the query filter
-/// applies here, like before.
-fn folder_tracks_filtered(tracks: Vec<Track>, query: &str) -> Vec<Track> {
+/// listing arrives borrowed from the folder projection's Arc-shared cache;
+/// only the query filter applies here, like before. Collects lightweight
+/// references — never clones Tracks — and hoists the lowercased query out
+/// of the per-item work.
+fn folder_tracks_filtered<'a>(tracks: &'a [Track], query: &str) -> Vec<&'a Track> {
     if query.is_empty() {
-        tracks
+        tracks.iter().collect()
     } else {
         let q = query.to_lowercase();
         tracks
-            .into_iter()
+            .iter()
             .filter(|t| t.metadata.search_text().contains(&q))
             .collect()
     }
@@ -2402,6 +2474,9 @@ struct TrackMenuArgs<'a> {
     /// The Application Store's playlists section: entry mutations commit
     /// through it as one immediate durable transaction.
     playlist_store: &'a mut dyn PlaylistStore,
+    /// The open-playlist row cache; entry mutations here clear it so the
+    /// next frame re-resolves from the store.
+    playlist_cache: &'a mut Option<PlaylistViewCache>,
     /// When `Some`, adds a "Remove from Playlist" action for that playlist.
     remove_from_playlist: Option<&'a PlaylistId>,
 }
@@ -2419,6 +2494,7 @@ fn show_track_context_menu(response: &egui::Response, args: TrackMenuArgs<'_>) {
         advanced,
         playlists,
         playlist_store,
+        playlist_cache,
         remove_from_playlist,
     } = args;
     let cmd = cmd.cloned();
@@ -2450,7 +2526,14 @@ fn show_track_context_menu(response: &egui::Response, args: TrackMenuArgs<'_>) {
                 }
                 ui.close();
             }
-            add_to_playlist_menu(ui, &playlist_options, playlists, playlist_store, &tid);
+            add_to_playlist_menu(
+                ui,
+                &playlist_options,
+                playlists,
+                playlist_store,
+                playlist_cache,
+                &tid,
+            );
         }
         if let Some(ref pid) = remove_pid
             && ui.button("Remove from Playlist").clicked() {
@@ -2463,6 +2546,9 @@ fn show_track_context_menu(response: &egui::Response, args: TrackMenuArgs<'_>) {
                         {
                             playlist.tracks.retain(|t| t != &tid);
                         }
+                        // The committed mutation does not move the Library
+                        // generation, so drop the row cache explicitly.
+                        *playlist_cache = None;
                     }
                     Ok(false) => {}
                     Err(e) => tracing::warn!("Failed to remove playlist entry: {e}"),
@@ -2561,12 +2647,15 @@ fn cover_art_ui(
 /// Clicking a playlist appends the track (exact duplicates ignored) as one
 /// immediate durable transaction, so the change survives a restart. Takes the
 /// playlists slice (not the whole `AppState`) so callers can capture a
-/// disjoint field and avoid whole-state borrow conflicts.
+/// disjoint field and avoid whole-state borrow conflicts. A committed append
+/// clears `playlist_cache` — the mutation does not move the Library
+/// generation, so the open-playlist row cache would otherwise go stale.
 fn add_to_playlist_menu(
     ui: &mut egui::Ui,
     playlist_options: &[(PlaylistId, String)],
     playlists: &mut [Playlist],
     store: &mut dyn PlaylistStore,
+    playlist_cache: &mut Option<PlaylistViewCache>,
     track_id: &TrackId,
 ) {
     ui.menu_button("Add to Playlist", |ui| {
@@ -2582,6 +2671,7 @@ fn add_to_playlist_menu(
                         if let Some(playlist) = playlists.iter_mut().find(|p| &p.id == pid) {
                             playlist.tracks.push(track_id.clone());
                         }
+                        *playlist_cache = None;
                     }
                     Ok(false) => {}
                     Err(e) => tracing::warn!("Failed to add playlist entry: {e}"),

@@ -794,10 +794,11 @@ mod tests {
     fn wire(mock: MockLibraryQueryStore) -> (SessionViews, MockHandle, StoreGeneration) {
         let mock = Arc::new(Mutex::new(mock));
         let generation = StoreGeneration::new();
-        // The playlist generation is wired but unused by these Library-view
-        // tests; a fresh counter stands in for the playlist adapter's bumps.
+        // The playlist ports are wired but unused by these Library-view
+        // tests; an empty stub stands in for the Playlists section.
         let views = SessionViews::new(
             Box::new(SharedMock(Arc::clone(&mock))),
+            Box::new(crate::mocks::MockPlaylistStore::default()),
             generation.clone(),
             StoreGeneration::new(),
         );
@@ -1469,7 +1470,7 @@ mod tests {
         queue.shuffle = true;
         // A hand-seeded shuffle order (indices into tracks): t4 then t2 —
         // the window must mirror the QUEUE's order, not the append order.
-        queue.shuffled_indices = vec![3, 1];
+        queue.shuffled_indices = std::collections::VecDeque::from(vec![3, 1]);
 
         views.sync_playback(&queue, 5);
 
@@ -2921,7 +2922,7 @@ mod cover_service_tests {
     fn test_cover_request_resolves_and_poll_yields_image() {
         let image = test_image();
         let h = spawn_service(
-            CoverSource::Embedded(vec![1, 2, 3]),
+            CoverSource::Embedded(vec![1, 2, 3].into()),
             Ok(Some(image.clone())),
         );
 
@@ -2986,7 +2987,7 @@ mod cover_service_tests {
         let (gate_tx, gate_rx) = crossbeam_channel::unbounded();
         let image = test_image();
         let h = spawn_with_gate(
-            CoverSource::Embedded(vec![1, 2, 3]),
+            CoverSource::Embedded(vec![1, 2, 3].into()),
             Ok(Some(image)),
             Some(gate_rx),
         );
@@ -3081,7 +3082,10 @@ mod cover_service_tests {
 
     #[test]
     fn test_cover_poll_drains_all_completed_results_then_stays_empty() {
-        let h = spawn_service(CoverSource::Embedded(vec![9, 9, 9]), Ok(Some(test_image())));
+        let h = spawn_service(
+            CoverSource::Embedded(vec![9, 9, 9].into()),
+            Ok(Some(test_image())),
+        );
 
         // Three distinct tracks, all resolvable.
         for i in 0..3 {
@@ -3106,6 +3110,388 @@ mod cover_service_tests {
         assert!(
             h.service.poll().is_empty(),
             "poll must be empty once everything drained"
+        );
+    }
+}
+
+/// The sixth Session Projection: user playlists read through the seam
+/// (ADR 0002). These tests drive `SessionViews` against a real `SQLite`
+/// scratch store at the infra seam — the same house pattern as the store
+/// tests — because the property under test is that committed store
+/// mutations show up on the next view call with zero caller action.
+mod playlist_projection_tests {
+    use super::*;
+    use riff::app::errors::AppError;
+    use riff::app::store::{LibraryMutationStore, PlaylistEntry, PlaylistStore, StoreGeneration};
+    use riff::infra::store::{MutexLibraryQueryStore, MutexPlaylistStore, SqliteStore};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counting [`PlaylistStore`] decorator: delegates everything to the
+    /// real adapter while counting entry-list reads, so tests can tell
+    /// "served from cache" apart from "hit the store".
+    struct CountingPlaylistStore {
+        inner: MutexPlaylistStore,
+        entry_loads: Arc<AtomicUsize>,
+    }
+
+    impl CountingPlaylistStore {
+        fn new(inner: MutexPlaylistStore) -> (Self, Arc<AtomicUsize>) {
+            let entry_loads = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    inner,
+                    entry_loads: Arc::clone(&entry_loads),
+                },
+                entry_loads,
+            )
+        }
+    }
+
+    impl PlaylistStore for CountingPlaylistStore {
+        fn load_playlists(&self) -> Result<Vec<Playlist>, AppError> {
+            self.inner.load_playlists()
+        }
+
+        fn load_playlist_entries(&self, id: &PlaylistId) -> Result<Vec<PlaylistEntry>, AppError> {
+            self.entry_loads.fetch_add(1, Ordering::SeqCst);
+            self.inner.load_playlist_entries(id)
+        }
+
+        fn create_playlist(
+            &mut self,
+            name: &str,
+            initial_tracks: &[TrackId],
+        ) -> Result<PlaylistId, AppError> {
+            self.inner.create_playlist(name, initial_tracks)
+        }
+
+        fn rename_playlist(&mut self, id: &PlaylistId, new_name: &str) -> Result<bool, AppError> {
+            self.inner.rename_playlist(id, new_name)
+        }
+
+        fn delete_playlist(&mut self, id: &PlaylistId) -> Result<bool, AppError> {
+            self.inner.delete_playlist(id)
+        }
+
+        fn add_playlist_entry(
+            &mut self,
+            id: &PlaylistId,
+            track: &TrackId,
+        ) -> Result<bool, AppError> {
+            self.inner.add_playlist_entry(id, track)
+        }
+
+        fn remove_playlist_entries(
+            &mut self,
+            id: &PlaylistId,
+            track: &TrackId,
+        ) -> Result<bool, AppError> {
+            self.inner.remove_playlist_entries(id, track)
+        }
+
+        fn reorder_playlist_entries(
+            &mut self,
+            id: &PlaylistId,
+            ordered: &[TrackId],
+        ) -> Result<bool, AppError> {
+            self.inner.reorder_playlist_entries(id, ordered)
+        }
+    }
+
+    /// One scratch Application Store plus a `SessionViews` wired to it
+    /// through the real infra adapters, with the playlist mutation adapter
+    /// kept out for seeding and direct store mutations.
+    struct Scratch {
+        /// Keeps the scratch database (and the seeded audio files) alive for
+        /// the whole test; read by `seed_track` for file placement.
+        dir: tempfile::TempDir,
+        shared: Arc<Mutex<SqliteStore>>,
+        mutations: MutexPlaylistStore,
+        views: riff::app::views::SessionViews,
+        entry_loads: Arc<AtomicUsize>,
+    }
+
+    impl Scratch {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("riff.sqlite3");
+            let shared = Arc::new(Mutex::new(
+                SqliteStore::open_and_migrate(&db_path).expect("fresh store must open and migrate"),
+            ));
+            let library_generation = StoreGeneration::new();
+            let playlist_generation = StoreGeneration::new();
+            let mutations = MutexPlaylistStore::new(shared.clone(), playlist_generation.clone());
+            let (playlist_queries, entry_loads) = CountingPlaylistStore::new(mutations.clone());
+            let views = riff::app::views::SessionViews::new(
+                Box::new(MutexLibraryQueryStore::new(shared.clone())),
+                Box::new(playlist_queries),
+                library_generation,
+                playlist_generation,
+            );
+            Self {
+                dir,
+                shared,
+                mutations,
+                views,
+                entry_loads,
+            }
+        }
+
+        /// How often the facade read playlist entries through the store.
+        fn entry_loads(&self) -> usize {
+            self.entry_loads.load(Ordering::SeqCst)
+        }
+
+        /// Create a real audio file on disk and index it into the Library,
+        /// so the entry resolution's filesystem check passes.
+        fn seed_track(&self, name: &str) -> Track {
+            let path = self.dir.path().join(name);
+            std::fs::write(&path, b"fake audio bytes").expect("scratch file writes");
+            let track = crate::test_utils::create_test_track_with_metadata(
+                &path.to_string_lossy(),
+                &path.to_string_lossy(),
+                "Artist",
+                name,
+                "Album",
+            );
+            self.shared
+                .lock_or_recover()
+                .apply_scan_batch(std::slice::from_ref(&track))
+                .expect("seed scan commits");
+            track
+        }
+    }
+
+    #[test]
+    fn test_initial_fetch_serves_seeded_playlists_and_resolved_rows() {
+        let mut scratch = Scratch::new();
+        let t1 = scratch.seed_track("one.mp3");
+        let dangling = TrackId("f:\\nowhere\\gone.mp3".to_string());
+        let pid = scratch
+            .mutations
+            .create_playlist("Focus Mix", &[t1.id.clone(), dangling.clone()])
+            .expect("create works");
+
+        // First call fetches through the store: the seeded playlist list...
+        let playlists = scratch.views.playlists();
+        assert_eq!(playlists.len(), 1, "the seeded playlist is listed");
+        assert_eq!(playlists[0].id, pid);
+        assert_eq!(playlists[0].name, "Focus Mix");
+
+        // ...and its ready-to-render rows: the known track resolves with
+        // metadata and a valid verdict; the dangling reference stays listed
+        // as (id, None, false) per ADR 0001.
+        let view = scratch
+            .views
+            .playlist_view(&pid)
+            .expect("known id yields a view");
+        assert_eq!(view.rows.len(), 2, "dangling entries stay listed");
+        assert_eq!(view.rows[0].0, t1.id);
+        assert_eq!(
+            view.rows[0].1.as_ref().map(|track| track.id.clone()),
+            Some(t1.id.clone()),
+            "the Library-known track resolves"
+        );
+        assert!(view.rows[0].2, "the seeded file exists so the row is valid");
+        assert_eq!(view.rows[1].0, dangling);
+        assert!(view.rows[1].1.is_none(), "unknown tracks resolve to None");
+        assert!(!view.rows[1].2, "a dangling reference is flagged invalid");
+        assert_eq!(
+            view.valid_ids.as_ref(),
+            std::slice::from_ref(&t1.id),
+            "only playable ids make valid_ids"
+        );
+    }
+
+    #[test]
+    fn test_store_mutations_appear_on_the_next_call_with_zero_caller_action() {
+        let mut scratch = Scratch::new();
+        let t1 = scratch.seed_track("one.mp3");
+        let t2 = scratch.seed_track("two.mp3");
+        let pid = scratch
+            .mutations
+            .create_playlist("Gym", std::slice::from_ref(&t1.id))
+            .expect("create works");
+
+        // Warm both projections at the current generation.
+        let first = scratch
+            .views
+            .playlist_view(&pid)
+            .expect("known id yields a view");
+        assert_eq!(first.rows.len(), 1);
+        let _ = scratch.views.playlists();
+
+        // Mutate through the store directly — no invalidation call, no cache
+        // clearing, nothing but the committed mutations.
+        assert!(
+            scratch.mutations.add_playlist_entry(&pid, &t2.id).unwrap(),
+            "the add commits"
+        );
+        assert!(
+            scratch
+                .mutations
+                .reorder_playlist_entries(&pid, &[t2.id.clone(), t1.id.clone()])
+                .unwrap(),
+            "the reorder commits"
+        );
+        assert!(
+            scratch.mutations.rename_playlist(&pid, "Workout").unwrap(),
+            "the rename commits"
+        );
+
+        // The very next reads reflect the committed state.
+        let playlists = scratch.views.playlists();
+        assert_eq!(playlists[0].name, "Workout", "the rename is visible");
+        assert_eq!(
+            playlists[0].tracks,
+            vec![t2.id.clone(), t1.id.clone()],
+            "the reorder is visible"
+        );
+
+        let view = scratch
+            .views
+            .playlist_view(&pid)
+            .expect("known id yields a view");
+        assert_eq!(view.rows.len(), 2, "the added entry is visible");
+        assert_eq!(view.rows[0].0, t2.id, "rows follow the new order");
+        assert_eq!(view.rows[1].0, t1.id);
+        assert_eq!(
+            view.valid_ids.as_ref(),
+            &[t2.id.clone(), t1.id.clone()],
+            "valid_ids follow the new order too"
+        );
+    }
+
+    #[test]
+    fn test_store_error_fallback_keeps_last_good_rows_and_retries() {
+        let mut scratch = Scratch::new();
+        let t1 = scratch.seed_track("one.mp3");
+        let t2 = scratch.seed_track("two.mp3");
+        let pid = scratch
+            .mutations
+            .create_playlist("Focus Mix", std::slice::from_ref(&t1.id))
+            .expect("create works");
+
+        // Warm both projections with good data.
+        let good_list = scratch.views.playlists();
+        let good_view = scratch
+            .views
+            .playlist_view(&pid)
+            .expect("known id yields a view");
+        assert_eq!(good_view.rows.len(), 1);
+        let loads_after_warm = scratch.entry_loads();
+        assert_eq!(loads_after_warm, 1, "the warm fetch hit the store once");
+
+        // Break every playlist READ at the seam: both store reads join the
+        // entries table, so hiding it fails them (reversible — no schema
+        // surgery needed to recover).
+        scratch
+            .shared
+            .lock_or_recover()
+            .with_connection(|conn| {
+                conn.execute_batch(
+                    "ALTER TABLE playlist_entries RENAME TO playlist_entries_broken;",
+                )
+            })
+            .expect("hiding the entries table works");
+
+        // A playlist-side mutation still commits (the playlists table is
+        // intact) and moves the generation, so the cached rows are stale.
+        assert!(
+            scratch.mutations.rename_playlist(&pid, "Workout").unwrap(),
+            "the rename commits while reads are broken"
+        );
+
+        // The next reads fail at the store and fall back to the last good
+        // data instead of blanking out.
+        let fallback_list = scratch.views.playlists();
+        assert_eq!(
+            fallback_list[0].name, good_list[0].name,
+            "the list keeps its last good rows (not the committed rename)"
+        );
+        assert_eq!(
+            fallback_list[0].tracks, good_list[0].tracks,
+            "the list keeps its last good entry refs"
+        );
+        let fallback_view = scratch
+            .views
+            .playlist_view(&pid)
+            .expect("the fallback keeps a view");
+        // Rows carry unresolved `Track`s (no PartialEq); compare the row
+        // identity, resolution presence, and verdict instead.
+        let row_keys = |view: &riff::app::views::PlaylistView| {
+            view.rows
+                .iter()
+                .map(|(id, track, valid)| (id.clone(), track.is_some(), *valid))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            row_keys(&fallback_view),
+            row_keys(&good_view),
+            "rows keep their last good data"
+        );
+        assert_eq!(
+            fallback_view.valid_ids.as_ref(),
+            good_view.valid_ids.as_ref(),
+            "valid_ids keep their last good data"
+        );
+
+        // Because failed fetches never stamp the generation, the very next
+        // call retries the loader instead of serving the stale cache.
+        let _ = scratch.views.playlist_view(&pid);
+        assert_eq!(
+            scratch.entry_loads(),
+            loads_after_warm + 2,
+            "each stale call retries the store; a stamped failure would serve cache"
+        );
+
+        // Recovery: restore the table and commit through the adapter — the
+        // next read reflects the committed state.
+        scratch
+            .shared
+            .lock_or_recover()
+            .with_connection(|conn| {
+                conn.execute_batch(
+                    "ALTER TABLE playlist_entries_broken RENAME TO playlist_entries;",
+                )
+            })
+            .expect("restoring the entries table works");
+        assert!(
+            scratch.mutations.add_playlist_entry(&pid, &t2.id).unwrap(),
+            "the add commits after recovery"
+        );
+        let recovered = scratch
+            .views
+            .playlist_view(&pid)
+            .expect("known id yields a view");
+        assert_eq!(recovered.rows.len(), 2, "the retry sees the new entry");
+        assert_eq!(recovered.rows[0].0, t1.id);
+        assert_eq!(recovered.rows[1].0, t2.id);
+    }
+
+    #[test]
+    fn test_unknown_playlist_id_yields_none_without_a_third_method() {
+        let mut scratch = Scratch::new();
+        let t1 = scratch.seed_track("one.mp3");
+        let pid = scratch
+            .mutations
+            .create_playlist("Known", std::slice::from_ref(&t1.id))
+            .expect("create works");
+
+        assert!(
+            scratch.views.playlist_view(&pid).is_some(),
+            "a known id yields a view"
+        );
+
+        // An unknown id answers None — and never touches the entry loader,
+        // the playlists list alone decides membership.
+        let loads_before = scratch.entry_loads();
+        let unknown = PlaylistId("playlist-does-not-exist".to_string());
+        assert!(scratch.views.playlist_view(&unknown).is_none());
+        assert_eq!(
+            scratch.entry_loads(),
+            loads_before,
+            "unknown ids resolve without querying entries"
         );
     }
 }

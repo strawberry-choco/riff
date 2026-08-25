@@ -188,6 +188,21 @@ impl AudioEngine {
                     let _ = self.cmd_tx.send(PlaybackCommand::Play(track_id));
                 }
             }
+            PlaybackCommand::AddMany(track_ids) => {
+                // One lock, one queue mutation for the whole batch
+                // (allocation plan 4.3). Same idle-auto-play contract as
+                // AddToQueue: the first id starts playback when idle.
+                let first = track_ids.first().cloned();
+                {
+                    let mut state = self.state.lock_or_recover();
+                    state.queue.append_many(track_ids);
+                }
+                if self.current_track_id.is_none()
+                    && let Some(first) = first
+                {
+                    let _ = self.cmd_tx.send(PlaybackCommand::Play(first));
+                }
+            }
         }
     }
 
@@ -555,6 +570,11 @@ impl AudioEngine {
             PlaybackCommand::AddToQueue(track_id) => {
                 let mut s = self.state.lock_or_recover();
                 s.queue.append(track_id);
+                false
+            }
+            PlaybackCommand::AddMany(track_ids) => {
+                let mut s = self.state.lock_or_recover();
+                s.queue.append_many(track_ids);
                 false
             }
             _ => false,

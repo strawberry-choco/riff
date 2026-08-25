@@ -5,10 +5,13 @@ use crate::app::commands::{LibraryCommand, LibraryUpdate};
 // LRU implementation (spec: no second constant scheme).
 use crate::app::cover_service::Covers;
 pub use crate::app::cover_service::{COVER_CACHE_CAP, lru_insert};
+// The playlist row shape lives in the app layer next to the Session
+// Projection that produces it, re-exported through the views seam.
 use crate::app::state::{AppState, BrowseMode, LibraryStatus, ViewMode};
 use crate::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
 use crate::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
 use crate::app::traits::TagEdit;
+use crate::app::views::PlaylistEntryRow;
 use crate::app::views::SessionViews;
 use crate::app::watcher_manager::WatcherManager;
 use crate::domain::{
@@ -104,10 +107,6 @@ struct PlaylistViewCache {
     /// The playable ids (valid verdicts only), for the header context menu.
     valid_ids: Arc<[TrackId]>,
 }
-
-/// One resolved row of an open user playlist: the entry id, its
-/// store-resolved Track when known, and whether it can play.
-type PlaylistEntryRow = (TrackId, Option<Track>, bool);
 
 /// The lazily computed display labels for one track (allocation plan 2.1):
 /// each variant is formatted at most once per store generation and then
@@ -1749,8 +1748,11 @@ impl RiffApp {
             .and_then(|tid| self.views.resolve_track(tid))
             .map(|t| {
                 (
-                    t.metadata.display_album_artist(),
-                    t.metadata.display_album(),
+                    // `display_*` return borrowed `Cow`s now (allocation
+                    // plan 4.6); the tuple outlives the track, so own the
+                    // strings.
+                    t.metadata.display_album_artist().into_owned(),
+                    t.metadata.display_album().into_owned(),
                 )
             });
 
@@ -2747,24 +2749,28 @@ pub fn cache_polled_covers<S: std::hash::BuildHasher>(
     }
 }
 
-/// Play a folder: start its first track and queue the rest. The ids arrive
-/// in the store's path order — exactly what the former mirror listing
-/// produced.
+/// Play a folder: start its first track and queue the rest as ONE batch
+/// command (allocation plan 4.3), so the queue mutates once under one lock
+/// instead of N times. The ids arrive in the store's path order — exactly
+/// what the former mirror listing produced.
 fn play_folder(track_ids: &[TrackId], cmd: Option<&Sender<PlaybackCommand>>) {
     let Some(s) = cmd else { return };
-    if let Some(first) = track_ids.first() {
-        let _ = s.send(PlaybackCommand::Play(first.clone()));
-        for tid in &track_ids[1..] {
-            let _ = s.send(PlaybackCommand::AddToQueue(tid.clone()));
-        }
+    let Some(first) = track_ids.first() else {
+        return;
+    };
+    let _ = s.send(PlaybackCommand::Play(first.clone()));
+    if track_ids.len() > 1 {
+        let _ = s.send(PlaybackCommand::AddMany(track_ids[1..].to_vec()));
     }
 }
 
 /// Tracks directly in a folder, optionally filtered by search query. The
 /// listing arrives borrowed from the folder projection's Arc-shared cache;
-/// only the query filter applies here, like before. Collects lightweight
-/// references — never clones Tracks — and hoists the lowercased query out
-/// of the per-item work.
+/// the filter matches against each track's PRECOMPUTED lowercase search
+/// text — the same value the store keeps in its `search_text` column, so
+/// the per-frame `format!` + `to_lowercase` work is gone (allocation plan
+/// 4.2). Collects lightweight references and hoists the lowercased query
+/// out of the per-item work.
 fn folder_tracks_filtered<'a>(tracks: &'a [Track], query: &str) -> Vec<&'a Track> {
     if query.is_empty() {
         tracks.iter().collect()
@@ -2772,7 +2778,7 @@ fn folder_tracks_filtered<'a>(tracks: &'a [Track], query: &str) -> Vec<&'a Track
         let q = query.to_lowercase();
         tracks
             .iter()
-            .filter(|t| t.metadata.search_text().contains(&q))
+            .filter(|t| t.search_text.contains(&q))
             .collect()
     }
 }

@@ -469,7 +469,7 @@ impl PlaylistStore for SqliteStore {
     fn load_playlists(&self) -> Result<Vec<Playlist>, AppError> {
         self.with_connection(|conn| {
             let mut stmt =
-                conn.prepare("SELECT id, name, created_at FROM playlists ORDER BY rowid")?;
+                conn.prepare_cached("SELECT id, name, created_at FROM playlists ORDER BY rowid")?;
             let rows = stmt.query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -477,13 +477,15 @@ impl PlaylistStore for SqliteStore {
                     row.get::<_, i64>(2)?,
                 ))
             })?;
+            // Prepared once for the whole loop (allocation plan 4.1): the
+            // per-playlist entries query no longer re-prepares per row.
+            let mut entries = conn.prepare_cached(
+                "SELECT track_id FROM playlist_entries
+                 WHERE playlist_id = ?1 ORDER BY position",
+            )?;
             let mut playlists = Vec::new();
             for row in rows {
                 let (id, name, created_at) = row?;
-                let mut entries = conn.prepare(
-                    "SELECT track_id FROM playlist_entries
-                     WHERE playlist_id = ?1 ORDER BY position",
-                )?;
                 let tracks = entries
                     .query_map([&id], |r| r.get::<_, String>(0))?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -515,7 +517,7 @@ impl PlaylistStore for SqliteStore {
             // reference, which survives the join even when dangling. A
             // dangling row has NULL in every tracks column, so `path`
             // (index 0) being NULL is the validity bit.
-            let mut stmt = conn.prepare(&format!(
+            let mut stmt = conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS}, e.track_id
                  FROM playlist_entries e
                  LEFT JOIN tracks ON tracks.path = e.track_id
@@ -854,9 +856,11 @@ impl SqliteStore {
         for track in tracks {
             // Resolved display fallbacks drive grouping and the FK chain;
             // raw optional metadata is stored alongside for exact
-            // round-trips (search parity uses the raw values).
-            let album_artist_key = track.metadata.display_album_artist();
-            let album_title_key = track.metadata.display_album();
+            // round-trips (search parity uses the raw values). The display
+            // keys are owned copies — the scan path is cold (10-track
+            // batches), and owned `String`s bind straight into the queries.
+            let album_artist_key = track.metadata.display_album_artist().into_owned();
+            let album_title_key = track.metadata.display_album().into_owned();
             conn.execute(
                 "INSERT OR IGNORE INTO artists(name) VALUES (?1)",
                 [&album_artist_key],
@@ -949,8 +953,8 @@ impl SqliteStore {
         Self::apply_scan_batch_in_tx(conn, std::slice::from_ref(track))?;
 
         let new_key = (
-            track.metadata.display_album_artist(),
-            track.metadata.display_album(),
+            track.metadata.display_album_artist().into_owned(),
+            track.metadata.display_album().into_owned(),
         );
         let mut affected: Vec<(String, String)> = Vec::with_capacity(2);
         if let Some(old) = previous_keys
@@ -1037,12 +1041,12 @@ const TRACK_COLUMNS: &str = "path, title, artist, album, album_artist,
             track_number, disc_number, genre, year, composer, comment,
             replaygain_track_gain, replaygain_track_peak,
             duration_nanos, sample_rate, channels,
-            play_count, last_played_nanos, date_added_nanos";
+            play_count, last_played_nanos, date_added_nanos, search_text";
 
 /// How many columns [`TRACK_COLUMNS`] expands to; result rows that append
 /// extra columns after them (e.g. the playlist-entries LEFT JOIN) index
 /// past this.
-const TRACK_COLUMN_COUNT: usize = 19;
+const TRACK_COLUMN_COUNT: usize = 20;
 
 /// Escape SQL-LIKE wildcards and the escape character itself so a path
 /// component matches literally under `LIKE ... ESCAPE '#'`: `%` and `_`
@@ -1123,6 +1127,7 @@ fn track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         play_count: narrow_u32(Some(row.get::<_, i64>(16)?)).unwrap_or(0),
         last_played: row.get::<_, Option<i64>>(17)?.map(system_time_from_nanos),
         date_added: row.get::<_, Option<i64>>(18)?.map(system_time_from_nanos),
+        search_text: row.get(19)?,
     })
 }
 
@@ -1130,7 +1135,8 @@ impl LibraryQueryStore for SqliteStore {
     /// Resolve one `Track` by its `TrackId` (its full file path).
     fn get_track(&self, id: &TrackId) -> Result<Option<Track>, AppError> {
         self.with_connection(|conn| {
-            let mut stmt = conn.prepare(&format!(
+            // Runs per finished play — cached (allocation plan 4.1).
+            let mut stmt = conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS} FROM tracks WHERE path = ?1"
             ))?;
             let mut rows = stmt.query_map([&id.0], track_from_row)?;
@@ -1142,7 +1148,7 @@ impl LibraryQueryStore for SqliteStore {
     /// One bounded window of the flat library list, path-ascending.
     fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, AppError> {
         self.with_connection(|conn| {
-            let mut stmt = conn.prepare(&format!(
+            let mut stmt = conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS} FROM tracks ORDER BY path ASC LIMIT ?1 OFFSET ?2"
             ))?;
             let rows = stmt.query_map(
@@ -1191,7 +1197,8 @@ impl LibraryQueryStore for SqliteStore {
     ) -> Result<Vec<Track>, AppError> {
         self.with_connection(|conn| {
             let needle = query.to_lowercase();
-            let mut stmt = conn.prepare(&format!(
+            // Runs per keystroke — cached (allocation plan 4.1).
+            let mut stmt = conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS} FROM tracks
                  WHERE instr(search_text, ?1) > 0
                  ORDER BY path ASC LIMIT ?2 OFFSET ?3"
@@ -1314,7 +1321,7 @@ impl LibraryQueryStore for SqliteStore {
     /// numbers first (the legacy `unwrap_or(0)` slot), path tiebreak.
     fn album_tracks(&self, album_artist: &str, album_title: &str) -> Result<Vec<Track>, AppError> {
         self.with_connection(|conn| {
-            let mut stmt = conn.prepare(&format!(
+            let mut stmt = conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS} FROM tracks
                  WHERE album_artist_key = ?1 AND album_title_key = ?2
                  ORDER BY COALESCE(track_number, 0) ASC, path ASC"
@@ -1330,11 +1337,13 @@ impl LibraryQueryStore for SqliteStore {
     fn folder_has_audio(&self, folder: &std::path::Path) -> Result<bool, AppError> {
         let params = folder_prefix_params(&folder.to_string_lossy());
         self.with_connection(|conn| {
-            let exists: i64 = conn.query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM tracks WHERE {FOLDER_PREFIX_SQL})"),
-                rusqlite::params![params[0], params[1], params[2]],
-                |row| row.get(0),
-            )?;
+            let exists: i64 = conn
+                .prepare_cached(&format!(
+                    "SELECT EXISTS(SELECT 1 FROM tracks WHERE {FOLDER_PREFIX_SQL})"
+                ))?
+                .query_row(rusqlite::params![params[0], params[1], params[2]], |row| {
+                    row.get(0)
+                })?;
             Ok(exists > 0)
         })
         .map_err(|e| AppError::InvalidOperation(format!("folder probe failed: {e}")))
@@ -1350,16 +1359,17 @@ impl LibraryQueryStore for SqliteStore {
         let needle = query.to_lowercase();
         let params = folder_prefix_params(&folder.to_string_lossy());
         self.with_connection(|conn| {
-            let exists: i64 = conn.query_row(
-                &format!(
+            let exists: i64 = conn
+                .prepare_cached(&format!(
                     "SELECT EXISTS(
                         SELECT 1 FROM tracks
                         WHERE {FOLDER_PREFIX_SQL} AND instr(search_text, ?4) > 0
                      )"
-                ),
-                rusqlite::params![params[0], params[1], params[2], needle],
-                |row| row.get(0),
-            )?;
+                ))?
+                .query_row(
+                    rusqlite::params![params[0], params[1], params[2], needle],
+                    |row| row.get(0),
+                )?;
             Ok(exists > 0)
         })
         .map_err(|e| AppError::InvalidOperation(format!("folder search failed: {e}")))
@@ -1382,7 +1392,7 @@ impl LibraryQueryStore for SqliteStore {
         let folder_text = folder.to_string_lossy().into_owned();
         let params = folder_prefix_params(&folder_text);
         self.with_connection(|conn| {
-            let mut stmt = conn.prepare(&format!(
+            let mut stmt = conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS} FROM tracks
                  WHERE {FOLDER_PREFIX_SQL}
                    AND length(path) > length(?1) + 1
@@ -1447,7 +1457,7 @@ impl LibraryQueryStore for SqliteStore {
         match kind {
             SmartPlaylistKind::MostPlayed => {
                 let mut played: Vec<Track> = self.with_connection(|conn| {
-                    let mut stmt = conn.prepare(&format!(
+                    let mut stmt = conn.prepare_cached(&format!(
                         "SELECT {TRACK_COLUMNS} FROM tracks WHERE play_count > 0"
                     ))?;
                     let rows = stmt.query_map([], track_from_row)?;
@@ -1469,7 +1479,7 @@ impl LibraryQueryStore for SqliteStore {
             // Newest first by the stored first-add stamp; missing dates
             // never qualify (the mirror filtered them out entirely).
             SmartPlaylistKind::RecentlyAdded => self.with_connection(|conn| {
-                let mut stmt = conn.prepare(&format!(
+                let mut stmt = conn.prepare_cached(&format!(
                     "SELECT {TRACK_COLUMNS} FROM tracks
                      WHERE date_added_nanos IS NOT NULL
                      ORDER BY date_added_nanos DESC, path ASC
@@ -1480,7 +1490,7 @@ impl LibraryQueryStore for SqliteStore {
             }),
             // Path-ascending unplayed list.
             SmartPlaylistKind::NeverPlayed => self.with_connection(|conn| {
-                let mut stmt = conn.prepare(&format!(
+                let mut stmt = conn.prepare_cached(&format!(
                     "SELECT {TRACK_COLUMNS} FROM tracks
                      WHERE play_count = 0
                      ORDER BY path ASC
@@ -1500,7 +1510,7 @@ impl LibraryQueryStore for SqliteStore {
                     i64::try_from(LOST_GEMS_THRESHOLD.as_nanos()).unwrap_or(i64::MAX);
                 let cutoff = now_nanos.saturating_sub(threshold_nanos);
                 self.with_connection(|conn| {
-                    let mut stmt = conn.prepare(&format!(
+                    let mut stmt = conn.prepare_cached(&format!(
                         "SELECT {TRACK_COLUMNS} FROM tracks
                          WHERE last_played_nanos IS NULL
                             OR last_played_nanos < ?1
@@ -1530,7 +1540,7 @@ impl SqliteStore {
     fn folder_paths_under(&self, folder: &std::path::Path) -> Result<Vec<String>, AppError> {
         let params = folder_prefix_params(&folder.to_string_lossy());
         self.with_connection(|conn| {
-            let mut stmt = conn.prepare(&format!(
+            let mut stmt = conn.prepare_cached(&format!(
                 "SELECT path FROM tracks WHERE {FOLDER_PREFIX_SQL}"
             ))?;
             let rows = stmt

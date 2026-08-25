@@ -1416,19 +1416,18 @@ mod tests {
         let first = cache.texture(&ctx, icons::Icon::Play, 16.0, ink);
         let again = cache.texture(&ctx, icons::Icon::Play, 16.0, ink);
         assert_eq!(
-            first.id(),
-            again.id(),
+            first, again,
             "same icon/size/color must reuse the cached texture"
         );
 
         let other_icon = cache.texture(&ctx, icons::Icon::Pause, 16.0, ink);
-        assert_ne!(first.id(), other_icon.id());
+        assert_ne!(first, other_icon);
 
         let recolored = cache.texture(&ctx, icons::Icon::Play, 16.0, theme::BRAND_500);
-        assert_ne!(first.id(), recolored.id(), "tint participates in the key");
+        assert_ne!(first, recolored, "tint participates in the key");
 
         let resized = cache.texture(&ctx, icons::Icon::Play, 32.0, ink);
-        assert_ne!(first.id(), resized.id(), "size participates in the key");
+        assert_ne!(first, resized, "size participates in the key");
     }
 
     #[test]
@@ -1448,6 +1447,7 @@ mod tests {
         };
         let palette = theme::Palette::dark();
         let mut cache = IconCache::new();
+        let mut widget_actions = Vec::new();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(800.0, 56.0))
             .with_pixels_per_point(1.0)
@@ -1456,7 +1456,9 @@ mod tests {
                     // ACCUMULATE across frames: a click fires its action on
                     // exactly one frame, and harness.run() settles over
                     // further no-op frames afterwards.
-                    actions.extend(show_titlebar(ui, &mut cache, &palette, &content));
+                    widget_actions.clear();
+                    show_titlebar(ui, &mut cache, &palette, &content, &mut widget_actions);
+                    actions.append(&mut widget_actions);
                 },
                 Vec::new(),
             );
@@ -1651,7 +1653,7 @@ mod tests {
             .build_ui_state(
                 |ui, actions: &mut Vec<PlaylistRowAction>| {
                     if let Some(action) =
-                        sidebar::playlist_row(ui, &mut cache, &palette, "Gym", 3, false)
+                        sidebar::playlist_row(ui, &mut cache, &palette, "Gym", "Gym (3)", false)
                     {
                         actions.push(action);
                     }
@@ -1735,7 +1737,6 @@ mod tests {
         riff::ui::app::apply_playlist_row_action(
             sidebar::PlaylistRowAction::Delete,
             &gone,
-            "Gone",
             store.as_mut(),
             &mut state,
             riff::ui::app::PlaylistPromptSlots {
@@ -1785,7 +1786,6 @@ mod tests {
         riff::ui::app::apply_playlist_row_action(
             sidebar::PlaylistRowAction::Rename,
             &pid,
-            "Gym",
             store.as_mut(),
             &mut state,
             riff::ui::app::PlaylistPromptSlots {
@@ -1840,7 +1840,6 @@ mod tests {
         riff::ui::app::apply_playlist_row_action(
             sidebar::PlaylistRowAction::Open,
             &pid,
-            "Focus",
             store.as_mut(),
             &mut state,
             riff::ui::app::PlaylistPromptSlots {
@@ -1949,50 +1948,71 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_transport_clicks_report_playback_actions() {
-        use egui_kittest::kittest::Queryable;
-        use riff::ui::icons::IconCache;
-        use riff::ui::playerbar::PlayerBarAction;
+    /// Draw one playerbar frame into the caller's retained readout/buffer
+    /// handles — the shared body of the harness closures below.
+    fn draw_playerbar_frame(
+        ui: &mut egui::Ui,
+        cache: &mut icons::IconCache,
+        palette: &theme::Palette,
+        content: &playerbar::PlayerBarContent<'static>,
+        readouts: &mut riff::ui::playerbar::SeekReadouts,
+        buf: &mut Vec<PlayerBarAction>,
+    ) {
+        buf.clear();
+        playerbar::show_player_bar(ui, cache, palette, content, readouts, buf);
+    }
 
-        // Playing: the primary button is Pause.
-        let content = playing_content();
-        let palette = theme::Palette::dark();
-        let mut cache = IconCache::new();
+    /// Run a playerbar harness against `content` and click each label in
+    /// turn, asserting its expected action was reported (actions accumulate
+    /// across frames; `harness.run()` settles between clicks).
+    fn click_playerbar_sequence(
+        palette: &theme::Palette,
+        content: &playerbar::PlayerBarContent<'static>,
+        clicks: &[(&str, PlayerBarAction)],
+    ) {
+        use egui_kittest::kittest::Queryable;
+
+        let mut cache = icons::IconCache::new();
+        let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+        let mut buf = Vec::new();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    // ACCUMULATE across frames: a click fires its action on
-                    // exactly one frame; harness.run() settles afterwards.
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &content,
-                    ));
+                    buf.clear();
+                    draw_playerbar_frame(ui, &mut cache, palette, content, &mut readouts, &mut buf);
+                    actions.append(&mut buf);
                 },
                 Vec::new(),
             );
         harness.run();
+        for (label, expected) in clicks {
+            harness.get_by_label(label).click();
+            harness.run();
+            assert!(
+                harness.state().contains(expected),
+                "clicking {label:?} must report {expected:?}, got {:?}",
+                harness.state()
+            );
+        }
+    }
 
-        harness.get_by_label("Previous track").click();
-        harness.run();
-        assert!(
-            harness.state().contains(&PlayerBarAction::Previous),
-            "previous must keep reporting Previous"
-        );
+    #[test]
+    fn test_transport_clicks_report_playback_actions() {
+        use riff::ui::playerbar::PlayerBarAction;
 
-        harness.get_by_label("Pause").click();
-        harness.run();
-        assert!(
-            harness.state().contains(&PlayerBarAction::Pause),
-            "while playing, the primary button reports Pause"
-        );
+        let palette = theme::Palette::dark();
 
-        harness.get_by_label("Next track").click();
-        harness.run();
-        assert!(
-            harness.state().contains(&PlayerBarAction::Next),
-            "next must keep reporting Next"
+        // Playing: Previous and Next flank the primary Pause.
+        click_playerbar_sequence(
+            &palette,
+            &playing_content(),
+            &[
+                ("Previous track", PlayerBarAction::Previous),
+                ("Pause", PlayerBarAction::Pause),
+                ("Next track", PlayerBarAction::Next),
+            ],
         );
 
         // Paused: the same primary button reports Resume.
@@ -2000,52 +2020,19 @@ mod tests {
             playback: PlaybackState::Paused,
             ..playing_content()
         };
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<PlayerBarAction>| {
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &paused,
-                    ));
-                },
-                Vec::new(),
-            );
-        harness.run();
-        harness.get_by_label("Play").click();
-        harness.run();
-        assert!(
-            harness.state().contains(&PlayerBarAction::Resume),
-            "while paused, the primary button reports Resume"
-        );
+        click_playerbar_sequence(&palette, &paused, &[("Play", PlayerBarAction::Resume)]);
 
         // Stopped: the primary button asks the app to play the selection.
         let stopped = playerbar::PlayerBarContent {
             playback: PlaybackState::Stopped,
             ..playing_content()
         };
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<PlayerBarAction>| {
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &stopped,
-                    ));
-                },
-                Vec::new(),
-            );
-        harness.run();
-        harness.get_by_label("Play").click();
-        harness.run();
-        assert!(
-            harness.state().contains(&PlayerBarAction::PlaySelected),
-            "while stopped, the primary button reports PlaySelected"
+        click_playerbar_sequence(
+            &palette,
+            &stopped,
+            &[("Play", PlayerBarAction::PlaySelected)],
         );
     }
-
     #[test]
     fn test_stop_button_only_exists_in_advanced_mode() {
         use egui_kittest::kittest::Queryable;
@@ -2065,9 +2052,17 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &advanced,
-                    ));
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &advanced,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
                 },
                 Vec::new(),
             );
@@ -2084,9 +2079,17 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &minimal,
-                    ));
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &minimal,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
                 },
                 Vec::new(),
             );
@@ -2111,9 +2114,17 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &content,
-                    ));
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
                 },
                 Vec::new(),
             );
@@ -2146,9 +2157,17 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &content,
-                    ));
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
                 },
                 Vec::new(),
             );
@@ -2179,9 +2198,17 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &content,
-                    ));
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
                 },
                 Vec::new(),
             );
@@ -2213,9 +2240,17 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<riff::ui::playerbar::PlayerBarAction>| {
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &content,
-                    ));
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
                 },
                 Vec::new(),
             );
@@ -2634,12 +2669,12 @@ mod tests {
         let mut cache = icons::IconCache::new();
         let content = now_playing::NowPlayingContent {
             cover: None,
-            title: Some("Nightcall".to_string()),
-            meta_line: Some("Kavinsky - OutRun".to_string()),
+            title: Some("Nightcall".into()),
+            meta_line: Some("Kavinsky - OutRun".into()),
             details: None,
             position: std::time::Duration::from_secs(83),
             total: Some(std::time::Duration::from_mins(4)),
-            up_next: Vec::new(),
+            up_next: Vec::new().into(),
         };
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(520.0, 456.0))
@@ -2648,9 +2683,17 @@ mod tests {
                 |ui, actions: &mut Vec<NowPlayingAction>| {
                     // ACCUMULATE across frames: a click fires its action on
                     // exactly one frame; harness.run() settles afterwards.
-                    actions.extend(now_playing::show_now_playing(
-                        ui, &mut cache, &palette, &content,
-                    ));
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    now_playing::show_now_playing(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
                 },
                 Vec::new(),
             );
@@ -2672,8 +2715,8 @@ mod tests {
         let mut cache = icons::IconCache::new();
         let content = now_playing::NowPlayingContent {
             cover: None,
-            title: Some("Nightcall".to_string()),
-            meta_line: Some("Kavinsky - OutRun".to_string()),
+            title: Some("Nightcall".into()),
+            meta_line: Some("Kavinsky - OutRun".into()),
             details: None,
             position: std::time::Duration::from_secs(83),
             total: Some(std::time::Duration::from_mins(4)),
@@ -2686,7 +2729,8 @@ mod tests {
                     id: TrackId("b.flac".to_string()),
                     label: "Artist - Beta".to_string(),
                 },
-            ],
+            ]
+            .into(),
         };
         let mut harness = egui_kittest::Harness::builder()
             // Tall enough that both Up Next rows fit below the fixed cover +
@@ -2696,9 +2740,17 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<NowPlayingAction>| {
-                    actions.extend(now_playing::show_now_playing(
-                        ui, &mut cache, &palette, &content,
-                    ));
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    now_playing::show_now_playing(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
                 },
                 Vec::new(),
             );
@@ -3177,7 +3229,16 @@ mod tests {
             .build_ui_state(
                 move |ui, opened: &mut Vec<&'static str>| {
                     make_tooltips_instant(ui.ctx());
-                    let _ = playerbar::show_player_bar(ui, &mut cache, &palette, &content);
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut readouts,
+                        &mut buf,
+                    );
                     for (id, name) in [
                         (mute_id, "mute"),
                         (shuffle_id, "shuffle"),

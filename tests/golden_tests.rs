@@ -142,7 +142,7 @@ mod tests {
             .exact_size(theme::TITLEBAR_H)
             .frame(egui::Frame::NONE)
             .show_inside(ui, |ui| {
-                show_titlebar(ui, &mut cache, &palette, &content);
+                show_titlebar(ui, &mut cache, &palette, &content, &mut Vec::new());
             });
 
         // Left chrome column: sidebar at SIDEBAR_W with representative
@@ -265,8 +265,15 @@ mod tests {
                 ui.add_space(12.0);
 
                 sidebar::section_header(ui, &palette, "Playlists");
-                sidebar::playlist_row(ui, &mut cache, &palette, "Focus Mix", 12, false);
-                sidebar::playlist_row(ui, &mut cache, &palette, "Workout", 3, true);
+                sidebar::playlist_row(
+                    ui,
+                    &mut cache,
+                    &palette,
+                    "Focus Mix",
+                    "Focus Mix (12)",
+                    false,
+                );
+                sidebar::playlist_row(ui, &mut cache, &palette, "Workout", "Workout (3)", true);
 
                 // A nested track row pair showing the indent scale in action.
                 sidebar::tree_row(
@@ -343,7 +350,14 @@ mod tests {
             advanced: false,
         };
         let mut cache = IconCache::new();
-        playerbar::show_player_bar(ui, &mut cache, &palette, &content);
+        playerbar::show_player_bar(
+            ui,
+            &mut cache,
+            &palette,
+            &content,
+            &mut riff::ui::playerbar::SeekReadouts::default(),
+            &mut Vec::new(),
+        );
     }
 
     // --- Library stage baselines (Issue 09) ---------------------------------------
@@ -489,9 +503,9 @@ mod tests {
         let palette = Palette::dark();
         let content = NowPlayingContent {
             cover: None,
-            title: Some("Nightcall".to_owned()),
-            meta_line: Some("Kavinsky - OutRun".to_owned()),
-            details: Some("2013 \u{b7} Synthwave \u{b7} Track 1".to_owned()),
+            title: Some("Nightcall".into()),
+            meta_line: Some("Kavinsky - OutRun".into()),
+            details: Some("2013 \u{b7} Synthwave \u{b7} Track 1".into()),
             position: std::time::Duration::from_secs(83),
             total: Some(std::time::Duration::from_mins(4)),
             up_next: vec![
@@ -503,10 +517,18 @@ mod tests {
                     id: riff::domain::TrackId("b.flac".to_owned()),
                     label: "Timecop1983 - On the Run".to_owned(),
                 },
-            ],
+            ]
+            .into(),
         };
         let mut cache = IconCache::new();
-        now_playing::show_now_playing(ui, &mut cache, &palette, &content);
+        now_playing::show_now_playing(
+            ui,
+            &mut cache,
+            &palette,
+            &content,
+            &mut riff::ui::playerbar::SeekReadouts::default(),
+            &mut Vec::new(),
+        );
     }
 
     // --- Settings stage baseline (Issue 11) -----------------------------------------

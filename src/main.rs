@@ -41,11 +41,10 @@ fn main() {
         generation,
         playlist_generation,
     ) = open_application_store();
-    // The UI's single read seam over the Application Store (ADR 0002): owns
-    // the five Session Projections, the query port, and both session
-    // generations (Library + playlists).
-    let session_views = riff::app::views::SessionViews::new(
-        Box::new(library_query_store.clone()),
+    // The UI's single read seam over the Application Store (ADR 0002).
+    let session_views = wire_session_views(
+        &library_query_store,
+        &playlist_store,
         generation,
         playlist_generation,
     );
@@ -147,6 +146,12 @@ fn main() {
         Box::new(covers),
     );
 
+    run_native_app(app, options);
+}
+
+/// Hand the composed [`RiffApp`] to eframe: frameless native window with the
+/// app's font configuration installed before the first frame.
+fn run_native_app(app: RiffApp, options: eframe::NativeOptions) {
     eframe::run_native(
         "riff",
         options,
@@ -422,6 +427,23 @@ fn open_application_store() -> (
         playlist_store,
         library_mutation_store,
         library_query_store,
+        generation,
+        playlist_generation,
+    )
+}
+
+/// Composition-root wiring for the UI's read seam (ADR 0002): box the query
+/// ports and hand over both session generations. The mutation adapters keep
+/// their own clones of the handles and do the bumping.
+fn wire_session_views(
+    library_query_store: &riff::infra::store::MutexLibraryQueryStore,
+    playlist_store: &riff::infra::store::MutexPlaylistStore,
+    generation: riff::app::store::StoreGeneration,
+    playlist_generation: riff::app::store::StoreGeneration,
+) -> riff::app::views::SessionViews {
+    riff::app::views::SessionViews::new(
+        Box::new(library_query_store.clone()),
+        Box::new(playlist_store.clone()),
         generation,
         playlist_generation,
     )

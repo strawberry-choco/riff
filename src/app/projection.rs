@@ -9,7 +9,11 @@
 //! refresh, which generation invalidation makes explicit.
 
 use crate::app::errors::AppError;
-use crate::domain::{Album, Artist, PlaybackQueue, SmartPlaylistKind, Track, TrackId};
+use crate::app::playlist_manager;
+use crate::app::store::PlaylistEntry;
+use crate::domain::{
+    Album, Artist, PlaybackQueue, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
+};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -672,5 +676,165 @@ fn upcoming_matches(cached: &[TrackId], queue: &PlaybackQueue, limit: usize) -> 
         let end = (start + limit).min(queue.tracks.len());
         let window = queue.tracks.get(start..end).unwrap_or(&[]);
         window == cached
+    }
+}
+
+/// One resolved row of an open user playlist: the entry id, its
+/// store-resolved Track when the Library knows it, and whether it can play.
+pub type PlaylistEntryRow = (TrackId, Option<Track>, bool);
+
+/// The ready-to-render view of one user playlist: one row per entry in
+/// playlist order, plus the playable ids (valid verdicts only) for the
+/// header context menu.
+#[derive(Clone, Default)]
+pub struct PlaylistView {
+    /// One row per entry, in playlist order. Missing tracks are included as
+    /// `(id, None, false)` — dangling references stay listed (ADR 0001).
+    pub rows: Arc<[PlaylistEntryRow]>,
+    /// The playable ids (valid verdicts only), in playlist order.
+    pub valid_ids: Arc<[TrackId]>,
+}
+
+/// Session Projection for the user playlists (ADR 0002).
+///
+/// Caches the playlist list plus per-playlist resolved views, keyed by the
+/// session's dedicated playlist generation that the playlist mutation
+/// adapter bumps after every committed mutation. A bump drops every level at
+/// once so a frame never mixes rows from two generations; levels then
+/// refetch lazily as their views render again. Resolved rows additionally
+/// stamp the Library generation: their Track metadata resolves against the
+/// Library collection, so a Library-side move (tag edit, rescan, clear)
+/// invalidates the rows even though the playlist generation stood still.
+///
+/// Loader errors propagate and leave the cache untouched — the previous
+/// good rows stay readable through [`Self::cached_playlists`] /
+/// [`Self::cached_view`] while the next call retries.
+pub struct PlaylistProjection {
+    loaded_generation: Option<u64>,
+    /// Library-generation stamp for the resolved views only: rows embed
+    /// Track metadata, which Library mutations move. The playlist list is
+    /// pure user data and depends on this stamp not at all.
+    loaded_library_generation: Option<u64>,
+    playlists: Option<Arc<[Playlist]>>,
+    views: HashMap<PlaylistId, PlaylistView>,
+}
+
+impl Default for PlaylistProjection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PlaylistProjection {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            loaded_generation: None,
+            loaded_library_generation: None,
+            playlists: None,
+            views: HashMap::new(),
+        }
+    }
+
+    /// Drop every cached level when `generation` moved since the last load.
+    /// The failed-generation case stays stale: `loaded_generation` is only
+    /// stamped after a successful fetch, so the next call retries.
+    fn ensure_generation(&mut self, generation: u64) {
+        if self.loaded_generation == Some(generation) {
+            return;
+        }
+        self.playlists = None;
+        self.views.clear();
+    }
+
+    /// Every user playlist in creation order, cached per playlist
+    /// generation. Fresh frames hand out an `Arc` clone of the cached list.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn playlists(
+        &mut self,
+        generation: u64,
+        loader: &mut dyn FnMut() -> Result<Vec<Playlist>, AppError>,
+    ) -> Result<Arc<[Playlist]>, AppError> {
+        if self.loaded_generation != Some(generation) || self.playlists.is_none() {
+            let fresh: Arc<[Playlist]> = loader()?.into();
+            self.ensure_generation(generation);
+            self.loaded_generation = Some(generation);
+            self.playlists = Some(Arc::clone(&fresh));
+            return Ok(fresh);
+        }
+        Ok(Arc::clone(self.playlists.as_ref().expect("just checked")))
+    }
+
+    /// One playlist's resolved view, cached per playlist generation plus
+    /// the Library generation the rows were resolved against. Fresh frames
+    /// hand out a clone of the cached view (`Arc` row bumps, no deep copy).
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn playlist_view(
+        &mut self,
+        generation: u64,
+        library_generation: u64,
+        id: &PlaylistId,
+        loader: &mut dyn FnMut(&PlaylistId) -> Result<Vec<PlaylistEntry>, AppError>,
+    ) -> Result<PlaylistView, AppError> {
+        let fresh = self.loaded_generation == Some(generation)
+            && self.loaded_library_generation == Some(library_generation)
+            && self.views.contains_key(id);
+        if !fresh {
+            let resolved = loader(id)?;
+            if self.loaded_generation != Some(generation) {
+                self.ensure_generation(generation);
+                self.loaded_generation = Some(generation);
+            }
+            if self.loaded_library_generation != Some(library_generation) {
+                // Rows embed Library-resolved metadata: a Library-side move
+                // invalidates them even though the playlist generation
+                // stood still.
+                self.views.clear();
+                self.loaded_library_generation = Some(library_generation);
+            }
+            let view = Self::resolve(resolved);
+            self.views.insert(id.clone(), view.clone());
+            return Ok(view);
+        }
+        Ok(self.views.get(id).expect("checked above").clone())
+    }
+
+    /// The stale-but-present playlist list, if any — the error fallback
+    /// keeps last good data instead of blanking the sidebar.
+    #[must_use]
+    pub fn cached_playlists(&self) -> Option<Arc<[Playlist]>> {
+        self.playlists.clone()
+    }
+
+    /// The stale-but-present view for `id`, if any — the error fallback
+    /// keeps last good rows instead of blanking the open playlist.
+    #[must_use]
+    pub fn cached_view(&self, id: &PlaylistId) -> Option<PlaylistView> {
+        self.views.get(id).cloned()
+    }
+
+    /// Map store entries to ready-to-render rows: each entry rides its
+    /// LEFT-JOIN validity plus the read-time filesystem check, and missing
+    /// tracks stay listed as `(id, None, false)` (ADR 0001).
+    fn resolve(entries: Vec<PlaylistEntry>) -> PlaylistView {
+        let mut valid_ids = Vec::new();
+        let rows: Vec<PlaylistEntryRow> = entries
+            .into_iter()
+            .map(|entry| {
+                let valid = playlist_manager::track_is_valid(&entry);
+                if valid {
+                    valid_ids.push(entry.id.clone());
+                }
+                (entry.id, entry.track, valid)
+            })
+            .collect();
+        PlaylistView {
+            rows: rows.into(),
+            valid_ids: valid_ids.into(),
+        }
     }
 }

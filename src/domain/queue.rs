@@ -1,15 +1,31 @@
 use crate::domain::{RepeatMode, TrackId};
 use rand::seq::SliceRandom;
+use std::collections::VecDeque;
 
 /// Manages the playback queue and shuffle/repeat state.
+///
+/// Shuffle order maintenance is LAZY (allocation plan 4.4): mutations mark
+/// the order dirty instead of regenerating an O(n) permutation each time,
+/// and the next [`Self::advance`] rebuilds it once. Between a mutation and
+/// that advance, [`Self::upcoming`] reports the stale-but-valid previous
+/// order — the same trade the plan sanctions. The order itself lives in a
+/// `VecDeque`, so consuming it during playback pops the front in O(1)
+/// instead of memmoving the whole tail per advance.
 #[derive(Debug, Clone, Default)]
 pub struct PlaybackQueue {
     pub tracks: Vec<TrackId>,
     pub current_index: Option<usize>,
     pub shuffle: bool,
     pub repeat: RepeatMode,
-    pub shuffled_indices: Vec<usize>,
+    /// Upcoming play order while shuffling (indices into `tracks`,
+    /// excluding the current track). A `VecDeque` so advancing pops the
+    /// front in O(1).
+    pub shuffled_indices: VecDeque<usize>,
     pub shuffle_history: Vec<usize>,
+    /// Set by mutations while shuffle is engaged; the order regenerates on
+    /// the next `advance`. Private so the invariant (dirty ⇒ stale order)
+    /// cannot be broken from outside.
+    shuffle_dirty: bool,
 }
 
 impl PlaybackQueue {
@@ -19,8 +35,9 @@ impl PlaybackQueue {
             current_index: None,
             shuffle: false,
             repeat: RepeatMode::None,
-            shuffled_indices: Vec::new(),
+            shuffled_indices: VecDeque::new(),
             shuffle_history: Vec::new(),
+            shuffle_dirty: false,
         }
     }
 
@@ -29,13 +46,23 @@ impl PlaybackQueue {
         self.current_index = None;
         self.shuffled_indices.clear();
         self.shuffle_history.clear();
+        self.shuffle_dirty = false;
     }
 
     pub fn append(&mut self, track: TrackId) {
         self.tracks.push(track);
-        if self.shuffle {
-            self.regenerate_shuffle();
+        self.touch_shuffle();
+    }
+
+    /// Append a batch in one mutation. With lazy regeneration this costs
+    /// one O(n) reorder at the next advance instead of one per track
+    /// (allocation plan 4.3).
+    pub fn append_many(&mut self, tracks: Vec<TrackId>) {
+        if tracks.is_empty() {
+            return;
         }
+        self.tracks.extend(tracks);
+        self.touch_shuffle();
     }
 
     pub fn insert_next(&mut self, track: TrackId) {
@@ -45,9 +72,7 @@ impl PlaybackQueue {
         } else {
             self.tracks.push(track);
         }
-        if self.shuffle {
-            self.regenerate_shuffle();
-        }
+        self.touch_shuffle();
     }
 
     pub fn remove(&mut self, index: usize) {
@@ -60,9 +85,7 @@ impl PlaybackQueue {
                     self.current_index = None;
                 }
             }
-            if self.shuffle {
-                self.regenerate_shuffle();
-            }
+            self.touch_shuffle();
         }
     }
 
@@ -72,10 +95,14 @@ impl PlaybackQueue {
         }
         self.shuffle = enabled;
         if enabled {
+            // A user toggle is rare and its effect is immediately visible
+            // (the Up Next window reorders), so regenerate eagerly — the
+            // lazy path exists for mutation churn, not for this.
             self.regenerate_shuffle();
         } else {
             self.shuffled_indices.clear();
             self.shuffle_history.clear();
+            self.shuffle_dirty = false;
         }
     }
 
@@ -90,20 +117,26 @@ impl PlaybackQueue {
     /// Advance to the next track (respecting shuffle/repeat state) and make
     /// it current. Named `advance` rather than `next` to avoid confusion
     /// with `std::iter::Iterator::next`.
+    ///
+    /// In shuffle mode this is where a dirty order regenerates (lazy
+    /// regeneration, allocation plan 4.4); consuming the order pops its
+    /// front in O(1).
     pub fn advance(&mut self) -> Option<&TrackId> {
         if self.tracks.is_empty() {
             return None;
         }
 
         let next_idx = if self.shuffle {
-            if self.shuffled_indices.is_empty() {
+            if self.shuffle_dirty {
+                self.regenerate_shuffle();
+            } else if self.shuffled_indices.is_empty() {
                 if self.repeat == RepeatMode::All {
                     self.regenerate_shuffle();
                 } else {
                     return None;
                 }
             }
-            self.shuffled_indices.first().copied()
+            self.shuffled_indices.front().copied()
         } else {
             self.current_index
                 .map(|i| i + 1)
@@ -114,19 +147,17 @@ impl PlaybackQueue {
             self.current_index = Some(idx);
             if self.shuffle {
                 self.shuffle_history.push(idx);
-                if !self.shuffled_indices.is_empty() {
-                    self.shuffled_indices.remove(0);
-                }
+                self.shuffled_indices.pop_front();
             }
             self.tracks.get(idx)
         } else if self.repeat == RepeatMode::All {
             self.current_index = Some(0);
             if self.shuffle {
                 self.regenerate_shuffle();
-                if let Some(idx) = self.shuffled_indices.first().copied() {
+                if let Some(idx) = self.shuffled_indices.front().copied() {
                     self.current_index = Some(idx);
                     self.shuffle_history.push(idx);
-                    self.shuffled_indices.remove(0);
+                    self.shuffled_indices.pop_front();
                 }
             }
             self.tracks.first()
@@ -188,6 +219,15 @@ impl PlaybackQueue {
         result
     }
 
+    /// Mark the shuffle order stale after a mutation. Regeneration stays
+    /// deferred to the next `advance` (allocation plan 4.4); with shuffle
+    /// off there is no order to invalidate.
+    fn touch_shuffle(&mut self) {
+        if self.shuffle {
+            self.shuffle_dirty = true;
+        }
+    }
+
     fn regenerate_shuffle(&mut self) {
         let mut indices: Vec<usize> = (0..self.tracks.len()).collect();
         if let Some(current) = self.current_index {
@@ -195,6 +235,7 @@ impl PlaybackQueue {
         }
         let mut rng = rand::rng();
         indices.shuffle(&mut rng);
-        self.shuffled_indices = indices;
+        self.shuffled_indices = VecDeque::from(indices);
+        self.shuffle_dirty = false;
     }
 }

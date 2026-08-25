@@ -178,7 +178,7 @@ mod tests {
                 artist: Some("Artist".to_string()),
                 ..Default::default()
             },
-            cover_source: CoverSource::Embedded(vec![1, 2, 3]),
+            cover_source: CoverSource::Embedded(vec![1, 2, 3].into()),
             ..Default::default()
         };
 
@@ -188,7 +188,7 @@ mod tests {
         assert_eq!(metadata.title.as_deref(), Some("Song"));
         assert_eq!(metadata.artist.as_deref(), Some("Artist"));
         assert_eq!(duration, Some(Duration::from_secs(90)));
-        assert!(matches!(cover, CoverSource::Embedded(ref data) if data == &vec![1, 2, 3]));
+        assert!(matches!(cover, CoverSource::Embedded(ref data) if data.as_ref() == [1, 2, 3]));
         assert_eq!(format.sample_rate, 44_100);
 
         // Individual accessors agree with read_all.
@@ -258,7 +258,7 @@ mod tests {
             result: Err("decode failed".to_string()),
         };
         let err = failing
-            .load_cover(&CoverSource::Embedded(vec![9]))
+            .load_cover(&CoverSource::Embedded(vec![9].into()))
             .unwrap_err();
         assert!(matches!(err, AppError::CoverLoad(_)));
         assert!(err.to_string().contains("decode failed"));
@@ -1281,6 +1281,7 @@ fn library_track(
         play_count: 0,
         last_played: None,
         date_added: None,
+        search_text: String::new(),
     }
 }
 
@@ -1713,6 +1714,7 @@ fn test_get_track_roundtrips_all_fields() {
         play_count: 4,
         last_played: Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000)),
         date_added: Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(500)),
+        search_text: String::new(),
     };
     store
         .apply_scan_batch(std::slice::from_ref(&full))
@@ -2156,6 +2158,7 @@ fn browsing_track(
         play_count: 0,
         last_played: None,
         date_added: None,
+        search_text: String::new(),
     }
 }
 
@@ -2169,7 +2172,7 @@ mod reference_order {
     pub fn artists_az(fixtures: &[Track]) -> Vec<String> {
         let names: BTreeSet<String> = fixtures
             .iter()
-            .map(|t| t.metadata.display_album_artist())
+            .map(|t| t.metadata.display_album_artist().into_owned())
             .collect();
         names.into_iter().collect()
     }
@@ -2181,7 +2184,7 @@ mod reference_order {
             .iter()
             .filter(|t| t.metadata.display_album_artist() == artist)
         {
-            let title = track.metadata.display_album();
+            let title = track.metadata.display_album().into_owned();
             if seen.insert(title.clone()) {
                 albums.push((title, track.metadata.year));
             }
@@ -2906,6 +2909,7 @@ fn smart_track(
         play_count,
         last_played,
         date_added,
+        search_text: String::new(),
     }
 }
 

@@ -1772,15 +1772,25 @@ impl SettingsStore for MutexSettingsStore {
 /// `PlaylistStore` view of the shared store handle. One `SQLite` connection
 /// serves every store port, so every call locks the shared connection for
 /// the duration of its transaction.
+///
+/// The adapter owns the session [`StoreGeneration`]: every successfully
+/// committed mutation bumps it, so callers cannot forget to invalidate
+/// Session Projections (ADR 0002).
+#[derive(Clone)]
 pub struct MutexPlaylistStore {
     store: std::sync::Arc<std::sync::Mutex<SqliteStore>>,
+    generation: StoreGeneration,
 }
 
 impl MutexPlaylistStore {
-    /// Wrap the shared store handle.
+    /// Wrap the shared store handle together with the session generation
+    /// this adapter bumps after each committed mutation.
     #[must_use]
-    pub fn new(store: std::sync::Arc<std::sync::Mutex<SqliteStore>>) -> Self {
-        Self { store }
+    pub fn new(
+        store: std::sync::Arc<std::sync::Mutex<SqliteStore>>,
+        generation: StoreGeneration,
+    ) -> Self {
+        Self { store, generation }
     }
 }
 
@@ -1799,52 +1809,85 @@ impl PlaylistStore for MutexPlaylistStore {
         self.store.lock_or_recover().load_playlist_entries(id)
     }
 
-    /// Create a Playlist through the shared connection.
+    /// Create a Playlist through the shared connection; bumps the
+    /// generation on commit.
     fn create_playlist(
         &mut self,
         name: &str,
         initial_tracks: &[TrackId],
     ) -> Result<PlaylistId, AppError> {
-        self.store
+        let created = self
+            .store
             .lock_or_recover()
-            .create_playlist(name, initial_tracks)
+            .create_playlist(name, initial_tracks);
+        if created.is_ok() {
+            self.generation.bump();
+        }
+        created
     }
 
-    /// Rename a Playlist through the shared connection.
+    /// Rename a Playlist through the shared connection; bumps the
+    /// generation when the rename was committed.
     fn rename_playlist(&mut self, id: &PlaylistId, new_name: &str) -> Result<bool, AppError> {
-        self.store.lock_or_recover().rename_playlist(id, new_name)
+        let renamed = self.store.lock_or_recover().rename_playlist(id, new_name);
+        if matches!(renamed, Ok(true)) {
+            self.generation.bump();
+        }
+        renamed
     }
 
-    /// Delete a Playlist through the shared connection.
+    /// Delete a Playlist through the shared connection; bumps the
+    /// generation when anything was removed.
     fn delete_playlist(&mut self, id: &PlaylistId) -> Result<bool, AppError> {
-        self.store.lock_or_recover().delete_playlist(id)
+        let deleted = self.store.lock_or_recover().delete_playlist(id);
+        if matches!(deleted, Ok(true)) {
+            self.generation.bump();
+        }
+        deleted
     }
 
-    /// Append an entry through the shared connection.
+    /// Append an entry through the shared connection; bumps the generation
+    /// when the entry was committed.
     fn add_playlist_entry(&mut self, id: &PlaylistId, track: &TrackId) -> Result<bool, AppError> {
-        self.store.lock_or_recover().add_playlist_entry(id, track)
+        let added = self.store.lock_or_recover().add_playlist_entry(id, track);
+        if matches!(added, Ok(true)) {
+            self.generation.bump();
+        }
+        added
     }
 
-    /// Remove entries through the shared connection.
+    /// Remove entries through the shared connection; bumps the generation
+    /// when anything was removed.
     fn remove_playlist_entries(
         &mut self,
         id: &PlaylistId,
         track: &TrackId,
     ) -> Result<bool, AppError> {
-        self.store
+        let removed = self
+            .store
             .lock_or_recover()
-            .remove_playlist_entries(id, track)
+            .remove_playlist_entries(id, track);
+        if matches!(removed, Ok(true)) {
+            self.generation.bump();
+        }
+        removed
     }
 
-    /// Reorder entries through the shared connection.
+    /// Reorder entries through the shared connection; bumps the generation
+    /// when the new order was committed.
     fn reorder_playlist_entries(
         &mut self,
         id: &PlaylistId,
         ordered: &[TrackId],
     ) -> Result<bool, AppError> {
-        self.store
+        let reordered = self
+            .store
             .lock_or_recover()
-            .reorder_playlist_entries(id, ordered)
+            .reorder_playlist_entries(id, ordered);
+        if matches!(reordered, Ok(true)) {
+            self.generation.bump();
+        }
+        reordered
     }
 }
 

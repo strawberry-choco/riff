@@ -33,12 +33,22 @@ fn main() {
 
     // Open the Application Store and wire every port over its shared
     // connection (fatal on open/migration failure — never silent fallbacks).
-    let (settings_store, playlist_store, library_mutation_store, library_query_store, generation) =
-        open_application_store();
-    // The UI's single read seam over the Library collection (ADR 0002): owns
-    // the five Session Projections, the query port, and the generation.
-    let session_views =
-        riff::app::views::SessionViews::new(Box::new(library_query_store.clone()), generation);
+    let (
+        settings_store,
+        playlist_store,
+        library_mutation_store,
+        library_query_store,
+        generation,
+        playlist_generation,
+    ) = open_application_store();
+    // The UI's single read seam over the Application Store (ADR 0002): owns
+    // the five Session Projections, the query port, and both session
+    // generations (Library + playlists).
+    let session_views = riff::app::views::SessionViews::new(
+        Box::new(library_query_store.clone()),
+        generation,
+        playlist_generation,
+    );
 
     let state = Arc::new(Mutex::new(AppState::new()));
     let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
@@ -368,14 +378,16 @@ fn spawn_fs_watcher(
 /// Open the Application Store before anything else and wire every store port
 /// over its one shared connection. Open or migration failures are fatal
 /// startup errors with a clear message — never silent fallbacks to empty
-/// state. Returns the ports in their UI/thread wiring order plus the session
-/// generation the mutation adapter bumps (ADR 0002).
+/// state. Returns the ports in their UI/thread wiring order plus both
+/// session generations the mutation adapters bump (ADR 0002): the Library
+/// generation and the dedicated playlist generation.
 #[allow(clippy::type_complexity)]
 fn open_application_store() -> (
     riff::infra::store::MutexSettingsStore,
     riff::infra::store::MutexPlaylistStore,
     riff::infra::store::MutexLibraryMutationStore,
     riff::infra::store::MutexLibraryQueryStore,
+    riff::app::store::StoreGeneration,
     riff::app::store::StoreGeneration,
 ) {
     let store_path = riff::infra::store::default_store_path().expect(
@@ -388,7 +400,14 @@ fn open_application_store() -> (
             .unwrap_or_else(|e| panic!("fatal: {e}")),
     ));
     let settings_store = riff::infra::store::MutexSettingsStore::new(store.clone());
-    let playlist_store = riff::infra::store::MutexPlaylistStore::new(store.clone());
+    // Playlist curation ports over the same shared connection: every
+    // committed playlist mutation bumps this dedicated session-local
+    // generation, independent of the Library generation so entry edits never
+    // invalidate Library projections (ADR 0002). The adapter owns the bump —
+    // callers cannot forget it.
+    let playlist_generation = riff::app::store::StoreGeneration::new();
+    let playlist_store =
+        riff::infra::store::MutexPlaylistStore::new(store.clone(), playlist_generation.clone());
     // Library collection ports over the same shared connection: scans write
     // through the mutation port, playback resolves through the query port,
     // and every committed mutation bumps this session-local generation so
@@ -404,6 +423,7 @@ fn open_application_store() -> (
         library_mutation_store,
         library_query_store,
         generation,
+        playlist_generation,
     )
 }
 

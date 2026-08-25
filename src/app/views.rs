@@ -44,6 +44,7 @@ pub struct TrackListPage {
 pub struct SessionViews {
     queries: Box<dyn LibraryQueryStore>,
     generation: StoreGeneration,
+    playlist_generation: StoreGeneration,
     tracks: TrackListProjection,
     browsing: BrowsingProjection,
     folders: FolderProjection,
@@ -52,13 +53,20 @@ pub struct SessionViews {
 }
 
 impl SessionViews {
-    /// Wire the facade to the Library query port and the session generation
-    /// the mutation adapter bumps after each committed store mutation.
+    /// Wire the facade to the Library query port and both session
+    /// generations — the Library generation and the dedicated playlist
+    /// generation their mutation adapters bump after each committed store
+    /// mutation.
     #[must_use]
-    pub fn new(queries: Box<dyn LibraryQueryStore>, generation: StoreGeneration) -> Self {
+    pub fn new(
+        queries: Box<dyn LibraryQueryStore>,
+        generation: StoreGeneration,
+        playlist_generation: StoreGeneration,
+    ) -> Self {
         Self {
             queries,
             generation,
+            playlist_generation,
             tracks: TrackListProjection::new(ProjectionKey::Flat),
             browsing: BrowsingProjection::new(),
             folders: FolderProjection::new(),
@@ -74,6 +82,14 @@ impl SessionViews {
     #[must_use]
     pub fn generation(&self) -> u64 {
         self.generation.current()
+    }
+
+    /// The playlist store generation's current value — the epoch every
+    /// committed playlist mutation advances, independent of
+    /// [`Self::generation`] so entry edits never invalidate Library views.
+    #[must_use]
+    pub fn playlist_generation(&self) -> u64 {
+        self.playlist_generation.current()
     }
 
     // --- Flat list / search -------------------------------------------------

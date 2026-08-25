@@ -794,7 +794,13 @@ mod tests {
     fn wire(mock: MockLibraryQueryStore) -> (SessionViews, MockHandle, StoreGeneration) {
         let mock = Arc::new(Mutex::new(mock));
         let generation = StoreGeneration::new();
-        let views = SessionViews::new(Box::new(SharedMock(Arc::clone(&mock))), generation.clone());
+        // The playlist generation is wired but unused by these Library-view
+        // tests; a fresh counter stands in for the playlist adapter's bumps.
+        let views = SessionViews::new(
+            Box::new(SharedMock(Arc::clone(&mock))),
+            generation.clone(),
+            StoreGeneration::new(),
+        );
         (views, MockHandle(mock), generation)
     }
 

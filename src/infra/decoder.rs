@@ -22,6 +22,10 @@ pub struct SymphoniaDecoder {
     spec: Option<AudioSpec>,
     duration: Option<Duration>,
     pending_samples: Vec<f32>,
+    /// Reusable interleaved-samples scratch for decoded packets. Kept across
+    /// packets so steady-state decoding performs no per-packet heap
+    /// allocations (allocation-optimization plan, task 3.2).
+    scratch: Vec<f32>,
 }
 
 impl SymphoniaDecoder {
@@ -34,6 +38,7 @@ impl SymphoniaDecoder {
             spec: None,
             duration: None,
             pending_samples: Vec::new(),
+            scratch: Vec::new(),
         }
     }
 }
@@ -100,6 +105,7 @@ impl AudioDecoder for SymphoniaDecoder {
         ));
 
         self.pending_samples.clear();
+        self.scratch.clear();
         self.decoder = Some(decoder);
         self.format_reader = Some(format);
 
@@ -110,13 +116,16 @@ impl AudioDecoder for SymphoniaDecoder {
         })
     }
 
-    fn next_frames(&mut self, max_samples: usize) -> Result<Option<Vec<f32>>, AppError> {
+    fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, AppError> {
         // Drain leftover samples from a previous oversized decode before decoding more.
         if !self.pending_samples.is_empty() {
             let available = self.pending_samples.len();
-            let to_return = max_samples.min(available);
-            let result: Vec<f32> = self.pending_samples.drain(..to_return).collect();
-            return Ok(Some(result));
+            let to_return = out.len().min(available);
+            out[..to_return].copy_from_slice(&self.pending_samples[..to_return]);
+            // Shift the remainder to the front in place — no reallocation.
+            self.pending_samples.copy_within(to_return.., 0);
+            self.pending_samples.truncate(available - to_return);
+            return Ok(to_return);
         }
 
         let format = self
@@ -128,37 +137,51 @@ impl AudioDecoder for SymphoniaDecoder {
             .as_mut()
             .ok_or_else(|| AppError::Decode("Decoder not initialized".to_string()))?;
 
-        let packet = match format.next_packet() {
-            Ok(Some(packet)) => packet,
-            // In symphonia 0.6 end-of-stream is signalled with `Ok(None)`.
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(AppError::Decode(format!("Packet read error: {e}"))),
-        };
+        loop {
+            let packet = match format.next_packet() {
+                Ok(Some(packet)) => packet,
+                // In symphonia 0.6 end-of-stream is signalled with `Ok(None)`.
+                Ok(None) => return Ok(0),
+                Err(e) => return Err(AppError::Decode(format!("Packet read error: {e}"))),
+            };
 
-        if packet.track_id != self.track_id {
-            return self.next_frames(max_samples);
-        }
+            if packet.track_id != self.track_id {
+                continue;
+            }
 
-        let decoded_audio = decoder
-            .decode(&packet)
-            .map_err(|e| AppError::Decode(format!("Decode error: {e}")))?;
+            let decoded_audio = decoder
+                .decode(&packet)
+                .map_err(|e| AppError::Decode(format!("Decode error: {e}")))?;
 
-        let spec = decoded_audio.spec().clone();
-        if self.spec.as_ref() != Some(&spec) {
-            self.spec = Some(spec);
-        }
+            let spec = decoded_audio.spec().clone();
+            if self.spec.as_ref() != Some(&spec) {
+                self.spec = Some(spec);
+            }
 
-        // Copy the decoded (any sample format) audio into interleaved f32 samples.
-        let mut samples: Vec<f32> = Vec::with_capacity(decoded_audio.samples_interleaved());
-        decoded_audio.copy_to_vec_interleaved::<f32>(&mut samples);
+            // Copy the decoded (any sample format) audio into interleaved f32
+            // samples, reusing the scratch buffer across packets.
+            self.scratch.clear();
+            decoded_audio.copy_to_vec_interleaved::<f32>(&mut self.scratch);
 
-        let total = samples.len();
-        if total <= max_samples {
-            Ok(Some(samples))
-        } else {
-            // Packet had more samples than requested — buffer the rest.
-            self.pending_samples = samples[max_samples..].to_vec();
-            Ok(Some(samples[..max_samples].to_vec()))
+            let total = self.scratch.len();
+            if total == 0 {
+                // Empty packet (e.g. codec padding): keep pulling so `Ok(0)`
+                // unambiguously means end of stream.
+                continue;
+            }
+
+            if total <= out.len() {
+                out[..total].copy_from_slice(&self.scratch);
+                return Ok(total);
+            }
+
+            // Packet had more samples than requested — keep the rest without
+            // reallocating (`pending_samples` retains its capacity).
+            out.copy_from_slice(&self.scratch[..out.len()]);
+            self.pending_samples.clear();
+            self.pending_samples
+                .extend_from_slice(&self.scratch[out.len()..]);
+            return Ok(out.len());
         }
     }
 
@@ -203,5 +226,6 @@ impl AudioDecoder for SymphoniaDecoder {
         self.spec = None;
         self.duration = None;
         self.pending_samples.clear();
+        self.scratch.clear();
     }
 }

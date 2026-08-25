@@ -140,8 +140,8 @@ pub mod mocks {
 
     /// Scripted [`AudioDecoder`]: `open` returns a configured format (or an
     /// injected error), `next_frames` drains a queue of sample batches and
-    /// then reports EOF, and every `seek` is recorded and resets the stream
-    /// to the start of the script.
+    /// then reports EOF (`Ok(0)`), and every `seek` is recorded and resets the
+    /// stream to the start of the script.
     pub struct MockAudioDecoder {
         pub open_error: Option<String>,
         pub decode_error: Option<String>,
@@ -190,15 +190,24 @@ pub mod mocks {
             Ok(self.format.clone())
         }
 
-        fn next_frames(&mut self, _samples: usize) -> Result<Option<Vec<f32>>, AppError> {
+        fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, AppError> {
             if let Some(ref msg) = self.decode_error {
                 return Err(AppError::Decode(msg.clone()));
             }
-            if self.queue.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(self.queue.remove(0)))
+            let Some(batch) = self.queue.first_mut() else {
+                return Ok(0);
+            };
+            // Fill as much of `out` as the current scripted batch holds; a
+            // batch larger than `out` keeps its remainder queued for the next
+            // call, mirroring how the real decoder spills oversized packets
+            // into `pending_samples` (nothing is ever dropped).
+            let n = out.len().min(batch.len());
+            out[..n].copy_from_slice(&batch[..n]);
+            batch.drain(..n);
+            if batch.is_empty() {
+                self.queue.remove(0);
             }
+            Ok(n)
         }
 
         fn seek(&mut self, position: Duration) -> Result<(), AppError> {

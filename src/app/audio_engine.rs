@@ -39,6 +39,17 @@ const PRE_ENCODE_SECONDS: f32 = 2.0;
 /// extra memory is bounded independently of queue length.
 const PRE_BUFFER_SECONDS: f32 = 4.0;
 
+/// Samples per decode chunk handed to [`AudioDecoder::next_frames`]. One
+/// buffer is allocated per decode session and reused for every chunk
+/// (allocation-optimization plan, task 3.2).
+const DECODE_CHUNK_SAMPLES: usize = 4096;
+
+/// Position updates (task 3.3): send [`PlaybackUpdate::PositionChanged`] only
+/// when playback crosses a boundary of this many milliseconds, instead of once
+/// per decoded chunk (~43/s), each of which wakes the update processor and
+/// locks `AppState`.
+const POSITION_UPDATE_INTERVAL_MS: u64 = 250;
+
 /// The audio engine: owns the decoders and audio output, processes
 /// [`PlaybackCommand`]s, and drives decode/position/gapless logic.
 pub struct AudioEngine {
@@ -331,6 +342,10 @@ impl AudioEngine {
         let mut is_playing = true;
         let mut should_stop_audio = true;
         let mut max_buffer_samples = (info.sample_rate as usize) * usize::from(info.channels) * 2;
+        // Reused decode chunk (task 3.2): allocated once per session.
+        let mut chunk = vec![0.0f32; DECODE_CHUNK_SAMPLES];
+        // Last 250 ms boundary reported to the UI (task 3.3).
+        let mut position_bucket: Option<u64> = None;
 
         loop {
             if !is_playing {
@@ -350,24 +365,9 @@ impl AudioEngine {
                 break;
             }
 
-            match self.decoder.next_frames(4096) {
-                Ok(Some(samples)) => {
-                    if let Err(e) = self.audio_output.write_samples(&samples) {
-                        let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
-                        break;
-                    }
-                    accumulated_samples += samples.len();
-                    let elapsed =
-                        elapsed_from_samples(accumulated_samples, info.sample_rate, info.channels);
-                    let _ =
-                        self.update_tx
-                            .send(PlaybackUpdate::PositionChanged(PlaybackPosition {
-                                current: elapsed,
-                                total: info.duration,
-                            }));
-                }
-                Ok(None) => {
-                    // Final position at the track's true total.
+            match self.decoder.next_frames(&mut chunk) {
+                Ok(0) => {
+                    // End of stream: final position at the track's true total.
                     if let Some(dur) = info.duration {
                         let _ = self.update_tx.send(PlaybackUpdate::PositionChanged(
                             PlaybackPosition {
@@ -383,6 +383,29 @@ impl AudioEngine {
                         continue;
                     }
                     break;
+                }
+                Ok(n) => {
+                    if let Err(e) = self.audio_output.write_samples(&chunk[..n]) {
+                        let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
+                        break;
+                    }
+                    accumulated_samples += n;
+                    let elapsed =
+                        elapsed_from_samples(accumulated_samples, info.sample_rate, info.channels);
+                    // Throttled position reporting (task 3.3): send only when
+                    // playback crosses a 250 ms boundary. The final position at
+                    // EOF above is sent unconditionally.
+                    let millis = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+                    let bucket = Some(millis / POSITION_UPDATE_INTERVAL_MS);
+                    if position_bucket != bucket {
+                        position_bucket = bucket;
+                        let _ = self.update_tx.send(PlaybackUpdate::PositionChanged(
+                            PlaybackPosition {
+                                current: elapsed,
+                                total: info.duration,
+                            },
+                        ));
+                    }
                 }
                 Err(e) => {
                     let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
@@ -581,13 +604,16 @@ impl AudioEngine {
             Ok(fmt) => {
                 let cap = pre_buffer_cap(fmt.sample_rate, fmt.channels, PRE_BUFFER_SECONDS);
                 let mut failed = false;
+                // Reused decode chunk (task 3.2): allocated once per
+                // pre-decode session.
+                let mut chunk = vec![0.0f32; DECODE_CHUNK_SAMPLES];
                 while self.pre_decode.buffer.len() < cap {
-                    match self.next_decoder.next_frames(4096) {
-                        Ok(Some(samples)) => {
-                            self.pre_decode.buffer.extend_from_slice(&samples);
-                        }
+                    match self.next_decoder.next_frames(&mut chunk) {
                         // Short track: fully buffered already.
-                        Ok(None) => break,
+                        Ok(0) => break,
+                        Ok(n) => {
+                            self.pre_decode.buffer.extend_from_slice(&chunk[..n]);
+                        }
                         Err(e) => {
                             tracing::warn!("Gapless pre-decode error: {}", e);
                             failed = true;

@@ -11,7 +11,14 @@ pub type DecoderFactory = Box<dyn Fn() -> Box<dyn AudioDecoder> + Send>;
 /// Trait for audio decoders (implemented by infrastructure).
 pub trait AudioDecoder: Send {
     fn open(&mut self, path: &Path) -> Result<AudioFormatInfo, AppError>;
-    fn next_frames(&mut self, samples: usize) -> Result<Option<Vec<f32>>, AppError>;
+    /// Decode the next packet of interleaved f32 samples into `out`,
+    /// returning the number of samples written. Callers reuse one buffer
+    /// across calls so steady-state decoding performs no per-chunk heap
+    /// allocations. Returns `Ok(0)` at end of stream.
+    ///
+    /// A short fill (fewer samples than `out.len()`) is normal: one call
+    /// never spans more than one decoded packet.
+    fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, AppError>;
     fn seek(&mut self, position: Duration) -> Result<(), AppError>;
     fn duration(&self) -> Option<Duration>;
     /// Release the currently open file's resources (format reader, decoder,

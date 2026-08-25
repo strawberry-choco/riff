@@ -31,6 +31,10 @@ symphonia-adapter-libopus = "0.3"
 # Audio output (cross-platform)
 cpal = "0.18"
 
+# Lock-free SPSC ring buffer between the decoder thread and the cpal
+# callback (allocation-optimization plan, task 3.1)
+ringbuf = "0.5"
+
 # Metadata reading (pure Rust)
 lofty = "0.25"
 

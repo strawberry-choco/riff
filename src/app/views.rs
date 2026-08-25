@@ -16,11 +16,16 @@
 //! so the next call retries automatically.
 
 use crate::app::projection::{
-    BrowsingProjection, FolderProjection, PlaybackProjection, ProjectionKey,
+    BrowsingProjection, FolderProjection, PlaybackProjection, PlaylistProjection, ProjectionKey,
     SmartPlaylistsProjection, TrackListProjection, WINDOW_SIZE,
 };
-use crate::app::store::{LibraryQueryStore, StoreGeneration};
-use crate::domain::{Album, Artist, PlaybackQueue, SmartPlaylistKind, Track, TrackId};
+// The playlist view shapes are part of the seam's public surface: the
+// projection module itself is private, so UI code imports these from here.
+pub use crate::app::projection::{PlaylistEntryRow, PlaylistView};
+use crate::app::store::{LibraryQueryStore, PlaylistStore, StoreGeneration};
+use crate::domain::{
+    Album, Artist, PlaybackQueue, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -43,6 +48,10 @@ pub struct TrackListPage {
 /// injection in `main.rs`.
 pub struct SessionViews {
     queries: Box<dyn LibraryQueryStore>,
+    /// Query-use-only handle over the Playlists section: the projection
+    /// reads through it; mutations commit through the store directly at the
+    /// UI's call sites and invalidate via the playlist generation.
+    playlist_queries: Box<dyn PlaylistStore>,
     generation: StoreGeneration,
     playlist_generation: StoreGeneration,
     tracks: TrackListProjection,
@@ -50,21 +59,24 @@ pub struct SessionViews {
     folders: FolderProjection,
     smart_playlists: SmartPlaylistsProjection,
     playback: PlaybackProjection,
+    playlists: PlaylistProjection,
 }
 
 impl SessionViews {
-    /// Wire the facade to the Library query port and both session
-    /// generations — the Library generation and the dedicated playlist
-    /// generation their mutation adapters bump after each committed store
-    /// mutation.
+    /// Wire the facade to the Library query port, the Playlists query port,
+    /// and both session generations — the Library generation and the
+    /// dedicated playlist generation their mutation adapters bump after
+    /// each committed store mutation.
     #[must_use]
     pub fn new(
         queries: Box<dyn LibraryQueryStore>,
+        playlist_queries: Box<dyn PlaylistStore>,
         generation: StoreGeneration,
         playlist_generation: StoreGeneration,
     ) -> Self {
         Self {
             queries,
+            playlist_queries,
             generation,
             playlist_generation,
             tracks: TrackListProjection::new(ProjectionKey::Flat),
@@ -72,6 +84,7 @@ impl SessionViews {
             folders: FolderProjection::new(),
             smart_playlists: SmartPlaylistsProjection::new(),
             playback: PlaybackProjection::new(),
+            playlists: PlaylistProjection::new(),
         }
     }
 
@@ -312,6 +325,48 @@ impl SessionViews {
                 );
                 Arc::from([])
             })
+    }
+
+    // --- User playlists ---------------------------------------------------------
+
+    /// Every user playlist in creation order, cached per playlist
+    /// generation. Fresh frames hand out an `Arc` clone of the cached list.
+    /// On a store error the last good list is kept (a cold miss renders
+    /// empty) and the next call retries.
+    pub fn playlists(&mut self) -> Arc<[Playlist]> {
+        let generation = self.playlist_generation.current();
+        self.playlists
+            .playlists(generation, &mut || self.playlist_queries.load_playlists())
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to load playlists from the store: {e}");
+                self.playlists.cached_playlists().unwrap_or_default()
+            })
+    }
+
+    /// One user playlist's ready-to-render rows: the entry id, its
+    /// Library-resolved Track when known, and the playability verdict, plus
+    /// the playable ids for the header context menu. Cached per playlist
+    /// generation and Library generation; on a store error the last good
+    /// rows are kept (a cold miss renders empty). Unknown ids yield `None`
+    /// without a third method.
+    pub fn playlist_view(&mut self, id: &PlaylistId) -> Option<PlaylistView> {
+        // Unknown ids answer None without touching the entry loader.
+        if !self.playlists().iter().any(|playlist| &playlist.id == id) {
+            return None;
+        }
+        let generation = self.playlist_generation.current();
+        let library_generation = self.generation.current();
+        match self
+            .playlists
+            .playlist_view(generation, library_generation, id, &mut |pid| {
+                self.playlist_queries.load_playlist_entries(pid)
+            }) {
+            Ok(view) => Some(view),
+            Err(e) => {
+                tracing::warn!("Failed to load playlist entries for {id:?} from the store: {e}");
+                Some(self.playlists.cached_view(id).unwrap_or_default())
+            }
+        }
     }
 
     // --- Playback-side reads ------------------------------------------------------

@@ -1186,8 +1186,8 @@ mod tests {
             assert_eq!(views.folder_subtree_ids(folder).len(), 1);
             assert_eq!(views.folder_direct_tracks(folder).len(), 1);
             assert_eq!(
-                views.folder_children(folder),
-                vec![PathBuf::from("f:\\lib\\child")]
+                views.folder_children(folder).as_ref(),
+                [PathBuf::from("f:\\lib\\child")]
             );
         }
 
@@ -1701,8 +1701,8 @@ mod audio_engine_tests {
             self.0.lock().unwrap().open(path)
         }
 
-        fn next_frames(&mut self, samples: usize) -> Result<Option<Vec<f32>>, AppError> {
-            self.0.lock().unwrap().next_frames(samples)
+        fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, AppError> {
+            self.0.lock().unwrap().next_frames(out)
         }
 
         fn seek(&mut self, position: Duration) -> Result<(), AppError> {
@@ -2063,7 +2063,10 @@ mod audio_engine_tests {
         let out = h.output.lock().unwrap();
         assert_eq!(out.initialized, vec![(RATE, CHANNELS)]);
         assert_eq!(out.start_count, 1, "the stream started exactly once");
-        assert_eq!(out.written.len(), 2, "both scripted batches were written");
+        // Each scripted batch holds 4800 samples, so both split across the
+        // engine's 4096-sample decode chunk: four writes cover the two
+        // batches (4096 + 704 remainder, twice).
+        assert_eq!(out.written.len(), 4, "both scripted batches were written");
 
         // Release the gapped EOF drain (samples sit in the mock buffer): the
         // drain loop swallows this Stop without dispatching it, which is the

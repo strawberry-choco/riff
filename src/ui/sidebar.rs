@@ -146,9 +146,9 @@ pub fn ghost_icon_button(
         } else {
             palette.ink_3
         };
-        let tex = cache.texture(ui.ctx(), icon, 16.0, tint);
+        let tex_id = cache.texture(ui.ctx(), icon, 16.0, tint);
         ui.painter_at(rect)
-            .image(tex.id(), rect.shrink(4.0), UV_FULL, tint);
+            .image(tex_id, rect.shrink(4.0), UV_FULL, tint);
     }
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     response.on_hover_text(label).clicked()
@@ -192,8 +192,8 @@ pub fn search_box(
         |ui| {
             ui.spacing_mut().item_spacing.x = ICON_GAP;
 
-            let tex = cache.texture(ui.ctx(), Icon::Search, 16.0, palette.ink_3);
-            let sized = egui::load::SizedTexture::new(tex.id(), egui::vec2(16.0, 16.0));
+            let tex_id = cache.texture(ui.ctx(), Icon::Search, 16.0, palette.ink_3);
+            let sized = egui::load::SizedTexture::new(tex_id, egui::vec2(16.0, 16.0));
             ui.add(egui::Image::from_texture(sized));
 
             let response = ui.add(
@@ -387,12 +387,12 @@ pub fn tree_row(
         } else {
             palette.ink_2
         };
-        let tex = cache.texture(ui.ctx(), icon, 16.0, tint);
+        let tex_id = cache.texture(ui.ctx(), icon, 16.0, tint);
         let icon_rect = egui::Rect::from_center_size(
             egui::pos2(x + 8.0, rect.center().y),
             egui::vec2(16.0, 16.0),
         );
-        painter.image(tex.id(), icon_rect, UV_FULL, tint);
+        painter.image(tex_id, icon_rect, UV_FULL, tint);
         x += 16.0 + ICON_GAP;
     }
 
@@ -453,13 +453,15 @@ pub enum PlaylistRowAction {
 /// One playlist row: the name opens the playlist, and hovering reveals the
 /// edit/delete affordances at the right edge. The affordances are always
 /// interactive (and always present in the accessibility tree); only their
-/// glyphs wait for the hover, matching the mockup's hover-reveal.
+/// glyphs wait for the hover, matching the mockup's hover-reveal. `label`
+/// is the painted text — the caller supplies it preformatted ("Name
+/// (count)") from its label cache so steady-state frames allocate nothing.
 pub fn playlist_row(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
     name: &str,
-    count: usize,
+    label: &str,
     selected: bool,
 ) -> Option<PlaylistRowAction> {
     let (rect, response) = ui.allocate_exact_size(
@@ -478,7 +480,7 @@ pub fn playlist_row(
     painter.text(
         egui::pos2(rect.left() + indent_px(0), rect.center().y),
         egui::Align2::LEFT_CENTER,
-        format!("{name} ({count})"),
+        label,
         font,
         palette.ink,
     );

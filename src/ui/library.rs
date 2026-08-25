@@ -150,12 +150,12 @@ pub fn empty_state_hero(ui: &mut egui::Ui, cache: &mut IconCache, palette: &Pale
     // rasterized with the tint baked in, so it is drawn at its own colors
     // ([`theme::TEXTURE_TINT`]).
     let glyph_tint = palette.ink_3.gamma_multiply(0.4);
-    let tex = cache.texture(ui.ctx(), Icon::Disc, HERO_DISC_ICON_SIZE, glyph_tint);
+    let tex_id = cache.texture(ui.ctx(), Icon::Disc, HERO_DISC_ICON_SIZE, glyph_tint);
     let icon_rect = egui::Rect::from_center_size(
         disc_center,
         egui::vec2(HERO_DISC_ICON_SIZE, HERO_DISC_ICON_SIZE),
     );
-    painter.image(tex.id(), icon_rect, UV_FULL, theme::TEXTURE_TINT);
+    painter.image(tex_id, icon_rect, UV_FULL, theme::TEXTURE_TINT);
 
     // Copy block under the circle, each line centered on the stage axis.
     let title_top = group_top + HERO_DISC_SIZE + HERO_TITLE_GAP;

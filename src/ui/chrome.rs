@@ -182,15 +182,16 @@ pub enum TitleBarAction {
 /// Must run inside a top panel of exactly [`crate::ui::theme::TITLEBAR_H`]
 /// height with no frame margins, so the drag region covers the full strip.
 ///
-/// Returns the actions observed this frame; the caller applies them to app
-/// state and viewport commands.
+/// Observed actions are appended to `actions` — a buffer the caller owns and
+/// clears per frame, so idle frames never build a fresh `Vec`. The caller
+/// applies them to app state and viewport commands.
 pub fn show_titlebar(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
     content: &TitleBarContent<'_>,
-) -> Vec<TitleBarAction> {
-    let mut actions = Vec::new();
+    actions: &mut Vec<TitleBarAction>,
+) {
     let rect = ui.max_rect();
 
     // Register the drag region FIRST so the buttons added below sit on top
@@ -241,11 +242,9 @@ pub fn show_titlebar(
             .max_rect(rect)
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
         |ui| {
-            show_titlebar_controls(ui, cache, palette, content, &mut actions);
+            show_titlebar_controls(ui, cache, palette, content, actions);
         },
     );
-
-    actions
 }
 
 /// The right-edge control cluster: theme / Now Playing / Settings / Advanced

@@ -34,7 +34,7 @@ pub mod ui_tests;
 //
 // Bring the library modules into the test crate root so qualified paths such as
 // `crate::domain::TrackMetadata`, `crate::app::state::AppState` and
-// `crate::app::commands::LibraryCommand` resolve from inside the test modules.
+// `crate::app::scan_service::ScanService` resolve from inside the test modules.
 pub use riff::app;
 pub use riff::domain;
 pub use riff::infra;

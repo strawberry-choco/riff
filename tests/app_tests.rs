@@ -1648,6 +1648,560 @@ mod tests {
     }
 }
 
+// --- Library Scan Service tests ----------------------------------------------
+//
+// The extracted scan flow (`src/app/scan_service.rs`) is exercised end to end
+// through its public seam (ADR 0006): real tempdir fixtures with dummy
+// audio-extension files, the canned metadata reader below, and a REAL SQLite
+// Application Store in a scratch dir wired through the same infra adapters the
+// composition root uses. A helper thread runs `ScanWorker::run()`; every wait
+// spins on the public interface only, bounded by TIMEOUT so a wedged worker
+// fails an assertion instead of hanging CI.
+mod scan_service_tests {
+    use super::*;
+    use riff::app::errors::AppError;
+    use riff::app::scan_service::{ScanOutcome, ScanService, Scans};
+    use riff::app::store::{LibraryMutationStore, LibraryQueryStore, StoreGeneration};
+    use riff::app::traits::{AudioFormatInfo, MetadataReader};
+    use riff::domain::CoverSource;
+    use riff::infra::store::{MutexLibraryMutationStore, MutexLibraryQueryStore, SqliteStore};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant, SystemTime};
+
+    /// How long any single wait on the worker may take before the test
+    /// declares it wedged.
+    const TIMEOUT: Duration = Duration::from_secs(10);
+
+    // --- Fixtures --------------------------------------------------------------
+
+    /// Canned [`MetadataReader`] for scan fixtures: derives title/artist/
+    /// album from each file's path (bytes on disk are irrelevant). When
+    /// `gate` is `Some`, `read_all` calls beyond `permit_first` BLOCK until
+    /// the flag flips — lets the cancel test freeze the worker mid-scan
+    /// deterministically, after the first batch's Progress is observable.
+    struct FixtureReader {
+        permit_first: usize,
+        served: AtomicUsize,
+        gate: Option<std::sync::Arc<AtomicBool>>,
+    }
+
+    impl FixtureReader {
+        /// A reader that serves every call immediately.
+        fn open() -> Self {
+            Self {
+                permit_first: usize::MAX,
+                served: AtomicUsize::new(0),
+                gate: None,
+            }
+        }
+
+        /// A reader whose first `permit_first` reads pass and every later
+        /// read blocks until the returned flag is set.
+        fn gated_after(permit_first: usize) -> (Self, std::sync::Arc<AtomicBool>) {
+            let gate = std::sync::Arc::new(AtomicBool::new(false));
+            (
+                Self {
+                    permit_first,
+                    served: AtomicUsize::new(0),
+                    gate: Some(std::sync::Arc::clone(&gate)),
+                },
+                gate,
+            )
+        }
+
+        fn canned_read(
+            &self,
+            path: &Path,
+        ) -> (
+            TrackMetadata,
+            Option<Duration>,
+            CoverSource,
+            AudioFormatInfo,
+        ) {
+            let n = self.served.fetch_add(1, Ordering::SeqCst);
+            if n >= self.permit_first {
+                let gate = self.gate.as_ref().expect("gated reader has a gate");
+                while !gate.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            let title = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Unknown")
+                .to_string();
+            (
+                TrackMetadata {
+                    title: Some(title),
+                    artist: Some("Scan Artist".to_string()),
+                    album: Some("Scan Album".to_string()),
+                    ..Default::default()
+                },
+                Some(Duration::from_secs(90)),
+                CoverSource::None,
+                AudioFormatInfo {
+                    sample_rate: 44_100,
+                    channels: 2,
+                    duration: Some(Duration::from_secs(90)),
+                },
+            )
+        }
+    }
+
+    impl MetadataReader for FixtureReader {
+        fn read_metadata(&self, path: &Path) -> Result<TrackMetadata, AppError> {
+            Ok(self.canned_read(path).0)
+        }
+
+        fn read_duration(&self, _path: &Path) -> Result<Option<Duration>, AppError> {
+            Ok(Some(Duration::from_secs(90)))
+        }
+
+        fn read_cover_source(&self, _path: &Path) -> Result<CoverSource, AppError> {
+            Ok(CoverSource::None)
+        }
+
+        fn read_audio_format(&self, _path: &Path) -> Result<AudioFormatInfo, AppError> {
+            Ok(AudioFormatInfo {
+                sample_rate: 44_100,
+                channels: 2,
+                duration: Some(Duration::from_secs(90)),
+            })
+        }
+
+        fn read_all(
+            &self,
+            path: &Path,
+        ) -> Result<
+            (
+                TrackMetadata,
+                Option<Duration>,
+                CoverSource,
+                AudioFormatInfo,
+            ),
+            AppError,
+        > {
+            Ok(self.canned_read(path))
+        }
+    }
+
+    /// One scratch Application Store (real `SQLite` in a tempdir) plus the two
+    /// Library ports wired over its shared connection, mirroring the
+    /// composition root's wiring.
+    struct ScratchStore {
+        /// Keeps the database file alive for the whole test.
+        _dir: tempfile::TempDir,
+        mutations: MutexLibraryMutationStore,
+        queries: MutexLibraryQueryStore,
+    }
+
+    impl ScratchStore {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("riff.sqlite3");
+            let shared = std::sync::Arc::new(Mutex::new(
+                SqliteStore::open_and_migrate(&db_path).expect("fresh store must open and migrate"),
+            ));
+            let mutations = MutexLibraryMutationStore::new(shared.clone(), StoreGeneration::new());
+            let queries = MutexLibraryQueryStore::new(shared);
+            Self {
+                _dir: dir,
+                mutations,
+                queries,
+            }
+        }
+
+        /// Rows currently committed in the Library collection, read through
+        /// the query port.
+        fn track_count(&self) -> usize {
+            self.queries.track_count().expect("count reads")
+        }
+    }
+
+    /// Create `n` dummy audio-extension files under a fresh tempdir and
+    /// return the directory plus the root to scan.
+    fn seed_audio_dir(name: &str, n: usize) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..n {
+            std::fs::write(root.join(format!("song_{i:03}.mp3")), b"not really audio").unwrap();
+        }
+        (dir, root)
+    }
+
+    /// Wire a real service/worker pair over the given ports and run the
+    /// blocking worker on its own thread, exactly like the composition root
+    /// (ADR 0006). The walk closure binds a real [`AudioFileScanner`] to the
+    /// same cancel flag the service cancels through.
+    fn spawn_service(reader: FixtureReader, scratch: &ScratchStore) -> ScanService {
+        let cancel_flag = std::sync::Arc::new(AtomicBool::new(false));
+        let scanner = AudioFileScanner::new(cancel_flag.clone());
+        let (service, worker) = ScanService::new(
+            Box::new(reader),
+            Box::new(scratch.queries.clone()),
+            Box::new(scratch.mutations.clone()),
+            cancel_flag,
+            move |path| scanner.scan(path),
+        );
+        std::thread::spawn(move || worker.run());
+        service
+    }
+
+    /// Poll until `pred` holds over the accumulated outcome stream, or panic
+    /// with everything that did arrive. Spins on the public interface only.
+    fn poll_until(service: &dyn Scans, pred: impl Fn(&[ScanOutcome]) -> bool) -> Vec<ScanOutcome> {
+        let start = Instant::now();
+        let mut outcomes = Vec::new();
+        while start.elapsed() < TIMEOUT {
+            outcomes.extend(service.poll());
+            if pred(&outcomes) {
+                return outcomes;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("condition not met within {TIMEOUT:?}; outcomes so far: {outcomes:?}");
+    }
+
+    /// Poll until the `Complete` outcome for `root` arrives.
+    fn poll_until_complete(service: &dyn Scans, root: &Path) -> Vec<ScanOutcome> {
+        poll_until(service, |outcomes| {
+            outcomes
+                .iter()
+                .any(|o| matches!(o, ScanOutcome::Complete { path, .. } if path.as_path() == root))
+        })
+    }
+
+    // --- Failure-injection stubs -------------------------------------------------
+
+    /// [`LibraryQueryStore`] whose `get_track` ALWAYS fails — the fail-open
+    /// trigger. Every other query answers empty: the scan flow issues only
+    /// `get_track`.
+    struct FailingFreshnessQueries;
+
+    impl LibraryQueryStore for FailingFreshnessQueries {
+        fn get_track(&self, _id: &TrackId) -> Result<Option<Track>, AppError> {
+            Err(AppError::InvalidOperation(
+                "freshness probe boom".to_string(),
+            ))
+        }
+
+        fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn track_count(&self) -> Result<usize, AppError> {
+            Ok(0)
+        }
+
+        fn all_track_ids(&self) -> Result<Vec<TrackId>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn search_window(
+            &self,
+            _query: &str,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<Vec<Track>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn search_count(&self, _query: &str) -> Result<usize, AppError> {
+            Ok(0)
+        }
+
+        fn all_artists(&self) -> Result<Vec<crate::domain::Artist>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn artist_albums(&self, _artist: &str) -> Result<Vec<crate::domain::Album>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn album_tracks(
+            &self,
+            _album_artist: &str,
+            _album_title: &str,
+        ) -> Result<Vec<Track>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn folder_has_audio(&self, _folder: &Path) -> Result<bool, AppError> {
+            Ok(false)
+        }
+
+        fn folder_has_search_match(&self, _folder: &Path, _query: &str) -> Result<bool, AppError> {
+            Ok(false)
+        }
+
+        fn track_ids_in_folder_tree(&self, _folder: &Path) -> Result<Vec<TrackId>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn tracks_in_folder(&self, _folder: &Path) -> Result<Vec<Track>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, AppError> {
+            Ok(Vec::new())
+        }
+
+        fn smart_playlist(
+            &self,
+            _kind: crate::domain::SmartPlaylistKind,
+            _limit: usize,
+        ) -> Result<Vec<Track>, AppError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// [`LibraryMutationStore`] whose scan batches always fail to commit —
+    /// simulates a broken store so the `Failed` outcome path is exercised.
+    struct FailingCommitMutations;
+
+    impl LibraryMutationStore for FailingCommitMutations {
+        fn apply_scan_batch(&mut self, _tracks: &[Track]) -> Result<usize, AppError> {
+            Err(AppError::InvalidOperation(
+                "scan batch commit boom".to_string(),
+            ))
+        }
+
+        fn record_track_played(
+            &mut self,
+            _id: &TrackId,
+            _played_at: SystemTime,
+        ) -> Result<bool, AppError> {
+            Ok(false)
+        }
+
+        fn apply_tag_refresh(&mut self, _track: &Track) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        fn remove_library_path(&mut self, _root: &Path) -> Result<usize, AppError> {
+            Ok(0)
+        }
+
+        fn clear_library(&mut self) -> Result<usize, AppError> {
+            Ok(0)
+        }
+    }
+
+    // --- Tests -------------------------------------------------------------------
+
+    #[test]
+    fn test_cancel_mid_scan_keeps_committed_batches_and_never_completes() {
+        let scratch = ScratchStore::new();
+        let (_dir, root) = seed_audio_dir("cancel-me", 25);
+        // Reads 1..=10 pass (batch one); read #11 blocks until the gate
+        // opens, freezing the worker inside the SECOND batch.
+        let (reader, gate) = FixtureReader::gated_after(10);
+        let scans = spawn_service(reader, &scratch);
+
+        scans.request(root.clone());
+
+        // Wait until the FIRST batch's Progress is observable: by then batch
+        // one is durably committed (the commit precedes the Progress send).
+        let first = poll_until(&scans, |outcomes| {
+            outcomes.iter().any(|o| {
+                matches!(
+                    o,
+                    ScanOutcome::Progress {
+                        files_found: 10,
+                        ..
+                    }
+                )
+            })
+        });
+        assert_eq!(
+            first,
+            vec![ScanOutcome::Progress {
+                path: root.clone(),
+                files_found: 10
+            }],
+            "exactly the first batch's progress before cancel"
+        );
+
+        // Cancel while the second batch is blocked mid-read, then release it.
+        scans.cancel();
+        gate.store(true, Ordering::SeqCst);
+
+        // Quiesce: the worker finishes the in-flight batch, sees the flag
+        // BETWEEN batches, and stops without publishing anything further.
+        let start = Instant::now();
+        while scans.is_scanning(&root) && start.elapsed() < TIMEOUT {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let rest = scans.poll();
+
+        assert!(
+            !rest
+                .iter()
+                .any(|o| matches!(o, ScanOutcome::Complete { .. })),
+            "a cancelled scan must never publish Complete: {rest:?}"
+        );
+        assert!(
+            !rest.iter().any(|o| matches!(o, ScanOutcome::Failed { .. })),
+            "cancellation is not failure: {rest:?}"
+        );
+        assert!(!scans.is_scanning(&root), "the cancelled scan ended");
+
+        // Committed batches survive the cancel: batch one always, batch two
+        // too unless the cancel landed between the batches (either way the
+        // third batch never ran).
+        let committed = scratch.track_count();
+        assert!(
+            (10..25).contains(&committed),
+            "committed batches survive cancel, got {committed}"
+        );
+    }
+
+    #[test]
+    fn test_freshness_check_failure_fails_open_and_still_commits() {
+        let scratch = ScratchStore::new();
+        let (_dir, root) = seed_audio_dir("fail-open", 3);
+
+        let cancel_flag = std::sync::Arc::new(AtomicBool::new(false));
+        let scanner = AudioFileScanner::new(cancel_flag.clone());
+        let (scans, worker) = ScanService::new(
+            Box::new(FixtureReader::open()),
+            Box::new(FailingFreshnessQueries),
+            Box::new(scratch.mutations.clone()),
+            cancel_flag,
+            move |path| scanner.scan(path),
+        );
+        std::thread::spawn(move || worker.run());
+
+        scans.request(root.clone());
+        let outcomes = poll_until_complete(&scans, &root);
+
+        assert_eq!(
+            scratch.track_count(),
+            3,
+            "the scan committed even though EVERY freshness query failed"
+        );
+        assert!(
+            outcomes
+                .iter()
+                .all(|o| !matches!(o, ScanOutcome::Failed { .. })),
+            "a fail-open scan is not a failure: {outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn test_rescan_through_the_service_is_idempotent_and_keeps_play_history() {
+        let mut scratch = ScratchStore::new();
+        let (_dir, root) = seed_audio_dir("rescan", 3);
+        let scans = spawn_service(FixtureReader::open(), &scratch);
+
+        scans.request(root.clone());
+        poll_until_complete(&scans, &root);
+        assert_eq!(scratch.track_count(), 3, "first scan indexed every file");
+
+        // Play one track, then rescan the SAME directory through the service.
+        let played_id = TrackId::from_path(&root.join("song_000.mp3"));
+        scratch
+            .mutations
+            .record_track_played(&played_id, SystemTime::now())
+            .expect("play records");
+
+        scans.request(root.clone());
+        poll_until_complete(&scans, &root);
+
+        // No duplicate rows, and the play history survived the upserts.
+        assert_eq!(scratch.track_count(), 3, "rescan must not duplicate rows");
+        let played = scratch
+            .queries
+            .get_track(&played_id)
+            .expect("read works")
+            .expect("track still indexed");
+        assert_eq!(played.play_count, 1, "rescan preserves play history");
+        assert!(
+            played.last_played.is_some(),
+            "last_played survives the rescan"
+        );
+    }
+
+    #[test]
+    fn test_outcome_stream_reports_progress_cadence_then_complete_total() {
+        let scratch = ScratchStore::new();
+        // 23 files over the ~10-track batch size: chunks of 10 / 10 / 3.
+        let (_dir, root) = seed_audio_dir("cadence", 23);
+        let scans = spawn_service(FixtureReader::open(), &scratch);
+
+        scans.request(root.clone());
+        let outcomes = poll_until_complete(&scans, &root);
+
+        let progress: Vec<usize> = outcomes
+            .iter()
+            .filter_map(|o| match o {
+                ScanOutcome::Progress { files_found, .. } => Some(*files_found),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            progress,
+            vec![10, 20, 23],
+            "one cumulative Progress per committed batch"
+        );
+        assert_eq!(
+            outcomes.len(),
+            4,
+            "three Progress outcomes then one Complete"
+        );
+        assert_eq!(
+            outcomes.last(),
+            Some(&ScanOutcome::Complete {
+                path: root.clone(),
+                total_files: 23
+            }),
+            "Complete carries the exact discovered total"
+        );
+    }
+
+    #[test]
+    fn test_commit_failure_surfaces_as_failed_outcome() {
+        let (_dir, root) = seed_audio_dir("broken-commit", 12);
+
+        let cancel_flag = std::sync::Arc::new(AtomicBool::new(false));
+        let scanner = AudioFileScanner::new(cancel_flag.clone());
+        let (scans, worker) = ScanService::new(
+            Box::new(FixtureReader::open()),
+            Box::new(FailingFreshnessQueries),
+            Box::new(FailingCommitMutations),
+            cancel_flag,
+            move |path| scanner.scan(path),
+        );
+        std::thread::spawn(move || worker.run());
+
+        scans.request(root.clone());
+        let outcomes = poll_until(&scans, |outcomes| {
+            outcomes
+                .iter()
+                .any(|o| matches!(o, ScanOutcome::Failed { .. }))
+        });
+
+        match outcomes.first() {
+            Some(ScanOutcome::Failed { path, reason }) => {
+                assert_eq!(path, &root, "the failure names the scanned root");
+                assert!(
+                    reason.contains("scan batch commit boom"),
+                    "the reason carries the store error: {reason}"
+                );
+            }
+            other => panic!("expected Failed first, got {other:?}"),
+        }
+        assert!(
+            !outcomes
+                .iter()
+                .any(|o| matches!(o, ScanOutcome::Complete { .. })),
+            "a scan whose commit failed must not report Complete: {outcomes:?}"
+        );
+    }
+}
+
 // --- Audio Engine loop tests -------------------------------------------------
 //
 // The extracted engine (`src/app/audio_engine.rs`) is exercised through its

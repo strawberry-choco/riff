@@ -1,5 +1,4 @@
 pub mod audio_engine;
-pub mod commands;
 pub mod cover_resolver;
 pub mod cover_service;
 pub mod errors;
@@ -8,6 +7,7 @@ pub mod playback_coordinator;
 pub mod playlist_manager;
 mod projection;
 pub mod scan;
+pub mod scan_service;
 pub mod state;
 pub mod store;
 pub mod tag_edit_service;

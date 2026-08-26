@@ -1,10 +1,10 @@
 use crate::app::MutexExt;
-use crate::app::commands::{LibraryCommand, LibraryUpdate};
 // The cover-cache capacity discipline lives in the app layer next to the
 // Cover Service's negative cache, so both caches share ONE constant and ONE
 // LRU implementation (spec: no second constant scheme).
 use crate::app::cover_service::Covers;
 pub use crate::app::cover_service::{COVER_CACHE_CAP, lru_insert};
+use crate::app::scan_service::{ScanOutcome, Scans};
 use crate::app::state::{AppState, BrowseMode, LibraryStatus, ViewMode};
 use crate::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
 use crate::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
@@ -19,7 +19,7 @@ use crate::ui::chrome::TitleBarAction;
 use crate::ui::now_playing::{NowPlayingAction, UpNextEntry};
 use crate::ui::playerbar::PlayerBarAction;
 use crate::ui::theme;
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::Sender;
 use eframe::egui;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -145,8 +145,11 @@ struct NpText {
 pub struct RiffApp {
     pub state: Arc<Mutex<AppState>>,
     command_sender: Option<Sender<PlaybackCommand>>,
-    library_command_sender: Option<Sender<LibraryCommand>>,
-    library_update_rx: Option<Receiver<LibraryUpdate>>,
+    /// The Library Scan Service front end (ADR 0006): requests scans and
+    /// yields polled outcomes; the whole walk/commit/cancel flow and the
+    /// per-path scan state live behind it. The watcher thread holds its own
+    /// clone of the same shareable service.
+    pub(crate) scans: Box<dyn Scans>,
     cover_textures: std::collections::HashMap<String, egui::TextureHandle>,
     cover_lru_keys: Vec<String>,
     /// The Cover Service front end (ADR 0006): sends resolve intent and
@@ -260,8 +263,7 @@ impl RiffApp {
     pub fn new(
         state: Arc<Mutex<AppState>>,
         command_sender: Sender<PlaybackCommand>,
-        library_command_sender: Sender<LibraryCommand>,
-        library_update_rx: Receiver<LibraryUpdate>,
+        scans: Box<dyn Scans>,
         watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
         #[cfg(not(target_os = "linux"))] tray_icon: Option<tray_icon::TrayIcon>,
         quit_flag: Arc<AtomicBool>,
@@ -275,8 +277,7 @@ impl RiffApp {
         Self {
             state,
             command_sender: Some(command_sender),
-            library_command_sender: Some(library_command_sender),
-            library_update_rx: Some(library_update_rx),
+            scans,
             cover_textures: std::collections::HashMap::new(),
             cover_lru_keys: Vec::new(),
             covers,
@@ -360,35 +361,32 @@ impl RiffApp {
         );
     }
 
+    /// Drain polled Library Scan outcomes from the service and map them onto
+    /// session state exactly as before the extraction: per-root statuses
+    /// plus the titlebar scan-status line. The service NEVER touches
+    /// `AppState` — this mapping is the UI's whole remaining scan
+    /// responsibility (ADR 0006). The watcher observes a scan's end itself
+    /// via `is_scanning`, so no relay fires here anymore.
     fn poll_library_updates(&self, state: &mut AppState) {
-        if let Some(ref rx) = self.library_update_rx {
-            while let Ok(update) = rx.try_recv() {
-                match update {
-                    LibraryUpdate::Progress {
-                        path,
-                        files_found,
-                        current_dir,
-                    } => {
-                        state
-                            .library_statuses
-                            .insert(path, LibraryStatus::Scanning { files_found });
-                        state.scan_status = Some(format!("{files_found} files, {current_dir}"));
-                    }
-                    LibraryUpdate::Complete { path, total_files } => {
-                        state
-                            .library_statuses
-                            .insert(path.clone(), LibraryStatus::Scanned(total_files));
-                        state.scan_status = Some(format!("Scan complete: {total_files} tracks"));
-                        // Scan batches already committed through the store as
-                        // they progressed; nothing whole-file remains to save.
-                        if let Some(ref mut mgr) = *self.watcher_manager.lock_or_recover() {
-                            mgr.mark_scan_complete(&path);
-                        }
-                    }
-                    LibraryUpdate::Error { path, message } => {
-                        state.library_statuses.insert(path, LibraryStatus::Idle);
-                        state.scan_status = Some(format!("Error: {message}"));
-                    }
+        for outcome in self.scans.poll() {
+            match outcome {
+                ScanOutcome::Progress { path, files_found } => {
+                    state
+                        .library_statuses
+                        .insert(path, LibraryStatus::Scanning { files_found });
+                    state.scan_status = Some(format!("{files_found} files"));
+                }
+                ScanOutcome::Complete { path, total_files } => {
+                    state
+                        .library_statuses
+                        .insert(path, LibraryStatus::Scanned(total_files));
+                    state.scan_status = Some(format!("Scan complete: {total_files} tracks"));
+                    // Scan batches already committed through the store as
+                    // they progressed; nothing whole-file remains to save.
+                }
+                ScanOutcome::Failed { path, reason } => {
+                    state.library_statuses.insert(path, LibraryStatus::Idle);
+                    state.scan_status = Some(format!("Error: {reason}"));
                 }
             }
         }
@@ -909,7 +907,6 @@ impl eframe::App for RiffApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let cmd = self.command_sender.clone();
-        let lib_cmd = self.library_command_sender.clone();
         let state_arc = self.state.clone();
 
         let mut state = state_arc.lock_or_recover();
@@ -1005,7 +1002,7 @@ impl eframe::App for RiffApp {
                 ViewMode::Library => self.render_track_details_panel(ui, &mut state),
                 ViewMode::NowPlaying => self.show_now_playing_view(ui, &mut state, cmd.as_ref()),
                 ViewMode::Settings => {
-                    self.show_settings_view(ui, &mut state, lib_cmd.as_ref());
+                    self.show_settings_view(ui, &mut state);
                 }
             });
 

@@ -62,7 +62,7 @@ crossbeam-queue = "0.3"
 notify = "8"
 
 # Random for shuffle
-rand = "0.10"
+fastrand = "2"
 
 # For image data in egui
 epi = { package = "egui_extras", version = "0.35", features = ["image"] }

@@ -1,12 +1,7 @@
 use crate::app::scan_service::{ScanService, Scans};
 use crate::infra::watcher::FilesystemWatcher;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
-
-/// How long filesystem changes for one root are debounced before a rescan
-/// is requested.
-const DEBOUNCE: Duration = Duration::from_secs(2);
 
 pub struct WatcherManager {
     watcher: Option<FilesystemWatcher>,
@@ -16,12 +11,11 @@ pub struct WatcherManager {
     /// state is the single source of truth, so this manager keeps no
     /// parallel copy of it (and needs no Complete relay from the UI).
     scans: ScanService,
-    debounce_timers: HashMap<PathBuf, Instant>,
     /// Roots whose changes arrived while a scan was running and want exactly
     /// one follow-up rescan once it ends.
     pending_rescan: HashSet<PathBuf>,
     /// Roots currently watched (`start_watching` minus `stop_watching`);
-    /// `on_fs_event` maps a changed path back to its root through this set.
+    /// `on_fs_events` maps a changed path back to its root through this set.
     watched: HashSet<PathBuf>,
 }
 
@@ -30,7 +24,6 @@ impl WatcherManager {
         Self {
             watcher,
             scans,
-            debounce_timers: HashMap::new(),
             pending_rescan: HashSet::new(),
             watched: HashSet::new(),
         }
@@ -53,7 +46,6 @@ impl WatcherManager {
         if let Some(ref mut watcher) = self.watcher {
             let _ = watcher.unwatch(&canonical);
         }
-        self.debounce_timers.remove(&canonical);
         self.pending_rescan.remove(&canonical);
         self.watched.remove(&canonical);
     }
@@ -66,40 +58,39 @@ impl WatcherManager {
         self.watcher = None;
     }
 
-    pub fn on_fs_event(&mut self, changed_path: &Path) {
-        let Some(lib_path) = self.find_library_path(changed_path) else {
-            return;
-        };
-
-        // Changes landing during a running scan cannot be scanned right now:
-        // remember the root for exactly one follow-up rescan once the service
-        // reports the path idle again (checked in `poll`).
-        if self.scans.is_scanning(&lib_path) {
-            self.pending_rescan.insert(lib_path);
-            return;
+    /// Consume one already-debounced batch of changed audio-file paths (the
+    /// coalescing window lives upstream in [`FilesystemWatcher`], so no
+    /// timing state is kept here). Each distinct watched root gets exactly
+    /// one decision per batch:
+    ///
+    /// - changes landing during a running scan cannot be scanned right now:
+    ///   remember the root for exactly one follow-up rescan once the service
+    ///   reports the path idle again (checked in [`Self::poll`]);
+    /// - otherwise request the rescan immediately.
+    pub fn on_fs_events(&mut self, changed_paths: &[PathBuf]) {
+        let mut roots: Vec<PathBuf> = Vec::new();
+        for changed_path in changed_paths {
+            if let Some(lib_path) = self.find_library_path(changed_path)
+                && !roots.contains(&lib_path)
+            {
+                roots.push(lib_path);
+            }
         }
 
-        self.debounce_timers.insert(lib_path, Instant::now());
+        for lib_path in roots {
+            if self.scans.is_scanning(&lib_path) {
+                self.pending_rescan.insert(lib_path);
+            } else {
+                self.scans.request(lib_path);
+            }
+        }
     }
 
+    /// Fire deferred follow-ups: a root whose changes landed mid-scan gets
+    /// one rescan as soon as the running scan ends. The service's
+    /// `is_scanning` is queried directly — no Complete relay needed. Called
+    /// once per UI frame, exactly like before.
     pub fn poll(&mut self) {
-        let now = Instant::now();
-        let mut expired = Vec::new();
-        for (path, timer) in &self.debounce_timers {
-            if now.duration_since(*timer) >= DEBOUNCE {
-                expired.push(path.clone());
-            }
-        }
-        for path in expired {
-            self.debounce_timers.remove(&path);
-            if !self.scans.is_scanning(&path) {
-                self.scans.request(path);
-            }
-        }
-
-        // Fire deferred follow-ups: a root whose changes landed mid-scan
-        // gets one rescan as soon as the running scan ends. The service's
-        // `is_scanning` is queried directly — no Complete relay needed.
         let ready: Vec<PathBuf> = self
             .pending_rescan
             .iter()

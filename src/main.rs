@@ -170,7 +170,7 @@ fn run_native_app(app: RiffApp, options: eframe::NativeOptions) {
 fn spawn_fs_watcher(
     scans: riff::app::scan_service::ScanService,
 ) -> Arc<Mutex<Option<WatcherManager>>> {
-    let (fs_event_tx, fs_event_rx) = unbounded::<PathBuf>();
+    let (fs_event_tx, fs_event_rx) = unbounded::<Vec<PathBuf>>();
     let watcher = match FilesystemWatcher::new(fs_event_tx) {
         Ok(w) => Some(w),
         Err(e) => {
@@ -183,9 +183,9 @@ fn spawn_fs_watcher(
 
     let thread_manager = watcher_manager.clone();
     let _handle = thread::spawn(move || {
-        while let Ok(changed_path) = fs_event_rx.recv() {
+        while let Ok(changed_paths) = fs_event_rx.recv() {
             if let Some(ref mut mgr) = *thread_manager.lock_or_recover() {
-                mgr.on_fs_event(&changed_path);
+                mgr.on_fs_events(&changed_paths);
             }
         }
     });

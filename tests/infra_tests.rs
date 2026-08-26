@@ -440,10 +440,97 @@ mod tests {
         // Scanner creation test
     }
 
+    // --- Filesystem watcher: debounced batch shaping (pure) -------------------
+
+    /// Build one synthetic debounced event carrying a single path.
+    fn debounced_event(
+        kind: notify::EventKind,
+        path: &std::path::Path,
+    ) -> notify_debouncer_full::DebouncedEvent {
+        let mut event = notify::Event::new(kind);
+        event.paths.push(path.to_path_buf());
+        notify_debouncer_full::DebouncedEvent::new(event, std::time::Instant::now())
+    }
+
+    #[test]
+    fn test_debounced_audio_paths_filters_and_dedupes_a_batch() {
+        use notify::event::{CreateKind, DataChange, EventKind, ModifyKind};
+        use std::path::Path;
+
+        // One burst: an .mp3 created then modified (two raw events for the
+        // same file), a non-audio file, and a case-insensitive extension hit.
+        let events = vec![
+            debounced_event(EventKind::Create(CreateKind::File), Path::new("/lib/a.mp3")),
+            debounced_event(
+                EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+                Path::new("/lib/a.mp3"),
+            ),
+            debounced_event(
+                EventKind::Create(CreateKind::File),
+                Path::new("/lib/notes.txt"),
+            ),
+            debounced_event(
+                EventKind::Create(CreateKind::File),
+                Path::new("/lib/b.FLAC"),
+            ),
+        ];
+
+        // Expected straight from the audio-extension contract: audio paths
+        // only, deduplicated, first-seen order preserved.
+        assert_eq!(
+            riff::infra::watcher::debounced_audio_paths(&events),
+            vec![PathBuf::from("/lib/a.mp3"), PathBuf::from("/lib/b.FLAC")]
+        );
+    }
+
+    #[test]
+    fn test_filesystem_watcher_forwards_debounced_audio_batches() {
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded::<Vec<PathBuf>>();
+        let mut watcher = FilesystemWatcher::new(tx).expect("watcher must build");
+        watcher.watch(dir.path()).expect("watch must register");
+
+        // One burst: an audio file and a non-audio file, written back to
+        // back so the debouncer coalesces them into one flush.
+        let song = dir.path().join("song.mp3");
+        std::fs::write(&song, b"audio").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"text").unwrap();
+
+        // The debouncer flushes once the filesystem has been quiet for its
+        // 2s window; bound the wait so a wedged backend fails instead of
+        // hanging the suite.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut seen: Vec<PathBuf> = Vec::new();
+        while !seen.contains(&song) {
+            assert!(
+                Instant::now() < deadline,
+                "no batch containing {song:?} arrived; seen {seen:?}"
+            );
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(batch) => seen.extend(batch),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    panic!("debouncer never flushed; seen {seen:?}")
+                }
+                Err(err) => panic!("event channel failed: {err}"),
+            }
+        }
+
+        // Contract: which paths changed — audio only, non-audio filtered.
+        assert!(
+            !seen.iter().any(|path| {
+                path.extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"))
+            }),
+            "non-audio paths must not be forwarded; seen {seen:?}"
+        );
+    }
+
     #[test]
     fn test_filesystem_watcher_new() {
         // This test might fail if there are filesystem permissions issues
-        let (tx, _) = crossbeam_channel::unbounded();
+        let (tx, _) = crossbeam_channel::unbounded::<Vec<PathBuf>>();
         let _result = FilesystemWatcher::new(tx);
         // The result could be Ok or Err depending on the system
     }

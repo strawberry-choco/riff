@@ -140,6 +140,304 @@ mod tests {
         );
     }
 
+    /// Wire a real Library Scan Service pair over mocks whose walk returns
+    /// instantly (every request publishes one `Complete`), run the worker on
+    /// its own thread exactly like the composition root, and return the
+    /// front-end handle.
+    fn instant_scan_service() -> (
+        riff::app::scan_service::ScanService,
+        crossbeam_channel::Receiver<Vec<std::path::PathBuf>>,
+    ) {
+        use crate::mocks::{MockLibraryMutationStore, MockLibraryQueryStore, MockMetadataReader};
+        use riff::app::scan_service::ScanService;
+        use std::path::PathBuf;
+        use std::sync::atomic::AtomicBool;
+
+        let (_watch_tx, watch_rx) = unbounded::<Vec<PathBuf>>();
+        let (scans, worker) = ScanService::new(
+            Box::new(MockMetadataReader::default()),
+            Box::new(MockLibraryQueryStore::default()),
+            Box::new(MockLibraryMutationStore::new()),
+            Arc::new(AtomicBool::new(false)),
+            move |_path| Vec::new(),
+        );
+        std::thread::spawn(move || worker.run());
+        (scans, watch_rx)
+    }
+
+    /// Drain scan outcomes into `outcomes` until `expected` `Complete`
+    /// outcomes for `root` have landed in total. Bounded so a wedged worker
+    /// fails the test instead of hanging it.
+    fn drain_until_completes(
+        scans: &riff::app::scan_service::ScanService,
+        root: &std::path::Path,
+        expected: usize,
+        budget: std::time::Duration,
+        outcomes: &mut Vec<riff::app::scan_service::ScanOutcome>,
+    ) {
+        use riff::app::scan_service::{ScanOutcome, Scans};
+        use std::time::{Duration, Instant};
+
+        let start = Instant::now();
+        loop {
+            outcomes.extend(scans.poll());
+            let completes = outcomes
+                .iter()
+                .filter(
+                    |o| matches!(o, ScanOutcome::Complete { path, .. } if path.as_path() == root),
+                )
+                .count();
+            if completes >= expected {
+                return;
+            }
+            assert!(
+                start.elapsed() < budget,
+                "only {completes}/{expected} completes for {root:?}; got {outcomes:?}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Wire a real Library Scan Service pair whose walk blocks until the
+    /// returned release channel fires (to hold a scan open mid-flight),
+    /// running the worker on its own thread like the composition root.
+    fn gated_scan_service() -> (
+        riff::app::scan_service::ScanService,
+        crossbeam_channel::Sender<()>,
+    ) {
+        use crate::mocks::{MockLibraryMutationStore, MockLibraryQueryStore, MockMetadataReader};
+        use riff::app::scan_service::ScanService;
+        use std::sync::atomic::AtomicBool;
+
+        let (release_tx, release_rx) = unbounded::<()>();
+        let (scans, worker) = ScanService::new(
+            Box::new(MockMetadataReader::default()),
+            Box::new(MockLibraryQueryStore::default()),
+            Box::new(MockLibraryMutationStore::new()),
+            Arc::new(AtomicBool::new(false)),
+            move |_path| {
+                let _ = release_rx.recv();
+                Vec::new()
+            },
+        );
+        std::thread::spawn(move || worker.run());
+        (scans, release_tx)
+    }
+
+    /// A [`WatcherManager`] over a real watcher with `root` registered as a
+    /// watched library root. Returns the manager, the scratch dir backing it
+    /// (must outlive the manager), and the canonicalized root.
+    fn watched_manager(
+        scans: riff::app::scan_service::ScanService,
+    ) -> (
+        riff::app::watcher_manager::WatcherManager,
+        tempfile::TempDir,
+        std::path::PathBuf,
+    ) {
+        use riff::app::watcher_manager::WatcherManager;
+        use riff::infra::FilesystemWatcher;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        // The event channel stays idle: tests feed synthetic batches that
+        // stand in for debouncer flushes arriving over the boundary.
+        let watcher = FilesystemWatcher::new(unbounded().0).expect("watcher must build");
+        let mut mgr = WatcherManager::new(Some(watcher), scans);
+        mgr.start_watching(dir.path()).expect("watchable root");
+        (mgr, dir, root)
+    }
+
+    /// How many `Complete` outcomes in `outcomes` finished for `root`.
+    fn completes_for(
+        outcomes: &[riff::app::scan_service::ScanOutcome],
+        root: &std::path::Path,
+    ) -> usize {
+        use riff::app::scan_service::ScanOutcome;
+        outcomes
+            .iter()
+            .filter(|o| matches!(o, ScanOutcome::Complete { path, .. } if path.as_path() == root))
+            .count()
+    }
+
+    #[test]
+    fn test_watcher_manager_requests_rescan_immediately_per_debounced_batch() {
+        let (scans, _watch_rx) = instant_scan_service();
+        let (mut mgr, _dir, root) = watched_manager(scans.clone());
+
+        // ONE debounced burst: several paths under the same root.
+        let batch = vec![root.join("album").join("a.mp3"), root.join("b.mp3")];
+        mgr.on_fs_events(&batch);
+
+        // The batch was already debounced upstream, so the rescan decision
+        // must happen NOW — no `poll()`, no second quiet-window wait.
+        let mut outcomes = Vec::new();
+        drain_until_completes(
+            &scans,
+            &root,
+            1,
+            std::time::Duration::from_secs(10),
+            &mut outcomes,
+        );
+        assert_eq!(completes_for(&outcomes, &root), 1);
+    }
+
+    #[test]
+    fn test_watcher_manager_burst_in_one_batch_triggers_exactly_one_rescan() {
+        let (scans, _watch_rx) = instant_scan_service();
+        let (mut mgr, _dir, root) = watched_manager(scans.clone());
+
+        // A whole-album drop lands as one debounced flush of many paths.
+        let batch: Vec<std::path::PathBuf> = (0..5)
+            .map(|i| root.join(format!("track_{i}.mp3")))
+            .collect();
+        mgr.on_fs_events(&batch);
+
+        let mut outcomes = Vec::new();
+        drain_until_completes(
+            &scans,
+            &root,
+            1,
+            std::time::Duration::from_secs(10),
+            &mut outcomes,
+        );
+        assert_eq!(
+            completes_for(&outcomes, &root),
+            1,
+            "one coalesced burst must trigger exactly one rescan"
+        );
+    }
+
+    #[test]
+    fn test_watcher_manager_separate_batches_trigger_separate_rescans() {
+        let (scans, _watch_rx) = instant_scan_service();
+        let (mut mgr, _dir, root) = watched_manager(scans.clone());
+
+        // Two bursts separated outside the debounce window arrive as two
+        // distinct batches; each drives its own rescan decision.
+        let mut outcomes = Vec::new();
+        mgr.on_fs_events(&[root.join("first.mp3")]);
+        drain_until_completes(
+            &scans,
+            &root,
+            1,
+            std::time::Duration::from_secs(10),
+            &mut outcomes,
+        );
+
+        mgr.on_fs_events(&[root.join("second.mp3")]);
+        drain_until_completes(
+            &scans,
+            &root,
+            2,
+            std::time::Duration::from_secs(10),
+            &mut outcomes,
+        );
+        assert_eq!(
+            completes_for(&outcomes, &root),
+            2,
+            "batches outside the window must trigger separate rescans"
+        );
+    }
+
+    #[test]
+    fn test_watcher_manager_changes_during_scan_defer_one_follow_up() {
+        use riff::app::scan_service::Scans;
+        use std::time::{Duration, Instant};
+
+        let (scans, release) = gated_scan_service();
+        let (mut mgr, _dir, root) = watched_manager(scans.clone());
+
+        // Start a scan and hold it open mid-walk.
+        mgr.on_fs_events(&[root.join("initial.mp3")]);
+        let start = Instant::now();
+        while !scans.is_scanning(&root) {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "scan never started"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        // A multi-path burst lands while the scan runs: exactly one
+        // follow-up rescan is remembered for when it ends.
+        mgr.on_fs_events(&[
+            root.join("mid_1.mp3"),
+            root.join("mid_2.mp3"),
+            root.join("mid_3.mp3"),
+        ]);
+
+        release.send(()).expect("walk released");
+        let mut outcomes = Vec::new();
+        drain_until_completes(&scans, &root, 1, Duration::from_secs(10), &mut outcomes);
+
+        // The UI's per-frame poll fires the single deferred follow-up; the
+        // gated walk needs one more release to finish it.
+        mgr.poll();
+        release.send(()).expect("follow-up walk released");
+        drain_until_completes(&scans, &root, 2, Duration::from_secs(10), &mut outcomes);
+        assert_eq!(
+            completes_for(&outcomes, &root),
+            2,
+            "mid-scan changes must collapse into exactly one follow-up"
+        );
+    }
+
+    #[test]
+    fn test_watcher_manager_stop_watching_drops_pending_follow_up() {
+        use riff::app::scan_service::Scans;
+        use std::time::{Duration, Instant};
+
+        let (scans, release) = gated_scan_service();
+        let (mut mgr, dir, root) = watched_manager(scans.clone());
+
+        mgr.on_fs_events(&[root.join("initial.mp3")]);
+        let start = Instant::now();
+        while !scans.is_scanning(&root) {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "scan never started"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        mgr.on_fs_events(&[root.join("deferred.mp3")]);
+
+        release.send(()).expect("walk released");
+        let mut outcomes = Vec::new();
+        drain_until_completes(&scans, &root, 1, Duration::from_secs(10), &mut outcomes);
+
+        // Unwatching the root removes its pending state: no follow-up ever
+        // fires, even though changes landed mid-scan.
+        mgr.stop_watching(dir.path());
+        mgr.poll();
+        std::thread::sleep(Duration::from_millis(300));
+        outcomes.extend(scans.poll());
+        assert_eq!(
+            completes_for(&outcomes, &root),
+            1,
+            "unwatch must remove the pending follow-up"
+        );
+    }
+
+    #[test]
+    fn test_watcher_manager_unwatchable_root_reports_warning_diagnostic() {
+        use std::path::Path;
+
+        let (scans, _watch_rx) = instant_scan_service();
+        let (mut mgr, dir, _root) = watched_manager(scans);
+
+        // A nonexistent path cannot be watched; the error text becomes the
+        // UI's `WatchState::Warning` diagnostic.
+        let missing = dir.path().join("does-not-exist");
+        let err = mgr
+            .start_watching(Path::new(&missing))
+            .expect_err("unwatchable root must fail the start");
+
+        assert!(
+            err.contains("Watch failed") && err.len() > "Watch failed".len(),
+            "warning diagnostic must carry the reason: {err}"
+        );
+    }
+
     #[test]
     fn test_audio_buffer_simulation() {
         // Simulate audio buffer operations (the real output buffer is

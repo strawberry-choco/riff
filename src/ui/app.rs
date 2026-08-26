@@ -103,6 +103,9 @@ fn label_numbered(track: &Track) -> String {
     )
 }
 
+/// Transient UI prompt/focus flags are genuinely two-state; the fourth bool
+/// only exists on Linux (`settings_show_input`), which is where the lint fires.
+#[allow(clippy::struct_excessive_bools)]
 pub struct RiffApp {
     pub state: Arc<Mutex<AppState>>,
     command_sender: Option<Sender<PlaybackCommand>>,

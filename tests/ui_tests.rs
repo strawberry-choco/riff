@@ -139,7 +139,11 @@ mod tests {
         std::fs::write(&legacy_path, "{{{ corrupt legacy json").unwrap();
         let legacy_bytes_before = std::fs::read(&legacy_path).unwrap();
 
-        riff::ui::app::load_persisted_state(&mut AppState::new(), boxed_store(&dir).as_ref(), None);
+        riff::ui::app::load_persisted_state(
+            &mut AppState::new(),
+            boxed_store(&dir).as_ref(),
+            &crate::mocks::MockTransport::new(),
+        );
 
         assert_eq!(
             std::fs::read(&legacy_path).unwrap(),
@@ -674,7 +678,11 @@ mod tests {
         // Restore like the UI's first frame: curation comes back intact.
         // Playlists need no hydration step — the seam reads the store live.
         let mut state = AppState::new();
-        riff::ui::app::load_persisted_state(&mut state, boxed_store(&dir).as_ref(), None);
+        riff::ui::app::load_persisted_state(
+            &mut state,
+            boxed_store(&dir).as_ref(),
+            &crate::mocks::MockTransport::new(),
+        );
         let mut views = seam_views(&dir);
 
         // The store kept the curation across the wipe...
@@ -2299,67 +2307,71 @@ mod tests {
         );
     }
 
-    // --- Player bar actions drive the engine commands (Issue 08) -----------------
+    // --- Player bar actions drive the transport intents (Issue 08) ---------------
     //
     // "Every control still emits its engine command": the restyled widgets
     // report [`PlayerBarAction`]s and the app maps each one through the SAME
-    // command channel and state paths the pre-restyle buttons used. These
-    // tests pin that contract headlessly over a real crossbeam channel.
+    // Transport intents and state paths the pre-restyle buttons used. These
+    // tests pin that contract headlessly over a recording mock.
 
     use riff::ui::app::apply_player_bar_action;
     use riff::ui::playerbar::PlayerBarAction;
 
-    /// Apply one action against a fresh state + recording channel + mock
+    use crate::mocks::TransportIntent;
+
+    /// Apply one action against a fresh state + recording transport + mock
     /// store, returning all three for inspection.
     fn applied(
         action: PlayerBarAction,
     ) -> (
         AppState,
-        crossbeam_channel::Receiver<PlaybackCommand>,
+        crate::mocks::MockTransport,
         crate::mocks::MockSettingsStore,
     ) {
-        let (tx, rx) = crossbeam_channel::unbounded();
         let mut state = AppState::new();
+        let transport = crate::mocks::MockTransport::new();
         let mut store = crate::mocks::MockSettingsStore::default();
-        apply_player_bar_action(action, &mut state, Some(&tx), &mut store);
-        (state, rx, store)
+        apply_player_bar_action(action, &mut state, &transport, &mut store);
+        (state, transport, store)
     }
 
     #[test]
     fn test_transport_actions_emit_the_same_engine_commands() {
-        // Straight pass-through commands.
+        // Straight pass-through intents: the Action → intent mapping table.
         for (action, expected) in [
-            (PlayerBarAction::Previous, PlaybackCommand::Previous),
-            (PlayerBarAction::Pause, PlaybackCommand::Pause),
-            (PlayerBarAction::Resume, PlaybackCommand::Resume),
-            (PlayerBarAction::Next, PlaybackCommand::Next),
-            (PlayerBarAction::Stop, PlaybackCommand::Stop),
+            (PlayerBarAction::Previous, TransportIntent::Previous),
+            (PlayerBarAction::Pause, TransportIntent::Pause),
+            (PlayerBarAction::Resume, TransportIntent::Resume),
+            (PlayerBarAction::Next, TransportIntent::Next),
+            (PlayerBarAction::Stop, TransportIntent::Stop),
         ] {
-            let (_, rx, _) = applied(action);
+            let (_, transport, _) = applied(action);
             assert_eq!(
-                rx.try_recv().ok(),
-                Some(expected.clone()),
-                "{expected:?} must still reach the engine"
+                transport.recorded(),
+                vec![expected.clone()],
+                "{expected:?} must still be issued to the engine"
             );
         }
     }
 
     #[test]
     fn test_play_selected_plays_the_selected_track() {
-        let (mut state, rx, mut store) = applied(PlayerBarAction::PlaySelected); // no selection yet
-        assert!(rx.try_recv().is_err(), "no selection means no play command");
+        let (mut state, transport, mut store) = applied(PlayerBarAction::PlaySelected); // no selection yet
+        assert!(
+            transport.recorded().is_empty(),
+            "no selection means no play intent"
+        );
 
         state.selected_track = Some(TrackId("song.flac".to_string()));
-        let (tx, rx) = crossbeam_channel::unbounded();
         apply_player_bar_action(
             PlayerBarAction::PlaySelected,
             &mut state,
-            Some(&tx),
+            &transport,
             &mut store,
         );
         assert_eq!(
-            rx.try_recv().ok(),
-            Some(PlaybackCommand::Play(TrackId("song.flac".to_string())))
+            transport.recorded(),
+            vec![TransportIntent::Play(TrackId("song.flac".to_string()))]
         );
     }
 
@@ -2368,31 +2380,31 @@ mod tests {
         let (mut state, _, mut store) = applied(PlayerBarAction::Pause);
         state.current_position.total = Some(std::time::Duration::from_secs(245));
 
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let transport = crate::mocks::MockTransport::new();
         apply_player_bar_action(
             PlayerBarAction::Seek(std::time::Duration::from_secs_f32(999.0)),
             &mut state,
-            Some(&tx),
+            &transport,
             &mut store,
         );
         assert_eq!(
-            rx.try_recv().ok(),
-            Some(PlaybackCommand::Seek(std::time::Duration::from_secs(245))),
+            transport.recorded(),
+            vec![TransportIntent::Seek(std::time::Duration::from_secs(245))],
             "an out-of-range seek target clamps to the track duration"
         );
     }
 
     #[test]
     fn test_volume_action_updates_state_persists_and_sends_effective_volume() {
-        let (state, rx, store) = applied(PlayerBarAction::SetVolume(0.7));
+        let (state, transport, store) = applied(PlayerBarAction::SetVolume(0.7));
 
         assert!(
             (state.current_volume - 0.7).abs() < 1e-6,
             "slider value lands"
         );
         assert_eq!(
-            rx.try_recv().ok(),
-            Some(PlaybackCommand::SetVolume(0.7)),
+            transport.recorded(),
+            vec![TransportIntent::ApplyVolume(0.7)],
             "the engine hears the new volume"
         );
         assert!(
@@ -2404,20 +2416,22 @@ mod tests {
     #[test]
     fn test_mute_toggle_sends_zero_and_keeps_slider_value() {
         let (mut state, _, mut store) = applied(PlayerBarAction::SetVolume(0.7));
-        let (_, _rx) = crossbeam_channel::unbounded::<PlaybackCommand>(); // drain noise
+        let transport = crate::mocks::MockTransport::new();
 
         // Muting sends the muted (zero) volume to the engine...
-        let (tx, rx) = crossbeam_channel::unbounded();
         apply_player_bar_action(
             PlayerBarAction::ToggleMute,
             &mut state,
-            Some(&tx),
+            &transport,
             &mut store,
         );
         assert!(state.muted);
         assert_eq!(
-            rx.try_recv().ok(),
-            Some(PlaybackCommand::SetVolume(0.0)),
+            transport.recorded(),
+            vec![
+                TransportIntent::ToggleMute(true),
+                TransportIntent::ApplyVolumeAfterMute(0.0)
+            ],
             "muting zeroes what the engine hears"
         );
         assert!(
@@ -2427,28 +2441,29 @@ mod tests {
 
         // ...and a slider change while muted still edits current_volume
         // while the engine keeps receiving zero until unmuted.
-        let (tx, rx) = crossbeam_channel::unbounded();
         apply_player_bar_action(
             PlayerBarAction::SetVolume(0.9),
             &mut state,
-            Some(&tx),
+            &transport,
             &mut store,
         );
         assert!((state.current_volume - 0.9).abs() < 1e-6);
-        assert_eq!(rx.try_recv().ok(), Some(PlaybackCommand::SetVolume(0.0)));
+        assert_eq!(
+            transport.recorded().last(),
+            Some(&TransportIntent::ApplyVolume(0.0))
+        );
 
         // Unmuting restores the slider's value to the engine.
-        let (tx, rx) = crossbeam_channel::unbounded();
         apply_player_bar_action(
             PlayerBarAction::ToggleMute,
             &mut state,
-            Some(&tx),
+            &transport,
             &mut store,
         );
         assert!(!state.muted);
         assert_eq!(
-            rx.try_recv().ok(),
-            Some(PlaybackCommand::SetVolume(0.9)),
+            transport.recorded().last(),
+            Some(&TransportIntent::ApplyVolumeAfterMute(0.9)),
             "unmuting restores the slider's volume"
         );
     }
@@ -2456,13 +2471,13 @@ mod tests {
     #[test]
     fn test_shuffle_and_repeat_toggles_flip_queue_state() {
         let (mut state, _, mut store) = applied(PlayerBarAction::Pause);
+        let transport = crate::mocks::MockTransport::new();
 
         let was = state.queue.shuffle;
-        let (tx, _rx) = crossbeam_channel::unbounded();
         apply_player_bar_action(
             PlayerBarAction::ToggleShuffle,
             &mut state,
-            Some(&tx),
+            &transport,
             &mut store,
         );
         assert_ne!(state.queue.shuffle, was, "shuffle flips");
@@ -2471,7 +2486,7 @@ mod tests {
         apply_player_bar_action(
             PlayerBarAction::ToggleRepeat,
             &mut state,
-            Some(&tx),
+            &transport,
             &mut store,
         );
         assert_eq!(
@@ -2585,8 +2600,8 @@ mod tests {
             state.view_mode = start;
             state.browse_mode = BrowseMode::Folders;
 
-            let (tx, rx) = crossbeam_channel::unbounded();
-            apply_now_playing_action(NowPlayingAction::Close, &mut state, Some(&tx));
+            let transport = crate::mocks::MockTransport::new();
+            apply_now_playing_action(NowPlayingAction::Close, &mut state, &transport);
 
             assert_eq!(
                 state.view_mode,
@@ -2594,7 +2609,7 @@ mod tests {
                 "closing Now Playing from {start:?} must land on the Library View"
             );
             assert!(
-                rx.try_recv().is_err(),
+                transport.recorded().is_empty(),
                 "closing is pure navigation; it never touches the engine"
             );
         }
@@ -2603,16 +2618,16 @@ mod tests {
     #[test]
     fn test_now_playing_play_next_queues_the_clicked_track() {
         let mut state = AppState::new();
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let transport = crate::mocks::MockTransport::new();
         apply_now_playing_action(
             NowPlayingAction::PlayNext(TrackId("t9.mp3".to_string())),
             &mut state,
-            Some(&tx),
+            &transport,
         );
         assert_eq!(
-            rx.try_recv().ok(),
-            Some(PlaybackCommand::PlayNext(TrackId("t9.mp3".to_string()))),
-            "clicking an Up Next row queues it via the SAME PlayNext command as before"
+            transport.recorded(),
+            vec![TransportIntent::PlayNext(TrackId("t9.mp3".to_string()))],
+            "clicking an Up Next row queues it via the SAME PlayNext intent as before"
         );
     }
 
@@ -2620,15 +2635,15 @@ mod tests {
     fn test_now_playing_seek_action_clamps_against_the_live_total() {
         let mut state = AppState::new();
         state.current_position.total = Some(std::time::Duration::from_secs(100));
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let transport = crate::mocks::MockTransport::new();
         apply_now_playing_action(
             NowPlayingAction::Seek(std::time::Duration::from_secs_f32(999.0)),
             &mut state,
-            Some(&tx),
+            &transport,
         );
         assert_eq!(
-            rx.try_recv().ok(),
-            Some(PlaybackCommand::Seek(std::time::Duration::from_secs(100))),
+            transport.recorded(),
+            vec![TransportIntent::Seek(std::time::Duration::from_secs(100))],
             "the in-view seek clamps exactly like the playerbar's"
         );
     }

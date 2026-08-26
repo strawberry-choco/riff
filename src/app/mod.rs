@@ -12,6 +12,7 @@ pub mod state;
 pub mod store;
 pub mod tag_edit_service;
 pub mod traits;
+pub mod transport;
 pub mod views;
 pub mod watcher_manager;
 

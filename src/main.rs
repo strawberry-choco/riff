@@ -120,7 +120,7 @@ fn main() {
     #[cfg(not(target_os = "linux"))]
     let app = RiffApp::new(
         state.clone(),
-        ui_cmd_tx,
+        Box::new(app::transport::ChannelTransport::new(ui_cmd_tx)),
         Box::new(scans.clone()),
         watcher_manager,
         tray_icon,
@@ -136,7 +136,7 @@ fn main() {
     #[cfg(target_os = "linux")]
     let app = RiffApp::new(
         state.clone(),
-        ui_cmd_tx,
+        Box::new(app::transport::ChannelTransport::new(ui_cmd_tx)),
         Box::new(scans),
         watcher_manager,
         quit_flag.clone(),

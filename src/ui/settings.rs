@@ -1,10 +1,8 @@
 use crate::app::MutexExt;
-use crate::app::commands::LibraryCommand;
 use crate::app::state::{AppState, LibraryStatus, ViewMode, WatchState};
 use crate::app::store::SettingsStore;
 use crate::ui::icons::{Icon, IconCache};
 use crate::ui::theme::{self, Palette};
-use crossbeam_channel::Sender;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 
@@ -1235,14 +1233,9 @@ impl super::app::RiffApp {
     /// Render the Settings stage inside the shell's central panel and apply
     /// everything the user did this frame. The stage itself is a pure
     /// renderer ([`show_settings_stage`]); this adapter owns the effects:
-    /// watcher start/stop, store mutations, scan commands, and the platform
-    /// folder-picker split.
-    pub fn show_settings_view(
-        &mut self,
-        ui: &mut egui::Ui,
-        state: &mut AppState,
-        lib_cmd: Option<&Sender<LibraryCommand>>,
-    ) {
+    /// watcher start/stop, store mutations, scan requests through the
+    /// Library Scan Service, and the platform folder-picker split.
+    pub fn show_settings_view(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         // Per-root indexed-track counts come from the store through the
         // Session Views facade (component-wise subtree ids, invalidated by
         // generation bumps) — never the former in-memory mirror.
@@ -1271,7 +1264,7 @@ impl super::app::RiffApp {
 
         let palette = self.theme.active;
         for action in show_settings_stage(ui, &mut self.icons, &palette, &content) {
-            self.apply_settings_action(action, state, lib_cmd);
+            self.apply_settings_action(action, state);
         }
 
         // Transient rows beneath the stage column.
@@ -1291,27 +1284,19 @@ impl super::app::RiffApp {
         }
     }
 
-    /// Apply one [`SettingsAction`] through the app's state/command/store
+    /// Apply one [`SettingsAction`] through the app's state/service/store
     /// paths.
-    fn apply_settings_action(
-        &mut self,
-        action: SettingsAction,
-        state: &mut AppState,
-        lib_cmd: Option<&Sender<LibraryCommand>>,
-    ) {
+    fn apply_settings_action(&mut self, action: SettingsAction, state: &mut AppState) {
         match action {
             SettingsAction::Back => state.view_mode = ViewMode::Library,
             SettingsAction::AddLibrary => self.add_library_via_platform_picker(state),
-            SettingsAction::Scan(path) => {
-                if let Some(s) = lib_cmd {
-                    let _ = s.send(LibraryCommand::ScanDirectory(path));
-                }
-            }
+            // Scan intent goes through the Library Scan Service seam (ADR
+            // 0006): dedup against in-flight scans and the whole walk/commit
+            // flow live behind it.
+            SettingsAction::Scan(path) => self.scans.request(path),
             SettingsAction::ScanAll => {
-                if let Some(s) = lib_cmd {
-                    for path in &state.library_paths {
-                        let _ = s.send(LibraryCommand::ScanDirectory(path.clone()));
-                    }
+                for path in &state.library_paths {
+                    self.scans.request(path.clone());
                 }
             }
             SettingsAction::Remove(path) => self.remove_library_path(&path, state),

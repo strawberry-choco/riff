@@ -59,37 +59,86 @@ mod tests {
     }
 
     #[test]
-    fn test_library_scan_simulation() {
-        let state = Arc::new(Mutex::new(AppState::new()));
-        let (cmd_tx, cmd_rx) = unbounded::<crate::app::commands::LibraryCommand>();
+    fn test_library_scan_service_drives_a_real_scan_end_to_end() {
+        // The former channel-simulation is gone: the Library Scan lives
+        // behind the Scan Service seam (ADR 0006), so this drives the real
+        // service pair end to end — real walker over dummy files, real
+        // SQLite Application Store in a scratch dir, worker on its own
+        // thread, exactly like the composition root wires it.
+        use crate::mocks::MockMetadataReader;
+        use riff::app::scan_service::{ScanOutcome, ScanService, Scans};
+        use riff::app::store::{LibraryQueryStore, StoreGeneration};
+        use riff::infra::AudioFileScanner;
+        use riff::infra::store::{MutexLibraryMutationStore, MutexLibraryQueryStore, SqliteStore};
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
 
-        // Simulate a library scan
-        let scan_path = std::path::PathBuf::from("test_directory");
-        cmd_tx
-            .send(crate::app::commands::LibraryCommand::ScanDirectory(
-                scan_path.clone(),
-            ))
-            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let shared = Arc::new(Mutex::new(
+            SqliteStore::open_and_migrate(&db_path).expect("fresh store must open and migrate"),
+        ));
+        let mutations = MutexLibraryMutationStore::new(shared.clone(), StoreGeneration::new());
+        let queries = MutexLibraryQueryStore::new(shared.clone());
 
-        // Process the scan command (this would normally be done in a separate
-        // thread). Use `try_recv` to drain the pending commands without blocking
-        // once the channel is empty.
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            if let crate::app::commands::LibraryCommand::ScanDirectory(path) = cmd {
-                let mut state = state.lock_or_recover();
-                state
-                    .library_statuses
-                    .insert(path, crate::app::state::LibraryStatus::Scanned(10));
-            }
+        let root = dir.path().join("music");
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..3 {
+            std::fs::write(root.join(format!("song_{i}.mp3")), b"dummy audio").unwrap();
         }
 
-        // Verify the scan status was updated
-        let state = state.lock_or_recover();
-        assert!(state.library_statuses.contains_key(&scan_path));
-        assert!(matches!(
-            state.library_statuses[&scan_path],
-            crate::app::state::LibraryStatus::Scanned(_)
-        ));
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let scanner = AudioFileScanner::new(cancel_flag.clone());
+        let (scans, worker) = ScanService::new(
+            Box::new(MockMetadataReader::default()),
+            Box::new(queries.clone()),
+            Box::new(mutations),
+            cancel_flag,
+            move |path| scanner.scan(path),
+        );
+        std::thread::spawn(move || worker.run());
+
+        assert!(!scans.is_scanning(&root), "nothing requested yet");
+        scans.request(root.clone());
+
+        // Drain outcomes until the Complete for this root lands (bounded so
+        // a wedged worker fails the test instead of hanging it).
+        let start = Instant::now();
+        let mut outcomes: Vec<ScanOutcome> = Vec::new();
+        let complete = loop {
+            outcomes.extend(scans.poll());
+            if let Some(pos) = outcomes.iter().position(
+                |o| matches!(o, ScanOutcome::Complete { path, .. } if path.as_path() == root),
+            ) {
+                break outcomes.remove(pos);
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "worker never completed the scan; got {outcomes:?}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        };
+
+        // The walk, the durable commits, and the outcome stream all line up.
+        assert_eq!(
+            complete,
+            ScanOutcome::Complete {
+                path: root.clone(),
+                total_files: 3
+            }
+        );
+        assert!(!scans.is_scanning(&root), "the scan ended");
+        assert_eq!(
+            queries.track_count().unwrap(),
+            3,
+            "every discovered file committed durably"
+        );
+        assert!(
+            outcomes
+                .iter()
+                .any(|o| matches!(o, ScanOutcome::Progress { files_found: 3, .. })),
+            "progress was reported before completion: {outcomes:?}"
+        );
     }
 
     #[test]

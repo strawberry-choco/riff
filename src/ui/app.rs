@@ -136,7 +136,7 @@ pub struct RiffApp {
     /// The current `TrackId` the window title and tray tooltip were last
     /// pushed for (REQ-SI-001): both OS side effects only fire when this
     /// identity moves — pure command suppression, never staleness.
-    last_title_key: Option<Option<TrackId>>,
+    last_title_key: TitleKey,
     /// Retained seek-row readout buffers for the playerbar and the
     /// Now Playing stage (allocation plan 2.4).
     playerbar_readouts: crate::ui::playerbar::SeekReadouts,
@@ -229,7 +229,7 @@ impl RiffApp {
             smart_playlist_view: None,
             playlist_view: None,
             now_playing_cover_key: None,
-            last_title_key: None,
+            last_title_key: TitleKey::Unset,
             playerbar_readouts: crate::ui::playerbar::SeekReadouts::new(),
             stage_readouts: crate::ui::playerbar::SeekReadouts::new(),
             titlebar_actions: Vec::new(),
@@ -1071,15 +1071,25 @@ fn handle_keyboard_shortcuts(
 /// commands, not for staleness; the current Track resolves through the
 /// Session Views facade over the store's `get_track` query — never the
 /// in-memory mirror.
+/// Last identity pushed to the window title / tray tooltip. `Unset`
+/// distinguishes "nothing pushed yet" from "pushed while nothing plays" so
+/// the very first frame always pushes once.
+#[derive(Default)]
+enum TitleKey {
+    #[default]
+    Unset,
+    Set(Option<TrackId>),
+}
+
 impl RiffApp {
     fn update_window_title(&mut self, ctx: &egui::Context, state: &AppState) {
         self.views
             .sync_playback(&state.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
         let current_id = self.views.playback_current().map(|t| &t.id);
-        let unchanged = self
-            .last_title_key
-            .as_ref()
-            .is_some_and(|id| id.as_ref() == current_id);
+        let unchanged = match &self.last_title_key {
+            TitleKey::Set(id) => id.as_ref() == current_id,
+            TitleKey::Unset => false,
+        };
         if unchanged {
             return;
         }
@@ -1099,7 +1109,7 @@ impl RiffApp {
             None => ("riff".to_owned(), "riff".to_owned()),
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
-        self.last_title_key = Some(current_id.cloned());
+        self.last_title_key = TitleKey::Set(current_id.cloned());
 
         #[cfg(not(target_os = "linux"))]
         {

@@ -512,9 +512,12 @@ impl FolderProjection {
 /// cache serves repeat frames without touching the store. A request whose
 /// limit exceeds what the cache holds also refetches, so callers can never
 /// see a truncated-as-cached list where they asked for more.
+/// Per-kind computed lists stamped with the limit they were loaded at.
+type SmartPlaylistLists = HashMap<SmartPlaylistKind, (usize, Arc<[Track]>)>;
+
 pub struct SmartPlaylistsProjection {
     /// Generation-keyed slot over the per-kind computed lists.
-    cache: GenerationCache<(), HashMap<SmartPlaylistKind, (usize, Arc<[Track]>)>>,
+    cache: GenerationCache<(), SmartPlaylistLists>,
 }
 
 impl Default for SmartPlaylistsProjection {

@@ -92,6 +92,10 @@ _Avoid_: projection manager, view cache
 The module that turns Playback Commands into decoded audio and Playback Updates, owning decode scheduling, output startup, and gapless handoff; it decides nothing about queue order beyond filling an empty Playback Queue.
 _Avoid_: playback thread, sound server
 
+**PlaybackCoordinator**:
+The module that applies Playback Updates to session state and owns playback continuation: committing play history before advancing, repeat-one re-play, auto-advance, and stopping when nothing follows. It is the decider of queue continuation; the Audio Engine only reports what happened.
+_Avoid_: update processor, track-end handler
+
 **Tag Edit**:
 The user action of editing a Track's Metadata through the edit dialog; saving commits the file tags and the Store facts as one durable change, and a failure leaves the dialog open with the reason.
 _Avoid_: metadata editor, tag writer

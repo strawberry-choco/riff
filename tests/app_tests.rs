@@ -3495,3 +3495,195 @@ mod playlist_projection_tests {
         );
     }
 }
+
+// Playback Coordinator (CONTEXT.md): applies Playback Updates to session
+// state and owns playback continuation. These tests drive the synchronous
+// core (`PlaybackCoordinator::apply_update`) directly — no threads, no real
+// store — over the shared recording mocks.
+//
+// The shared-handle adapter below exists because the coordinator takes
+// ownership of its mutation port: it delegates every call to the real mock
+// behind a mutex so the mock's recordings remain inspectable after wiring.
+mod playback_coordinator_tests {
+    use super::*;
+    use crate::mocks::MockLibraryMutationStore;
+    use crossbeam_channel::{Receiver, unbounded};
+    use riff::app::errors::AppError;
+    use riff::app::playback_coordinator::PlaybackCoordinator;
+    use riff::app::store::LibraryMutationStore;
+    use std::path::Path;
+
+    /// [`LibraryMutationStore`] view over one recording
+    /// [`MockLibraryMutationStore`] owned by the coordinator; the test keeps
+    /// the other handle and inspects the recordings afterwards.
+    struct SharedMutations(Arc<Mutex<MockLibraryMutationStore>>);
+
+    impl LibraryMutationStore for SharedMutations {
+        fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, AppError> {
+            self.0.lock().unwrap().apply_scan_batch(tracks)
+        }
+
+        fn record_track_played(
+            &mut self,
+            id: &TrackId,
+            played_at: std::time::SystemTime,
+        ) -> Result<bool, AppError> {
+            self.0.lock().unwrap().record_track_played(id, played_at)
+        }
+
+        fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), AppError> {
+            self.0.lock().unwrap().apply_tag_refresh(track)
+        }
+
+        fn remove_library_path(&mut self, root: &Path) -> Result<usize, AppError> {
+            self.0.lock().unwrap().remove_library_path(root)
+        }
+
+        fn clear_library(&mut self) -> Result<usize, AppError> {
+            self.0.lock().unwrap().clear_library()
+        }
+    }
+
+    /// One wired coordinator plus every handle a test inspects: the shared
+    /// state, the command receiver (what the engine would receive), and the
+    /// mutation recordings.
+    struct Harness {
+        state: Arc<Mutex<AppState>>,
+        cmd_rx: Receiver<PlaybackCommand>,
+        mutations: Arc<Mutex<MockLibraryMutationStore>>,
+        coordinator: PlaybackCoordinator,
+    }
+
+    /// Wire a harness whose queue holds `ids` with `current_index` and
+    /// `repeat` preset. No threads: tests call `apply_update` directly. The
+    /// update channel stays empty (its sender drops immediately) because the
+    /// core is driven by hand.
+    fn harness(ids: &[&str], current_index: Option<usize>, repeat: RepeatMode) -> Harness {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        {
+            let mut locked = state.lock_or_recover();
+            locked.queue =
+                PlaybackQueue::new(ids.iter().map(|id| TrackId((*id).to_string())).collect());
+            locked.queue.current_index = current_index;
+            locked.queue.repeat = repeat;
+        }
+        let (cmd_tx, cmd_rx) = unbounded();
+        let mutations = Arc::new(Mutex::new(MockLibraryMutationStore::new()));
+        let coordinator = PlaybackCoordinator::new(
+            state.clone(),
+            unbounded().1,
+            cmd_tx,
+            Box::new(SharedMutations(mutations.clone())),
+        );
+        Harness {
+            state,
+            cmd_rx,
+            mutations,
+            coordinator,
+        }
+    }
+
+    #[test]
+    fn test_playback_coordinator_commits_history_before_advancing() {
+        let mut h = harness(&["a.mp3", "b.mp3"], Some(0), RepeatMode::None);
+
+        h.coordinator.apply_update(PlaybackUpdate::TrackEnded);
+
+        // The recorded play is the track that WAS current at commit time —
+        // proof the store commit happened BEFORE the advance moved the index.
+        let played = h.mutations.lock().unwrap().played();
+        assert_eq!(played.len(), 1, "exactly one play commits");
+        assert_eq!(
+            played[0].0,
+            TrackId("a.mp3".to_string()),
+            "the finished track is committed, not the advanced-to one"
+        );
+
+        // ...and only then did the queue advance onto the next track.
+        assert_eq!(
+            h.state.lock_or_recover().queue.current_index,
+            Some(1),
+            "the queue advances after the commit"
+        );
+
+        // The engine was told to play the advanced-to track.
+        assert_eq!(
+            h.cmd_rx.recv().expect("a Play command follows"),
+            PlaybackCommand::Play(TrackId("b.mp3".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_playback_coordinator_repeat_one_replays_current_without_advancing() {
+        let mut h = harness(&["a.mp3", "b.mp3"], Some(0), RepeatMode::One);
+
+        h.coordinator.apply_update(PlaybackUpdate::TrackEnded);
+
+        // History still commits for the finished track...
+        let played = h.mutations.lock().unwrap().played();
+        assert_eq!(played.len(), 1, "repeat-one still records the play");
+        assert_eq!(played[0].0, TrackId("a.mp3".to_string()));
+
+        // ...the queue index deliberately does NOT move...
+        assert_eq!(
+            h.state.lock_or_recover().queue.current_index,
+            Some(0),
+            "repeat-one never advances the queue index"
+        );
+
+        // ...and the SAME track is re-sent for playback; the engine's dedup
+        // guard swallows this no-op if gapless handoff already happened.
+        assert_eq!(
+            h.cmd_rx
+                .recv()
+                .expect("repeat-one re-plays the current track"),
+            PlaybackCommand::Play(TrackId("a.mp3".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_playback_coordinator_advance_past_last_stops_without_play() {
+        let mut h = harness(&["a.mp3"], Some(0), RepeatMode::None);
+
+        h.coordinator.apply_update(PlaybackUpdate::TrackEnded);
+
+        // Nothing follows the last track: no Play command reaches the engine...
+        assert!(
+            h.cmd_rx.try_recv().is_err(),
+            "no Play command when nothing follows"
+        );
+
+        // ...and playback stops.
+        assert_eq!(
+            h.state.lock_or_recover().playback_state,
+            PlaybackState::Stopped
+        );
+    }
+
+    #[test]
+    fn test_playback_coordinator_error_sets_stopped_and_scan_status() {
+        let mut h = harness(&["a.mp3"], Some(0), RepeatMode::None);
+
+        h.coordinator
+            .apply_update(PlaybackUpdate::Error("boom".to_string()));
+
+        let locked = h.state.lock_or_recover();
+        assert_eq!(locked.playback_state, PlaybackState::Stopped);
+        assert_eq!(
+            locked.scan_status.as_deref(),
+            Some("Playback error: boom"),
+            "the exact user-facing string format is preserved"
+        );
+    }
+
+    #[test]
+    fn test_playback_coordinator_track_changed_updates_current_index_by_id() {
+        let mut h = harness(&["a.mp3", "b.mp3", "c.mp3"], Some(0), RepeatMode::None);
+
+        h.coordinator
+            .apply_update(PlaybackUpdate::TrackChanged(TrackId("c.mp3".to_string())));
+
+        // The index relocates by identity lookup, not by stepping.
+        assert_eq!(h.state.lock_or_recover().queue.current_index, Some(2));
+    }
+}

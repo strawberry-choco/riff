@@ -4,6 +4,7 @@ pub mod cover_resolver;
 pub mod cover_service;
 pub mod errors;
 pub mod gapless;
+pub mod playback_coordinator;
 pub mod playlist_manager;
 mod projection;
 pub mod scan;

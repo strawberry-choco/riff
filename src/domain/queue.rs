@@ -1,5 +1,5 @@
 use crate::domain::{RepeatMode, TrackId};
-use rand::seq::SliceRandom;
+use fastrand::Rng;
 use std::collections::VecDeque;
 
 /// Manages the playback queue and shuffle/repeat state.
@@ -233,8 +233,8 @@ impl PlaybackQueue {
         if let Some(current) = self.current_index {
             indices.retain(|&i| i != current);
         }
-        let mut rng = rand::rng();
-        indices.shuffle(&mut rng);
+        let mut rng = Rng::new();
+        rng.shuffle(&mut indices);
         self.shuffled_indices = VecDeque::from(indices);
         self.shuffle_dirty = false;
     }

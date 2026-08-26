@@ -96,6 +96,10 @@ _Avoid_: playback thread, sound server
 The module that applies Playback Updates to session state and owns playback continuation: committing play history before advancing, repeat-one re-play, auto-advance, and stopping when nothing follows. It is the decider of queue continuation; the Audio Engine only reports what happened.
 _Avoid_: update processor, track-end handler
 
+**Library Scan**:
+The operation that discovers audio files under a Library Path and commits them into the Library in durable batches; progress and completion are reported to the session, and an interrupted scan keeps committed batches.
+_Avoid_: scanner thread, directory walker
+
 **Tag Edit**:
 The user action of editing a Track's Metadata through the edit dialog; saving commits the file tags and the Store facts as one durable change, and a failure leaves the dialog open with the reason.
 _Avoid_: metadata editor, tag writer

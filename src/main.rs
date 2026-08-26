@@ -8,20 +8,17 @@ use riff::infra;
 use riff::ui;
 
 use crossbeam_channel::unbounded;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::app::MutexExt;
 use crate::app::audio_engine::AudioEngine;
-use crate::app::commands::{LibraryCommand, LibraryUpdate};
 use crate::app::playback_coordinator::PlaybackCoordinator;
-use crate::app::scan::build_tracks;
 use crate::app::state::AppState;
-use crate::app::store::{LibraryMutationStore, LibraryQueryStore};
 use crate::app::traits::DecoderFactory;
 use crate::app::watcher_manager::WatcherManager;
-use crate::domain::{PlaybackCommand, PlaybackUpdate, TrackId};
+use crate::domain::{PlaybackCommand, PlaybackUpdate};
 use crate::infra::{
     AudioFileScanner, CpalAudioOutput, FilesystemWatcher, ImageCoverLoader, LoftyMetadataReader,
     LoftyMetadataWriter, SymphoniaDecoder,
@@ -53,13 +50,10 @@ fn main() {
     let state = Arc::new(Mutex::new(AppState::new()));
     let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
     let (update_tx, update_rx) = unbounded::<PlaybackUpdate>();
-    let (library_cmd_tx, library_cmd_rx) = unbounded::<LibraryCommand>();
-    let (library_update_tx, library_update_rx) = unbounded::<LibraryUpdate>();
 
     // Clone senders for different consumers before cmd_tx is moved
     let ui_cmd_tx = cmd_tx.clone();
     let engine_cmd_tx = cmd_tx.clone();
-    let ui_library_cmd_tx = library_cmd_tx.clone();
 
     let app_state = state.clone();
     let engine_queries = library_query_store.clone();
@@ -76,17 +70,24 @@ fn main() {
         Box::new(library_mutation_store.clone()),
     );
 
-    // Library scan thread
+    // Library Scan Service (ADR 0006 pattern): the whole Library Scan flow —
+    // walk, freshness filter, durable ~10-track batch commits, cancellation,
+    // and per-path scan state — lives behind the `Scans` seam on one serial
+    // worker thread, spawned here exactly like the Audio Engine. The walk
+    // closure binds the real infra scanner to the SAME cancel flag the
+    // service cancels through, so the app layer never names infra types.
     let cancel_flag = Arc::new(AtomicBool::new(false));
-    spawn_library_scanner(
-        library_cmd_rx,
-        library_update_tx,
-        cancel_flag.clone(),
-        library_mutation_store.clone(),
-        library_query_store.clone(),
+    let scanner = AudioFileScanner::new(cancel_flag.clone());
+    let (scans, scan_worker) = riff::app::scan_service::ScanService::new(
+        Box::new(LoftyMetadataReader::new()),
+        Box::new(library_query_store.clone()),
+        Box::new(library_mutation_store.clone()),
+        cancel_flag,
+        move |path| scanner.scan(path),
     );
+    let _scan_thread = thread::spawn(move || scan_worker.run());
 
-    let watcher_manager = spawn_fs_watcher(library_cmd_tx);
+    let watcher_manager = spawn_fs_watcher(scans.clone());
 
     // Background services (ADR 0006): real adapters, dedicated worker
     // threads — spawned here exactly like the Audio Engine, nowhere else.
@@ -120,8 +121,7 @@ fn main() {
     let app = RiffApp::new(
         state.clone(),
         ui_cmd_tx,
-        ui_library_cmd_tx,
-        library_update_rx,
+        Box::new(scans.clone()),
         watcher_manager,
         tray_icon,
         quit_flag.clone(),
@@ -137,8 +137,7 @@ fn main() {
     let app = RiffApp::new(
         state.clone(),
         ui_cmd_tx,
-        ui_library_cmd_tx,
-        library_update_rx,
+        Box::new(scans),
         watcher_manager,
         quit_flag.clone(),
         Box::new(settings_store),
@@ -166,114 +165,10 @@ fn run_native_app(app: RiffApp, options: eframe::NativeOptions) {
     .expect("Failed to run eframe");
 }
 
-/// Thread that receives [`LibraryCommand`]s and runs directory scans. The
-/// scan thread never touches `AppState`: it reads the store through the
-/// query port and commits through the mutation port.
-fn spawn_library_scanner(
-    library_cmd_rx: crossbeam_channel::Receiver<LibraryCommand>,
-    library_update_tx: crossbeam_channel::Sender<LibraryUpdate>,
-    cancel_flag: Arc<AtomicBool>,
-    mut mutation_store: riff::infra::store::MutexLibraryMutationStore,
-    query_store: riff::infra::store::MutexLibraryQueryStore,
-) {
-    let _handle = thread::spawn(move || {
-        let reader = LoftyMetadataReader::new();
-        while let Ok(cmd) = library_cmd_rx.recv() {
-            match cmd {
-                LibraryCommand::ScanDirectory(path) => {
-                    cancel_flag.store(false, Ordering::Relaxed);
-                    let scanner = AudioFileScanner::new(cancel_flag.clone());
-                    scan_directory(
-                        &reader,
-                        &scanner,
-                        &path,
-                        &library_update_tx,
-                        &cancel_flag,
-                        &mut mutation_store,
-                        &query_store,
-                    );
-                }
-                LibraryCommand::CancelScan => {
-                    cancel_flag.store(true, Ordering::Relaxed);
-                }
-            }
-        }
-    });
-}
-
-/// Scan one directory in ~10-track batches. Every batch commits to the
-/// Application Store as ONE durable transaction first — an interrupted scan
-/// keeps all committed batches — and the mutation adapter bumps the session
-/// generation so Session Projections refetch.
-#[allow(clippy::too_many_arguments)]
-fn scan_directory(
-    reader: &LoftyMetadataReader,
-    scanner: &AudioFileScanner,
-    path: &std::path::Path,
-    library_update_tx: &crossbeam_channel::Sender<LibraryUpdate>,
-    cancel_flag: &Arc<AtomicBool>,
-    mutation_store: &mut riff::infra::store::MutexLibraryMutationStore,
-    query_store: &riff::infra::store::MutexLibraryQueryStore,
-) {
-    let files = scanner.scan(path);
-    let total = files.len();
-    let chunk_size = 10;
-
-    for (i, chunk) in files.chunks(chunk_size).enumerate() {
-        if cancel_flag.load(Ordering::Relaxed) {
-            break;
-        }
-
-        let processed = i * chunk_size + chunk.len();
-
-        // Skip paths the store already knows so rescans don't re-read
-        // unchanged metadata. One indexed primary-key lookup per path —
-        // cheap next to the tag I/O it saves, and the scan thread stays
-        // off `AppState` entirely.
-        let mut fresh_paths: Vec<PathBuf> = Vec::with_capacity(chunk.len());
-        for p in chunk {
-            match query_store.get_track(&TrackId::from_path(p)) {
-                Ok(None) => fresh_paths.push(p.clone()),
-                Ok(Some(_)) => {}
-                Err(e) => {
-                    // When the check fails, scan the path anyway: the store
-                    // upsert is idempotent and preserves play history.
-                    tracing::warn!("Freshness check failed for {p:?}: {e}");
-                    fresh_paths.push(p.clone());
-                }
-            }
-        }
-
-        if !fresh_paths.is_empty() {
-            // Per-file read failures are skipped inside `build_tracks`, so a
-            // scan never aborts on one bad file.
-            let tracks = build_tracks(fresh_paths, reader);
-            if !tracks.is_empty() {
-                // The mutation adapter bumps the session generation on each
-                // committed batch.
-                if let Err(e) = mutation_store.apply_scan_batch(&tracks) {
-                    tracing::error!("Scan batch failed to commit: {e}");
-                }
-            }
-        }
-
-        let _ = library_update_tx.send(LibraryUpdate::Progress {
-            path: path.to_path_buf(),
-            files_found: processed.min(total),
-            current_dir: path.to_string_lossy().to_string(),
-        });
-    }
-
-    let _ = library_update_tx.send(LibraryUpdate::Complete {
-        path: path.to_path_buf(),
-        total_files: total,
-    });
-}
-
 /// Create the filesystem watcher and its manager, and spawn the thread that
 /// forwards watch events. Returns the shared manager handle.
 fn spawn_fs_watcher(
-    library_cmd_tx: crossbeam_channel::Sender<LibraryCommand>,
+    scans: riff::app::scan_service::ScanService,
 ) -> Arc<Mutex<Option<WatcherManager>>> {
     let (fs_event_tx, fs_event_rx) = unbounded::<PathBuf>();
     let watcher = match FilesystemWatcher::new(fs_event_tx) {
@@ -284,10 +179,7 @@ fn spawn_fs_watcher(
         }
     };
 
-    let watcher_manager = Arc::new(Mutex::new(Some(WatcherManager::new(
-        watcher,
-        library_cmd_tx,
-    ))));
+    let watcher_manager = Arc::new(Mutex::new(Some(WatcherManager::new(watcher, scans))));
 
     let thread_manager = watcher_manager.clone();
     let _handle = thread::spawn(move || {

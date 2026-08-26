@@ -3457,25 +3457,23 @@ fn test_clear_library_is_atomic_on_failure() {
 
 use riff::app::store::StoreGeneration;
 
-/// Scratch store plus the playlist adapter wired to a fresh session
-/// generation handle; `_dir` keeps the database file alive for the test.
+/// Scratch store plus a clone wired to the session playlist generation
+/// handle; `_dir` keeps the database file alive for the test.
 struct PlaylistGenerationFixture {
     _dir: tempfile::TempDir,
-    shared: Arc<Mutex<riff::infra::store::SqliteStore>>,
+    shared: riff::infra::store::SqliteStore,
     generation: StoreGeneration,
-    store: riff::infra::store::MutexPlaylistStore,
+    store: riff::infra::store::SqliteStore,
 }
 
 impl PlaylistGenerationFixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("riff.sqlite3");
-        let shared = Arc::new(Mutex::new(
-            riff::infra::store::SqliteStore::open_and_migrate(&db_path)
-                .expect("fresh store must open and migrate"),
-        ));
-        let generation = StoreGeneration::new();
-        let store = riff::infra::store::MutexPlaylistStore::new(shared.clone(), generation.clone());
+        let shared = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+            .expect("fresh store must open and migrate");
+        let generation = shared.playlist_generation();
+        let store = shared.clone();
         Self {
             _dir: dir,
             shared,
@@ -3486,9 +3484,8 @@ impl PlaylistGenerationFixture {
 }
 
 /// Run one schema batch against the scratch connection (trigger plumbing).
-fn exec_batch(shared: &Arc<Mutex<riff::infra::store::SqliteStore>>, batch: &str) {
+fn exec_batch(shared: &riff::infra::store::SqliteStore, batch: &str) {
     shared
-        .lock_or_recover()
         .with_connection(|conn| conn.execute_batch(batch))
         .expect("schema batch works");
 }

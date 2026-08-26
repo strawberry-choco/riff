@@ -67,19 +67,18 @@ mod tests {
         // thread, exactly like the composition root wires it.
         use crate::mocks::MockMetadataReader;
         use riff::app::scan_service::{ScanOutcome, ScanService, Scans};
-        use riff::app::store::{LibraryQueryStore, StoreGeneration};
+        use riff::app::store::LibraryQueryStore;
         use riff::infra::AudioFileScanner;
-        use riff::infra::store::{MutexLibraryMutationStore, MutexLibraryQueryStore, SqliteStore};
+        use riff::infra::store::SqliteStore;
         use std::sync::atomic::AtomicBool;
         use std::time::{Duration, Instant};
 
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("riff.sqlite3");
-        let shared = Arc::new(Mutex::new(
-            SqliteStore::open_and_migrate(&db_path).expect("fresh store must open and migrate"),
-        ));
-        let mutations = MutexLibraryMutationStore::new(shared.clone(), StoreGeneration::new());
-        let queries = MutexLibraryQueryStore::new(shared.clone());
+        let store =
+            SqliteStore::open_and_migrate(&db_path).expect("fresh store must open and migrate");
+        let mutations = store.clone();
+        let queries = store;
 
         let root = dir.path().join("music");
         std::fs::create_dir_all(&root).unwrap();

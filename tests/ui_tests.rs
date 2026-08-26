@@ -45,20 +45,13 @@ mod tests {
         dir: &tempfile::TempDir,
     ) -> (Box<dyn PlaylistStore>, riff::app::views::SessionViews) {
         let db_path = dir.path().join("riff.sqlite3");
-        let shared = std::sync::Arc::new(std::sync::Mutex::new(
-            riff::infra::store::SqliteStore::open_and_migrate(&db_path)
-                .expect("opening a fresh store must work"),
-        ));
-        let playlist_generation = riff::app::store::StoreGeneration::new();
-        let store = riff::infra::store::MutexPlaylistStore::new(
-            shared.clone(),
-            playlist_generation.clone(),
-        );
+        let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+            .expect("opening a fresh store must work");
         let views = riff::app::views::SessionViews::new(
-            Box::new(riff::infra::store::MutexLibraryQueryStore::new(shared)),
             Box::new(store.clone()),
-            riff::app::store::StoreGeneration::new(),
-            playlist_generation,
+            Box::new(store.clone()),
+            store.library_generation(),
+            store.playlist_generation(),
         );
         (Box::new(store), views)
     }
@@ -67,20 +60,13 @@ mod tests {
     /// reading playlists the way the UI does.
     fn seam_views(dir: &tempfile::TempDir) -> riff::app::views::SessionViews {
         let db_path = dir.path().join("riff.sqlite3");
-        let shared = std::sync::Arc::new(std::sync::Mutex::new(
-            riff::infra::store::SqliteStore::open_and_migrate(&db_path)
-                .expect("opening a fresh store must work"),
-        ));
+        let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+            .expect("opening a fresh store must work");
         riff::app::views::SessionViews::new(
-            Box::new(riff::infra::store::MutexLibraryQueryStore::new(
-                shared.clone(),
-            )),
-            Box::new(riff::infra::store::MutexPlaylistStore::new(
-                shared,
-                riff::app::store::StoreGeneration::new(),
-            )),
-            riff::app::store::StoreGeneration::new(),
-            riff::app::store::StoreGeneration::new(),
+            Box::new(store.clone()),
+            Box::new(store.clone()),
+            store.library_generation(),
+            store.playlist_generation(),
         )
     }
 
@@ -3174,7 +3160,7 @@ mod tests {
     /// LAST frame rendered them.
     struct ReorderRenderState {
         views: riff::app::views::SessionViews,
-        store: riff::infra::store::MutexPlaylistStore,
+        store: riff::infra::store::SqliteStore,
         pid: PlaylistId,
         rendered: Vec<String>,
         cache: icons::IconCache,
@@ -3256,10 +3242,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("riff.sqlite3");
-        let shared = std::sync::Arc::new(std::sync::Mutex::new(
-            riff::infra::store::SqliteStore::open_and_migrate(&db_path)
-                .expect("opening a fresh store must work"),
-        ));
+        let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+            .expect("opening a fresh store must work");
 
         // Three real audio files indexed into the Library, so every entry
         // resolves valid and renders as a reorderable row.
@@ -3278,26 +3262,21 @@ mod tests {
                 title,
                 "Album",
             );
-            shared
-                .lock_or_recover()
+            store
                 .apply_scan_batch(std::slice::from_ref(&track))
                 .expect("seed scan commits");
             track_ids.push(track.id);
         }
 
-        let playlist_generation = riff::app::store::StoreGeneration::new();
-        let mut store = riff::infra::store::MutexPlaylistStore::new(
-            shared.clone(),
-            playlist_generation.clone(),
-        );
-        let pid = store
+        let mut store_for_views = store.clone();
+        let pid = store_for_views
             .create_playlist("Gym", &track_ids)
             .expect("create works");
         let mut views = riff::app::views::SessionViews::new(
-            Box::new(riff::infra::store::MutexLibraryQueryStore::new(shared)),
             Box::new(store.clone()),
-            riff::app::store::StoreGeneration::new(),
-            playlist_generation,
+            Box::new(store_for_views),
+            store.library_generation(),
+            store.playlist_generation(),
         );
 
         // Warm the projection the way an open playlist view would, then hand

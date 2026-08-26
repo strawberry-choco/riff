@@ -196,15 +196,16 @@ fn spawn_fs_watcher(
 /// Open the Application Store before anything else and wire every store port
 /// over its one shared connection. Open or migration failures are fatal
 /// startup errors with a clear message — never silent fallbacks to empty
-/// state. Returns the ports in their UI/thread wiring order plus both
-/// session generations the mutation adapters bump (ADR 0002): the Library
-/// generation and the dedicated playlist generation.
+/// state. Returns one clone of the shared store handle per port in their
+/// UI/thread wiring order plus both session generations the store bumps on
+/// committed mutations (ADR 0002): the Library generation and the dedicated
+/// playlist generation.
 #[allow(clippy::type_complexity)]
 fn open_application_store() -> (
-    riff::infra::store::MutexSettingsStore,
-    riff::infra::store::MutexPlaylistStore,
-    riff::infra::store::MutexLibraryMutationStore,
-    riff::infra::store::MutexLibraryQueryStore,
+    riff::infra::store::SqliteStore,
+    riff::infra::store::SqliteStore,
+    riff::infra::store::SqliteStore,
+    riff::infra::store::SqliteStore,
     riff::app::store::StoreGeneration,
     riff::app::store::StoreGeneration,
 ) {
@@ -212,45 +213,28 @@ fn open_application_store() -> (
         "fatal: could not resolve the Application Store location \
          (no data-local directory available)",
     );
-    // One shared connection behind a mutex serves every store port.
-    let store = std::sync::Arc::new(std::sync::Mutex::new(
-        riff::infra::store::SqliteStore::open_and_migrate(&store_path)
-            .unwrap_or_else(|e| panic!("fatal: {e}")),
-    ));
-    let settings_store = riff::infra::store::MutexSettingsStore::new(store.clone());
-    // Playlist curation ports over the same shared connection: every
-    // committed playlist mutation bumps this dedicated session-local
-    // generation, independent of the Library generation so entry edits never
-    // invalidate Library projections (ADR 0002). The adapter owns the bump —
-    // callers cannot forget it.
-    let playlist_generation = riff::app::store::StoreGeneration::new();
-    let playlist_store =
-        riff::infra::store::MutexPlaylistStore::new(store.clone(), playlist_generation.clone());
-    // Library collection ports over the same shared connection: scans write
-    // through the mutation port, playback resolves through the query port,
-    // and every committed mutation bumps this session-local generation so
-    // Session Projections know to refetch (ADR 0002). The mutation adapter
-    // owns the bump — callers cannot forget it.
-    let generation = riff::app::store::StoreGeneration::new();
-    let library_mutation_store =
-        riff::infra::store::MutexLibraryMutationStore::new(store.clone(), generation.clone());
-    let library_query_store = riff::infra::store::MutexLibraryQueryStore::new(store.clone());
+    // One shared connection behind an internal mutex serves every store
+    // port: every clone of the handle shares it and both session
+    // generations, whose bumps live inside the store's mutation impls —
+    // callers cannot forget them.
+    let store = riff::infra::store::SqliteStore::open_and_migrate(&store_path)
+        .unwrap_or_else(|e| panic!("fatal: {e}"));
     (
-        settings_store,
-        playlist_store,
-        library_mutation_store,
-        library_query_store,
-        generation,
-        playlist_generation,
+        store.clone(),
+        store.clone(),
+        store.clone(),
+        store.clone(),
+        store.library_generation(),
+        store.playlist_generation(),
     )
 }
 
 /// Composition-root wiring for the UI's read seam (ADR 0002): box the query
-/// ports and hand over both session generations. The mutation adapters keep
-/// their own clones of the handles and do the bumping.
+/// ports and hand over both session generations. Committed mutations bump
+/// those same handles inside the store itself.
 fn wire_session_views(
-    library_query_store: &riff::infra::store::MutexLibraryQueryStore,
-    playlist_store: &riff::infra::store::MutexPlaylistStore,
+    library_query_store: &riff::infra::store::SqliteStore,
+    playlist_store: &riff::infra::store::SqliteStore,
     generation: riff::app::store::StoreGeneration,
     playlist_generation: riff::app::store::StoreGeneration,
 ) -> riff::app::views::SessionViews {
@@ -268,8 +252,8 @@ fn wire_session_views(
 /// Returns the front-end handles the UI holds boxed (`Box<dyn TagEdits>`,
 /// `Box<dyn Covers>`).
 fn spawn_background_services(
-    library_queries: riff::infra::store::MutexLibraryQueryStore,
-    library_mutations: riff::infra::store::MutexLibraryMutationStore,
+    library_queries: riff::infra::store::SqliteStore,
+    library_mutations: riff::infra::store::SqliteStore,
 ) -> (
     riff::app::tag_edit_service::TagEditService,
     riff::app::cover_service::CoverService,
@@ -308,7 +292,7 @@ fn run_engine_thread(
     cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
     update_tx: crossbeam_channel::Sender<PlaybackUpdate>,
     state: Arc<Mutex<AppState>>,
-    library_queries: riff::infra::store::MutexLibraryQueryStore,
+    library_queries: riff::infra::store::SqliteStore,
 ) {
     let decoder_factory: DecoderFactory =
         Box::new(|| Box::new(SymphoniaDecoder::new(build_codec_registry())));

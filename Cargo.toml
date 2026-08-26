@@ -60,6 +60,9 @@ crossbeam-queue = "0.3"
 
 # Filesystem watching
 notify = "8"
+# Debounce companion for notify — 0.7 targets notify ^8.2.0, matching our
+# lockfile so both crates share one notify version family.
+notify-debouncer-full = "0.7"
 
 # Random for shuffle
 fastrand = "2"

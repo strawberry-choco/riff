@@ -648,7 +648,7 @@ mod tests {
     // [`MockLibraryQueryStore`] stands in for the store port and a real
     // `StoreGeneration` handle plays the mutation adapter's bumps.
 
-    use crate::mocks::{FailingQuery, LibraryQueryCall, MockLibraryQueryStore};
+    use crate::mocks::{LibraryQueryCall, MockLibraryQueryStore};
     use riff::app::store::{LibraryQueryStore, StoreGeneration};
     use riff::app::views::SessionViews;
 
@@ -831,80 +831,6 @@ mod tests {
     }
 
     #[test]
-    fn test_same_generation_track_list_serves_cache_without_refetching() {
-        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
-            flat: flat_library(120),
-            ..Default::default()
-        });
-
-        for _ in 0..2 {
-            let page = views.track_list("", 0);
-            assert_eq!(page.rows.len(), 50);
-        }
-
-        assert_eq!(
-            mock.window_calls().len(),
-            1,
-            "a fresh projection must serve cached rows without refetching"
-        );
-    }
-
-    #[test]
-    fn test_bumped_generation_invalidates_all_windows() {
-        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
-            flat: flat_library(120),
-            ..Default::default()
-        });
-        views.track_list("", 0);
-        views.track_list("", 50);
-        let calls_after_load = mock.window_calls().len();
-
-        // A committed mutation bumps the generation; every visible window
-        // refetches even though the offsets are unchanged.
-        generation.bump();
-        views.track_list("", 0);
-        views.track_list("", 50);
-
-        assert_eq!(
-            mock.window_calls().len(),
-            calls_after_load * 2,
-            "generation bump invalidates every cached window"
-        );
-        assert_eq!(mock.window_calls().last(), Some(&(50, 50)));
-    }
-
-    #[test]
-    fn test_query_change_retargets_even_at_same_generation() {
-        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
-            flat: flat_library(120),
-            search: flat_library(3),
-            ..Default::default()
-        });
-        let page = views.track_list("", 0);
-        assert_eq!(page.total, 120);
-        assert_eq!(mock.window_calls(), vec![(0, 50)]);
-
-        // Retargeting to a search query (the search box changed) must drop
-        // the cache even at the same generation.
-        let page = views.track_list("x", 0);
-        assert_eq!(page.total, 3, "the retargeted view recounts its own query");
-        assert_eq!(
-            page.rows.len(),
-            3,
-            "retargeted projections never serve rows from the old signature"
-        );
-        assert_eq!(
-            mock.window_calls(),
-            vec![(0, 50), (0, 50)],
-            "refetch happens despite unchanged generation"
-        );
-
-        // And back to the flat list refetches that signature too.
-        views.track_list("", 0);
-        assert_eq!(mock.window_calls().len(), 3);
-    }
-
-    #[test]
     fn test_cache_is_bounded_fifo() {
         let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
             flat: flat_library(500),
@@ -933,38 +859,6 @@ mod tests {
             mock.window_calls().len(),
             calls_before,
             "the newest window remains cached"
-        );
-    }
-
-    #[test]
-    fn test_loader_error_keeps_stale_rows_and_retries() {
-        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
-            flat: flat_library(120),
-            ..Default::default()
-        });
-        let first = views.track_list("", 0);
-        assert_eq!(first.rows.len(), 50);
-
-        // The next refresh fails mid-flight; stale-but-present beats blank
-        // while the UI retries.
-        mock.lock().failing = vec![FailingQuery::TracksWindow];
-        generation.bump();
-        let stale = views.track_list("", 0);
-        assert_eq!(
-            stale.rows.len(),
-            50,
-            "a failed refresh leaves the previous windows untouched"
-        );
-        assert_eq!(stale.total, 120);
-
-        mock.lock().failing.clear();
-        let retried = views.track_list("", 0);
-        assert_eq!(retried.rows.len(), 50, "the next frame retries and reloads");
-        assert_eq!(retried.rows[0].id.0, "0");
-        assert_eq!(
-            mock.window_calls().len(),
-            3,
-            "the initial load, the failed attempt, and the retry each fetched once"
         );
     }
 
@@ -1104,74 +998,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_browsing_views_invalidate_everything_on_generation_bump() {
-        let (artists, albums, tracks) = browsing_fixtures();
-        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
-            artists,
-            albums,
-            album_tracks: tracks,
-            ..Default::default()
-        });
-        let _ = views.artists();
-        let _ = views.artist_albums("Alpha");
-        let _ = views.album_tracks("Alpha", "One");
-
-        // A committed mutation bumps the generation; every level refetches.
-        generation.bump();
-        let artists = views.artists();
-        let albums = views.artist_albums("Alpha");
-        let album_tracks = views.album_tracks("Alpha", "One");
-
-        assert_eq!(mock.count_of(&LibraryQueryCall::AllArtists), 2);
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::ArtistAlbums("Alpha".to_string())),
-            2
-        );
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::AlbumTracks(
-                "Alpha".to_string(),
-                "One".to_string()
-            )),
-            2
-        );
-        assert_eq!(artists[0].name, "Alpha");
-        assert_eq!(albums[0].title, "One");
-        assert_eq!(album_tracks[0].id.0, "f:\\a\\1.mp3");
-    }
-
-    #[test]
-    fn test_browsing_view_error_renders_empty_then_retries() {
-        let (artists, _albums, _tracks) = browsing_fixtures();
-        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
-            artists,
-            ..Default::default()
-        });
-        let first = views.artists();
-
-        // The next load fails; the facade renders it as an empty list…
-        mock.lock().failing = vec![FailingQuery::AllArtists];
-        generation.bump();
-        assert!(
-            views.artists().is_empty(),
-            "store errors render as an empty list, never propagate"
-        );
-
-        // …and the retry reloads committed state.
-        mock.lock().failing.clear();
-        let retried = views.artists();
-        assert_eq!(
-            retried.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
-            first.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
-            "the retry re-fetches and matches the prior shape"
-        );
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::AllArtists),
-            3,
-            "the failed attempt fetched once, then the retry fetched again"
-        );
-    }
-
     // --- Folder views: five folder query shapes over store queries -----------
 
     #[test]
@@ -1225,72 +1051,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_folder_views_invalidate_everything_on_generation_bump() {
-        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
-            folder_tree_ids: vec![TrackId("f:\\lib\\a\\1.mp3".to_string())],
-            ..Default::default()
-        });
-        let folder = Path::new("f:\\lib");
-        assert!(views.folder_has_audio(folder));
-
-        // A committed mutation bumps the generation; every level refetches.
-        generation.bump();
-        assert!(
-            views.folder_has_audio(folder),
-            "the probe reloads from the store"
-        );
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::FolderHasAudio(folder.to_path_buf())),
-            2
-        );
-
-        let ids = views.folder_subtree_ids(folder);
-        assert_eq!(ids.len(), 1);
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::TrackIdsInFolderTree(
-                folder.to_path_buf()
-            )),
-            1,
-            "bump dropped the gen-1 cache"
-        );
-    }
-
     // --- Smart playlist views: read-only lists over store queries ------------
-
-    #[test]
-    fn test_smart_list_serves_cache_within_generation() {
-        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
-            smart: vec![crate::test_utils::create_test_track(
-                "f:\\sm\\1.mp3",
-                "f:\\sm\\1.mp3",
-            )],
-            ..Default::default()
-        });
-
-        for _ in 0..2 {
-            let tracks = views.smart_list(SmartPlaylistKind::MostPlayed, 50);
-            assert_eq!(tracks.len(), 1);
-        }
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::SmartPlaylist(
-                SmartPlaylistKind::MostPlayed,
-                50
-            )),
-            1,
-            "a fresh generation serves cached rows without refetching"
-        );
-
-        // A different kind is an independent cache slot.
-        let _ = views.smart_list(SmartPlaylistKind::LostGems, usize::MAX);
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::SmartPlaylist(
-                SmartPlaylistKind::LostGems,
-                usize::MAX
-            )),
-            1
-        );
-    }
 
     #[test]
     fn test_smart_list_refetches_after_generation_bump_and_limit_increase() {
@@ -1318,35 +1079,6 @@ mod tests {
                 LibraryQueryCall::SmartPlaylist(SmartPlaylistKind::MostPlayed, 100),
             ],
             "bumps and limit growth refetch; equal limits do not"
-        );
-    }
-
-    #[test]
-    fn test_smart_list_error_renders_empty_then_retries() {
-        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
-            smart: vec![crate::test_utils::create_test_track(
-                "f:\\sm\\1.mp3",
-                "f:\\sm\\1.mp3",
-            )],
-            ..Default::default()
-        });
-
-        mock.lock().failing = vec![FailingQuery::SmartPlaylist];
-        assert!(
-            views.smart_list(SmartPlaylistKind::LostGems, 10).is_empty(),
-            "store errors render as an empty list, never propagate"
-        );
-
-        mock.lock().failing.clear();
-        let tracks = views.smart_list(SmartPlaylistKind::LostGems, 10);
-        assert_eq!(tracks.len(), 1, "the retry loads");
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::SmartPlaylist(
-                SmartPlaylistKind::LostGems,
-                10
-            )),
-            2,
-            "the failed attempt fetched once, then the retry fetched again"
         );
     }
 
@@ -1442,25 +1174,6 @@ mod tests {
     }
 
     #[test]
-    fn test_playback_slots_refetch_on_generation_bump() {
-        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
-            library: playback_library(),
-            ..Default::default()
-        });
-        let queue = playback_queue();
-        views.sync_playback(&queue, 5);
-        let calls_after_load = mock.get_track_calls().len();
-
-        generation.bump();
-        views.sync_playback(&queue, 5);
-
-        assert!(
-            mock.get_track_calls().len() > calls_after_load,
-            "a committed mutation invalidates the playback slots"
-        );
-    }
-
-    #[test]
     fn test_playback_slots_follow_the_queue_shuffle_order() {
         let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
             library: playback_library(),
@@ -1521,35 +1234,6 @@ mod tests {
         assert!(
             mock.get_track_calls().is_empty(),
             "nothing to resolve, nothing asked"
-        );
-    }
-
-    #[test]
-    fn test_playback_slot_error_keeps_stale_cache_and_retries() {
-        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
-            library: playback_library(),
-            ..Default::default()
-        });
-        let mut queue = playback_queue();
-        views.sync_playback(&queue, 5);
-
-        // A failing reload (mid-scan store hiccup) keeps the previous cache
-        // completely untouched — stale-but-present beats blank.
-        queue.advance();
-        mock.lock().failing = vec![FailingQuery::GetTrack];
-        views.sync_playback(&queue, 5);
-        assert_eq!(
-            views.playback_current().map(|t| t.id.0.as_str()),
-            Some("t1.mp3"),
-            "stale-but-present beats blank while the UI retries"
-        );
-
-        mock.lock().failing.clear();
-        views.sync_playback(&queue, 5);
-        assert_eq!(
-            views.playback_current().map(|t| t.id.0.as_str()),
-            Some("t2.mp3"),
-            "the next frame retries"
         );
     }
 
@@ -3912,111 +3596,6 @@ mod playlist_projection_tests {
     }
 
     #[test]
-    fn test_store_error_fallback_keeps_last_good_rows_and_retries() {
-        let mut scratch = Scratch::new();
-        let t1 = scratch.seed_track("one.mp3");
-        let t2 = scratch.seed_track("two.mp3");
-        let pid = scratch
-            .mutations
-            .create_playlist("Focus Mix", std::slice::from_ref(&t1.id))
-            .expect("create works");
-
-        // Warm both projections with good data.
-        let good_list = scratch.views.playlists();
-        let good_view = scratch
-            .views
-            .playlist_view(&pid)
-            .expect("known id yields a view");
-        assert_eq!(good_view.rows.len(), 1);
-        let loads_after_warm = scratch.entry_loads();
-        assert_eq!(loads_after_warm, 1, "the warm fetch hit the store once");
-
-        // Break every playlist READ at the seam: both store reads join the
-        // entries table, so hiding it fails them (reversible — no schema
-        // surgery needed to recover).
-        scratch
-            .shared
-            .with_connection(|conn| {
-                conn.execute_batch(
-                    "ALTER TABLE playlist_entries RENAME TO playlist_entries_broken;",
-                )
-            })
-            .expect("hiding the entries table works");
-
-        // A playlist-side mutation still commits (the playlists table is
-        // intact) and moves the generation, so the cached rows are stale.
-        assert!(
-            scratch.mutations.rename_playlist(&pid, "Workout").unwrap(),
-            "the rename commits while reads are broken"
-        );
-
-        // The next reads fail at the store and fall back to the last good
-        // data instead of blanking out.
-        let fallback_list = scratch.views.playlists();
-        assert_eq!(
-            fallback_list[0].name, good_list[0].name,
-            "the list keeps its last good rows (not the committed rename)"
-        );
-        assert_eq!(
-            fallback_list[0].tracks, good_list[0].tracks,
-            "the list keeps its last good entry refs"
-        );
-        let fallback_view = scratch
-            .views
-            .playlist_view(&pid)
-            .expect("the fallback keeps a view");
-        // Rows carry unresolved `Track`s (no PartialEq); compare the row
-        // identity, resolution presence, and verdict instead.
-        let row_keys = |view: &riff::app::views::PlaylistView| {
-            view.rows
-                .iter()
-                .map(|(id, track, valid)| (id.clone(), track.is_some(), *valid))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            row_keys(&fallback_view),
-            row_keys(&good_view),
-            "rows keep their last good data"
-        );
-        assert_eq!(
-            fallback_view.valid_ids.as_ref(),
-            good_view.valid_ids.as_ref(),
-            "valid_ids keep their last good data"
-        );
-
-        // Because failed fetches never stamp the generation, the very next
-        // call retries the loader instead of serving the stale cache.
-        let _ = scratch.views.playlist_view(&pid);
-        assert_eq!(
-            scratch.entry_loads(),
-            loads_after_warm + 2,
-            "each stale call retries the store; a stamped failure would serve cache"
-        );
-
-        // Recovery: restore the table and commit through the adapter — the
-        // next read reflects the committed state.
-        scratch
-            .shared
-            .with_connection(|conn| {
-                conn.execute_batch(
-                    "ALTER TABLE playlist_entries_broken RENAME TO playlist_entries;",
-                )
-            })
-            .expect("restoring the entries table works");
-        assert!(
-            scratch.mutations.add_playlist_entry(&pid, &t2.id).unwrap(),
-            "the add commits after recovery"
-        );
-        let recovered = scratch
-            .views
-            .playlist_view(&pid)
-            .expect("known id yields a view");
-        assert_eq!(recovered.rows.len(), 2, "the retry sees the new entry");
-        assert_eq!(recovered.rows[0].0, t1.id);
-        assert_eq!(recovered.rows[1].0, t2.id);
-    }
-
-    #[test]
     fn test_unknown_playlist_id_yields_none_without_a_third_method() {
         let mut scratch = Scratch::new();
         let t1 = scratch.seed_track("one.mp3");
@@ -4232,5 +3811,120 @@ mod playback_coordinator_tests {
 
         // The index relocates by identity lookup, not by stepping.
         assert_eq!(h.state.lock_or_recover().queue.current_index, Some(2));
+    }
+}
+
+/// The one generic generation-keyed cache behind every Session Projection
+/// (ADR 0002). These property tests pin the primitive ONCE so the
+/// per-projection suites stay thin descriptor/mapping smokes: a fresh load
+/// stamps the observed epoch, an epoch move (or key change) drops the entry,
+/// and a failed load — which by contract never reaches `store`/`slot` —
+/// leaves the stale-but-present value readable for the retry.
+mod generation_cache_tests {
+    use riff::app::store::StoreGeneration;
+    use riff::app::views::GenerationCache;
+
+    #[test]
+    fn test_fresh_load_stamps_the_observed_epoch() {
+        let counter = StoreGeneration::new();
+        let mut cache = GenerationCache::<String, i32>::new(counter.clone());
+
+        // A fresh cache holds nothing at any epoch.
+        let epoch = counter.current();
+        assert!(!cache.loaded_at(epoch), "a new cache starts empty");
+        assert!(cache.peek().is_none());
+
+        // Committing a load stamps exactly the observed epoch and key.
+        cache.store(epoch, "k".to_string(), 7);
+        assert!(cache.loaded_at(epoch));
+        assert!(cache.holds(epoch, &"k".to_string()));
+        assert_eq!(cache.peek(), Some(&7));
+    }
+
+    #[test]
+    fn test_epoch_move_drops_the_entry_and_slot_reinitializes() {
+        let counter = StoreGeneration::new();
+        let mut cache = GenerationCache::<(), i32>::new(counter.clone());
+        let epoch = counter.current();
+        cache.store(epoch, (), 7);
+
+        // A committed mutation bumps the counter: nothing holds at the NEW
+        // observed epoch, while the entry keeps its old stamp readable for
+        // the stale-but-present fallback.
+        counter.bump();
+        let moved = counter.current();
+        assert_ne!(moved, epoch);
+        assert!(
+            !cache.loaded_at(moved),
+            "nothing counts as loaded at the new epoch yet"
+        );
+        assert!(
+            cache.loaded_at(epoch),
+            "the entry still remembers the epoch it was loaded at"
+        );
+
+        // The commit step for the new epoch hands out a FRESH default slot:
+        // the previous generation's value must not leak through.
+        let slot = cache.slot(moved, &());
+        assert_eq!(*slot, 0, "the stale value is dropped, not served");
+        *slot = 42;
+        assert_eq!(cache.peek(), Some(&42));
+        assert!(cache.loaded_at(moved));
+    }
+
+    #[test]
+    fn test_key_change_at_the_same_epoch_resets_the_slot() {
+        let counter = StoreGeneration::new();
+        let mut cache = GenerationCache::<String, Vec<i32>>::new(counter.clone());
+        let epoch = counter.current();
+        cache.store(epoch, "a".to_string(), vec![1]);
+
+        // Same epoch, different key: not a hit, and the slot reinitializes.
+        assert!(!cache.holds(epoch, &"b".to_string()));
+        let slot = cache.slot(epoch, &"b".to_string());
+        assert!(
+            slot.is_empty(),
+            "entries are keyed: another key never sees the first key's rows"
+        );
+    }
+
+    #[test]
+    fn test_failed_load_keeps_the_stale_value_readable_for_the_retry() {
+        let counter = StoreGeneration::new();
+        let mut cache = GenerationCache::<(), String>::new(counter.clone());
+        let epoch = counter.current();
+        cache.store(epoch, (), "good".to_string());
+
+        // A failed load touches nothing (the loader's `?` returns before any
+        // store/slot call), so after the bump the stale-but-present value…
+        counter.bump();
+        let moved = counter.current();
+        assert_eq!(
+            cache.peek(),
+            Some(&"good".to_string()),
+            "stale-but-present beats blank while the caller retries"
+        );
+
+        // …survives until the successful retry commits over it.
+        cache.store(moved, (), "reloaded".to_string());
+        assert_eq!(cache.peek(), Some(&"reloaded".to_string()));
+    }
+
+    #[test]
+    fn test_invalidate_and_take_value_drop_whatever_is_cached() {
+        let counter = StoreGeneration::new();
+        let mut cache = GenerationCache::<(), i32>::new(counter.clone());
+        let epoch = counter.current();
+        cache.store(epoch, (), 5);
+
+        // take_value steals regardless of epoch (fetch-then-swap merges).
+        assert_eq!(cache.take_value(), Some(5));
+        assert_eq!(cache.peek(), None);
+
+        // invalidate clears unconditionally too.
+        cache.store(epoch, (), 6);
+        cache.invalidate();
+        assert_eq!(cache.peek(), None);
+        assert!(!cache.loaded_at(epoch));
     }
 }

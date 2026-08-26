@@ -21,7 +21,6 @@ use crate::ui::playerbar::PlayerBarAction;
 use crate::ui::theme;
 use crossbeam_channel::Sender;
 use eframe::egui;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -85,61 +84,23 @@ pub(crate) struct ThemeState {
     last_applied: Option<(bool, bool)>,
 }
 
-/// The lazily computed display labels for one track (allocation plan 2.1):
-/// each variant is formatted at most once per store generation and then
-/// handed out as an `Arc` clone. `None` means "not computed yet".
-#[derive(Default)]
-struct CachedTrackLabels {
-    /// `"Artist - Title"` — flat list, search, playlists, window title.
-    artist_title: Option<Arc<str>>,
-    /// `"N. Title"` — album and folder tree rows.
-    numbered: Option<Arc<str>>,
+/// `"Artist - Title"` for one track — flat list, search, playlists, window
+/// title. Formatted fresh each frame; staleness is the projections' job.
+fn label_artist_title(track: &Track) -> String {
+    format!(
+        "{} - {}",
+        track.metadata.display_artist(),
+        track.metadata.display_title(&track.file_path)
+    )
 }
 
-/// The cached Up Next rows for the Now Playing stage (allocation plan 2.2),
-/// keyed by the store generation plus the exact Up Next window contents:
-/// queue labels only change when the playback projection's window does.
-struct UpNextLabels {
-    generation: u64,
-    /// The window ids the entries were built from; compared by reference
-    /// against the live projection window so fresh frames allocate nothing.
-    ids: Vec<TrackId>,
-    entries: Arc<[UpNextEntry]>,
-}
-
-/// The Now Playing stage's text block (allocation plan 2.2), keyed by
-/// current `TrackId` + generation: title, `"Artist - Album"` meta line, and
-/// the joined details line.
-struct NpTextCache {
-    generation: u64,
-    id: Option<TrackId>,
-    title: Option<Arc<str>>,
-    meta_line: Option<Arc<str>>,
-    details: NpDetails,
-}
-
-/// Tri-state for the cached details line: computed-absent (the track has no
-/// detail fields, or no track is playing) or the line itself.
-enum NpDetails {
-    Absent,
-    Line(Arc<str>),
-}
-
-impl NpDetails {
-    fn from_option(line: Option<String>) -> Self {
-        match line {
-            Some(line) => Self::Line(Arc::from(line)),
-            None => Self::Absent,
-        }
-    }
-}
-
-/// The Now Playing stage's per-frame text handout — `Arc` clones out of
-/// [`NpTextCache`], so fresh frames bump refcounts instead of formatting.
-struct NpText {
-    title: Option<Arc<str>>,
-    meta_line: Option<Arc<str>>,
-    details: Option<Arc<str>>,
+/// `"N. Title"` for one track — album and folder tree rows.
+fn label_numbered(track: &Track) -> String {
+    format!(
+        "{}. {}",
+        track.metadata.track_number.unwrap_or(0),
+        track.metadata.display_title(&track.file_path)
+    )
 }
 
 pub struct RiffApp {
@@ -169,32 +130,13 @@ pub struct RiffApp {
     smart_playlist_view: Option<SmartPlaylistKind>,
     /// Which user playlist is open in the library explorer, if any.
     playlist_view: Option<PlaylistId>,
-    /// Store generation the [`Self::row_labels`] cache was filled at; a
-    /// mismatch clears it (allocation plan 2.1).
-    row_label_generation: u64,
-    /// Per-track display labels, computed at most once per store generation
-    /// and handed out as `Arc` clones — kills the per-row `format!` class.
-    row_labels: HashMap<TrackId, CachedTrackLabels>,
-    /// Sidebar playlist-row labels ("Name (count)"), keyed by playlist id
-    /// and rebuilt only when the row's name or entry count moves. Entries
-    /// for deleted playlists linger until their id is reused — bounded by
-    /// playlists created this session and never looked up.
-    playlist_labels: HashMap<PlaylistId, (String, usize, Arc<str>)>,
-    /// The Now Playing stage's cached text block — see [`NpTextCache`].
-    np_text_cache: Option<NpTextCache>,
     /// The playing track's id whose cover the Now Playing stage last
     /// requested/rendered; only re-cloned when the track moves.
     now_playing_cover_key: Option<String>,
-    /// The cached Up Next rows for the Now Playing stage — see
-    /// [`UpNextLabels`].
-    up_next_cache: Option<UpNextLabels>,
-    /// The (current `TrackId`, generation) pair the window title and tray
-    /// tooltip were last pushed for (allocation plan 2.3): both are only
-    /// rebuilt when this identity moves.
-    last_title_key: Option<(Option<TrackId>, u64)>,
-    /// The `{index}/{len}` queue-position label, rebuilt only when either
-    /// component moves (allocation plan 2.4).
-    queue_position_cache: (Option<usize>, usize, Option<Arc<str>>),
+    /// The current `TrackId` the window title and tray tooltip were last
+    /// pushed for (REQ-SI-001): both OS side effects only fire when this
+    /// identity moves — pure command suppression, never staleness.
+    last_title_key: Option<Option<TrackId>>,
     /// Retained seek-row readout buffers for the playerbar and the
     /// Now Playing stage (allocation plan 2.4).
     playerbar_readouts: crate::ui::playerbar::SeekReadouts,
@@ -286,14 +228,8 @@ impl RiffApp {
             tag_edit: None,
             smart_playlist_view: None,
             playlist_view: None,
-            row_label_generation: 0,
-            row_labels: HashMap::new(),
-            playlist_labels: HashMap::new(),
-            np_text_cache: None,
             now_playing_cover_key: None,
-            up_next_cache: None,
             last_title_key: None,
-            queue_position_cache: (None, 0, None),
             playerbar_readouts: crate::ui::playerbar::SeekReadouts::new(),
             stage_readouts: crate::ui::playerbar::SeekReadouts::new(),
             titlebar_actions: Vec::new(),
@@ -584,197 +520,6 @@ impl RiffApp {
         );
     }
 
-    // --- Per-frame label caches (allocation plan 2.1/2.2) ------------------
-
-    /// Drop the per-track label cache when the store generation moved: any
-    /// committed mutation may have changed metadata, so labels recompute
-    /// lazily on their next request.
-    fn ensure_label_generation(&mut self) {
-        let generation = self.views.generation();
-        if self.row_label_generation != generation {
-            self.row_labels.clear();
-            self.row_label_generation = generation;
-        }
-    }
-
-    /// Fill-or-fetch one lazily computed label slot for `track_id`. Fresh
-    /// frames hand out an `Arc` clone; only the first request per
-    /// (track, generation) formats.
-    fn slot_label(
-        &mut self,
-        track_id: &TrackId,
-        pick: impl Fn(&CachedTrackLabels) -> &Option<Arc<str>>,
-        set: impl Fn(&mut CachedTrackLabels, Arc<str>),
-        make: impl FnOnce() -> String,
-    ) -> Arc<str> {
-        self.ensure_label_generation();
-        if let Some(labels) = self.row_labels.get(track_id)
-            && let Some(label) = pick(labels)
-        {
-            return Arc::clone(label);
-        }
-        let label: Arc<str> = Arc::from(make());
-        set(
-            self.row_labels.entry(track_id.clone()).or_default(),
-            Arc::clone(&label),
-        );
-        label
-    }
-
-    /// `"Artist - Title"` for one track, cached per generation.
-    fn label_artist_title(&mut self, track: &Track) -> Arc<str> {
-        self.slot_label(
-            &track.id,
-            |labels| &labels.artist_title,
-            |labels, value| labels.artist_title = Some(value),
-            || {
-                format!(
-                    "{} - {}",
-                    track.metadata.display_artist(),
-                    track.metadata.display_title(&track.file_path)
-                )
-            },
-        )
-    }
-
-    /// `"N. Title"` for one track (album/folder tree rows), cached per
-    /// generation.
-    fn label_numbered(&mut self, track: &Track) -> Arc<str> {
-        self.slot_label(
-            &track.id,
-            |labels| &labels.numbered,
-            |labels, value| labels.numbered = Some(value),
-            || {
-                format!(
-                    "{}. {}",
-                    track.metadata.track_number.unwrap_or(0),
-                    track.metadata.display_title(&track.file_path)
-                )
-            },
-        )
-    }
-
-    /// The sidebar playlist row's painted label (`"Name (count)"`), rebuilt
-    /// only while the row's name or entry count differs from the cache.
-    fn playlist_label(&mut self, id: &PlaylistId, name: &str, count: usize) -> Arc<str> {
-        if let Some((cached_name, cached_count, label)) = self.playlist_labels.get(id)
-            && cached_name == name
-            && *cached_count == count
-        {
-            return Arc::clone(label);
-        }
-        let label: Arc<str> = Arc::from(format!("{name} ({count})"));
-        self.playlist_labels
-            .insert(id.clone(), (name.to_owned(), count, Arc::clone(&label)));
-        label
-    }
-
-    /// The Now Playing stage's text block (title, meta line, details line),
-    /// keyed by current `TrackId` + generation and handed out as `Arc`
-    /// clones — allocation plan 2.2.
-    fn now_playing_text(&mut self) -> NpText {
-        let generation = self.views.generation();
-        let current = self.views.playback_current();
-        let fresh = self.np_text_cache.as_ref().is_some_and(|cache| {
-            cache.generation == generation && cache.id.as_ref() == current.map(|t| &t.id)
-        });
-        if !fresh {
-            // Cold path: the playing track or the generation moved.
-            let id = current.map(|t| t.id.clone());
-            let (title, meta_line, details) = match self.views.playback_current() {
-                Some(track) => (
-                    Some(Arc::from(track.metadata.display_title(&track.file_path))),
-                    Some(Arc::from(format!(
-                        "{} - {}",
-                        track.metadata.display_artist(),
-                        track.metadata.display_album()
-                    ))),
-                    NpDetails::from_option(crate::ui::now_playing::metadata_details(
-                        &track.metadata,
-                    )),
-                ),
-                None => (None, None, NpDetails::Absent),
-            };
-            self.np_text_cache = Some(NpTextCache {
-                generation,
-                id,
-                title,
-                meta_line,
-                details,
-            });
-        }
-        let cache = self.np_text_cache.as_ref().expect("np text just ensured");
-        NpText {
-            title: cache.title.clone(),
-            meta_line: cache.meta_line.clone(),
-            details: match &cache.details {
-                NpDetails::Line(line) => Some(Arc::clone(line)),
-                NpDetails::Absent => None,
-            },
-        }
-    }
-
-    /// The Up Next rows for the Now Playing stage, cached against the store
-    /// generation plus the exact window contents (allocation plan 2.2):
-    /// queue labels only change when the playback projection's window does,
-    /// and the comparison walks it by reference so fresh frames allocate
-    /// nothing.
-    fn up_next_entries_cached(&mut self, limit: usize) -> Arc<[UpNextEntry]> {
-        let generation = self.views.generation();
-        let fresh = {
-            let window = self.views.playback_up_next();
-            let window = &window[..window.len().min(limit)];
-            match &self.up_next_cache {
-                Some(cache) => {
-                    cache.generation == generation
-                        && cache.ids.len() == window.len()
-                        && cache
-                            .ids
-                            .iter()
-                            .zip(window.iter())
-                            .all(|(cached, track)| cached == &track.id)
-                }
-                None => false,
-            }
-        };
-        if !fresh {
-            let window = self.views.playback_up_next();
-            let entries: Vec<UpNextEntry> = crate::ui::now_playing::up_next_entries(window, limit);
-            let ids: Vec<TrackId> = window
-                .iter()
-                .take(limit)
-                .map(|track| track.id.clone())
-                .collect();
-            self.up_next_cache = Some(UpNextLabels {
-                generation,
-                ids,
-                entries: entries.into(),
-            });
-        }
-        Arc::clone(
-            &self
-                .up_next_cache
-                .as_ref()
-                .expect("up next just ensured")
-                .entries,
-        )
-    }
-
-    /// The playerbar's `{index}/{len}` queue-position label, rebuilt only
-    /// when either component moves (allocation plan 2.4).
-    fn queue_position_label(&mut self, index: Option<usize>, len: usize) -> Arc<str> {
-        let (cached_index, cached_len, label) = &self.queue_position_cache;
-        if *cached_index == index
-            && *cached_len == len
-            && let Some(label) = label
-        {
-            return Arc::clone(label);
-        }
-        let label: Arc<str> = Arc::from(format!("{}/{}", index.map_or(0, |i| i + 1), len));
-        self.queue_position_cache = (index, len, Some(Arc::clone(&label)));
-        label
-    }
-
     /// One library-list track row (Issue 07): a 40px tree row with the
     /// animated equalizer indicator on the now-playing row, click/double-click
     /// handling, and the shared context menu.
@@ -787,7 +532,7 @@ impl RiffApp {
         current_track: Option<&TrackId>,
         remove_from_playlist: Option<&PlaylistId>,
     ) {
-        let label = self.label_artist_title(track);
+        let label = label_artist_title(track);
         self.interactive_track_row(
             ui,
             state,
@@ -802,8 +547,7 @@ impl RiffApp {
 
     /// Shared clickable track row behind every track listing: restyled 40px
     /// tree row + selection/play/context-menu wiring. `label` lets callers
-    /// keep their display formats ("Artist - Title", "01. Title") — both
-    /// served from the per-generation label cache as `Arc` clones.
+    /// keep their display formats ("Artist - Title", "01. Title").
     #[allow(clippy::too_many_arguments)]
     fn interactive_track_row(
         &mut self,
@@ -936,9 +680,8 @@ impl eframe::App for RiffApp {
 
         // Update window title and tray tooltip (REQ-SI-001). Both are
         // compared against the last-pushed identity first and only rebuilt
-        // when the playing track or the store generation moves (allocation
-        // plan 2.3); the tooltip shows "Artist - Title" for the current
-        // track, else "riff".
+        // when the playing track moves; the tooltip shows "Artist - Title"
+        // for the current track, else "riff".
         self.update_window_title(ui.ctx(), &state);
 
         // --- SHELL (Issue 06): unified Panel API at exact token dimensions ---
@@ -1322,30 +1065,27 @@ fn handle_keyboard_shortcuts(
 }
 
 /// Push the window title and tray tooltip for the current track (REQ-SI-001).
-/// Both derive from one identity — the current `TrackId` plus the store
-/// generation — which is compared against the last push FIRST: steady-state
-/// frames send no viewport command and format nothing (allocation plan 2.3,
-/// mirroring the `last_tray_tooltip` pattern). The current Track resolves
-/// through the Session Views facade over the store's `get_track` query —
-/// never the in-memory mirror.
+/// Both derive from one identity — the current `TrackId` — which is compared
+/// against the last push FIRST: steady-state frames send no viewport command
+/// and format nothing. The key exists to avoid repeating OS viewport
+/// commands, not for staleness; the current Track resolves through the
+/// Session Views facade over the store's `get_track` query — never the
+/// in-memory mirror.
 impl RiffApp {
     fn update_window_title(&mut self, ctx: &egui::Context, state: &AppState) {
         self.views
             .sync_playback(&state.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
-        let generation = self.views.generation();
         let current_id = self.views.playback_current().map(|t| &t.id);
         let unchanged = self
             .last_title_key
             .as_ref()
-            .is_some_and(|(id, cached_gen)| *cached_gen == generation && id.as_ref() == current_id);
+            .is_some_and(|id| id.as_ref() == current_id);
         if unchanged {
             return;
         }
 
-        // Cold path: the playing track or the generation moved — both
-        // strings are rebuilt and pushed exactly once per identity change,
-        // so they format directly instead of touching the row-label cache.
-        let id_for_key = current_id.cloned();
+        // Cold path: the playing track moved — both strings are rebuilt and
+        // pushed exactly once per identity change.
         let (tooltip, title) = match self.views.playback_current() {
             Some(track) => {
                 let tooltip = format!(
@@ -1359,7 +1099,7 @@ impl RiffApp {
             None => ("riff".to_owned(), "riff".to_owned()),
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
-        self.last_title_key = Some((id_for_key, generation));
+        self.last_title_key = Some(current_id.cloned());
 
         #[cfg(not(target_os = "linux"))]
         {
@@ -1401,8 +1141,13 @@ impl RiffApp {
             cover = self.get_cover_texture(&id.0);
         }
 
-        let queue_position =
-            self.queue_position_label(state.queue.current_index, state.queue.tracks.len());
+        // The `{index}/{len}` queue-position label, formatted fresh each
+        // frame from the live queue shape.
+        let queue_position = format!(
+            "{}/{}",
+            state.queue.current_index.map_or(0, |i| i + 1),
+            state.queue.tracks.len()
+        );
         self.playerbar_readouts
             .sync(state.current_position.current, state.current_position.total);
         let content = crate::ui::playerbar::PlayerBarContent {
@@ -1846,7 +1591,7 @@ impl RiffApp {
         current_track: Option<&TrackId>,
     ) {
         for track in tracks {
-            let label = self.label_numbered(track);
+            let label = label_numbered(track);
             self.interactive_track_row(ui, state, cmd, track, current_track, None, &label, 2);
         }
     }
@@ -1994,16 +1739,14 @@ impl RiffApp {
         //
         // Iterated by index straight over the seam's `Arc`'d snapshot
         // (allocation plan 2.5): no per-frame summaries Vec, no per-row
-        // id/name clones. Each row's painted label comes from the
-        // generation-aware playlist label cache; ids are only cloned on a
-        // click frame.
+        // id/name clones. Each row's painted label is formatted from the
+        // snapshot row; ids are only cloned on a click frame.
         let playlists = self.views.playlists();
         for index in 0..playlists.len() {
             let action = {
                 let playlist = &playlists[index];
                 let selected = self.playlist_view.as_ref() == Some(&playlist.id);
-                let label =
-                    self.playlist_label(&playlist.id, &playlist.name, playlist.tracks.len());
+                let label = format!("{} ({})", playlist.name, playlist.tracks.len());
                 sidebar::playlist_row(
                     ui,
                     &mut self.icons,
@@ -2253,7 +1996,7 @@ impl RiffApp {
         let is_selected = state.selected_track.as_ref() == Some(&track.id);
         let is_current = current_track == Some(&track.id);
         let playing = state.playback_state == PlaybackState::Playing;
-        let label = self.label_artist_title(track);
+        let label = label_artist_title(track);
 
         self.request_cover(&track.id, &track.file_path);
 
@@ -2346,17 +2089,32 @@ impl RiffApp {
             .as_ref()
             .and_then(|key| self.get_cover_texture(key));
         self.now_playing_cover_key = cover_key;
-        // Text block + Up Next rows from the generation-keyed caches
-        // (allocation plan 2.2): `Arc` clones per frame, strings formatted
-        // only when the playing track or the queue window actually moved.
-        let np_text = self.now_playing_text();
-        let up_next = self.up_next_entries_cached(crate::ui::now_playing::UP_NEXT_LIMIT);
+        // Text block + Up Next rows formatted straight from the playback
+        // projection's resolved tracks each frame; staleness is the
+        // projection's job, not the widget layer's.
+        let (title, meta_line, details) = match self.views.playback_current() {
+            Some(track) => (
+                Some(Arc::from(track.metadata.display_title(&track.file_path))),
+                Some(Arc::from(format!(
+                    "{} - {}",
+                    track.metadata.display_artist(),
+                    track.metadata.display_album()
+                ))),
+                crate::ui::now_playing::metadata_details(&track.metadata).map(Arc::from),
+            ),
+            None => (None, None, None),
+        };
+        let up_next: Arc<[UpNextEntry]> = crate::ui::now_playing::up_next_entries(
+            self.views.playback_up_next(),
+            crate::ui::now_playing::UP_NEXT_LIMIT,
+        )
+        .into();
 
         let content = crate::ui::now_playing::NowPlayingContent {
             cover,
-            title: np_text.title,
-            meta_line: np_text.meta_line,
-            details: np_text.details,
+            title,
+            meta_line,
+            details,
             position: state.current_position.current,
             total: state.current_position.total,
             up_next,
@@ -2500,7 +2258,7 @@ impl RiffApp {
             let tracks = folder_tracks_filtered(&direct, query);
 
             for track in tracks.iter().copied() {
-                let label = self.label_numbered(track);
+                let label = label_numbered(track);
                 self.interactive_track_row(
                     ui,
                     state,

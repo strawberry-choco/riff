@@ -1172,11 +1172,23 @@ fn folder_prefix_params(folder_text: &str) -> [String; 3] {
         }
     }
     let escaped = escape_like_pattern(trimmed);
-    [
-        trimmed.to_string(),
-        format!("{escaped}/%"),
-        format!("{escaped}\\%"),
-    ]
+    // A bare root ("/", "\\", "//") already ends in its separator, so the
+    // continuation must not append another one: `/` + `/tmp/x` is
+    // `/tmp/x`, not `//tmp/x`. `Path::starts_with` agrees — every absolute
+    // path starts_with(`/`).
+    if !trimmed.is_empty() && trimmed.chars().all(|c| c == '\\' || c == '/') {
+        [
+            trimmed.to_string(),
+            format!("{escaped}%"),
+            format!("{escaped}%"),
+        ]
+    } else {
+        [
+            trimmed.to_string(),
+            format!("{escaped}/%"),
+            format!("{escaped}\\%"),
+        ]
+    }
 }
 
 /// Narrow a `REAL` column value back into the domain's `f32` tag fields.

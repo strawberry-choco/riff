@@ -563,13 +563,16 @@ pub mod mocks {
     /// Recording [`LibraryMutationStore`] fake: `apply_tag_refresh` snapshots
     /// every Track it was handed (so tests can pin the refreshed metadata AND
     /// the untouched play history) and can be switched to fail, simulating a
-    /// failed store commit. The remaining mutations are no-ops returning
-    /// benign defaults; the tag-edit service exercises only the refresh.
+    /// failed store commit. `record_track_played` snapshots every
+    /// `(id, played_at)` pair (so playback-continuation tests can pin the
+    /// committed plays); the remaining mutations are no-ops returning benign
+    /// defaults.
     pub struct MockLibraryMutationStore {
         /// When set, `apply_tag_refresh` fails with an `InvalidOperation`
         /// error and records nothing.
         pub fail_tag_refresh: bool,
         refreshed: Mutex<Vec<Track>>,
+        played: Mutex<Vec<(TrackId, std::time::SystemTime)>>,
     }
 
     impl Default for MockLibraryMutationStore {
@@ -585,6 +588,7 @@ pub mod mocks {
             Self {
                 fail_tag_refresh: false,
                 refreshed: Mutex::new(Vec::new()),
+                played: Mutex::new(Vec::new()),
             }
         }
 
@@ -596,6 +600,7 @@ pub mod mocks {
             Self {
                 fail_tag_refresh: true,
                 refreshed: Mutex::new(Vec::new()),
+                played: Mutex::new(Vec::new()),
             }
         }
 
@@ -604,6 +609,13 @@ pub mod mocks {
         #[must_use]
         pub fn refreshed(&self) -> Vec<Track> {
             self.refreshed.lock().unwrap().clone()
+        }
+
+        /// Snapshot of every `(id, played_at)` passed to
+        /// `record_track_played`, in call order.
+        #[must_use]
+        pub fn played(&self) -> Vec<(TrackId, std::time::SystemTime)> {
+            self.played.lock().unwrap().clone()
         }
     }
 
@@ -614,10 +626,11 @@ pub mod mocks {
 
         fn record_track_played(
             &mut self,
-            _id: &TrackId,
-            _played_at: std::time::SystemTime,
+            id: &TrackId,
+            played_at: std::time::SystemTime,
         ) -> Result<bool, AppError> {
-            Ok(false)
+            self.played.lock().unwrap().push((id.clone(), played_at));
+            Ok(true)
         }
 
         fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), AppError> {

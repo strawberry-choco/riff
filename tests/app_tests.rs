@@ -1661,10 +1661,10 @@ mod scan_service_tests {
     use super::*;
     use riff::app::errors::AppError;
     use riff::app::scan_service::{ScanOutcome, ScanService, Scans};
-    use riff::app::store::{LibraryMutationStore, LibraryQueryStore, StoreGeneration};
+    use riff::app::store::{LibraryMutationStore, LibraryQueryStore};
     use riff::app::traits::{AudioFormatInfo, MetadataReader};
     use riff::domain::CoverSource;
-    use riff::infra::store::{MutexLibraryMutationStore, MutexLibraryQueryStore, SqliteStore};
+    use riff::infra::store::SqliteStore;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant, SystemTime};
@@ -1792,19 +1792,18 @@ mod scan_service_tests {
     struct ScratchStore {
         /// Keeps the database file alive for the whole test.
         _dir: tempfile::TempDir,
-        mutations: MutexLibraryMutationStore,
-        queries: MutexLibraryQueryStore,
+        mutations: SqliteStore,
+        queries: SqliteStore,
     }
 
     impl ScratchStore {
         fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
             let db_path = dir.path().join("riff.sqlite3");
-            let shared = std::sync::Arc::new(Mutex::new(
-                SqliteStore::open_and_migrate(&db_path).expect("fresh store must open and migrate"),
-            ));
-            let mutations = MutexLibraryMutationStore::new(shared.clone(), StoreGeneration::new());
-            let queries = MutexLibraryQueryStore::new(shared);
+            let store =
+                SqliteStore::open_and_migrate(&db_path).expect("fresh store must open and migrate");
+            let mutations = store.clone();
+            let queries = store;
             Self {
                 _dir: dir,
                 mutations,
@@ -3676,20 +3675,20 @@ mod cover_service_tests {
 mod playlist_projection_tests {
     use super::*;
     use riff::app::errors::AppError;
-    use riff::app::store::{LibraryMutationStore, PlaylistEntry, PlaylistStore, StoreGeneration};
-    use riff::infra::store::{MutexLibraryQueryStore, MutexPlaylistStore, SqliteStore};
+    use riff::app::store::{LibraryMutationStore, PlaylistEntry, PlaylistStore};
+    use riff::infra::store::SqliteStore;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Counting [`PlaylistStore`] decorator: delegates everything to the
-    /// real adapter while counting entry-list reads, so tests can tell
+    /// real store handle while counting entry-list reads, so tests can tell
     /// "served from cache" apart from "hit the store".
     struct CountingPlaylistStore {
-        inner: MutexPlaylistStore,
+        inner: SqliteStore,
         entry_loads: Arc<AtomicUsize>,
     }
 
     impl CountingPlaylistStore {
-        fn new(inner: MutexPlaylistStore) -> (Self, Arc<AtomicUsize>) {
+        fn new(inner: SqliteStore) -> (Self, Arc<AtomicUsize>) {
             let entry_loads = Arc::new(AtomicUsize::new(0));
             (
                 Self {
@@ -3753,14 +3752,14 @@ mod playlist_projection_tests {
     }
 
     /// One scratch Application Store plus a `SessionViews` wired to it
-    /// through the real infra adapters, with the playlist mutation adapter
-    /// kept out for seeding and direct store mutations.
+    /// through clones of the real store handle, with one clone kept out for
+    /// seeding and direct store mutations.
     struct Scratch {
         /// Keeps the scratch database (and the seeded audio files) alive for
         /// the whole test; read by `seed_track` for file placement.
         dir: tempfile::TempDir,
-        shared: Arc<Mutex<SqliteStore>>,
-        mutations: MutexPlaylistStore,
+        shared: SqliteStore,
+        mutations: SqliteStore,
         views: riff::app::views::SessionViews,
         entry_loads: Arc<AtomicUsize>,
     }
@@ -3769,22 +3768,19 @@ mod playlist_projection_tests {
         fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
             let db_path = dir.path().join("riff.sqlite3");
-            let shared = Arc::new(Mutex::new(
-                SqliteStore::open_and_migrate(&db_path).expect("fresh store must open and migrate"),
-            ));
-            let library_generation = StoreGeneration::new();
-            let playlist_generation = StoreGeneration::new();
-            let mutations = MutexPlaylistStore::new(shared.clone(), playlist_generation.clone());
+            let store =
+                SqliteStore::open_and_migrate(&db_path).expect("fresh store must open and migrate");
+            let mutations = store.clone();
             let (playlist_queries, entry_loads) = CountingPlaylistStore::new(mutations.clone());
             let views = riff::app::views::SessionViews::new(
-                Box::new(MutexLibraryQueryStore::new(shared.clone())),
+                Box::new(store.clone()),
                 Box::new(playlist_queries),
-                library_generation,
-                playlist_generation,
+                store.library_generation(),
+                store.playlist_generation(),
             );
             Self {
                 dir,
-                shared,
+                shared: store,
                 mutations,
                 views,
                 entry_loads,
@@ -3798,7 +3794,7 @@ mod playlist_projection_tests {
 
         /// Create a real audio file on disk and index it into the Library,
         /// so the entry resolution's filesystem check passes.
-        fn seed_track(&self, name: &str) -> Track {
+        fn seed_track(&mut self, name: &str) -> Track {
             let path = self.dir.path().join(name);
             std::fs::write(&path, b"fake audio bytes").expect("scratch file writes");
             let track = crate::test_utils::create_test_track_with_metadata(
@@ -3809,7 +3805,6 @@ mod playlist_projection_tests {
                 "Album",
             );
             self.shared
-                .lock_or_recover()
                 .apply_scan_batch(std::slice::from_ref(&track))
                 .expect("seed scan commits");
             track
@@ -3941,7 +3936,6 @@ mod playlist_projection_tests {
         // surgery needed to recover).
         scratch
             .shared
-            .lock_or_recover()
             .with_connection(|conn| {
                 conn.execute_batch(
                     "ALTER TABLE playlist_entries RENAME TO playlist_entries_broken;",
@@ -4003,7 +3997,6 @@ mod playlist_projection_tests {
         // next read reflects the committed state.
         scratch
             .shared
-            .lock_or_recover()
             .with_connection(|conn| {
                 conn.execute_batch(
                     "ALTER TABLE playlist_entries_broken RENAME TO playlist_entries;",

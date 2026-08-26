@@ -15,12 +15,13 @@ use std::thread;
 use crate::app::MutexExt;
 use crate::app::audio_engine::AudioEngine;
 use crate::app::commands::{LibraryCommand, LibraryUpdate};
+use crate::app::playback_coordinator::PlaybackCoordinator;
 use crate::app::scan::build_tracks;
 use crate::app::state::AppState;
 use crate::app::store::{LibraryMutationStore, LibraryQueryStore};
 use crate::app::traits::DecoderFactory;
 use crate::app::watcher_manager::WatcherManager;
-use crate::domain::{PlaybackCommand, PlaybackState, PlaybackUpdate, RepeatMode, TrackId};
+use crate::domain::{PlaybackCommand, PlaybackUpdate, TrackId};
 use crate::infra::{
     AudioFileScanner, CpalAudioOutput, FilesystemWatcher, ImageCoverLoader, LoftyMetadataReader,
     LoftyMetadataWriter, SymphoniaDecoder,
@@ -66,11 +67,13 @@ fn main() {
         run_engine_thread(cmd_rx, engine_cmd_tx, update_tx, app_state, engine_queries);
     });
 
-    spawn_update_processor(
+    // Playback Coordinator (CONTEXT.md): applies Playback Updates to session
+    // state and owns playback continuation, on its dedicated thread.
+    let _update_processor = PlaybackCoordinator::spawn(
         state.clone(),
         update_rx,
         cmd_tx.clone(),
-        library_mutation_store.clone(),
+        Box::new(library_mutation_store.clone()),
     );
 
     // Library scan thread
@@ -161,88 +164,6 @@ fn run_native_app(app: RiffApp, options: eframe::NativeOptions) {
         }),
     )
     .expect("Failed to run eframe");
-}
-
-/// Thread that applies [`PlaybackUpdate`]s to the shared state and drives
-/// auto-advance when a track ends.
-fn spawn_update_processor(
-    state: Arc<Mutex<AppState>>,
-    update_rx: crossbeam_channel::Receiver<PlaybackUpdate>,
-    cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
-    mut mutation_store: riff::infra::store::MutexLibraryMutationStore,
-) {
-    let _handle = thread::spawn(move || {
-        while let Ok(update) = update_rx.recv() {
-            let mut locked = state.lock_or_recover();
-            match update {
-                PlaybackUpdate::StateChanged(new_state) => {
-                    locked.playback_state = new_state;
-                }
-                PlaybackUpdate::PositionChanged(pos) => {
-                    locked.current_position = pos;
-                }
-                PlaybackUpdate::TrackChanged(track_id) => {
-                    locked.queue.current_index =
-                        locked.queue.tracks.iter().position(|id| id == &track_id);
-                }
-                PlaybackUpdate::TrackEnded => {
-                    drop(locked);
-                    handle_track_ended(&state, &cmd_tx, &mut mutation_store);
-                }
-                PlaybackUpdate::Error(msg) => {
-                    tracing::error!("Playback error: {}", msg);
-                    locked.playback_state = PlaybackState::Stopped;
-                    locked.scan_status = Some(format!("Playback error: {msg}"));
-                }
-            }
-        }
-    });
-}
-
-/// Record play history for the track that just finished — the queue's current
-/// track at this moment, before the auto-advance below moves the index — and
-/// advance the queue (or stop when nothing follows).
-///
-/// The play commits to the Application Store FIRST as its own single durable
-/// transaction (ticket 06), so a crash right after the track ends cannot lose
-/// it; the mutation adapter bumps the session generation so Session
-/// Projections refetch.
-fn handle_track_ended(
-    state: &Arc<Mutex<AppState>>,
-    cmd_tx: &crossbeam_channel::Sender<PlaybackCommand>,
-    mutation_store: &mut riff::infra::store::MutexLibraryMutationStore,
-) {
-    let finished_id = {
-        let locked = state.lock_or_recover();
-        locked.queue.current_track().cloned()
-    };
-    if let Some(finished_id) = finished_id {
-        // The mutation adapter bumps the session generation when the play
-        // commits; the mirror no longer tracks play history.
-        match mutation_store.record_track_played(&finished_id, std::time::SystemTime::now()) {
-            Ok(true) => {}
-            Ok(false) => tracing::debug!(?finished_id, "finished track is not in the store"),
-            Err(e) => tracing::error!("Failed to persist play history for {finished_id:?}: {e}"),
-        }
-    }
-    let next_track = {
-        let mut locked = state.lock_or_recover();
-        if locked.queue.repeat == RepeatMode::One {
-            // Repeat-one loops the SAME track (Task 4.1): the queue
-            // deliberately doesn't model it (`advance()` would move on), so
-            // re-play the current track. If the engine already handed off
-            // gaplessly, its Play(current) dedup guard swallows this no-op.
-            locked.queue.current_track().cloned()
-        } else {
-            locked.queue.advance().cloned()
-        }
-    };
-    if let Some(track_id) = next_track {
-        let _ = cmd_tx.send(PlaybackCommand::Play(track_id));
-    } else {
-        let mut locked = state.lock_or_recover();
-        locked.playback_state = PlaybackState::Stopped;
-    }
 }
 
 /// Thread that receives [`LibraryCommand`]s and runs directory scans. The

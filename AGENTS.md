@@ -47,11 +47,12 @@ Cross-thread communication: `crossbeam_channel::unbounded()` for all message pas
 ## Commands (Dev Workflow)
 
 ```bash
-cargo fmt                        # format
-cargo clippy                     # lint (pedantic + selected strict lints)
-cargo check                      # fast type-check only
-cargo run                        # run in dev mode
-cargo build --release            # release build (LTO, stripped)
+cargo fmt                                  # format
+cargo check --all-targets                  # type/borrow checking across all targets
+cargo clippy --all-targets -- -D warnings  # lint with warnings as errors
+cargo test --all-targets                   # run all unit and integration tests
+cargo run                                  # run in dev mode
+cargo build --release                      # release build (LTO, stripped)
 ```
 
 **Test suite**: a single integration crate rooted at `tests/mod.rs` (`autotests = false`, one `[[test]]` target named `integration`), organized into `domain_tests`, `app_tests`, `infra_tests`, `ui_tests`, `golden_tests`, `integration_tests` with shared `test_utils`/`mocks`/`integration_helpers`. Run with `cargo test`. No inline `#[cfg(test)]` modules in `src/`. See `docs/engineering/testing-strategy.md`; golden-image snapshot workflow in `docs/engineering/golden-image-testing.md`.

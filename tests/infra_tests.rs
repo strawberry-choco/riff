@@ -2535,7 +2535,10 @@ fn folder_fixtures(base: &std::path::Path) -> Vec<Track> {
     }
 
     let track = |rel: &str, title: &str, number: Option<u32>| {
-        let path = base.join(rel);
+        // Fixture literals use `\` for readability; translate to the platform
+        // separator so stored paths match real scan output on every OS
+        // (`Path::join` only normalizes separators native to the host).
+        let path = base.join(rel.replace('\\', std::path::MAIN_SEPARATOR_STR));
         browsing_track(
             &path.to_string_lossy(),
             title,

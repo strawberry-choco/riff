@@ -24,6 +24,8 @@ jobs:
       # eframe 0.34 (wgpu + winit x11/wayland + clipboard) and cpal 0.18 (ALSA)
       # need these headers to COMPILE on Linux. tray-icon/muda/rfd are gated to
       # non-Linux targets, so libgtk-3-dev is intentionally NOT required here.
+      # mesa-vulkan-drivers provides the lavapipe software Vulkan adapter that
+      # egui_kittest's wgpu renderer needs to run golden-image tests headless.
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
@@ -41,7 +43,8 @@ jobs:
             libxkbcommon-dev \
             libxkbcommon-x11-dev \
             libwayland-dev \
-            libssl-dev
+            libssl-dev \
+            mesa-vulkan-drivers
 
       # Installs pinned stable Rust with rustfmt + clippy, enables cargo caching
       # (Swatinem/rust-cache under the hood) and PR problem-matchers. Successor to

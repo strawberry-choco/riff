@@ -9,17 +9,16 @@ use crate::app::state::{AppState, BrowseMode, LibraryStatus, ViewMode};
 use crate::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
 use crate::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
 use crate::app::traits::TagEdit;
+use crate::app::transport::Transport;
 use crate::app::views::SessionViews;
 use crate::app::watcher_manager::WatcherManager;
 use crate::domain::{
-    Album, Artist, PlaybackCommand, PlaybackState, Playlist, PlaylistId, SmartPlaylistKind, Track,
-    TrackId,
+    Album, Artist, PlaybackState, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
 };
 use crate::ui::chrome::TitleBarAction;
 use crate::ui::now_playing::{NowPlayingAction, UpNextEntry};
 use crate::ui::playerbar::PlayerBarAction;
 use crate::ui::theme;
-use crossbeam_channel::Sender;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -108,7 +107,10 @@ fn label_numbered(track: &Track) -> String {
 #[allow(clippy::struct_excessive_bools)]
 pub struct RiffApp {
     pub state: Arc<Mutex<AppState>>,
-    command_sender: Option<Sender<PlaybackCommand>>,
+    /// The Transport port: the UI's intent-level playback front end. Command
+    /// mapping, seek clamping, and volume math live behind it (in the
+    /// `ChannelTransport` adapter); the UI never names engine commands.
+    transport: Box<dyn Transport>,
     /// The Library Scan Service front end (ADR 0006): requests scans and
     /// yields polled outcomes; the whole walk/commit/cancel flow and the
     /// per-path scan state live behind it. The watcher thread holds its own
@@ -207,7 +209,7 @@ impl RiffApp {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         state: Arc<Mutex<AppState>>,
-        command_sender: Sender<PlaybackCommand>,
+        transport: Box<dyn Transport>,
         scans: Box<dyn Scans>,
         watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
         #[cfg(not(target_os = "linux"))] tray_icon: Option<tray_icon::TrayIcon>,
@@ -221,7 +223,7 @@ impl RiffApp {
     ) -> Self {
         Self {
             state,
-            command_sender: Some(command_sender),
+            transport,
             scans,
             cover_textures: std::collections::HashMap::new(),
             cover_lru_keys: Vec::new(),
@@ -497,7 +499,6 @@ impl RiffApp {
         &mut self,
         response: &egui::Response,
         state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
         track_id: &TrackId,
         track: Option<&Track>,
         remove_from_playlist: Option<&PlaylistId>,
@@ -511,7 +512,7 @@ impl RiffApp {
         show_track_context_menu(
             response,
             TrackMenuArgs {
-                cmd,
+                transport: self.transport.as_ref(),
                 track_id,
                 track,
                 tag_edit: tag_edit_slot,
@@ -530,7 +531,6 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
         track: &Track,
         current_track: Option<&TrackId>,
         remove_from_playlist: Option<&PlaylistId>,
@@ -539,7 +539,6 @@ impl RiffApp {
         self.interactive_track_row(
             ui,
             state,
-            cmd,
             track,
             current_track,
             remove_from_playlist,
@@ -556,7 +555,6 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
         track: &Track,
         current_track: Option<&TrackId>,
         remove_from_playlist: Option<&PlaylistId>,
@@ -590,14 +588,11 @@ impl RiffApp {
         }
         if response.double_clicked() {
             state.selected_track = Some(track.id.clone());
-            if let Some(s) = cmd {
-                let _ = s.send(PlaybackCommand::Play(track.id.clone()));
-            }
+            self.transport.play(track.id.clone());
         }
         self.attach_track_menu(
             &response,
             state,
-            cmd,
             &track.id,
             Some(track),
             remove_from_playlist,
@@ -653,7 +648,6 @@ impl eframe::App for RiffApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let cmd = self.command_sender.clone();
         let state_arc = self.state.clone();
 
         let mut state = state_arc.lock_or_recover();
@@ -664,7 +658,11 @@ impl eframe::App for RiffApp {
         }
 
         if self.first_frame {
-            load_persisted_state(&mut state, self.settings_store.as_ref(), cmd.as_ref());
+            load_persisted_state(
+                &mut state,
+                self.settings_store.as_ref(),
+                self.transport.as_ref(),
+            );
             self.first_frame = false;
         }
 
@@ -679,7 +677,12 @@ impl eframe::App for RiffApp {
         self.update_cover_cache(ui.ctx());
         self.poll_watchers();
 
-        handle_keyboard_shortcuts(ui.ctx(), &mut state, &mut self.search_focus, cmd.as_ref());
+        handle_keyboard_shortcuts(
+            ui.ctx(),
+            &mut state,
+            &mut self.search_focus,
+            self.transport.as_ref(),
+        );
 
         // Update window title and tray tooltip (REQ-SI-001). Both are
         // compared against the last-pushed identity first and only rebuilt
@@ -735,18 +738,18 @@ impl eframe::App for RiffApp {
             .resizable(false)
             .frame(egui::Frame::new().inner_margin(egui::Margin::same(12)))
             .show(ui, |ui| {
-                self.render_library_sidebar(ui, &mut state, cmd.as_ref());
+                self.render_library_sidebar(ui, &mut state);
             });
 
         // Bottom 88px strip: transport + progress + volume.
-        self.render_control_bar(ui, &mut state, cmd.as_ref());
+        self.render_control_bar(ui, &mut state);
 
         // --- MAIN STAGE: exactly one View visible at a time ---
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(self.theme.active.background))
             .show(ui, |ui| match state.view_mode {
                 ViewMode::Library => self.render_track_details_panel(ui, &mut state),
-                ViewMode::NowPlaying => self.show_now_playing_view(ui, &mut state, cmd.as_ref()),
+                ViewMode::NowPlaying => self.show_now_playing_view(ui, &mut state),
                 ViewMode::Settings => {
                     self.show_settings_view(ui, &mut state);
                 }
@@ -800,29 +803,18 @@ fn apply_titlebar_action(
 /// ALWAYS lands on the Library View: Now Playing is a mode that replaces the
 /// active View (resolved navigation gaps), so there is no prior view to
 /// restore — closing from anywhere returns to the Library. Transport actions
-/// pass straight through to the command channel; seek targets re-clamp
+/// pass straight through to the Transport port; seek targets re-clamp
 /// against the live track duration exactly like the playerbar's.
 pub fn apply_now_playing_action(
     action: crate::ui::now_playing::NowPlayingAction,
     state: &mut AppState,
-    cmd: Option<&Sender<PlaybackCommand>>,
+    transport: &dyn Transport,
 ) {
     use crate::ui::now_playing::NowPlayingAction as Action;
     match action {
         Action::Close => state.view_mode = ViewMode::Library,
-        Action::PlayNext(track_id) => {
-            if let Some(s) = cmd {
-                let _ = s.send(PlaybackCommand::PlayNext(track_id));
-            }
-        }
-        Action::Seek(duration) => {
-            if let Some(s) = cmd {
-                let _ = s.send(PlaybackCommand::Seek(clamp_seek(
-                    duration.as_secs_f32(),
-                    state.current_position.total,
-                )));
-            }
-        }
+        Action::PlayNext(track_id) => transport.play_next(track_id),
+        Action::Seek(duration) => transport.seek(state, duration),
     }
 }
 
@@ -940,54 +932,39 @@ pub fn commit_playlist_reorder(
 }
 
 /// Apply one restyled player-bar action (Issue 08) through the SAME engine
-/// commands and state paths the pre-restyle controls used. Transport actions
-/// pass straight through to the command channel; volume routes through
-/// [`AppState::effective_volume`] so a muted app never emits sound; seek
-/// targets re-clamp against the live track duration.
+/// intents and state paths the pre-restyle controls used. Transport actions
+/// pass straight through to the Transport port; volume routes through the
+/// port's `apply_volume_from_state` (which applies [`AppState::
+/// effective_volume`]) so a muted app never emits sound; seek targets
+/// re-clamp against the live track duration inside the adapter.
 pub fn apply_player_bar_action(
     action: crate::ui::playerbar::PlayerBarAction,
     state: &mut AppState,
-    cmd: Option<&Sender<PlaybackCommand>>,
+    transport: &dyn Transport,
     store: &mut dyn SettingsStore,
 ) {
     use crate::ui::playerbar::PlayerBarAction as Action;
-    let send = |command: PlaybackCommand| {
-        if let Some(s) = cmd {
-            let _ = s.send(command);
-        }
-    };
     match action {
-        Action::Previous => send(PlaybackCommand::Previous),
-        Action::Pause => send(PlaybackCommand::Pause),
-        Action::Resume => send(PlaybackCommand::Resume),
+        Action::Previous => transport.previous(),
+        Action::Pause => transport.pause(),
+        Action::Resume => transport.resume(),
         Action::PlaySelected => {
             // Pre-restyle behavior: with nothing selected, play does nothing.
             if let Some(selected) = state.selected_track.clone() {
-                send(PlaybackCommand::Play(selected));
+                transport.play(selected);
             }
         }
-        Action::Next => send(PlaybackCommand::Next),
-        Action::Stop => send(PlaybackCommand::Stop),
-        Action::Seek(target) => {
-            let secs = target.as_secs_f32();
-            send(PlaybackCommand::Seek(clamp_seek(
-                secs,
-                state.current_position.total,
-            )));
-        }
+        Action::Next => transport.next(),
+        Action::Stop => transport.stop(),
+        Action::Seek(target) => transport.seek(state, target),
         Action::SetVolume(volume) => {
             state.current_volume = volume;
             persist_scalars(store, state);
             // While muted the slider still edits current_volume, but the
             // engine keeps receiving 0 until unmuted.
-            send(PlaybackCommand::SetVolume(state.effective_volume()));
+            transport.apply_volume_from_state(state);
         }
-        Action::ToggleMute => {
-            // Muting never moves the volume slider — it only zeroes the
-            // effective volume sent to the engine; unmuting restores it.
-            state.muted = !state.muted;
-            send(PlaybackCommand::SetVolume(state.effective_volume()));
-        }
+        Action::ToggleMute => transport.toggle_mute(state),
         Action::ToggleShuffle => {
             let was = state.queue.shuffle;
             state.queue.set_shuffle(!was);
@@ -1005,7 +982,7 @@ pub fn apply_player_bar_action(
 pub fn load_persisted_state(
     state: &mut AppState,
     store: &dyn SettingsStore,
-    cmd: Option<&Sender<PlaybackCommand>>,
+    transport: &dyn Transport,
 ) {
     let settings = match store.load_settings() {
         Ok(settings) => settings,
@@ -1031,11 +1008,9 @@ pub fn load_persisted_state(
 
     if let Some(vol) = settings.scalars.volume {
         state.current_volume = vol;
-        if let Some(s) = cmd {
-            // Route through effective_volume so a muted app (once mute
-            // state is restored) never emits sound at startup.
-            let _ = s.send(PlaybackCommand::SetVolume(state.effective_volume()));
-        }
+        // Route through effective_volume so a muted app (once mute
+        // state is restored) never emits sound at startup.
+        transport.apply_volume_from_state(state);
     }
 
     state.ui_flags.advanced_mode = settings.scalars.advanced_mode;
@@ -1048,7 +1023,7 @@ fn handle_keyboard_shortcuts(
     ctx: &egui::Context,
     state: &mut AppState,
     search_focus: &mut bool,
-    cmd: Option<&Sender<PlaybackCommand>>,
+    transport: &dyn Transport,
 ) {
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::F)) {
         *search_focus = true;
@@ -1058,11 +1033,9 @@ fn handle_keyboard_shortcuts(
     {
         let playing = state.playback_state == PlaybackState::Playing;
         if playing {
-            if let Some(s) = cmd {
-                let _ = s.send(PlaybackCommand::Pause);
-            }
-        } else if let Some(s) = cmd {
-            let _ = s.send(PlaybackCommand::Resume);
+            transport.pause();
+        } else {
+            transport.resume();
         }
     }
 }
@@ -1134,12 +1107,7 @@ impl RiffApp {
     /// playerbar widgets. Every reported [`crate::ui::playerbar::
     /// PlayerBarAction`] routes through [`apply_player_bar_action`], so each
     /// control still emits its engine command.
-    fn render_control_bar(
-        &mut self,
-        ui: &mut egui::Ui,
-        state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
-    ) {
+    fn render_control_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         // Cover for the current track, served from the LRU texture cache;
         // misses enqueue a background resolve exactly like the other views.
         // The current Track comes from the Session Views facade over the
@@ -1189,7 +1157,12 @@ impl RiffApp {
                 );
             });
         for action in self.playerbar_actions.drain(..) {
-            apply_player_bar_action(action, state, cmd, self.settings_store.as_mut());
+            apply_player_bar_action(
+                action,
+                state,
+                self.transport.as_ref(),
+                self.settings_store.as_mut(),
+            );
         }
     }
 }
@@ -1202,12 +1175,7 @@ impl RiffApp {
     /// present on every view; only the main stage switches. Nav routes
     /// through [`crate::ui::chrome::NavDestination`] so exactly one View is
     /// visible after any click.
-    fn render_library_sidebar(
-        &mut self,
-        ui: &mut egui::Ui,
-        state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
-    ) {
+    fn render_library_sidebar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         use crate::ui::chrome::NavDestination;
         use crate::ui::sidebar::{self, SidebarNav};
 
@@ -1250,21 +1218,15 @@ impl RiffApp {
         let query = state.search_query.clone();
 
         match state.browse_mode {
-            BrowseMode::Library => self.render_library_browser(ui, state, cmd, &query),
-            BrowseMode::Folders => self.render_folder_tree(ui, state, cmd, &query),
+            BrowseMode::Library => self.render_library_browser(ui, state, &query),
+            BrowseMode::Folders => self.render_folder_tree(ui, state, &query),
         }
     }
 
     /// Left-panel content in Library browse mode: the All Tracks / Artists
     /// rows, smart playlists, user playlists, and the results dispatch — all
     /// on the restyled 40px tree rows (Issue 07).
-    fn render_library_browser(
-        &mut self,
-        ui: &mut egui::Ui,
-        state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
-        query: &str,
-    ) {
+    fn render_library_browser(&mut self, ui: &mut egui::Ui, state: &mut AppState, query: &str) {
         use crate::ui::sidebar::{self, TreeRow};
         let palette = self.theme.active;
 
@@ -1366,13 +1328,13 @@ impl RiffApp {
                 ui.label(format!("No tracks found matching '{query}'"));
             });
         } else if let Some(pid) = open_user_playlist {
-            self.render_playlist_view(ui, state, cmd, &pid);
+            self.render_playlist_view(ui, state, &pid);
         } else if let Some(kind) = open_playlist {
-            self.render_smart_playlist_view(ui, state, cmd, kind);
+            self.render_smart_playlist_view(ui, state, kind);
         } else if state.ui_flags.show_artists_view {
-            self.render_artist_view(ui, state, cmd, query);
+            self.render_artist_view(ui, state, query);
         } else {
-            self.render_flat_view(ui, state, cmd, query);
+            self.render_flat_view(ui, state, query);
         }
     }
 
@@ -1411,13 +1373,7 @@ impl RiffApp {
         });
     }
 
-    fn render_artist_view(
-        &mut self,
-        ui: &mut egui::Ui,
-        state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
-        query: &str,
-    ) {
+    fn render_artist_view(&mut self, ui: &mut egui::Ui, state: &mut AppState, query: &str) {
         // Browsing reads through the Session Views facade over store queries
         // (ADR 0002/0003): artists A–Z straight from the Application Store,
         // each level cached until the next committed mutation bumps the
@@ -1464,7 +1420,6 @@ impl RiffApp {
                 self.render_artist_node(
                     ui,
                     state,
-                    cmd,
                     artist,
                     current_album.as_ref(),
                     current_track.as_ref(),
@@ -1484,7 +1439,6 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
         artist: &Artist,
         current_album: Option<&(String, String)>,
         current_track: Option<&TrackId>,
@@ -1526,15 +1480,7 @@ impl RiffApp {
                 let album_has_current = current_album.is_some_and(|(album_artist, album_title)| {
                     album_artist == &album.artist && album_title == &album.title
                 });
-                self.render_album_node(
-                    ui,
-                    state,
-                    cmd,
-                    album,
-                    current_track,
-                    album_has_current,
-                    query,
-                );
+                self.render_album_node(ui, state, album, current_track, album_has_current, query);
             }
         }) {
             let _ = body;
@@ -1548,7 +1494,6 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
         album: &Album,
         current_track: Option<&TrackId>,
         album_has_current: bool,
@@ -1587,7 +1532,7 @@ impl RiffApp {
 
         collapsing.show_body_unindented(ui, |ui| {
             let tracks = self.views.album_tracks(&album.artist, &album.title);
-            self.render_album_track_rows(ui, state, cmd, &tracks, current_track);
+            self.render_album_track_rows(ui, state, &tracks, current_track);
         });
     }
 
@@ -1599,23 +1544,16 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
         tracks: &[Track],
         current_track: Option<&TrackId>,
     ) {
         for track in tracks {
             let label = label_numbered(track);
-            self.interactive_track_row(ui, state, cmd, track, current_track, None, &label, 2);
+            self.interactive_track_row(ui, state, track, current_track, None, &label, 2);
         }
     }
 
-    fn render_flat_view(
-        &mut self,
-        ui: &mut egui::Ui,
-        state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
-        query: &str,
-    ) {
+    fn render_flat_view(&mut self, ui: &mut egui::Ui, state: &mut AppState, query: &str) {
         // Row-virtualization audit (Issue 12): every UNBOUNDED track listing
         // culls through `ScrollArea::show_rows` — this flat list and search
         // (bounded store windows via `SessionViews::track_list`), smart
@@ -1652,7 +1590,7 @@ impl RiffApp {
                     }
                     let page = page.as_ref().expect("page fetched above");
                     if let Some(track) = page.rows.get(i - page.start) {
-                        self.render_track_row(ui, state, cmd, track, current_track.as_ref(), None);
+                        self.render_track_row(ui, state, track, current_track.as_ref(), None);
                     }
                 }
             },
@@ -1667,7 +1605,6 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
         kind: SmartPlaylistKind,
     ) {
         // Bounded playlists cap at 50 entries; open-ended ones list all.
@@ -1686,7 +1623,7 @@ impl RiffApp {
         });
         if !tracks.is_empty() {
             let tids: Vec<TrackId> = tracks.iter().map(|t| t.id.clone()).collect();
-            show_list_context_menu(&header.response, cmd, &tids);
+            show_list_context_menu(&header.response, self.transport.as_ref(), &tids);
         }
         ui.separator();
 
@@ -1704,7 +1641,7 @@ impl RiffApp {
             |ui, row_range| {
                 for i in row_range {
                     if let Some(track) = tracks.get(i) {
-                        self.render_track_row(ui, state, cmd, track, current_track.as_ref(), None);
+                        self.render_track_row(ui, state, track, current_track.as_ref(), None);
                     }
                 }
             },
@@ -1873,7 +1810,6 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
         playlist_id: &PlaylistId,
     ) {
         let playlists = self.views.playlists();
@@ -1903,7 +1839,7 @@ impl RiffApp {
             ui.weak(format!("({track_count} tracks)"));
         });
         if !valid_ids.is_empty() {
-            show_list_context_menu(&header.response, cmd, &valid_ids);
+            show_list_context_menu(&header.response, self.transport.as_ref(), &valid_ids);
         }
         ui.separator();
 
@@ -1927,7 +1863,6 @@ impl RiffApp {
                         self.render_playlist_entry(
                             ui,
                             state,
-                            cmd,
                             playlist_id,
                             entry,
                             current_track.as_ref(),
@@ -1946,7 +1881,6 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
         playlist_id: &PlaylistId,
         entry: &(TrackId, Option<Track>, bool),
         current_track: Option<&TrackId>,
@@ -1954,15 +1888,7 @@ impl RiffApp {
     ) {
         let (tid, track, valid) = entry;
         if *valid && let Some(t) = track {
-            self.render_reorderable_playlist_row(
-                ui,
-                state,
-                cmd,
-                t,
-                current_track,
-                playlist_id,
-                index,
-            );
+            self.render_reorderable_playlist_row(ui, state, t, current_track, playlist_id, index);
             return;
         }
 
@@ -1983,7 +1909,7 @@ impl RiffApp {
                         .color(ui.visuals().warn_fg_color),
                 )
                 .on_hover_text("File moved or deleted \u{2014} this entry won't play");
-            self.attach_track_menu(&response, state, cmd, tid, None, Some(playlist_id));
+            self.attach_track_menu(&response, state, tid, None, Some(playlist_id));
         });
     }
 
@@ -1998,7 +1924,6 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
         track: &Track,
         current_track: Option<&TrackId>,
         playlist_id: &PlaylistId,
@@ -2035,9 +1960,7 @@ impl RiffApp {
         }
         if response.double_clicked() {
             state.selected_track = Some(track.id.clone());
-            if let Some(s) = cmd {
-                let _ = s.send(PlaybackCommand::Play(track.id.clone()));
-            }
+            self.transport.play(track.id.clone());
         }
         if let Some(from) = outcome.drop_from {
             // One immediate durable transaction; the committed mutation
@@ -2051,14 +1974,7 @@ impl RiffApp {
                 index,
             );
         }
-        self.attach_track_menu(
-            &response,
-            state,
-            cmd,
-            &track.id,
-            Some(track),
-            Some(playlist_id),
-        );
+        self.attach_track_menu(&response, state, &track.id, Some(track), Some(playlist_id));
     }
 
     /// The restyled Now Playing stage (Issue 10): the 240px cover with its
@@ -2068,12 +1984,7 @@ impl RiffApp {
     /// [`crate::ui::now_playing::show_now_playing`]; every reported action
     /// routes through [`apply_now_playing_action`], so Close always lands on
     /// the Library View and the transport still emits engine commands.
-    fn show_now_playing_view(
-        &mut self,
-        ui: &mut egui::Ui,
-        state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
-    ) {
+    fn show_now_playing_view(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         let palette = self.theme.active;
 
         // Current track + cover from the LRU texture cache; misses enqueue a
@@ -2143,17 +2054,11 @@ impl RiffApp {
             &mut self.now_playing_actions,
         );
         for action in self.now_playing_actions.drain(..) {
-            apply_now_playing_action(action, state, cmd);
+            apply_now_playing_action(action, state, self.transport.as_ref());
         }
     }
 
-    fn render_folder_tree(
-        &mut self,
-        ui: &mut egui::Ui,
-        state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
-        query: &str,
-    ) {
+    fn render_folder_tree(&mut self, ui: &mut egui::Ui, state: &mut AppState, query: &str) {
         if state.library_paths.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(40.0);
@@ -2172,7 +2077,7 @@ impl RiffApp {
                 if !self.views.folder_has_audio(lib_path) {
                     continue;
                 }
-                self.render_folder_node(ui, state, cmd, lib_path, 0, query);
+                self.render_folder_node(ui, state, lib_path, 0, query);
             }
         });
     }
@@ -2185,7 +2090,6 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
-        cmd: Option<&Sender<PlaybackCommand>>,
         path: &Path,
         level: usize,
         query: &str,
@@ -2254,17 +2158,17 @@ impl RiffApp {
             state.selected_folder = Some(path.to_path_buf());
         }
         if response.double_clicked() {
-            play_folder(&folder_track_ids, cmd);
+            play_folder(&folder_track_ids, self.transport.as_ref());
         }
         if !folder_track_ids.is_empty() {
-            show_list_context_menu(&response, cmd, &folder_track_ids);
+            show_list_context_menu(&response, self.transport.as_ref(), &folder_track_ids);
         }
         collapsing.store(ui.ctx());
 
         collapsing.show_body_unindented(ui, |ui| {
             let children = self.views.folder_children(path);
             for child_path in children.iter() {
-                self.render_folder_node(ui, state, cmd, child_path, level + 1, query);
+                self.render_folder_node(ui, state, child_path, level + 1, query);
             }
 
             let direct = self.views.folder_direct_tracks(path);
@@ -2275,7 +2179,6 @@ impl RiffApp {
                 self.interactive_track_row(
                     ui,
                     state,
-                    cmd,
                     track,
                     current_track.as_ref(),
                     None,
@@ -2423,16 +2326,13 @@ pub fn cache_polled_covers<S: std::hash::BuildHasher>(
 /// Play a folder: start its first track and queue the rest as ONE batch
 /// command (allocation plan 4.3), so the queue mutates once under one lock
 /// instead of N times. The ids arrive in the store's path order — exactly
-/// what the former mirror listing produced.
-fn play_folder(track_ids: &[TrackId], cmd: Option<&Sender<PlaybackCommand>>) {
-    let Some(s) = cmd else { return };
+/// what the former mirror listing produced. The play/append split maps onto
+/// the Transport port's [`crate::app::transport::Transport::play_many`].
+fn play_folder(track_ids: &[TrackId], transport: &dyn Transport) {
     let Some(first) = track_ids.first() else {
         return;
     };
-    let _ = s.send(PlaybackCommand::Play(first.clone()));
-    if track_ids.len() > 1 {
-        let _ = s.send(PlaybackCommand::AddMany(track_ids[1..].to_vec()));
-    }
+    transport.play_many(first.clone(), track_ids[1..].to_vec());
 }
 
 /// Tracks directly in a folder, optionally filtered by search query. The
@@ -2487,7 +2387,7 @@ fn render_track_meta_labels(
 /// Arguments for the shared track context menu, grouped into one value to
 /// keep the call sites readable.
 struct TrackMenuArgs<'a> {
-    cmd: Option<&'a Sender<PlaybackCommand>>,
+    transport: &'a dyn Transport,
     track_id: &'a TrackId,
     /// The track itself; `None` (e.g. a playlist entry whose file is missing)
     /// suppresses playback actions and "Edit Tags".
@@ -2511,7 +2411,7 @@ struct TrackMenuArgs<'a> {
 /// (`track` is `None`).
 fn show_track_context_menu(response: &egui::Response, args: TrackMenuArgs<'_>) {
     let TrackMenuArgs {
-        cmd,
+        transport,
         track_id,
         track,
         tag_edit,
@@ -2520,7 +2420,6 @@ fn show_track_context_menu(response: &egui::Response, args: TrackMenuArgs<'_>) {
         playlist_store,
         remove_from_playlist,
     } = args;
-    let cmd = cmd.cloned();
     let tid = track_id.clone();
     let playable = track.is_some();
     let edit_track = track.filter(|_| advanced).cloned();
@@ -2532,21 +2431,15 @@ fn show_track_context_menu(response: &egui::Response, args: TrackMenuArgs<'_>) {
     response.context_menu(move |ui| {
         if playable {
             if ui.button("Play").clicked() {
-                if let Some(ref s) = cmd {
-                    let _ = s.send(PlaybackCommand::Play(tid.clone()));
-                }
+                transport.play(tid.clone());
                 ui.close();
             }
             if ui.button("Play Next").clicked() {
-                if let Some(ref s) = cmd {
-                    let _ = s.send(PlaybackCommand::PlayNext(tid.clone()));
-                }
+                transport.play_next(tid.clone());
                 ui.close();
             }
             if ui.button("Add to Queue").clicked() {
-                if let Some(ref s) = cmd {
-                    let _ = s.send(PlaybackCommand::AddToQueue(tid.clone()));
-                }
+                transport.add_to_queue(tid.clone());
                 ui.close();
             }
             add_to_playlist_menu(ui, &playlist_options, playlist_store, &tid);
@@ -2580,36 +2473,29 @@ fn show_track_context_menu(response: &egui::Response, args: TrackMenuArgs<'_>) {
 /// track, then queue the rest), Play Next, and Append to Queue.
 fn show_list_context_menu(
     response: &egui::Response,
-    cmd: Option<&Sender<PlaybackCommand>>,
+    transport: &dyn Transport,
     track_ids: &[TrackId],
 ) {
-    let cmd = cmd.cloned();
     let tids = track_ids.to_vec();
     response.context_menu(move |ui| {
         if ui.button("Play").clicked() {
-            if let Some(ref s) = cmd
-                && let Some(first) = tids.first()
-            {
-                let _ = s.send(PlaybackCommand::Play(first.clone()));
+            if let Some(first) = tids.first() {
+                transport.play(first.clone());
                 for tid in &tids[1..] {
-                    let _ = s.send(PlaybackCommand::AddToQueue(tid.clone()));
+                    transport.add_to_queue(tid.clone());
                 }
             }
             ui.close();
         }
         if ui.button("Play Next").clicked() {
-            if let Some(ref s) = cmd {
-                for tid in tids.iter().rev() {
-                    let _ = s.send(PlaybackCommand::PlayNext(tid.clone()));
-                }
+            for tid in tids.iter().rev() {
+                transport.play_next(tid.clone());
             }
             ui.close();
         }
         if ui.button("Append to Queue").clicked() {
-            if let Some(ref s) = cmd {
-                for tid in &tids {
-                    let _ = s.send(PlaybackCommand::AddToQueue(tid.clone()));
-                }
+            for tid in &tids {
+                transport.add_to_queue(tid.clone());
             }
             ui.close();
         }
@@ -2681,13 +2567,3 @@ fn add_to_playlist_menu(
 /// widgets that render it (Issue 08); re-exported here so existing callers
 /// and the test prelude keep their stable path.
 pub use crate::ui::playerbar::format_duration;
-
-/// Clamp a seek request (in seconds) into `[0, total]` so a drag past the end
-/// of a track seeks to the end rather than beyond it (REQ-UI-005). When the
-/// total duration is unknown there is nothing to clamp against, so the seek
-/// falls back to the start; non-finite inputs (NaN/infinity) do the same.
-pub fn clamp_seek(secs: f32, total: Option<std::time::Duration>) -> std::time::Duration {
-    let finite = if secs.is_finite() { secs } else { 0.0 };
-    let upper = total.map_or(0.0, |t| t.as_secs_f32());
-    std::time::Duration::from_secs_f32(finite.clamp(0.0, upper.max(0.0)))
-}

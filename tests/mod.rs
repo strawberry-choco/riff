@@ -49,6 +49,7 @@ pub use riff::app::gapless::{
     repeat_one_handoff_eligible, samples_from_duration,
 };
 pub use riff::app::state::{AppState, LibraryStatus, WatchState, replaygain_factor};
+pub use riff::app::transport::clamp_seek;
 pub use riff::domain::{
     Album, Artist, PlaybackCommand, PlaybackPosition, PlaybackQueue, PlaybackState, PlaybackUpdate,
     Playlist, PlaylistId, RepeatMode, SmartPlaylistKind, Track, TrackId, TrackMetadata,
@@ -58,7 +59,7 @@ pub use riff::infra::{
     AudioFileScanner, CpalAudioOutput, FilesystemWatcher, ImageCoverLoader, LoftyMetadataReader,
     LoftyMetadataWriter, SymphoniaDecoder,
 };
-pub use riff::ui::app::{TagEditState, clamp_seek, format_duration, lru_insert};
+pub use riff::ui::app::{TagEditState, format_duration, lru_insert};
 pub use riff::ui::settings::{expand_tilde, suggest_directories};
 
 // Standard-library names referenced unqualified in some suites.
@@ -128,6 +129,7 @@ pub mod test_utils {
 /// tests) build on the same scripted decoder/output behavior.
 pub mod mocks {
     use riff::app::errors::AppError;
+    use riff::app::state::AppState;
     use riff::app::store::{
         LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings, SettingsStore,
     };
@@ -135,6 +137,7 @@ pub mod mocks {
         AudioDecoder, AudioFormatInfo, AudioOutput, CoverImage, CoverLoader, MetadataReader,
         MetadataWriter, TagEdit,
     };
+    use riff::app::transport::clamp_seek;
     use riff::domain::{
         Album, Artist, CoverSource, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
         TrackMetadata,
@@ -720,6 +723,122 @@ pub mod mocks {
             _ordered: &[TrackId],
         ) -> Result<bool, AppError> {
             Ok(false)
+        }
+    }
+
+    /// One recorded [`Transport`](riff::app::transport::Transport) intent,
+    /// in issue order. Seek/volume intents carry the ADAPTED values (clamped
+    /// target, effective volume), mirroring what
+    /// [`ChannelTransport`](riff::app::transport::ChannelTransport) would
+    /// put on the wire.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum TransportIntent {
+        Play(TrackId),
+        PlayMany(TrackId, Vec<TrackId>),
+        PlayNext(TrackId),
+        AddToQueue(TrackId),
+        Pause,
+        Resume,
+        Next,
+        Previous,
+        Stop,
+        /// The clamped seek target.
+        Seek(Duration),
+        /// The effective volume applied from state.
+        ApplyVolume(f32),
+        /// The new muted flag after the flip, followed by the resulting
+        /// effective volume.
+        ToggleMute(bool),
+        ApplyVolumeAfterMute(f32),
+    }
+
+    /// Recording [`Transport`](riff::app::transport::Transport) fake: keeps
+    /// every issued intent behind an internal mutex so UI-layer tests can
+    /// assert on playback intents instead of raw channel bytes. The
+    /// state-coupled methods reuse the production clamp/volume math, exactly
+    /// like the real adapter.
+    pub struct MockTransport {
+        intents: Mutex<Vec<TransportIntent>>,
+    }
+
+    impl MockTransport {
+        pub fn new() -> Self {
+            Self {
+                intents: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Snapshot of every recorded intent, in issue order.
+        #[must_use]
+        pub fn recorded(&self) -> Vec<TransportIntent> {
+            self.intents.lock().unwrap().clone()
+        }
+
+        fn record(&self, intent: TransportIntent) {
+            self.intents.lock().unwrap().push(intent);
+        }
+    }
+
+    impl Default for MockTransport {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl riff::app::transport::Transport for MockTransport {
+        fn play(&self, track: TrackId) {
+            self.record(TransportIntent::Play(track));
+        }
+
+        fn play_many(&self, first: TrackId, rest: Vec<TrackId>) {
+            self.record(TransportIntent::PlayMany(first, rest));
+        }
+
+        fn play_next(&self, track: TrackId) {
+            self.record(TransportIntent::PlayNext(track));
+        }
+
+        fn add_to_queue(&self, track: TrackId) {
+            self.record(TransportIntent::AddToQueue(track));
+        }
+
+        fn pause(&self) {
+            self.record(TransportIntent::Pause);
+        }
+
+        fn resume(&self) {
+            self.record(TransportIntent::Resume);
+        }
+
+        fn next(&self) {
+            self.record(TransportIntent::Next);
+        }
+
+        fn previous(&self) {
+            self.record(TransportIntent::Previous);
+        }
+
+        fn stop(&self) {
+            self.record(TransportIntent::Stop);
+        }
+
+        fn seek(&self, state: &AppState, position: Duration) {
+            self.record(TransportIntent::Seek(clamp_seek(
+                position.as_secs_f32(),
+                state.current_position.total,
+            )));
+        }
+
+        fn apply_volume_from_state(&self, state: &AppState) {
+            self.record(TransportIntent::ApplyVolume(state.effective_volume()));
+        }
+
+        fn toggle_mute(&self, state: &mut AppState) {
+            state.muted = !state.muted;
+            self.record(TransportIntent::ToggleMute(state.muted));
+            self.record(TransportIntent::ApplyVolumeAfterMute(
+                state.effective_volume(),
+            ));
         }
     }
 

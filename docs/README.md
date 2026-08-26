@@ -53,7 +53,10 @@ What riff is, what it does, and how to use it.
 - [ADR 0001: SQLite is the authoritative Application Store](adr/0001-sqlite-is-the-authoritative-application-store.md) — supersedes decision 004.
 - [ADR 0002: The UI reads the store through Session Projections](adr/0002-ui-reads-the-store-through-session-projections.md).
 - [ADR 0003: Store query model](adr/0003-store-query-model.md).
+- [ADR 0004: Dual-theme tokens despite a dark-only design source](adr/0004-dual-theme-tokens.md).
+- [ADR 0005: Custom window chrome (frameless) on all platforms](adr/0005-frameless-window-chrome-on-all-platforms.md).
 - [ADR 0006: Background workers behind app-layer service seams](adr/0006-background-workers-behind-app-layer-service-seams.md) — Tag Edit and Cover services replace the worker threads spawned inline by `RiffApp`.
+- [ADR 0007: No write-side SessionStore facade](adr/0007-no-write-side-sessionstore-facade.md) — the three store-mutation ports stay separate; the store owns generation bumps, so a facade would be a pass-through.
 
 ### Technical
 

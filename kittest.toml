@@ -1,0 +1,23 @@
+# egui_kittest golden-image comparison config (loaded automatically from
+# the directory containing Cargo.lock).
+#
+# Baselines are pixel-exact on the authoring machine, but rasterization
+# differs slightly across GPUs/drivers (anti-aliasing at text and curve
+# edges), so CI runners legitimately produce small per-pixel diffs.
+# `failed_pixel_count_threshold` allows that noise while still failing any
+# real regression (layout shifts and color changes move far more pixels).
+# Values are calibrated against observed CI diff counts with headroom;
+# tighten them if whole goldens start passing with visible regressions.
+
+failed_pixel_count_threshold = 8_000
+
+[windows]
+failed_pixel_count_threshold = 8_000
+
+[linux]
+# Software rendering (lavapipe) diverges more from the authoring GPU than
+# a hardware runner does; revisit after the first green Linux run.
+failed_pixel_count_threshold = 20_000
+
+[mac]
+failed_pixel_count_threshold = 8_000

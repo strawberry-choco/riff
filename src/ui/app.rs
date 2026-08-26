@@ -1,43 +1,29 @@
 use crate::app::MutexExt;
-use crate::app::commands::{LibraryCommand, LibraryUpdate};
-use crate::app::cover_resolver::CoverResolver;
-use crate::app::projection::{
-    BrowsingProjection, FolderProjection, PlaybackProjection, ProjectionKey,
-    SmartPlaylistsProjection, TrackListProjection, WINDOW_SIZE,
-};
+// The cover-cache capacity discipline lives in the app layer next to the
+// Cover Service's negative cache, so both caches share ONE constant and ONE
+// LRU implementation (spec: no second constant scheme).
+use crate::app::cover_service::Covers;
+pub use crate::app::cover_service::{COVER_CACHE_CAP, lru_insert};
+use crate::app::scan_service::{ScanOutcome, Scans};
 use crate::app::state::{AppState, BrowseMode, LibraryStatus, ViewMode};
-use crate::app::store::{
-    LibraryMutationStore, LibraryQueryStore, PlaylistStore, SettingsStore, StoreGeneration,
-};
-use crate::app::traits::{CoverImage, MetadataWriter, TagEdit};
+use crate::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
+use crate::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
+use crate::app::traits::TagEdit;
+use crate::app::views::SessionViews;
 use crate::app::watcher_manager::WatcherManager;
 use crate::domain::{
     Album, Artist, PlaybackCommand, PlaybackState, Playlist, PlaylistId, SmartPlaylistKind, Track,
     TrackId,
 };
-use crate::infra::{ImageCoverLoader, LoftyMetadataReader, LoftyMetadataWriter};
+use crate::ui::chrome::TitleBarAction;
+use crate::ui::now_playing::{NowPlayingAction, UpNextEntry};
+use crate::ui::playerbar::PlayerBarAction;
 use crate::ui::theme;
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::Sender;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-
-/// Request to write metadata tags to a track's file, sent from the UI thread
-/// to the background tag-write thread.
-struct TagWriteRequest {
-    path: PathBuf,
-    edit: TagEdit,
-    track_id: TrackId,
-}
-
-/// Outcome of a background tag write, sent back to the UI thread.
-struct TagWriteResult {
-    track_id: TrackId,
-    path: PathBuf,
-    edit: TagEdit,
-    outcome: Result<(), String>,
-}
 
 /// Transient UI state for the "Edit Tags" modal. Lives on `RiffApp` (not
 /// `AppState`), following the `settings_text_input` precedent. Public so the
@@ -98,39 +84,48 @@ pub(crate) struct ThemeState {
     last_applied: Option<(bool, bool)>,
 }
 
-/// Max entries per cover cache (positive textures and negative results
-/// alike); the oldest entries are evicted LRU-style beyond this cap.
-const COVER_CACHE_CAP: usize = 50;
-
-/// Insert `key` at the most-recently-used end of an LRU key list: an already
-/// present entry is moved to the end (no duplicates), and keys evicted beyond
-/// `cap` are returned so the caller can drop their cached payloads. Shared by
-/// the positive (texture) and negative (artless-track) cover caches.
-pub fn lru_insert(keys: &mut Vec<String>, key: String, cap: usize) -> Vec<String> {
-    keys.retain(|k| k != &key);
-    keys.push(key);
-    let mut evicted = Vec::new();
-    while keys.len() > cap {
-        evicted.push(keys.remove(0));
-    }
-    evicted
+/// `"Artist - Title"` for one track — flat list, search, playlists, window
+/// title. Formatted fresh each frame; staleness is the projections' job.
+fn label_artist_title(track: &Track) -> String {
+    format!(
+        "{} - {}",
+        track.metadata.display_artist(),
+        track.metadata.display_title(&track.file_path)
+    )
 }
 
+/// `"N. Title"` for one track — album and folder tree rows.
+fn label_numbered(track: &Track) -> String {
+    format!(
+        "{}. {}",
+        track.metadata.track_number.unwrap_or(0),
+        track.metadata.display_title(&track.file_path)
+    )
+}
+
+/// Transient UI prompt/focus flags are genuinely two-state; the fourth bool
+/// only exists on Linux (`settings_show_input`), which is where the lint fires.
+#[allow(clippy::struct_excessive_bools)]
 pub struct RiffApp {
     pub state: Arc<Mutex<AppState>>,
     command_sender: Option<Sender<PlaybackCommand>>,
-    library_command_sender: Option<Sender<LibraryCommand>>,
-    library_update_rx: Option<Receiver<LibraryUpdate>>,
+    /// The Library Scan Service front end (ADR 0006): requests scans and
+    /// yields polled outcomes; the whole walk/commit/cancel flow and the
+    /// per-path scan state live behind it. The watcher thread holds its own
+    /// clone of the same shareable service.
+    pub(crate) scans: Box<dyn Scans>,
     cover_textures: std::collections::HashMap<String, egui::TextureHandle>,
     cover_lru_keys: Vec<String>,
-    /// Tracks (by key) whose cover resolve came back empty, so
-    /// `request_cover` does not re-enqueue the same disk/tag I/O every
-    /// frame. Same LRU discipline as `cover_lru_keys`.
-    cover_negative_keys: Vec<String>,
-    cover_request_tx: Option<Sender<(TrackId, PathBuf)>>,
-    cover_response_rx: Receiver<(String, Option<CoverImage>)>,
-    tag_write_request_tx: Option<Sender<TagWriteRequest>>,
-    tag_write_result_rx: Receiver<TagWriteResult>,
+    /// The Cover Service front end (ADR 0006): sends resolve intent and
+    /// yields drained results; dedup and the negative cache live behind it.
+    covers: Box<dyn Covers>,
+    /// The Tag Edit Service front end (ADR 0006): submits save intent and
+    /// yields polled outcomes; the whole save flow lives behind it.
+    tag_edits: Box<dyn TagEdits>,
+    /// The one Tag Edit currently outstanding, recorded at submit time so a
+    /// polled outcome can be matched back to its modal (and its file name
+    /// shown in the status line) — outcomes themselves carry no identity.
+    tag_edit_in_flight: Option<(TrackId, PathBuf)>,
     tag_edit: Option<TagEditState>,
     /// Which read-only smart playlist is open in the library explorer, if any.
     /// Transient UI state (precedent: `tag_edit`); the playlist contents are
@@ -138,6 +133,23 @@ pub struct RiffApp {
     smart_playlist_view: Option<SmartPlaylistKind>,
     /// Which user playlist is open in the library explorer, if any.
     playlist_view: Option<PlaylistId>,
+    /// The playing track's id whose cover the Now Playing stage last
+    /// requested/rendered; only re-cloned when the track moves.
+    now_playing_cover_key: Option<String>,
+    /// The current `TrackId` the window title and tray tooltip were last
+    /// pushed for (REQ-SI-001): both OS side effects only fire when this
+    /// identity moves — pure command suppression, never staleness.
+    last_title_key: TitleKey,
+    /// Retained seek-row readout buffers for the playerbar and the
+    /// Now Playing stage (allocation plan 2.4).
+    playerbar_readouts: crate::ui::playerbar::SeekReadouts,
+    stage_readouts: crate::ui::playerbar::SeekReadouts,
+    /// Caller-retained action buffers for the shell widgets (allocation
+    /// plan 2.5): cleared and refilled per frame so idle frames never build
+    /// a fresh `Vec`.
+    titlebar_actions: Vec<TitleBarAction>,
+    playerbar_actions: Vec<PlayerBarAction>,
+    now_playing_actions: Vec<NowPlayingAction>,
     /// Transient "New Playlist" name prompt (`Some` = open, holds the draft).
     playlist_create_name: Option<String>,
     /// Transient rename prompt: (playlist id, draft name).
@@ -153,46 +165,22 @@ pub struct RiffApp {
     /// back, so preferences survive restarts through the store.
     pub(crate) settings_store: Box<dyn SettingsStore>,
     /// The Application Store's playlists section. Every playlist mutation
-    /// commits through it as one immediate durable transaction; the in-memory
-    /// `state.playlists` list is only a Session Projection refreshed from the
-    /// store after each committed change.
+    /// commits through it as one immediate durable transaction; its adapter
+    /// owns the session playlist generation whose bumps invalidate the
+    /// seam's playlist projection automatically — reads go through
+    /// [`Self::views`] and no commit site refreshes or patches anything.
     pub(crate) playlist_store: Box<dyn PlaylistStore>,
-    /// The Application Store's Library collection query port: the flat list
-    /// and search box fetch bounded windows through it, and startup hydrates
-    /// the transitional in-memory mirror from it.
-    pub(crate) library_queries: Box<dyn LibraryQueryStore>,
     /// The Application Store's Library collection mutation port: committed
     /// metadata changes (e.g. tag edits) persist through it as one durable
     /// transaction per batch.
     pub(crate) library_mutations: Box<dyn LibraryMutationStore>,
-    /// Session-local generation counter bumped after each committed store
-    /// mutation; projections compare against it to know when to refetch
-    /// (ADR 0002).
-    pub(crate) store_generation: StoreGeneration,
-    /// Bounded Session Projection serving the flat list and search box
-    /// (ADR 0003). Never authoritative; invalidated by generation bumps.
-    tracks_projection: TrackListProjection,
-    /// Session Projection serving the artist/album browsing views: artists
-    /// A–Z, per-artist albums, and per-album tracks, all fetched from the
-    /// store through [`Self::library_queries`] and invalidated by generation
-    /// bumps. Never authoritative.
-    browsing_projection: BrowsingProjection,
-    /// Session Projection serving the folder-tree views: subtree probes,
-    /// subtree search matches, subtree track ids, direct track listings,
-    /// and child directories, all fetched from the store through
-    /// [`Self::library_queries`] and invalidated by generation bumps.
-    pub(crate) folder_projection: FolderProjection,
-    /// Session Projection serving the read-only smart playlists: one
-    /// computed list per kind, fetched from the store through
-    /// [`Self::library_queries`] and invalidated by generation bumps, so a
-    /// finished play or scan regenerates them on the next frame.
-    smart_playlists_projection: SmartPlaylistsProjection,
-    /// Session Projection serving the playback-side reads (ADR 0002): the
-    /// current Track, the Now Playing Up Next window, and the track-details
-    /// panel's selected Track — all fetched from the store through
-    /// [`Self::library_queries`] and invalidated by generation bumps and
-    /// Playback Queue changes. Never authoritative.
-    playback_projection: PlaybackProjection,
+    /// The Session Views facade (ADR 0002): every store-backed read the UI
+    /// renders — flat list, search, browsing, folders, smart playlists, and
+    /// the playback-side slots — goes through it. It owns the five bounded
+    /// Session Projections, the Library query port, and the session-local
+    /// generation counter, so view code never touches staleness handling or
+    /// store-error fallbacks.
+    pub(crate) views: SessionViews,
     pub(crate) theme: ThemeState,
     /// Vendored-glyph texture cache for the shell's icon controls (Issue 06).
     pub(crate) icons: crate::ui::icons::IconCache,
@@ -220,79 +208,36 @@ impl RiffApp {
     pub fn new(
         state: Arc<Mutex<AppState>>,
         command_sender: Sender<PlaybackCommand>,
-        library_command_sender: Sender<LibraryCommand>,
-        library_update_rx: Receiver<LibraryUpdate>,
+        scans: Box<dyn Scans>,
         watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
         #[cfg(not(target_os = "linux"))] tray_icon: Option<tray_icon::TrayIcon>,
         quit_flag: Arc<AtomicBool>,
         settings_store: Box<dyn SettingsStore>,
         playlist_store: Box<dyn PlaylistStore>,
-        library_queries: Box<dyn LibraryQueryStore>,
         library_mutations: Box<dyn LibraryMutationStore>,
-        store_generation: StoreGeneration,
+        views: SessionViews,
+        tag_edits: Box<dyn TagEdits>,
+        covers: Box<dyn Covers>,
     ) -> Self {
-        let resolver = CoverResolver::new(
-            Box::new(LoftyMetadataReader::new()),
-            Box::new(ImageCoverLoader::new()),
-        );
-
-        let (cover_tx, cover_rx_inner): (Sender<(TrackId, PathBuf)>, _) = unbounded();
-        let (response_tx, response_rx): (Sender<(String, Option<CoverImage>)>, _) = unbounded();
-
-        std::thread::spawn(move || {
-            while let Ok((track_id, path)) = cover_rx_inner.recv() {
-                let result = match resolver.resolve(&path) {
-                    Ok(val) => val,
-                    Err(e) => {
-                        tracing::warn!("Cover resolution failed for {:?}: {}", path, e);
-                        None
-                    }
-                };
-                let _ = response_tx.send((track_id.0.clone(), result));
-            }
-        });
-
-        // Tag-write background thread: owns the lofty-based writer, processes
-        // write requests off the UI thread, and reports outcomes back.
-        let writer = Box::new(LoftyMetadataWriter::new());
-        let (tag_write_tx, tag_write_rx): (Sender<TagWriteRequest>, Receiver<TagWriteRequest>) =
-            unbounded();
-        let (tag_result_tx, tag_result_rx): (Sender<TagWriteResult>, Receiver<TagWriteResult>) =
-            unbounded();
-
-        std::thread::spawn(move || {
-            while let Ok(request) = tag_write_rx.recv() {
-                let outcome = match writer.write_metadata(&request.path, &request.edit) {
-                    Ok(()) => Ok(()),
-                    Err(e) => {
-                        tracing::warn!("Tag write failed for {:?}: {}", request.path, e);
-                        Err(e.to_string())
-                    }
-                };
-                let _ = tag_result_tx.send(TagWriteResult {
-                    track_id: request.track_id,
-                    path: request.path,
-                    edit: request.edit,
-                    outcome,
-                });
-            }
-        });
-
         Self {
             state,
             command_sender: Some(command_sender),
-            library_command_sender: Some(library_command_sender),
-            library_update_rx: Some(library_update_rx),
+            scans,
             cover_textures: std::collections::HashMap::new(),
             cover_lru_keys: Vec::new(),
-            cover_negative_keys: Vec::new(),
-            cover_request_tx: Some(cover_tx),
-            cover_response_rx: response_rx,
-            tag_write_request_tx: Some(tag_write_tx),
-            tag_write_result_rx: tag_result_rx,
+            covers,
+            tag_edits,
+            tag_edit_in_flight: None,
             tag_edit: None,
             smart_playlist_view: None,
             playlist_view: None,
+            now_playing_cover_key: None,
+            last_title_key: TitleKey::Unset,
+            playerbar_readouts: crate::ui::playerbar::SeekReadouts::new(),
+            stage_readouts: crate::ui::playerbar::SeekReadouts::new(),
+            titlebar_actions: Vec::new(),
+            playerbar_actions: Vec::new(),
+            now_playing_actions: Vec::new(),
             playlist_create_name: None,
             playlist_rename: None,
             clear_library_confirm: false,
@@ -301,14 +246,8 @@ impl RiffApp {
             watcher_manager,
             settings_store,
             playlist_store,
-            library_queries,
             library_mutations,
-            store_generation,
-            tracks_projection: TrackListProjection::new(ProjectionKey::Flat),
-            browsing_projection: BrowsingProjection::new(),
-            folder_projection: FolderProjection::new(),
-            smart_playlists_projection: SmartPlaylistsProjection::new(),
-            playback_projection: PlaybackProjection::new(),
+            views,
             theme: ThemeState {
                 dark: true, // dark (mockup palette) by default
                 active: theme::Palette::dark(),
@@ -348,45 +287,45 @@ impl RiffApp {
         self.theme.last_applied = Some((dark, high_contrast));
     }
 
+    /// Send cover intent for one track to the Cover Service. The only
+    /// UI-side check left is the texture cache (the texture LRU is
+    /// UI-owned per the texture boundary); request deduplication and the
+    /// negative cache live behind the service seam.
     fn request_cover(&self, track_id: &TrackId, file_path: &Path) {
-        let key = &track_id.0;
-        if !self.cover_textures.contains_key(key)
-            && !self.cover_negative_keys.contains(key)
-            && let Some(ref tx) = self.cover_request_tx
-        {
-            let _ = tx.send((track_id.clone(), file_path.to_path_buf()));
-        }
+        request_cover_intent(
+            self.cover_textures.contains_key(&track_id.0),
+            self.covers.as_ref(),
+            track_id.clone(),
+            file_path.to_path_buf(),
+        );
     }
 
+    /// Drain polled Library Scan outcomes from the service and map them onto
+    /// session state exactly as before the extraction: per-root statuses
+    /// plus the titlebar scan-status line. The service NEVER touches
+    /// `AppState` — this mapping is the UI's whole remaining scan
+    /// responsibility (ADR 0006). The watcher observes a scan's end itself
+    /// via `is_scanning`, so no relay fires here anymore.
     fn poll_library_updates(&self, state: &mut AppState) {
-        if let Some(ref rx) = self.library_update_rx {
-            while let Ok(update) = rx.try_recv() {
-                match update {
-                    LibraryUpdate::Progress {
-                        path,
-                        files_found,
-                        current_dir,
-                    } => {
-                        state
-                            .library_statuses
-                            .insert(path, LibraryStatus::Scanning { files_found });
-                        state.scan_status = Some(format!("{files_found} files, {current_dir}"));
-                    }
-                    LibraryUpdate::Complete { path, total_files } => {
-                        state
-                            .library_statuses
-                            .insert(path.clone(), LibraryStatus::Scanned(total_files));
-                        state.scan_status = Some(format!("Scan complete: {total_files} tracks"));
-                        // Scan batches already committed through the store as
-                        // they progressed; nothing whole-file remains to save.
-                        if let Some(ref mut mgr) = *self.watcher_manager.lock_or_recover() {
-                            mgr.mark_scan_complete(&path);
-                        }
-                    }
-                    LibraryUpdate::Error { path, message } => {
-                        state.library_statuses.insert(path, LibraryStatus::Idle);
-                        state.scan_status = Some(format!("Error: {message}"));
-                    }
+        for outcome in self.scans.poll() {
+            match outcome {
+                ScanOutcome::Progress { path, files_found } => {
+                    state
+                        .library_statuses
+                        .insert(path, LibraryStatus::Scanning { files_found });
+                    state.scan_status = Some(format!("{files_found} files"));
+                }
+                ScanOutcome::Complete { path, total_files } => {
+                    state
+                        .library_statuses
+                        .insert(path, LibraryStatus::Scanned(total_files));
+                    state.scan_status = Some(format!("Scan complete: {total_files} tracks"));
+                    // Scan batches already committed through the store as
+                    // they progressed; nothing whole-file remains to save.
+                }
+                ScanOutcome::Failed { path, reason } => {
+                    state.library_statuses.insert(path, LibraryStatus::Idle);
+                    state.scan_status = Some(format!("Error: {reason}"));
                 }
             }
         }
@@ -398,104 +337,32 @@ impl RiffApp {
         }
     }
 
-    /// Drain completed tag writes from the background thread. On success the
-    /// edit persists through the store's targeted tag-refresh flow as one
-    /// durable transaction (history preserved, album year/genre re-derived);
-    /// the mutation adapter bumps the session generation so projections
-    /// refetch. The edited Track resolves from the Application Store — the
-    /// sole authority — and an unknown track surfaces like any other save
-    /// failure. On failure the error is surfaced in the open modal, which
-    /// stays open.
-    fn poll_tag_write_results(&mut self, state: &mut AppState) {
-        while let Ok(result) = self.tag_write_result_rx.try_recv() {
-            match result.outcome {
-                Ok(()) => {
-                    // Resolve the edited Track from the store, apply the edit
-                    // to the fresh copy, and persist it.
-                    let resolved = match self.library_queries.get_track(&result.track_id) {
-                        Ok(track) => track,
-                        Err(e) => {
-                            tracing::error!(
-                                "Failed to resolve {:?} from the store for its tag edit: {e}",
-                                result.path
-                            );
-                            None
-                        }
-                    };
-                    let mut failure: Option<String> = None;
-                    match resolved {
-                        Some(mut track) => {
-                            result.edit.apply_to(&mut track.metadata);
-                            if let Err(e) = self.library_mutations.apply_tag_refresh(&track) {
-                                tracing::error!(
-                                    "Failed to persist tag edit for {:?}: {e}",
-                                    result.path
-                                );
-                            }
-                        }
-                        None => {
-                            // Unknown to the store (removed mid-edit, or the
-                            // read failed): nothing to persist.
-                            failure = Some("Track is no longer in the library".to_string());
-                        }
-                    }
-                    if let Some(message) = failure {
-                        if let Some(ref mut tag_edit) = self.tag_edit
-                            && tag_edit.track_id == result.track_id
-                        {
-                            tag_edit.error = Some(message);
-                            tag_edit.saving = false;
-                        }
-                    } else if self
-                        .tag_edit
-                        .as_ref()
-                        .is_some_and(|te| te.track_id == result.track_id)
-                    {
-                        self.tag_edit = None;
-                    }
-                    let name = result.path.file_name().map_or_else(
-                        || result.path.to_string_lossy().to_string(),
-                        |n| n.to_string_lossy().to_string(),
-                    );
-                    state.scan_status = Some(format!("Tags saved for {name}"));
-                    tracing::info!("Tags written for {:?}", result.path);
-                }
-                Err(message) => {
-                    tracing::warn!("Tag write failed for {:?}: {}", result.path, message);
-                    if let Some(ref mut tag_edit) = self.tag_edit
-                        && tag_edit.track_id == result.track_id
-                    {
-                        tag_edit.error = Some(message);
-                        tag_edit.saving = false;
-                    }
-                }
-            }
+    /// Drain polled Tag Edit outcomes from the service. On [`Saved`] the
+    /// matching open modal closes and the status line reports the saved
+    /// file; on `Failed` the dialog stays open with the reason — there is
+    /// no silent-success path. All outcome application lives in the free
+    /// [`apply_tag_edit_outcome`], which is what tests drive.
+    fn poll_tag_edit_outcomes(&mut self, state: &mut AppState) {
+        while let Some(outcome) = self.tag_edits.poll() {
+            apply_tag_edit_outcome(
+                outcome,
+                &mut self.tag_edit,
+                &mut self.tag_edit_in_flight,
+                &mut state.scan_status,
+            );
         }
     }
 
+    /// Consume polled cover results into the UI texture cache: rgba→texture
+    /// conversion is the egui-bound work that stays on the main thread;
+    /// every other caching concern lives in the service.
     fn update_cover_cache(&mut self, ctx: &egui::Context) {
-        while let Ok((key, cover)) = self.cover_response_rx.try_recv() {
-            if let Some(cover_image) = cover {
-                let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                    [cover_image.width as usize, cover_image.height as usize],
-                    &cover_image.rgba,
-                );
-                let texture = ctx.load_texture(&key, color_image, egui::TextureOptions::default());
-                self.cover_textures.insert(key.clone(), texture);
-                for old in lru_insert(&mut self.cover_lru_keys, key.clone(), COVER_CACHE_CAP) {
-                    self.cover_textures.remove(&old);
-                }
-                // Art arrived after a negative result (or an eviction
-                // retry): drop any stale negative entry.
-                self.cover_negative_keys.retain(|k| k != &key);
-            } else {
-                // Negative cache: remember artless tracks so `request_cover`
-                // stops re-enqueueing a resolve request (disk/tag I/O) every
-                // frame. Eviction allows an eventual retry, e.g. once art is
-                // added and the cache cycles.
-                lru_insert(&mut self.cover_negative_keys, key, COVER_CACHE_CAP);
-            }
-        }
+        cache_polled_covers(
+            self.covers.as_ref(),
+            &mut self.cover_textures,
+            &mut self.cover_lru_keys,
+            ctx,
+        );
     }
 
     /// Render the "Edit Tags" modal while `self.tag_edit` is open. Writing
@@ -597,45 +464,18 @@ impl RiffApp {
         }
     }
 
-    /// Validate the modal fields and send a [`TagWriteRequest`] to the
-    /// background tag-write thread. Invalid numeric fields keep the modal
-    /// open with an error; nothing is ever written without an explicit Save.
+    /// Validate the modal fields and submit a [`TagEditRequest`] to the Tag
+    /// Edit Service. Invalid numeric fields keep the modal open with an
+    /// error; nothing is ever written without an explicit Save. The whole
+    /// flow lives in the free [`submit_tag_edit_fields`], which is what
+    /// tests drive.
     fn submit_tag_edit(&mut self) {
-        let Some(tag_edit) = self.tag_edit.as_mut() else {
-            return;
-        };
-
-        let request = match (
-            parse_number("Year", &tag_edit.year),
-            parse_number("Track number", &tag_edit.track_number),
-        ) {
-            (Ok(year), Ok(track_number)) => {
-                tag_edit.error = None;
-                tag_edit.saving = true;
-                Some(TagWriteRequest {
-                    path: tag_edit.path.clone(),
-                    track_id: tag_edit.track_id.clone(),
-                    edit: TagEdit {
-                        title: Some(tag_edit.title.clone()),
-                        artist: Some(tag_edit.artist.clone()),
-                        album: Some(tag_edit.album.clone()),
-                        album_artist: Some(tag_edit.album_artist.clone()),
-                        genre: Some(tag_edit.genre.clone()),
-                        year,
-                        track_number,
-                    },
-                })
-            }
-            (Err(error), _) | (_, Err(error)) => {
-                tag_edit.error = Some(error);
-                None
-            }
-        };
-
-        if let Some(request) = request
-            && let Some(ref tx) = self.tag_write_request_tx
-        {
-            let _ = tx.send(request);
+        if let Some(ref mut tag_edit) = self.tag_edit {
+            submit_tag_edit_fields(
+                tag_edit,
+                self.tag_edits.as_ref(),
+                &mut self.tag_edit_in_flight,
+            );
         }
     }
 
@@ -663,7 +503,9 @@ impl RiffApp {
         remove_from_playlist: Option<&PlaylistId>,
     ) {
         let advanced = state.ui_flags.advanced_mode;
-        let playlists_slot = &mut state.playlists;
+        // Arc clone out of the seam first: no `&self.views` borrow may live
+        // across widget rendering.
+        let playlists = self.views.playlists();
         let tag_edit_slot = &mut self.tag_edit;
         let playlist_store_slot = self.playlist_store.as_mut();
         show_track_context_menu(
@@ -674,7 +516,7 @@ impl RiffApp {
                 track,
                 tag_edit: tag_edit_slot,
                 advanced,
-                playlists: playlists_slot,
+                playlists,
                 playlist_store: playlist_store_slot,
                 remove_from_playlist,
             },
@@ -693,11 +535,7 @@ impl RiffApp {
         current_track: Option<&TrackId>,
         remove_from_playlist: Option<&PlaylistId>,
     ) {
-        let label = format!(
-            "{} - {}",
-            track.metadata.display_artist(),
-            track.metadata.display_title(&track.file_path)
-        );
+        let label = label_artist_title(track);
         self.interactive_track_row(
             ui,
             state,
@@ -705,7 +543,7 @@ impl RiffApp {
             track,
             current_track,
             remove_from_playlist,
-            label,
+            &label,
             0,
         );
     }
@@ -722,7 +560,7 @@ impl RiffApp {
         track: &Track,
         current_track: Option<&TrackId>,
         remove_from_playlist: Option<&PlaylistId>,
-        label: String,
+        label: &str,
         indent_level: usize,
     ) {
         use crate::ui::sidebar::{self, TreeRow};
@@ -740,7 +578,7 @@ impl RiffApp {
             TreeRow {
                 indent_level,
                 icon: None,
-                label: &label,
+                label,
                 selected: is_selected,
                 now_playing: is_current,
                 playing: is_current && playing,
@@ -816,7 +654,6 @@ impl eframe::App for RiffApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let cmd = self.command_sender.clone();
-        let lib_cmd = self.library_command_sender.clone();
         let state_arc = self.state.clone();
 
         let mut state = state_arc.lock_or_recover();
@@ -827,12 +664,7 @@ impl eframe::App for RiffApp {
         }
 
         if self.first_frame {
-            load_persisted_state(
-                &mut state,
-                self.settings_store.as_ref(),
-                self.playlist_store.as_ref(),
-                cmd.as_ref(),
-            );
+            load_persisted_state(&mut state, self.settings_store.as_ref(), cmd.as_ref());
             self.first_frame = false;
         }
 
@@ -843,28 +675,17 @@ impl eframe::App for RiffApp {
         self.apply_theme(ui.ctx(), state.ui_flags.high_contrast);
 
         self.poll_library_updates(&mut state);
-        self.poll_tag_write_results(&mut state);
+        self.poll_tag_edit_outcomes(&mut state);
         self.update_cover_cache(ui.ctx());
         self.poll_watchers();
 
         handle_keyboard_shortcuts(ui.ctx(), &mut state, &mut self.search_focus, cmd.as_ref());
 
-        // Update window title and tray tooltip (REQ-SI-001). The tooltip shows
-        // "Artist - Title" for the current track, else "riff".
-        #[cfg(not(target_os = "linux"))]
-        {
-            let tray_tooltip = self.update_window_title(ui.ctx(), &state);
-            if self.last_tray_tooltip != tray_tooltip {
-                if let Some(ref tray) = self.tray_icon {
-                    crate::ui::tray::update_tooltip(tray, &tray_tooltip);
-                }
-                self.last_tray_tooltip = tray_tooltip;
-            }
-        }
-        #[cfg(target_os = "linux")]
-        {
-            self.update_window_title(ui.ctx(), &state);
-        }
+        // Update window title and tray tooltip (REQ-SI-001). Both are
+        // compared against the last-pushed identity first and only rebuilt
+        // when the playing track moves; the tooltip shows "Artist - Title"
+        // for the current track, else "riff".
+        self.update_window_title(ui.ctx(), &state);
 
         // --- SHELL (Issue 06): unified Panel API at exact token dimensions ---
         //
@@ -886,12 +707,15 @@ impl eframe::App for RiffApp {
                         state.browse_mode,
                     ),
                 };
-                for action in crate::ui::chrome::show_titlebar(
+                self.titlebar_actions.clear();
+                crate::ui::chrome::show_titlebar(
                     ui,
                     &mut self.icons,
                     &self.theme.active,
                     &content,
-                ) {
+                    &mut self.titlebar_actions,
+                );
+                for action in self.titlebar_actions.drain(..) {
                     apply_titlebar_action(
                         action,
                         ui.ctx(),
@@ -924,7 +748,7 @@ impl eframe::App for RiffApp {
                 ViewMode::Library => self.render_track_details_panel(ui, &mut state),
                 ViewMode::NowPlaying => self.show_now_playing_view(ui, &mut state, cmd.as_ref()),
                 ViewMode::Settings => {
-                    self.show_settings_view(ui, &mut state, lib_cmd.as_ref());
+                    self.show_settings_view(ui, &mut state);
                 }
             });
 
@@ -1016,16 +840,6 @@ fn persist_scalars(store: &mut dyn SettingsStore, state: &AppState) {
     }
 }
 
-/// Refresh the playlists Session Projection from the Application Store.
-/// Failures are logged; the previous projection stands until the next
-/// successful load.
-fn reload_playlists(store: &dyn PlaylistStore, state: &mut AppState) {
-    match store.load_playlists() {
-        Ok(playlists) => state.playlists = playlists,
-        Err(e) => tracing::warn!("Failed to load playlists from the store: {e}"),
-    }
-}
-
 /// The transient playlist-prompt slots the sidebar's playlist rows act on,
 /// grouped so [`apply_playlist_row_action`] stays readable. They live on
 /// [`RiffApp`] between frames; this borrow bundle is built per frame.
@@ -1043,14 +857,17 @@ pub struct PlaylistPromptSlots<'a> {
 
 /// Apply one restyled playlist-row action (Issue 07) through the SAME Store
 /// flows the pre-restyle buttons used (ADR 0002): every mutation commits to
-/// the [`PlaylistStore`] first, then the Session Projection refreshes from
-/// it via [`reload_playlists`]. Open/Rename only move transient prompt state.
+/// the [`PlaylistStore`] and nothing else — the seam's playlist projection
+/// invalidates itself via the mutation adapter's generation bump, so the
+/// next [`SessionViews::playlists`] read reflects the commit with zero
+/// caller action. Open/Rename only move transient prompt state; Rename
+/// looks the playlist's current name up through the seam so callers never
+/// need a per-frame name copy.
 pub fn apply_playlist_row_action(
     action: crate::ui::sidebar::PlaylistRowAction,
     id: &PlaylistId,
-    name: &str,
     store: &mut dyn PlaylistStore,
-    state: &mut AppState,
+    views: &mut SessionViews,
     slots: PlaylistPromptSlots<'_>,
 ) {
     match action {
@@ -1059,13 +876,17 @@ pub fn apply_playlist_row_action(
             *slots.smart_view = None;
         }
         crate::ui::sidebar::PlaylistRowAction::Rename => {
-            *slots.rename = Some((id.clone(), name.to_string()));
+            let name = views
+                .playlists()
+                .iter()
+                .find(|p| &p.id == id)
+                .map_or_else(String::new, |p| p.name.clone());
+            *slots.rename = Some((id.clone(), name));
             *slots.create_name = None;
         }
         crate::ui::sidebar::PlaylistRowAction::Delete => {
-            match store.delete_playlist(id) {
-                Ok(_) => reload_playlists(store, state),
-                Err(e) => tracing::warn!("Failed to delete playlist: {e}"),
+            if let Err(e) = store.delete_playlist(id) {
+                tracing::warn!("Failed to delete playlist: {e}");
             }
             if slots.view.as_ref() == Some(id) {
                 *slots.view = None;
@@ -1074,40 +895,37 @@ pub fn apply_playlist_row_action(
     }
 }
 
-/// Commit the inline rename prompt's Save: trim the draft, rename through
-/// the [`PlaylistStore`] as one durable transaction, then refresh the
-/// Session Projection. Empty drafts are ignored (pre-restyle behavior).
-pub fn commit_playlist_rename(
-    store: &mut dyn PlaylistStore,
-    state: &mut AppState,
-    id: &PlaylistId,
-    draft: &str,
-) {
+/// Commit the inline rename prompt's Save: trim the draft and rename through
+/// the [`PlaylistStore`] as one durable transaction. Empty drafts are
+/// ignored (pre-restyle behavior). The seam's next read reflects the commit
+/// on its own — no projection refresh here.
+pub fn commit_playlist_rename(store: &mut dyn PlaylistStore, id: &PlaylistId, draft: &str) {
     let draft = draft.trim().to_string();
     if draft.is_empty() {
         return;
     }
-    match store.rename_playlist(id, &draft) {
-        Ok(_) => reload_playlists(store, state),
-        Err(e) => tracing::warn!("Failed to rename playlist: {e}"),
+    if let Err(e) = store.rename_playlist(id, &draft) {
+        tracing::warn!("Failed to rename playlist: {e}");
     }
 }
 
 /// Commit a playlist drag-reorder (Issue 12): compute the new entry order
 /// from the gesture (`from` → `to`) via [`crate::app::playlist_manager::
-/// reorder_tracks`], persist it through the [`PlaylistStore`] port as one
-/// immediate durable transaction, then patch the Session Projection to
-/// mirror the committed change (ADR 0002). No-ops — the store is never
-/// touched — for self-drops, out-of-bounds gestures, and unknown playlists.
+/// reorder_tracks`] against the seam's current snapshot, then persist it
+/// through the [`PlaylistStore`] port as one immediate durable transaction.
+/// No-ops — the store is never touched — for self-drops, out-of-bounds
+/// gestures, and unknown playlists. The committed mutation bumps the
+/// playlist generation, so the seam's next read reflects the new order with
+/// zero caller action (ADR 0002).
 pub fn commit_playlist_reorder(
+    views: &mut SessionViews,
     store: &mut dyn PlaylistStore,
-    state: &mut AppState,
     id: &PlaylistId,
     from: usize,
     to: usize,
 ) {
-    let new_order = state
-        .playlists
+    let new_order = views
+        .playlists()
         .iter()
         .find(|p| &p.id == id)
         .and_then(|playlist| {
@@ -1116,14 +934,8 @@ pub fn commit_playlist_reorder(
     let Some(new_order) = new_order else {
         return;
     };
-    match store.reorder_playlist_entries(id, &new_order) {
-        Ok(_) => {
-            // Projection patch mirroring the committed reorder.
-            if let Some(playlist) = state.playlists.iter_mut().find(|p| &p.id == id) {
-                playlist.tracks = new_order;
-            }
-        }
-        Err(e) => tracing::warn!("Failed to reorder playlist entries: {e}"),
+    if let Err(e) = store.reorder_playlist_entries(id, &new_order) {
+        tracing::warn!("Failed to reorder playlist entries: {e}");
     }
 }
 
@@ -1184,22 +996,17 @@ pub fn apply_player_bar_action(
     }
 }
 
-/// First-frame restore. Playlists hydrate through the [`PlaylistStore`]
-/// port and every user preference from the typed settings tables via
-/// [`SettingsStore`]; the Library collection needs no hydration — every
-/// view reads it live through the [`LibraryQueryStore`] port. The legacy
-/// JSON cache is never read or written. Public so the restore contract is
-/// testable headlessly.
+/// First-frame restore. Every user preference hydrates from the typed
+/// settings tables via [`SettingsStore`]; the Library collection and the
+/// user playlists need no hydration step at all — every view reads them
+/// live through the [`SessionViews`] seam, which serves the Application
+/// Store directly on its first call. The legacy JSON cache is never read
+/// or written. Public so the restore contract is testable headlessly.
 pub fn load_persisted_state(
     state: &mut AppState,
     store: &dyn SettingsStore,
-    playlist_store: &dyn PlaylistStore,
     cmd: Option<&Sender<PlaybackCommand>>,
 ) {
-    // Playlists are user data in the Application Store, so they survive a
-    // Clear Library (which wipes collection data only).
-    reload_playlists(playlist_store, state);
-
     let settings = match store.load_settings() {
         Ok(settings) => settings,
         Err(e) => {
@@ -1260,41 +1067,65 @@ fn handle_keyboard_shortcuts(
     }
 }
 
-/// Send the window title for the current track and return the tray tooltip
-/// text (REQ-SI-001). The current Track resolves through the playback-side
-/// Session Projection over the store's `get_track` query — never the
-/// transitional in-memory mirror.
-impl RiffApp {
-    fn update_window_title(&mut self, ctx: &egui::Context, state: &AppState) -> String {
-        let mut tooltip = "riff".to_owned();
-        self.refresh_playback_projection(state);
-        if let Some(track) = self.playback_projection.current() {
-            let artist = track.metadata.display_artist();
-            let title = track.metadata.display_title(&track.file_path);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-                "{artist} - {title} \u{2014} riff"
-            )));
-            tooltip = format!("{artist} - {title}");
-        } else {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title("riff".to_owned()));
-        }
-        tooltip
-    }
+/// Push the window title and tray tooltip for the current track (REQ-SI-001).
+/// Both derive from one identity — the current `TrackId` — which is compared
+/// against the last push FIRST: steady-state frames send no viewport command
+/// and format nothing. The key exists to avoid repeating OS viewport
+/// commands, not for staleness; the current Track resolves through the
+/// Session Views facade over the store's `get_track` query — never the
+/// in-memory mirror.
+/// Last identity pushed to the window title / tray tooltip. `Unset`
+/// distinguishes "nothing pushed yet" from "pushed while nothing plays" so
+/// the very first frame always pushes once.
+#[derive(Default)]
+enum TitleKey {
+    #[default]
+    Unset,
+    Set(Option<TrackId>),
+}
 
-    /// Refresh the playback-side Session Projection against the current
-    /// store generation and queue shape. Cheap when nothing moved (a stamp
-    /// comparison); otherwise refetches the current Track plus the Up Next
-    /// window through [`Self::library_queries`]. Failures degrade to the
-    /// previous cache with a warning, like every other projection.
-    fn refresh_playback_projection(&mut self, state: &AppState) {
-        let generation = self.store_generation.current();
-        if let Err(e) = self.playback_projection.refresh(
-            generation,
-            &state.queue,
-            crate::ui::now_playing::UP_NEXT_LIMIT,
-            &mut |id| self.library_queries.get_track(id),
-        ) {
-            tracing::warn!("Failed to refresh the playback projection from the store: {e}");
+impl RiffApp {
+    fn update_window_title(&mut self, ctx: &egui::Context, state: &AppState) {
+        self.views
+            .sync_playback(&state.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
+        let current_id = self.views.playback_current().map(|t| &t.id);
+        let unchanged = match &self.last_title_key {
+            TitleKey::Set(id) => id.as_ref() == current_id,
+            TitleKey::Unset => false,
+        };
+        if unchanged {
+            return;
+        }
+
+        // Cold path: the playing track moved — both strings are rebuilt and
+        // pushed exactly once per identity change.
+        let (tooltip, title) = match self.views.playback_current() {
+            Some(track) => {
+                let tooltip = format!(
+                    "{} - {}",
+                    track.metadata.display_artist(),
+                    track.metadata.display_title(&track.file_path)
+                );
+                let title = format!("{tooltip} \u{2014} riff");
+                (tooltip, title)
+            }
+            None => ("riff".to_owned(), "riff".to_owned()),
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        self.last_title_key = TitleKey::Set(current_id.cloned());
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            if self.last_tray_tooltip != tooltip {
+                if let Some(ref tray) = self.tray_icon {
+                    crate::ui::tray::update_tooltip(tray, &tooltip);
+                }
+                self.last_tray_tooltip = tooltip;
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let _ = tooltip;
         }
     }
 
@@ -1311,22 +1142,27 @@ impl RiffApp {
     ) {
         // Cover for the current track, served from the LRU texture cache;
         // misses enqueue a background resolve exactly like the other views.
-        // The current Track comes from the playback-side Session Projection
-        // over the store's `get_track` query — never the in-memory mirror.
+        // The current Track comes from the Session Views facade over the
+        // store's `get_track` query — never the in-memory mirror.
         let mut cover = None;
-        self.refresh_playback_projection(state);
-        if let Some(track) = self.playback_projection.current() {
+        self.views
+            .sync_playback(&state.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
+        if let Some(track) = self.views.playback_current() {
             let id = track.id.clone();
             let file_path = track.file_path.clone();
             self.request_cover(&id, &file_path);
             cover = self.get_cover_texture(&id.0);
         }
 
+        // The `{index}/{len}` queue-position label, formatted fresh each
+        // frame from the live queue shape.
         let queue_position = format!(
             "{}/{}",
             state.queue.current_index.map_or(0, |i| i + 1),
             state.queue.tracks.len()
         );
+        self.playerbar_readouts
+            .sync(state.current_position.current, state.current_position.total);
         let content = crate::ui::playerbar::PlayerBarContent {
             cover,
             playback: state.playback_state,
@@ -1343,15 +1179,18 @@ impl RiffApp {
         egui::Panel::bottom("playerbar")
             .exact_size(theme::PLAYERBAR_H)
             .show(ui, |ui| {
-                for action in crate::ui::playerbar::show_player_bar(
+                crate::ui::playerbar::show_player_bar(
                     ui,
                     &mut self.icons,
                     &self.theme.active,
                     &content,
-                ) {
-                    apply_player_bar_action(action, state, cmd, self.settings_store.as_mut());
-                }
+                    &mut self.playerbar_readouts,
+                    &mut self.playerbar_actions,
+                );
             });
+        for action in self.playerbar_actions.drain(..) {
+            apply_player_bar_action(action, state, cmd, self.settings_store.as_mut());
+        }
     }
 }
 
@@ -1508,13 +1347,12 @@ impl RiffApp {
         // gated behind advanced mode). Hidden while searching, like
         // smart playlists.
         if query.is_empty() {
-            self.render_playlists_section(ui, state);
+            self.render_playlists_section(ui);
         }
 
         // Search gating reads the store's match count (the same query the
         // flat view's projection totals use) — never the in-memory mirror.
-        let has_results =
-            query.is_empty() || self.library_queries.search_count(query).unwrap_or(0) > 0;
+        let has_results = query.is_empty() || self.views.search_has_matches(query);
         // A playlist only renders when not searching; search shows
         // matching tracks only. Turning advanced mode off closes
         // any open smart playlist.
@@ -1547,24 +1385,14 @@ impl RiffApp {
             crate::ui::library::empty_state_hero(ui, &mut self.icons, &palette);
             return;
         };
-        // The selected Track resolves through the playback-side Session
-        // Projection over the store's `get_track` query (cached until the
-        // selection or the generation moves) — never the in-memory mirror.
-        let track = match self.playback_projection.selected_track(
-            self.store_generation.current(),
-            &track_id,
-            &mut |id| self.library_queries.get_track(id),
-        ) {
-            Ok(Some(track)) => track,
-            Ok(None) => {
-                crate::ui::library::empty_state_hero(ui, &mut self.icons, &palette);
-                return;
-            }
-            Err(e) => {
-                tracing::warn!("Failed to resolve selected track from the store: {e}");
-                crate::ui::library::empty_state_hero(ui, &mut self.icons, &palette);
-                return;
-            }
+        // The selected Track resolves through the Session Views facade over
+        // the store's `get_track` query (cached until the selection or the
+        // generation moves) — never the in-memory mirror. An absent track —
+        // unknown to the store, or unreadable right now — renders the empty
+        // state.
+        let Some(track) = self.views.selected_track(&track_id) else {
+            crate::ui::library::empty_state_hero(ui, &mut self.icons, &palette);
+            return;
         };
         self.request_cover(&track.id, &track.file_path);
         ui.horizontal(|ui| {
@@ -1574,8 +1402,7 @@ impl RiffApp {
                 ui.label(format!("Album: {}", track.metadata.display_album()));
                 render_track_meta_labels(ui, &track.metadata, false);
                 ui.separator();
-                let path_display = track.file_path.to_string_lossy().to_string();
-                ui.label(format!("File: {path_display}"));
+                ui.label(format!("File: {}", track.file_path.display()));
             });
             ui.with_layout(egui::Layout::top_down(egui::Align::RIGHT), |ui| {
                 let texture = self.get_cover_texture(&track.id.0);
@@ -1591,27 +1418,22 @@ impl RiffApp {
         cmd: Option<&Sender<PlaybackCommand>>,
         query: &str,
     ) {
-        // Browsing reads through the Session Projection over store queries
+        // Browsing reads through the Session Views facade over store queries
         // (ADR 0002/0003): artists A–Z straight from the Application Store,
         // each level cached until the next committed mutation bumps the
         // generation. No in-memory mirror involved.
-        let generation = self.store_generation.current();
-        let artists: Vec<Artist> = match self
-            .browsing_projection
-            .artists(generation, &mut || self.library_queries.all_artists())
-        {
-            Ok(artists) => artists,
-            Err(e) => {
-                tracing::warn!("Failed to load artists from the store: {e}");
-                Vec::new()
-            }
-        };
-        let artists: Vec<Artist> = if query.is_empty() {
-            artists
+        //
+        // Single pass over the borrowed cache: the projection hands back an
+        // Arc-shared list, so filtering collects lightweight references
+        // instead of cloning Artists, and the lowercased query is hoisted
+        // out of the per-item work.
+        let artists = self.views.artists();
+        let visible: Vec<&Artist> = if query.is_empty() {
+            artists.iter().collect()
         } else {
             let q = query.to_lowercase();
             artists
-                .into_iter()
+                .iter()
                 .filter(|a| a.name.to_lowercase().contains(&q))
                 .collect()
         };
@@ -1621,17 +1443,21 @@ impl RiffApp {
         // the collapsed headers containing it — the same outcome as the
         // former scan of every artist's albums, without loading closed
         // artists' data.
-        let current_album: Option<(String, String)> = current_track.as_ref().and_then(|tid| {
-            self.library_queries.get_track(tid).ok().flatten().map(|t| {
+        let current_album: Option<(String, String)> = current_track
+            .as_ref()
+            .and_then(|tid| self.views.resolve_track(tid))
+            .map(|t| {
                 (
-                    t.metadata.display_album_artist(),
-                    t.metadata.display_album(),
+                    // `display_*` return borrowed `Cow`s now (allocation
+                    // plan 4.6); the tuple outlives the track, so own the
+                    // strings.
+                    t.metadata.display_album_artist().into_owned(),
+                    t.metadata.display_album().into_owned(),
                 )
-            })
-        });
+            });
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for artist in &artists {
+            for &artist in &visible {
                 let artist_has_current = current_album
                     .as_ref()
                     .is_some_and(|(album_artist, _)| album_artist == &artist.name);
@@ -1639,7 +1465,6 @@ impl RiffApp {
                     ui,
                     state,
                     cmd,
-                    generation,
                     artist,
                     current_album.as_ref(),
                     current_track.as_ref(),
@@ -1660,7 +1485,6 @@ impl RiffApp {
         ui: &mut egui::Ui,
         state: &mut AppState,
         cmd: Option<&Sender<PlaybackCommand>>,
-        generation: u64,
         artist: &Artist,
         current_album: Option<&(String, String)>,
         current_track: Option<&TrackId>,
@@ -1696,20 +1520,9 @@ impl RiffApp {
         collapsing.store(ui.ctx());
 
         if let Some(body) = collapsing.show_body_unindented(ui, |ui| {
-            let albums: Vec<Album> =
-                match self
-                    .browsing_projection
-                    .artist_albums(generation, &artist.name, &mut |a| {
-                        self.library_queries.artist_albums(a)
-                    }) {
-                    Ok(albums) => albums,
-                    Err(e) => {
-                        tracing::warn!("Failed to load albums for {}: {e}", artist.name);
-                        return;
-                    }
-                };
+            let albums = self.views.artist_albums(&artist.name);
 
-            for album in &albums {
+            for album in albums.iter() {
                 let album_has_current = current_album.is_some_and(|(album_artist, album_title)| {
                     album_artist == &album.artist && album_title == &album.title
                 });
@@ -1717,7 +1530,6 @@ impl RiffApp {
                     ui,
                     state,
                     cmd,
-                    generation,
                     album,
                     current_track,
                     album_has_current,
@@ -1737,7 +1549,6 @@ impl RiffApp {
         ui: &mut egui::Ui,
         state: &mut AppState,
         cmd: Option<&Sender<PlaybackCommand>>,
-        generation: u64,
         album: &Album,
         current_track: Option<&TrackId>,
         album_has_current: bool,
@@ -1775,18 +1586,7 @@ impl RiffApp {
         collapsing.store(ui.ctx());
 
         collapsing.show_body_unindented(ui, |ui| {
-            let tracks: Vec<Track> = match self.browsing_projection.album_tracks(
-                generation,
-                &album.artist,
-                &album.title,
-                &mut |a, t| self.library_queries.album_tracks(a, t),
-            ) {
-                Ok(tracks) => tracks,
-                Err(e) => {
-                    tracing::warn!("Failed to load tracks for {}: {e}", album.title);
-                    return;
-                }
-            };
+            let tracks = self.views.album_tracks(&album.artist, &album.title);
             self.render_album_track_rows(ui, state, cmd, &tracks, current_track);
         });
     }
@@ -1804,12 +1604,8 @@ impl RiffApp {
         current_track: Option<&TrackId>,
     ) {
         for track in tracks {
-            let display = format!(
-                "{}. {}",
-                track.metadata.track_number.unwrap_or(0),
-                track.metadata.display_title(&track.file_path)
-            );
-            self.interactive_track_row(ui, state, cmd, track, current_track, None, display, 2);
+            let label = label_numbered(track);
+            self.interactive_track_row(ui, state, cmd, track, current_track, None, &label, 2);
         }
     }
 
@@ -1822,8 +1618,8 @@ impl RiffApp {
     ) {
         // Row-virtualization audit (Issue 12): every UNBOUNDED track listing
         // culls through `ScrollArea::show_rows` — this flat list and search
-        // (bounded store windows via `TrackListProjection`), smart playlists
-        // and user playlists (`render_smart_playlist_view` /
+        // (bounded store windows via `SessionViews::track_list`), smart
+        // playlists and user playlists (`render_smart_playlist_view` /
         // `render_playlist_view`), and the Up Next queue
         // (`now_playing::show_now_playing`). The artist/album and folder
         // trees render per-node loops instead, but each loop is bounded by
@@ -1832,113 +1628,39 @@ impl RiffApp {
         // `test_large_library_fixture_culls_rows_to_the_visible_window`.
         //
         // The flat list and search box are served through the bounded
-        // Session Projection over store queries (ADR 0003): only visible row
-        // windows fetch, invalidated by generation bumps after committed
-        // mutations.
-        let key = if query.is_empty() {
-            ProjectionKey::Flat
-        } else {
-            ProjectionKey::Search(query.to_string())
-        };
-        if self.tracks_projection.key() != &key {
-            self.tracks_projection.set_key(key);
-        }
-
-        // The authoritative total comes from the store whenever the
-        // projection is invalidated; fresh frames reuse the cached count.
-        // `total_generation` records when that count was read so the refresh
-        // below can detect a mutation landing mid-frame.
-        let total_generation = self.store_generation.current();
-        let total = if self.tracks_projection.is_fresh(total_generation) {
-            self.tracks_projection.total()
-        } else if query.is_empty() {
-            self.library_queries.track_count().unwrap_or(0)
-        } else {
-            self.library_queries.search_count(query).unwrap_or(0)
-        };
-
+        // Session Projection behind the Session Views facade (ADR 0003):
+        // only visible row windows fetch, invalidated by generation bumps
+        // after committed mutations. The facade owns the window math, the
+        // count reads, and the torn-count recount; this view only maps row
+        // indices to pages.
         let current_track = state.queue.current_track().cloned();
+
+        // Anchor read: sizes the row range with the authoritative total.
+        let first_page = self.views.track_list(query, 0);
 
         egui::ScrollArea::vertical().show_rows(
             ui,
             crate::ui::sidebar::ROW_H,
-            total,
+            first_page.total,
             |ui, row_range| {
-                // Declare exactly the visible windows, then refresh the
-                // projection from the store before painting rows.
-                let start_window = (row_range.start / WINDOW_SIZE) * WINDOW_SIZE;
-                let end_window = (row_range.end / WINDOW_SIZE) * WINDOW_SIZE;
-                let mut window = start_window;
-                while window <= end_window {
-                    self.tracks_projection.request_window(window);
-                    window += WINDOW_SIZE;
-                }
-                let generation = self.store_generation.current();
-                // If a mutation committed between the outer count read and here,
-                // recount so the cached total agrees with the refreshed rows;
-                // otherwise reuse the outer read (one COUNT query per frame max).
-                let effective_total = if generation == total_generation {
-                    total
-                } else if query.is_empty() {
-                    self.library_queries.track_count().unwrap_or(0)
-                } else {
-                    self.library_queries.search_count(query).unwrap_or(0)
-                };
-                let _ = self.tracks_projection.refresh(
-                    generation,
-                    effective_total,
-                    &mut |offset, limit| {
-                        if query.is_empty() {
-                            self.library_queries.tracks_window(offset, limit)
-                        } else {
-                            self.library_queries.search_window(query, offset, limit)
-                        }
-                    },
-                );
-
+                let mut page: Option<crate::app::views::TrackListPage> = None;
                 for i in row_range {
-                    let window_start = (i / WINDOW_SIZE) * WINDOW_SIZE;
-                    // Clone the row so the projection's shared borrow ends before
-                    // the mutable render call (one small clone per visible row).
-                    let row = self
-                        .tracks_projection
-                        .window(window_start)
-                        .and_then(|rows| rows.get(i - window_start))
-                        .cloned();
-                    if let Some(track) = row {
-                        self.render_track_row(ui, state, cmd, &track, current_track.as_ref(), None);
+                    // Refetch only when the row leaves the page in hand; the
+                    // facade serves repeat windows from cache.
+                    if page.as_ref().is_none_or(|p| p.start + p.rows.len() <= i) {
+                        page = Some(self.views.track_list(query, i));
+                    }
+                    let page = page.as_ref().expect("page fetched above");
+                    if let Some(track) = page.rows.get(i - page.start) {
+                        self.render_track_row(ui, state, cmd, track, current_track.as_ref(), None);
                     }
                 }
             },
         );
     }
 
-    /// Cached smart-playlist computation for one frame generation; failures
-    /// render as an empty list with a warning logged.
-    fn smart_list_cached(
-        &mut self,
-        generation: u64,
-        kind: SmartPlaylistKind,
-        limit: usize,
-    ) -> Vec<Track> {
-        match self
-            .smart_playlists_projection
-            .list(generation, kind, limit, &mut |k, l| {
-                self.library_queries.smart_playlist(k, l)
-            }) {
-            Ok(tracks) => tracks,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to compute smart playlist {}: {e}",
-                    kind.display_name()
-                );
-                Vec::new()
-            }
-        }
-    }
-
     /// Render the tracks of a read-only smart playlist. The list reads
-    /// through the Session Projection over store queries (ADR 0002): every
+    /// through the Session Views facade over store queries (ADR 0002): every
     /// committed mutation bumps the generation, so the next frame
     /// regenerates from committed state — no manual refresh needed.
     fn render_smart_playlist_view(
@@ -1953,8 +1675,7 @@ impl RiffApp {
             SmartPlaylistKind::RecentlyAdded | SmartPlaylistKind::MostPlayed => 50,
             SmartPlaylistKind::NeverPlayed | SmartPlaylistKind::LostGems => usize::MAX,
         };
-        let generation = self.store_generation.current();
-        let tracks = self.smart_list_cached(generation, kind, limit);
+        let tracks = self.views.smart_list(kind, limit);
         let current_track = state.queue.current_track().cloned();
 
         // Header: name + count, clearly read-only (no edit/delete affordances),
@@ -1994,8 +1715,9 @@ impl RiffApp {
     /// playlists as restyled rows whose hover-revealed edit/delete drive the
     /// existing rename/delete Store flows (Issue 07, ADR 0002), plus the
     /// create and rename prompts. Every mutation commits through the
-    /// [`PlaylistStore`] port as one immediate durable transaction.
-    fn render_playlists_section(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+    /// [`PlaylistStore`] port as one immediate durable transaction; reads
+    /// come from the seam's playlist projection.
+    fn render_playlists_section(&mut self, ui: &mut egui::Ui) {
         use crate::ui::icons::Icon;
         use crate::ui::sidebar;
 
@@ -2024,25 +1746,36 @@ impl RiffApp {
             });
         });
 
-        self.render_playlist_create_prompt(ui, state);
+        self.render_playlist_create_prompt(ui);
 
         // --- Playlist rows (open / hover-reveal rename / delete) ---
-        let summaries: Vec<(PlaylistId, String, usize)> = state
-            .playlists
-            .iter()
-            .map(|p| (p.id.clone(), p.name.clone(), p.tracks.len()))
-            .collect();
-        for (id, name, count) in summaries {
-            let selected = self.playlist_view.as_ref() == Some(&id);
-            if let Some(action) =
-                sidebar::playlist_row(ui, &mut self.icons, &palette, &name, count, selected)
-            {
+        //
+        // Iterated by index straight over the seam's `Arc`'d snapshot
+        // (allocation plan 2.5): no per-frame summaries Vec, no per-row
+        // id/name clones. Each row's painted label is formatted from the
+        // snapshot row; ids are only cloned on a click frame.
+        let playlists = self.views.playlists();
+        for index in 0..playlists.len() {
+            let action = {
+                let playlist = &playlists[index];
+                let selected = self.playlist_view.as_ref() == Some(&playlist.id);
+                let label = format!("{} ({})", playlist.name, playlist.tracks.len());
+                sidebar::playlist_row(
+                    ui,
+                    &mut self.icons,
+                    &palette,
+                    &playlist.name,
+                    &label,
+                    selected,
+                )
+            };
+            if let Some(action) = action {
+                let id = playlists[index].id.clone();
                 apply_playlist_row_action(
                     action,
                     &id,
-                    &name,
                     self.playlist_store.as_mut(),
-                    state,
+                    &mut self.views,
                     PlaylistPromptSlots {
                         view: &mut self.playlist_view,
                         smart_view: &mut self.smart_playlist_view,
@@ -2052,12 +1785,12 @@ impl RiffApp {
                 );
             }
 
-            self.render_playlist_rename_prompt(ui, state, &id);
+            self.render_playlist_rename_prompt(ui, &playlists[index].id);
         }
     }
 
     /// The inline "New Playlist" name prompt while it is open.
-    fn render_playlist_create_prompt(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+    fn render_playlist_create_prompt(&mut self, ui: &mut egui::Ui) {
         if self.playlist_create_name.is_none() {
             return;
         }
@@ -2080,7 +1813,8 @@ impl RiffApp {
             if !name.is_empty() {
                 match self.playlist_store.create_playlist(&name, &[]) {
                     Ok(id) => {
-                        reload_playlists(self.playlist_store.as_ref(), state);
+                        // The committed create bumps the playlist generation;
+                        // the seam's next read lists the new playlist.
                         self.playlist_view = Some(id);
                     }
                     Err(e) => tracing::warn!("Failed to create playlist: {e}"),
@@ -2091,17 +1825,13 @@ impl RiffApp {
         }
     }
 
-    /// The inline rename prompt for one playlist while it is open.
-    fn render_playlist_rename_prompt(
-        &mut self,
-        ui: &mut egui::Ui,
-        state: &mut AppState,
-        playlist_id: &PlaylistId,
-    ) {
+    /// The inline rename prompt for one playlist while it is open. Addressed
+    /// by playlist id so fresh frames never clone it.
+    fn render_playlist_rename_prompt(&mut self, ui: &mut egui::Ui, pid: &PlaylistId) {
         let renaming = self
             .playlist_rename
             .as_ref()
-            .is_some_and(|(rid, _)| rid == playlist_id);
+            .is_some_and(|(rid, _)| rid == pid);
         if !renaming {
             return;
         }
@@ -2121,8 +1851,9 @@ impl RiffApp {
         if confirm {
             if let Some((rid, draft)) = self.playlist_rename.take() {
                 // Same Store flow as before the restyle: trim, rename as one
-                // durable transaction, refresh the projection (ADR 0002).
-                commit_playlist_rename(self.playlist_store.as_mut(), state, &rid, &draft);
+                // durable transaction. The seam's next read reflects the new
+                // name on its own (ADR 0002).
+                commit_playlist_rename(self.playlist_store.as_mut(), &rid, &draft);
             }
         } else if cancel {
             self.playlist_rename = None;
@@ -2133,6 +1864,11 @@ impl RiffApp {
     /// have been moved or deleted are flagged invalid (dimmed, strikethrough,
     /// "missing" hint) and excluded from playback; valid entries get the
     /// standard track context menu plus "Remove from Playlist".
+    ///
+    /// Nothing here clones per frame in steady state: the header facts are
+    /// read from the seam's `Arc`'d playlist list by reference (the borrow
+    /// ends before the render loops take `self` mutably), and the resolved
+    /// rows come from [`SessionViews::playlist_view`] as `Arc` clones.
     fn render_playlist_view(
         &mut self,
         ui: &mut egui::Ui,
@@ -2140,46 +1876,38 @@ impl RiffApp {
         cmd: Option<&Sender<PlaybackCommand>>,
         playlist_id: &PlaylistId,
     ) {
-        let Some(playlist) = state
-            .playlists
-            .iter()
-            .find(|p| &p.id == playlist_id)
-            .cloned()
-        else {
+        let playlists = self.views.playlists();
+        let Some(playlist) = playlists.iter().find(|p| &p.id == playlist_id) else {
             ui.label("Playlist not found");
             return;
         };
+        let playlist_name = &playlist.name;
+        let track_count = playlist.tracks.len();
 
         let current_track = state.queue.current_track().cloned();
 
-        // Resolve every entry against the Application Store in one query:
-        // each entry rides its Library validity flag (SQL LEFT JOIN against
-        // tracks; dangling references stay listed, flagged invalid). Whether
-        // an otherwise known file still exists on disk remains a read-time
-        // filesystem check — the former mirror-based rule with the Store as
-        // the sole authority on what the library knows.
-        let resolved: Vec<crate::app::store::PlaylistEntry> =
-            match self.playlist_store.load_playlist_entries(playlist_id) {
-                Ok(entries) => entries,
-                Err(e) => {
-                    tracing::warn!("Failed to load playlist entries from the store: {e}");
-                    Vec::new()
-                }
-            };
-        let valid_ids = crate::app::playlist_manager::valid_tracks(&resolved);
+        // Ready-to-render rows straight from the seam (ADR 0002): the
+        // projection resolves every entry against the Library in one query
+        // (LEFT-JOIN validity plus the read-time filesystem check), keeps
+        // last good rows across store errors, and refetches whenever a
+        // committed mutation moved either generation. `Arc` clones out — no
+        // borrow held across rendering.
+        let view = self.views.playlist_view(playlist_id).unwrap_or_default();
+        let entries = view.rows;
+        let valid_ids = view.valid_ids;
 
         // Header: name + count, with whole-list actions (valid tracks only),
         // mirroring the smart-playlist header menu.
         let header = ui.horizontal(|ui| {
-            ui.heading(&playlist.name);
-            ui.weak(format!("({} tracks)", playlist.tracks.len()));
+            ui.heading(playlist_name);
+            ui.weak(format!("({track_count} tracks)"));
         });
         if !valid_ids.is_empty() {
             show_list_context_menu(&header.response, cmd, &valid_ids);
         }
         ui.separator();
 
-        if playlist.tracks.is_empty() {
+        if track_count == 0 {
             ui.vertical_centered(|ui| {
                 ui.label("No tracks in this playlist");
                 ui.weak("Use a track's context menu \u{2192} Add to Playlist to add tracks.");
@@ -2189,14 +1917,6 @@ impl RiffApp {
 
         // One row per entry: the store-resolved track (if any) plus the
         // final playability verdict (Library-known AND file exists on disk).
-        let entries: Vec<(TrackId, Option<Track>, bool)> = resolved
-            .into_iter()
-            .map(|entry| {
-                let valid = crate::app::playlist_manager::track_is_valid(&entry);
-                (entry.id, entry.track, valid)
-            })
-            .collect();
-
         egui::ScrollArea::vertical().show_rows(
             ui,
             crate::ui::sidebar::ROW_H,
@@ -2289,11 +2009,7 @@ impl RiffApp {
         let is_selected = state.selected_track.as_ref() == Some(&track.id);
         let is_current = current_track == Some(&track.id);
         let playing = state.playback_state == PlaybackState::Playing;
-        let label = format!(
-            "{} - {}",
-            track.metadata.display_artist(),
-            track.metadata.display_title(&track.file_path)
-        );
+        let label = label_artist_title(track);
 
         self.request_cover(&track.id, &track.file_path);
 
@@ -2324,9 +2040,12 @@ impl RiffApp {
             }
         }
         if let Some(from) = outcome.drop_from {
+            // One immediate durable transaction; the committed mutation
+            // bumps the playlist generation, so the seam's next read serves
+            // the new order with zero caller action (ADR 0002).
             commit_playlist_reorder(
+                &mut self.views,
                 self.playlist_store.as_mut(),
-                state,
                 playlist_id,
                 from,
                 index,
@@ -2359,116 +2078,72 @@ impl RiffApp {
 
         // Current track + cover from the LRU texture cache; misses enqueue a
         // background resolve exactly like the other views. Both the current
-        // Track and the Up Next window come from the playback-side Session
-        // Projection over the store's `get_track` query — never the mirror.
-        self.refresh_playback_projection(state);
-        let track = self.playback_projection.current().cloned();
-        let cover = track.as_ref().and_then(|track| {
-            self.request_cover(&track.id, &track.file_path);
-            self.get_cover_texture(&track.id.0)
-        });
+        // Track and the Up Next window come from the Session Views facade
+        // over the store's `get_track` query — never the mirror. The cover
+        // key is only re-cloned when the playing track moves, so fresh
+        // frames allocate nothing here.
+        self.views
+            .sync_playback(&state.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
+        let cover_key_changed = self.now_playing_cover_key.as_deref()
+            != self.views.playback_current().map(|t| t.id.0.as_str());
+        if cover_key_changed {
+            if let Some(track) = self.views.playback_current() {
+                let (id, file_path) = (track.id.clone(), track.file_path.clone());
+                self.request_cover(&id, &file_path);
+                self.now_playing_cover_key = Some(id.0);
+            } else {
+                self.now_playing_cover_key = None;
+            }
+        }
+        // Take/restore keeps the borrow checker happy without copying the
+        // key on fresh frames.
+        let cover_key = self.now_playing_cover_key.take();
+        let cover = cover_key
+            .as_ref()
+            .and_then(|key| self.get_cover_texture(key));
+        self.now_playing_cover_key = cover_key;
+        // Text block + Up Next rows formatted straight from the playback
+        // projection's resolved tracks each frame; staleness is the
+        // projection's job, not the widget layer's.
+        let (title, meta_line, details) = match self.views.playback_current() {
+            Some(track) => (
+                Some(Arc::from(track.metadata.display_title(&track.file_path))),
+                Some(Arc::from(format!(
+                    "{} - {}",
+                    track.metadata.display_artist(),
+                    track.metadata.display_album()
+                ))),
+                crate::ui::now_playing::metadata_details(&track.metadata).map(Arc::from),
+            ),
+            None => (None, None, None),
+        };
+        let up_next: Arc<[UpNextEntry]> = crate::ui::now_playing::up_next_entries(
+            self.views.playback_up_next(),
+            crate::ui::now_playing::UP_NEXT_LIMIT,
+        )
+        .into();
 
         let content = crate::ui::now_playing::NowPlayingContent {
             cover,
-            title: track
-                .as_ref()
-                .map(|t| t.metadata.display_title(&t.file_path)),
-            meta_line: track.as_ref().map(|t| {
-                format!(
-                    "{} - {}",
-                    t.metadata.display_artist(),
-                    t.metadata.display_album()
-                )
-            }),
-            details: track
-                .as_ref()
-                .and_then(|t| crate::ui::now_playing::metadata_details(&t.metadata)),
+            title,
+            meta_line,
+            details,
             position: state.current_position.current,
             total: state.current_position.total,
-            up_next: crate::ui::now_playing::up_next_entries(
-                self.playback_projection.up_next(),
-                crate::ui::now_playing::UP_NEXT_LIMIT,
-            ),
+            up_next,
         };
 
-        for action in
-            crate::ui::now_playing::show_now_playing(ui, &mut self.icons, &palette, &content)
-        {
+        self.now_playing_actions.clear();
+        crate::ui::now_playing::show_now_playing(
+            ui,
+            &mut self.icons,
+            &palette,
+            &content,
+            &mut self.stage_readouts,
+            &mut self.now_playing_actions,
+        );
+        for action in self.now_playing_actions.drain(..) {
             apply_now_playing_action(action, state, cmd);
-        }
-    }
-
-    /// Cached [`LibraryQueryStore::folder_has_audio`] for one frame
-    /// generation; failures render as "no audio" with a warning logged.
-    fn folder_has_audio_cached(&mut self, generation: u64, path: &Path) -> bool {
-        match self
-            .folder_projection
-            .has_audio(generation, path, &mut |f| {
-                self.library_queries.folder_has_audio(f)
-            }) {
-            Ok(has) => has,
-            Err(e) => {
-                tracing::warn!("Failed to probe folder {}: {e}", path.display());
-                false
-            }
-        }
-    }
-
-    /// Cached subtree search match for one frame generation.
-    fn folder_search_match_cached(&mut self, generation: u64, path: &Path, query: &str) -> bool {
-        match self
-            .folder_projection
-            .has_search_match(generation, path, query, &mut |f, q| {
-                self.library_queries.folder_has_search_match(f, q)
-            }) {
-            Ok(has) => has,
-            Err(e) => {
-                tracing::warn!("Failed to search folder {}: {e}", path.display());
-                false
-            }
-        }
-    }
-
-    /// Cached subtree track ids for one frame generation.
-    fn folder_subtree_ids_cached(&mut self, generation: u64, path: &Path) -> Vec<TrackId> {
-        match self
-            .folder_projection
-            .subtree_ids(generation, path, &mut |f| {
-                self.library_queries.track_ids_in_folder_tree(f)
-            }) {
-            Ok(ids) => ids,
-            Err(e) => {
-                tracing::warn!("Failed to list folder tree {}: {e}", path.display());
-                Vec::new()
-            }
-        }
-    }
-
-    /// Cached child directories for one frame generation.
-    fn folder_children_cached(&mut self, generation: u64, path: &Path) -> Vec<PathBuf> {
-        match self.folder_projection.children(generation, path, &mut |f| {
-            self.library_queries.subdirs_with_audio(f)
-        }) {
-            Ok(children) => children,
-            Err(e) => {
-                tracing::warn!("Failed to list folder children {}: {e}", path.display());
-                Vec::new()
-            }
-        }
-    }
-
-    /// Cached direct-track listing for one frame generation.
-    fn folder_direct_tracks_cached(&mut self, generation: u64, path: &Path) -> Vec<Track> {
-        match self
-            .folder_projection
-            .direct_tracks(generation, path, &mut |f| {
-                self.library_queries.tracks_in_folder(f)
-            }) {
-            Ok(tracks) => tracks,
-            Err(e) => {
-                tracing::warn!("Failed to list folder tracks {}: {e}", path.display());
-                Vec::new()
-            }
         }
     }
 
@@ -2487,18 +2162,17 @@ impl RiffApp {
             return;
         }
 
-        // Folder views read through the Session Projection over store
+        // Folder views read through the Session Views facade over store
         // queries (ADR 0002/0003): escaped prefix matching over stored track
         // paths, cached until the next committed mutation bumps the
         // generation. No in-memory mirror involved.
-        let generation = self.store_generation.current();
         let lib_paths = state.library_paths.clone();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for lib_path in &lib_paths {
-                if !self.folder_has_audio_cached(generation, lib_path) {
+                if !self.views.folder_has_audio(lib_path) {
                     continue;
                 }
-                self.render_folder_node(ui, state, cmd, generation, lib_path, 0, query);
+                self.render_folder_node(ui, state, cmd, lib_path, 0, query);
             }
         });
     }
@@ -2506,15 +2180,12 @@ impl RiffApp {
     /// One folder node of the Folders tree (Issue 07): a restyled 40px
     /// collapsible row on the indent scale whose click toggles AND selects —
     /// the exact gesture set of the former `CollapsingHeader` header.
-    /// `generation` is passed down so every node of one frame reads the same
-    /// snapshot even if a mutation commits mid-frame.
     #[allow(clippy::too_many_arguments)]
     fn render_folder_node(
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
         cmd: Option<&Sender<PlaybackCommand>>,
-        generation: u64,
         path: &Path,
         level: usize,
         query: &str,
@@ -2523,11 +2194,11 @@ impl RiffApp {
         use crate::ui::sidebar::{self, TreeRow};
         use egui::collapsing_header::CollapsingState;
 
-        if !self.folder_has_audio_cached(generation, path) {
+        if !self.views.folder_has_audio(path) {
             return;
         }
 
-        if !query.is_empty() && !self.folder_search_match_cached(generation, path, query) {
+        if !query.is_empty() && !self.views.folder_search_match(path, query) {
             return;
         }
 
@@ -2547,7 +2218,7 @@ impl RiffApp {
             |n| n.to_string_lossy().to_string(),
         );
 
-        let folder_track_ids: Vec<TrackId> = self.folder_subtree_ids_cached(generation, path);
+        let folder_track_ids = self.views.folder_subtree_ids(path);
 
         // Collapse state persists per path in egui memory, exactly like the
         // former CollapsingHeader; roots open when they contain the playing
@@ -2591,20 +2262,16 @@ impl RiffApp {
         collapsing.store(ui.ctx());
 
         collapsing.show_body_unindented(ui, |ui| {
-            let children = self.folder_children_cached(generation, path);
-            for child_path in &children {
-                self.render_folder_node(ui, state, cmd, generation, child_path, level + 1, query);
+            let children = self.views.folder_children(path);
+            for child_path in children.iter() {
+                self.render_folder_node(ui, state, cmd, child_path, level + 1, query);
             }
 
-            let tracks =
-                folder_tracks_filtered(self.folder_direct_tracks_cached(generation, path), query);
+            let direct = self.views.folder_direct_tracks(path);
+            let tracks = folder_tracks_filtered(&direct, query);
 
-            for track in &tracks {
-                let display = format!(
-                    "{}. {}",
-                    track.metadata.track_number.unwrap_or(0),
-                    track.metadata.display_title(&track.file_path)
-                );
+            for track in tracks.iter().copied() {
+                let label = label_numbered(track);
                 self.interactive_track_row(
                     ui,
                     state,
@@ -2612,7 +2279,7 @@ impl RiffApp {
                     track,
                     current_track.as_ref(),
                     None,
-                    display,
+                    &label,
                     level + 1,
                 );
             }
@@ -2633,30 +2300,156 @@ fn parse_number(label: &str, raw: &str) -> Result<Option<u32>, String> {
     }
 }
 
-/// Play a folder: start its first track and queue the rest. The ids arrive
-/// in the store's path order — exactly what the former mirror listing
-/// produced.
-fn play_folder(track_ids: &[TrackId], cmd: Option<&Sender<PlaybackCommand>>) {
-    let Some(s) = cmd else { return };
-    if let Some(first) = track_ids.first() {
-        let _ = s.send(PlaybackCommand::Play(first.clone()));
-        for tid in &track_ids[1..] {
-            let _ = s.send(PlaybackCommand::AddToQueue(tid.clone()));
+/// The UI's whole remaining cover responsibility (ADR 0006): ask the Cover
+/// Service for art unless the texture is already in the UI-owned cache.
+/// Free function so tests drive the exact production path without a window.
+pub fn request_cover_intent(
+    texture_cached: bool,
+    covers: &dyn Covers,
+    track_id: TrackId,
+    path: PathBuf,
+) {
+    if !texture_cached {
+        covers.request(track_id, path);
+    }
+}
+
+/// Apply one polled Tag Edit outcome to the modal state, the outstanding
+/// request record, and the status line — the same code path
+/// `poll_tag_edit_outcomes` runs per outcome. `Saved` closes the matching
+/// open modal and reports the saved file; `Failed` keeps the dialog open
+/// with the reason. Outcomes carry no identity, so the record captured at
+/// submit time supplies both the match key and the file name; an outcome
+/// with no matching outstanding request is ignored.
+pub fn apply_tag_edit_outcome(
+    outcome: TagEditOutcome,
+    tag_edit: &mut Option<TagEditState>,
+    in_flight: &mut Option<(TrackId, PathBuf)>,
+    scan_status: &mut Option<String>,
+) {
+    let Some((track_id, path)) = in_flight.take() else {
+        return;
+    };
+    match outcome {
+        TagEditOutcome::Saved => {
+            let name = path.file_name().map_or_else(
+                || path.to_string_lossy().to_string(),
+                |n| n.to_string_lossy().to_string(),
+            );
+            *scan_status = Some(format!("Tags saved for {name}"));
+            tracing::info!("Tags written for {:?}", path);
+            if tag_edit.as_ref().is_some_and(|te| te.track_id == track_id) {
+                *tag_edit = None;
+            }
+        }
+        TagEditOutcome::Failed { reason } => {
+            tracing::warn!("Tag edit failed for {:?}: {}", path, reason);
+            if let Some(modal) = tag_edit.as_mut()
+                && modal.track_id == track_id
+            {
+                modal.error = Some(reason);
+                modal.saving = false;
+            }
         }
     }
 }
 
+/// Validate the "Edit Tags" modal fields and submit one [`TagEditRequest`]
+/// through the service seam. Invalid numeric fields keep the modal open
+/// with an error and submit nothing; valid fields clear the error, flip the
+/// modal into its saving state, and record the outstanding request so its
+/// outcome can be matched later. Nothing is ever written without an
+/// explicit Save upstream.
+pub fn submit_tag_edit_fields(
+    tag_edit: &mut TagEditState,
+    tag_edits: &dyn TagEdits,
+    in_flight: &mut Option<(TrackId, PathBuf)>,
+) {
+    match (
+        parse_number("Year", &tag_edit.year),
+        parse_number("Track number", &tag_edit.track_number),
+    ) {
+        (Ok(year), Ok(track_number)) => {
+            tag_edit.error = None;
+            tag_edit.saving = true;
+            let request = TagEditRequest {
+                track_id: tag_edit.track_id.clone(),
+                path: tag_edit.path.clone(),
+                edit: TagEdit {
+                    title: Some(tag_edit.title.clone()),
+                    artist: Some(tag_edit.artist.clone()),
+                    album: Some(tag_edit.album.clone()),
+                    album_artist: Some(tag_edit.album_artist.clone()),
+                    genre: Some(tag_edit.genre.clone()),
+                    year,
+                    track_number,
+                },
+            };
+            *in_flight = Some((request.track_id.clone(), request.path.clone()));
+            tag_edits.submit(request);
+        }
+        (Err(error), _) | (_, Err(error)) => {
+            tag_edit.error = Some(error);
+        }
+    }
+}
+
+/// Consume polled cover results into the UI texture cache: rgba→texture
+/// conversion is the egui-bound work that stays on the main thread (the
+/// texture boundary, ADR 0006); dedup and negative caching live behind the
+/// service seam, so artless results are simply dropped here.
+pub fn cache_polled_covers<S: std::hash::BuildHasher>(
+    covers: &dyn Covers,
+    textures: &mut std::collections::HashMap<String, egui::TextureHandle, S>,
+    lru_keys: &mut Vec<String>,
+    ctx: &egui::Context,
+) {
+    for (track_id, cover_image) in covers.poll() {
+        let Some(cover_image) = cover_image else {
+            continue; // artless: the service negative-caches it
+        };
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            [cover_image.width as usize, cover_image.height as usize],
+            &cover_image.rgba,
+        );
+        let texture = ctx.load_texture(&track_id.0, color_image, egui::TextureOptions::default());
+        textures.insert(track_id.0.clone(), texture);
+        for old in lru_insert(lru_keys, track_id.0, COVER_CACHE_CAP) {
+            textures.remove(&old);
+        }
+    }
+}
+
+/// Play a folder: start its first track and queue the rest as ONE batch
+/// command (allocation plan 4.3), so the queue mutates once under one lock
+/// instead of N times. The ids arrive in the store's path order — exactly
+/// what the former mirror listing produced.
+fn play_folder(track_ids: &[TrackId], cmd: Option<&Sender<PlaybackCommand>>) {
+    let Some(s) = cmd else { return };
+    let Some(first) = track_ids.first() else {
+        return;
+    };
+    let _ = s.send(PlaybackCommand::Play(first.clone()));
+    if track_ids.len() > 1 {
+        let _ = s.send(PlaybackCommand::AddMany(track_ids[1..].to_vec()));
+    }
+}
+
 /// Tracks directly in a folder, optionally filtered by search query. The
-/// listing arrives from the store in canonical order; only the query filter
-/// applies here, like before.
-fn folder_tracks_filtered(tracks: Vec<Track>, query: &str) -> Vec<Track> {
+/// listing arrives borrowed from the folder projection's Arc-shared cache;
+/// the filter matches against each track's PRECOMPUTED lowercase search
+/// text — the same value the store keeps in its `search_text` column, so
+/// the per-frame `format!` + `to_lowercase` work is gone (allocation plan
+/// 4.2). Collects lightweight references and hoists the lowercased query
+/// out of the per-item work.
+fn folder_tracks_filtered<'a>(tracks: &'a [Track], query: &str) -> Vec<&'a Track> {
     if query.is_empty() {
-        tracks
+        tracks.iter().collect()
     } else {
         let q = query.to_lowercase();
         tracks
-            .into_iter()
-            .filter(|t| t.metadata.search_text().contains(&q))
+            .iter()
+            .filter(|t| t.search_text.contains(&q))
             .collect()
     }
 }
@@ -2701,7 +2494,10 @@ struct TrackMenuArgs<'a> {
     track: Option<&'a Track>,
     tag_edit: &'a mut Option<TagEditState>,
     advanced: bool,
-    playlists: &'a mut Vec<Playlist>,
+    /// The seam's `Arc`'d playlist snapshot, cloned out before rendering —
+    /// it only names the "Add to Playlist" targets; mutations commit through
+    /// the store and the projection invalidates itself.
+    playlists: Arc<[Playlist]>,
     /// The Application Store's playlists section: entry mutations commit
     /// through it as one immediate durable transaction.
     playlist_store: &'a mut dyn PlaylistStore,
@@ -2753,22 +2549,15 @@ fn show_track_context_menu(response: &egui::Response, args: TrackMenuArgs<'_>) {
                 }
                 ui.close();
             }
-            add_to_playlist_menu(ui, &playlist_options, playlists, playlist_store, &tid);
+            add_to_playlist_menu(ui, &playlist_options, playlist_store, &tid);
         }
         if let Some(ref pid) = remove_pid
             && ui.button("Remove from Playlist").clicked() {
-                // One immediate durable transaction; the projection patch
-                // mirrors the committed change until the next reload.
-                match playlist_store.remove_playlist_entries(pid, &tid) {
-                    Ok(true) => {
-                        if let Some(playlist) =
-                            playlists.iter_mut().find(|p| &p.id == pid)
-                        {
-                            playlist.tracks.retain(|t| t != &tid);
-                        }
-                    }
-                    Ok(false) => {}
-                    Err(e) => tracing::warn!("Failed to remove playlist entry: {e}"),
+                // One immediate durable transaction; the committed mutation
+                // bumps the playlist generation, so the seam's next read
+                // reflects the removal with zero caller action (ADR 0002).
+                if let Err(e) = playlist_store.remove_playlist_entries(pid, &tid) {
+                    tracing::warn!("Failed to remove playlist entry: {e}");
                 }
                 ui.close();
             }
@@ -2862,13 +2651,13 @@ fn cover_art_ui(
 
 /// "Add to Playlist" submenu shared by the track context menus (Task 4.2).
 /// Clicking a playlist appends the track (exact duplicates ignored) as one
-/// immediate durable transaction, so the change survives a restart. Takes the
-/// playlists slice (not the whole `AppState`) so callers can capture a
-/// disjoint field and avoid whole-state borrow conflicts.
+/// immediate durable transaction, so the change survives a restart. Takes
+/// only the precomputed options and the store: the committed append bumps
+/// the playlist generation, so the seam's next read reflects it with zero
+/// caller action — nothing to patch or clear here.
 fn add_to_playlist_menu(
     ui: &mut egui::Ui,
     playlist_options: &[(PlaylistId, String)],
-    playlists: &mut [Playlist],
     store: &mut dyn PlaylistStore,
     track_id: &TrackId,
 ) {
@@ -2879,15 +2668,8 @@ fn add_to_playlist_menu(
         }
         for (pid, pname) in playlist_options {
             if ui.button(pname).clicked() {
-                match store.add_playlist_entry(pid, track_id) {
-                    Ok(true) => {
-                        // Projection patch mirroring the committed append.
-                        if let Some(playlist) = playlists.iter_mut().find(|p| &p.id == pid) {
-                            playlist.tracks.push(track_id.clone());
-                        }
-                    }
-                    Ok(false) => {}
-                    Err(e) => tracing::warn!("Failed to add playlist entry: {e}"),
+                if let Err(e) = store.add_playlist_entry(pid, track_id) {
+                    tracing::warn!("Failed to add playlist entry: {e}");
                 }
                 ui.close();
             }

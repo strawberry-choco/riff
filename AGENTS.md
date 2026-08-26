@@ -47,11 +47,12 @@ Cross-thread communication: `crossbeam_channel::unbounded()` for all message pas
 ## Commands (Dev Workflow)
 
 ```bash
-cargo fmt                        # format
-cargo clippy                     # lint (pedantic + selected strict lints)
-cargo check                      # fast type-check only
-cargo run                        # run in dev mode
-cargo build --release            # release build (LTO, stripped)
+cargo fmt                                  # format
+cargo check --all-targets                  # type/borrow checking across all targets
+cargo clippy --all-targets -- -D warnings  # lint with warnings as errors
+cargo test --all-targets                   # run all unit and integration tests
+cargo run                                  # run in dev mode
+cargo build --release                      # release build (LTO, stripped)
 ```
 
 **Test suite**: a single integration crate rooted at `tests/mod.rs` (`autotests = false`, one `[[test]]` target named `integration`), organized into `domain_tests`, `app_tests`, `infra_tests`, `ui_tests`, `golden_tests`, `integration_tests` with shared `test_utils`/`mocks`/`integration_helpers`. Run with `cargo test`. No inline `#[cfg(test)]` modules in `src/`. See `docs/engineering/testing-strategy.md`; golden-image snapshot workflow in `docs/engineering/golden-image-testing.md`.
@@ -67,7 +68,8 @@ cargo build --release            # release build (LTO, stripped)
 
 ## Important Gotchas
 
-- **msrv**: `rust-version = "1.95"` in Cargo.toml (edition 2021; raised for egui 0.36). CI uses the stable toolchain.
+- **msrv**: `rust-version = "1.95"` in Cargo.toml (edition 2021). CI uses the stable toolchain.
+- **egui pinned to 0.35**: egui 0.36 regressed headless texture rendering — kittest golden snapshots lose all user-loaded textures (`ctx.load_texture` + painter/image widgets paint nothing; text/shapes still render). The app itself renders fine windowed, but goldens would bake in icon-less UI. Revisit when upgrading past 0.35 (check upstream fix status first).
 - **Release profile**: LTO, codegen-units=1, strip=true. `cargo build --release` takes longer but produces smaller binaries.
 - **Audio device**: Falls back to device default sample rate if the track's rate is unsupported (common on Windows WASAPI shared mode at 48 kHz).
 - **Tests live in `tests/`** — one integration crate rooted at `tests/mod.rs` (per-suite files are modules of it, not separate crates). App-layer tests drive the port traits via the shared mocks module; store tests run against real SQLite in `tempfile` scratch dirs at the infra seam.

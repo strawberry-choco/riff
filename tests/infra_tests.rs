@@ -62,11 +62,14 @@ mod tests {
         assert_eq!(decoder.opened, vec![path]);
         assert_eq!(decoder.duration(), Some(Duration::from_secs(1)));
 
-        // Scripted batches come out in order, then EOF (`None`).
-        assert_eq!(decoder.next_frames(2).unwrap(), Some(vec![0.1, 0.2]));
-        assert_eq!(decoder.next_frames(3).unwrap(), Some(vec![0.3, 0.4, 0.5]));
-        assert_eq!(decoder.next_frames(2).unwrap(), None);
-        assert_eq!(decoder.next_frames(2).unwrap(), None);
+        // Scripted batches come out in order, then EOF (`Ok(0)`).
+        let mut out = [0.0f32; 4];
+        assert_eq!(decoder.next_frames(&mut out).unwrap(), 2);
+        assert_eq!(out[..2], [0.1, 0.2]);
+        assert_eq!(decoder.next_frames(&mut out).unwrap(), 3);
+        assert_eq!(out[..3], [0.3, 0.4, 0.5]);
+        assert_eq!(decoder.next_frames(&mut out).unwrap(), 0);
+        assert_eq!(decoder.next_frames(&mut out).unwrap(), 0);
 
         decoder.close();
         assert!(decoder.closed);
@@ -81,12 +84,16 @@ mod tests {
 
         // Drain the first batch, then seek: the stream restarts from the
         // beginning of the script and the seek position is recorded.
-        assert_eq!(decoder.next_frames(1).unwrap(), Some(vec![1.0]));
+        let mut out = [0.0f32; 1];
+        assert_eq!(decoder.next_frames(&mut out).unwrap(), 1);
+        assert!(crate::test_utils::float_close(out[0], 1.0));
         decoder.seek(Duration::from_secs(5)).unwrap();
         assert_eq!(decoder.seeks, vec![Duration::from_secs(5)]);
-        assert_eq!(decoder.next_frames(1).unwrap(), Some(vec![1.0]));
-        assert_eq!(decoder.next_frames(1).unwrap(), Some(vec![2.0]));
-        assert_eq!(decoder.next_frames(1).unwrap(), None);
+        assert_eq!(decoder.next_frames(&mut out).unwrap(), 1);
+        assert!(crate::test_utils::float_close(out[0], 1.0));
+        assert_eq!(decoder.next_frames(&mut out).unwrap(), 1);
+        assert!(crate::test_utils::float_close(out[0], 2.0));
+        assert_eq!(decoder.next_frames(&mut out).unwrap(), 0);
     }
 
     #[test]
@@ -103,10 +110,12 @@ mod tests {
         // Decode errors surface mid-stream without losing earlier samples.
         let mut decoder = MockAudioDecoder::new(test_format()).with_batches(vec![vec![0.5]]);
         decoder.open(&PathBuf::from("ok.ogg")).unwrap();
-        assert_eq!(decoder.next_frames(1).unwrap(), Some(vec![0.5]));
+        let mut out = [0.0f32; 1];
+        assert_eq!(decoder.next_frames(&mut out).unwrap(), 1);
+        assert!(crate::test_utils::float_close(out[0], 0.5));
         decoder.decode_error = Some("corrupt frame".to_string());
         assert!(matches!(
-            decoder.next_frames(1).unwrap_err(),
+            decoder.next_frames(&mut out).unwrap_err(),
             AppError::Decode(_)
         ));
     }
@@ -169,7 +178,7 @@ mod tests {
                 artist: Some("Artist".to_string()),
                 ..Default::default()
             },
-            cover_source: CoverSource::Embedded(vec![1, 2, 3]),
+            cover_source: CoverSource::Embedded(vec![1, 2, 3].into()),
             ..Default::default()
         };
 
@@ -179,7 +188,7 @@ mod tests {
         assert_eq!(metadata.title.as_deref(), Some("Song"));
         assert_eq!(metadata.artist.as_deref(), Some("Artist"));
         assert_eq!(duration, Some(Duration::from_secs(90)));
-        assert!(matches!(cover, CoverSource::Embedded(ref data) if data == &vec![1, 2, 3]));
+        assert!(matches!(cover, CoverSource::Embedded(ref data) if data.as_ref() == [1, 2, 3]));
         assert_eq!(format.sample_rate, 44_100);
 
         // Individual accessors agree with read_all.
@@ -249,7 +258,7 @@ mod tests {
             result: Err("decode failed".to_string()),
         };
         let err = failing
-            .load_cover(&CoverSource::Embedded(vec![9]))
+            .load_cover(&CoverSource::Embedded(vec![9].into()))
             .unwrap_err();
         assert!(matches!(err, AppError::CoverLoad(_)));
         assert!(err.to_string().contains("decode failed"));
@@ -1272,6 +1281,7 @@ fn library_track(
         play_count: 0,
         last_played: None,
         date_added: None,
+        search_text: String::new(),
     }
 }
 
@@ -1704,6 +1714,7 @@ fn test_get_track_roundtrips_all_fields() {
         play_count: 4,
         last_played: Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000)),
         date_added: Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(500)),
+        search_text: String::new(),
     };
     store
         .apply_scan_batch(std::slice::from_ref(&full))
@@ -2147,6 +2158,7 @@ fn browsing_track(
         play_count: 0,
         last_played: None,
         date_added: None,
+        search_text: String::new(),
     }
 }
 
@@ -2160,7 +2172,7 @@ mod reference_order {
     pub fn artists_az(fixtures: &[Track]) -> Vec<String> {
         let names: BTreeSet<String> = fixtures
             .iter()
-            .map(|t| t.metadata.display_album_artist())
+            .map(|t| t.metadata.display_album_artist().into_owned())
             .collect();
         names.into_iter().collect()
     }
@@ -2172,7 +2184,7 @@ mod reference_order {
             .iter()
             .filter(|t| t.metadata.display_album_artist() == artist)
         {
-            let title = track.metadata.display_album();
+            let title = track.metadata.display_album().into_owned();
             if seen.insert(title.clone()) {
                 albums.push((title, track.metadata.year));
             }
@@ -2523,7 +2535,10 @@ fn folder_fixtures(base: &std::path::Path) -> Vec<Track> {
     }
 
     let track = |rel: &str, title: &str, number: Option<u32>| {
-        let path = base.join(rel);
+        // Fixture literals use `\` for readability; translate to the platform
+        // separator so stored paths match real scan output on every OS
+        // (`Path::join` only normalizes separators native to the host).
+        let path = base.join(rel.replace('\\', std::path::MAIN_SEPARATOR_STR));
         browsing_track(
             &path.to_string_lossy(),
             title,
@@ -2897,6 +2912,7 @@ fn smart_track(
         play_count,
         last_played,
         date_added,
+        search_text: String::new(),
     }
 }
 
@@ -3438,4 +3454,200 @@ fn test_clear_library_is_atomic_on_failure() {
         .expect("trigger removal works");
     assert_eq!(store.clear_library().expect("clear works"), 3);
     assert_eq!(store.track_count().expect("count"), 0);
+}
+
+// --- Playlist adapter: session generation bumps only on committed mutations ---
+
+use riff::app::store::StoreGeneration;
+
+/// Scratch store plus a clone wired to the session playlist generation
+/// handle; `_dir` keeps the database file alive for the test.
+struct PlaylistGenerationFixture {
+    _dir: tempfile::TempDir,
+    shared: riff::infra::store::SqliteStore,
+    generation: StoreGeneration,
+    store: riff::infra::store::SqliteStore,
+}
+
+impl PlaylistGenerationFixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let shared = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+            .expect("fresh store must open and migrate");
+        let generation = shared.playlist_generation();
+        let store = shared.clone();
+        Self {
+            _dir: dir,
+            shared,
+            generation,
+            store,
+        }
+    }
+}
+
+/// Run one schema batch against the scratch connection (trigger plumbing).
+fn exec_batch(shared: &riff::infra::store::SqliteStore, batch: &str) {
+    shared
+        .with_connection(|conn| conn.execute_batch(batch))
+        .expect("schema batch works");
+}
+
+#[test]
+fn test_playlist_adapter_bumps_generation_on_committed_mutations() {
+    let mut fx = PlaylistGenerationFixture::new();
+    assert_eq!(fx.generation.current(), 0, "a fresh session starts at zero");
+
+    let t1 = TrackId("a.mp3".to_string());
+    let t2 = TrackId("b.mp3".to_string());
+
+    let pid = fx
+        .store
+        .create_playlist("Focus Mix", &[])
+        .expect("create works");
+    assert_eq!(fx.generation.current(), 1, "create_playlist commit bumps");
+
+    assert!(fx.store.rename_playlist(&pid, "Workout").unwrap());
+    assert_eq!(fx.generation.current(), 2, "rename_playlist commit bumps");
+
+    assert!(fx.store.add_playlist_entry(&pid, &t1).unwrap());
+    assert_eq!(
+        fx.generation.current(),
+        3,
+        "add_playlist_entry commit bumps"
+    );
+
+    assert!(fx.store.add_playlist_entry(&pid, &t2).unwrap());
+    assert_eq!(fx.generation.current(), 4);
+
+    assert!(
+        fx.store
+            .reorder_playlist_entries(&pid, &[t2.clone(), t1.clone()])
+            .unwrap()
+    );
+    assert_eq!(
+        fx.generation.current(),
+        5,
+        "reorder_playlist_entries commit bumps"
+    );
+
+    assert!(fx.store.remove_playlist_entries(&pid, &t1).unwrap());
+    assert_eq!(
+        fx.generation.current(),
+        6,
+        "remove_playlist_entries commit bumps"
+    );
+
+    assert!(fx.store.delete_playlist(&pid).unwrap());
+    assert_eq!(fx.generation.current(), 7, "delete_playlist commit bumps");
+}
+
+#[test]
+fn test_playlist_adapter_noop_mutations_do_not_bump_generation() {
+    let mut fx = PlaylistGenerationFixture::new();
+    let t1 = TrackId("a.mp3".to_string());
+    let missing = TrackId("gone.mp3".to_string());
+    let unknown = PlaylistId("playlist-does-not-exist".to_string());
+
+    // One committed create seeds one entry and sets the baseline every
+    // no-op compares against.
+    let pid = fx
+        .store
+        .create_playlist("Focus Mix", std::slice::from_ref(&t1))
+        .expect("create works");
+    assert_eq!(fx.generation.current(), 1);
+
+    assert!(!fx.store.add_playlist_entry(&pid, &t1).unwrap());
+    assert!(!fx.store.remove_playlist_entries(&pid, &missing).unwrap());
+    assert!(!fx.store.rename_playlist(&unknown, "New").unwrap());
+    assert!(!fx.store.delete_playlist(&unknown).unwrap());
+    assert!(!fx.store.add_playlist_entry(&unknown, &t1).unwrap());
+    assert!(
+        !fx.store
+            .reorder_playlist_entries(&unknown, std::slice::from_ref(&t1))
+            .unwrap()
+    );
+    assert_eq!(
+        fx.generation.current(),
+        1,
+        "no-op Ok(false) mutations must not bump the generation"
+    );
+}
+#[test]
+fn test_playlist_adapter_failed_mutations_do_not_bump_generation() {
+    let mut fx = PlaylistGenerationFixture::new();
+    let t1 = TrackId("a.mp3".to_string());
+    let t2 = TrackId("b.mp3".to_string());
+
+    // A playlist holding one entry backs the entry-mutation failure cases.
+    let pid = fx
+        .store
+        .create_playlist("Focus Mix", std::slice::from_ref(&t1))
+        .expect("create works");
+    assert_eq!(fx.generation.current(), 1);
+
+    // Each case aborts exactly one kind of playlist statement mid-transaction
+    // (same seam trick as the clear-library atomicity test above).
+    exec_batch(
+        &fx.shared,
+        "CREATE TRIGGER fail_create BEFORE INSERT ON playlists
+         BEGIN SELECT RAISE(ABORT, 'simulated create failure'); END;",
+    );
+    assert!(
+        fx.store.create_playlist("Broken", &[]).is_err(),
+        "the simulated failure surfaces as an error"
+    );
+    assert_eq!(fx.generation.current(), 1, "failed create must not bump");
+    exec_batch(&fx.shared, "DROP TRIGGER fail_create;");
+
+    exec_batch(
+        &fx.shared,
+        "CREATE TRIGGER fail_rename BEFORE UPDATE ON playlists
+         BEGIN SELECT RAISE(ABORT, 'simulated rename failure'); END;",
+    );
+    assert!(fx.store.rename_playlist(&pid, "Broken").is_err());
+    assert_eq!(fx.generation.current(), 1, "failed rename must not bump");
+    exec_batch(&fx.shared, "DROP TRIGGER fail_rename;");
+
+    exec_batch(
+        &fx.shared,
+        "CREATE TRIGGER fail_delete BEFORE DELETE ON playlists
+         BEGIN SELECT RAISE(ABORT, 'simulated delete failure'); END;",
+    );
+    assert!(fx.store.delete_playlist(&pid).is_err());
+    assert_eq!(fx.generation.current(), 1, "failed delete must not bump");
+    exec_batch(&fx.shared, "DROP TRIGGER fail_delete;");
+
+    exec_batch(
+        &fx.shared,
+        "CREATE TRIGGER fail_add BEFORE INSERT ON playlist_entries
+         BEGIN SELECT RAISE(ABORT, 'simulated add failure'); END;",
+    );
+    assert!(fx.store.add_playlist_entry(&pid, &t2).is_err());
+    assert_eq!(fx.generation.current(), 1, "failed add must not bump");
+    exec_batch(&fx.shared, "DROP TRIGGER fail_add;");
+
+    // remove and reorder both start by deleting playlist_entries rows.
+    exec_batch(
+        &fx.shared,
+        "CREATE TRIGGER fail_remove BEFORE DELETE ON playlist_entries
+         BEGIN SELECT RAISE(ABORT, 'simulated remove failure'); END;",
+    );
+    assert!(fx.store.remove_playlist_entries(&pid, &t1).is_err());
+    assert_eq!(fx.generation.current(), 1, "failed remove must not bump");
+    assert!(
+        fx.store
+            .reorder_playlist_entries(&pid, std::slice::from_ref(&t1))
+            .is_err()
+    );
+    assert_eq!(fx.generation.current(), 1, "failed reorder must not bump");
+    exec_batch(&fx.shared, "DROP TRIGGER fail_remove;");
+
+    // Sanity: with the trigger gone the same mutation commits and moves.
+    assert!(fx.store.delete_playlist(&pid).unwrap());
+    assert_eq!(
+        fx.generation.current(),
+        2,
+        "commits after failures still bump"
+    );
 }

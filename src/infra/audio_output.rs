@@ -1,12 +1,24 @@
 use crate::app::errors::AppError;
 use crate::app::traits::AudioOutput;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use ringbuf::{
+    HeapCons, HeapProd, HeapRb,
+    traits::{Consumer, Observer, Producer, Split},
+};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-/// Shared audio buffer between decoder (producer) and cpal callback (consumer).
-type AudioBuffer = Arc<Mutex<VecDeque<f32>>>;
+/// Slack added on top of the engine's backpressure watermark
+/// (`sample_rate * channels * 2`) when sizing the ring. After the engine's
+/// `buffer_len() < max_buffer_samples` check a full decode chunk (4096
+/// samples) always fits, so steady-state writes never block or drop samples.
+const CHUNK_SLACK_SAMPLES: usize = 4096;
+
+/// How long [`AudioOutput::write_samples`] may wait on the callback to free
+/// ring space before giving up. Only trips when the stream is effectively
+/// dead (device gone) while the ring is full.
+const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Wrapper to make `cpal::Stream` Send-safe.
 /// `cpal::Stream` is !Send on some platforms, but in practice it is safe
@@ -26,7 +38,18 @@ pub struct CpalAudioOutput {
     /// differ from `sample_rate`. The gapless format gate compares against it.
     effective_sample_rate: u32,
     channels: u16,
-    buffer: AudioBuffer,
+    /// Producer half of the lock-free SPSC ring between the decode loop
+    /// (here, on the audio engine thread) and the cpal callback. A fresh
+    /// ring is built per `initialize`; the consumer half moves into the
+    /// stream closure at `start`.
+    producer: Option<HeapProd<f32>>,
+    /// Consumer half parked until `start` hands it to the cpal callback.
+    pending_consumer: Option<HeapCons<f32>>,
+    /// Flush generation shared with the callback. `clear_buffer` bumps it;
+    /// the callback detects the change and drains the ring, which is how a
+    /// producer-side clear works without locks (the consumer owns the read
+    /// cursor, so only it can reclaim the space).
+    flush_epoch: Arc<AtomicU64>,
     volume: Arc<AtomicU32>,
     /// `ReplayGain` linear factor (Task 4.3), stored as f32 bits like `volume`
     /// so the audio callback can read it lock-free. Defaults to 1.0 (no
@@ -35,13 +58,6 @@ pub struct CpalAudioOutput {
 }
 
 impl CpalAudioOutput {
-    /// The sample rate the running (or last built) cpal stream actually uses.
-    /// See the `effective_sample_rate` field — this is what the gapless
-    /// format-compatibility gate in the engine compares against (Task 4.1).
-    pub fn effective_sample_rate(&self) -> u32 {
-        self.effective_sample_rate
-    }
-
     pub fn new() -> Self {
         Self {
             host: cpal::default_host(),
@@ -50,7 +66,9 @@ impl CpalAudioOutput {
             sample_rate: 44100,
             effective_sample_rate: 44100,
             channels: 2,
-            buffer: Arc::new(Mutex::new(VecDeque::with_capacity(65536))),
+            producer: None,
+            pending_consumer: None,
+            flush_epoch: Arc::new(AtomicU64::new(0)),
             volume: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
             replaygain: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
         }
@@ -83,6 +101,100 @@ fn f32_to_u16(v: f32) -> u16 {
     (v.clamp(-1.0, 1.0) * 32767.0 + 32768.0) as u16
 }
 
+/// Drain the ring if a `clear_buffer` flush happened since the callback last
+/// looked. Called at the START of every callback invocation; stale samples
+/// left by the flush are discarded so playback resumes at whatever the
+/// producer writes after the clear.
+#[inline]
+fn absorb_flush_start(cons: &mut HeapCons<f32>, flush_epoch: &AtomicU64, seen: &mut u64) {
+    let epoch = flush_epoch.load(Ordering::Acquire);
+    if epoch != *seen {
+        *seen = epoch;
+        // Drop every queued sample; the producer-side clear cannot advance
+        // the read cursor itself, so the consumer reclaims the space here.
+        cons.skip(usize::MAX);
+    }
+}
+
+/// Re-check for a flush at the END of a callback invocation. A clear may race
+/// with samples already popped into the output buffer this invocation; those
+/// must not be played, so the caller silences its whole buffer and drains.
+#[inline]
+fn absorb_flush_end(cons: &mut HeapCons<f32>, flush_epoch: &AtomicU64, seen: &mut u64) -> bool {
+    let epoch = flush_epoch.load(Ordering::Acquire);
+    if epoch == *seen {
+        return false;
+    }
+    *seen = epoch;
+    cons.skip(usize::MAX);
+    true
+}
+
+fn audio_callback_f32(
+    data: &mut [f32],
+    cons: &mut HeapCons<f32>,
+    flush_epoch: &AtomicU64,
+    seen: &mut u64,
+    volume: &AtomicU32,
+    replaygain: &AtomicU32,
+) {
+    absorb_flush_start(cons, flush_epoch, seen);
+    let vol = f32::from_bits(volume.load(Ordering::Relaxed));
+    let rg = f32::from_bits(replaygain.load(Ordering::Relaxed));
+    let filled = cons.pop_slice(data);
+    if absorb_flush_end(cons, flush_epoch, seen) {
+        // A clear raced with this callback: discard everything produced here.
+        data.fill(0.0);
+        return;
+    }
+    for sample in &mut data[..filled] {
+        *sample *= vol * rg;
+    }
+    data[filled..].fill(0.0);
+}
+
+fn audio_callback_i16(
+    data: &mut [i16],
+    cons: &mut HeapCons<f32>,
+    flush_epoch: &AtomicU64,
+    seen: &mut u64,
+    volume: &AtomicU32,
+    replaygain: &AtomicU32,
+) {
+    absorb_flush_start(cons, flush_epoch, seen);
+    let vol = f32::from_bits(volume.load(Ordering::Relaxed));
+    let rg = f32::from_bits(replaygain.load(Ordering::Relaxed));
+    for slot in data.iter_mut() {
+        let f32_val = cons.try_pop().map_or(0.0, |s| s * vol * rg);
+        *slot = f32_to_i16(f32_val);
+    }
+    if absorb_flush_end(cons, flush_epoch, seen) {
+        // A clear raced with this callback: discard everything produced here.
+        data.fill(0);
+    }
+}
+
+fn audio_callback_u16(
+    data: &mut [u16],
+    cons: &mut HeapCons<f32>,
+    flush_epoch: &AtomicU64,
+    seen: &mut u64,
+    volume: &AtomicU32,
+    replaygain: &AtomicU32,
+) {
+    absorb_flush_start(cons, flush_epoch, seen);
+    let vol = f32::from_bits(volume.load(Ordering::Relaxed));
+    let rg = f32::from_bits(replaygain.load(Ordering::Relaxed));
+    for slot in data.iter_mut() {
+        let f32_val = cons.try_pop().map_or(0.0, |s| s * vol * rg);
+        *slot = f32_to_u16(f32_val);
+    }
+    if absorb_flush_end(cons, flush_epoch, seen) {
+        // A clear raced with this callback: discard everything produced here.
+        data.fill(32768);
+    }
+}
+
 impl AudioOutput for CpalAudioOutput {
     fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), AppError> {
         self.sample_rate = sample_rate;
@@ -93,6 +205,15 @@ impl AudioOutput for CpalAudioOutput {
             .default_output_device()
             .ok_or_else(|| AppError::AudioOutput("No default output device".to_string()))?;
 
+        // Fresh ring per session, sized to the decode loop's backpressure
+        // watermark plus one chunk of slack (see `CHUNK_SLACK_SAMPLES`).
+        // Replacing the ring also discards any samples left over from the
+        // previous session without relying on callback cooperation.
+        let capacity = (sample_rate as usize) * usize::from(channels) * 2 + CHUNK_SLACK_SAMPLES;
+        let (producer, consumer) = HeapRb::<f32>::new(capacity.max(1)).split();
+        self.producer = Some(producer);
+        self.pending_consumer = Some(consumer);
+
         self.device = Some(device);
         Ok(())
     }
@@ -102,6 +223,10 @@ impl AudioOutput for CpalAudioOutput {
             .device
             .as_ref()
             .ok_or_else(|| AppError::AudioOutput("Device not initialized".to_string()))?;
+        let mut consumer = self
+            .pending_consumer
+            .take()
+            .ok_or_else(|| AppError::AudioOutput("Output not initialized".to_string()))?;
 
         let supported_config = device
             .default_output_config()
@@ -117,15 +242,25 @@ impl AudioOutput for CpalAudioOutput {
             build_stream_config(device, self.sample_rate, self.channels, &supported_config);
         // Record the rate the stream is ACTUALLY built with (Task 4.1).
         self.effective_sample_rate = stream_config.sample_rate;
-        let buffer_clone = self.buffer.clone();
         let volume_clone = self.volume.clone();
         let replaygain_clone = self.replaygain.clone();
+        let flush_epoch = self.flush_epoch.clone();
+        // The callback tracks the flush generation it has already absorbed.
+        let mut seen_flush = flush_epoch.load(Ordering::Acquire);
 
+        // Only one arm runs, but each needs to own the consumer half.
         let stream = match sample_format {
             cpal::SampleFormat::F32 => device.build_output_stream(
                 stream_config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    audio_callback_f32(data, &buffer_clone, &volume_clone, &replaygain_clone);
+                    audio_callback_f32(
+                        data,
+                        &mut consumer,
+                        &flush_epoch,
+                        &mut seen_flush,
+                        &volume_clone,
+                        &replaygain_clone,
+                    );
                 },
                 move |err| {
                     tracing::error!("Audio stream error: {}", err);
@@ -135,7 +270,14 @@ impl AudioOutput for CpalAudioOutput {
             cpal::SampleFormat::I16 => device.build_output_stream(
                 stream_config,
                 move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                    audio_callback_i16(data, &buffer_clone, &volume_clone, &replaygain_clone);
+                    audio_callback_i16(
+                        data,
+                        &mut consumer,
+                        &flush_epoch,
+                        &mut seen_flush,
+                        &volume_clone,
+                        &replaygain_clone,
+                    );
                 },
                 move |err| {
                     tracing::error!("Audio stream error: {}", err);
@@ -145,7 +287,14 @@ impl AudioOutput for CpalAudioOutput {
             cpal::SampleFormat::U16 => device.build_output_stream(
                 stream_config,
                 move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
-                    audio_callback_u16(data, &buffer_clone, &volume_clone, &replaygain_clone);
+                    audio_callback_u16(
+                        data,
+                        &mut consumer,
+                        &flush_epoch,
+                        &mut seen_flush,
+                        &volume_clone,
+                        &replaygain_clone,
+                    );
                 },
                 move |err| {
                     tracing::error!("Audio stream error: {}", err);
@@ -172,33 +321,59 @@ impl AudioOutput for CpalAudioOutput {
         if let Some(ref stream) = self.stream.0 {
             let _ = stream.pause();
         }
+        // Dropping the stream joins the callback and drops the consumer half
+        // parked inside its closure. Any samples left in the ring are
+        // discarded when the next session's `initialize` builds a fresh ring.
         self.stream = SendStream(None);
         Ok(())
     }
 
     fn buffer_len(&self) -> usize {
-        match self.buffer.lock() {
-            Ok(buf) => buf.len(),
-            Err(_) => 0,
-        }
+        // Lock-free: the producer side can observe the fill level while the
+        // callback consumes concurrently.
+        self.producer.as_ref().map_or(0, Observer::occupied_len)
     }
 
     fn clear_buffer(&mut self) {
-        if let Ok(mut buf) = self.buffer.lock() {
-            buf.clear();
+        // Producer-side clear: bump the flush generation. The callback notices
+        // on its next invocation (and re-checks at the end of the current one,
+        // so a mid-callback clear can never play stale samples), drains the
+        // ring, and thereby hands the space back to the producer. Every
+        // `clear_buffer` call site either has a live stream to service the
+        // drain or is followed by `initialize`, which replaces the ring.
+        if self.producer.is_some() {
+            self.flush_epoch.fetch_add(1, Ordering::Release);
         }
     }
 
     fn write_samples(&mut self, samples: &[f32]) -> Result<usize, AppError> {
-        match self.buffer.lock() {
-            Ok(mut buf) => {
-                buf.extend(samples.iter());
-                Ok(samples.len())
+        let Some(producer) = self.producer.as_mut() else {
+            return Err(AppError::AudioOutput(
+                "Audio output not initialized".to_string(),
+            ));
+        };
+        // Push as much as fits, waiting for the callback to free space rather
+        // than dropping samples (the old shared VecDeque grew unboundedly; the
+        // ring is bounded). Under normal playback the watermark plus slack
+        // guarantees the whole chunk fits on the first push; the retry loop
+        // matters for the gapless handoff's bulk pre-buffer write, which the
+        // callback drains in real time.
+        let deadline = Instant::now() + WRITE_TIMEOUT;
+        let mut written = 0usize;
+        while written < samples.len() {
+            written += producer.push_slice(&samples[written..]);
+            if written == samples.len() {
+                break;
             }
-            Err(_) => Err(AppError::AudioOutput(
-                "Failed to acquire audio buffer lock".to_string(),
-            )),
+            if Instant::now() >= deadline {
+                return Err(AppError::AudioOutput(format!(
+                    "Audio output buffer stalled: wrote {written}/{} samples",
+                    samples.len()
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(1));
         }
+        Ok(written)
     }
 
     fn set_volume(&mut self, volume: f32) {
@@ -208,6 +383,10 @@ impl AudioOutput for CpalAudioOutput {
     fn set_replaygain(&mut self, factor: f32) {
         self.replaygain
             .store(f32::to_bits(factor), Ordering::Relaxed);
+    }
+
+    fn effective_sample_rate(&self) -> u32 {
+        self.effective_sample_rate
     }
 }
 
@@ -243,60 +422,4 @@ fn build_stream_config(
     }
 
     config
-}
-
-fn audio_callback_f32(
-    data: &mut [f32],
-    buffer: &AudioBuffer,
-    volume: &Arc<AtomicU32>,
-    replaygain: &Arc<AtomicU32>,
-) {
-    let Ok(mut buf) = buffer.try_lock() else {
-        // If we can't get the lock, fill with silence to avoid glitches
-        data.fill(0.0);
-        return;
-    };
-    let vol = f32::from_bits(volume.load(Ordering::Relaxed));
-    let rg = f32::from_bits(replaygain.load(Ordering::Relaxed));
-    for sample in data.iter_mut() {
-        *sample = buf.pop_front().unwrap_or(0.0) * vol * rg;
-    }
-}
-
-fn audio_callback_i16(
-    data: &mut [i16],
-    buffer: &AudioBuffer,
-    volume: &Arc<AtomicU32>,
-    replaygain: &Arc<AtomicU32>,
-) {
-    let Ok(mut buf) = buffer.try_lock() else {
-        // If we can't get the lock, fill with silence to avoid glitches
-        data.fill(0);
-        return;
-    };
-    let vol = f32::from_bits(volume.load(Ordering::Relaxed));
-    let rg = f32::from_bits(replaygain.load(Ordering::Relaxed));
-    for sample in data.iter_mut() {
-        let f32_val = buf.pop_front().unwrap_or(0.0) * vol * rg;
-        *sample = f32_to_i16(f32_val);
-    }
-}
-
-fn audio_callback_u16(
-    data: &mut [u16],
-    buffer: &AudioBuffer,
-    volume: &Arc<AtomicU32>,
-    replaygain: &Arc<AtomicU32>,
-) {
-    let Ok(mut buf) = buffer.try_lock() else {
-        // If we can't get the lock, fill with silence to avoid glitches
-        data.fill(32768);
-        return;
-    };
-    let vol = f32::from_bits(volume.load(Ordering::Relaxed));
-    let rg = f32::from_bits(replaygain.load(Ordering::Relaxed));
-    for sample in data.iter_mut() {
-        let f32_val = buf.pop_front().unwrap_or(0.0) * vol * rg;
-        *sample = f32_to_u16(f32_val);
-    }
 }

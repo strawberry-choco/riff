@@ -200,8 +200,15 @@ fn rename_aside(path: &std::path::Path) -> Result<(), AppError> {
 }
 
 /// The shared `SQLite` connection backing the `Application Store`.
+///
+/// A cheaply clonable handle: every clone shares the one mutex-guarded
+/// connection and both session generations, so any clone can serve any of
+/// the store ports.
+#[derive(Clone)]
 pub struct SqliteStore {
-    conn: Connection,
+    conn: std::sync::Arc<std::sync::Mutex<Connection>>,
+    library_generation: StoreGeneration,
+    playlist_generation: StoreGeneration,
 }
 
 impl SqliteStore {
@@ -314,22 +321,64 @@ impl SqliteStore {
     /// applied versions are verified against their embedded checksum and
     /// skipped, pending ones are applied exactly once.
     pub fn apply_migrations(&mut self) -> Result<(), AppError> {
-        Self::run_migrations(&self.conn)
+        let conn = self.conn.lock_or_recover();
+        Self::run_migrations(&conn)
     }
 
-    /// Run `f` with the underlying connection. Used by infrastructure tests
-    /// at the port boundary; later store features build on this access path.
+    /// Run `f` with the underlying connection, locking it for the duration
+    /// of the call (recovering from a poisoned lock rather than panicking).
+    /// Used by infrastructure tests at the port boundary; later store
+    /// features build on this access path.
     pub fn with_connection<T>(
         &self,
         f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> Result<T, AppError> {
-        f(&self.conn).map_err(|e| AppError::InvalidOperation(format!("store query failed: {e}")))
+        let conn = self.conn.lock_or_recover();
+        f(&conn).map_err(|e| AppError::InvalidOperation(format!("store query failed: {e}")))
+    }
+
+    /// The session Library generation this handle bumps after each committed
+    /// Library mutation (ADR 0002). Clones share it.
+    #[must_use]
+    pub fn library_generation(&self) -> StoreGeneration {
+        self.library_generation.clone()
+    }
+
+    /// The session playlist generation this handle bumps after each
+    /// committed playlist mutation (ADR 0002), independent of the Library
+    /// generation so entry edits never invalidate Library projections.
+    /// Clones share it.
+    #[must_use]
+    pub fn playlist_generation(&self) -> StoreGeneration {
+        self.playlist_generation.clone()
+    }
+
+    /// Record whether a playlist mutation committed by bumping the session
+    /// playlist generation exactly on commit (ADR 0002): projections refetch
+    /// on their next read.
+    fn bump_playlist_generation_on_commit(&self, committed: bool) {
+        if committed {
+            self.playlist_generation.bump();
+        }
+    }
+
+    /// Record whether a Library mutation committed by bumping the session
+    /// Library generation exactly on commit (ADR 0002): projections refetch
+    /// on their next read.
+    fn bump_library_generation_on_commit(&self, committed: bool) {
+        if committed {
+            self.library_generation.bump();
+        }
     }
 
     fn configure_and_migrate(mut conn: Connection) -> Result<Self, AppError> {
         Self::configure_connection(&mut conn)?;
         Self::run_migrations(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+            library_generation: StoreGeneration::new(),
+            playlist_generation: StoreGeneration::new(),
+        })
     }
 
     /// Durability setup required by the spec: WAL journal mode,
@@ -469,7 +518,7 @@ impl PlaylistStore for SqliteStore {
     fn load_playlists(&self) -> Result<Vec<Playlist>, AppError> {
         self.with_connection(|conn| {
             let mut stmt =
-                conn.prepare("SELECT id, name, created_at FROM playlists ORDER BY rowid")?;
+                conn.prepare_cached("SELECT id, name, created_at FROM playlists ORDER BY rowid")?;
             let rows = stmt.query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -477,13 +526,15 @@ impl PlaylistStore for SqliteStore {
                     row.get::<_, i64>(2)?,
                 ))
             })?;
+            // Prepared once for the whole loop (allocation plan 4.1): the
+            // per-playlist entries query no longer re-prepares per row.
+            let mut entries = conn.prepare_cached(
+                "SELECT track_id FROM playlist_entries
+                 WHERE playlist_id = ?1 ORDER BY position",
+            )?;
             let mut playlists = Vec::new();
             for row in rows {
                 let (id, name, created_at) = row?;
-                let mut entries = conn.prepare(
-                    "SELECT track_id FROM playlist_entries
-                     WHERE playlist_id = ?1 ORDER BY position",
-                )?;
                 let tracks = entries
                     .query_map([&id], |r| r.get::<_, String>(0))?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -515,7 +566,7 @@ impl PlaylistStore for SqliteStore {
             // reference, which survives the join even when dangling. A
             // dangling row has NULL in every tracks column, so `path`
             // (index 0) being NULL is the validity bit.
-            let mut stmt = conn.prepare(&format!(
+            let mut stmt = conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS}, e.track_id
                  FROM playlist_entries e
                  LEFT JOIN tracks ON tracks.path = e.track_id
@@ -547,102 +598,114 @@ impl PlaylistStore for SqliteStore {
         name: &str,
         initial_tracks: &[TrackId],
     ) -> Result<PlaylistId, AppError> {
-        self.with_connection(|conn| {
-            conn.execute_batch("BEGIN IMMEDIATE;")?;
-            match Self::create_playlist_in_tx(conn, name, initial_tracks) {
-                Ok(id) => conn.execute_batch("COMMIT;").map(|()| id),
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    Err(e)
+        let created = self
+            .with_connection(|conn| {
+                conn.execute_batch("BEGIN IMMEDIATE;")?;
+                match Self::create_playlist_in_tx(conn, name, initial_tracks) {
+                    Ok(id) => conn.execute_batch("COMMIT;").map(|()| id),
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        Err(e)
+                    }
                 }
-            }
-        })
-        .map_err(|e| AppError::InvalidOperation(format!("failed to create playlist: {e}")))
+            })
+            .map_err(|e| AppError::InvalidOperation(format!("failed to create playlist: {e}")));
+        self.bump_playlist_generation_on_commit(created.is_ok());
+        created
     }
 
     /// One immediate durable transaction: only the renamed row is written.
     fn rename_playlist(&mut self, id: &PlaylistId, new_name: &str) -> Result<bool, AppError> {
-        self.with_connection(|conn| {
-            conn.execute_batch("BEGIN IMMEDIATE;")?;
-            let updated = conn.execute(
-                "UPDATE playlists SET name = ?2 WHERE id = ?1",
-                rusqlite::params![id.0, new_name.trim()],
-            );
-            match updated {
-                Ok(_) => conn.execute_batch("COMMIT;").map(|()| updated.unwrap_or(0)),
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    Err(e)
+        let renamed = self
+            .with_connection(|conn| {
+                conn.execute_batch("BEGIN IMMEDIATE;")?;
+                let updated = conn.execute(
+                    "UPDATE playlists SET name = ?2 WHERE id = ?1",
+                    rusqlite::params![id.0, new_name.trim()],
+                );
+                match updated {
+                    Ok(_) => conn.execute_batch("COMMIT;").map(|()| updated.unwrap_or(0)),
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        Err(e)
+                    }
                 }
-            }
-        })
-        .map(|rows| rows > 0)
-        .map_err(|e| AppError::InvalidOperation(format!("failed to rename playlist: {e}")))
+            })
+            .map(|rows| rows > 0)
+            .map_err(|e| AppError::InvalidOperation(format!("failed to rename playlist: {e}")));
+        self.bump_playlist_generation_on_commit(matches!(renamed, Ok(true)));
+        renamed
     }
 
     /// One immediate durable transaction: the playlist row goes and its
     /// entries cascade; no other playlist's data is rewritten.
     fn delete_playlist(&mut self, id: &PlaylistId) -> Result<bool, AppError> {
-        self.with_connection(|conn| {
-            conn.execute_batch("BEGIN IMMEDIATE;")?;
-            let deleted = conn.execute("DELETE FROM playlists WHERE id = ?1", [&id.0]);
-            match deleted {
-                Ok(_) => conn.execute_batch("COMMIT;").map(|()| deleted.unwrap_or(0)),
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    Err(e)
+        let deleted = self
+            .with_connection(|conn| {
+                conn.execute_batch("BEGIN IMMEDIATE;")?;
+                let deleted = conn.execute("DELETE FROM playlists WHERE id = ?1", [&id.0]);
+                match deleted {
+                    Ok(_) => conn.execute_batch("COMMIT;").map(|()| deleted.unwrap_or(0)),
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        Err(e)
+                    }
                 }
-            }
-        })
-        .map(|rows| rows > 0)
-        .map_err(|e| AppError::InvalidOperation(format!("failed to delete playlist: {e}")))
+            })
+            .map(|rows| rows > 0)
+            .map_err(|e| AppError::InvalidOperation(format!("failed to delete playlist: {e}")));
+        self.bump_playlist_generation_on_commit(matches!(deleted, Ok(true)));
+        deleted
     }
 
     /// One immediate durable transaction: a single appended entry row, or
     /// nothing when the playlist is unknown or the entry already exists.
     fn add_playlist_entry(&mut self, id: &PlaylistId, track: &TrackId) -> Result<bool, AppError> {
-        self.with_connection(|conn| {
-            conn.execute_batch("BEGIN IMMEDIATE;")?;
-            let outcome = (|| -> rusqlite::Result<bool> {
-                let known: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM playlists WHERE id = ?1",
-                    [&id.0],
-                    |row| row.get(0),
-                )?;
-                if known == 0 {
-                    return Ok(false);
+        let added = self
+            .with_connection(|conn| {
+                conn.execute_batch("BEGIN IMMEDIATE;")?;
+                let outcome = (|| -> rusqlite::Result<bool> {
+                    let known: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM playlists WHERE id = ?1",
+                        [&id.0],
+                        |row| row.get(0),
+                    )?;
+                    if known == 0 {
+                        return Ok(false);
+                    }
+                    let duplicate: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM playlist_entries
+                         WHERE playlist_id = ?1 AND track_id = ?2",
+                        rusqlite::params![id.0, track.0],
+                        |row| row.get(0),
+                    )?;
+                    if duplicate > 0 {
+                        return Ok(false);
+                    }
+                    let next: i64 = conn.query_row(
+                        "SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_entries
+                         WHERE playlist_id = ?1",
+                        [&id.0],
+                        |row| row.get(0),
+                    )?;
+                    conn.execute(
+                        "INSERT INTO playlist_entries(playlist_id, position, track_id)
+                         VALUES (?1, ?2, ?3)",
+                        rusqlite::params![id.0, next, track.0],
+                    )?;
+                    Ok(true)
+                })();
+                match outcome {
+                    Ok(committed) => conn.execute_batch("COMMIT;").map(|()| committed),
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        Err(e)
+                    }
                 }
-                let duplicate: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM playlist_entries
-                     WHERE playlist_id = ?1 AND track_id = ?2",
-                    rusqlite::params![id.0, track.0],
-                    |row| row.get(0),
-                )?;
-                if duplicate > 0 {
-                    return Ok(false);
-                }
-                let next: i64 = conn.query_row(
-                    "SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_entries
-                     WHERE playlist_id = ?1",
-                    [&id.0],
-                    |row| row.get(0),
-                )?;
-                conn.execute(
-                    "INSERT INTO playlist_entries(playlist_id, position, track_id)
-                     VALUES (?1, ?2, ?3)",
-                    rusqlite::params![id.0, next, track.0],
-                )?;
-                Ok(true)
-            })();
-            match outcome {
-                Ok(committed) => conn.execute_batch("COMMIT;").map(|()| committed),
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    Err(e)
-                }
-            }
-        })
-        .map_err(|e| AppError::InvalidOperation(format!("failed to add playlist entry: {e}")))
+            })
+            .map_err(|e| AppError::InvalidOperation(format!("failed to add playlist entry: {e}")));
+        self.bump_playlist_generation_on_commit(matches!(added, Ok(true)));
+        added
     }
 
     /// One immediate durable transaction removing every occurrence of the
@@ -652,22 +715,27 @@ impl PlaylistStore for SqliteStore {
         id: &PlaylistId,
         track: &TrackId,
     ) -> Result<bool, AppError> {
-        self.with_connection(|conn| {
-            conn.execute_batch("BEGIN IMMEDIATE;")?;
-            let removed = conn.execute(
-                "DELETE FROM playlist_entries WHERE playlist_id = ?1 AND track_id = ?2",
-                rusqlite::params![id.0, track.0],
-            );
-            match removed {
-                Ok(_) => conn.execute_batch("COMMIT;").map(|()| removed.unwrap_or(0)),
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    Err(e)
+        let removed = self
+            .with_connection(|conn| {
+                conn.execute_batch("BEGIN IMMEDIATE;")?;
+                let removed = conn.execute(
+                    "DELETE FROM playlist_entries WHERE playlist_id = ?1 AND track_id = ?2",
+                    rusqlite::params![id.0, track.0],
+                );
+                match removed {
+                    Ok(_) => conn.execute_batch("COMMIT;").map(|()| removed.unwrap_or(0)),
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        Err(e)
+                    }
                 }
-            }
-        })
-        .map(|rows| rows > 0)
-        .map_err(|e| AppError::InvalidOperation(format!("failed to remove playlist entries: {e}")))
+            })
+            .map(|rows| rows > 0)
+            .map_err(|e| {
+                AppError::InvalidOperation(format!("failed to remove playlist entries: {e}"))
+            });
+        self.bump_playlist_generation_on_commit(matches!(removed, Ok(true)));
+        removed
     }
 
     /// One immediate durable transaction rewriting the playlist's entries to
@@ -679,43 +747,48 @@ impl PlaylistStore for SqliteStore {
         id: &PlaylistId,
         ordered: &[TrackId],
     ) -> Result<bool, AppError> {
-        self.with_connection(|conn| {
-            conn.execute_batch("BEGIN IMMEDIATE;")?;
-            let outcome = (|| -> rusqlite::Result<bool> {
-                let known: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM playlists WHERE id = ?1",
-                    [&id.0],
-                    |row| row.get(0),
-                )?;
-                if known == 0 {
-                    return Ok(false);
-                }
-                conn.execute(
-                    "DELETE FROM playlist_entries WHERE playlist_id = ?1",
-                    [&id.0],
-                )?;
-                for (position, track) in ordered.iter().enumerate() {
-                    conn.execute(
-                        "INSERT INTO playlist_entries(playlist_id, position, track_id)
-                         VALUES (?1, ?2, ?3)",
-                        rusqlite::params![
-                            id.0,
-                            i64::try_from(position).unwrap_or(i64::MAX),
-                            track.0
-                        ],
+        let reordered = self
+            .with_connection(|conn| {
+                conn.execute_batch("BEGIN IMMEDIATE;")?;
+                let outcome = (|| -> rusqlite::Result<bool> {
+                    let known: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM playlists WHERE id = ?1",
+                        [&id.0],
+                        |row| row.get(0),
                     )?;
+                    if known == 0 {
+                        return Ok(false);
+                    }
+                    conn.execute(
+                        "DELETE FROM playlist_entries WHERE playlist_id = ?1",
+                        [&id.0],
+                    )?;
+                    for (position, track) in ordered.iter().enumerate() {
+                        conn.execute(
+                            "INSERT INTO playlist_entries(playlist_id, position, track_id)
+                             VALUES (?1, ?2, ?3)",
+                            rusqlite::params![
+                                id.0,
+                                i64::try_from(position).unwrap_or(i64::MAX),
+                                track.0
+                            ],
+                        )?;
+                    }
+                    Ok(true)
+                })();
+                match outcome {
+                    Ok(committed) => conn.execute_batch("COMMIT;").map(|()| committed),
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        Err(e)
+                    }
                 }
-                Ok(true)
-            })();
-            match outcome {
-                Ok(committed) => conn.execute_batch("COMMIT;").map(|()| committed),
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    Err(e)
-                }
-            }
-        })
-        .map_err(|e| AppError::InvalidOperation(format!("failed to reorder playlist entries: {e}")))
+            })
+            .map_err(|e| {
+                AppError::InvalidOperation(format!("failed to reorder playlist entries: {e}"))
+            });
+        self.bump_playlist_generation_on_commit(matches!(reordered, Ok(true)));
+        reordered
     }
 }
 
@@ -726,17 +799,20 @@ impl LibraryMutationStore for SqliteStore {
     /// history columns excluded from the update branch, so rescans refresh
     /// metadata without ever touching history.
     fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, AppError> {
-        self.with_connection(|conn| {
-            conn.execute_batch("BEGIN IMMEDIATE;")?;
-            match Self::apply_scan_batch_in_tx(conn, tracks) {
-                Ok(written) => conn.execute_batch("COMMIT;").map(|()| written),
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    Err(e)
+        let written = self
+            .with_connection(|conn| {
+                conn.execute_batch("BEGIN IMMEDIATE;")?;
+                match Self::apply_scan_batch_in_tx(conn, tracks) {
+                    Ok(written) => conn.execute_batch("COMMIT;").map(|()| written),
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        Err(e)
+                    }
                 }
-            }
-        })
-        .map_err(|e| AppError::InvalidOperation(format!("failed to apply scan batch: {e}")))
+            })
+            .map_err(|e| AppError::InvalidOperation(format!("failed to apply scan batch: {e}")));
+        self.bump_library_generation_on_commit(written.is_ok());
+        written
     }
 
     /// One immediate durable transaction per finished play: a single-row
@@ -747,41 +823,47 @@ impl LibraryMutationStore for SqliteStore {
         id: &TrackId,
         played_at: SystemTime,
     ) -> Result<bool, AppError> {
-        self.with_connection(|conn| {
-            conn.execute_batch("BEGIN IMMEDIATE;")?;
-            let updated = conn.execute(
-                "UPDATE tracks SET play_count = play_count + 1, last_played_nanos = ?1
-                 WHERE path = ?2",
-                rusqlite::params![nanos_from_system_time(played_at), id.0],
-            );
-            match updated {
-                Ok(_) => conn
-                    .execute_batch("COMMIT;")
-                    .map(|()| updated.unwrap_or(0) > 0),
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    Err(e)
+        let recorded = self
+            .with_connection(|conn| {
+                conn.execute_batch("BEGIN IMMEDIATE;")?;
+                let updated = conn.execute(
+                    "UPDATE tracks SET play_count = play_count + 1, last_played_nanos = ?1
+                     WHERE path = ?2",
+                    rusqlite::params![nanos_from_system_time(played_at), id.0],
+                );
+                match updated {
+                    Ok(_) => conn
+                        .execute_batch("COMMIT;")
+                        .map(|()| updated.unwrap_or(0) > 0),
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        Err(e)
+                    }
                 }
-            }
-        })
-        .map_err(|e| AppError::InvalidOperation(format!("failed to record played track: {e}")))
+            })
+            .map_err(|e| AppError::InvalidOperation(format!("failed to record played track: {e}")));
+        self.bump_library_generation_on_commit(matches!(recorded, Ok(true)));
+        recorded
     }
 
     /// One immediate durable transaction for a tag edit: the metadata upsert
     /// (history columns excluded) plus the album year/genre re-derivation and
     /// orphan cleanup commit together or not at all.
     fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), AppError> {
-        self.with_connection(|conn| {
-            conn.execute_batch("BEGIN IMMEDIATE;")?;
-            match Self::apply_tag_refresh_in_tx(conn, track) {
-                Ok(()) => conn.execute_batch("COMMIT;"),
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    Err(e)
+        let applied = self
+            .with_connection(|conn| {
+                conn.execute_batch("BEGIN IMMEDIATE;")?;
+                match Self::apply_tag_refresh_in_tx(conn, track) {
+                    Ok(()) => conn.execute_batch("COMMIT;"),
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        Err(e)
+                    }
                 }
-            }
-        })
-        .map_err(|e| AppError::InvalidOperation(format!("failed to apply tag refresh: {e}")))
+            })
+            .map_err(|e| AppError::InvalidOperation(format!("failed to apply tag refresh: {e}")));
+        self.bump_library_generation_on_commit(applied.is_ok());
+        applied
     }
 
     /// One immediate durable transaction removing exactly the root's tracks,
@@ -790,32 +872,35 @@ impl LibraryMutationStore for SqliteStore {
     /// valid product behavior.
     fn remove_library_path(&mut self, root: &std::path::Path) -> Result<usize, AppError> {
         let root_text = root.to_string_lossy().into_owned();
-        self.with_connection(|conn| {
-            conn.execute_batch("BEGIN IMMEDIATE;")?;
-            // Byte-prefix match mirroring `Path::starts_with`: the root
-            // itself (exact match) or the root followed by a path separator,
-            // so "m:\music" can never swallow "m:\music2\...".
-            let removed = conn.execute(
-                "DELETE FROM tracks
-                 WHERE path = ?1
-                    OR (substr(path, 1, length(?1)) = ?1
-                        AND substr(path, length(?1) + 1, 1) IN ('\\', '/'))",
-                [&root_text],
-            );
-            let outcome = removed.and_then(|count| {
-                Self::delete_orphaned_parents(conn)?;
-                conn.execute("DELETE FROM library_paths WHERE path = ?1", [&root_text])?;
-                Ok(count)
-            });
-            match outcome {
-                Ok(count) => conn.execute_batch("COMMIT;").map(|()| count),
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    Err(e)
+        let removed = self
+            .with_connection(|conn| {
+                conn.execute_batch("BEGIN IMMEDIATE;")?;
+                // Byte-prefix match mirroring `Path::starts_with`: the root
+                // itself (exact match) or the root followed by a path
+                // separator, so "m:\music" can never swallow "m:\music2\...".
+                let removed = conn.execute(
+                    "DELETE FROM tracks
+                     WHERE path = ?1
+                        OR (substr(path, 1, length(?1)) = ?1
+                            AND substr(path, length(?1) + 1, 1) IN ('\\', '/'))",
+                    [&root_text],
+                );
+                let outcome = removed.and_then(|count| {
+                    Self::delete_orphaned_parents(conn)?;
+                    conn.execute("DELETE FROM library_paths WHERE path = ?1", [&root_text])?;
+                    Ok(count)
+                });
+                match outcome {
+                    Ok(count) => conn.execute_batch("COMMIT;").map(|()| count),
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        Err(e)
+                    }
                 }
-            }
-        })
-        .map_err(|e| AppError::InvalidOperation(format!("failed to remove library path: {e}")))
+            })
+            .map_err(|e| AppError::InvalidOperation(format!("failed to remove library path: {e}")));
+        self.bump_library_generation_on_commit(removed.is_ok());
+        removed
     }
 
     /// One immediate durable transaction: all tracks (history included),
@@ -823,21 +908,24 @@ impl LibraryMutationStore for SqliteStore {
     /// orphan cleanup. Playlists and Settings tables are never touched. Any
     /// failure rolls the whole wipe back — nothing partially clears.
     fn clear_library(&mut self) -> Result<usize, AppError> {
-        self.with_connection(|conn| {
-            conn.execute_batch("BEGIN IMMEDIATE;")?;
-            let outcome = conn.execute("DELETE FROM tracks", []).and_then(|count| {
-                Self::delete_orphaned_parents(conn)?;
-                Ok(count)
-            });
-            match outcome {
-                Ok(count) => conn.execute_batch("COMMIT;").map(|()| count),
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    Err(e)
+        let cleared = self
+            .with_connection(|conn| {
+                conn.execute_batch("BEGIN IMMEDIATE;")?;
+                let outcome = conn.execute("DELETE FROM tracks", []).and_then(|count| {
+                    Self::delete_orphaned_parents(conn)?;
+                    Ok(count)
+                });
+                match outcome {
+                    Ok(count) => conn.execute_batch("COMMIT;").map(|()| count),
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        Err(e)
+                    }
                 }
-            }
-        })
-        .map_err(|e| AppError::InvalidOperation(format!("failed to clear the library: {e}")))
+            })
+            .map_err(|e| AppError::InvalidOperation(format!("failed to clear the library: {e}")));
+        self.bump_library_generation_on_commit(cleared.is_ok());
+        cleared
     }
 }
 
@@ -854,9 +942,11 @@ impl SqliteStore {
         for track in tracks {
             // Resolved display fallbacks drive grouping and the FK chain;
             // raw optional metadata is stored alongside for exact
-            // round-trips (search parity uses the raw values).
-            let album_artist_key = track.metadata.display_album_artist();
-            let album_title_key = track.metadata.display_album();
+            // round-trips (search parity uses the raw values). The display
+            // keys are owned copies — the scan path is cold (10-track
+            // batches), and owned `String`s bind straight into the queries.
+            let album_artist_key = track.metadata.display_album_artist().into_owned();
+            let album_title_key = track.metadata.display_album().into_owned();
             conn.execute(
                 "INSERT OR IGNORE INTO artists(name) VALUES (?1)",
                 [&album_artist_key],
@@ -949,8 +1039,8 @@ impl SqliteStore {
         Self::apply_scan_batch_in_tx(conn, std::slice::from_ref(track))?;
 
         let new_key = (
-            track.metadata.display_album_artist(),
-            track.metadata.display_album(),
+            track.metadata.display_album_artist().into_owned(),
+            track.metadata.display_album().into_owned(),
         );
         let mut affected: Vec<(String, String)> = Vec::with_capacity(2);
         if let Some(old) = previous_keys
@@ -1037,12 +1127,12 @@ const TRACK_COLUMNS: &str = "path, title, artist, album, album_artist,
             track_number, disc_number, genre, year, composer, comment,
             replaygain_track_gain, replaygain_track_peak,
             duration_nanos, sample_rate, channels,
-            play_count, last_played_nanos, date_added_nanos";
+            play_count, last_played_nanos, date_added_nanos, search_text";
 
 /// How many columns [`TRACK_COLUMNS`] expands to; result rows that append
 /// extra columns after them (e.g. the playlist-entries LEFT JOIN) index
 /// past this.
-const TRACK_COLUMN_COUNT: usize = 19;
+const TRACK_COLUMN_COUNT: usize = 20;
 
 /// Escape SQL-LIKE wildcards and the escape character itself so a path
 /// component matches literally under `LIKE ... ESCAPE '#'`: `%` and `_`
@@ -1082,11 +1172,23 @@ fn folder_prefix_params(folder_text: &str) -> [String; 3] {
         }
     }
     let escaped = escape_like_pattern(trimmed);
-    [
-        trimmed.to_string(),
-        format!("{escaped}/%"),
-        format!("{escaped}\\%"),
-    ]
+    // A bare root ("/", "\\", "//") already ends in its separator, so the
+    // continuation must not append another one: `/` + `/tmp/x` is
+    // `/tmp/x`, not `//tmp/x`. `Path::starts_with` agrees — every absolute
+    // path starts_with(`/`).
+    if !trimmed.is_empty() && trimmed.chars().all(|c| c == '\\' || c == '/') {
+        [
+            trimmed.to_string(),
+            format!("{escaped}%"),
+            format!("{escaped}%"),
+        ]
+    } else {
+        [
+            trimmed.to_string(),
+            format!("{escaped}/%"),
+            format!("{escaped}\\%"),
+        ]
+    }
 }
 
 /// Narrow a `REAL` column value back into the domain's `f32` tag fields.
@@ -1123,6 +1225,7 @@ fn track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         play_count: narrow_u32(Some(row.get::<_, i64>(16)?)).unwrap_or(0),
         last_played: row.get::<_, Option<i64>>(17)?.map(system_time_from_nanos),
         date_added: row.get::<_, Option<i64>>(18)?.map(system_time_from_nanos),
+        search_text: row.get(19)?,
     })
 }
 
@@ -1130,7 +1233,8 @@ impl LibraryQueryStore for SqliteStore {
     /// Resolve one `Track` by its `TrackId` (its full file path).
     fn get_track(&self, id: &TrackId) -> Result<Option<Track>, AppError> {
         self.with_connection(|conn| {
-            let mut stmt = conn.prepare(&format!(
+            // Runs per finished play — cached (allocation plan 4.1).
+            let mut stmt = conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS} FROM tracks WHERE path = ?1"
             ))?;
             let mut rows = stmt.query_map([&id.0], track_from_row)?;
@@ -1142,7 +1246,7 @@ impl LibraryQueryStore for SqliteStore {
     /// One bounded window of the flat library list, path-ascending.
     fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, AppError> {
         self.with_connection(|conn| {
-            let mut stmt = conn.prepare(&format!(
+            let mut stmt = conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS} FROM tracks ORDER BY path ASC LIMIT ?1 OFFSET ?2"
             ))?;
             let rows = stmt.query_map(
@@ -1191,7 +1295,8 @@ impl LibraryQueryStore for SqliteStore {
     ) -> Result<Vec<Track>, AppError> {
         self.with_connection(|conn| {
             let needle = query.to_lowercase();
-            let mut stmt = conn.prepare(&format!(
+            // Runs per keystroke — cached (allocation plan 4.1).
+            let mut stmt = conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS} FROM tracks
                  WHERE instr(search_text, ?1) > 0
                  ORDER BY path ASC LIMIT ?2 OFFSET ?3"
@@ -1314,7 +1419,7 @@ impl LibraryQueryStore for SqliteStore {
     /// numbers first (the legacy `unwrap_or(0)` slot), path tiebreak.
     fn album_tracks(&self, album_artist: &str, album_title: &str) -> Result<Vec<Track>, AppError> {
         self.with_connection(|conn| {
-            let mut stmt = conn.prepare(&format!(
+            let mut stmt = conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS} FROM tracks
                  WHERE album_artist_key = ?1 AND album_title_key = ?2
                  ORDER BY COALESCE(track_number, 0) ASC, path ASC"
@@ -1330,11 +1435,13 @@ impl LibraryQueryStore for SqliteStore {
     fn folder_has_audio(&self, folder: &std::path::Path) -> Result<bool, AppError> {
         let params = folder_prefix_params(&folder.to_string_lossy());
         self.with_connection(|conn| {
-            let exists: i64 = conn.query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM tracks WHERE {FOLDER_PREFIX_SQL})"),
-                rusqlite::params![params[0], params[1], params[2]],
-                |row| row.get(0),
-            )?;
+            let exists: i64 = conn
+                .prepare_cached(&format!(
+                    "SELECT EXISTS(SELECT 1 FROM tracks WHERE {FOLDER_PREFIX_SQL})"
+                ))?
+                .query_row(rusqlite::params![params[0], params[1], params[2]], |row| {
+                    row.get(0)
+                })?;
             Ok(exists > 0)
         })
         .map_err(|e| AppError::InvalidOperation(format!("folder probe failed: {e}")))
@@ -1350,16 +1457,17 @@ impl LibraryQueryStore for SqliteStore {
         let needle = query.to_lowercase();
         let params = folder_prefix_params(&folder.to_string_lossy());
         self.with_connection(|conn| {
-            let exists: i64 = conn.query_row(
-                &format!(
+            let exists: i64 = conn
+                .prepare_cached(&format!(
                     "SELECT EXISTS(
                         SELECT 1 FROM tracks
                         WHERE {FOLDER_PREFIX_SQL} AND instr(search_text, ?4) > 0
                      )"
-                ),
-                rusqlite::params![params[0], params[1], params[2], needle],
-                |row| row.get(0),
-            )?;
+                ))?
+                .query_row(
+                    rusqlite::params![params[0], params[1], params[2], needle],
+                    |row| row.get(0),
+                )?;
             Ok(exists > 0)
         })
         .map_err(|e| AppError::InvalidOperation(format!("folder search failed: {e}")))
@@ -1382,7 +1490,7 @@ impl LibraryQueryStore for SqliteStore {
         let folder_text = folder.to_string_lossy().into_owned();
         let params = folder_prefix_params(&folder_text);
         self.with_connection(|conn| {
-            let mut stmt = conn.prepare(&format!(
+            let mut stmt = conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS} FROM tracks
                  WHERE {FOLDER_PREFIX_SQL}
                    AND length(path) > length(?1) + 1
@@ -1447,7 +1555,7 @@ impl LibraryQueryStore for SqliteStore {
         match kind {
             SmartPlaylistKind::MostPlayed => {
                 let mut played: Vec<Track> = self.with_connection(|conn| {
-                    let mut stmt = conn.prepare(&format!(
+                    let mut stmt = conn.prepare_cached(&format!(
                         "SELECT {TRACK_COLUMNS} FROM tracks WHERE play_count > 0"
                     ))?;
                     let rows = stmt.query_map([], track_from_row)?;
@@ -1469,7 +1577,7 @@ impl LibraryQueryStore for SqliteStore {
             // Newest first by the stored first-add stamp; missing dates
             // never qualify (the mirror filtered them out entirely).
             SmartPlaylistKind::RecentlyAdded => self.with_connection(|conn| {
-                let mut stmt = conn.prepare(&format!(
+                let mut stmt = conn.prepare_cached(&format!(
                     "SELECT {TRACK_COLUMNS} FROM tracks
                      WHERE date_added_nanos IS NOT NULL
                      ORDER BY date_added_nanos DESC, path ASC
@@ -1480,7 +1588,7 @@ impl LibraryQueryStore for SqliteStore {
             }),
             // Path-ascending unplayed list.
             SmartPlaylistKind::NeverPlayed => self.with_connection(|conn| {
-                let mut stmt = conn.prepare(&format!(
+                let mut stmt = conn.prepare_cached(&format!(
                     "SELECT {TRACK_COLUMNS} FROM tracks
                      WHERE play_count = 0
                      ORDER BY path ASC
@@ -1500,7 +1608,7 @@ impl LibraryQueryStore for SqliteStore {
                     i64::try_from(LOST_GEMS_THRESHOLD.as_nanos()).unwrap_or(i64::MAX);
                 let cutoff = now_nanos.saturating_sub(threshold_nanos);
                 self.with_connection(|conn| {
-                    let mut stmt = conn.prepare(&format!(
+                    let mut stmt = conn.prepare_cached(&format!(
                         "SELECT {TRACK_COLUMNS} FROM tracks
                          WHERE last_played_nanos IS NULL
                             OR last_played_nanos < ?1
@@ -1530,7 +1638,7 @@ impl SqliteStore {
     fn folder_paths_under(&self, folder: &std::path::Path) -> Result<Vec<String>, AppError> {
         let params = folder_prefix_params(&folder.to_string_lossy());
         self.with_connection(|conn| {
-            let mut stmt = conn.prepare(&format!(
+            let mut stmt = conn.prepare_cached(&format!(
                 "SELECT path FROM tracks WHERE {FOLDER_PREFIX_SQL}"
             ))?;
             let rows = stmt
@@ -1729,319 +1837,5 @@ impl SettingsStore for SqliteStore {
             }
         })
         .map_err(|e| AppError::InvalidOperation(format!("failed to save watch states: {e}")))
-    }
-}
-
-/// `SettingsStore` view of the shared store handle. One `SQLite` connection
-/// serves every store port, so every call locks the shared connection for
-/// the duration of its transaction.
-pub struct MutexSettingsStore {
-    store: std::sync::Arc<std::sync::Mutex<SqliteStore>>,
-}
-
-impl MutexSettingsStore {
-    /// Wrap the shared store handle.
-    #[must_use]
-    pub fn new(store: std::sync::Arc<std::sync::Mutex<SqliteStore>>) -> Self {
-        Self { store }
-    }
-}
-
-impl SettingsStore for MutexSettingsStore {
-    /// Load every persisted setting through the shared connection.
-    fn load_settings(&self) -> Result<Settings, AppError> {
-        self.store.lock_or_recover().load_settings()
-    }
-
-    /// Save the scalar block through the shared connection.
-    fn save_scalars(&mut self, scalars: &ScalarSettings) -> Result<(), AppError> {
-        self.store.lock_or_recover().save_scalars(scalars)
-    }
-
-    /// Replace the library-path list through the shared connection.
-    fn save_library_paths(&mut self, paths: &[std::path::PathBuf]) -> Result<(), AppError> {
-        self.store.lock_or_recover().save_library_paths(paths)
-    }
-
-    /// Replace the whole watch-state map through the shared connection.
-    fn save_watch_states(&mut self, states: &HashMap<PathBuf, WatchState>) -> Result<(), AppError> {
-        self.store.lock_or_recover().save_watch_states(states)
-    }
-}
-
-/// `PlaylistStore` view of the shared store handle. One `SQLite` connection
-/// serves every store port, so every call locks the shared connection for
-/// the duration of its transaction.
-pub struct MutexPlaylistStore {
-    store: std::sync::Arc<std::sync::Mutex<SqliteStore>>,
-}
-
-impl MutexPlaylistStore {
-    /// Wrap the shared store handle.
-    #[must_use]
-    pub fn new(store: std::sync::Arc<std::sync::Mutex<SqliteStore>>) -> Self {
-        Self { store }
-    }
-}
-
-impl PlaylistStore for MutexPlaylistStore {
-    /// Load every Playlist through the shared connection.
-    fn load_playlists(&self) -> Result<Vec<Playlist>, AppError> {
-        self.store.lock_or_recover().load_playlists()
-    }
-
-    /// Load one Playlist's entries with validity through the shared
-    /// connection.
-    fn load_playlist_entries(
-        &self,
-        id: &PlaylistId,
-    ) -> Result<Vec<crate::app::store::PlaylistEntry>, AppError> {
-        self.store.lock_or_recover().load_playlist_entries(id)
-    }
-
-    /// Create a Playlist through the shared connection.
-    fn create_playlist(
-        &mut self,
-        name: &str,
-        initial_tracks: &[TrackId],
-    ) -> Result<PlaylistId, AppError> {
-        self.store
-            .lock_or_recover()
-            .create_playlist(name, initial_tracks)
-    }
-
-    /// Rename a Playlist through the shared connection.
-    fn rename_playlist(&mut self, id: &PlaylistId, new_name: &str) -> Result<bool, AppError> {
-        self.store.lock_or_recover().rename_playlist(id, new_name)
-    }
-
-    /// Delete a Playlist through the shared connection.
-    fn delete_playlist(&mut self, id: &PlaylistId) -> Result<bool, AppError> {
-        self.store.lock_or_recover().delete_playlist(id)
-    }
-
-    /// Append an entry through the shared connection.
-    fn add_playlist_entry(&mut self, id: &PlaylistId, track: &TrackId) -> Result<bool, AppError> {
-        self.store.lock_or_recover().add_playlist_entry(id, track)
-    }
-
-    /// Remove entries through the shared connection.
-    fn remove_playlist_entries(
-        &mut self,
-        id: &PlaylistId,
-        track: &TrackId,
-    ) -> Result<bool, AppError> {
-        self.store
-            .lock_or_recover()
-            .remove_playlist_entries(id, track)
-    }
-
-    /// Reorder entries through the shared connection.
-    fn reorder_playlist_entries(
-        &mut self,
-        id: &PlaylistId,
-        ordered: &[TrackId],
-    ) -> Result<bool, AppError> {
-        self.store
-            .lock_or_recover()
-            .reorder_playlist_entries(id, ordered)
-    }
-}
-
-/// `LibraryMutationStore` view of the shared store handle. One `SQLite`
-/// connection serves every store port, so every call locks the shared
-/// connection for the duration of its transaction.
-///
-/// The adapter owns the session [`StoreGeneration`]: every successfully
-/// committed mutation bumps it, so callers cannot forget to invalidate
-/// Session Projections (ADR 0002).
-#[derive(Clone)]
-pub struct MutexLibraryMutationStore {
-    store: std::sync::Arc<std::sync::Mutex<SqliteStore>>,
-    generation: StoreGeneration,
-}
-
-impl MutexLibraryMutationStore {
-    /// Wrap the shared store handle together with the session generation
-    /// this adapter bumps after each committed mutation.
-    #[must_use]
-    pub fn new(
-        store: std::sync::Arc<std::sync::Mutex<SqliteStore>>,
-        generation: StoreGeneration,
-    ) -> Self {
-        Self { store, generation }
-    }
-}
-
-impl LibraryMutationStore for MutexLibraryMutationStore {
-    /// Apply one scan batch through the shared connection; bumps the
-    /// generation on commit.
-    fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, AppError> {
-        let written = self.store.lock_or_recover().apply_scan_batch(tracks);
-        if written.is_ok() {
-            self.generation.bump();
-        }
-        written
-    }
-
-    /// Record a finished play through the shared connection; bumps the
-    /// generation when the play was recorded.
-    fn record_track_played(
-        &mut self,
-        id: &TrackId,
-        played_at: SystemTime,
-    ) -> Result<bool, AppError> {
-        let recorded = self
-            .store
-            .lock_or_recover()
-            .record_track_played(id, played_at);
-        if matches!(recorded, Ok(true)) {
-            self.generation.bump();
-        }
-        recorded
-    }
-
-    /// Apply a tag refresh through the shared connection; bumps the
-    /// generation on commit.
-    fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), AppError> {
-        let applied = self.store.lock_or_recover().apply_tag_refresh(track);
-        if applied.is_ok() {
-            self.generation.bump();
-        }
-        applied
-    }
-
-    /// Remove a library root through the shared connection; bumps the
-    /// generation on commit.
-    fn remove_library_path(&mut self, root: &std::path::Path) -> Result<usize, AppError> {
-        let removed = self.store.lock_or_recover().remove_library_path(root);
-        if removed.is_ok() {
-            self.generation.bump();
-        }
-        removed
-    }
-
-    /// Wipe the Library collection through the shared connection; bumps the
-    /// generation on commit.
-    fn clear_library(&mut self) -> Result<usize, AppError> {
-        let cleared = self.store.lock_or_recover().clear_library();
-        if cleared.is_ok() {
-            self.generation.bump();
-        }
-        cleared
-    }
-}
-
-/// `LibraryQueryStore` view of the shared store handle. One `SQLite`
-/// connection serves every store port, so every call locks the shared
-/// connection for the duration of its query.
-#[derive(Clone)]
-pub struct MutexLibraryQueryStore {
-    store: std::sync::Arc<std::sync::Mutex<SqliteStore>>,
-}
-
-impl MutexLibraryQueryStore {
-    /// Wrap the shared store handle.
-    #[must_use]
-    pub fn new(store: std::sync::Arc<std::sync::Mutex<SqliteStore>>) -> Self {
-        Self { store }
-    }
-}
-
-impl LibraryQueryStore for MutexLibraryQueryStore {
-    /// Resolve one Track through the shared connection.
-    fn get_track(&self, id: &TrackId) -> Result<Option<Track>, AppError> {
-        self.store.lock_or_recover().get_track(id)
-    }
-
-    /// Fetch one flat-list window through the shared connection.
-    fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, AppError> {
-        self.store.lock_or_recover().tracks_window(offset, limit)
-    }
-
-    /// Count tracks through the shared connection.
-    fn track_count(&self) -> Result<usize, AppError> {
-        self.store.lock_or_recover().track_count()
-    }
-
-    /// List every Track id through the shared connection.
-    fn all_track_ids(&self) -> Result<Vec<TrackId>, AppError> {
-        self.store.lock_or_recover().all_track_ids()
-    }
-
-    /// Fetch one search window through the shared connection.
-    fn search_window(
-        &self,
-        query: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Result<Vec<Track>, AppError> {
-        self.store
-            .lock_or_recover()
-            .search_window(query, offset, limit)
-    }
-
-    /// Count matches through the shared connection.
-    fn search_count(&self, query: &str) -> Result<usize, AppError> {
-        self.store.lock_or_recover().search_count(query)
-    }
-
-    /// List every artist through the shared connection.
-    fn all_artists(&self) -> Result<Vec<Artist>, AppError> {
-        self.store.lock_or_recover().all_artists()
-    }
-
-    /// List one artist's albums through the shared connection.
-    fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, AppError> {
-        self.store.lock_or_recover().artist_albums(artist)
-    }
-
-    /// List one album's tracks through the shared connection.
-    fn album_tracks(&self, album_artist: &str, album_title: &str) -> Result<Vec<Track>, AppError> {
-        self.store
-            .lock_or_recover()
-            .album_tracks(album_artist, album_title)
-    }
-
-    /// Probe a folder subtree through the shared connection.
-    fn folder_has_audio(&self, folder: &std::path::Path) -> Result<bool, AppError> {
-        self.store.lock_or_recover().folder_has_audio(folder)
-    }
-
-    /// Search one folder subtree through the shared connection.
-    fn folder_has_search_match(
-        &self,
-        folder: &std::path::Path,
-        query: &str,
-    ) -> Result<bool, AppError> {
-        self.store
-            .lock_or_recover()
-            .folder_has_search_match(folder, query)
-    }
-
-    /// List a folder subtree's track ids through the shared connection.
-    fn track_ids_in_folder_tree(&self, folder: &std::path::Path) -> Result<Vec<TrackId>, AppError> {
-        self.store
-            .lock_or_recover()
-            .track_ids_in_folder_tree(folder)
-    }
-
-    /// List a folder's direct tracks through the shared connection.
-    fn tracks_in_folder(&self, folder: &std::path::Path) -> Result<Vec<Track>, AppError> {
-        self.store.lock_or_recover().tracks_in_folder(folder)
-    }
-
-    /// List a folder's child directories through the shared connection.
-    fn subdirs_with_audio(&self, folder: &std::path::Path) -> Result<Vec<PathBuf>, AppError> {
-        self.store.lock_or_recover().subdirs_with_audio(folder)
-    }
-
-    /// Compute one smart playlist through the shared connection.
-    fn smart_playlist(
-        &self,
-        kind: SmartPlaylistKind,
-        limit: usize,
-    ) -> Result<Vec<Track>, AppError> {
-        self.store.lock_or_recover().smart_playlist(kind, limit)
     }
 }

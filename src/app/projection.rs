@@ -9,9 +9,15 @@
 //! refresh, which generation invalidation makes explicit.
 
 use crate::app::errors::AppError;
-use crate::domain::{Album, Artist, PlaybackQueue, SmartPlaylistKind, Track, TrackId};
+use crate::app::playlist_manager;
+use crate::app::store::{PlaylistEntry, StoreGeneration};
+use crate::app::views::GenerationCache;
+use crate::domain::{
+    Album, Artist, PlaybackQueue, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
+};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Rows fetched per window. The projection owns the window-size policy so
 /// callers declare visible offsets without duplicating page math.
@@ -32,34 +38,36 @@ pub enum ProjectionKey {
     Search(String),
 }
 
+/// The cached payload of one track-list query signature: the authoritative
+/// total plus the bounded window map.
+#[derive(Default)]
+struct TrackListRows {
+    total: usize,
+    windows: HashMap<usize, Arc<[Track]>>,
+    eviction_order: VecDeque<usize>,
+}
+
 /// Bounded window cache for one track-list query signature.
 ///
 /// Per frame the UI declares which window offsets are visible
-/// ([`Self::request_window`]) and calls [`Self::refresh`] with the Store's
-/// current generation plus a loader bound to the query port. Fresh frames
-/// serve cached rows without touching the store; invalidated frames refetch
-/// every declared window.
+/// ([`Self::request_window`]) and calls [`Self::refresh`] with a loader
+/// bound to the query port. Fresh frames serve cached rows without touching
+/// the store; invalidated frames refetch every declared window.
 pub struct TrackListProjection {
     key: ProjectionKey,
-    /// Generation the cache was loaded at; `None` means "never loaded"
-    /// (fresh construction or retargeted key).
-    loaded_generation: Option<u64>,
-    total: usize,
-    windows: HashMap<usize, Vec<Track>>,
-    eviction_order: VecDeque<usize>,
+    /// Generation-keyed slot holding [`TrackListRows`]; keyed by the query
+    /// signature so a retarget drops rows even at an unchanged generation.
+    cache: GenerationCache<ProjectionKey, TrackListRows>,
     /// Window offsets declared since the last successful refresh.
     pending_requests: Vec<usize>,
 }
 
 impl TrackListProjection {
     #[must_use]
-    pub fn new(key: ProjectionKey) -> Self {
+    pub fn new(generation: StoreGeneration, key: ProjectionKey) -> Self {
         Self {
             key,
-            loaded_generation: None,
-            total: 0,
-            windows: HashMap::new(),
-            eviction_order: VecDeque::new(),
+            cache: GenerationCache::new(generation),
             pending_requests: Vec::new(),
         }
     }
@@ -76,9 +84,7 @@ impl TrackListProjection {
     pub fn set_key(&mut self, key: ProjectionKey) {
         if key != self.key {
             self.key = key;
-            self.loaded_generation = None;
-            self.windows.clear();
-            self.eviction_order.clear();
+            self.cache.invalidate();
         }
     }
 
@@ -94,23 +100,37 @@ impl TrackListProjection {
     /// Total row count as of the last successful refresh.
     #[must_use]
     pub fn total(&self) -> usize {
-        self.total
+        self.cache.peek().map_or(0, |rows| rows.total)
     }
 
-    /// Cached rows starting at `offset`, when present and loaded.
+    /// Cached rows starting at `offset`, when present and loaded. Handed
+    /// out as an `Arc` clone — a refcount bump, never a deep copy of the
+    /// window's rows.
     #[must_use]
-    pub fn window(&self, offset: usize) -> Option<&[Track]> {
-        self.windows.get(&offset).map(Vec::as_slice)
+    pub fn window(&self, offset: usize) -> Option<Arc<[Track]>> {
+        self.cache
+            .peek()
+            .and_then(|rows| rows.windows.get(&offset))
+            .cloned()
     }
 
-    /// Whether cached rows reflect `generation`. Projections reload when
-    /// this returns `false`.
+    /// Whether cached rows reflect the session counter's current epoch.
+    /// Projections reload when this returns `false`.
     #[must_use]
-    pub fn is_fresh(&self, generation: u64) -> bool {
-        self.loaded_generation == Some(generation)
+    pub fn is_fresh(&self) -> bool {
+        let epoch = self.cache.observe();
+        self.cache.holds(epoch, &self.key)
     }
 
-    /// Bring the projection up to date with `generation` and `total`.
+    /// The session epoch the projection currently observes — read once per
+    /// frame so the torn-count guard compares two observations of the same
+    /// counter.
+    #[must_use]
+    pub fn observe(&self) -> u64 {
+        self.cache.observe()
+    }
+
+    /// Bring the projection up to date with `total`.
     ///
     /// * Invalidated (generation moved or key retargeted): every declared
     ///   window refetches and all prior rows are replaced.
@@ -120,14 +140,19 @@ impl TrackListProjection {
     /// untouched — stale-but-present beats blank while the UI retries.
     pub fn refresh(
         &mut self,
-        generation: u64,
         total: usize,
         loader: &mut dyn FnMut(usize, usize) -> Result<Vec<Track>, AppError>,
     ) -> Result<(), AppError> {
-        let stale = !self.is_fresh(generation);
+        let epoch = self.cache.observe();
+        let stale = !self.cache.holds(epoch, &self.key);
         let mut targets = std::mem::take(&mut self.pending_requests);
         if !stale {
-            targets.retain(|offset| !self.windows.contains_key(offset));
+            targets.retain(|offset| {
+                !self
+                    .cache
+                    .peek()
+                    .is_some_and(|rows| rows.windows.contains_key(offset))
+            });
         }
 
         // Fetch first, swap later: a failure anywhere leaves the previous
@@ -138,33 +163,42 @@ impl TrackListProjection {
             fetched.push((offset, rows));
         }
 
-        if stale {
-            self.windows.clear();
-            self.eviction_order.clear();
-        }
-        for (offset, rows) in fetched {
-            if !self.windows.contains_key(&offset) {
-                self.eviction_order.push_back(offset);
+        let mut rows = if stale {
+            TrackListRows::default()
+        } else {
+            self.cache.take_value().expect("holds implied an entry")
+        };
+        for (offset, window) in fetched {
+            if !rows.windows.contains_key(&offset) {
+                rows.eviction_order.push_back(offset);
             }
-            self.windows.insert(offset, rows);
-            self.enforce_bound();
+            rows.windows.insert(offset, window.into());
+            Self::enforce_bound(&mut rows);
         }
-        self.total = total;
-        self.loaded_generation = Some(generation);
+        rows.total = total;
+        self.cache.store(epoch, self.key.clone(), rows);
         Ok(())
     }
 
     /// Keep at most [`MAX_CACHED_WINDOWS`] windows, evicting the oldest
     /// inserted ones first.
-    fn enforce_bound(&mut self) {
-        while self.windows.len() > MAX_CACHED_WINDOWS {
-            let oldest = self
+    fn enforce_bound(rows: &mut TrackListRows) {
+        while rows.windows.len() > MAX_CACHED_WINDOWS {
+            let oldest = rows
                 .eviction_order
                 .pop_front()
                 .expect("eviction order tracks cached windows");
-            self.windows.remove(&oldest);
+            rows.windows.remove(&oldest);
         }
     }
+}
+
+/// The three lazily-filled levels of the browsing hierarchy.
+#[derive(Default)]
+struct BrowsingLevels {
+    artists: Option<Arc<[Artist]>>,
+    albums: HashMap<String, Arc<[Album]>>,
+    tracks: HashMap<(String, String), Arc<[Track]>>,
 }
 
 /// Session Projection for the artist/album browsing views (ADR 0002).
@@ -180,10 +214,9 @@ impl TrackListProjection {
 /// hierarchical, so each query returns one artist's or one album's worth of
 /// rows rather than one screen's.
 pub struct BrowsingProjection {
-    loaded_generation: Option<u64>,
-    artists: Option<Vec<Artist>>,
-    albums: HashMap<String, Vec<Album>>,
-    tracks: HashMap<(String, String), Vec<Track>>,
+    /// Generation-keyed slot over the whole level bundle: a moved epoch
+    /// drops every level together, within a generation levels fill lazily.
+    cache: GenerationCache<(), BrowsingLevels>,
 }
 
 /// Loader signature for one album's tracks (factored out for readability).
@@ -191,92 +224,106 @@ type AlbumTracksLoader<'a> = &'a mut dyn FnMut(&str, &str) -> Result<Vec<Track>,
 
 impl Default for BrowsingProjection {
     fn default() -> Self {
-        Self::new()
+        Self::new(StoreGeneration::new())
     }
 }
 
 impl BrowsingProjection {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(generation: StoreGeneration) -> Self {
         Self {
-            loaded_generation: None,
-            artists: None,
-            albums: HashMap::new(),
-            tracks: HashMap::new(),
+            cache: GenerationCache::new(generation),
         }
     }
 
-    /// Drop every cached level when `generation` moved since the last load.
-    /// The failed-generation case stays stale: `loaded_generation` is only
-    /// stamped after a successful fetch, so the next call retries.
-    fn ensure_generation(&mut self, generation: u64) {
-        if self.loaded_generation == Some(generation) {
-            return;
-        }
-        self.artists = None;
-        self.albums.clear();
-        self.tracks.clear();
-    }
-
-    /// Every artist name-ascending, cached per generation.
+    /// Every artist name-ascending, cached per generation. Fresh frames
+    /// hand out an `Arc` clone of the cached list — no per-frame copy.
     ///
     /// # Errors
     /// Propagates loader failures without touching the cache.
     pub fn artists(
         &mut self,
-        generation: u64,
         loader: &mut dyn FnMut() -> Result<Vec<Artist>, AppError>,
-    ) -> Result<Vec<Artist>, AppError> {
-        if self.loaded_generation != Some(generation) || self.artists.is_none() {
-            let fresh = loader()?;
-            self.ensure_generation(generation);
-            self.loaded_generation = Some(generation);
-            self.artists = Some(fresh);
+    ) -> Result<Arc<[Artist]>, AppError> {
+        let epoch = self.cache.observe();
+        let cached = if self.cache.loaded_at(epoch) {
+            self.cache.peek().and_then(|levels| levels.artists.clone())
+        } else {
+            None
+        };
+        if let Some(cached) = cached {
+            return Ok(cached);
         }
-        Ok(self.artists.as_ref().expect("just loaded").clone())
+        let fresh: Arc<[Artist]> = loader()?.into();
+        self.cache.slot(epoch, &()).artists = Some(Arc::clone(&fresh));
+        Ok(fresh)
     }
 
     /// One artist's albums in canonical order, cached per generation.
+    /// Fresh frames hand out an `Arc` clone of the cached list.
     ///
     /// # Errors
     /// Propagates loader failures without touching the cache.
     pub fn artist_albums(
         &mut self,
-        generation: u64,
         artist: &str,
         loader: &mut dyn FnMut(&str) -> Result<Vec<Album>, AppError>,
-    ) -> Result<Vec<Album>, AppError> {
-        if self.loaded_generation != Some(generation) || !self.albums.contains_key(artist) {
-            let fresh = loader(artist)?;
-            self.ensure_generation(generation);
-            self.loaded_generation = Some(generation);
-            self.albums.insert(artist.to_string(), fresh.clone());
-            return Ok(fresh);
+    ) -> Result<Arc<[Album]>, AppError> {
+        let epoch = self.cache.observe();
+        let cached = if self.cache.loaded_at(epoch) {
+            self.cache
+                .peek()
+                .and_then(|levels| levels.albums.get(artist).cloned())
+        } else {
+            None
+        };
+        if let Some(cached) = cached {
+            return Ok(cached);
         }
-        Ok(self.albums.get(artist).expect("checked above").clone())
+        let fresh: Arc<[Album]> = loader(artist)?.into();
+        let levels = self.cache.slot(epoch, &());
+        levels.albums.insert(artist.to_string(), Arc::clone(&fresh));
+        Ok(fresh)
     }
 
     /// One album's tracks in canonical order, cached per generation.
+    /// Fresh frames hand out an `Arc` clone of the cached list.
     ///
     /// # Errors
     /// Propagates loader failures without touching the cache.
     pub fn album_tracks(
         &mut self,
-        generation: u64,
         album_artist: &str,
         album_title: &str,
         loader: AlbumTracksLoader<'_>,
-    ) -> Result<Vec<Track>, AppError> {
+    ) -> Result<Arc<[Track]>, AppError> {
         let key = (album_artist.to_string(), album_title.to_string());
-        if self.loaded_generation != Some(generation) || !self.tracks.contains_key(&key) {
-            let fresh = loader(album_artist, album_title)?;
-            self.ensure_generation(generation);
-            self.loaded_generation = Some(generation);
-            self.tracks.insert(key, fresh.clone());
-            return Ok(fresh);
+        let epoch = self.cache.observe();
+        let cached = if self.cache.loaded_at(epoch) {
+            self.cache
+                .peek()
+                .and_then(|levels| levels.tracks.get(&key).cloned())
+        } else {
+            None
+        };
+        if let Some(cached) = cached {
+            return Ok(cached);
         }
-        Ok(self.tracks.get(&key).expect("checked above").clone())
+        let fresh: Arc<[Track]> = loader(album_artist, album_title)?.into();
+        let levels = self.cache.slot(epoch, &());
+        levels.tracks.insert(key, Arc::clone(&fresh));
+        Ok(fresh)
     }
+}
+
+/// The five lazily-filled folder query shapes, keyed by folder.
+#[derive(Default)]
+struct FolderLevels {
+    has_audio: HashMap<String, bool>,
+    search_matches: HashMap<(String, String), bool>,
+    subtree_ids: HashMap<String, Arc<[TrackId]>>,
+    direct_tracks: HashMap<String, Arc<[Track]>>,
+    children: HashMap<String, Arc<[PathBuf]>>,
 }
 
 /// Session Projection for the folder-tree views (ADR 0002).
@@ -288,45 +335,23 @@ impl BrowsingProjection {
 /// mixes rows from two generations; levels then refetch lazily as the tree
 /// renders again. Loader errors propagate and leave the cache untouched.
 pub struct FolderProjection {
-    loaded_generation: Option<u64>,
-    has_audio: HashMap<String, bool>,
-    search_matches: HashMap<(String, String), bool>,
-    subtree_ids: HashMap<String, Vec<TrackId>>,
-    direct_tracks: HashMap<String, Vec<Track>>,
-    children: HashMap<String, Vec<PathBuf>>,
+    /// Generation-keyed slot over the whole level bundle: a moved epoch
+    /// drops every level together, within a generation levels fill lazily.
+    cache: GenerationCache<(), FolderLevels>,
 }
 
 impl Default for FolderProjection {
     fn default() -> Self {
-        Self::new()
+        Self::new(StoreGeneration::new())
     }
 }
 
 impl FolderProjection {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(generation: StoreGeneration) -> Self {
         Self {
-            loaded_generation: None,
-            has_audio: HashMap::new(),
-            search_matches: HashMap::new(),
-            subtree_ids: HashMap::new(),
-            direct_tracks: HashMap::new(),
-            children: HashMap::new(),
+            cache: GenerationCache::new(generation),
         }
-    }
-
-    /// Drop every cached level when `generation` moved since the last load.
-    /// The failed-generation case stays stale: `loaded_generation` is only
-    /// stamped after a successful fetch, so the next call retries.
-    fn ensure_generation(&mut self, generation: u64) {
-        if self.loaded_generation == Some(generation) {
-            return;
-        }
-        self.has_audio.clear();
-        self.search_matches.clear();
-        self.subtree_ids.clear();
-        self.direct_tracks.clear();
-        self.children.clear();
     }
 
     /// Whether `folder` contains any audio, cached per generation.
@@ -335,19 +360,24 @@ impl FolderProjection {
     /// Propagates loader failures without touching the cache.
     pub fn has_audio(
         &mut self,
-        generation: u64,
         folder: &std::path::Path,
         loader: &mut dyn FnMut(&std::path::Path) -> Result<bool, AppError>,
     ) -> Result<bool, AppError> {
         let key = folder.to_string_lossy().into_owned();
-        if self.loaded_generation != Some(generation) || !self.has_audio.contains_key(&key) {
-            let fresh = loader(folder)?;
-            self.ensure_generation(generation);
-            self.loaded_generation = Some(generation);
-            self.has_audio.insert(key.clone(), fresh);
-            return Ok(fresh);
+        let epoch = self.cache.observe();
+        let cached = if self.cache.loaded_at(epoch) {
+            self.cache
+                .peek()
+                .and_then(|levels| levels.has_audio.get(&key).copied())
+        } else {
+            None
+        };
+        if let Some(cached) = cached {
+            return Ok(cached);
         }
-        Ok(self.has_audio[&key])
+        let fresh = loader(folder)?;
+        self.cache.slot(epoch, &()).has_audio.insert(key, fresh);
+        Ok(fresh)
     }
 
     /// Whether any track under `folder` matches the search query, cached
@@ -357,84 +387,119 @@ impl FolderProjection {
     /// Propagates loader failures without touching the cache.
     pub fn has_search_match(
         &mut self,
-        generation: u64,
         folder: &std::path::Path,
         query: &str,
         loader: &mut dyn FnMut(&std::path::Path, &str) -> Result<bool, AppError>,
     ) -> Result<bool, AppError> {
         let key = (folder.to_string_lossy().into_owned(), query.to_string());
-        if self.loaded_generation != Some(generation) || !self.search_matches.contains_key(&key) {
-            let fresh = loader(folder, query)?;
-            self.ensure_generation(generation);
-            self.loaded_generation = Some(generation);
-            self.search_matches.insert(key.clone(), fresh);
-            return Ok(fresh);
+        let epoch = self.cache.observe();
+        let cached = if self.cache.loaded_at(epoch) {
+            self.cache
+                .peek()
+                .and_then(|levels| levels.search_matches.get(&key).copied())
+        } else {
+            None
+        };
+        if let Some(cached) = cached {
+            return Ok(cached);
         }
-        Ok(self.search_matches[&key])
+        let fresh = loader(folder, query)?;
+        self.cache
+            .slot(epoch, &())
+            .search_matches
+            .insert(key, fresh);
+        Ok(fresh)
     }
 
     /// Every track id under `folder`, path-ordered, cached per generation.
+    /// Fresh frames hand out an `Arc` clone of the cached list — no
+    /// per-frame copy of one id per track.
     ///
     /// # Errors
     /// Propagates loader failures without touching the cache.
     pub fn subtree_ids(
         &mut self,
-        generation: u64,
         folder: &std::path::Path,
         loader: &mut dyn FnMut(&std::path::Path) -> Result<Vec<TrackId>, AppError>,
-    ) -> Result<Vec<TrackId>, AppError> {
+    ) -> Result<Arc<[TrackId]>, AppError> {
         let key = folder.to_string_lossy().into_owned();
-        if self.loaded_generation != Some(generation) || !self.subtree_ids.contains_key(&key) {
-            let fresh = loader(folder)?;
-            self.ensure_generation(generation);
-            self.loaded_generation = Some(generation);
-            self.subtree_ids.insert(key.clone(), fresh.clone());
-            return Ok(fresh);
+        let epoch = self.cache.observe();
+        let cached = if self.cache.loaded_at(epoch) {
+            self.cache
+                .peek()
+                .and_then(|levels| levels.subtree_ids.get(&key).cloned())
+        } else {
+            None
+        };
+        if let Some(cached) = cached {
+            return Ok(cached);
         }
-        Ok(self.subtree_ids[&key].clone())
+        let fresh: Arc<[TrackId]> = loader(folder)?.into();
+        self.cache
+            .slot(epoch, &())
+            .subtree_ids
+            .insert(key, Arc::clone(&fresh));
+        Ok(fresh)
     }
 
-    /// The tracks directly inside `folder`, cached per generation.
+    /// The tracks directly inside `folder`, cached per generation. Fresh
+    /// frames hand out an `Arc` clone of the cached list.
     ///
     /// # Errors
     /// Propagates loader failures without touching the cache.
     pub fn direct_tracks(
         &mut self,
-        generation: u64,
         folder: &std::path::Path,
         loader: &mut dyn FnMut(&std::path::Path) -> Result<Vec<Track>, AppError>,
-    ) -> Result<Vec<Track>, AppError> {
+    ) -> Result<Arc<[Track]>, AppError> {
         let key = folder.to_string_lossy().into_owned();
-        if self.loaded_generation != Some(generation) || !self.direct_tracks.contains_key(&key) {
-            let fresh = loader(folder)?;
-            self.ensure_generation(generation);
-            self.loaded_generation = Some(generation);
-            self.direct_tracks.insert(key.clone(), fresh.clone());
-            return Ok(fresh);
+        let epoch = self.cache.observe();
+        let cached = if self.cache.loaded_at(epoch) {
+            self.cache
+                .peek()
+                .and_then(|levels| levels.direct_tracks.get(&key).cloned())
+        } else {
+            None
+        };
+        if let Some(cached) = cached {
+            return Ok(cached);
         }
-        Ok(self.direct_tracks[&key].clone())
+        let fresh: Arc<[Track]> = loader(folder)?.into();
+        self.cache
+            .slot(epoch, &())
+            .direct_tracks
+            .insert(key, Arc::clone(&fresh));
+        Ok(fresh)
     }
 
     /// The child directories of `folder` holding audio, cached per
-    /// generation.
+    /// generation. Fresh frames hand out an `Arc` clone of the cached list.
     ///
     /// # Errors
     /// Propagates loader failures without touching the cache.
     pub fn children(
         &mut self,
-        generation: u64,
         folder: &std::path::Path,
         loader: &mut dyn FnMut(&std::path::Path) -> Result<Vec<PathBuf>, AppError>,
-    ) -> Result<Vec<PathBuf>, AppError> {
+    ) -> Result<Arc<[PathBuf]>, AppError> {
         let key = folder.to_string_lossy().into_owned();
-        if self.loaded_generation != Some(generation) || !self.children.contains_key(&key) {
-            let fresh = loader(folder)?;
-            self.ensure_generation(generation);
-            self.loaded_generation = Some(generation);
-            self.children.insert(key.clone(), fresh.clone());
-            return Ok(fresh);
+        let epoch = self.cache.observe();
+        let cached = if self.cache.loaded_at(epoch) {
+            self.cache
+                .peek()
+                .and_then(|levels| levels.children.get(&key).cloned())
+        } else {
+            None
+        };
+        if let Some(cached) = cached {
+            return Ok(cached);
         }
-        Ok(self.children[&key].clone())
+        let fresh: Arc<[PathBuf]> = loader(folder)?.into();
+        self.cache
+            .slot(epoch, &())
+            .children
+            .insert(key, Arc::clone(&fresh));
+        Ok(fresh)
     }
 }
 
@@ -447,53 +512,70 @@ impl FolderProjection {
 /// cache serves repeat frames without touching the store. A request whose
 /// limit exceeds what the cache holds also refetches, so callers can never
 /// see a truncated-as-cached list where they asked for more.
+/// Per-kind computed lists stamped with the limit they were loaded at.
+type SmartPlaylistLists = HashMap<SmartPlaylistKind, (usize, Arc<[Track]>)>;
+
 pub struct SmartPlaylistsProjection {
-    loaded_generation: Option<u64>,
-    lists: HashMap<SmartPlaylistKind, (usize, Vec<Track>)>,
+    /// Generation-keyed slot over the per-kind computed lists.
+    cache: GenerationCache<(), SmartPlaylistLists>,
 }
 
 impl Default for SmartPlaylistsProjection {
     fn default() -> Self {
-        Self::new()
+        Self::new(StoreGeneration::new())
     }
 }
 
 impl SmartPlaylistsProjection {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(generation: StoreGeneration) -> Self {
         Self {
-            loaded_generation: None,
-            lists: HashMap::new(),
+            cache: GenerationCache::new(generation),
         }
     }
 
     /// The computed list for `kind`, cached per generation and limit.
+    /// Fresh frames hand out an `Arc` clone of the cached list — no
+    /// per-frame copy.
     ///
     /// # Errors
     /// Propagates loader failures without touching the cache.
     pub fn list(
         &mut self,
-        generation: u64,
         kind: SmartPlaylistKind,
         limit: usize,
         loader: &mut dyn FnMut(SmartPlaylistKind, usize) -> Result<Vec<Track>, AppError>,
-    ) -> Result<Vec<Track>, AppError> {
-        if self.loaded_generation != Some(generation)
-            || self
-                .lists
-                .get(&kind)
-                .is_none_or(|(cached_limit, _)| *cached_limit < limit)
-        {
-            let fresh = loader(kind, limit)?;
-            if self.loaded_generation != Some(generation) {
-                self.lists.clear();
-                self.loaded_generation = Some(generation);
-            }
-            self.lists.insert(kind, (limit, fresh.clone()));
-            return Ok(fresh);
+    ) -> Result<Arc<[Track]>, AppError> {
+        let epoch = self.cache.observe();
+        let cached = if self.cache.loaded_at(epoch) {
+            self.cache
+                .peek()
+                .and_then(|lists| lists.get(&kind))
+                .filter(|(cached_limit, _)| *cached_limit >= limit)
+                .map(|(_, list)| Arc::clone(list))
+        } else {
+            None
+        };
+        if let Some(cached) = cached {
+            return Ok(cached);
         }
-        Ok(self.lists[&kind].1.clone())
+        let fresh: Arc<[Track]> = loader(kind, limit)?.into();
+        self.cache
+            .slot(epoch, &())
+            .insert(kind, (limit, Arc::clone(&fresh)));
+        Ok(fresh)
     }
+}
+
+/// The playback slots plus the queue shape they were loaded for.
+struct PlaybackSlots {
+    /// Queue shape the slots were loaded for: `(current_index, upcoming ids
+    /// at the window limit)`. Recomputing this cheap stamp per frame detects
+    /// every queue mutation (advance, previous, insert-next, append,
+    /// shuffle regeneration) without hooking each mutator.
+    stamp: (Option<usize>, Vec<TrackId>),
+    current: Option<Track>,
+    up_next: Vec<Track>,
 }
 
 /// Session Projection for the playback-side reads (ADR 0002): the current
@@ -507,42 +589,34 @@ impl SmartPlaylistsProjection {
 /// errors propagate and leave the previous cache untouched — the next call
 /// retries.
 pub struct PlaybackProjection {
-    loaded_generation: Option<u64>,
-    /// Queue shape the playback slots were loaded for: `(current_index,
-    /// upcoming ids at the window limit)`. Recomputing this cheap stamp per
-    /// frame detects every queue mutation (advance, previous, insert-next,
-    /// append, shuffle regeneration) without hooking each mutator.
-    queue_stamp: Option<(Option<usize>, Vec<TrackId>)>,
-    current: Option<Track>,
-    up_next: Vec<Track>,
-    /// The details-panel slot: generation, selected id, and the resolution
-    /// (`None` = known absent from the store). Stamped separately from the
-    /// playback slots because selection is independent of the queue.
-    selected: Option<(u64, TrackId, Option<Track>)>,
+    /// Generation-keyed slot over the playback slots; the queue shape rides
+    /// inside as part of the loaded state.
+    slots: GenerationCache<(), PlaybackSlots>,
+    /// Generation-keyed single-selection slot: a cached `None` means the id
+    /// is known absent from the store, so a dangling selection does not
+    /// requery per frame.
+    selected: GenerationCache<TrackId, Option<Track>>,
 }
 
 impl Default for PlaybackProjection {
     fn default() -> Self {
-        Self::new()
+        Self::new(StoreGeneration::new())
     }
 }
 
 impl PlaybackProjection {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(generation: StoreGeneration) -> Self {
         Self {
-            loaded_generation: None,
-            queue_stamp: None,
-            current: None,
-            up_next: Vec::new(),
-            selected: None,
+            slots: GenerationCache::new(generation.clone()),
+            selected: GenerationCache::new(generation),
         }
     }
 
     /// The resolved current Track, when one is playing and it still resolves.
     #[must_use]
     pub fn current(&self) -> Option<&Track> {
-        self.current.as_ref()
+        self.slots.peek().and_then(|slots| slots.current.as_ref())
     }
 
     /// The resolved Up Next window in Playback Queue order. Ids whose files
@@ -550,10 +624,12 @@ impl PlaybackProjection {
     /// this can be shorter than the requested window.
     #[must_use]
     pub fn up_next(&self) -> &[Track] {
-        &self.up_next
+        self.slots
+            .peek()
+            .map_or(&[], |slots| slots.up_next.as_slice())
     }
 
-    /// Bring the playback slots up to date with `generation` and `queue`.
+    /// Bring the playback slots up to date with `queue`.
     ///
     /// Fresh inputs (same generation, same queue shape) are served entirely
     /// from cache; moved inputs refetch the current Track plus the first
@@ -565,11 +641,23 @@ impl PlaybackProjection {
     /// Propagates loader failures without touching the cache.
     pub fn refresh(
         &mut self,
-        generation: u64,
         queue: &PlaybackQueue,
         limit: usize,
         loader: &mut dyn FnMut(&TrackId) -> Result<Option<Track>, AppError>,
     ) -> Result<(), AppError> {
+        let epoch = self.slots.observe();
+
+        // Fresh-frame fast path: compare the queue's shape lazily, by
+        // reference — the per-frame check materializes nothing (the stamp's
+        // `Vec` is only built below, when the inputs actually moved).
+        if let Some(slots) = self.slots.peek()
+            && self.slots.loaded_at(epoch)
+            && slots.stamp.0 == queue.current_index
+            && upcoming_matches(&slots.stamp.1, queue, limit)
+        {
+            return Ok(());
+        }
+
         let stamp = (
             queue.current_index,
             queue
@@ -578,9 +666,6 @@ impl PlaybackProjection {
                 .cloned()
                 .collect::<Vec<_>>(),
         );
-        if self.loaded_generation == Some(generation) && self.queue_stamp.as_ref() == Some(&stamp) {
-            return Ok(());
-        }
 
         // Fetch first, swap later: a failure anywhere leaves the previous
         // cache completely untouched.
@@ -595,10 +680,15 @@ impl PlaybackProjection {
             }
         }
 
-        self.current = fetched_current;
-        self.up_next = fetched_up_next;
-        self.loaded_generation = Some(generation);
-        self.queue_stamp = Some(stamp);
+        self.slots.store(
+            epoch,
+            (),
+            PlaybackSlots {
+                stamp,
+                current: fetched_current,
+                up_next: fetched_up_next,
+            },
+        );
         Ok(())
     }
 
@@ -610,18 +700,193 @@ impl PlaybackProjection {
     /// Propagates loader failures without touching the cache.
     pub fn selected_track(
         &mut self,
-        generation: u64,
         id: &TrackId,
         loader: &mut dyn FnMut(&TrackId) -> Result<Option<Track>, AppError>,
     ) -> Result<Option<Track>, AppError> {
-        if let Some((cached_generation, cached_id, track)) = &self.selected
-            && *cached_generation == generation
-            && cached_id == id
-        {
-            return Ok(track.clone());
+        let epoch = self.selected.observe();
+        if self.selected.holds(epoch, id) {
+            return Ok(self
+                .selected
+                .peek()
+                .expect("holds implies an entry")
+                .clone());
         }
         let fresh = loader(id)?;
-        self.selected = Some((generation, id.clone(), fresh.clone()));
+        self.selected.store(epoch, id.clone(), fresh.clone());
         Ok(fresh)
+    }
+}
+
+/// Whether `cached` — the Up Next ids recorded in the playback stamp —
+/// still equals what [`PlaybackQueue::upcoming`] would return for `limit`.
+///
+/// The comparison walks the queue **by reference**, mirroring the domain
+/// traversal exactly (shuffle order when active, otherwise linear order
+/// from the slot after the current one; out-of-range shuffle indices are
+/// skipped just as the domain skips them), so the per-frame freshness check
+/// materializes nothing. Keep in sync with `PlaybackQueue::upcoming`; the
+/// app-layer projection tests pin both orders.
+fn upcoming_matches(cached: &[TrackId], queue: &PlaybackQueue, limit: usize) -> bool {
+    if queue.shuffle && !queue.shuffled_indices.is_empty() {
+        let mut matched = 0;
+        for &idx in queue.shuffled_indices.iter().take(limit) {
+            if let Some(track) = queue.tracks.get(idx) {
+                if cached.get(matched) != Some(track) {
+                    return false;
+                }
+                matched += 1;
+            }
+        }
+        matched == cached.len()
+    } else {
+        let start = queue.current_index.map_or(0, |i| i + 1);
+        let end = (start + limit).min(queue.tracks.len());
+        let window = queue.tracks.get(start..end).unwrap_or(&[]);
+        window == cached
+    }
+}
+
+/// One resolved row of an open user playlist: the entry id, its
+/// store-resolved Track when the Library knows it, and whether it can play.
+pub type PlaylistEntryRow = (TrackId, Option<Track>, bool);
+
+/// The ready-to-render view of one user playlist: one row per entry in
+/// playlist order, plus the playable ids (valid verdicts only) for the
+/// header context menu.
+#[derive(Clone, Default)]
+pub struct PlaylistView {
+    /// One row per entry, in playlist order. Missing tracks are included as
+    /// `(id, None, false)` — dangling references stay listed (ADR 0001).
+    pub rows: Arc<[PlaylistEntryRow]>,
+    /// The playable ids (valid verdicts only), in playlist order.
+    pub valid_ids: Arc<[TrackId]>,
+}
+
+/// Session Projection for the user playlists (ADR 0002).
+///
+/// Caches the playlist list plus per-playlist resolved views as TWO
+/// [`GenerationCache`] instances keyed on different counters. The list is
+/// pure user data: keyed on the session's dedicated playlist generation
+/// alone. Resolved rows embed Track metadata resolved against the Library
+/// collection, so their cache is keyed on the Library generation with the
+/// playlist epoch baked into the key — a move of EITHER counter drops every
+/// row while the list stays. Within matching counters levels refetch lazily
+/// as their views render again.
+///
+/// Loader errors propagate and leave the cache untouched — the previous
+/// good rows stay readable through [`Self::cached_playlists`] /
+/// [`Self::cached_view`] while the next call retries.
+pub struct PlaylistProjection {
+    /// The playlist list, keyed on the playlist generation alone.
+    playlists: GenerationCache<(), Arc<[Playlist]>>,
+    /// The per-playlist resolved views: keyed on the Library generation,
+    /// with the playlist generation the rows were built under as the key.
+    views: GenerationCache<u64, HashMap<PlaylistId, PlaylistView>>,
+}
+
+impl Default for PlaylistProjection {
+    fn default() -> Self {
+        Self::new(StoreGeneration::new(), StoreGeneration::new())
+    }
+}
+
+impl PlaylistProjection {
+    #[must_use]
+    pub fn new(playlist_generation: StoreGeneration, library_generation: StoreGeneration) -> Self {
+        Self {
+            playlists: GenerationCache::new(playlist_generation),
+            views: GenerationCache::new(library_generation),
+        }
+    }
+
+    /// Every user playlist in creation order, cached per playlist
+    /// generation. Fresh frames hand out an `Arc` clone of the cached list.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn playlists(
+        &mut self,
+        loader: &mut dyn FnMut() -> Result<Vec<Playlist>, AppError>,
+    ) -> Result<Arc<[Playlist]>, AppError> {
+        let epoch = self.playlists.observe();
+        if self.playlists.loaded_at(epoch)
+            && let Some(cached) = self.playlists.peek()
+        {
+            return Ok(Arc::clone(cached));
+        }
+        let fresh: Arc<[Playlist]> = loader()?.into();
+        self.playlists.store(epoch, (), Arc::clone(&fresh));
+        Ok(fresh)
+    }
+
+    /// One playlist's resolved view, cached per playlist generation plus
+    /// the Library generation the rows were resolved against. Fresh frames
+    /// hand out a clone of the cached view (`Arc` row bumps, no deep copy).
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn playlist_view(
+        &mut self,
+        id: &PlaylistId,
+        loader: &mut dyn FnMut(&PlaylistId) -> Result<Vec<PlaylistEntry>, AppError>,
+    ) -> Result<PlaylistView, AppError> {
+        let playlist_epoch = self.playlists.observe();
+        let library_epoch = self.views.observe();
+        let fresh = self.views.holds(library_epoch, &playlist_epoch)
+            && self
+                .views
+                .peek()
+                .is_some_and(|views| views.contains_key(id));
+        if !fresh {
+            // Rows embed Library-resolved metadata: a move of either counter
+            // invalidates them even though the other stood still.
+            let resolved = loader(id)?;
+            let views = self.views.slot(library_epoch, &playlist_epoch);
+            let view = Self::resolve(resolved);
+            views.insert(id.clone(), view.clone());
+            return Ok(view);
+        }
+        Ok(self
+            .views
+            .peek()
+            .expect("checked above")
+            .get(id)
+            .expect("checked above")
+            .clone())
+    }
+
+    /// The stale-but-present playlist list, if any — the error fallback
+    /// keeps last good data instead of blanking the sidebar.
+    #[must_use]
+    pub fn cached_playlists(&self) -> Option<Arc<[Playlist]>> {
+        self.playlists.peek().cloned()
+    }
+
+    /// The stale-but-present view for `id`, if any — the error fallback
+    /// keeps last good rows instead of blanking the open playlist.
+    #[must_use]
+    pub fn cached_view(&self, id: &PlaylistId) -> Option<PlaylistView> {
+        self.views.peek().and_then(|views| views.get(id)).cloned()
+    }
+
+    /// Map store entries to ready-to-render rows: each entry rides its
+    /// LEFT-JOIN validity plus the read-time filesystem check, and missing
+    /// tracks stay listed as `(id, None, false)` (ADR 0001).
+    fn resolve(entries: Vec<PlaylistEntry>) -> PlaylistView {
+        let mut valid_ids = Vec::new();
+        let rows: Vec<PlaylistEntryRow> = entries
+            .into_iter()
+            .map(|entry| {
+                let valid = playlist_manager::track_is_valid(&entry);
+                if valid {
+                    valid_ids.push(entry.id.clone());
+                }
+                (entry.id, entry.track, valid)
+            })
+            .collect();
+        PlaylistView {
+            rows: rows.into(),
+            valid_ids: valid_ids.into(),
+        }
     }
 }

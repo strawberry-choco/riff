@@ -37,6 +37,53 @@ mod tests {
         )
     }
 
+    /// A real store-backed playlists port plus a `SessionViews` seam sharing
+    /// its session playlist generation — the same pairing the composition
+    /// root wires, so commits through the port invalidate the seam's
+    /// playlist projection exactly like production.
+    fn boxed_playlist_seam(
+        dir: &tempfile::TempDir,
+    ) -> (Box<dyn PlaylistStore>, riff::app::views::SessionViews) {
+        let db_path = dir.path().join("riff.sqlite3");
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(
+            riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+                .expect("opening a fresh store must work"),
+        ));
+        let playlist_generation = riff::app::store::StoreGeneration::new();
+        let store = riff::infra::store::MutexPlaylistStore::new(
+            shared.clone(),
+            playlist_generation.clone(),
+        );
+        let views = riff::app::views::SessionViews::new(
+            Box::new(riff::infra::store::MutexLibraryQueryStore::new(shared)),
+            Box::new(store.clone()),
+            riff::app::store::StoreGeneration::new(),
+            playlist_generation,
+        );
+        (Box::new(store), views)
+    }
+
+    /// A `SessionViews` seam over the store already living at `dir`, for
+    /// reading playlists the way the UI does.
+    fn seam_views(dir: &tempfile::TempDir) -> riff::app::views::SessionViews {
+        let db_path = dir.path().join("riff.sqlite3");
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(
+            riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+                .expect("opening a fresh store must work"),
+        ));
+        riff::app::views::SessionViews::new(
+            Box::new(riff::infra::store::MutexLibraryQueryStore::new(
+                shared.clone(),
+            )),
+            Box::new(riff::infra::store::MutexPlaylistStore::new(
+                shared,
+                riff::app::store::StoreGeneration::new(),
+            )),
+            riff::app::store::StoreGeneration::new(),
+            riff::app::store::StoreGeneration::new(),
+        )
+    }
+
     // --- Playlists persist through the Application Store port ------------------
     //
     // The playlists surface commits every mutation straight to the
@@ -106,12 +153,7 @@ mod tests {
         std::fs::write(&legacy_path, "{{{ corrupt legacy json").unwrap();
         let legacy_bytes_before = std::fs::read(&legacy_path).unwrap();
 
-        riff::ui::app::load_persisted_state(
-            &mut AppState::new(),
-            boxed_store(&dir).as_ref(),
-            boxed_playlist_store(&dir).as_ref(),
-            None,
-        );
+        riff::ui::app::load_persisted_state(&mut AppState::new(), boxed_store(&dir).as_ref(), None);
 
         assert_eq!(
             std::fs::read(&legacy_path).unwrap(),
@@ -644,16 +686,27 @@ mod tests {
         }
 
         // Restore like the UI's first frame: curation comes back intact.
+        // Playlists need no hydration step — the seam reads the store live.
         let mut state = AppState::new();
-        riff::ui::app::load_persisted_state(
-            &mut state,
-            boxed_store(&dir).as_ref(),
-            boxed_playlist_store(&dir).as_ref(),
-            None,
+        riff::ui::app::load_persisted_state(&mut state, boxed_store(&dir).as_ref(), None);
+        let mut views = seam_views(&dir);
+
+        // The store kept the curation across the wipe...
+        assert_eq!(
+            boxed_playlist_store(&dir).load_playlists().unwrap().len(),
+            1,
+            "curation survived the wipe in the store"
         );
 
-        assert_eq!(state.playlists.len(), 1, "playlists hydrate as usual");
-        assert_eq!(state.playlists[0].name, "Keep Me");
+        // ...and the seam sees both facts: curation kept, collection empty.
+        let playlists = views.playlists();
+        assert_eq!(playlists.len(), 1, "playlists read back as usual");
+        assert_eq!(playlists[0].name, "Keep Me");
+        assert_eq!(
+            views.track_list("", 0).total,
+            0,
+            "the wiped collection reads empty through the seam"
+        );
     }
 
     // --- Theme token foundation (Issue 01) ------------------------------------
@@ -1715,20 +1768,20 @@ mod tests {
 
     // --- Playlist hover actions drive the existing Store flows -----------------
     //
-    // ADR 0002: writes commit to the Store first, then the Session Projection
-    // (`state.playlists`) refreshes from it. The restyled rows report actions;
+    // ADR 0002: writes commit to the Store and nothing else — the seam's
+    // playlist projection invalidates itself via the mutation adapter's
+    // generation bump, so the next `views.playlists()` read reflects the
+    // commit with zero caller action. The restyled rows report actions;
     // these tests pin that the action handler drives the SAME rename/delete
     // Store flows the pre-restyle buttons used.
 
     #[test]
     fn test_playlist_row_delete_action_commits_through_store_and_refreshes_projection() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = boxed_playlist_store(&dir);
+        let (mut store, mut views) = boxed_playlist_seam(&dir);
         let _keep = store.create_playlist("Keep", &[]).unwrap();
         let gone = store.create_playlist("Gone", &[]).unwrap();
 
-        let mut state = AppState::new();
-        state.playlists = store.load_playlists().unwrap();
         let mut view = Some(gone.clone());
         let mut smart_view = None;
         let mut rename_slot = None;
@@ -1738,7 +1791,7 @@ mod tests {
             sidebar::PlaylistRowAction::Delete,
             &gone,
             store.as_mut(),
-            &mut state,
+            &mut views,
             riff::ui::app::PlaylistPromptSlots {
                 view: &mut view,
                 smart_view: &mut smart_view,
@@ -1751,13 +1804,14 @@ mod tests {
             !store.load_playlists().unwrap().iter().any(|p| p.id == gone),
             "the delete committed through the PlaylistStore"
         );
+        let playlists = views.playlists();
         assert_eq!(
-            state.playlists.len(),
+            playlists.len(),
             1,
             "the projection refreshed from the store after the committed write"
         );
         assert_eq!(
-            state.playlists[0].name, "Keep",
+            playlists[0].name, "Keep",
             "only the deleted playlist went away"
         );
         assert_eq!(
@@ -1773,11 +1827,9 @@ mod tests {
     #[test]
     fn test_playlist_row_rename_action_opens_the_existing_rename_prompt_flow() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = boxed_playlist_store(&dir);
+        let (mut store, mut views) = boxed_playlist_seam(&dir);
         let pid = store.create_playlist("Gym", &[]).unwrap();
 
-        let mut state = AppState::new();
-        state.playlists = store.load_playlists().unwrap();
         let mut view = None;
         let mut smart_view = None;
         let mut rename_slot = None;
@@ -1787,7 +1839,7 @@ mod tests {
             sidebar::PlaylistRowAction::Rename,
             &pid,
             store.as_mut(),
-            &mut state,
+            &mut views,
             riff::ui::app::PlaylistPromptSlots {
                 view: &mut view,
                 smart_view: &mut smart_view,
@@ -1810,16 +1862,17 @@ mod tests {
             "rename alone commits nothing yet — Save does"
         );
 
-        // Saving the prompt commits through the same Store flow and refreshes
-        // the projection (ADR 0002).
-        riff::ui::app::commit_playlist_rename(store.as_mut(), &mut state, &pid, "  Cardio  ");
+        // Saving the prompt commits through the same Store flow; the seam's
+        // next read reflects it with zero caller action (ADR 0002).
+        riff::ui::app::commit_playlist_rename(store.as_mut(), &pid, "  Cardio  ");
         assert_eq!(
             store.load_playlists().unwrap()[0].name,
             "Cardio",
             "the trimmed name persisted through the PlaylistStore"
         );
         assert_eq!(
-            state.playlists[0].name, "Cardio",
+            views.playlists()[0].name,
+            "Cardio",
             "the projection refreshed after the committed rename"
         );
     }
@@ -1827,11 +1880,9 @@ mod tests {
     #[test]
     fn test_playlist_row_open_action_selects_the_playlist_view() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = boxed_playlist_store(&dir);
+        let (mut store, mut views) = boxed_playlist_seam(&dir);
         let pid = store.create_playlist("Focus", &[]).unwrap();
 
-        let mut state = AppState::new();
-        state.playlists = store.load_playlists().unwrap();
         let mut view = None;
         let mut smart_view = Some(SmartPlaylistKind::MostPlayed);
         let mut rename_slot = None;
@@ -1841,7 +1892,7 @@ mod tests {
             sidebar::PlaylistRowAction::Open,
             &pid,
             store.as_mut(),
-            &mut state,
+            &mut views,
             riff::ui::app::PlaylistPromptSlots {
                 view: &mut view,
                 smart_view: &mut smart_view,
@@ -3045,7 +3096,7 @@ mod tests {
     #[test]
     fn test_playlist_reorder_commits_through_store_and_patches_projection() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = boxed_playlist_store(&dir);
+        let (mut store, mut views) = boxed_playlist_seam(&dir);
         let pid = store
             .create_playlist(
                 "Gym",
@@ -3057,11 +3108,8 @@ mod tests {
             )
             .unwrap();
 
-        let mut state = AppState::new();
-        state.playlists = store.load_playlists().unwrap();
-
         // Drag entry 0 (A) onto entry 2's slot (C): A,B,C → B,C,A.
-        riff::ui::app::commit_playlist_reorder(store.as_mut(), &mut state, &pid, 0, 2);
+        riff::ui::app::commit_playlist_reorder(&mut views, store.as_mut(), &pid, 0, 2);
 
         // The store committed the new order as one durable transaction...
         assert_eq!(
@@ -3073,23 +3121,42 @@ mod tests {
             ],
             "the dragged order persisted through the PlaylistStore"
         );
-        // ...and the Session Projection mirrors it without a reload.
+        // ...and the seam's projection reflects it with zero caller action —
+        // the committed mutation bumped the playlist generation itself.
         assert_eq!(
-            state.playlists[0].tracks,
+            views.playlists()[0].tracks,
             vec![
                 TrackId("b.mp3".to_string()),
                 TrackId("c.mp3".to_string()),
                 TrackId("a.mp3".to_string())
             ],
-            "the projection patched to mirror the committed reorder"
+            "the projection refreshed without any explicit invalidation"
+        );
+        // The plan's contract for the OPEN playlist itself: the resolved
+        // rows follow the new order too, read back through
+        // `views.playlist_view`.
+        let view = views.playlist_view(&pid).expect("known id yields a view");
+        let row_order: Vec<TrackId> = view.rows.iter().map(|(id, _, _)| id.clone()).collect();
+        assert_eq!(
+            row_order,
+            vec![
+                TrackId("b.mp3".to_string()),
+                TrackId("c.mp3".to_string()),
+                TrackId("a.mp3".to_string())
+            ],
+            "the open playlist's rendered rows follow the new order"
+        );
+        assert!(
+            view.valid_ids.is_empty(),
+            "the dangling fixture entries stay flagged invalid"
         );
 
         // Dropping an entry back onto itself changes nothing anywhere.
-        riff::ui::app::commit_playlist_reorder(store.as_mut(), &mut state, &pid, 1, 1);
+        riff::ui::app::commit_playlist_reorder(&mut views, store.as_mut(), &pid, 1, 1);
         assert_eq!(store.load_playlists().unwrap()[0].tracks.len(), 3);
 
         // Out-of-bounds gestures are ignored end to end.
-        riff::ui::app::commit_playlist_reorder(store.as_mut(), &mut state, &pid, 0, 9);
+        riff::ui::app::commit_playlist_reorder(&mut views, store.as_mut(), &pid, 0, 9);
         assert_eq!(
             store.load_playlists().unwrap()[0].tracks,
             vec![
@@ -3098,6 +3165,193 @@ mod tests {
                 TrackId("a.mp3".to_string())
             ],
             "an invalid gesture never rewrites the store"
+        );
+    }
+
+    /// Harness state for
+    /// [`test_playlist_reorder_render_reflects_new_order_without_explicit_invalidation`]:
+    /// the production seam/store pairing plus the row ids in the order the
+    /// LAST frame rendered them.
+    struct ReorderRenderState {
+        views: riff::app::views::SessionViews,
+        store: riff::infra::store::MutexPlaylistStore,
+        pid: PlaylistId,
+        rendered: Vec<String>,
+        cache: icons::IconCache,
+    }
+
+    /// The production playlist-view data path, replicated frame-for-frame:
+    /// rows come from `views.playlist_view` as `Arc` clones, each valid
+    /// entry renders through [`sidebar::reorderable_row`], and a drop
+    /// commits through the store port — nothing else.
+    fn render_reorder_state_ui(ui: &mut egui::Ui, s: &mut ReorderRenderState) {
+        let palette = theme::Palette::dark();
+        // Exactly `render_playlist_view`'s read: ready-to-render rows from
+        // the seam, Arc'd out before any widget call.
+        let Some(view) = s.views.playlist_view(&s.pid) else {
+            s.rendered.clear();
+            return;
+        };
+        s.rendered = view
+            .rows
+            .iter()
+            .map(|(id, _, _)| {
+                PathBuf::from(&id.0)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or(&id.0)
+                    .to_string()
+            })
+            .collect();
+
+        for (index, (_tid, track, valid)) in view.rows.iter().enumerate() {
+            if !*valid {
+                continue;
+            }
+            let Some(track) = track else { continue };
+            let label = format!(
+                "Artist - {}",
+                track.metadata.display_title(&track.file_path)
+            );
+            let outcome = sidebar::reorderable_row(
+                ui,
+                &mut s.cache,
+                &palette,
+                egui::Id::new(("riff_stale_fixture", index)),
+                index,
+                sidebar::TreeRow {
+                    indent_level: 0,
+                    icon: None,
+                    label: &label,
+                    selected: false,
+                    now_playing: false,
+                    playing: false,
+                    disclosure: None,
+                },
+            );
+            if let Some(from) = outcome.drop_from {
+                // The UI action path: commit and nothing else — no reload,
+                // no cache clear, no patch.
+                riff::ui::app::commit_playlist_reorder(
+                    &mut s.views,
+                    &mut s.store,
+                    &s.pid,
+                    from,
+                    index,
+                );
+            }
+        }
+    }
+
+    /// The core Phase 3 property, pinned at the render level: a drag-reorder
+    /// committed through the UI action path (`commit_playlist_reorder`, the
+    /// same call `render_reorderable_playlist_row` makes on a drop) is
+    /// reflected by the NEXT rendered frame's rows with NO explicit
+    /// invalidation, cache clear, or reload anywhere in the flow — the
+    /// committed mutation bumps the playlist generation and the seam's
+    /// projection refetches on its own (ADR 0002).
+    #[test]
+    fn test_playlist_reorder_render_reflects_new_order_without_explicit_invalidation() {
+        use egui_kittest::kittest::Queryable;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(
+            riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+                .expect("opening a fresh store must work"),
+        ));
+
+        // Three real audio files indexed into the Library, so every entry
+        // resolves valid and renders as a reorderable row.
+        let mut track_ids = Vec::new();
+        for (file, title) in [
+            ("one.mp3", "Alpha"),
+            ("two.mp3", "Beta"),
+            ("three.mp3", "Gamma"),
+        ] {
+            let path = dir.path().join(file);
+            std::fs::write(&path, b"fake audio bytes").expect("scratch file writes");
+            let track = crate::test_utils::create_test_track_with_metadata(
+                &path.to_string_lossy(),
+                &path.to_string_lossy(),
+                "Artist",
+                title,
+                "Album",
+            );
+            shared
+                .lock_or_recover()
+                .apply_scan_batch(std::slice::from_ref(&track))
+                .expect("seed scan commits");
+            track_ids.push(track.id);
+        }
+
+        let playlist_generation = riff::app::store::StoreGeneration::new();
+        let mut store = riff::infra::store::MutexPlaylistStore::new(
+            shared.clone(),
+            playlist_generation.clone(),
+        );
+        let pid = store
+            .create_playlist("Gym", &track_ids)
+            .expect("create works");
+        let mut views = riff::app::views::SessionViews::new(
+            Box::new(riff::infra::store::MutexLibraryQueryStore::new(shared)),
+            Box::new(store.clone()),
+            riff::app::store::StoreGeneration::new(),
+            playlist_generation,
+        );
+
+        // Warm the projection the way an open playlist view would, then hand
+        // the SAME seam instance to the harness — one instance across the
+        // commit boundary is what makes staleness observable.
+        assert_eq!(views.playlists().len(), 1);
+        assert_eq!(views.playlist_view(&pid).expect("view").rows.len(), 3);
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, sidebar::ROW_H * 3.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                render_reorder_state_ui,
+                ReorderRenderState {
+                    views,
+                    store,
+                    pid,
+                    rendered: Vec::new(),
+                    cache: icons::IconCache::new(),
+                },
+            );
+        harness.run();
+        assert_eq!(
+            harness.state().rendered,
+            vec!["one", "two", "three"],
+            "the first frame renders the seeded order"
+        );
+
+        // Drag row 0 ("one") onto row 2 ("three"): press, move, release.
+        let src = harness.get_by_label("Artist - Alpha").rect();
+        let dst = harness.get_by_label("Artist - Gamma").rect();
+        harness.drag_at(src.center());
+        harness.run();
+        harness.hover_at(dst.center());
+        harness.run();
+        harness.drop_at(dst.center());
+        harness.run();
+
+        // The next rendered frame reflects the committed reorder — with no
+        // explicit invalidation call anywhere in the flow.
+        assert_eq!(
+            harness.state().rendered,
+            vec!["two", "three", "one"],
+            "rendered rows reflect the committed reorder without explicit invalidation"
+        );
+        // The store committed the same order.
+        assert_eq!(
+            harness.state().store.load_playlists().unwrap()[0].tracks,
+            vec![
+                track_ids[1].clone(),
+                track_ids[2].clone(),
+                track_ids[0].clone()
+            ],
+            "the drag persisted through the PlaylistStore"
         );
     }
 

@@ -92,6 +92,10 @@ _Avoid_: projection manager, view cache
 The module that turns Playback Commands into decoded audio and Playback Updates, owning decode scheduling, output startup, and gapless handoff; it decides nothing about queue order beyond filling an empty Playback Queue.
 _Avoid_: playback thread, sound server
 
+**Transport**:
+The module the UI uses to command playback: user intents (play, seek, volume, queue changes) enter here and map onto Playback Commands; it owns seek clamping and effective-volume math so call sites never re-derive them.
+_Avoid_: command sender, playback API
+
 **PlaybackCoordinator**:
 The module that applies Playback Updates to session state and owns playback continuation: committing play history before advancing, repeat-one re-play, auto-advance, and stopping when nothing follows. It is the decider of queue continuation; the Audio Engine only reports what happened.
 _Avoid_: update processor, track-end handler

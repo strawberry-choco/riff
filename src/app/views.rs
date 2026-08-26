@@ -29,6 +29,110 @@ use crate::domain::{
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Generic generation-keyed cache slot — the ONE implementation of "drop
+/// when the epoch moved" behind every Session Projection (ADR 0002).
+///
+/// Holds at most one `(epoch, key, value)` entry stamped with the session
+/// [`StoreGeneration`] epoch it was loaded at. Per operation a caller
+/// observes the counter exactly once ([`Self::observe`]), serves the cached
+/// value while [`Self::holds`] holds, and commits a fresh load through
+/// [`Self::store`] or [`Self::slot`] only AFTER its loader succeeded — a
+/// failed load leaves the previous entry untouched, so stale-but-present
+/// data survives to the next retry.
+///
+/// Internal seam machinery: projections own private instances and no code
+/// outside the views implementation may observe an epoch value.
+pub struct GenerationCache<K, V> {
+    /// The session counter this cache is keyed on.
+    counter: StoreGeneration,
+    /// The single cached entry, if any.
+    loaded: Option<LoadedEntry<K, V>>,
+}
+
+/// One epoch-stamped cache entry.
+struct LoadedEntry<K, V> {
+    epoch: u64,
+    key: K,
+    value: V,
+}
+
+impl<K, V> GenerationCache<K, V> {
+    /// Key a cache on `counter`; starts empty.
+    pub fn new(counter: StoreGeneration) -> Self {
+        Self {
+            counter,
+            loaded: None,
+        }
+    }
+
+    /// The epoch currently being observed. Read ONCE per operation and
+    /// reuse it for both the freshness check and the commit stamp, so a
+    /// store commit racing mid-frame cannot split one logical read across
+    /// two generations.
+    pub fn observe(&self) -> u64 {
+        self.counter.current()
+    }
+
+    /// Whether an entry is present and stamped with `epoch`.
+    pub fn loaded_at(&self, epoch: u64) -> bool {
+        self.loaded
+            .as_ref()
+            .is_some_and(|entry| entry.epoch == epoch)
+    }
+
+    /// Whether an entry is present, stamped with `epoch`, and keyed `key`.
+    pub fn holds(&self, epoch: u64, key: &K) -> bool
+    where
+        K: PartialEq,
+    {
+        self.loaded
+            .as_ref()
+            .is_some_and(|entry| entry.epoch == epoch && entry.key == *key)
+    }
+
+    /// The cached value regardless of epoch — the stale-but-present error
+    /// fallback reads through here.
+    pub fn peek(&self) -> Option<&V> {
+        self.loaded.as_ref().map(|entry| &entry.value)
+    }
+
+    /// Steal the cached value regardless of epoch (the fetch-then-swap
+    /// merge path reuses prior-generation rows only when they still hold).
+    pub fn take_value(&mut self) -> Option<V> {
+        self.loaded.take().map(|entry| entry.value)
+    }
+
+    /// Drop the cached entry whatever it is stamped with.
+    pub fn invalidate(&mut self) {
+        self.loaded = None;
+    }
+
+    /// Commit `value` as loaded at `epoch` for `key`. The stamp happens
+    /// here and nowhere else, so a failed load never advances it.
+    pub fn store(&mut self, epoch: u64, key: K, value: V) {
+        self.loaded = Some(LoadedEntry { epoch, key, value });
+    }
+
+    /// The mutable entry slot stamped `epoch` for `key`: drops any entry
+    /// from a different epoch or key and hands out a freshly initialized
+    /// default one. The commit step for lazily-filled multi-level bundles —
+    /// call only after a successful load.
+    pub fn slot(&mut self, epoch: u64, key: &K) -> &mut V
+    where
+        V: Default,
+        K: Clone + PartialEq,
+    {
+        if !self.holds(epoch, key) {
+            self.loaded = Some(LoadedEntry {
+                epoch,
+                key: key.clone(),
+                value: V::default(),
+            });
+        }
+        &mut self.loaded.as_mut().expect("entry just ensured").value
+    }
+}
+
 /// One page of the flat/search track list: the authoritative total plus the
 /// cached rows of one window.
 pub struct TrackListPage {
@@ -52,8 +156,6 @@ pub struct SessionViews {
     /// reads through it; mutations commit through the store directly at the
     /// UI's call sites and invalidate via the playlist generation.
     playlist_queries: Box<dyn PlaylistStore>,
-    generation: StoreGeneration,
-    playlist_generation: StoreGeneration,
     tracks: TrackListProjection,
     browsing: BrowsingProjection,
     folders: FolderProjection,
@@ -63,10 +165,11 @@ pub struct SessionViews {
 }
 
 impl SessionViews {
-    /// Wire the facade to the Library query port, the Playlists query port,
-    /// and both session generations — the Library generation and the
-    /// dedicated playlist generation their mutation adapters bump after
-    /// each committed store mutation.
+    /// Wire the facade to the Library query port and the Playlists query
+    /// port plus both session counters — the Library generation and the
+    /// dedicated playlist generation the store bumps after each committed
+    /// mutation. The handles are consumed here: every projection observes
+    /// its counter internally, and no epoch value ever leaves this module.
     #[must_use]
     pub fn new(
         queries: Box<dyn LibraryQueryStore>,
@@ -74,35 +177,24 @@ impl SessionViews {
         generation: StoreGeneration,
         playlist_generation: StoreGeneration,
     ) -> Self {
+        // The projections observe the session counters internally from here
+        // on: no per-call epoch crosses the seam again.
+        let tracks = TrackListProjection::new(generation.clone(), ProjectionKey::Flat);
+        let browsing = BrowsingProjection::new(generation.clone());
+        let folders = FolderProjection::new(generation.clone());
+        let smart_playlists = SmartPlaylistsProjection::new(generation.clone());
+        let playback = PlaybackProjection::new(generation.clone());
+        let playlists = PlaylistProjection::new(playlist_generation.clone(), generation.clone());
         Self {
             queries,
             playlist_queries,
-            generation,
-            playlist_generation,
-            tracks: TrackListProjection::new(ProjectionKey::Flat),
-            browsing: BrowsingProjection::new(),
-            folders: FolderProjection::new(),
-            smart_playlists: SmartPlaylistsProjection::new(),
-            playback: PlaybackProjection::new(),
-            playlists: PlaylistProjection::new(),
+            tracks,
+            browsing,
+            folders,
+            smart_playlists,
+            playback,
+            playlists,
         }
-    }
-
-    /// The session store generation's current value — the epoch every
-    /// committed Library mutation advances. UI-local caches key on it so
-    /// they re-resolve when the Library moves, exactly like the projections
-    /// do.
-    #[must_use]
-    pub fn generation(&self) -> u64 {
-        self.generation.current()
-    }
-
-    /// The playlist store generation's current value — the epoch every
-    /// committed playlist mutation advances, independent of
-    /// [`Self::generation`] so entry edits never invalidate Library views.
-    #[must_use]
-    pub fn playlist_generation(&self) -> u64 {
-        self.playlist_generation.current()
     }
 
     // --- Flat list / search -------------------------------------------------
@@ -128,8 +220,8 @@ impl SessionViews {
 
         // Outer count read: authoritative from the store whenever the
         // projection is invalidated; fresh frames reuse the cached count.
-        let outer_generation = self.generation.current();
-        let total = if self.tracks.is_fresh(outer_generation) {
+        let outer_generation = self.tracks.observe();
+        let total = if self.tracks.is_fresh() {
             self.tracks.total()
         } else {
             self.count_rows(query)
@@ -142,23 +234,20 @@ impl SessionViews {
         // read and here, recount so the cached total agrees with the
         // refreshed rows; otherwise reuse the outer read (one COUNT query
         // per frame max).
-        let generation = self.generation.current();
+        let generation = self.tracks.observe();
         let effective_total = if generation == outer_generation {
             total
         } else {
             self.count_rows(query)
         };
 
-        if let Err(e) = self
-            .tracks
-            .refresh(generation, effective_total, &mut |o, l| {
-                if query.is_empty() {
-                    self.queries.tracks_window(o, l)
-                } else {
-                    self.queries.search_window(query, o, l)
-                }
-            })
-        {
+        if let Err(e) = self.tracks.refresh(effective_total, &mut |o, l| {
+            if query.is_empty() {
+                self.queries.tracks_window(o, l)
+            } else {
+                self.queries.search_window(query, o, l)
+            }
+        }) {
             tracing::warn!(
                 "Failed to refresh the track list (query {query:?}) from the store: {e}"
             );
@@ -200,9 +289,8 @@ impl SessionViews {
     /// Every artist name-ascending, cached per generation. Fresh frames
     /// hand out an `Arc` clone of the cached list — no per-frame copy.
     pub fn artists(&mut self) -> Arc<[Artist]> {
-        let generation = self.generation.current();
         self.browsing
-            .artists(generation, &mut || self.queries.all_artists())
+            .artists(&mut || self.queries.all_artists())
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to load artists from the store: {e}");
                 Arc::from([])
@@ -212,9 +300,8 @@ impl SessionViews {
     /// One artist's albums in canonical order, cached per generation.
     /// Fresh frames hand out an `Arc` clone of the cached list.
     pub fn artist_albums(&mut self, artist: &str) -> Arc<[Album]> {
-        let generation = self.generation.current();
         self.browsing
-            .artist_albums(generation, artist, &mut |a| self.queries.artist_albums(a))
+            .artist_albums(artist, &mut |a| self.queries.artist_albums(a))
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to load albums for {artist}: {e}");
                 Arc::from([])
@@ -224,9 +311,8 @@ impl SessionViews {
     /// One album's tracks in canonical order, cached per generation. Fresh
     /// frames hand out an `Arc` clone of the cached list.
     pub fn album_tracks(&mut self, album_artist: &str, album_title: &str) -> Arc<[Track]> {
-        let generation = self.generation.current();
         self.browsing
-            .album_tracks(generation, album_artist, album_title, &mut |a, t| {
+            .album_tracks(album_artist, album_title, &mut |a, t| {
                 self.queries.album_tracks(a, t)
             })
             .unwrap_or_else(|e| {
@@ -239,11 +325,8 @@ impl SessionViews {
 
     /// Whether `folder` contains any audio, cached per generation.
     pub fn folder_has_audio(&mut self, folder: &Path) -> bool {
-        let generation = self.generation.current();
         self.folders
-            .has_audio(generation, folder, &mut |f| {
-                self.queries.folder_has_audio(f)
-            })
+            .has_audio(folder, &mut |f| self.queries.folder_has_audio(f))
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to probe folder {}: {e}", folder.display());
                 false
@@ -253,9 +336,8 @@ impl SessionViews {
     /// Whether any track under `folder` matches the search query, cached per
     /// (folder, query) per generation.
     pub fn folder_search_match(&mut self, folder: &Path, query: &str) -> bool {
-        let generation = self.generation.current();
         self.folders
-            .has_search_match(generation, folder, query, &mut |f, q| {
+            .has_search_match(folder, query, &mut |f, q| {
                 self.queries.folder_has_search_match(f, q)
             })
             .unwrap_or_else(|e| {
@@ -268,11 +350,8 @@ impl SessionViews {
     /// Fresh frames hand out an `Arc` clone of the cached list — no
     /// per-frame copy of one id per track.
     pub fn folder_subtree_ids(&mut self, folder: &Path) -> Arc<[TrackId]> {
-        let generation = self.generation.current();
         self.folders
-            .subtree_ids(generation, folder, &mut |f| {
-                self.queries.track_ids_in_folder_tree(f)
-            })
+            .subtree_ids(folder, &mut |f| self.queries.track_ids_in_folder_tree(f))
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to list folder tree {}: {e}", folder.display());
                 Arc::from([])
@@ -282,11 +361,8 @@ impl SessionViews {
     /// The child directories of `folder` holding audio, cached per
     /// generation. Fresh frames hand out an `Arc` clone of the cached list.
     pub fn folder_children(&mut self, folder: &Path) -> Arc<[PathBuf]> {
-        let generation = self.generation.current();
         self.folders
-            .children(generation, folder, &mut |f| {
-                self.queries.subdirs_with_audio(f)
-            })
+            .children(folder, &mut |f| self.queries.subdirs_with_audio(f))
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to list folder children {}: {e}", folder.display());
                 Arc::from([])
@@ -296,11 +372,8 @@ impl SessionViews {
     /// The tracks directly inside `folder`, cached per generation. Fresh
     /// frames hand out an `Arc` clone of the cached list.
     pub fn folder_direct_tracks(&mut self, folder: &Path) -> Arc<[Track]> {
-        let generation = self.generation.current();
         self.folders
-            .direct_tracks(generation, folder, &mut |f| {
-                self.queries.tracks_in_folder(f)
-            })
+            .direct_tracks(folder, &mut |f| self.queries.tracks_in_folder(f))
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to list folder tracks {}: {e}", folder.display());
                 Arc::from([])
@@ -313,11 +386,8 @@ impl SessionViews {
     /// generation and limit. Fresh frames hand out an `Arc` clone of the
     /// cached list.
     pub fn smart_list(&mut self, kind: SmartPlaylistKind, limit: usize) -> Arc<[Track]> {
-        let generation = self.generation.current();
         self.smart_playlists
-            .list(generation, kind, limit, &mut |k, l| {
-                self.queries.smart_playlist(k, l)
-            })
+            .list(kind, limit, &mut |k, l| self.queries.smart_playlist(k, l))
             .unwrap_or_else(|e| {
                 tracing::warn!(
                     "Failed to compute smart playlist {}: {e}",
@@ -334,9 +404,8 @@ impl SessionViews {
     /// On a store error the last good list is kept (a cold miss renders
     /// empty) and the next call retries.
     pub fn playlists(&mut self) -> Arc<[Playlist]> {
-        let generation = self.playlist_generation.current();
         self.playlists
-            .playlists(generation, &mut || self.playlist_queries.load_playlists())
+            .playlists(&mut || self.playlist_queries.load_playlists())
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to load playlists from the store: {e}");
                 self.playlists.cached_playlists().unwrap_or_default()
@@ -354,13 +423,9 @@ impl SessionViews {
         if !self.playlists().iter().any(|playlist| &playlist.id == id) {
             return None;
         }
-        let generation = self.playlist_generation.current();
-        let library_generation = self.generation.current();
-        match self
-            .playlists
-            .playlist_view(generation, library_generation, id, &mut |pid| {
-                self.playlist_queries.load_playlist_entries(pid)
-            }) {
+        match self.playlists.playlist_view(id, &mut |pid| {
+            self.playlist_queries.load_playlist_entries(pid)
+        }) {
             Ok(view) => Some(view),
             Err(e) => {
                 tracing::warn!("Failed to load playlist entries for {id:?} from the store: {e}");
@@ -376,12 +441,9 @@ impl SessionViews {
     /// moved (a stamp comparison); otherwise refetches through the store.
     /// Failures keep the previous slots so stale-but-present beats blank.
     pub fn sync_playback(&mut self, queue: &PlaybackQueue, up_next_limit: usize) {
-        let generation = self.generation.current();
         if let Err(e) = self
             .playback
-            .refresh(generation, queue, up_next_limit, &mut |id| {
-                self.queries.get_track(id)
-            })
+            .refresh(queue, up_next_limit, &mut |id| self.queries.get_track(id))
         {
             tracing::warn!("Failed to refresh the playback projection from the store: {e}");
         }
@@ -406,10 +468,9 @@ impl SessionViews {
     /// or the generation moves. A cached absence (id unknown to the store)
     /// yields `None` without requerying per frame.
     pub fn selected_track(&mut self, id: &TrackId) -> Option<Track> {
-        let generation = self.generation.current();
         match self
             .playback
-            .selected_track(generation, id, &mut |tid| self.queries.get_track(tid))
+            .selected_track(id, &mut |tid| self.queries.get_track(tid))
         {
             Ok(track) => track,
             Err(e) => {

@@ -1,13 +1,18 @@
-pub mod commands;
+pub mod audio_engine;
 pub mod cover_resolver;
+pub mod cover_service;
 pub mod errors;
 pub mod gapless;
+pub mod playback_coordinator;
 pub mod playlist_manager;
-pub mod projection;
+mod projection;
 pub mod scan;
+pub mod scan_service;
 pub mod state;
 pub mod store;
+pub mod tag_edit_service;
 pub mod traits;
+pub mod views;
 pub mod watcher_manager;
 
 use std::sync::{Mutex, MutexGuard};

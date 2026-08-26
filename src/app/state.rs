@@ -1,4 +1,4 @@
-use crate::domain::{PlaybackPosition, PlaybackQueue, PlaybackState, Playlist, TrackId};
+use crate::domain::{PlaybackPosition, PlaybackQueue, PlaybackState, TrackId};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -76,11 +76,6 @@ pub struct AppState {
     /// `true`, the engine applies each track's `REPLAYGAIN_TRACK_GAIN`
     /// (peak-capped) in the audio output's volume-scaling step.
     pub replaygain_enabled: bool,
-    /// User playlists (Task 4.2). Session Projection of the Application
-    /// Store's Playlists section: refreshed from the store through the
-    /// `PlaylistStore` port, never authoritative. Playlists survive a Clear
-    /// Library (which wipes collection data only).
-    pub playlists: Vec<Playlist>,
 }
 
 /// The single-row scalar preferences persisted in the Application Store's
@@ -144,7 +139,6 @@ impl AppState {
             ui_flags: UiFlags::default(),
             watch_states: HashMap::new(),
             replaygain_enabled: false,
-            playlists: Vec::new(),
         }
     }
 

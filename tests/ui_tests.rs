@@ -37,6 +37,39 @@ mod tests {
         )
     }
 
+    /// A real store-backed playlists port plus a `SessionViews` seam sharing
+    /// its session playlist generation — the same pairing the composition
+    /// root wires, so commits through the port invalidate the seam's
+    /// playlist projection exactly like production.
+    fn boxed_playlist_seam(
+        dir: &tempfile::TempDir,
+    ) -> (Box<dyn PlaylistStore>, riff::app::views::SessionViews) {
+        let db_path = dir.path().join("riff.sqlite3");
+        let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+            .expect("opening a fresh store must work");
+        let views = riff::app::views::SessionViews::new(
+            Box::new(store.clone()),
+            Box::new(store.clone()),
+            store.library_generation(),
+            store.playlist_generation(),
+        );
+        (Box::new(store), views)
+    }
+
+    /// A `SessionViews` seam over the store already living at `dir`, for
+    /// reading playlists the way the UI does.
+    fn seam_views(dir: &tempfile::TempDir) -> riff::app::views::SessionViews {
+        let db_path = dir.path().join("riff.sqlite3");
+        let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+            .expect("opening a fresh store must work");
+        riff::app::views::SessionViews::new(
+            Box::new(store.clone()),
+            Box::new(store.clone()),
+            store.library_generation(),
+            store.playlist_generation(),
+        )
+    }
+
     // --- Playlists persist through the Application Store port ------------------
     //
     // The playlists surface commits every mutation straight to the
@@ -106,12 +139,7 @@ mod tests {
         std::fs::write(&legacy_path, "{{{ corrupt legacy json").unwrap();
         let legacy_bytes_before = std::fs::read(&legacy_path).unwrap();
 
-        riff::ui::app::load_persisted_state(
-            &mut AppState::new(),
-            boxed_store(&dir).as_ref(),
-            boxed_playlist_store(&dir).as_ref(),
-            None,
-        );
+        riff::ui::app::load_persisted_state(&mut AppState::new(), boxed_store(&dir).as_ref(), None);
 
         assert_eq!(
             std::fs::read(&legacy_path).unwrap(),
@@ -644,16 +672,27 @@ mod tests {
         }
 
         // Restore like the UI's first frame: curation comes back intact.
+        // Playlists need no hydration step — the seam reads the store live.
         let mut state = AppState::new();
-        riff::ui::app::load_persisted_state(
-            &mut state,
-            boxed_store(&dir).as_ref(),
-            boxed_playlist_store(&dir).as_ref(),
-            None,
+        riff::ui::app::load_persisted_state(&mut state, boxed_store(&dir).as_ref(), None);
+        let mut views = seam_views(&dir);
+
+        // The store kept the curation across the wipe...
+        assert_eq!(
+            boxed_playlist_store(&dir).load_playlists().unwrap().len(),
+            1,
+            "curation survived the wipe in the store"
         );
 
-        assert_eq!(state.playlists.len(), 1, "playlists hydrate as usual");
-        assert_eq!(state.playlists[0].name, "Keep Me");
+        // ...and the seam sees both facts: curation kept, collection empty.
+        let playlists = views.playlists();
+        assert_eq!(playlists.len(), 1, "playlists read back as usual");
+        assert_eq!(playlists[0].name, "Keep Me");
+        assert_eq!(
+            views.track_list("", 0).total,
+            0,
+            "the wiped collection reads empty through the seam"
+        );
     }
 
     // --- Theme token foundation (Issue 01) ------------------------------------
@@ -1416,19 +1455,18 @@ mod tests {
         let first = cache.texture(&ctx, icons::Icon::Play, 16.0, ink);
         let again = cache.texture(&ctx, icons::Icon::Play, 16.0, ink);
         assert_eq!(
-            first.id(),
-            again.id(),
+            first, again,
             "same icon/size/color must reuse the cached texture"
         );
 
         let other_icon = cache.texture(&ctx, icons::Icon::Pause, 16.0, ink);
-        assert_ne!(first.id(), other_icon.id());
+        assert_ne!(first, other_icon);
 
         let recolored = cache.texture(&ctx, icons::Icon::Play, 16.0, theme::BRAND_500);
-        assert_ne!(first.id(), recolored.id(), "tint participates in the key");
+        assert_ne!(first, recolored, "tint participates in the key");
 
         let resized = cache.texture(&ctx, icons::Icon::Play, 32.0, ink);
-        assert_ne!(first.id(), resized.id(), "size participates in the key");
+        assert_ne!(first, resized, "size participates in the key");
     }
 
     #[test]
@@ -1448,6 +1486,7 @@ mod tests {
         };
         let palette = theme::Palette::dark();
         let mut cache = IconCache::new();
+        let mut widget_actions = Vec::new();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(800.0, 56.0))
             .with_pixels_per_point(1.0)
@@ -1456,7 +1495,9 @@ mod tests {
                     // ACCUMULATE across frames: a click fires its action on
                     // exactly one frame, and harness.run() settles over
                     // further no-op frames afterwards.
-                    actions.extend(show_titlebar(ui, &mut cache, &palette, &content));
+                    widget_actions.clear();
+                    show_titlebar(ui, &mut cache, &palette, &content, &mut widget_actions);
+                    actions.append(&mut widget_actions);
                 },
                 Vec::new(),
             );
@@ -1651,7 +1692,7 @@ mod tests {
             .build_ui_state(
                 |ui, actions: &mut Vec<PlaylistRowAction>| {
                     if let Some(action) =
-                        sidebar::playlist_row(ui, &mut cache, &palette, "Gym", 3, false)
+                        sidebar::playlist_row(ui, &mut cache, &palette, "Gym", "Gym (3)", false)
                     {
                         actions.push(action);
                     }
@@ -1713,20 +1754,20 @@ mod tests {
 
     // --- Playlist hover actions drive the existing Store flows -----------------
     //
-    // ADR 0002: writes commit to the Store first, then the Session Projection
-    // (`state.playlists`) refreshes from it. The restyled rows report actions;
+    // ADR 0002: writes commit to the Store and nothing else — the seam's
+    // playlist projection invalidates itself via the mutation adapter's
+    // generation bump, so the next `views.playlists()` read reflects the
+    // commit with zero caller action. The restyled rows report actions;
     // these tests pin that the action handler drives the SAME rename/delete
     // Store flows the pre-restyle buttons used.
 
     #[test]
     fn test_playlist_row_delete_action_commits_through_store_and_refreshes_projection() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = boxed_playlist_store(&dir);
+        let (mut store, mut views) = boxed_playlist_seam(&dir);
         let _keep = store.create_playlist("Keep", &[]).unwrap();
         let gone = store.create_playlist("Gone", &[]).unwrap();
 
-        let mut state = AppState::new();
-        state.playlists = store.load_playlists().unwrap();
         let mut view = Some(gone.clone());
         let mut smart_view = None;
         let mut rename_slot = None;
@@ -1735,9 +1776,8 @@ mod tests {
         riff::ui::app::apply_playlist_row_action(
             sidebar::PlaylistRowAction::Delete,
             &gone,
-            "Gone",
             store.as_mut(),
-            &mut state,
+            &mut views,
             riff::ui::app::PlaylistPromptSlots {
                 view: &mut view,
                 smart_view: &mut smart_view,
@@ -1750,13 +1790,14 @@ mod tests {
             !store.load_playlists().unwrap().iter().any(|p| p.id == gone),
             "the delete committed through the PlaylistStore"
         );
+        let playlists = views.playlists();
         assert_eq!(
-            state.playlists.len(),
+            playlists.len(),
             1,
             "the projection refreshed from the store after the committed write"
         );
         assert_eq!(
-            state.playlists[0].name, "Keep",
+            playlists[0].name, "Keep",
             "only the deleted playlist went away"
         );
         assert_eq!(
@@ -1772,11 +1813,9 @@ mod tests {
     #[test]
     fn test_playlist_row_rename_action_opens_the_existing_rename_prompt_flow() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = boxed_playlist_store(&dir);
+        let (mut store, mut views) = boxed_playlist_seam(&dir);
         let pid = store.create_playlist("Gym", &[]).unwrap();
 
-        let mut state = AppState::new();
-        state.playlists = store.load_playlists().unwrap();
         let mut view = None;
         let mut smart_view = None;
         let mut rename_slot = None;
@@ -1785,9 +1824,8 @@ mod tests {
         riff::ui::app::apply_playlist_row_action(
             sidebar::PlaylistRowAction::Rename,
             &pid,
-            "Gym",
             store.as_mut(),
-            &mut state,
+            &mut views,
             riff::ui::app::PlaylistPromptSlots {
                 view: &mut view,
                 smart_view: &mut smart_view,
@@ -1810,16 +1848,17 @@ mod tests {
             "rename alone commits nothing yet — Save does"
         );
 
-        // Saving the prompt commits through the same Store flow and refreshes
-        // the projection (ADR 0002).
-        riff::ui::app::commit_playlist_rename(store.as_mut(), &mut state, &pid, "  Cardio  ");
+        // Saving the prompt commits through the same Store flow; the seam's
+        // next read reflects it with zero caller action (ADR 0002).
+        riff::ui::app::commit_playlist_rename(store.as_mut(), &pid, "  Cardio  ");
         assert_eq!(
             store.load_playlists().unwrap()[0].name,
             "Cardio",
             "the trimmed name persisted through the PlaylistStore"
         );
         assert_eq!(
-            state.playlists[0].name, "Cardio",
+            views.playlists()[0].name,
+            "Cardio",
             "the projection refreshed after the committed rename"
         );
     }
@@ -1827,11 +1866,9 @@ mod tests {
     #[test]
     fn test_playlist_row_open_action_selects_the_playlist_view() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = boxed_playlist_store(&dir);
+        let (mut store, mut views) = boxed_playlist_seam(&dir);
         let pid = store.create_playlist("Focus", &[]).unwrap();
 
-        let mut state = AppState::new();
-        state.playlists = store.load_playlists().unwrap();
         let mut view = None;
         let mut smart_view = Some(SmartPlaylistKind::MostPlayed);
         let mut rename_slot = None;
@@ -1840,9 +1877,8 @@ mod tests {
         riff::ui::app::apply_playlist_row_action(
             sidebar::PlaylistRowAction::Open,
             &pid,
-            "Focus",
             store.as_mut(),
-            &mut state,
+            &mut views,
             riff::ui::app::PlaylistPromptSlots {
                 view: &mut view,
                 smart_view: &mut smart_view,
@@ -1949,50 +1985,71 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_transport_clicks_report_playback_actions() {
-        use egui_kittest::kittest::Queryable;
-        use riff::ui::icons::IconCache;
-        use riff::ui::playerbar::PlayerBarAction;
+    /// Draw one playerbar frame into the caller's retained readout/buffer
+    /// handles — the shared body of the harness closures below.
+    fn draw_playerbar_frame(
+        ui: &mut egui::Ui,
+        cache: &mut icons::IconCache,
+        palette: &theme::Palette,
+        content: &playerbar::PlayerBarContent<'static>,
+        readouts: &mut riff::ui::playerbar::SeekReadouts,
+        buf: &mut Vec<PlayerBarAction>,
+    ) {
+        buf.clear();
+        playerbar::show_player_bar(ui, cache, palette, content, readouts, buf);
+    }
 
-        // Playing: the primary button is Pause.
-        let content = playing_content();
-        let palette = theme::Palette::dark();
-        let mut cache = IconCache::new();
+    /// Run a playerbar harness against `content` and click each label in
+    /// turn, asserting its expected action was reported (actions accumulate
+    /// across frames; `harness.run()` settles between clicks).
+    fn click_playerbar_sequence(
+        palette: &theme::Palette,
+        content: &playerbar::PlayerBarContent<'static>,
+        clicks: &[(&str, PlayerBarAction)],
+    ) {
+        use egui_kittest::kittest::Queryable;
+
+        let mut cache = icons::IconCache::new();
+        let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+        let mut buf = Vec::new();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    // ACCUMULATE across frames: a click fires its action on
-                    // exactly one frame; harness.run() settles afterwards.
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &content,
-                    ));
+                    buf.clear();
+                    draw_playerbar_frame(ui, &mut cache, palette, content, &mut readouts, &mut buf);
+                    actions.append(&mut buf);
                 },
                 Vec::new(),
             );
         harness.run();
+        for (label, expected) in clicks {
+            harness.get_by_label(label).click();
+            harness.run();
+            assert!(
+                harness.state().contains(expected),
+                "clicking {label:?} must report {expected:?}, got {:?}",
+                harness.state()
+            );
+        }
+    }
 
-        harness.get_by_label("Previous track").click();
-        harness.run();
-        assert!(
-            harness.state().contains(&PlayerBarAction::Previous),
-            "previous must keep reporting Previous"
-        );
+    #[test]
+    fn test_transport_clicks_report_playback_actions() {
+        use riff::ui::playerbar::PlayerBarAction;
 
-        harness.get_by_label("Pause").click();
-        harness.run();
-        assert!(
-            harness.state().contains(&PlayerBarAction::Pause),
-            "while playing, the primary button reports Pause"
-        );
+        let palette = theme::Palette::dark();
 
-        harness.get_by_label("Next track").click();
-        harness.run();
-        assert!(
-            harness.state().contains(&PlayerBarAction::Next),
-            "next must keep reporting Next"
+        // Playing: Previous and Next flank the primary Pause.
+        click_playerbar_sequence(
+            &palette,
+            &playing_content(),
+            &[
+                ("Previous track", PlayerBarAction::Previous),
+                ("Pause", PlayerBarAction::Pause),
+                ("Next track", PlayerBarAction::Next),
+            ],
         );
 
         // Paused: the same primary button reports Resume.
@@ -2000,52 +2057,19 @@ mod tests {
             playback: PlaybackState::Paused,
             ..playing_content()
         };
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<PlayerBarAction>| {
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &paused,
-                    ));
-                },
-                Vec::new(),
-            );
-        harness.run();
-        harness.get_by_label("Play").click();
-        harness.run();
-        assert!(
-            harness.state().contains(&PlayerBarAction::Resume),
-            "while paused, the primary button reports Resume"
-        );
+        click_playerbar_sequence(&palette, &paused, &[("Play", PlayerBarAction::Resume)]);
 
         // Stopped: the primary button asks the app to play the selection.
         let stopped = playerbar::PlayerBarContent {
             playback: PlaybackState::Stopped,
             ..playing_content()
         };
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<PlayerBarAction>| {
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &stopped,
-                    ));
-                },
-                Vec::new(),
-            );
-        harness.run();
-        harness.get_by_label("Play").click();
-        harness.run();
-        assert!(
-            harness.state().contains(&PlayerBarAction::PlaySelected),
-            "while stopped, the primary button reports PlaySelected"
+        click_playerbar_sequence(
+            &palette,
+            &stopped,
+            &[("Play", PlayerBarAction::PlaySelected)],
         );
     }
-
     #[test]
     fn test_stop_button_only_exists_in_advanced_mode() {
         use egui_kittest::kittest::Queryable;
@@ -2065,9 +2089,17 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &advanced,
-                    ));
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &advanced,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
                 },
                 Vec::new(),
             );
@@ -2084,9 +2116,17 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &minimal,
-                    ));
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &minimal,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
                 },
                 Vec::new(),
             );
@@ -2111,9 +2151,17 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &content,
-                    ));
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
                 },
                 Vec::new(),
             );
@@ -2146,9 +2194,17 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &content,
-                    ));
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
                 },
                 Vec::new(),
             );
@@ -2179,9 +2235,17 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &content,
-                    ));
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
                 },
                 Vec::new(),
             );
@@ -2213,9 +2277,17 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<riff::ui::playerbar::PlayerBarAction>| {
-                    actions.extend(playerbar::show_player_bar(
-                        ui, &mut cache, &palette, &content,
-                    ));
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
                 },
                 Vec::new(),
             );
@@ -2634,12 +2706,12 @@ mod tests {
         let mut cache = icons::IconCache::new();
         let content = now_playing::NowPlayingContent {
             cover: None,
-            title: Some("Nightcall".to_string()),
-            meta_line: Some("Kavinsky - OutRun".to_string()),
+            title: Some("Nightcall".into()),
+            meta_line: Some("Kavinsky - OutRun".into()),
             details: None,
             position: std::time::Duration::from_secs(83),
             total: Some(std::time::Duration::from_mins(4)),
-            up_next: Vec::new(),
+            up_next: Vec::new().into(),
         };
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(520.0, 456.0))
@@ -2648,9 +2720,17 @@ mod tests {
                 |ui, actions: &mut Vec<NowPlayingAction>| {
                     // ACCUMULATE across frames: a click fires its action on
                     // exactly one frame; harness.run() settles afterwards.
-                    actions.extend(now_playing::show_now_playing(
-                        ui, &mut cache, &palette, &content,
-                    ));
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    now_playing::show_now_playing(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
                 },
                 Vec::new(),
             );
@@ -2672,8 +2752,8 @@ mod tests {
         let mut cache = icons::IconCache::new();
         let content = now_playing::NowPlayingContent {
             cover: None,
-            title: Some("Nightcall".to_string()),
-            meta_line: Some("Kavinsky - OutRun".to_string()),
+            title: Some("Nightcall".into()),
+            meta_line: Some("Kavinsky - OutRun".into()),
             details: None,
             position: std::time::Duration::from_secs(83),
             total: Some(std::time::Duration::from_mins(4)),
@@ -2686,7 +2766,8 @@ mod tests {
                     id: TrackId("b.flac".to_string()),
                     label: "Artist - Beta".to_string(),
                 },
-            ],
+            ]
+            .into(),
         };
         let mut harness = egui_kittest::Harness::builder()
             // Tall enough that both Up Next rows fit below the fixed cover +
@@ -2696,9 +2777,17 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<NowPlayingAction>| {
-                    actions.extend(now_playing::show_now_playing(
-                        ui, &mut cache, &palette, &content,
-                    ));
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    now_playing::show_now_playing(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
                 },
                 Vec::new(),
             );
@@ -2993,7 +3082,7 @@ mod tests {
     #[test]
     fn test_playlist_reorder_commits_through_store_and_patches_projection() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = boxed_playlist_store(&dir);
+        let (mut store, mut views) = boxed_playlist_seam(&dir);
         let pid = store
             .create_playlist(
                 "Gym",
@@ -3005,11 +3094,8 @@ mod tests {
             )
             .unwrap();
 
-        let mut state = AppState::new();
-        state.playlists = store.load_playlists().unwrap();
-
         // Drag entry 0 (A) onto entry 2's slot (C): A,B,C → B,C,A.
-        riff::ui::app::commit_playlist_reorder(store.as_mut(), &mut state, &pid, 0, 2);
+        riff::ui::app::commit_playlist_reorder(&mut views, store.as_mut(), &pid, 0, 2);
 
         // The store committed the new order as one durable transaction...
         assert_eq!(
@@ -3021,23 +3107,42 @@ mod tests {
             ],
             "the dragged order persisted through the PlaylistStore"
         );
-        // ...and the Session Projection mirrors it without a reload.
+        // ...and the seam's projection reflects it with zero caller action —
+        // the committed mutation bumped the playlist generation itself.
         assert_eq!(
-            state.playlists[0].tracks,
+            views.playlists()[0].tracks,
             vec![
                 TrackId("b.mp3".to_string()),
                 TrackId("c.mp3".to_string()),
                 TrackId("a.mp3".to_string())
             ],
-            "the projection patched to mirror the committed reorder"
+            "the projection refreshed without any explicit invalidation"
+        );
+        // The plan's contract for the OPEN playlist itself: the resolved
+        // rows follow the new order too, read back through
+        // `views.playlist_view`.
+        let view = views.playlist_view(&pid).expect("known id yields a view");
+        let row_order: Vec<TrackId> = view.rows.iter().map(|(id, _, _)| id.clone()).collect();
+        assert_eq!(
+            row_order,
+            vec![
+                TrackId("b.mp3".to_string()),
+                TrackId("c.mp3".to_string()),
+                TrackId("a.mp3".to_string())
+            ],
+            "the open playlist's rendered rows follow the new order"
+        );
+        assert!(
+            view.valid_ids.is_empty(),
+            "the dangling fixture entries stay flagged invalid"
         );
 
         // Dropping an entry back onto itself changes nothing anywhere.
-        riff::ui::app::commit_playlist_reorder(store.as_mut(), &mut state, &pid, 1, 1);
+        riff::ui::app::commit_playlist_reorder(&mut views, store.as_mut(), &pid, 1, 1);
         assert_eq!(store.load_playlists().unwrap()[0].tracks.len(), 3);
 
         // Out-of-bounds gestures are ignored end to end.
-        riff::ui::app::commit_playlist_reorder(store.as_mut(), &mut state, &pid, 0, 9);
+        riff::ui::app::commit_playlist_reorder(&mut views, store.as_mut(), &pid, 0, 9);
         assert_eq!(
             store.load_playlists().unwrap()[0].tracks,
             vec![
@@ -3046,6 +3151,186 @@ mod tests {
                 TrackId("a.mp3".to_string())
             ],
             "an invalid gesture never rewrites the store"
+        );
+    }
+
+    /// Harness state for
+    /// [`test_playlist_reorder_render_reflects_new_order_without_explicit_invalidation`]:
+    /// the production seam/store pairing plus the row ids in the order the
+    /// LAST frame rendered them.
+    struct ReorderRenderState {
+        views: riff::app::views::SessionViews,
+        store: riff::infra::store::SqliteStore,
+        pid: PlaylistId,
+        rendered: Vec<String>,
+        cache: icons::IconCache,
+    }
+
+    /// The production playlist-view data path, replicated frame-for-frame:
+    /// rows come from `views.playlist_view` as `Arc` clones, each valid
+    /// entry renders through [`sidebar::reorderable_row`], and a drop
+    /// commits through the store port — nothing else.
+    fn render_reorder_state_ui(ui: &mut egui::Ui, s: &mut ReorderRenderState) {
+        let palette = theme::Palette::dark();
+        // Exactly `render_playlist_view`'s read: ready-to-render rows from
+        // the seam, Arc'd out before any widget call.
+        let Some(view) = s.views.playlist_view(&s.pid) else {
+            s.rendered.clear();
+            return;
+        };
+        s.rendered = view
+            .rows
+            .iter()
+            .map(|(id, _, _)| {
+                PathBuf::from(&id.0)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or(&id.0)
+                    .to_string()
+            })
+            .collect();
+
+        for (index, (_tid, track, valid)) in view.rows.iter().enumerate() {
+            if !*valid {
+                continue;
+            }
+            let Some(track) = track else { continue };
+            let label = format!(
+                "Artist - {}",
+                track.metadata.display_title(&track.file_path)
+            );
+            let outcome = sidebar::reorderable_row(
+                ui,
+                &mut s.cache,
+                &palette,
+                egui::Id::new(("riff_stale_fixture", index)),
+                index,
+                sidebar::TreeRow {
+                    indent_level: 0,
+                    icon: None,
+                    label: &label,
+                    selected: false,
+                    now_playing: false,
+                    playing: false,
+                    disclosure: None,
+                },
+            );
+            if let Some(from) = outcome.drop_from {
+                // The UI action path: commit and nothing else — no reload,
+                // no cache clear, no patch.
+                riff::ui::app::commit_playlist_reorder(
+                    &mut s.views,
+                    &mut s.store,
+                    &s.pid,
+                    from,
+                    index,
+                );
+            }
+        }
+    }
+
+    /// The core Phase 3 property, pinned at the render level: a drag-reorder
+    /// committed through the UI action path (`commit_playlist_reorder`, the
+    /// same call `render_reorderable_playlist_row` makes on a drop) is
+    /// reflected by the NEXT rendered frame's rows with NO explicit
+    /// invalidation, cache clear, or reload anywhere in the flow — the
+    /// committed mutation bumps the playlist generation and the seam's
+    /// projection refetches on its own (ADR 0002).
+    #[test]
+    fn test_playlist_reorder_render_reflects_new_order_without_explicit_invalidation() {
+        use egui_kittest::kittest::Queryable;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+            .expect("opening a fresh store must work");
+
+        // Three real audio files indexed into the Library, so every entry
+        // resolves valid and renders as a reorderable row.
+        let mut track_ids = Vec::new();
+        for (file, title) in [
+            ("one.mp3", "Alpha"),
+            ("two.mp3", "Beta"),
+            ("three.mp3", "Gamma"),
+        ] {
+            let path = dir.path().join(file);
+            std::fs::write(&path, b"fake audio bytes").expect("scratch file writes");
+            let track = crate::test_utils::create_test_track_with_metadata(
+                &path.to_string_lossy(),
+                &path.to_string_lossy(),
+                "Artist",
+                title,
+                "Album",
+            );
+            store
+                .apply_scan_batch(std::slice::from_ref(&track))
+                .expect("seed scan commits");
+            track_ids.push(track.id);
+        }
+
+        let mut store_for_views = store.clone();
+        let pid = store_for_views
+            .create_playlist("Gym", &track_ids)
+            .expect("create works");
+        let mut views = riff::app::views::SessionViews::new(
+            Box::new(store.clone()),
+            Box::new(store_for_views),
+            store.library_generation(),
+            store.playlist_generation(),
+        );
+
+        // Warm the projection the way an open playlist view would, then hand
+        // the SAME seam instance to the harness — one instance across the
+        // commit boundary is what makes staleness observable.
+        assert_eq!(views.playlists().len(), 1);
+        assert_eq!(views.playlist_view(&pid).expect("view").rows.len(), 3);
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, sidebar::ROW_H * 3.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                render_reorder_state_ui,
+                ReorderRenderState {
+                    views,
+                    store,
+                    pid,
+                    rendered: Vec::new(),
+                    cache: icons::IconCache::new(),
+                },
+            );
+        harness.run();
+        assert_eq!(
+            harness.state().rendered,
+            vec!["one", "two", "three"],
+            "the first frame renders the seeded order"
+        );
+
+        // Drag row 0 ("one") onto row 2 ("three"): press, move, release.
+        let src = harness.get_by_label("Artist - Alpha").rect();
+        let dst = harness.get_by_label("Artist - Gamma").rect();
+        harness.drag_at(src.center());
+        harness.run();
+        harness.hover_at(dst.center());
+        harness.run();
+        harness.drop_at(dst.center());
+        harness.run();
+
+        // The next rendered frame reflects the committed reorder — with no
+        // explicit invalidation call anywhere in the flow.
+        assert_eq!(
+            harness.state().rendered,
+            vec!["two", "three", "one"],
+            "rendered rows reflect the committed reorder without explicit invalidation"
+        );
+        // The store committed the same order.
+        assert_eq!(
+            harness.state().store.load_playlists().unwrap()[0].tracks,
+            vec![
+                track_ids[1].clone(),
+                track_ids[2].clone(),
+                track_ids[0].clone()
+            ],
+            "the drag persisted through the PlaylistStore"
         );
     }
 
@@ -3177,7 +3462,16 @@ mod tests {
             .build_ui_state(
                 move |ui, opened: &mut Vec<&'static str>| {
                     make_tooltips_instant(ui.ctx());
-                    let _ = playerbar::show_player_bar(ui, &mut cache, &palette, &content);
+                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut readouts,
+                        &mut buf,
+                    );
                     for (id, name) in [
                         (mute_id, "mute"),
                         (shuffle_id, "shuffle"),
@@ -3355,5 +3649,327 @@ mod tests {
             harness.query_by_label("Track 00007").is_some(),
             "newly visible rows render after scrolling"
         );
+    }
+}
+
+// --- Background service seams in the UI ----------------------------------------
+//
+// The UI no longer owns worker threads or channel protocols (ADR 0006): it
+// submits intent and polls outcomes through the boxed `TagEdits`/`Covers`
+// handles. These tests drive the exact production code paths — the free
+// functions `submit_tag_edit_fields`, `apply_tag_edit_outcome`,
+// `request_cover_intent`, and `cache_polled_covers` that the RiffApp
+// methods delegate to — over recording fakes, with no threads and no disk
+// I/O.
+#[cfg(test)]
+mod background_service_ui_tests {
+    use super::*;
+    use riff::app::cover_service::Covers;
+    use riff::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
+    use riff::app::traits::CoverImage;
+    use riff::ui::app::{
+        apply_tag_edit_outcome, cache_polled_covers, request_cover_intent, submit_tag_edit_fields,
+    };
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// Recording [`TagEdits`] fake: captures every submitted request and
+    /// never yields outcomes (outcomes are injected through
+    /// [`apply_tag_edit_outcome`] directly).
+    struct RecordingTagEdits {
+        submitted: Mutex<Vec<TagEditRequest>>,
+    }
+
+    impl RecordingTagEdits {
+        fn new() -> Self {
+            Self {
+                submitted: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<TagEditRequest> {
+            self.submitted.lock().unwrap().clone()
+        }
+    }
+
+    impl TagEdits for RecordingTagEdits {
+        fn submit(&self, request: TagEditRequest) {
+            self.submitted.lock().unwrap().push(request);
+        }
+
+        fn poll(&self) -> Option<TagEditOutcome> {
+            None
+        }
+    }
+
+    /// Recording [`Covers`] fake: counts request intent, serves nothing.
+    struct RecordingCovers {
+        requested: Mutex<Vec<(TrackId, PathBuf)>>,
+    }
+
+    impl RecordingCovers {
+        fn new() -> Self {
+            Self {
+                requested: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requested(&self) -> Vec<(TrackId, PathBuf)> {
+            self.requested.lock().unwrap().clone()
+        }
+    }
+
+    impl Covers for RecordingCovers {
+        fn request(&self, track_id: TrackId, path: PathBuf) {
+            self.requested.lock().unwrap().push((track_id, path));
+        }
+
+        fn poll(&self) -> Vec<(TrackId, Option<CoverImage>)> {
+            Vec::new()
+        }
+    }
+
+    /// Canned [`Covers`] fake whose single poll drains scripted results.
+    struct CannedCovers(Vec<(TrackId, Option<CoverImage>)>);
+
+    impl Covers for CannedCovers {
+        fn request(&self, _track_id: TrackId, _path: PathBuf) {}
+
+        fn poll(&self) -> Vec<(TrackId, Option<CoverImage>)> {
+            self.0.clone()
+        }
+    }
+
+    /// An open "Edit Tags" modal mid-save for `/music/t1.mp3`.
+    fn saving_modal() -> TagEditState {
+        TagEditState {
+            track_id: TrackId("/music/t1.mp3".to_string()),
+            path: PathBuf::from("/music/t1.mp3"),
+            title: "Old Title".to_string(),
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            album_artist: "Album Artist".to_string(),
+            genre: "Genre".to_string(),
+            year: "1999".to_string(),
+            track_number: "7".to_string(),
+            error: None,
+            saving: true,
+        }
+    }
+
+    #[test]
+    fn test_saved_outcome_closes_dialog_and_sets_status_line() {
+        let mut modal = Some(saving_modal());
+        let mut in_flight = Some((
+            TrackId("/music/t1.mp3".to_string()),
+            PathBuf::from("/music/t1.mp3"),
+        ));
+        let mut status = None;
+
+        apply_tag_edit_outcome(
+            TagEditOutcome::Saved,
+            &mut modal,
+            &mut in_flight,
+            &mut status,
+        );
+
+        assert!(modal.is_none(), "a saved edit closes the dialog");
+        assert_eq!(
+            status.as_deref(),
+            Some("Tags saved for t1.mp3"),
+            "the status line names the saved file"
+        );
+        assert!(in_flight.is_none(), "the outstanding record is consumed");
+    }
+
+    #[test]
+    fn test_failed_outcome_keeps_dialog_open_with_reason() {
+        let mut modal = Some(saving_modal());
+        let mut in_flight = Some((
+            TrackId("/music/t1.mp3".to_string()),
+            PathBuf::from("/music/t1.mp3"),
+        ));
+        let mut status = Some("earlier message".to_string());
+
+        apply_tag_edit_outcome(
+            TagEditOutcome::Failed {
+                reason: "permission denied".to_string(),
+            },
+            &mut modal,
+            &mut in_flight,
+            &mut status,
+        );
+
+        let modal = modal.expect("a failed edit keeps the dialog open");
+        assert_eq!(modal.error.as_deref(), Some("permission denied"));
+        assert!(!modal.saving, "the save spinner stops");
+        // No silent success: the previous status line is left untouched.
+        assert_eq!(status.as_deref(), Some("earlier message"));
+    }
+
+    #[test]
+    fn test_outcome_for_another_track_leaves_modal_untouched() {
+        // The user opened a different track's editor while a save was in
+        // flight: its outcome must not close or alter the new dialog.
+        let mut modal = Some(saving_modal());
+        let mut in_flight = Some((
+            TrackId("/music/other.mp3".to_string()),
+            PathBuf::from("/music/other.mp3"),
+        ));
+        let mut status = None;
+
+        apply_tag_edit_outcome(
+            TagEditOutcome::Failed {
+                reason: "stale failure".to_string(),
+            },
+            &mut modal,
+            &mut in_flight,
+            &mut status,
+        );
+
+        let untouched = modal
+            .as_ref()
+            .expect("an unrelated outcome leaves the dialog open");
+        assert!(untouched.error.is_none());
+        assert!(untouched.saving);
+
+        apply_tag_edit_outcome(
+            TagEditOutcome::Saved,
+            &mut modal,
+            &mut in_flight,
+            &mut status,
+        );
+        assert!(
+            modal.is_some(),
+            "an unrelated save must not close the open dialog"
+        );
+    }
+
+    #[test]
+    fn test_outcome_without_outstanding_request_is_ignored() {
+        let mut modal = Some(saving_modal());
+        let mut in_flight = None;
+        let mut status = None;
+
+        apply_tag_edit_outcome(
+            TagEditOutcome::Saved,
+            &mut modal,
+            &mut in_flight,
+            &mut status,
+        );
+
+        assert!(
+            modal.is_some(),
+            "nothing outstanding means nothing to close"
+        );
+        assert!(status.is_none());
+    }
+
+    #[test]
+    fn test_parse_invalid_submit_keeps_dialog_open_without_submitting() {
+        let mut modal = saving_modal();
+        modal.year = "not a number".to_string();
+        modal.saving = false;
+        let edits = RecordingTagEdits::new();
+        let mut in_flight = None;
+
+        submit_tag_edit_fields(&mut modal, &edits, &mut in_flight);
+
+        assert!(
+            edits.requests().is_empty(),
+            "invalid fields must not reach the service"
+        );
+        assert!(modal.error.is_some(), "the parse error surfaces");
+        assert!(!modal.saving, "the modal stays open, not saving");
+        assert!(in_flight.is_none());
+    }
+
+    #[test]
+    fn test_valid_submit_sends_request_and_marks_saving() {
+        let mut modal = saving_modal();
+        modal.year = "2001".to_string();
+        modal.track_number = String::new(); // empty means "leave unset"
+        let edits = RecordingTagEdits::new();
+        let mut in_flight = None;
+
+        submit_tag_edit_fields(&mut modal, &edits, &mut in_flight);
+
+        let requests = edits.requests();
+        assert_eq!(requests.len(), 1, "exactly one request submitted");
+        let request = &requests[0];
+        assert_eq!(request.track_id.0, "/music/t1.mp3");
+        assert_eq!(request.path, PathBuf::from("/music/t1.mp3"));
+        assert_eq!(
+            request.edit.title.as_deref(),
+            Some("Old Title"),
+            "the edited field values travel with the request"
+        );
+        assert_eq!(request.edit.year, Some(2001));
+        assert_eq!(request.edit.track_number, None);
+        assert!(modal.saving, "the modal flips into its saving state");
+        assert!(modal.error.is_none());
+        assert_eq!(
+            in_flight,
+            Some((
+                TrackId("/music/t1.mp3".to_string()),
+                PathBuf::from("/music/t1.mp3")
+            )),
+            "the outstanding record enables outcome matching"
+        );
+    }
+
+    #[test]
+    fn test_cover_intent_skips_cached_texture_but_requests_uncached() {
+        let covers = RecordingCovers::new();
+        let id = TrackId("/music/t1.mp3".to_string());
+        let path = PathBuf::from("/music/t1.mp3");
+
+        request_cover_intent(true, &covers, id.clone(), path.clone());
+        assert!(
+            covers.requested().is_empty(),
+            "a cached texture suppresses the request"
+        );
+
+        request_cover_intent(false, &covers, id.clone(), path.clone());
+        assert_eq!(
+            covers.requested(),
+            vec![(id.clone(), path)],
+            "an uncached track sends intent to the service"
+        );
+    }
+
+    #[test]
+    fn test_cache_polled_covers_inserts_textures_and_skips_artless() {
+        let ctx = egui::Context::default();
+        let image = CoverImage {
+            width: 2,
+            height: 2,
+            rgba: vec![9; 2 * 2 * 4],
+        };
+        let covers = CannedCovers(vec![
+            (
+                TrackId("/music/art.mp3".to_string()),
+                Some(CoverImage {
+                    width: 2,
+                    height: 2,
+                    rgba: image.rgba.clone(),
+                }),
+            ),
+            (TrackId("/music/artless.mp3".to_string()), None),
+        ]);
+        let mut textures = std::collections::HashMap::new();
+        let mut lru_keys = Vec::new();
+
+        cache_polled_covers(&covers, &mut textures, &mut lru_keys, &ctx);
+
+        assert!(
+            textures.contains_key("/music/art.mp3"),
+            "resolved art becomes a texture keyed by track id"
+        );
+        assert!(
+            !textures.contains_key("/music/artless.mp3"),
+            "artless results create no texture (the service negative-caches them)"
+        );
+        assert_eq!(lru_keys, vec!["/music/art.mp3".to_string()]);
     }
 }

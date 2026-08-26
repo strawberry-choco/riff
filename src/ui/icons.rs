@@ -204,8 +204,9 @@ impl IconCache {
         Self::default()
     }
 
-    /// The texture for `icon` at `size` points in `color`, rasterizing and
-    /// caching on first request.
+    /// The texture id for `icon` at `size` points in `color`, rasterizing
+    /// and caching on first request. Fresh frames hand back the cached
+    /// texture's id (a small copy) instead of cloning the handle.
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn texture(
         &mut self,
@@ -213,11 +214,11 @@ impl IconCache {
         icon: Icon,
         size: f32,
         color: egui::Color32,
-    ) -> egui::TextureHandle {
+    ) -> egui::TextureId {
         let px = size.round().max(1.0) as u32;
         let key = (icon, px, color);
         if let Some(tex) = self.textures.get(&key) {
-            return tex.clone();
+            return tex.id();
         }
 
         let image = rasterize(icon.svg(), px as usize, color).unwrap_or_else(|| {
@@ -241,8 +242,9 @@ impl IconCache {
             image,
             egui::TextureOptions::LINEAR,
         );
-        self.textures.insert(key, tex.clone());
-        tex
+        let id = tex.id();
+        self.textures.insert(key, tex);
+        id
     }
 }
 
@@ -256,8 +258,8 @@ pub fn icon_button(
     size: f32,
     color: egui::Color32,
 ) -> egui::Response {
-    let tex = cache.texture(ui.ctx(), icon, size, color);
-    let sized = egui::load::SizedTexture::new(tex.id(), egui::vec2(size, size));
+    let tex_id = cache.texture(ui.ctx(), icon, size, color);
+    let sized = egui::load::SizedTexture::new(tex_id, egui::vec2(size, size));
     let response = ui.add(egui::Button::image(egui::Image::from_texture(sized)));
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     response

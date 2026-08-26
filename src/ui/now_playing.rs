@@ -16,6 +16,7 @@
 //! `tests/ui_tests.rs` / `tests/golden_tests.rs`.
 
 use eframe::egui;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::icons::{Icon, IconCache};
@@ -98,24 +99,27 @@ pub enum NowPlayingAction {
 }
 
 /// Everything the stage needs to render one frame. A plain value struct: the
-/// caller reads it out of `AppState`, the widgets never touch state.
+/// caller reads it out of `AppState`, the widgets never touch state. The
+/// text fields are `Arc`-shared cache handouts (allocation plan 2.2), so a
+/// fresh frame bumps refcounts instead of rebuilding strings.
 #[derive(Default)]
 pub struct NowPlayingContent {
     /// Real cover texture from the app's LRU cache; `None` paints the
     /// placeholder well.
     pub cover: Option<egui::TextureHandle>,
     /// Current track title; `None` renders the calm empty state.
-    pub title: Option<String>,
+    pub title: Option<Arc<str>>,
     /// `"Artist - Album"` line under the title.
-    pub meta_line: Option<String>,
+    pub meta_line: Option<Arc<str>>,
     /// Optional secondary details line (year · genre · track/disc).
-    pub details: Option<String>,
+    pub details: Option<Arc<str>>,
     /// Elapsed playback position.
     pub position: Duration,
     /// Track duration; `None` disables seeking and shows `--:--`.
     pub total: Option<Duration>,
-    /// Up Next rows in Playback Queue order (see [`up_next_entries`]).
-    pub up_next: Vec<UpNextEntry>,
+    /// Up Next rows in Playback Queue order (see [`up_next_entries`]),
+    /// shared with the app's label cache.
+    pub up_next: Arc<[UpNextEntry]>,
 }
 
 // --- Pure helpers -------------------------------------------------------------------
@@ -124,8 +128,8 @@ pub struct NowPlayingContent {
 /// the tracks after the current one, in the QUEUE's own order (shuffle
 /// included), capped at `limit`. The queue-to-window mapping and the skip of
 /// entries whose files have left the library live in
-/// [`crate::app::projection::PlaybackProjection`]; this is the pure label
-/// formatting over its result.
+/// [`crate::app::views::SessionViews`]; this is the pure label formatting
+/// over its result.
 #[must_use]
 pub fn up_next_entries(up_next: &[Track], limit: usize) -> Vec<UpNextEntry> {
     up_next
@@ -173,14 +177,21 @@ pub fn metadata_details(metadata: &TrackMetadata) -> Option<String> {
 /// Draw the Now Playing stage across the full panel area and report every
 /// interaction. Must run inside the shell's central stage panel; layout is
 /// manual and deterministic so the golden image pins real geometry.
+///
+/// Observed actions are appended to `actions` — a buffer the caller owns
+/// and clears per frame — and the in-view seek row refills the caller's
+/// retained [`playerbar::SeekReadouts`], so steady-state frames allocate
+/// nothing here beyond egui's own painting.
 pub fn show_now_playing(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
     content: &NowPlayingContent,
-) -> Vec<NowPlayingAction> {
-    let mut actions = Vec::new();
+    readouts: &mut playerbar::SeekReadouts,
+    actions: &mut Vec<NowPlayingAction>,
+) {
     let stage = ui.max_rect();
+    readouts.sync(content.position, content.total);
 
     // Close affordance at the stage's top-right corner, registered every
     // frame so it is reachable in the empty state too.
@@ -203,7 +214,7 @@ pub fn show_now_playing(
 
     let Some(title) = content.title.as_deref() else {
         paint_empty_state(ui);
-        return actions;
+        return;
     };
 
     // Resolve the design type scale through the CURRENT style: naming a
@@ -230,7 +241,15 @@ pub fn show_now_playing(
         copy_top,
     );
 
-    if let Some(action) = seek_row(ui, &ui.painter_at(stage), palette, content, cx, seek_top) {
+    if let Some(action) = seek_row(
+        ui,
+        &ui.painter_at(stage),
+        palette,
+        content,
+        readouts,
+        cx,
+        seek_top,
+    ) {
         actions.push(action);
     }
 
@@ -240,14 +259,12 @@ pub fn show_now_playing(
         cache,
         palette,
         content,
-        &mut actions,
+        actions,
         stage,
         cx,
         (&body_font, &xs_font),
         section_top,
     );
-
-    actions
 }
 
 /// The empty state: calm copy instead of dangling controls (REQ-UI-005).
@@ -319,11 +336,11 @@ fn paint_copy_block(
     let meta_galley = content
         .meta_line
         .as_ref()
-        .map(|meta| painter.layout_no_wrap(meta.clone(), body_font.clone(), palette.ink_2));
+        .map(|meta| painter.layout_no_wrap(meta.to_string(), body_font.clone(), palette.ink_2));
     let details_galley = content
         .details
         .as_ref()
-        .map(|details| painter.layout_no_wrap(details.clone(), xs_font.clone(), palette.ink_3));
+        .map(|details| painter.layout_no_wrap(details.to_string(), xs_font.clone(), palette.ink_3));
 
     let mut y = top;
     let title_galley = painter.layout_no_wrap(title.to_owned(), title_font.clone(), palette.ink);
@@ -346,13 +363,16 @@ fn paint_copy_block(
 
 /// The seek row (REQ-UI-005): monospace times around a 4px fill bar.
 /// Clicking or dragging reports an absolute [`NowPlayingAction::Seek`];
-/// seeking is only offered while the track duration is known. Returns the
-/// action observed this frame, if any.
+/// seeking is only offered while the track duration is known. Both labels
+/// come from the caller's retained [`playerbar::SeekReadouts`] (already
+/// synced against this frame's content). Returns the action observed this
+/// frame, if any.
 fn seek_row(
     ui: &egui::Ui,
     painter: &egui::Painter,
     palette: &Palette,
     content: &NowPlayingContent,
+    readouts: &playerbar::SeekReadouts,
     cx: f32,
     top: f32,
 ) -> Option<NowPlayingAction> {
@@ -365,16 +385,14 @@ fn seek_row(
     painter.text(
         egui::pos2(bar_rect.left() - 8.0, seek_cy),
         egui::Align2::RIGHT_CENTER,
-        playerbar::format_duration(content.position),
+        readouts.elapsed(),
         playerbar::time_font(),
         palette.ink_2,
     );
     painter.text(
         egui::pos2(bar_rect.right() + 8.0, seek_cy),
         egui::Align2::LEFT_CENTER,
-        content
-            .total
-            .map_or_else(|| "--:--".to_string(), playerbar::format_duration),
+        readouts.total(),
         playerbar::time_font(),
         palette.ink_2,
     );

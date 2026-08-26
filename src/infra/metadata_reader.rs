@@ -6,29 +6,44 @@ use lofty::prelude::*;
 use lofty::read_from_path;
 use lofty::tag::{ItemKey, Tag};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Parse a `ReplayGain` gain string such as `"-6.54 dB"`, `"+3.21 dB"`, or a
-/// bare `"3.21"` into dB. Strips a trailing `dB` (case-insensitive), trims,
-/// and parses; malformed values yield `None`.
+/// bare `"3.21"` into dB. Strips a trailing `dB` (case-insensitive, without
+/// lowercasing the whole value), trims, and parses; malformed values yield
+/// `None`.
 pub fn parse_replaygain_gain(s: &str) -> Option<f32> {
-    let lower = s.trim().to_ascii_lowercase();
-    let without_unit = lower.strip_suffix("db").unwrap_or(&lower);
-    without_unit.trim().parse::<f32>().ok()
+    let trimmed = s.trim();
+    let bytes = trimmed.as_bytes();
+    let without_unit = if bytes.len() >= 2
+        && bytes[bytes.len() - 2].eq_ignore_ascii_case(&b'd')
+        && bytes[bytes.len() - 1].eq_ignore_ascii_case(&b'b')
+    {
+        // Both suffix bytes are ASCII, so the slice is char-boundary safe.
+        trimmed[..trimmed.len() - 2].trim_end()
+    } else {
+        trimmed
+    };
+    without_unit.parse::<f32>().ok()
 }
 
 /// Extract a year from a tag text value: a bare `"1959"` parses directly,
 /// and date-style values (`"1959-08-17"`, full `ID3v2` timestamps) yield
 /// their leading four digits. Values without a plausible leading year give
-/// `None`.
+/// `None`. Byte-sliced over the ASCII digit prefix — no per-char iterator
+/// collect.
 fn year_from_text(s: &str) -> Option<u32> {
-    let digits: String = s
-        .trim()
-        .chars()
-        .take(4)
-        .take_while(char::is_ascii_digit)
-        .collect();
-    digits.parse::<u32>().ok()
+    let bytes = s.trim().as_bytes();
+    let mut end = 0;
+    while end < 4 && end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end == 0 {
+        return None;
+    }
+    // The prefix is all ASCII digits, so slicing is char-boundary safe.
+    std::str::from_utf8(&bytes[..end]).ok()?.parse::<u32>().ok()
 }
 
 pub struct LoftyMetadataReader;
@@ -120,7 +135,7 @@ impl LoftyMetadataReader {
             if mime_type == Some(&lofty::picture::MimeType::Jpeg)
                 || mime_type == Some(&lofty::picture::MimeType::Png)
             {
-                return CoverSource::Embedded(picture.data().to_vec());
+                return CoverSource::Embedded(Arc::from(picture.data()));
             }
         }
         CoverSource::None

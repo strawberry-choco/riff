@@ -1,10 +1,8 @@
 use crate::app::MutexExt;
-use crate::app::commands::LibraryCommand;
 use crate::app::state::{AppState, LibraryStatus, ViewMode, WatchState};
 use crate::app::store::SettingsStore;
 use crate::ui::icons::{Icon, IconCache};
 use crate::ui::theme::{self, Palette};
-use crossbeam_channel::Sender;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 
@@ -460,12 +458,12 @@ fn back_bar(
     } else {
         palette.ink_2
     };
-    let tex = cache.texture(ui.ctx(), Icon::ArrowLeft, 16.0, tint);
+    let tex_id = cache.texture(ui.ctx(), Icon::ArrowLeft, 16.0, tint);
     let icon_rect = egui::Rect::from_center_size(
         egui::pos2(btn_rect.left() + 20.0, btn_rect.center().y),
         egui::vec2(16.0, 16.0),
     );
-    painter.image(tex.id(), icon_rect, UV_FULL, tint);
+    painter.image(tex_id, icon_rect, UV_FULL, tint);
     painter.galley(
         egui::pos2(
             icon_rect.right() + 8.0,
@@ -539,12 +537,12 @@ fn filled_button(
     let icon_w: f32 = if icon.is_some() { 16.0 + 8.0 } else { 0.0 };
     let mut x = rect.center().x - icon_w.midpoint(galley.size().x);
     if let Some(icon) = icon {
-        let tex = cache.texture(ui.ctx(), icon, 16.0, ink);
+        let tex_id = cache.texture(ui.ctx(), icon, 16.0, ink);
         let icon_rect = egui::Rect::from_center_size(
             egui::pos2(x + 8.0, rect.center().y),
             egui::vec2(16.0, 16.0),
         );
-        painter.image(tex.id(), icon_rect, UV_FULL, ink);
+        painter.image(tex_id, icon_rect, UV_FULL, ink);
         x += icon_w;
     }
     painter.galley(
@@ -609,7 +607,11 @@ fn libraries_card(
 }
 
 /// One library row: folder glyph, truncated path, then the readiness dot +
-/// label, Scan, Watch, and trash controls.
+/// label, Scan, Watch, and trash controls. Every derived string (the lossy
+/// path text, its truncation, and the per-control accessibility/hover
+/// labels) is built ONCE here and passed down — allocation plan 2.5 hoists
+/// them out of the per-control call tree so idle frames format each string
+/// a single time per row.
 fn library_row(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -621,42 +623,56 @@ fn library_row(
         egui::vec2(ui.available_width(), LIBRARY_ROW_H),
         egui::Sense::hover(),
     );
-    let path_str = row.path.to_string_lossy().to_string();
+    let path_str = row.path.to_string_lossy();
+    let display = truncate_path(&path_str, 48);
+    let remove_label = format!("Remove {path_str} from your libraries");
+    let watch_label = format!("Watch {path_str}");
+    let scan_label = format!("Scan {path_str}");
 
-    library_row_path(ui, cache, palette, rect, row, &path_str);
+    library_row_path(ui, cache, palette, rect, row, &display);
     // Returns where the Scan button starts so the readiness pair can sit
     // gap-4 to its left.
-    let scan_left = library_row_controls(ui, cache, palette, rect, row, &path_str, actions);
+    let scan_left = library_row_controls(
+        ui,
+        cache,
+        palette,
+        rect,
+        row,
+        &path_str,
+        &remove_label,
+        &watch_label,
+        &scan_label,
+        actions,
+    );
     library_row_readiness(ui, palette, rect, row, scan_left);
 }
 
 /// The row's left cluster: folder glyph plus the (possibly struck-through)
-/// truncated path.
+/// truncated path. `display` arrives precomputed by [`library_row`].
 fn library_row_path(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
     rect: egui::Rect,
     row: &LibraryRow,
-    path_str: &str,
+    display: &str,
 ) {
     let painter = ui.painter_at(rect);
     let cy = rect.center().y;
     let is_unavailable = matches!(row.status, LibraryStatus::Unavailable);
 
-    let folder_tex = cache.texture(ui.ctx(), Icon::Folder, 16.0, palette.ink_3);
+    let folder_tex_id = cache.texture(ui.ctx(), Icon::Folder, 16.0, palette.ink_3);
     let folder_rect =
         egui::Rect::from_center_size(egui::pos2(rect.left() + 24.0, cy), egui::vec2(16.0, 16.0));
-    painter.image(folder_tex.id(), folder_rect, UV_FULL, palette.ink_3);
+    painter.image(folder_tex_id, folder_rect, UV_FULL, palette.ink_3);
 
-    let display = truncate_path(path_str, 48);
     let body_font = styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM);
     let path_color = if is_unavailable {
         palette.warning
     } else {
         palette.ink
     };
-    let path_galley = painter.layout_no_wrap(display, body_font, path_color);
+    let path_galley = painter.layout_no_wrap(display.to_owned(), body_font, path_color);
     let path_x = folder_rect.right() + 12.0;
     painter.galley(
         egui::pos2(path_x, cy - path_galley.size().y / 2.0),
@@ -676,7 +692,9 @@ fn library_row_path(
 }
 
 /// The row's right cluster (gap-4): trash | watch | scan. Returns the Scan
-/// button's left edge.
+/// button's left edge. All per-path labels arrive precomputed by
+/// [`library_row`]; the trash hover text is only built while hovered.
+#[allow(clippy::too_many_arguments)]
 fn library_row_controls(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -684,6 +702,9 @@ fn library_row_controls(
     rect: egui::Rect,
     row: &LibraryRow,
     path_str: &str,
+    remove_label: &str,
+    watch_label: &str,
+    scan_label: &str,
     actions: &mut Vec<SettingsAction>,
 ) -> f32 {
     let painter = ui.painter_at(rect);
@@ -691,27 +712,28 @@ fn library_row_controls(
     let is_unavailable = matches!(row.status, LibraryStatus::Unavailable);
     let is_scanning = matches!(row.status, LibraryStatus::Scanning { .. });
 
-    // Trash ghost icon button, destructive on hover.
+    // Trash ghost icon button, destructive on hover. The tooltip string is
+    // only formatted while the pointer is actually over the control.
     let right = rect.right() - 16.0;
     let trash_rect = egui::Rect::from_min_size(
         egui::pos2(right - TRASH_BTN, cy - TRASH_BTN / 2.0),
         egui::vec2(TRASH_BTN, TRASH_BTN),
     );
-    let trash_response = ui
-        .interact(
-            trash_rect,
-            egui::Id::new(("settings_trash", path_str)),
-            egui::Sense::click(),
-        )
-        // Icon-only buttons explain themselves on hover (Issue 12).
-        .on_hover_text(format!("Remove {path_str} from your libraries"));
+    let mut trash_response = ui.interact(
+        trash_rect,
+        egui::Id::new(("settings_trash", path_str)),
+        egui::Sense::click(),
+    );
+    if trash_response.hovered() {
+        trash_response = trash_response.on_hover_text(remove_label.to_owned());
+    }
     let trash_tint = if trash_response.hovered() {
         palette.error
     } else {
         palette.ink_3
     };
-    let trash_tex = cache.texture(ui.ctx(), Icon::Trash, 16.0, trash_tint);
-    painter.image(trash_tex.id(), trash_rect.shrink(6.0), UV_FULL, trash_tint);
+    let trash_tex_id = cache.texture(ui.ctx(), Icon::Trash, 16.0, trash_tint);
+    painter.image(trash_tex_id, trash_rect.shrink(6.0), UV_FULL, trash_tint);
     trash_response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Remove library")
     });
@@ -748,12 +770,7 @@ fn library_row_controls(
     );
     paint_watch_box(&painter, palette, box_rect, watching && can_watch);
     watch_response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::Checkbox,
-            can_watch,
-            watching,
-            format!("Watch {path_str}"),
-        )
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, can_watch, watching, watch_label)
     });
     if can_watch && watch_response.clicked() {
         actions.push(SettingsAction::SetWatch(row.path.clone(), !watching));
@@ -783,7 +800,7 @@ fn library_row_controls(
         scan_rect,
         egui::Id::new(("settings_scan", path_str)),
         "Scan",
-        &format!("Scan {path_str}"),
+        scan_label,
         None,
         false,
         true,
@@ -1216,29 +1233,18 @@ impl super::app::RiffApp {
     /// Render the Settings stage inside the shell's central panel and apply
     /// everything the user did this frame. The stage itself is a pure
     /// renderer ([`show_settings_stage`]); this adapter owns the effects:
-    /// watcher start/stop, store mutations, scan commands, and the platform
-    /// folder-picker split.
-    pub fn show_settings_view(
-        &mut self,
-        ui: &mut egui::Ui,
-        state: &mut AppState,
-        lib_cmd: Option<&Sender<LibraryCommand>>,
-    ) {
+    /// watcher start/stop, store mutations, scan requests through the
+    /// Library Scan Service, and the platform folder-picker split.
+    pub fn show_settings_view(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         // Per-root indexed-track counts come from the store through the
-        // cached folder projection (component-wise subtree ids, invalidated
-        // by generation bumps) — never the former in-memory mirror.
-        let generation = self.store_generation.current();
+        // Session Views facade (component-wise subtree ids, invalidated by
+        // generation bumps) — never the former in-memory mirror.
         let content = SettingsContent {
             libraries: state
                 .library_paths
                 .iter()
                 .map(|path| {
-                    let indexed_tracks = self
-                        .folder_projection
-                        .subtree_ids(generation, path, &mut |f| {
-                            self.library_queries.track_ids_in_folder_tree(f)
-                        })
-                        .map_or(0, |ids| ids.len());
+                    let indexed_tracks = self.views.folder_subtree_ids(path).len();
                     LibraryRow {
                         path: path.clone(),
                         status: state
@@ -1258,7 +1264,7 @@ impl super::app::RiffApp {
 
         let palette = self.theme.active;
         for action in show_settings_stage(ui, &mut self.icons, &palette, &content) {
-            self.apply_settings_action(action, state, lib_cmd);
+            self.apply_settings_action(action, state);
         }
 
         // Transient rows beneath the stage column.
@@ -1278,27 +1284,19 @@ impl super::app::RiffApp {
         }
     }
 
-    /// Apply one [`SettingsAction`] through the app's state/command/store
+    /// Apply one [`SettingsAction`] through the app's state/service/store
     /// paths.
-    fn apply_settings_action(
-        &mut self,
-        action: SettingsAction,
-        state: &mut AppState,
-        lib_cmd: Option<&Sender<LibraryCommand>>,
-    ) {
+    fn apply_settings_action(&mut self, action: SettingsAction, state: &mut AppState) {
         match action {
             SettingsAction::Back => state.view_mode = ViewMode::Library,
             SettingsAction::AddLibrary => self.add_library_via_platform_picker(state),
-            SettingsAction::Scan(path) => {
-                if let Some(s) = lib_cmd {
-                    let _ = s.send(LibraryCommand::ScanDirectory(path));
-                }
-            }
+            // Scan intent goes through the Library Scan Service seam (ADR
+            // 0006): dedup against in-flight scans and the whole walk/commit
+            // flow live behind it.
+            SettingsAction::Scan(path) => self.scans.request(path),
             SettingsAction::ScanAll => {
-                if let Some(s) = lib_cmd {
-                    for path in &state.library_paths {
-                        let _ = s.send(LibraryCommand::ScanDirectory(path.clone()));
-                    }
+                for path in &state.library_paths {
+                    self.scans.request(path.clone());
                 }
             }
             SettingsAction::Remove(path) => self.remove_library_path(&path, state),

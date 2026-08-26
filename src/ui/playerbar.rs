@@ -15,6 +15,7 @@
 //! egui-only and behavior-free.
 
 use eframe::egui;
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use super::icons::{Icon, IconCache};
@@ -72,6 +73,54 @@ pub fn time_font() -> egui::FontId {
 pub fn format_duration(duration: Duration) -> String {
     let total_seconds = duration.as_secs();
     format!("{:02}:{:02}", total_seconds / 60, total_seconds % 60)
+}
+
+/// Retained monospace readouts for one seek row (allocation plan 2.4): the
+/// elapsed side is cleared and refilled through `write!` into a fixed
+/// buffer every frame, and the total side is rebuilt only when the track's
+/// duration actually changes (`--:--` cached outright while unknown). The
+/// caller owns the buffers across frames, so steady-state frames allocate
+/// nothing for either label.
+#[derive(Default)]
+pub struct SeekReadouts {
+    /// Refilled every frame; capacity is retained across frames.
+    elapsed: String,
+    /// The total's whole seconds the cached `total` label was built from.
+    total_secs: Option<u64>,
+    /// Rebuilt only when `total_secs` moves.
+    total: String,
+}
+
+impl SeekReadouts {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Refresh both labels against this frame's position and duration.
+    pub fn sync(&mut self, position: Duration, total: Option<Duration>) {
+        self.elapsed.clear();
+        let secs = position.as_secs();
+        let _ = write!(self.elapsed, "{:02}:{:02}", secs / 60, secs % 60);
+
+        let total_secs = total.map(|duration| duration.as_secs());
+        if total_secs != self.total_secs {
+            self.total_secs = total_secs;
+            self.total = total.map_or_else(|| "--:--".to_owned(), format_duration);
+        }
+    }
+
+    /// The elapsed readout, e.g. `"02:00"`.
+    #[must_use]
+    pub fn elapsed(&self) -> &str {
+        &self.elapsed
+    }
+
+    /// The total readout, e.g. `"04:05"` or `"--:--"` when unknown.
+    #[must_use]
+    pub fn total(&self) -> &str {
+        &self.total
+    }
 }
 
 /// Playback progress as a fraction of `total`: 0 when the duration is
@@ -161,14 +210,21 @@ pub enum PlayerBarAction {
 /// interaction. Must run inside the shell's bottom panel of exactly
 /// [`crate::ui::theme::PLAYERBAR_H`] height; layout inside is manual and
 /// deterministic so the golden image pins real geometry.
+///
+/// Observed actions are appended to `actions` — a buffer the caller owns
+/// and clears per frame — and the seek row's time labels refill the
+/// caller's retained [`SeekReadouts`], so steady-state frames allocate
+/// nothing here.
 pub fn show_player_bar(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
     content: &PlayerBarContent<'_>,
-) -> Vec<PlayerBarAction> {
-    let mut actions = Vec::new();
+    readouts: &mut SeekReadouts,
+    actions: &mut Vec<PlayerBarAction>,
+) {
     let rect = ui.max_rect();
+    readouts.sync(content.position, content.total);
     // 16px side insets; vertical breathing room up to 12px, shrinking before
     // the bar's two rows are allowed to collide (host chrome may hand the
     // widget less than the full 88px strip).
@@ -189,17 +245,15 @@ pub fn show_player_bar(
     );
 
     // --- Right cluster ------------------------------------------------------
-    let queue_left = show_right_cluster(ui, cache, palette, content, inner, &mut actions);
+    let queue_left = show_right_cluster(ui, cache, palette, content, inner, actions);
 
     // --- Center column: seek row above centered transport -------------------
     let center = egui::Rect::from_min_max(
         egui::pos2(cover_rect.right() + 20.0, inner.top()),
         egui::pos2(queue_left - 20.0, inner.bottom()),
     );
-    show_seek_row(ui, palette, content, center, &mut actions);
-    transport_row(ui, cache, palette, content, center, &mut actions);
-
-    actions
+    show_seek_row(ui, palette, content, readouts, center, actions);
+    transport_row(ui, cache, palette, content, center, actions);
 }
 
 /// The right-hand cluster, laid right-to-left from the strip's right edge:
@@ -345,10 +399,13 @@ fn queue_label(
 /// total readouts around a 4px fill bar. Seeking is only offered while the
 /// track duration is known; the absolute target rides in the action and the
 /// app re-clamps it against the live total before sending it downstream.
+/// Both labels come from the caller's retained [`SeekReadouts`] (already
+/// synced against this frame's content).
 fn show_seek_row(
     ui: &mut egui::Ui,
     palette: &Palette,
     content: &PlayerBarContent<'_>,
+    readouts: &SeekReadouts,
     center: egui::Rect,
     actions: &mut Vec<PlayerBarAction>,
 ) {
@@ -357,16 +414,14 @@ fn show_seek_row(
     painter.text(
         egui::pos2(center.left(), seek_cy),
         egui::Align2::LEFT_CENTER,
-        format_duration(content.position),
+        readouts.elapsed(),
         time_font(),
         palette.ink_2,
     );
     painter.text(
         egui::pos2(center.right(), seek_cy),
         egui::Align2::RIGHT_CENTER,
-        content
-            .total
-            .map_or_else(|| "--:--".to_string(), format_duration),
+        readouts.total(),
         time_font(),
         palette.ink_2,
     );
@@ -611,9 +666,9 @@ fn ghost_circle_button(
     } else {
         palette.ink_2
     };
-    let tex = cache.texture(ui.ctx(), icon, 16.0, tint);
+    let tex_id = cache.texture(ui.ctx(), icon, 16.0, tint);
     let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
-    painter.image(tex.id(), icon_rect, UV_FULL, tint);
+    painter.image(tex_id, icon_rect, UV_FULL, tint);
 
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     response.on_hover_text(label).clicked()
@@ -640,9 +695,9 @@ fn primary_play_button(
             egui::Stroke::new(1.5_f32, palette.border),
         );
     }
-    let tex = cache.texture(ui.ctx(), icon, 18.0, palette.on_brand);
+    let tex_id = cache.texture(ui.ctx(), icon, 18.0, palette.on_brand);
     let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(18.0, 18.0));
-    painter.image(tex.id(), icon_rect, UV_FULL, palette.on_brand);
+    painter.image(tex_id, icon_rect, UV_FULL, palette.on_brand);
 
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     response.on_hover_text(label).clicked()

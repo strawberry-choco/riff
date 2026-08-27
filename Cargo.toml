@@ -1,3 +1,8 @@
+# Workspace: riff music player split into backend + frontend crates.
+[workspace]
+members = [".", "riff-backend", "riff-gui", "tests"]
+resolver = "2"
+
 [package]
 name = "riff"
 version = "0.2.0"
@@ -6,89 +11,57 @@ rust-version = "1.95"
 authors = ["riff contributors"]
 description = "A lightweight, offline-first music player built in Rust with egui"
 license = "MIT OR Apache-2.0"
-# The test suite is a single integration-test crate rooted at `tests/mod.rs`
-# (see `docs/engineering/testing-strategy.md`). Disable cargo's default
-# auto-discovery so each `tests/*_tests.rs` file is NOT compiled as its own
-# separate crate (they are modules of `tests/mod.rs`).
 autotests = false
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "riff"
+path = "src/main.rs"
+
+# Single integration-test crate rooted at tests/mod.rs.
 [[test]]
 name = "integration"
 path = "tests/mod.rs"
 
 [dependencies]
-# UI
-# NOTE: pinned to 0.35 — egui 0.36 regressed headless texture rendering
-# (kittest snapshots lose all user-loaded textures; see golden tests).
-egui = "0.35"
+riff-backend = { path = "riff-backend" }
+riff-gui     = { path = "riff-gui" }
+
+# Composition-only deps used by the legacy src/ mirror (which the tests crate
+# still reaches through `riff::app::*` etc.). Issue 11 removes the src/ mirror
+# entirely so these can be pruned.
 eframe = { version = "0.35", features = ["default", "persistence"] }
-
-# Audio decoding (pure Rust)
-symphonia = { version = "0.6", features = ["all"] }
-# Opus codec adapter (symphonia lacks native Opus decoder)
-symphonia-adapter-libopus = "0.3"
-
-# Audio output (cross-platform)
-cpal = "0.18"
-
-# Lock-free SPSC ring buffer between the decoder thread and the cpal
-# callback (allocation-optimization plan, task 3.1)
-ringbuf = "0.5"
-
-# Metadata reading (pure Rust)
-lofty = "0.25"
-
-# Image decoding for cover art
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-
-# File system scanning
-walkdir = "2"
-
-# Error handling
-thiserror = "2"
-
-# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Config directories
-directories = "6"
-
-# Threading / sync
 crossbeam-channel = "0.5"
 crossbeam-queue = "0.3"
-
-# Filesystem watching
+symphonia = { version = "0.6", features = ["all"] }
+symphonia-adapter-libopus = "0.3"
+cpal = "0.18"
+ringbuf = "0.5"
+lofty = "0.25"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+walkdir = "2"
 notify = "8"
-# Debounce companion for notify — 0.7 targets notify ^8.2.0, matching our
-# lockfile so both crates share one notify version family.
 notify-debouncer-full = "0.7"
-
-# Random for shuffle
 fastrand = "2"
-
-# For image data in egui
 epi = { package = "egui_extras", version = "0.35", features = ["image"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
-
-# Lucide icon glyph rasterization for the shell chrome (Issue 06)
 resvg = "0.48"
-
-# Testing dependencies
-[dev-dependencies]
-tempfile = "3.8"
-# The integration tests assert theme tokens against egui color values.
+thiserror = "2"
+directories = "6"
 egui = "0.35"
-# Golden-image snapshot tests render real egui frames headlessly (Issue 05);
-# wgpu provides the offscreen renderer, snapshot the image comparison.
-egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-# System tray (macOS/Windows only — requires GTK dev libs on Linux)
 tray-icon = "0.24"
 muda = "0.19"
-# Native file dialog (macOS/Windows only — Linux uses text input)
 rfd = "0.17"
+
+[dev-dependencies]
+tempfile = "3.8"
+egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
 
 [profile.release]
 opt-level = 3

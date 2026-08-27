@@ -1,0 +1,54 @@
+# riff-gui — the frontend: egui UI, tray icon, native dialogs, fonts.
+#
+# The ONLY crate dependency is riff-backend (domain + port types the UI uses).
+# Owns egui/eframe (pinned 0.35 — see root Cargo.toml note on the 0.36
+# headless texture regression), egui_kittest, resvg, rfd, and tray-icon/muda.
+# Contains NO audio, metadata, scanner, watcher, or SQLite dependencies.
+#
+# The integration test suite and golden snapshots live at ./tests/ (see its
+# own Cargo.toml) and declare this crate as a dev-dependency.
+
+[package]
+name = "riff-gui"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+riff-backend = { path = "../riff-backend" }
+
+# UI
+egui = "0.35"
+eframe = { version = "0.35", features = ["default", "persistence"] }
+epi = { package = "egui_extras", version = "0.35", features = ["image"] }
+
+# Lucide icon glyph rasterization for the shell chrome
+resvg = "0.48"
+
+# Logging
+tracing = "0.1"
+
+# Threading / sync
+crossbeam-channel = "0.5"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = "0.24"
+muda = "0.19"
+rfd = "0.17"
+
+[dev-dependencies]
+egui = "0.35"
+egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
+tempfile = "3.8"
+
+
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "allow", priority = -1 }
+needless_pass_by_value = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"

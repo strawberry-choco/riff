@@ -4030,6 +4030,8 @@ dependencies = [
  "notify-debouncer-full",
  "resvg",
  "rfd",
+ "riff-backend",
+ "riff-gui",
  "ringbuf",
  "rusqlite",
  "symphonia",
@@ -4040,6 +4042,64 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "walkdir",
+]
+
+[[package]]
+name = "riff-backend"
+version = "0.2.0"
+dependencies = [
+ "cpal",
+ "crossbeam-channel",
+ "crossbeam-queue",
+ "directories",
+ "fastrand",
+ "image",
+ "lofty",
+ "notify",
+ "notify-debouncer-full",
+ "ringbuf",
+ "rusqlite",
+ "symphonia",
+ "symphonia-adapter-libopus",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
+name = "riff-gui"
+version = "0.2.0"
+dependencies = [
+ "crossbeam-channel",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "egui_kittest",
+ "muda",
+ "resvg",
+ "rfd",
+ "riff-backend",
+ "tempfile",
+ "tracing",
+ "tray-icon",
+]
+
+[[package]]
+name = "riff-tests"
+version = "0.2.0"
+dependencies = [
+ "crossbeam-channel",
+ "egui",
+ "egui_kittest",
+ "notify",
+ "notify-debouncer-full",
+ "riff",
+ "riff-backend",
+ "riff-gui",
+ "rusqlite",
+ "symphonia",
+ "tempfile",
 ]
 
 [[package]]

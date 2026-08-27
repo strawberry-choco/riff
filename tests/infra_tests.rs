@@ -6,12 +6,12 @@ use super::*;
 mod tests {
     use super::*;
     use crate::mocks::{MockAudioDecoder, MockAudioOutput, MockCoverLoader, MockMetadataReader};
-    use riff::app::errors::AppError;
-    use riff::app::traits::{
+    use riff_backend::app::errors::AppError;
+    use riff_backend::app::traits::{
         AudioDecoder, AudioFormatInfo, AudioOutput, CoverImage, CoverLoader, MetadataReader,
         MetadataWriter, TagEdit,
     };
-    use riff::domain::CoverSource;
+    use riff_backend::domain::CoverSource;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -478,7 +478,7 @@ mod tests {
         // Expected straight from the audio-extension contract: audio paths
         // only, deduplicated, first-seen order preserved.
         assert_eq!(
-            riff::infra::watcher::debounced_audio_paths(&events),
+            riff_backend::infra::watcher::debounced_audio_paths(&events),
             vec![PathBuf::from("/lib/a.mp3"), PathBuf::from("/lib/b.FLAC")]
         );
     }
@@ -543,7 +543,9 @@ fn test_store_fresh_start_creates_file_and_applies_initial_migration_once() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
 
-    let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let store = riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
         .expect("fresh store must open and migrate");
 
     let applied: Vec<(i64, String)> = store
@@ -569,13 +571,18 @@ fn test_store_reopen_reuses_migrated_store_without_reapplying() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
 
-    let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     store
         .with_connection(|conn| conn.execute("UPDATE schema_migrations SET applied_at = 12345", []))
         .expect("marking applied_at must work");
     drop(store);
 
-    let reopened = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let reopened = riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
         .expect("reopening a migrated store must succeed");
     let applied_at: i64 = reopened
         .with_connection(|conn| {
@@ -597,7 +604,10 @@ fn test_store_double_apply_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
 
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     store
         .with_connection(|conn| conn.execute("UPDATE schema_migrations SET applied_at = 777", []))
         .expect("marking applied_at must work");
@@ -642,7 +652,10 @@ fn test_store_checksum_tamper_is_fatal() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
 
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     // Simulate a corrupted/tampered bookkeeping row: the recorded
     // checksum no longer matches the embedded migration.
     store
@@ -680,9 +693,12 @@ fn test_store_unopenable_path_is_a_clear_fatal_error() {
     // A path whose parent does not exist cannot be opened; the store
     // must report a clear error rather than panic or silently succeed.
     let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("nope").join("riff.sqlite3");
+    let db_path = dir.path().join("nope/should/fail.sqlite3");
 
-    let Err(err) = riff::infra::store::SqliteStore::open_and_migrate(&db_path) else {
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let Err(err) = riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+    else {
         panic!("unopenable store must fail, but opened successfully");
     };
     assert!(
@@ -696,7 +712,10 @@ fn test_store_connection_setup_pragmas() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
 
-    let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     let journal_mode: String = store
         .with_connection(|conn| conn.query_row("PRAGMA journal_mode", [], |row| row.get(0)))
         .expect("reading journal_mode must work");
@@ -718,7 +737,10 @@ fn test_store_busy_timeout_is_about_five_seconds() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
 
-    let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     let timeout_ms: i64 = store
         .with_connection(|conn| conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0)))
         .expect("reading busy_timeout must work");
@@ -738,8 +760,10 @@ fn test_store_corrupt_db_reopens_as_fresh_store_with_siblings_renamed_aside() {
     let shm_path = dir.path().join("riff.sqlite3-shm");
 
     // Build a healthy store with data, then close it so the WAL is
-    // checkpointed and the connection released.
-    let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     store
         .with_connection(|conn| {
             conn.execute(
@@ -767,7 +791,9 @@ fn test_store_corrupt_db_reopens_as_fresh_store_with_siblings_renamed_aside() {
 
     // Reopen: corruption must be detected at startup (quick_check) and
     // recovered automatically.
-    let reopened = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let reopened = riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
         .expect("corrupt store must be detected and replaced by a fresh one automatically");
 
     // Fresh start: pre-corruption data is intentionally not recovered.
@@ -845,7 +871,10 @@ fn test_store_recovery_failure_is_a_fatal_startup_error() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("nope").join("riff.sqlite3");
 
-    let Err(err) = riff::infra::store::SqliteStore::open_and_migrate(&db_path) else {
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let Err(err) = riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+    else {
         panic!("recovery failure must be a fatal startup error, but open succeeded");
     };
     let message = err.to_string();
@@ -858,7 +887,7 @@ fn test_store_recovery_failure_is_a_fatal_startup_error() {
 
 // --- Application Store: Settings in typed tables -----------------------------
 
-use riff::app::store::SettingsStore;
+use riff_backend::app::store::SettingsStore;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -869,7 +898,10 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
 
     // Fresh store: defaults (volume unset, toggles off).
     {
-        let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let store = riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .unwrap();
         let settings = store
             .load_settings()
             .expect("loading settings from a fresh store must work");
@@ -881,9 +913,13 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
 
     // Change every scalar and drop the connection (the "restart").
     {
-        let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store =
+            riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .unwrap();
         store
-            .save_scalars(&riff::app::state::ScalarSettings {
+            .save_scalars(&riff_backend::app::state::ScalarSettings {
                 volume: Some(0.42),
                 advanced_mode: true,
                 high_contrast: true,
@@ -893,7 +929,9 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
     }
 
     // Reopen: every value survives in its typed column.
-    let reopened = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let reopened = riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
         .expect("reopening must succeed");
     let settings = reopened
         .load_settings()
@@ -911,7 +949,11 @@ fn test_store_library_paths_and_watch_states_roundtrip_across_reopen() {
 
     // Change paths + watch states, then drop the connection ("restart").
     {
-        let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store =
+            riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .unwrap();
         let mut watch_states = HashMap::new();
         watch_states.insert(PathBuf::from("music/a"), WatchState::Enabled);
         watch_states.insert(
@@ -926,8 +968,11 @@ fn test_store_library_paths_and_watch_states_roundtrip_across_reopen() {
             .expect("saving library paths must work");
     }
 
-    let mut reopened = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
-        .expect("reopening must succeed");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut reopened =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("reopening must succeed");
     let settings = reopened
         .load_settings()
         .expect("loading settings must work");
@@ -966,15 +1011,18 @@ fn test_store_library_paths_and_watch_states_roundtrip_across_reopen() {
 
 // --- Application Store: Playlists, atomic per-mutation durability ------------
 
-use riff::app::store::PlaylistStore;
-use riff::domain::{PlaylistId, TrackId};
+use riff_backend::app::store::PlaylistStore;
+use riff_backend::domain::{PlaylistId, TrackId};
 
 #[test]
 fn test_store_fresh_playlists_are_empty() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
 
-    let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     let playlists = store
         .load_playlists()
         .expect("loading playlists from a fresh store must work");
@@ -989,7 +1037,11 @@ fn test_store_created_playlist_survives_immediate_restart() {
     // Create a playlist with initial entries; the mutation commits before
     // the connection is dropped (the "restart").
     {
-        let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store =
+            riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .unwrap();
         let id = store
             .create_playlist(
                 "  Chill Mix  ",
@@ -1003,7 +1055,9 @@ fn test_store_created_playlist_survives_immediate_restart() {
     }
 
     // Reopen: the playlist and its entry order are intact.
-    let reopened = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let reopened = riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
         .expect("reopening must succeed");
     let playlists = reopened
         .load_playlists()
@@ -1024,7 +1078,11 @@ fn test_store_rename_and_delete_commit_instantly_without_touching_unrelated_data
     let db_path = dir.path().join("riff.sqlite3");
 
     {
-        let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store =
+            riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .unwrap();
         let keep = store.create_playlist("Keep", &[]).unwrap();
         let gone = store
             .create_playlist("Gone", &[TrackId("g1.mp3".to_string())])
@@ -1051,7 +1109,11 @@ fn test_store_rename_and_delete_commit_instantly_without_touching_unrelated_data
         drop(store);
 
         // Simulated crash right after the actions: reopen and verify.
-        let reopened = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let reopened =
+            riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .unwrap();
         let playlists = reopened.load_playlists().unwrap();
         assert_eq!(
             playlists
@@ -1070,7 +1132,10 @@ fn test_store_rename_and_delete_commit_instantly_without_touching_unrelated_data
     }
 
     // The cascade removed the deleted playlist's entries at the SQL level.
-    let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     let orphan_entries: i64 = store
         .with_connection(|conn| {
             conn.query_row(
@@ -1093,7 +1158,11 @@ fn test_store_entry_add_remove_semantics_and_dangling_survival() {
     let pid;
 
     {
-        let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store =
+            riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .unwrap();
         pid = store.create_playlist("P", &[]).unwrap();
 
         // Appends land at the end, in call order.
@@ -1144,7 +1213,10 @@ fn test_store_entry_add_remove_semantics_and_dangling_survival() {
 
     // Restart: ordering and the dangling entry both survive; the entry stays
     // listed so it resolves again once the referenced file returns.
-    let reopened = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let reopened =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     let playlists = reopened.load_playlists().unwrap();
     assert_eq!(playlists.len(), 1);
     assert_eq!(
@@ -1162,7 +1234,10 @@ fn test_store_duplicate_names_allowed_with_unique_ids() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
 
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     // Same-millisecond creation of same-named playlists must not collide:
     // ids dedupe, names may repeat (today's behavior).
     let a = store.create_playlist("Mix", &[]).unwrap();
@@ -1182,7 +1257,11 @@ fn test_store_reorder_playlist_entries_persists_the_new_order_across_restart() {
     let pid;
 
     {
-        let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store =
+            riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .unwrap();
         pid = store
             .create_playlist(
                 "Gym",
@@ -1211,7 +1290,10 @@ fn test_store_reorder_playlist_entries_persists_the_new_order_across_restart() {
     }
 
     // Reopen: the new order survived the restart.
-    let reopened = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let reopened =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     let playlists = reopened.load_playlists().unwrap();
     assert_eq!(
         playlists[0].tracks,
@@ -1249,7 +1331,10 @@ fn test_store_reorder_unknown_playlist_is_a_noop_and_other_playlists_are_untouch
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
 
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     let keep = store
         .create_playlist(
             "Keep",
@@ -1277,7 +1362,10 @@ fn test_store_reorder_unknown_playlist_is_a_noop_and_other_playlists_are_untouch
 fn test_store_playlist_entries_report_library_validity_via_left_join() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     // Two scanned tracks plus a dangling reference that was never scanned.
     store
@@ -1340,7 +1428,7 @@ fn test_store_playlist_entries_report_library_validity_via_left_join() {
 
 // --- Application Store: Library collection (ticket 05) ---------------------
 
-use riff::app::store::{LibraryMutationStore, LibraryQueryStore};
+use riff_backend::app::store::{LibraryMutationStore, LibraryQueryStore};
 use std::time::Duration;
 
 /// Build a Track fixture with full metadata control (compilation cases need
@@ -1377,7 +1465,9 @@ fn test_store_library_migration_004_applies_and_reopens_idempotently() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
 
-    let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let store = riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
         .expect("fresh store must open and migrate");
     let tables: Vec<String> = store
         .with_connection(|conn| {
@@ -1396,7 +1486,9 @@ fn test_store_library_migration_004_applies_and_reopens_idempotently() {
     );
     drop(store);
 
-    riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
         .expect("reopening a store with the library schema must succeed");
 }
 
@@ -1404,7 +1496,10 @@ fn test_store_library_migration_004_applies_and_reopens_idempotently() {
 fn test_scan_batch_populates_collection_including_compilations() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     // Compilation: one album credited to "Various Artists", two tracks with
     // their own track-level artists.
@@ -1487,7 +1582,11 @@ fn test_interrupted_scan_keeps_committed_batches() {
     // Batch 1 commits; then the process "dies" before batch 2 is ever sent
     // (the store handle is dropped without applying more batches).
     {
-        let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store =
+            riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .unwrap();
         let batch1 = vec![library_track(
             "m:\\music\\a.mp3",
             "A",
@@ -1501,7 +1600,10 @@ fn test_interrupted_scan_keeps_committed_batches() {
     }
 
     // After reopening, everything committed so far is present.
-    let reopened = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let reopened =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     let count: i64 = reopened
         .with_connection(|conn| conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0)))
         .expect("counting tracks must work");
@@ -1512,7 +1614,10 @@ fn test_interrupted_scan_keeps_committed_batches() {
 fn test_rescan_is_idempotent_and_preserves_history() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     let first = vec![library_track(
         "m:\\music\\old.mp3",
@@ -1582,7 +1687,10 @@ fn test_rescan_is_idempotent_and_preserves_history() {
 fn test_foreign_keys_reject_orphan_tracks() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
-    let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     let err = store
         .with_connection(|conn| {
@@ -1603,7 +1711,10 @@ fn test_foreign_keys_reject_orphan_tracks() {
 fn test_flat_list_windows_are_path_ordered_and_bounded() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     // Shuffled insertion order with byte-ordering traps: uppercase sorts
     // before lowercase ('B' 0x42 < 'a' 0x61), digits before letters.
@@ -1653,7 +1764,10 @@ fn test_flat_list_windows_are_path_ordered_and_bounded() {
 fn test_all_track_ids_are_canonically_path_ordered() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
-    let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     // A fresh store has no ids to fill a queue with.
     assert!(
@@ -1663,7 +1777,10 @@ fn test_all_track_ids_are_canonically_path_ordered() {
             .is_empty()
     );
 
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     // Shuffled insertion order with byte-ordering traps: Queue Fill must see
     // the canonical flat ordering (path ascending, ADR 0003), not insertion
     // or HashMap luck.
@@ -1699,7 +1816,10 @@ fn test_all_track_ids_are_canonically_path_ordered() {
 fn test_search_parity_with_legacy_semantics() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     // Fixture library including non-Latin titles and literal wildcard
     // characters in metadata.
@@ -1776,7 +1896,10 @@ fn test_search_parity_with_legacy_semantics() {
 fn test_get_track_roundtrips_all_fields() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     let full = Track {
         id: TrackId::from_path(std::path::Path::new("f:\\full.flac")),
@@ -1877,7 +2000,10 @@ use std::time::SystemTime;
 fn test_record_track_played_persists_immediately_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     let batch = vec![
         library_track("m:\\music\\a.mp3", "A", Some("Artist A"), "Album A", None),
@@ -1911,7 +2037,10 @@ fn test_record_track_played_persists_immediately_across_reopen() {
 
     // Durability: the plays survive closing and reopening the store.
     drop(store);
-    let reopened = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let reopened =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     let a = reopened
         .get_track(&id_a)
         .expect("get_track works")
@@ -1931,7 +2060,10 @@ fn test_record_track_played_persists_immediately_across_reopen() {
 fn test_tag_refresh_preserves_history_and_updates_album_derivation() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     // Track A carries the album's derivation (first-added); B is newer.
     let mut track_a = library_track(
@@ -1975,7 +2107,10 @@ fn test_tag_refresh_preserves_history_and_updates_album_derivation() {
 
     // Durability: assert against a freshly opened store.
     drop(store);
-    let reopened = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let reopened =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     let a = reopened
         .get_track(&refreshed.id)
@@ -2027,7 +2162,10 @@ fn test_tag_refresh_preserves_history_and_updates_album_derivation() {
 fn test_tag_refresh_moving_between_albums_cleans_orphans() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     let original = library_track("f:\\x\\a.mp3", "A", Some("Solo"), "X", None);
     store
@@ -2052,7 +2190,10 @@ fn test_tag_refresh_moving_between_albums_cleans_orphans() {
     store.apply_tag_refresh(&moved).expect("refresh applies");
 
     drop(store);
-    let reopened = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let reopened =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     let a = reopened
         .get_track(&moved.id)
@@ -2108,7 +2249,10 @@ fn test_tag_refresh_moving_between_albums_cleans_orphans() {
 fn test_remove_library_path_is_atomic_and_keeps_playlists_dangling() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     // Two roots share artist "Shared"; "m:\one2" guards against prefix traps.
     let batch = vec![
@@ -2144,7 +2288,10 @@ fn test_remove_library_path_is_atomic_and_keeps_playlists_dangling() {
     assert_eq!(again, 0);
 
     drop(store);
-    let reopened = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let reopened =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     let remaining: Vec<String> = reopened
         .with_connection(|conn| {
@@ -2411,7 +2558,10 @@ fn test_browsing_queries_match_independent_reference_orderings() {
     // Store side: the whole fixture set through one scan commit.
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     store.apply_scan_batch(&fixtures).expect("batch applies");
 
     // Artists A–Z.
@@ -2455,7 +2605,10 @@ fn test_browsing_queries_match_independent_reference_orderings() {
 fn test_all_artists_lists_names_az_with_canonical_album_keys() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     // Fresh store: no artists.
     assert!(
@@ -2494,7 +2647,10 @@ fn test_all_artists_lists_names_az_with_canonical_album_keys() {
 fn test_artist_albums_orders_newest_first_missing_year_last_title_tiebreak() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     store
         .apply_scan_batch(&[
@@ -2531,7 +2687,10 @@ fn test_artist_albums_orders_newest_first_missing_year_last_title_tiebreak() {
 fn test_album_tracks_orders_missing_numbers_first_then_path() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
-    let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     // Insertion order deliberately scrambled relative to both number and
     // path; the query must impose the canonical order regardless.
@@ -2573,7 +2732,11 @@ fn test_browsing_works_straight_from_a_freshly_reopened_store() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
     {
-        let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store =
+            riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .unwrap();
         store
             .apply_scan_batch(&[
                 browsing_track("f:\\x\\2.mp3", "Two", "Ithaca", "LP", Some(2), Some(1977)),
@@ -2583,7 +2746,10 @@ fn test_browsing_works_straight_from_a_freshly_reopened_store() {
     } // store dropped: connection closed like an app restart.
 
     // Reopened cold — no hydration, no warm-up of any kind.
-    let reopened = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let reopened =
+        riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     let artists = reopened.all_artists().expect("artists query");
     assert_eq!(artists.len(), 1);
     assert_eq!(artists[0].name, "Ithaca");
@@ -2650,10 +2816,14 @@ fn folder_fixtures(base: &std::path::Path) -> Vec<Track> {
     ]
 }
 
-fn seeded_folder_store(dir: &tempfile::TempDir) -> riff::infra::store::SqliteStore {
-    let mut store =
-        riff::infra::store::SqliteStore::open_and_migrate(&dir.path().join("riff.sqlite3"))
-            .expect("fresh store must open");
+fn seeded_folder_store(dir: &tempfile::TempDir) -> riff_backend::infra::store::SqliteStore {
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store = riff_backend::infra::store::SqliteStore::open_and_migrate(
+        &dir.path().join("riff.sqlite3"),
+        changes_tx,
+    )
+    .expect("fresh store must open");
     store
         .apply_scan_batch(&folder_fixtures(dir.path()))
         .expect("fixtures apply");
@@ -2973,7 +3143,7 @@ fn test_folder_has_search_match_scopes_to_subtree() {
 
 // --- Application Store: smart playlists as SQL (ticket 09) ------------------
 
-use riff::domain::SmartPlaylistKind;
+use riff_backend::domain::SmartPlaylistKind;
 
 /// A fixture track with full control over history and dates.
 fn smart_track(
@@ -3097,9 +3267,11 @@ fn smart_fixtures() -> Vec<Track> {
 /// play history is written through direct updates exactly like the
 /// tag-refresh tests do (the scan upsert deliberately never touches
 /// history columns).
-fn seeded_smart_store(db_path: &std::path::Path) -> riff::infra::store::SqliteStore {
-    let mut store =
-        riff::infra::store::SqliteStore::open_and_migrate(db_path).expect("fresh store must open");
+fn seeded_smart_store(db_path: &std::path::Path) -> riff_backend::infra::store::SqliteStore {
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store = riff_backend::infra::store::SqliteStore::open_and_migrate(db_path, changes_tx)
+        .expect("fresh store must open");
 
     let fixtures = smart_fixtures();
 
@@ -3132,7 +3304,7 @@ fn seeded_smart_store(db_path: &std::path::Path) -> riff::infra::store::SqliteSt
 /// relocated constant to the semantics it parameterizes.
 mod smart_reference {
     use super::*;
-    use riff::app::store::LOST_GEMS_THRESHOLD;
+    use riff_backend::app::store::LOST_GEMS_THRESHOLD;
 
     pub fn playlist(tracks: &[Track], kind: SmartPlaylistKind, limit: usize) -> Vec<TrackId> {
         let mut selected: Vec<&Track> = match kind {
@@ -3327,9 +3499,11 @@ fn test_smart_playlists_reflect_committed_mutations_immediately() {
 /// Seed a full store: three tracks with play history across two albums and
 /// two artists, a playlist with entries (one pointing at a track), and
 /// every kind of setting.
-fn seeded_clear_store(db_path: &std::path::Path) -> riff::infra::store::SqliteStore {
-    let mut store =
-        riff::infra::store::SqliteStore::open_and_migrate(db_path).expect("fresh store must open");
+fn seeded_clear_store(db_path: &std::path::Path) -> riff_backend::infra::store::SqliteStore {
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let mut store = riff_backend::infra::store::SqliteStore::open_and_migrate(db_path, changes_tx)
+        .expect("fresh store must open");
 
     let mut t1 = browsing_track(
         "f:\\cl\\a\\one.mp3",
@@ -3384,7 +3558,7 @@ fn seeded_clear_store(db_path: &std::path::Path) -> riff::infra::store::SqliteSt
     let _ = pid;
 
     store
-        .save_scalars(&riff::app::state::ScalarSettings {
+        .save_scalars(&riff_backend::app::state::ScalarSettings {
             volume: Some(0.75),
             advanced_mode: true,
             high_contrast: false,
@@ -3480,8 +3654,10 @@ fn test_clear_library_survives_reopen() {
         store.clear_library().expect("clear works");
     } // dropped like an app restart.
 
-    let reopened =
-        riff::infra::store::SqliteStore::open_and_migrate(&db_path).expect("reopening works");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let reopened = riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+        .expect("reopening works");
     assert_eq!(reopened.track_count().expect("count"), 0);
     assert_eq!(
         reopened.load_playlists().expect("playlists").len(),
@@ -3545,23 +3721,26 @@ fn test_clear_library_is_atomic_on_failure() {
 
 // --- Playlist adapter: session generation bumps only on committed mutations ---
 
-use riff::app::store::StoreGeneration;
+use riff_backend::app::store::StoreGeneration;
 
 /// Scratch store plus a clone wired to the session playlist generation
 /// handle; `_dir` keeps the database file alive for the test.
 struct PlaylistGenerationFixture {
     _dir: tempfile::TempDir,
-    shared: riff::infra::store::SqliteStore,
+    shared: riff_backend::infra::store::SqliteStore,
     generation: StoreGeneration,
-    store: riff::infra::store::SqliteStore,
+    store: riff_backend::infra::store::SqliteStore,
 }
 
 impl PlaylistGenerationFixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("riff.sqlite3");
-        let shared = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
-            .expect("fresh store must open and migrate");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let shared =
+            riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .expect("fresh store must open and migrate");
         let generation = shared.playlist_generation();
         let store = shared.clone();
         Self {
@@ -3574,7 +3753,7 @@ impl PlaylistGenerationFixture {
 }
 
 /// Run one schema batch against the scratch connection (trigger plumbing).
-fn exec_batch(shared: &riff::infra::store::SqliteStore, batch: &str) {
+fn exec_batch(shared: &riff_backend::infra::store::SqliteStore, batch: &str) {
     shared
         .with_connection(|conn| conn.execute_batch(batch))
         .expect("schema batch works");

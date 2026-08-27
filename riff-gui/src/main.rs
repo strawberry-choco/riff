@@ -1,35 +1,35 @@
-// The module tree lives in the library crate (`src/lib.rs`). Import the
-// modules into the binary crate root so the existing `crate::app::...`,
-// `crate::domain::...`, `crate::infra::...` and `crate::ui::...` paths below
-// keep resolving unchanged.
-use riff::app;
-use riff::domain;
-use riff::infra;
-use riff::ui;
-
+// Composition root for the `riff` binary (lives in the frontend crate per
+// the spec: "the binary entry point, which becomes a thin composition over
+// the backend facade"). The whole wiring pattern is unchanged from the
+// pre-split code — the only delta is that the UI's command channel is now
+// wrapped in a `FacadeTransport` so every dispatch is recorded onto the
+// shared `BackendFacade` event inbox the tray also writes to. The audio
+// engine, scan service, watcher, and tag/cover workers still own their
+// threads exactly as before.
 use crossbeam_channel::unbounded;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::app::MutexExt;
-use crate::app::audio_engine::AudioEngine;
-use crate::app::playback_coordinator::PlaybackCoordinator;
-use crate::app::state::AppState;
-use crate::app::traits::DecoderFactory;
-use crate::app::watcher_manager::WatcherManager;
-use crate::domain::{PlaybackCommand, PlaybackUpdate};
-use crate::infra::{
+use riff_backend::app::MutexExt;
+use riff_backend::app::audio_engine::AudioEngine;
+use riff_backend::app::facade::BackendFacade;
+use riff_backend::app::playback_coordinator::PlaybackCoordinator;
+use riff_backend::app::state::AppState;
+use riff_backend::app::traits::DecoderFactory;
+use riff_backend::app::transport::FacadeTransport;
+use riff_backend::app::watcher_manager::WatcherManager;
+use riff_backend::domain::{PlaybackCommand, PlaybackUpdate};
+use riff_backend::infra::{
     AudioFileScanner, CpalAudioOutput, FilesystemWatcher, ImageCoverLoader, LoftyMetadataReader,
     LoftyMetadataWriter, SymphoniaDecoder,
 };
-use crate::ui::RiffApp;
+use riff_gui::ui::RiffApp;
+use riff_gui::ui::window_visibility::spawn_visibility_listener;
 use std::path::PathBuf;
-
+#[allow(clippy::too_many_lines)]
 fn main() {
     tracing_subscriber::fmt::init();
-
-    // Open the Application Store and wire every port over its shared
     // connection (fatal on open/migration failure — never silent fallbacks).
     let (
         settings_store,
@@ -38,7 +38,18 @@ fn main() {
         library_query_store,
         generation,
         playlist_generation,
+        changes_rx,
     ) = open_application_store();
+    // The single shared `BackendFacade` (Issues 02/04): every `FacadeTransport`
+    // — the UI's and the tray's — wraps the same `Arc<Mutex<BackendFacade>>`,
+    // so dispatched commands are recorded onto one observable event inbox.
+    // The store's `StoreChanged` stream is the facade's second input.
+    let facade = Arc::new(Mutex::new(BackendFacade::default()));
+    {
+        let mut f = facade.lock_or_recover();
+        f.subscribe_to_backend_changes(changes_rx);
+        f.bootstrap(generation.current(), playlist_generation.current());
+    }
     // The UI's single read seam over the Application Store (ADR 0002).
     let session_views = wire_session_views(
         &library_query_store,
@@ -54,6 +65,7 @@ fn main() {
     // Clone senders for different consumers before cmd_tx is moved
     let ui_cmd_tx = cmd_tx.clone();
     let engine_cmd_tx = cmd_tx.clone();
+    let tray_cmd_tx = cmd_tx.clone();
 
     let app_state = state.clone();
     let engine_queries = library_query_store.clone();
@@ -78,7 +90,7 @@ fn main() {
     // service cancels through, so the app layer never names infra types.
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let scanner = AudioFileScanner::new(cancel_flag.clone());
-    let (scans, scan_worker) = riff::app::scan_service::ScanService::new(
+    let (scans, scan_worker) = riff_backend::app::scan_service::ScanService::new(
         Box::new(LoftyMetadataReader::new()),
         Box::new(library_query_store.clone()),
         Box::new(library_mutation_store.clone()),
@@ -97,16 +109,28 @@ fn main() {
     let options = eframe::NativeOptions {
         // Frameless launch (Issue 04, ADR 0005): OS decorations are replaced
         // by riff's custom titlebar with a drag region and window controls.
-        viewport: crate::ui::chrome::viewport_builder(),
+        viewport: riff_gui::ui::chrome::viewport_builder(),
         ..Default::default()
     };
 
     let quit_flag = Arc::new(AtomicBool::new(false));
 
-    // The tray icon is owned directly by the UI (single owner, main thread);
+    // Frontend-local visibility channel (Issue 03): the tray pushes
+    // `Show Window` requests here, the UI thread drains them between frames.
+    // The tray never constructs backend commands on this path.
+    let (visibility_tx, visibility_listener) = spawn_visibility_listener();
+
+    // The UI's `Box<dyn Transport>` is a `FacadeTransport` wrapping the
+    // shared `Arc<Mutex<BackendFacade>>`, so every UI intent is recorded
+    let ui_transport: Box<dyn riff_backend::app::transport::Transport> =
+        Box::new(FacadeTransport::new(ui_cmd_tx, facade.clone()));
     // no Arc<Mutex<..>> wrapper is needed around the !Send handle.
     #[cfg(not(target_os = "linux"))]
-    let tray_icon = match crate::ui::tray::create_tray(cmd_tx.clone(), quit_flag.clone()) {
+    let tray_icon = match riff_gui::ui::tray::create_tray(
+        FacadeTransport::new(tray_cmd_tx, facade.clone()),
+        quit_flag.clone(),
+        visibility_tx,
+    ) {
         Ok(tray) => {
             tracing::info!("Tray icon created");
             Some(tray)
@@ -120,7 +144,7 @@ fn main() {
     #[cfg(not(target_os = "linux"))]
     let app = RiffApp::new(
         state.clone(),
-        Box::new(app::transport::ChannelTransport::new(ui_cmd_tx)),
+        ui_transport,
         Box::new(scans.clone()),
         watcher_manager,
         tray_icon,
@@ -131,12 +155,14 @@ fn main() {
         session_views,
         Box::new(tag_edits),
         Box::new(covers),
+        facade,
+        visibility_listener,
     );
 
     #[cfg(target_os = "linux")]
     let app = RiffApp::new(
         state.clone(),
-        Box::new(app::transport::ChannelTransport::new(ui_cmd_tx)),
+        ui_transport,
         Box::new(scans),
         watcher_manager,
         quit_flag.clone(),
@@ -146,11 +172,12 @@ fn main() {
         session_views,
         Box::new(tag_edits),
         Box::new(covers),
+        facade,
+        visibility_listener,
     );
 
     run_native_app(app, options);
 }
-
 /// Hand the composed [`RiffApp`] to eframe: frameless native window with the
 /// app's font configuration installed before the first frame.
 fn run_native_app(app: RiffApp, options: eframe::NativeOptions) {
@@ -158,7 +185,7 @@ fn run_native_app(app: RiffApp, options: eframe::NativeOptions) {
         "riff",
         options,
         Box::new(|cc| {
-            crate::ui::fonts::configure_fonts(&cc.egui_ctx);
+            riff_gui::ui::fonts::configure_fonts(&cc.egui_ctx);
             Ok(Box::new(app))
         }),
     )
@@ -168,7 +195,7 @@ fn run_native_app(app: RiffApp, options: eframe::NativeOptions) {
 /// Create the filesystem watcher and its manager, and spawn the thread that
 /// forwards watch events. Returns the shared manager handle.
 fn spawn_fs_watcher(
-    scans: riff::app::scan_service::ScanService,
+    scans: riff_backend::app::scan_service::ScanService,
 ) -> Arc<Mutex<Option<WatcherManager>>> {
     let (fs_event_tx, fs_event_rx) = unbounded::<Vec<PathBuf>>();
     let watcher = match FilesystemWatcher::new(fs_event_tx) {
@@ -202,22 +229,27 @@ fn spawn_fs_watcher(
 /// playlist generation.
 #[allow(clippy::type_complexity)]
 fn open_application_store() -> (
-    riff::infra::store::SqliteStore,
-    riff::infra::store::SqliteStore,
-    riff::infra::store::SqliteStore,
-    riff::infra::store::SqliteStore,
-    riff::app::store::StoreGeneration,
-    riff::app::store::StoreGeneration,
+    riff_backend::infra::store::SqliteStore,
+    riff_backend::infra::store::SqliteStore,
+    riff_backend::infra::store::SqliteStore,
+    riff_backend::infra::store::SqliteStore,
+    riff_backend::app::store::StoreGeneration,
+    riff_backend::app::store::StoreGeneration,
+    crossbeam_channel::Receiver<riff_backend::app::store::StoreChanged>,
 ) {
-    let store_path = riff::infra::store::default_store_path().expect(
+    let store_path = riff_backend::infra::store::default_store_path().expect(
         "fatal: could not resolve the Application Store location \
          (no data-local directory available)",
     );
     // One shared connection behind an internal mutex serves every store
     // port: every clone of the handle shares it and both session
     // generations, whose bumps live inside the store's mutation impls —
-    // callers cannot forget them.
-    let store = riff::infra::store::SqliteStore::open_and_migrate(&store_path)
+    // callers cannot forget them. The receiver is handed to the
+    // `BackendFacade` (issue 04: emit-beside-the-bump), so the facade
+    // sees every committed mutation as it lands.
+    let (changes_tx, changes_rx) =
+        crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+    let store = riff_backend::infra::store::SqliteStore::open_and_migrate(&store_path, changes_tx)
         .unwrap_or_else(|e| panic!("fatal: {e}"));
     (
         store.clone(),
@@ -226,6 +258,7 @@ fn open_application_store() -> (
         store.clone(),
         store.library_generation(),
         store.playlist_generation(),
+        changes_rx,
     )
 }
 
@@ -233,12 +266,12 @@ fn open_application_store() -> (
 /// ports and hand over both session generations. Committed mutations bump
 /// those same handles inside the store itself.
 fn wire_session_views(
-    library_query_store: &riff::infra::store::SqliteStore,
-    playlist_store: &riff::infra::store::SqliteStore,
-    generation: riff::app::store::StoreGeneration,
-    playlist_generation: riff::app::store::StoreGeneration,
-) -> riff::app::views::SessionViews {
-    riff::app::views::SessionViews::new(
+    library_query_store: &riff_backend::infra::store::SqliteStore,
+    playlist_store: &riff_backend::infra::store::SqliteStore,
+    generation: riff_backend::app::store::StoreGeneration,
+    playlist_generation: riff_backend::app::store::StoreGeneration,
+) -> riff_backend::app::views::SessionViews {
+    riff_backend::app::views::SessionViews::new(
         Box::new(library_query_store.clone()),
         Box::new(playlist_store.clone()),
         generation,
@@ -252,20 +285,20 @@ fn wire_session_views(
 /// Returns the front-end handles the UI holds boxed (`Box<dyn TagEdits>`,
 /// `Box<dyn Covers>`).
 fn spawn_background_services(
-    library_queries: riff::infra::store::SqliteStore,
-    library_mutations: riff::infra::store::SqliteStore,
+    library_queries: riff_backend::infra::store::SqliteStore,
+    library_mutations: riff_backend::infra::store::SqliteStore,
 ) -> (
-    riff::app::tag_edit_service::TagEditService,
-    riff::app::cover_service::CoverService,
+    riff_backend::app::tag_edit_service::TagEditService,
+    riff_backend::app::cover_service::CoverService,
 ) {
-    let (tag_edits, tag_worker) = riff::app::tag_edit_service::TagEditService::new(
+    let (tag_edits, tag_worker) = riff_backend::app::tag_edit_service::TagEditService::new(
         Box::new(LoftyMetadataWriter::new()),
         Box::new(library_queries),
         Box::new(library_mutations),
     );
     let _handle = thread::spawn(move || tag_worker.run());
 
-    let (covers, cover_worker) = riff::app::cover_service::CoverService::new(
+    let (covers, cover_worker) = riff_backend::app::cover_service::CoverService::new(
         Box::new(LoftyMetadataReader::new()),
         Box::new(ImageCoverLoader::new()),
     );
@@ -292,7 +325,7 @@ fn run_engine_thread(
     cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
     update_tx: crossbeam_channel::Sender<PlaybackUpdate>,
     state: Arc<Mutex<AppState>>,
-    library_queries: riff::infra::store::SqliteStore,
+    library_queries: riff_backend::infra::store::SqliteStore,
 ) {
     let decoder_factory: DecoderFactory =
         Box::new(|| Box::new(SymphoniaDecoder::new(build_codec_registry())));

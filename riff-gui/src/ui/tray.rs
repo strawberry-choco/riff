@@ -18,8 +18,8 @@ use tray_icon::Icon;
 #[cfg(not(target_os = "linux"))]
 use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-use riff_backend::app::transport::FacadeTransport;
 use crate::ui::window_visibility::{VisibilityMessage, VisibilityTx};
+use riff_backend::app::transport::FacadeTransport;
 
 /// Create a system tray icon with playback controls.
 /// On Linux this is a no-op (tray-icon requires GTK which isn't always available).
@@ -74,8 +74,7 @@ pub fn create_tray(
                 break;
             }
 
-            if let Ok(event) = menu_channel.recv_timeout(std::time::Duration::from_millis(200))
-            {
+            if let Ok(event) = menu_channel.recv_timeout(std::time::Duration::from_millis(200)) {
                 let id = event.id;
                 if id == play_pause_id {
                     transport.record_raw(PlaybackCommand::PlayPause);

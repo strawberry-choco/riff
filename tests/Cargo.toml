@@ -21,12 +21,8 @@ edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 
-[lib]
-path = "mod.rs"
-test = false
-doctest = false
-
 autotests = false
+
 
 [[test]]
 name = "integration"
@@ -35,7 +31,6 @@ path = "mod.rs"
 [dependencies]
 riff-backend = { path = "../riff-backend" }
 riff-gui     = { path = "../riff-gui" }
-riff         = { path = ".." }
 
 # Golden-image tests render real egui frames headlessly (kittest + wgpu).
 egui = "0.35"

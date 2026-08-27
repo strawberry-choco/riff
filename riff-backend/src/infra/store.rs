@@ -249,7 +249,6 @@ impl SqliteStore {
         Self::configure_and_migrate(conn, changes_tx)
     }
 
-
     /// Best-effort open without recovery; the error carries the exact stage
     /// (open, integrity check, or migration) that failed.
     fn try_open_and_migrate(
@@ -414,7 +413,6 @@ impl SqliteStore {
         })
     }
 
-
     /// Handle for wiring this store into the event backbone. Returns a fresh
     /// crossbeam [`Sender`] of [`StoreChanged`] so tests and the facade can
     /// consume the notifications this handle produces beside each generation bump.
@@ -530,8 +528,7 @@ impl SqliteStore {
 
 impl StoreMigrations for SqliteStore {
     fn open_and_migrate(&self, path: &std::path::Path) -> Result<(), AppError> {
-        Self::open_and_migrate(path, self.changes.clone())
-            .map(|_| ())
+        Self::open_and_migrate(path, self.changes.clone()).map(|_| ())
     }
 }
 
@@ -1881,7 +1878,6 @@ impl SettingsStore for SqliteStore {
     }
 }
 
-
 #[cfg(test)]
 mod issue04_emit_beside_bump {
     use crossbeam_channel::unbounded;
@@ -1944,13 +1940,13 @@ mod issue04_emit_beside_bump {
     #[test]
     fn committed_library_mutation_emits_one_notify_and_bumps() {
         use crate::app::store::LibraryMutationStore;
+        use std::path::PathBuf;
 
         let (mut store, rx) = fresh_store();
-        use std::path::PathBuf;
         let track = crate::domain::Track {
             id: TrackId::from_path(std::path::Path::new("track://x/1")),
             file_path: PathBuf::from("track://x/1"),
-            metadata: Default::default(),
+            metadata: crate::domain::TrackMetadata::default(),
             duration: None,
             sample_rate: None,
             channels: None,

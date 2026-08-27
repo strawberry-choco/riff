@@ -1,12 +1,19 @@
-# riff-gui — the frontend: egui UI, tray icon, native dialogs, fonts.
+# riff-gui — the frontend: egui UI, tray icon, native dialogs, fonts, and the
+# `riff` binary entry point.
 #
-# The ONLY crate dependency is riff-backend (domain + port types the UI uses).
 # Owns egui/eframe (pinned 0.35 — see root Cargo.toml note on the 0.36
 # headless texture regression), egui_kittest, resvg, rfd, and tray-icon/muda.
-# Contains NO audio, metadata, scanner, watcher, or SQLite dependencies.
 #
-# The integration test suite and golden snapshots live at ./tests/ (see its
-# own Cargo.toml) and declare this crate as a dev-dependency.
+# The composition root (src/main.rs) wires real backend adapters into the
+# audio engine, the scan service, and the tag/cover workers. The proper
+# long-term shape is for that wiring to live inside the backend (a
+# `BackendFacade::run` that owns its threads and exposes events), at which
+# point these adapter deps move out of the frontend. Until then the binary
+# lives here, with the deps it needs.
+#
+# The integration test suite and golden snapshots live at the workspace root
+# in `./tests/` (see its own Cargo.toml) and declare this crate as a
+# dev-dependency.
 
 [package]
 name = "riff-gui"
@@ -14,6 +21,10 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "riff"
+path = "src/main.rs"
 
 [dependencies]
 riff-backend = { path = "../riff-backend" }
@@ -26,8 +37,24 @@ epi = { package = "egui_extras", version = "0.35", features = ["image"] }
 # Lucide icon glyph rasterization for the shell chrome
 resvg = "0.48"
 
+# Composition root deps (transitional; see file header).
+symphonia = { version = "0.6", features = ["all"] }
+symphonia-adapter-libopus = "0.3"
+cpal = "0.18"
+ringbuf = "0.5"
+lofty = "0.25"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+walkdir = "2"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+notify = "8"
+notify-debouncer-full = "0.7"
+fastrand = "2"
+directories = "6"
+thiserror = "2"
+
 # Logging
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Threading / sync
 crossbeam-channel = "0.5"
@@ -41,8 +68,6 @@ rfd = "0.17"
 egui = "0.35"
 egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
 tempfile = "3.8"
-
-
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

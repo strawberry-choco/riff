@@ -1,0 +1,52 @@
+# Integration-test crate for the riff workspace (split layout).
+#
+# Single integration-test crate rooted at tests/mod.rs (autotests = false,
+# one [[test]] target), organized into domain/app/infra/ui/golden/integration
+# suites with shared test_utils/mocks/integration_helpers.
+#
+# Depends on both riff-backend and riff-gui as dev-dependencies so every
+# suite can reach the type it needs directly.
+#
+# Run:
+#   cargo test -p tests
+#   cargo test -p tests domain_tests
+#
+# See docs/engineering/testing-strategy.md and
+# docs/engineering/golden-image-testing.md.
+
+[package]
+name = "riff-tests"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "mod.rs"
+test = false
+doctest = false
+
+autotests = false
+
+[[test]]
+name = "integration"
+path = "mod.rs"
+
+[dependencies]
+riff-backend = { path = "../riff-backend" }
+riff-gui     = { path = "../riff-gui" }
+riff         = { path = ".." }
+
+# Golden-image tests render real egui frames headlessly (kittest + wgpu).
+egui = "0.35"
+egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
+
+# Test helpers used at test-runtime by app/infra suites.
+tempfile = "3.8"
+crossbeam-channel = "0.5"
+rusqlite = "0.40.2"
+# Backend-only deps used directly by infra suite tests.
+notify = "8"
+notify-debouncer-full = "0.7"
+symphonia = { version = "0.6", features = ["all"] }
+

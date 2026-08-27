@@ -273,7 +273,6 @@ impl Transport for FacadeTransport {
     }
 }
 
-
 /// Clamp a seek request (in seconds) into `[0, total]` so a drag past the end
 /// of a track seeks to the end rather than beyond it (REQ-UI-005). When the
 /// total duration is unknown there is nothing to clamp against, so the seek

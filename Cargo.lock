@@ -4011,40 +4011,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "riff"
-version = "0.2.0"
-dependencies = [
- "cpal",
- "crossbeam-channel",
- "crossbeam-queue",
- "directories",
- "eframe",
- "egui",
- "egui_extras",
- "egui_kittest",
- "fastrand",
- "image",
- "lofty",
- "muda",
- "notify",
- "notify-debouncer-full",
- "resvg",
- "rfd",
- "riff-backend",
- "riff-gui",
- "ringbuf",
- "rusqlite",
- "symphonia",
- "symphonia-adapter-libopus",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
- "tracing-subscriber",
- "tray-icon",
- "walkdir",
-]
-
-[[package]]
 name = "riff-backend"
 version = "0.2.0"
 dependencies = [
@@ -4071,18 +4037,32 @@ dependencies = [
 name = "riff-gui"
 version = "0.2.0"
 dependencies = [
+ "cpal",
  "crossbeam-channel",
+ "directories",
  "eframe",
  "egui",
  "egui_extras",
  "egui_kittest",
+ "fastrand",
+ "image",
+ "lofty",
  "muda",
+ "notify",
+ "notify-debouncer-full",
  "resvg",
  "rfd",
  "riff-backend",
+ "ringbuf",
+ "rusqlite",
+ "symphonia",
+ "symphonia-adapter-libopus",
  "tempfile",
+ "thiserror 2.0.20",
  "tracing",
+ "tracing-subscriber",
  "tray-icon",
+ "walkdir",
 ]
 
 [[package]]
@@ -4094,7 +4074,6 @@ dependencies = [
  "egui_kittest",
  "notify",
  "notify-debouncer-full",
- "riff",
  "riff-backend",
  "riff-gui",
  "rusqlite",

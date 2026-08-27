@@ -1,68 +1,23 @@
 # Workspace: riff music player split into backend + frontend crates.
+#
+# Pure virtual workspace: this directory owns no source files, no library,
+# no binary, and no integration tests. The actual code lives in:
+#   * `riff-backend` — headless backend (domain, app, infra, store, workers)
+#   * `riff-gui`     — frontend (egui UI, tray, native dialogs) + the `riff`
+#                       binary entry point (composition root in
+#                       `riff-gui/src/main.rs`)
+#   * `tests`        — the integration-test crate (package `riff-tests`)
+#
+# Build / run from here:
+#   cargo run              -p riff-gui
+#   cargo test --all-targets
+#   cargo build --release  -p riff-gui
+
 [workspace]
-members = [".", "riff-backend", "riff-gui", "tests"]
+members = ["riff-backend", "riff-gui", "tests"]
 resolver = "2"
 
-[package]
-name = "riff"
-version = "0.2.0"
-edition = "2024"
-rust-version = "1.95"
-authors = ["riff contributors"]
-description = "A lightweight, offline-first music player built in Rust with egui"
-license = "MIT OR Apache-2.0"
-autotests = false
-
-[lib]
-path = "src/lib.rs"
-
-[[bin]]
-name = "riff"
-path = "src/main.rs"
-
-# Single integration-test crate rooted at tests/mod.rs.
-[[test]]
-name = "integration"
-path = "tests/mod.rs"
-
-[dependencies]
-riff-backend = { path = "riff-backend" }
-riff-gui     = { path = "riff-gui" }
-
-# Composition-only deps used by the legacy src/ mirror (which the tests crate
-# still reaches through `riff::app::*` etc.). Issue 11 removes the src/ mirror
-# entirely so these can be pruned.
-eframe = { version = "0.35", features = ["default", "persistence"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-crossbeam-channel = "0.5"
-crossbeam-queue = "0.3"
-symphonia = { version = "0.6", features = ["all"] }
-symphonia-adapter-libopus = "0.3"
-cpal = "0.18"
-ringbuf = "0.5"
-lofty = "0.25"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-walkdir = "2"
-notify = "8"
-notify-debouncer-full = "0.7"
-fastrand = "2"
-epi = { package = "egui_extras", version = "0.35", features = ["image"] }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
-resvg = "0.48"
-thiserror = "2"
-directories = "6"
-egui = "0.35"
-
-[target.'cfg(not(target_os = "linux"))'.dependencies]
-tray-icon = "0.24"
-muda = "0.19"
-rfd = "0.17"
-
-[dev-dependencies]
-tempfile = "3.8"
-egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
-
+# Workspace-level profiles and lints apply to every member.
 [profile.release]
 opt-level = 3
 lto = true
@@ -72,7 +27,7 @@ strip = true
 [profile.dev]
 opt-level = 1
 
-[lints.clippy]
+[workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "allow", priority = -1 }
 needless_pass_by_value = "allow"

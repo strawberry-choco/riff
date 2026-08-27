@@ -10,13 +10,13 @@
 
 #[cfg(test)]
 mod tests {
-    use riff::ui::fonts::{self, INTER_FACES};
-    use riff::ui::theme::{self, Palette};
+    use riff_gui::ui::fonts::{self, INTER_FACES};
+    use riff_gui::ui::theme::{self, Palette};
 
     // --- Harness plumbing ------------------------------------------------------
 
     /// Deterministic font definitions for golden rendering: the vendored
-    /// Inter faces only. Unlike [`riff::ui::fonts::font_definitions`] this
+    /// Inter faces only. Unlike [`riff_gui::ui::fonts::font_definitions`] this
     /// never scans system CJK fonts, whose presence varies per machine —
     /// a golden must rasterize identically everywhere the suite runs.
     fn inter_only_font_definitions() -> egui::FontDefinitions {
@@ -58,11 +58,11 @@ mod tests {
 
     /// The first golden component: a primary "Play" button on a surface
     /// card. Every color comes from the token constants in
-    /// [`riff::ui::theme`], so the image pins the Issue 01 foundation:
+    /// [`riff_gui::ui::theme`], so the image pins the Issue 01 foundation:
     /// window background, surface fill, brand-500 fill, ink text, and both
     /// radius steps, with the button label in Inter Medium.
     fn draw_play_card(ui: &mut egui::Ui) {
-        use riff::ui::theme::{BRAND_500, INK, RADIUS_MD, RADIUS_SM, SURFACE, SURFACE_BG};
+        use riff_gui::ui::theme::{BRAND_500, INK, RADIUS_MD, RADIUS_SM, SURFACE, SURFACE_BG};
 
         // Paint the window background across the ENTIRE canvas. The root UI
         // under the kittest harness is inset from the true screen rect, so a
@@ -104,12 +104,12 @@ mod tests {
     /// The unified shell chrome at exact token dimensions: 56px titlebar
     /// (wordmark, drag region, window + view controls), 280px sidebar,
     /// 88px playerbar strip, and the central stage. The harness renders at
-    /// exactly [`riff::ui::chrome::MIN_WINDOW_SIZE`], so the golden pins both
+    /// exactly [`riff_gui::ui::chrome::MIN_WINDOW_SIZE`], so the golden pins both
     /// the panel sizes and the chrome-fitting minimum window.
     #[test]
     fn shell_chrome_dark_matches_golden_baseline() {
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(riff::ui::chrome::MIN_WINDOW_SIZE)
+            .with_size(riff_gui::ui::chrome::MIN_WINDOW_SIZE)
             .with_pixels_per_point(1.0)
             .build_ui(draw_shell_chrome);
         theme::install(&harness.ctx, &Palette::dark());
@@ -119,9 +119,9 @@ mod tests {
     }
 
     fn draw_shell_chrome(ui: &mut egui::Ui) {
-        use riff::ui::chrome::{TitleBarContent, show_titlebar};
-        use riff::ui::icons::IconCache;
-        use riff::ui::theme::{self, Palette, SURFACE_BG};
+        use riff_gui::ui::chrome::{TitleBarContent, show_titlebar};
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::theme::{self, Palette, SURFACE_BG};
 
         // Full-canvas background (determinism rule): the stage reads as the
         // window background while the chrome panels sit on surface tokens.
@@ -133,7 +133,7 @@ mod tests {
             scan_status: None,
             theme_dark: true,
             advanced_mode: false,
-            active_nav: Some(riff::ui::chrome::NavDestination::Library),
+            active_nav: Some(riff_gui::ui::chrome::NavDestination::Library),
         };
         let mut cache = IconCache::new();
 
@@ -198,9 +198,9 @@ mod tests {
     }
 
     fn draw_sidebar(ui: &mut egui::Ui) {
-        use riff::ui::icons::{Icon, IconCache};
-        use riff::ui::sidebar::{self, SidebarNav, TreeRow};
-        use riff::ui::theme::{Palette, SIDEBAR_W, SURFACE_BG};
+        use riff_gui::ui::icons::{Icon, IconCache};
+        use riff_gui::ui::sidebar::{self, SidebarNav, TreeRow};
+        use riff_gui::ui::theme::{Palette, SIDEBAR_W, SURFACE_BG};
 
         // Full-canvas background (determinism rule).
         let background = ui.ctx().layer_painter(egui::LayerId::background());
@@ -328,9 +328,9 @@ mod tests {
     }
 
     fn draw_playerbar(ui: &mut egui::Ui) {
-        use riff::ui::icons::IconCache;
-        use riff::ui::playerbar::{self, PlayerBarContent};
-        use riff::ui::theme::{Palette, SURFACE_BG};
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::playerbar::{self, PlayerBarContent};
+        use riff_gui::ui::theme::{Palette, SURFACE_BG};
 
         // Full-canvas background (determinism rule).
         let background = ui.ctx().layer_painter(egui::LayerId::background());
@@ -339,13 +339,13 @@ mod tests {
         let palette = Palette::dark();
         let content = PlayerBarContent {
             cover: None,
-            playback: riff::domain::PlaybackState::Playing,
+            playback: riff_backend::domain::PlaybackState::Playing,
             position: std::time::Duration::from_mins(2),
             total: Some(std::time::Duration::from_secs(245)),
             volume: 0.65,
             muted: false,
             shuffle: true,
-            repeat: riff::domain::RepeatMode::None,
+            repeat: riff_backend::domain::RepeatMode::None,
             queue_position: "3/12",
             advanced: false,
         };
@@ -355,7 +355,7 @@ mod tests {
             &mut cache,
             &palette,
             &content,
-            &mut riff::ui::playerbar::SeekReadouts::default(),
+            &mut riff_gui::ui::playerbar::SeekReadouts::default(),
             &mut Vec::new(),
         );
     }
@@ -367,8 +367,8 @@ mod tests {
     /// the smallest real estate they must fit without clipping.
     fn library_stage_size() -> egui::Vec2 {
         egui::vec2(
-            riff::ui::chrome::MIN_WINDOW_SIZE.x - theme::SIDEBAR_W,
-            riff::ui::chrome::MIN_WINDOW_SIZE.y - theme::TITLEBAR_H - theme::PLAYERBAR_H,
+            riff_gui::ui::chrome::MIN_WINDOW_SIZE.x - theme::SIDEBAR_W,
+            riff_gui::ui::chrome::MIN_WINDOW_SIZE.y - theme::TITLEBAR_H - theme::PLAYERBAR_H,
         )
     }
 
@@ -388,9 +388,9 @@ mod tests {
     }
 
     fn draw_library_hero(ui: &mut egui::Ui) {
-        use riff::ui::icons::IconCache;
-        use riff::ui::library::empty_state_hero;
-        use riff::ui::theme::{Palette, SURFACE_BG};
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::library::empty_state_hero;
+        use riff_gui::ui::theme::{Palette, SURFACE_BG};
 
         // Full-canvas background (determinism rule).
         let background = ui.ctx().layer_painter(egui::LayerId::background());
@@ -417,9 +417,9 @@ mod tests {
     }
 
     fn draw_library_track_list(ui: &mut egui::Ui) {
-        use riff::ui::icons::IconCache;
-        use riff::ui::sidebar::{self, TreeRow};
-        use riff::ui::theme::{Palette, SURFACE_BG};
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::sidebar::{self, TreeRow};
+        use riff_gui::ui::theme::{Palette, SURFACE_BG};
 
         // Full-canvas background (determinism rule).
         let background = ui.ctx().layer_painter(egui::LayerId::background());
@@ -471,12 +471,12 @@ mod tests {
     fn now_playing_dark_matches_golden_baseline() {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(
-                riff::ui::chrome::viewport_builder()
+                riff_gui::ui::chrome::viewport_builder()
                     .inner_size
                     .expect("launch size is configured")
                     .x
                     - theme::SIDEBAR_W,
-                riff::ui::chrome::viewport_builder()
+                riff_gui::ui::chrome::viewport_builder()
                     .inner_size
                     .expect("launch size is configured")
                     .y
@@ -492,9 +492,9 @@ mod tests {
     }
 
     fn draw_now_playing(ui: &mut egui::Ui) {
-        use riff::ui::icons::IconCache;
-        use riff::ui::now_playing::{self, NowPlayingContent, UpNextEntry};
-        use riff::ui::theme::{Palette, SURFACE_BG};
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::now_playing::{self, NowPlayingContent, UpNextEntry};
+        use riff_gui::ui::theme::{Palette, SURFACE_BG};
 
         // Full-canvas background (determinism rule).
         let background = ui.ctx().layer_painter(egui::LayerId::background());
@@ -510,11 +510,11 @@ mod tests {
             total: Some(std::time::Duration::from_mins(4)),
             up_next: vec![
                 UpNextEntry {
-                    id: riff::domain::TrackId("a.flac".to_owned()),
+                    id: riff_backend::domain::TrackId("a.flac".to_owned()),
                     label: "The Midnight - Sunset".to_owned(),
                 },
                 UpNextEntry {
-                    id: riff::domain::TrackId("b.flac".to_owned()),
+                    id: riff_backend::domain::TrackId("b.flac".to_owned()),
                     label: "Timecop1983 - On the Run".to_owned(),
                 },
             ]
@@ -526,7 +526,7 @@ mod tests {
             &mut cache,
             &palette,
             &content,
-            &mut riff::ui::playerbar::SeekReadouts::default(),
+            &mut riff_gui::ui::playerbar::SeekReadouts::default(),
             &mut Vec::new(),
         );
     }
@@ -546,7 +546,7 @@ mod tests {
     fn settings_dark_matches_golden_baseline() {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(
-                riff::ui::chrome::viewport_builder()
+                riff_gui::ui::chrome::viewport_builder()
                     .inner_size
                     .expect("launch size is configured")
                     .x
@@ -564,10 +564,10 @@ mod tests {
     }
 
     fn draw_settings_stage(ui: &mut egui::Ui) {
-        use riff::app::state::{LibraryStatus, WatchState};
-        use riff::ui::icons::IconCache;
-        use riff::ui::settings::{self, LibraryRow, SettingsContent};
-        use riff::ui::theme::{Palette, SURFACE_BG};
+        use riff_backend::app::state::{LibraryStatus, WatchState};
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::settings::{self, LibraryRow, SettingsContent};
+        use riff_gui::ui::theme::{Palette, SURFACE_BG};
 
         // Full-canvas background (determinism rule).
         let background = ui.ctx().layer_painter(egui::LayerId::background());

@@ -14,15 +14,17 @@ mod tests {
     // UI holds (`Box<dyn SettingsStore>`) over a real SQLite database,
     // dropping and reopening it to simulate a restart.
 
-    use riff::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
+    use riff_backend::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
     use std::path::PathBuf;
 
     /// Open a real store-backed settings port at a fresh temp location,
     /// exactly as the UI receives it: a boxed `SettingsStore`.
     fn boxed_store(dir: &tempfile::TempDir) -> Box<dyn SettingsStore> {
         let db_path = dir.path().join("riff.sqlite3");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
         Box::new(
-            riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+            riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
                 .expect("opening a fresh store must work"),
         )
     }
@@ -31,8 +33,10 @@ mod tests {
     /// exactly as the UI receives it: a boxed `PlaylistStore`.
     fn boxed_playlist_store(dir: &tempfile::TempDir) -> Box<dyn PlaylistStore> {
         let db_path = dir.path().join("riff.sqlite3");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
         Box::new(
-            riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+            riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
                 .expect("opening a fresh store must work"),
         )
     }
@@ -43,11 +47,16 @@ mod tests {
     /// playlist projection exactly like production.
     fn boxed_playlist_seam(
         dir: &tempfile::TempDir,
-    ) -> (Box<dyn PlaylistStore>, riff::app::views::SessionViews) {
+    ) -> (
+        Box<dyn PlaylistStore>,
+        riff_backend::app::views::SessionViews,
+    ) {
         let db_path = dir.path().join("riff.sqlite3");
-        let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let store = riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
             .expect("opening a fresh store must work");
-        let views = riff::app::views::SessionViews::new(
+        let views = riff_backend::app::views::SessionViews::new(
             Box::new(store.clone()),
             Box::new(store.clone()),
             store.library_generation(),
@@ -58,11 +67,13 @@ mod tests {
 
     /// A `SessionViews` seam over the store already living at `dir`, for
     /// reading playlists the way the UI does.
-    fn seam_views(dir: &tempfile::TempDir) -> riff::app::views::SessionViews {
+    fn seam_views(dir: &tempfile::TempDir) -> riff_backend::app::views::SessionViews {
         let db_path = dir.path().join("riff.sqlite3");
-        let store = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let store = riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
             .expect("opening a fresh store must work");
-        riff::app::views::SessionViews::new(
+        riff_backend::app::views::SessionViews::new(
             Box::new(store.clone()),
             Box::new(store.clone()),
             store.library_generation(),
@@ -139,7 +150,7 @@ mod tests {
         std::fs::write(&legacy_path, "{{{ corrupt legacy json").unwrap();
         let legacy_bytes_before = std::fs::read(&legacy_path).unwrap();
 
-        riff::ui::app::load_persisted_state(
+        riff_gui::ui::app::load_persisted_state(
             &mut AppState::new(),
             boxed_store(&dir).as_ref(),
             &crate::mocks::MockTransport::new(),
@@ -166,7 +177,7 @@ mod tests {
         {
             let mut store = boxed_store(&dir);
             store
-                .save_scalars(&riff::app::state::ScalarSettings {
+                .save_scalars(&riff_backend::app::state::ScalarSettings {
                     volume: Some(0.75),
                     ..Default::default()
                 })
@@ -197,7 +208,7 @@ mod tests {
         {
             let mut store = boxed_store(&dir);
             store
-                .save_scalars(&riff::app::state::ScalarSettings {
+                .save_scalars(&riff_backend::app::state::ScalarSettings {
                     advanced_mode: true,
                     ..Default::default()
                 })
@@ -215,7 +226,7 @@ mod tests {
         {
             let mut store = boxed_store(&dir);
             store
-                .save_scalars(&riff::app::state::ScalarSettings {
+                .save_scalars(&riff_backend::app::state::ScalarSettings {
                     advanced_mode: false,
                     ..Default::default()
                 })
@@ -247,7 +258,7 @@ mod tests {
         {
             let mut store = boxed_store(&dir);
             store
-                .save_scalars(&riff::app::state::ScalarSettings {
+                .save_scalars(&riff_backend::app::state::ScalarSettings {
                     high_contrast: true,
                     ..Default::default()
                 })
@@ -265,7 +276,7 @@ mod tests {
         {
             let mut store = boxed_store(&dir);
             store
-                .save_scalars(&riff::app::state::ScalarSettings {
+                .save_scalars(&riff_backend::app::state::ScalarSettings {
                     high_contrast: false,
                     ..Default::default()
                 })
@@ -297,7 +308,7 @@ mod tests {
         {
             let mut store = boxed_store(&dir);
             store
-                .save_scalars(&riff::app::state::ScalarSettings {
+                .save_scalars(&riff_backend::app::state::ScalarSettings {
                     replaygain_enabled: true,
                     ..Default::default()
                 })
@@ -315,7 +326,7 @@ mod tests {
         {
             let mut store = boxed_store(&dir);
             store
-                .save_scalars(&riff::app::state::ScalarSettings {
+                .save_scalars(&riff_backend::app::state::ScalarSettings {
                     replaygain_enabled: false,
                     ..Default::default()
                 })
@@ -655,7 +666,11 @@ mod tests {
 
         // Seed a full store: collection + playlist + settings.
         {
-            let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path).unwrap();
+            let (changes_tx, _changes_rx) =
+                crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+            let mut store =
+                riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+                    .unwrap();
             store
                 .apply_scan_batch(&[crate::test_utils::create_test_track_with_metadata(
                     "f:\\cl\\a.mp3",
@@ -667,7 +682,7 @@ mod tests {
                 .unwrap();
             store.create_playlist("Keep Me", &[]).unwrap();
             store
-                .save_scalars(&riff::app::state::ScalarSettings {
+                .save_scalars(&riff_backend::app::state::ScalarSettings {
                     volume: Some(0.5),
                     ..Default::default()
                 })
@@ -678,7 +693,7 @@ mod tests {
         // Restore like the UI's first frame: curation comes back intact.
         // Playlists need no hydration step — the seam reads the store live.
         let mut state = AppState::new();
-        riff::ui::app::load_persisted_state(
+        riff_gui::ui::app::load_persisted_state(
             &mut state,
             boxed_store(&dir).as_ref(),
             &crate::mocks::MockTransport::new(),
@@ -709,7 +724,7 @@ mod tests {
     // design-token sheet (`colors_and_type.css`) — the independent source of
     // truth for the mockup palette. The dark palette must match it exactly.
 
-    use riff::ui::theme;
+    use riff_gui::ui::theme;
 
     #[test]
     fn test_dark_surface_and_ink_tokens_match_the_mockup() {
@@ -986,7 +1001,7 @@ mod tests {
     // text-sm 14 / text-xl 20 / text-3xl 30, with font-medium/semibold/bold
     // accents on buttons, section headers, and the wordmark.
 
-    use riff::ui::fonts;
+    use riff_gui::ui::fonts;
 
     #[test]
     fn test_text_scale_constants_match_the_mockup_tailwind_usage() {
@@ -1167,7 +1182,7 @@ mod tests {
 
     #[test]
     fn test_launch_viewport_is_frameless_while_keeping_the_window_size_contract() {
-        let builder = riff::ui::chrome::viewport_builder();
+        let builder = riff_gui::ui::chrome::viewport_builder();
 
         // The OS title bar is gone; riff's custom chrome replaces it.
         assert_eq!(builder.decorations, Some(false));
@@ -1178,7 +1193,7 @@ mod tests {
 
     #[test]
     fn test_window_controls_minimize_and_route_close_through_the_vetoable_path() {
-        use riff::ui::chrome::WindowControl;
+        use riff_gui::ui::chrome::WindowControl;
 
         // Minimize collapses the window.
         assert_eq!(
@@ -1196,7 +1211,7 @@ mod tests {
 
     #[test]
     fn test_drag_region_gestures_decide_between_drag_and_maximize_toggle() {
-        use riff::ui::chrome::{DragRegionAction, drag_region_action};
+        use riff_gui::ui::chrome::{DragRegionAction, drag_region_action};
 
         // A primary-button press-and-move starts an OS window move.
         assert_eq!(
@@ -1285,6 +1300,8 @@ mod tests {
         let mut violations = Vec::new();
         scan_dir(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("riff-gui")
                 .join("src")
                 .join("ui"),
             &mut violations,
@@ -1326,8 +1343,8 @@ mod tests {
     // bar at exact token dimensions (56/280/88), vendors the Lucide glyphs
     // behind an icon helper, and routes nav so exactly one View is visible.
 
-    use riff::app::state::{BrowseMode, ViewMode};
-    use riff::ui::{chrome, icons};
+    use riff_backend::app::state::{BrowseMode, ViewMode};
+    use riff_gui::ui::{chrome, icons};
 
     #[test]
     fn test_min_window_size_fits_the_fixed_chrome() {
@@ -1434,7 +1451,7 @@ mod tests {
 
     #[test]
     fn test_rasterize_tints_icons_with_the_requested_color() {
-        use riff::ui::theme::INK;
+        use riff_gui::ui::theme::INK;
 
         let image = icons::rasterize(icons::Icon::Play.svg(), 24, INK)
             .expect("the play glyph rasterizes headlessly");
@@ -1479,8 +1496,8 @@ mod tests {
 
     #[test]
     fn test_titlebar_clicks_report_window_and_nav_actions() {
-        use riff::ui::chrome::{TitleBarAction, TitleBarContent, show_titlebar};
-        use riff::ui::icons::IconCache;
+        use riff_gui::ui::chrome::{TitleBarAction, TitleBarContent, show_titlebar};
+        use riff_gui::ui::icons::IconCache;
 
         // Harness label queries resolve through kittest's accessibility tree.
         use egui_kittest::kittest::Queryable;
@@ -1548,10 +1565,10 @@ mod tests {
     // hover-revealed edit/delete drive the EXISTING rename/delete Store flows
     // (ADR 0002 projection refresh). Restyle only — behavior untouched.
     //
-    // The widgets live behind headless seams in `riff::ui::sidebar`; the
+    // The widgets live behind headless seams in `riff_gui::ui::sidebar`; the
     // pixels are pinned by the `sidebar_dark` golden image.
 
-    use riff::ui::sidebar;
+    use riff_gui::ui::sidebar;
 
     #[test]
     fn test_sidebar_tree_rows_use_the_mockup_40px_height_and_indent_scale() {
@@ -1690,7 +1707,7 @@ mod tests {
     #[test]
     fn test_playlist_row_hover_reveal_reports_open_edit_delete() {
         use egui_kittest::kittest::Queryable;
-        use riff::ui::sidebar::PlaylistRowAction;
+        use riff_gui::ui::sidebar::PlaylistRowAction;
 
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
@@ -1781,12 +1798,12 @@ mod tests {
         let mut rename_slot = None;
         let mut create_slot = None;
 
-        riff::ui::app::apply_playlist_row_action(
+        riff_gui::ui::app::apply_playlist_row_action(
             sidebar::PlaylistRowAction::Delete,
             &gone,
             store.as_mut(),
             &mut views,
-            riff::ui::app::PlaylistPromptSlots {
+            riff_gui::ui::app::PlaylistPromptSlots {
                 view: &mut view,
                 smart_view: &mut smart_view,
                 rename: &mut rename_slot,
@@ -1829,12 +1846,12 @@ mod tests {
         let mut rename_slot = None;
         let mut create_slot = Some(String::new());
 
-        riff::ui::app::apply_playlist_row_action(
+        riff_gui::ui::app::apply_playlist_row_action(
             sidebar::PlaylistRowAction::Rename,
             &pid,
             store.as_mut(),
             &mut views,
-            riff::ui::app::PlaylistPromptSlots {
+            riff_gui::ui::app::PlaylistPromptSlots {
                 view: &mut view,
                 smart_view: &mut smart_view,
                 rename: &mut rename_slot,
@@ -1858,7 +1875,7 @@ mod tests {
 
         // Saving the prompt commits through the same Store flow; the seam's
         // next read reflects it with zero caller action (ADR 0002).
-        riff::ui::app::commit_playlist_rename(store.as_mut(), &pid, "  Cardio  ");
+        riff_gui::ui::app::commit_playlist_rename(store.as_mut(), &pid, "  Cardio  ");
         assert_eq!(
             store.load_playlists().unwrap()[0].name,
             "Cardio",
@@ -1882,12 +1899,12 @@ mod tests {
         let mut rename_slot = None;
         let mut create_slot = None;
 
-        riff::ui::app::apply_playlist_row_action(
+        riff_gui::ui::app::apply_playlist_row_action(
             sidebar::PlaylistRowAction::Open,
             &pid,
             store.as_mut(),
             &mut views,
-            riff::ui::app::PlaylistPromptSlots {
+            riff_gui::ui::app::PlaylistPromptSlots {
                 view: &mut view,
                 smart_view: &mut smart_view,
                 rename: &mut rename_slot,
@@ -1912,12 +1929,12 @@ mod tests {
     // repeat toggles, and a queue position label. Every control still emits
     // its engine command.
     //
-    // Headless seams (`riff::ui::playerbar`): the mockup dimension tokens,
+    // Headless seams (`riff_gui::ui::playerbar`): the mockup dimension tokens,
     // the monospace readout font, the seek-fraction math, and the
     // control→action contract. The pixels are pinned by the `playerbar_dark`
     // golden image; the action→command wiring is covered further below.
 
-    use riff::ui::playerbar;
+    use riff_gui::ui::playerbar;
 
     #[test]
     fn test_playerbar_dimensions_match_the_mockup() {
@@ -2000,7 +2017,7 @@ mod tests {
         cache: &mut icons::IconCache,
         palette: &theme::Palette,
         content: &playerbar::PlayerBarContent<'static>,
-        readouts: &mut riff::ui::playerbar::SeekReadouts,
+        readouts: &mut riff_gui::ui::playerbar::SeekReadouts,
         buf: &mut Vec<PlayerBarAction>,
     ) {
         buf.clear();
@@ -2018,7 +2035,7 @@ mod tests {
         use egui_kittest::kittest::Queryable;
 
         let mut cache = icons::IconCache::new();
-        let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+        let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
         let mut buf = Vec::new();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
@@ -2045,7 +2062,7 @@ mod tests {
 
     #[test]
     fn test_transport_clicks_report_playback_actions() {
-        use riff::ui::playerbar::PlayerBarAction;
+        use riff_gui::ui::playerbar::PlayerBarAction;
 
         let palette = theme::Palette::dark();
 
@@ -2081,8 +2098,8 @@ mod tests {
     #[test]
     fn test_stop_button_only_exists_in_advanced_mode() {
         use egui_kittest::kittest::Queryable;
-        use riff::ui::icons::IconCache;
-        use riff::ui::playerbar::PlayerBarAction;
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::playerbar::PlayerBarAction;
 
         let palette = theme::Palette::dark();
         let mut cache = IconCache::new();
@@ -2097,7 +2114,7 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
                     let mut buf = Vec::new();
                     playerbar::show_player_bar(
                         ui,
@@ -2124,7 +2141,7 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
                     let mut buf = Vec::new();
                     playerbar::show_player_bar(
                         ui,
@@ -2148,8 +2165,8 @@ mod tests {
     #[test]
     fn test_shuffle_repeat_mute_report_toggle_actions() {
         use egui_kittest::kittest::Queryable;
-        use riff::ui::icons::IconCache;
-        use riff::ui::playerbar::PlayerBarAction;
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::playerbar::PlayerBarAction;
 
         let content = playing_content();
         let palette = theme::Palette::dark();
@@ -2159,7 +2176,7 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
                     let mut buf = Vec::new();
                     playerbar::show_player_bar(
                         ui,
@@ -2191,8 +2208,8 @@ mod tests {
     #[test]
     fn test_seek_click_reports_seek_to_clicked_fraction() {
         use egui_kittest::kittest::Queryable;
-        use riff::ui::icons::IconCache;
-        use riff::ui::playerbar::PlayerBarAction;
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::playerbar::PlayerBarAction;
 
         let content = playing_content(); // total 245s
         let palette = theme::Palette::dark();
@@ -2202,7 +2219,7 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
                     let mut buf = Vec::new();
                     playerbar::show_player_bar(
                         ui,
@@ -2232,8 +2249,8 @@ mod tests {
     #[test]
     fn test_volume_click_reports_set_volume_at_clicked_fraction() {
         use egui_kittest::kittest::Queryable;
-        use riff::ui::icons::IconCache;
-        use riff::ui::playerbar::PlayerBarAction;
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::playerbar::PlayerBarAction;
 
         let content = playing_content();
         let palette = theme::Palette::dark();
@@ -2243,7 +2260,7 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlayerBarAction>| {
-                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
                     let mut buf = Vec::new();
                     playerbar::show_player_bar(
                         ui,
@@ -2275,7 +2292,7 @@ mod tests {
     #[test]
     fn test_queue_position_label_renders() {
         use egui_kittest::kittest::Queryable;
-        use riff::ui::icons::IconCache;
+        use riff_gui::ui::icons::IconCache;
 
         let content = playing_content(); // "3/12"
         let palette = theme::Palette::dark();
@@ -2284,8 +2301,8 @@ mod tests {
             .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
             .with_pixels_per_point(1.0)
             .build_ui_state(
-                |ui, actions: &mut Vec<riff::ui::playerbar::PlayerBarAction>| {
-                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                |ui, actions: &mut Vec<riff_gui::ui::playerbar::PlayerBarAction>| {
+                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
                     let mut buf = Vec::new();
                     playerbar::show_player_bar(
                         ui,
@@ -2314,8 +2331,8 @@ mod tests {
     // Transport intents and state paths the pre-restyle buttons used. These
     // tests pin that contract headlessly over a recording mock.
 
-    use riff::ui::app::apply_player_bar_action;
-    use riff::ui::playerbar::PlayerBarAction;
+    use riff_gui::ui::app::apply_player_bar_action;
+    use riff_gui::ui::playerbar::PlayerBarAction;
 
     use crate::mocks::TransportIntent;
 
@@ -2505,7 +2522,7 @@ mod tests {
     // (`box-shadow: 0 0 60px -20px brand@15%`), approximated with layered
     // translucent fills because egui has no blur.
 
-    use riff::ui::library;
+    use riff_gui::ui::library;
 
     #[test]
     fn test_library_hero_dimensions_match_the_mockup_stage() {
@@ -2561,11 +2578,11 @@ mod tests {
     fn test_disc_glow_color_is_derived_from_the_brand_token() {
         // ADR 0004: no flat color literals in view code — every glow tint is
         // the palette's brand primary scaled by the layer's alpha fraction.
-        let palette = riff::ui::theme::Palette::dark();
+        let palette = riff_gui::ui::theme::Palette::dark();
         for layer in &library::GLOW_LAYERS {
             assert_eq!(
                 library::glow_color(&palette, *layer),
-                riff::ui::theme::BRAND_500.gamma_multiply(layer.alpha),
+                riff_gui::ui::theme::BRAND_500.gamma_multiply(layer.alpha),
                 "the glow tint derives from brand_primary"
             );
         }
@@ -2580,8 +2597,8 @@ mod tests {
     // button always returns to the Library View no matter which View was up
     // before.
 
-    use riff::ui::app::apply_now_playing_action;
-    use riff::ui::now_playing::{self, NowPlayingAction, UpNextEntry};
+    use riff_gui::ui::app::apply_now_playing_action;
+    use riff_gui::ui::now_playing::{self, NowPlayingAction, UpNextEntry};
 
     #[test]
     fn test_now_playing_cover_uses_the_mockup_dimension() {
@@ -2593,7 +2610,7 @@ mod tests {
 
     #[test]
     fn test_now_playing_close_always_returns_to_the_library_view() {
-        use riff::app::state::{BrowseMode, ViewMode};
+        use riff_backend::app::state::{BrowseMode, ViewMode};
 
         for start in [ViewMode::Library, ViewMode::NowPlaying, ViewMode::Settings] {
             let mut state = AppState::new();
@@ -2693,7 +2710,7 @@ mod tests {
 
     #[test]
     fn test_metadata_details_line_hides_missing_fields() {
-        use riff::domain::TrackMetadata;
+        use riff_backend::domain::TrackMetadata;
 
         // Everything present: year · genre · track/disc.
         let full = TrackMetadata {
@@ -2735,7 +2752,7 @@ mod tests {
                 |ui, actions: &mut Vec<NowPlayingAction>| {
                     // ACCUMULATE across frames: a click fires its action on
                     // exactly one frame; harness.run() settles afterwards.
-                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
                     let mut buf = Vec::new();
                     now_playing::show_now_playing(
                         ui,
@@ -2792,7 +2809,7 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<NowPlayingAction>| {
-                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
                     let mut buf = Vec::new();
                     now_playing::show_now_playing(
                         ui,
@@ -2832,8 +2849,8 @@ mod tests {
     // Readiness is its own concept (CONTEXT.md): whether the path is present
     // on disk AND indexed into the Library — never its Watch State.
 
-    use riff::ui::settings::{self, LibraryRow, Readiness, SettingsAction, SettingsContent};
-    use riff::ui::toggle_switch;
+    use riff_gui::ui::settings::{self, LibraryRow, Readiness, SettingsAction, SettingsContent};
+    use riff_gui::ui::toggle_switch;
 
     #[test]
     fn test_toggle_switch_dimensions_match_the_mockup_pill() {
@@ -3110,7 +3127,7 @@ mod tests {
             .unwrap();
 
         // Drag entry 0 (A) onto entry 2's slot (C): A,B,C → B,C,A.
-        riff::ui::app::commit_playlist_reorder(&mut views, store.as_mut(), &pid, 0, 2);
+        riff_gui::ui::app::commit_playlist_reorder(&mut views, store.as_mut(), &pid, 0, 2);
 
         // The store committed the new order as one durable transaction...
         assert_eq!(
@@ -3153,11 +3170,11 @@ mod tests {
         );
 
         // Dropping an entry back onto itself changes nothing anywhere.
-        riff::ui::app::commit_playlist_reorder(&mut views, store.as_mut(), &pid, 1, 1);
+        riff_gui::ui::app::commit_playlist_reorder(&mut views, store.as_mut(), &pid, 1, 1);
         assert_eq!(store.load_playlists().unwrap()[0].tracks.len(), 3);
 
         // Out-of-bounds gestures are ignored end to end.
-        riff::ui::app::commit_playlist_reorder(&mut views, store.as_mut(), &pid, 0, 9);
+        riff_gui::ui::app::commit_playlist_reorder(&mut views, store.as_mut(), &pid, 0, 9);
         assert_eq!(
             store.load_playlists().unwrap()[0].tracks,
             vec![
@@ -3174,8 +3191,8 @@ mod tests {
     /// the production seam/store pairing plus the row ids in the order the
     /// LAST frame rendered them.
     struct ReorderRenderState {
-        views: riff::app::views::SessionViews,
-        store: riff::infra::store::SqliteStore,
+        views: riff_backend::app::views::SessionViews,
+        store: riff_backend::infra::store::SqliteStore,
         pid: PlaylistId,
         rendered: Vec<String>,
         cache: icons::IconCache,
@@ -3233,7 +3250,7 @@ mod tests {
             if let Some(from) = outcome.drop_from {
                 // The UI action path: commit and nothing else — no reload,
                 // no cache clear, no patch.
-                riff::ui::app::commit_playlist_reorder(
+                riff_gui::ui::app::commit_playlist_reorder(
                     &mut s.views,
                     &mut s.store,
                     &s.pid,
@@ -3257,8 +3274,11 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("riff.sqlite3");
-        let mut store = riff::infra::store::SqliteStore::open_and_migrate(&db_path)
-            .expect("opening a fresh store must work");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store =
+            riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .expect("opening a fresh store must work");
 
         // Three real audio files indexed into the Library, so every entry
         // resolves valid and renders as a reorderable row.
@@ -3287,7 +3307,7 @@ mod tests {
         let pid = store_for_views
             .create_playlist("Gym", &track_ids)
             .expect("create works");
-        let mut views = riff::app::views::SessionViews::new(
+        let mut views = riff_backend::app::views::SessionViews::new(
             Box::new(store.clone()),
             Box::new(store_for_views),
             store.library_generation(),
@@ -3477,7 +3497,7 @@ mod tests {
             .build_ui_state(
                 move |ui, opened: &mut Vec<&'static str>| {
                     make_tooltips_instant(ui.ctx());
-                    let mut readouts = riff::ui::playerbar::SeekReadouts::default();
+                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
                     let mut buf = Vec::new();
                     playerbar::show_player_bar(
                         ui,
@@ -3679,10 +3699,10 @@ mod tests {
 #[cfg(test)]
 mod background_service_ui_tests {
     use super::*;
-    use riff::app::cover_service::Covers;
-    use riff::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
-    use riff::app::traits::CoverImage;
-    use riff::ui::app::{
+    use riff_backend::app::cover_service::Covers;
+    use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
+    use riff_backend::app::traits::CoverImage;
+    use riff_gui::ui::app::{
         apply_tag_edit_outcome, cache_polled_covers, request_cover_intent, submit_tag_edit_fields,
     };
     use std::path::PathBuf;

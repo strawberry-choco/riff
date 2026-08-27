@@ -369,7 +369,7 @@ pub enum StoreChanged {
     Playlists(u64),
 }
 
-/// The [`StoreChanged`] variant produced by the given StoreChanged.
+/// The [`StoreChanged`] variant produced by the given `StoreChanged`.
 #[cfg(test)]
 mod issue04_store_events {
     use super::{StoreChanged, StoreGeneration};

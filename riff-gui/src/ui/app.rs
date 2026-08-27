@@ -3,9 +3,9 @@ use crate::ui::now_playing::{NowPlayingAction, UpNextEntry};
 use crate::ui::playerbar::PlayerBarAction;
 use crate::ui::theme;
 use eframe::egui;
-use riff_backend::app::facade::BackendFacade;
 use riff_backend::app::MutexExt;
 pub use riff_backend::app::cover_service::{COVER_CACHE_CAP, Covers, lru_insert};
+use riff_backend::app::facade::BackendFacade;
 use riff_backend::app::scan_service::{ScanOutcome, Scans};
 use riff_backend::app::state::{AppState, BrowseMode, LibraryStatus, ViewMode};
 use riff_backend::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
@@ -642,6 +642,11 @@ impl eframe::App for RiffApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let hidden = !ctx.input(|i| i.viewport().visible().unwrap_or(true));
 
+        if self.quit_flag.load(Ordering::Relaxed) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
         // While hidden ui() never runs, so keep a slow repaint loop alive to
         // keep observing the tray quit flag and visibility toggles.
         if hidden {
@@ -667,7 +672,9 @@ impl eframe::App for RiffApp {
         // Close-to-tray: veto the OS close request and hide instead (frontend-
         // local; no backend state touched). This only runs when NOT quitting —
         // a quit-initiated close goes through above.
-        if ctx.input(|i| i.viewport().close_requested()) {
+        if !self.quit_flag.load(Ordering::Relaxed)
+            && ctx.input(|i| i.viewport().close_requested())
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }

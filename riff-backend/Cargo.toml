@@ -59,7 +59,7 @@ fastrand = "2"
 
 [dev-dependencies]
 tempfile = "3.8"
-
+crossbeam-channel = "0.5"
 
 
 [lints.clippy]

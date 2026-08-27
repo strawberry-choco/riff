@@ -1,3 +1,11 @@
+# Path to the snapshot directory. The integration-test crate is rooted at
+# `tests/Cargo.toml`; the snapshots are committed one level above it under
+# `tests/snapshots/`, so the relative path from the test crate's manifest is
+# just `snapshots` (i.e. `tests/snapshots/` on disk). Without this, kittest
+# resolves to `tests/tests/snapshots/` and every golden fails with a
+# missing-snapshot error.
+output_path = "snapshots"
+
 # egui_kittest golden-image comparison config (loaded automatically from
 # the directory containing Cargo.lock).
 #

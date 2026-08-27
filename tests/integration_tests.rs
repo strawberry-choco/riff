@@ -66,17 +66,19 @@ mod tests {
         // SQLite Application Store in a scratch dir, worker on its own
         // thread, exactly like the composition root wires it.
         use crate::mocks::MockMetadataReader;
-        use riff::app::scan_service::{ScanOutcome, ScanService, Scans};
-        use riff::app::store::LibraryQueryStore;
-        use riff::infra::AudioFileScanner;
-        use riff::infra::store::SqliteStore;
+        use riff_backend::app::scan_service::{ScanOutcome, ScanService, Scans};
+        use riff_backend::app::store::LibraryQueryStore;
+        use riff_backend::infra::AudioFileScanner;
+        use riff_backend::infra::store::SqliteStore;
         use std::sync::atomic::AtomicBool;
         use std::time::{Duration, Instant};
 
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("riff.sqlite3");
-        let store =
-            SqliteStore::open_and_migrate(&db_path).expect("fresh store must open and migrate");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let store = SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("fresh store must open and migrate");
         let mutations = store.clone();
         let queries = store;
 
@@ -145,11 +147,11 @@ mod tests {
     /// its own thread exactly like the composition root, and return the
     /// front-end handle.
     fn instant_scan_service() -> (
-        riff::app::scan_service::ScanService,
+        riff_backend::app::scan_service::ScanService,
         crossbeam_channel::Receiver<Vec<std::path::PathBuf>>,
     ) {
         use crate::mocks::{MockLibraryMutationStore, MockLibraryQueryStore, MockMetadataReader};
-        use riff::app::scan_service::ScanService;
+        use riff_backend::app::scan_service::ScanService;
         use std::path::PathBuf;
         use std::sync::atomic::AtomicBool;
 
@@ -169,13 +171,13 @@ mod tests {
     /// outcomes for `root` have landed in total. Bounded so a wedged worker
     /// fails the test instead of hanging it.
     fn drain_until_completes(
-        scans: &riff::app::scan_service::ScanService,
+        scans: &riff_backend::app::scan_service::ScanService,
         root: &std::path::Path,
         expected: usize,
         budget: std::time::Duration,
-        outcomes: &mut Vec<riff::app::scan_service::ScanOutcome>,
+        outcomes: &mut Vec<riff_backend::app::scan_service::ScanOutcome>,
     ) {
-        use riff::app::scan_service::{ScanOutcome, Scans};
+        use riff_backend::app::scan_service::{ScanOutcome, Scans};
         use std::time::{Duration, Instant};
 
         let start = Instant::now();
@@ -202,11 +204,11 @@ mod tests {
     /// returned release channel fires (to hold a scan open mid-flight),
     /// running the worker on its own thread like the composition root.
     fn gated_scan_service() -> (
-        riff::app::scan_service::ScanService,
+        riff_backend::app::scan_service::ScanService,
         crossbeam_channel::Sender<()>,
     ) {
         use crate::mocks::{MockLibraryMutationStore, MockLibraryQueryStore, MockMetadataReader};
-        use riff::app::scan_service::ScanService;
+        use riff_backend::app::scan_service::ScanService;
         use std::sync::atomic::AtomicBool;
 
         let (release_tx, release_rx) = unbounded::<()>();
@@ -228,14 +230,14 @@ mod tests {
     /// watched library root. Returns the manager, the scratch dir backing it
     /// (must outlive the manager), and the canonicalized root.
     fn watched_manager(
-        scans: riff::app::scan_service::ScanService,
+        scans: riff_backend::app::scan_service::ScanService,
     ) -> (
-        riff::app::watcher_manager::WatcherManager,
+        riff_backend::app::watcher_manager::WatcherManager,
         tempfile::TempDir,
         std::path::PathBuf,
     ) {
-        use riff::app::watcher_manager::WatcherManager;
-        use riff::infra::FilesystemWatcher;
+        use riff_backend::app::watcher_manager::WatcherManager;
+        use riff_backend::infra::FilesystemWatcher;
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -249,10 +251,10 @@ mod tests {
 
     /// How many `Complete` outcomes in `outcomes` finished for `root`.
     fn completes_for(
-        outcomes: &[riff::app::scan_service::ScanOutcome],
+        outcomes: &[riff_backend::app::scan_service::ScanOutcome],
         root: &std::path::Path,
     ) -> usize {
-        use riff::app::scan_service::ScanOutcome;
+        use riff_backend::app::scan_service::ScanOutcome;
         outcomes
             .iter()
             .filter(|o| matches!(o, ScanOutcome::Complete { path, .. } if path.as_path() == root))
@@ -341,7 +343,7 @@ mod tests {
 
     #[test]
     fn test_watcher_manager_changes_during_scan_defer_one_follow_up() {
-        use riff::app::scan_service::Scans;
+        use riff_backend::app::scan_service::Scans;
         use std::time::{Duration, Instant};
 
         let (scans, release) = gated_scan_service();
@@ -384,7 +386,7 @@ mod tests {
 
     #[test]
     fn test_watcher_manager_stop_watching_drops_pending_follow_up() {
-        use riff::app::scan_service::Scans;
+        use riff_backend::app::scan_service::Scans;
         use std::time::{Duration, Instant};
 
         let (scans, release) = gated_scan_service();

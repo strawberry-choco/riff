@@ -81,14 +81,14 @@ fn generate_fixture(root: &std::path::Path) -> std::io::Result<()> {
 /// walker closure over the shared cancel flag, real Lofty reader, real
 /// `SQLite` store ports, serial worker thread. Returns the front end.
 fn wire_pipeline(
-    queries: riff::infra::store::SqliteStore,
-    mutations: riff::infra::store::SqliteStore,
+    queries: riff_backend::infra::store::SqliteStore,
+    mutations: riff_backend::infra::store::SqliteStore,
     cancel_flag: Arc<AtomicBool>,
-) -> riff::app::scan_service::ScanService {
-    use riff::infra::{AudioFileScanner, LoftyMetadataReader};
+) -> riff_backend::app::scan_service::ScanService {
+    use riff_backend::infra::{AudioFileScanner, LoftyMetadataReader};
 
     let scanner = AudioFileScanner::new(cancel_flag.clone());
-    let (scans, worker) = riff::app::scan_service::ScanService::new(
+    let (scans, worker) = riff_backend::app::scan_service::ScanService::new(
         Box::new(LoftyMetadataReader::new()),
         Box::new(queries),
         Box::new(mutations),
@@ -102,11 +102,11 @@ fn wire_pipeline(
 /// Request a scan of `root` and block until its `Complete` outcome lands,
 /// returning the wall-clock duration and the reported file total.
 fn timed_scan(
-    scans: &riff::app::scan_service::ScanService,
+    scans: &riff_backend::app::scan_service::ScanService,
     root: &std::path::Path,
     label: &str,
 ) -> (Duration, usize) {
-    use riff::app::scan_service::{ScanOutcome, Scans};
+    use riff_backend::app::scan_service::{ScanOutcome, Scans};
 
     let start = Instant::now();
     scans.request(root.to_path_buf());
@@ -131,13 +131,16 @@ fn timed_scan(
 }
 
 fn main() {
-    use riff::app::store::LibraryQueryStore;
-    use riff::infra::store::SqliteStore;
+    use riff_backend::app::store::LibraryQueryStore;
+    use riff_backend::infra::store::SqliteStore;
 
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("bench.sqlite3");
-    let store = SqliteStore::open_and_migrate(&db_path).expect("store must open");
-
+    // The new store signature takes a generation-bump channel that the
+    // mutation adapter writes to (issue 04: emit-beside-the-bump). The
+    // benchmark doesn't drain it; we only care about the side effects.
+    let (changes_tx, _changes_rx) = crossbeam_channel::unbounded();
+    let store = SqliteStore::open_and_migrate(&db_path, changes_tx).expect("store must open");
     println!("generating fixture (20,000 WAVs) ...");
     let gen_start = Instant::now();
     // The library lives one level below the scratch dir: tempfile's dir
@@ -170,7 +173,7 @@ fn main() {
 
     // 3. Walk alone (cache-warm): the ceiling on what a parallel walker
     //    could save from the end-to-end time.
-    let scanner = riff::infra::AudioFileScanner::new(cancel_flag);
+    let scanner = riff_backend::infra::AudioFileScanner::new(cancel_flag);
     let walk_start = Instant::now();
     let walked = scanner.scan(&root);
     println!(

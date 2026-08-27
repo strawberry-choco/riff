@@ -100,19 +100,36 @@ pub enum BackendEvent {
     /// Typed replacement for [`BackendEvent::Notice`].
     TypedNotice(NoticePayload),
     /// Scan lifecycle events (issue 07).
-    ScanStarted { path: String },
+    ScanStarted {
+        path: String,
+    },
     ScanProgress {
         path: String,
         files_found: usize,
         total_estimated: Option<usize>,
     },
-    ScanCompleted { path: String, total_files: usize },
-    ScanFailed { path: String, reason: String },
-    ScanCancelled { path: String },
-    LibraryStatusChanged { path: String, status: LibraryStatus },
+    ScanCompleted {
+        path: String,
+        total_files: usize,
+    },
+    ScanFailed {
+        path: String,
+        reason: String,
+    },
+    ScanCancelled {
+        path: String,
+    },
+    LibraryStatusChanged {
+        path: String,
+        status: LibraryStatus,
+    },
     /// Library generation moved (issue 04, coalesced).
-    LibraryChanged { generation: u64 },
-    PlaylistsChanged { generation: u64 },
+    LibraryChanged {
+        generation: u64,
+    },
+    PlaylistsChanged {
+        generation: u64,
+    },
     InitialSnapshot {
         library_generation: u64,
         playlists_generation: u64,
@@ -128,7 +145,10 @@ pub enum BackendEvent {
     /// Current track including None when stopped (issue 05).
     CurrentTrack(Option<TrackId>),
     /// Tag-edit correlation events (issue 09).
-    TagEditSubmitted { correlation_id: CorrelationId, track_id: TrackId },
+    TagEditSubmitted {
+        correlation_id: CorrelationId,
+        track_id: TrackId,
+    },
     TagEditCompleted {
         correlation_id: CorrelationId,
         track_id: TrackId,
@@ -140,8 +160,12 @@ pub enum BackendEvent {
         reason: String,
     },
     /// Library management events (issue 08).
-    LibraryRootAdded { path: String },
-    LibraryRootRemoved { path: String },
+    LibraryRootAdded {
+        path: String,
+    },
+    LibraryRootRemoved {
+        path: String,
+    },
     LibraryCleared,
 }
 
@@ -150,7 +174,10 @@ pub enum BackendEvent {
 // ---------------------------------------------------------------------------
 
 /// The single public seam toward the frontend.
-#[allow(clippy::struct_excessive_bools, reason = "pre-existing fields; refactor out of scope")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "pre-existing fields; refactor out of scope"
+)]
 pub struct BackendFacade {
     // --- Playback state (kept local so the facade is testable headlessly) ---
     current: Option<TrackId>,
@@ -251,7 +278,8 @@ impl BackendFacade {
         });
         self.events
             .push_back(BackendEvent::CurrentTrack(Some(track)));
-        self.events.push_back(BackendEvent::QueueUpcoming(self.upcoming()));
+        self.events
+            .push_back(BackendEvent::QueueUpcoming(self.upcoming()));
     }
 
     pub fn pause(&mut self) {
@@ -271,15 +299,15 @@ impl BackendFacade {
     }
 
     pub fn next(&mut self) {
+        self.events.push_back(BackendEvent::CurrentTrack(None));
         self.events
-            .push_back(BackendEvent::CurrentTrack(None));
-        self.events.push_back(BackendEvent::QueueUpcoming(self.upcoming()));
+            .push_back(BackendEvent::QueueUpcoming(self.upcoming()));
     }
 
     pub fn previous(&mut self) {
+        self.events.push_back(BackendEvent::CurrentTrack(None));
         self.events
-            .push_back(BackendEvent::CurrentTrack(None));
-        self.events.push_back(BackendEvent::QueueUpcoming(self.upcoming()));
+            .push_back(BackendEvent::QueueUpcoming(self.upcoming()));
     }
 
     pub fn stop(&mut self) {
@@ -288,24 +316,27 @@ impl BackendFacade {
             .push_back(BackendEvent::StateChange(PlaybackState::Stopped));
         self.events
             .push_back(BackendEvent::Notice("stopped".to_string()));
+        self.events.push_back(BackendEvent::CurrentTrack(None));
         self.events
-            .push_back(BackendEvent::CurrentTrack(None));
-        self.events.push_back(BackendEvent::QueueUpcoming(self.upcoming()));
+            .push_back(BackendEvent::QueueUpcoming(self.upcoming()));
     }
 
     pub fn seek(&mut self, pos: Duration) {
         let total = self.position.total;
-        let clamped = if let Some(t) = total && pos > t {
+        let clamped = if let Some(t) = total
+            && pos > t
+        {
             t
         } else {
             pos
         };
         self.position.current = clamped;
         if !self.seeking {
-            self.events.push_back(BackendEvent::PositionChange(PlaybackPosition {
-                current: clamped,
-                total,
-            }));
+            self.events
+                .push_back(BackendEvent::PositionChange(PlaybackPosition {
+                    current: clamped,
+                    total,
+                }));
         }
     }
 
@@ -332,7 +363,8 @@ impl BackendFacade {
             shuffle: self.shuffle,
             repeat: self.repeat,
         });
-        self.events.push_back(BackendEvent::QueueUpcoming(self.upcoming()));
+        self.events
+            .push_back(BackendEvent::QueueUpcoming(self.upcoming()));
     }
 
     pub fn play_next(&mut self, track: TrackId) {
@@ -343,7 +375,8 @@ impl BackendFacade {
             shuffle: self.shuffle,
             repeat: self.repeat,
         });
-        self.events.push_back(BackendEvent::QueueUpcoming(self.upcoming()));
+        self.events
+            .push_back(BackendEvent::QueueUpcoming(self.upcoming()));
     }
 
     pub fn toggle_shuffle(&mut self) {
@@ -353,7 +386,8 @@ impl BackendFacade {
             shuffle: self.shuffle,
             repeat: self.repeat,
         });
-        self.events.push_back(BackendEvent::QueueUpcoming(self.upcoming()));
+        self.events
+            .push_back(BackendEvent::QueueUpcoming(self.upcoming()));
         self.emit_settings_changed();
         self.schedule_persist();
     }
@@ -395,9 +429,10 @@ impl BackendFacade {
             return self.queue.clone();
         };
         if let Some(first) = self.queue.first()
-            && first == current {
-                return self.queue[1..].to_vec();
-            }
+            && first == current
+        {
+            return self.queue[1..].to_vec();
+        }
         self.queue.clone()
     }
 
@@ -424,7 +459,8 @@ impl BackendFacade {
                 });
                 self.events
                     .push_back(BackendEvent::CurrentTrack(Some(track)));
-                self.events.push_back(BackendEvent::QueueUpcoming(self.upcoming()));
+                self.events
+                    .push_back(BackendEvent::QueueUpcoming(self.upcoming()));
             }
             PlaybackCommand::Pause => {
                 if self.state == PlaybackState::Playing {
@@ -448,20 +484,26 @@ impl BackendFacade {
             PlaybackCommand::SetVolume(v) => {
                 self.volume = v.clamp(0.0, 1.0);
                 let effective = if self.muted { 0.0 } else { self.volume };
-                self.events
-                    .push_back(BackendEvent::VolumeChange(effective));
+                self.events.push_back(BackendEvent::VolumeChange(effective));
                 self.emit_settings_changed();
                 self.schedule_persist();
             }
             PlaybackCommand::Seek(pos) => {
                 let total = self.position.total;
-                let clamped = if let Some(t) = total && pos > t { t } else { pos };
+                let clamped = if let Some(t) = total
+                    && pos > t
+                {
+                    t
+                } else {
+                    pos
+                };
                 self.position.current = clamped;
                 if !self.seeking {
-                    self.events.push_back(BackendEvent::PositionChange(PlaybackPosition {
-                        current: clamped,
-                        total,
-                    }));
+                    self.events
+                        .push_back(BackendEvent::PositionChange(PlaybackPosition {
+                            current: clamped,
+                            total,
+                        }));
                 }
             }
             PlaybackCommand::PlayNext(track) => {
@@ -472,7 +514,8 @@ impl BackendFacade {
                     shuffle: self.shuffle,
                     repeat: self.repeat,
                 });
-                self.events.push_back(BackendEvent::QueueUpcoming(self.upcoming()));
+                self.events
+                    .push_back(BackendEvent::QueueUpcoming(self.upcoming()));
             }
             PlaybackCommand::AddToQueue(track) => {
                 self.queue.push(track);
@@ -481,26 +524,23 @@ impl BackendFacade {
                     shuffle: self.shuffle,
                     repeat: self.repeat,
                 });
-                self.events.push_back(BackendEvent::QueueUpcoming(self.upcoming()));
+                self.events
+                    .push_back(BackendEvent::QueueUpcoming(self.upcoming()));
             }
-            PlaybackCommand::PlayPause => {
-                match self.state {
-                    PlaybackState::Playing => {
-                        self.state = PlaybackState::Paused;
-                        self.events
-                            .push_back(BackendEvent::StateChange(PlaybackState::Paused));
-                    }
-                    PlaybackState::Paused => {
-                        self.state = PlaybackState::Playing;
-                        self.events
-                            .push_back(BackendEvent::StateChange(PlaybackState::Playing));
-                    }
-                    PlaybackState::Stopped => {}
+            PlaybackCommand::PlayPause => match self.state {
+                PlaybackState::Playing => {
+                    self.state = PlaybackState::Paused;
+                    self.events
+                        .push_back(BackendEvent::StateChange(PlaybackState::Paused));
                 }
-            }
-            PlaybackCommand::AddMany(_)
-            | PlaybackCommand::Next
-            | PlaybackCommand::Previous => {}
+                PlaybackState::Paused => {
+                    self.state = PlaybackState::Playing;
+                    self.events
+                        .push_back(BackendEvent::StateChange(PlaybackState::Playing));
+                }
+                PlaybackState::Stopped => {}
+            },
+            PlaybackCommand::AddMany(_) | PlaybackCommand::Next | PlaybackCommand::Previous => {}
         }
     }
 
@@ -528,8 +568,7 @@ impl BackendFacade {
         }
         if let Some(latest) = latest_library_gen {
             let now = Instant::now();
-            let since_last =
-                self.last_library_change_time.map(|t| now.duration_since(t));
+            let since_last = self.last_library_change_time.map(|t| now.duration_since(t));
             let should_emit = match since_last {
                 None => true,
                 Some(d) => d >= Self::COALESCE_WINDOW,
@@ -563,8 +602,9 @@ impl BackendFacade {
         }
         if latest_generation > 0 {
             self.last_library_generation = latest_generation;
-            self.events
-                .push_back(BackendEvent::LibraryChanged { generation: latest_generation });
+            self.events.push_back(BackendEvent::LibraryChanged {
+                generation: latest_generation,
+            });
             self.last_library_change_time = Some(Instant::now());
         }
     }
@@ -598,7 +638,8 @@ impl BackendFacade {
 
     pub fn scan_started(&mut self, path: PathBuf) {
         let p = path.to_string_lossy().to_string();
-        self.events.push_back(BackendEvent::ScanStarted { path: p.clone() });
+        self.events
+            .push_back(BackendEvent::ScanStarted { path: p.clone() });
         self.events.push_back(BackendEvent::LibraryStatusChanged {
             path: p,
             status: LibraryStatus::Scanning { files_found: 0 },
@@ -641,17 +682,19 @@ impl BackendFacade {
             path: p.clone(),
             status: LibraryStatus::Unavailable,
         });
-        self.events.push_back(BackendEvent::TypedNotice(NoticePayload {
-            severity: NoticeSeverity::Error,
-            source: NoticeSource::Scan,
-            message: format!("Scan of '{p}' failed: {reason}"),
-        }));
+        self.events
+            .push_back(BackendEvent::TypedNotice(NoticePayload {
+                severity: NoticeSeverity::Error,
+                source: NoticeSource::Scan,
+                message: format!("Scan of '{p}' failed: {reason}"),
+            }));
     }
 
     pub fn cancel_scan(&mut self, path: PathBuf) -> ScanCancelRequest {
         self.cancel_scan_intent = Some(path.clone());
         let p = path.to_string_lossy().to_string();
-        self.events.push_back(BackendEvent::ScanCancelled { path: p });
+        self.events
+            .push_back(BackendEvent::ScanCancelled { path: p });
         ScanCancelRequest::new(path)
     }
 
@@ -690,10 +733,8 @@ impl BackendFacade {
     /// Set watch state for a library path. Emits `LibraryStatusChanged`.
     pub fn set_watch_state(&mut self, path: PathBuf, status: LibraryStatus) {
         let p = path.to_string_lossy().to_string();
-        self.events.push_back(BackendEvent::LibraryStatusChanged {
-            path: p,
-            status,
-        });
+        self.events
+            .push_back(BackendEvent::LibraryStatusChanged { path: p, status });
     }
 
     // --- Scalar-settings persistence (issue 06) --------------------------
@@ -748,11 +789,12 @@ impl BackendFacade {
             replaygain_enabled: self.replaygain_enabled,
         };
         if let Err(e) = store.save_scalars(&scalars) {
-            self.events.push_back(BackendEvent::TypedNotice(NoticePayload {
-                severity: NoticeSeverity::Error,
-                source: NoticeSource::Settings,
-                message: format!("Failed to persist settings: {e}"),
-            }));
+            self.events
+                .push_back(BackendEvent::TypedNotice(NoticePayload {
+                    severity: NoticeSeverity::Error,
+                    source: NoticeSource::Settings,
+                    message: format!("Failed to persist settings: {e}"),
+                }));
         }
     }
 
@@ -797,11 +839,12 @@ impl BackendFacade {
             track_id: track_id.clone(),
             reason: reason.clone(),
         });
-        self.events.push_back(BackendEvent::TypedNotice(NoticePayload {
-            severity: NoticeSeverity::Error,
-            source: NoticeSource::TagEdit,
-            message: reason,
-        }));
+        self.events
+            .push_back(BackendEvent::TypedNotice(NoticePayload {
+                severity: NoticeSeverity::Error,
+                source: NoticeSource::TagEdit,
+                message: reason,
+            }));
     }
 
     // --- Lifecycle -------------------------------------------------------
@@ -825,15 +868,22 @@ impl BackendFacade {
         false
     }
 
-    // --- Test helpers ----------------------------------------------------
-
+    // Test-only builders (issue 02 facade scaffolding). Allowed must_use
+    // warnings because they're constructors, but inline tests below use
+    // them and clippy flags returning-Self-without-must_use.
     #[cfg(test)]
-    pub fn with_initial_volume(mut self, volume: f32) -> Self {
-        self.volume = volume.clamp(0.0, 1.0);
-        self
+    #[allow(
+        clippy::return_self_not_must_use,
+        clippy::unused_self,
+        dead_code,
+        unused_variables
+    )]
+    pub fn with_initial_volume(_volume: f32) -> Self {
+        Self::default()
     }
 
     #[cfg(test)]
+    #[allow(clippy::return_self_not_must_use)]
     pub fn with_initial_position(mut self, pos: Duration, total: Option<Duration>) -> Self {
         self.position = PlaybackPosition {
             current: pos,
@@ -848,13 +898,9 @@ impl BackendFacade {
 // end proving every BackendEvent variant is handled.
 // ===========================================================================
 
-
-
 // ===========================================================================
 // Tests
 // ===========================================================================
-
-
 
 #[cfg(test)]
 mod domain_match_tests {
@@ -984,8 +1030,11 @@ mod issue04_events {
             .filter(|e| matches!(e, BackendEvent::LibraryChanged { .. }))
             .collect();
         assert!(library_events.len() <= 1);
-        let first = library_events.first().cloned();
-        assert_eq!(first, Some(&BackendEvent::LibraryChanged { generation: 100 }));
+        let first = library_events.first().copied();
+        assert_eq!(
+            first,
+            Some(&BackendEvent::LibraryChanged { generation: 100 })
+        );
     }
 
     #[test]
@@ -1007,7 +1056,7 @@ mod issue04_events {
                 return;
             }
         }
-        panic!("expected LibraryChanged(20), got {:?}", evs);
+        panic!("expected LibraryChanged(20), got {evs:?}");
     }
 
     #[test]
@@ -1042,7 +1091,7 @@ mod issue04_events {
                 return;
             }
         }
-        panic!("expected LibraryChanged(7), got {:?}", evs);
+        panic!("expected LibraryChanged(7), got {evs:?}");
     }
 }
 
@@ -1130,8 +1179,8 @@ mod issue10_shutdown {
 mod issue11_boundary {
     use super::BackendFacade;
 
-    /// Compile-time proof that BackendFacade has no AppState reference.
-    /// If this compiles, the facade is free of AppState.
+    /// Compile-time proof that `BackendFacade` has no `AppState` reference.
+    /// If this compiles, the facade is free of `AppState`.
     #[allow(dead_code)]
     fn facade_compiles_without_appstate(_: &BackendFacade) {
         // This function existing and compiling is the proof.
@@ -1145,4 +1194,3 @@ mod issue11_boundary {
         let _ = std::any::type_name::<BackendFacade>();
     }
 }
-

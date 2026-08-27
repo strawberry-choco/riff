@@ -35,32 +35,32 @@ pub mod ui_tests;
 // Bring the library modules into the test crate root so qualified paths such as
 // `crate::domain::TrackMetadata`, `crate::app::state::AppState` and
 // `crate::app::scan_service::ScanService` resolve from inside the test modules.
-pub use riff::app;
-pub use riff::domain;
-pub use riff::infra;
-pub use riff::ui;
+pub use riff_backend::app;
+pub use riff_backend::domain;
+pub use riff_backend::infra;
+pub use riff_gui::ui;
 
 // Prelude of bare names used inside the test bodies through `use super::*`.
 // Kept explicit (rather than glob re-exports) to avoid name collisions.
-pub use riff::app::MutexExt;
-pub use riff::app::gapless::{
+pub use riff_backend::app::MutexExt;
+pub use riff_backend::app::gapless::{
     GaplessConditions, QueueConditions, duration_from_frames, elapsed_from_samples,
     formats_gapless_compatible, frames_from_duration, is_gapless_eligible, pre_buffer_cap,
     repeat_one_handoff_eligible, samples_from_duration,
 };
-pub use riff::app::state::{AppState, LibraryStatus, WatchState, replaygain_factor};
-pub use riff::app::transport::clamp_seek;
-pub use riff::domain::{
+pub use riff_backend::app::state::{AppState, LibraryStatus, WatchState, replaygain_factor};
+pub use riff_backend::app::transport::clamp_seek;
+pub use riff_backend::domain::{
     Album, Artist, PlaybackCommand, PlaybackPosition, PlaybackQueue, PlaybackState, PlaybackUpdate,
     Playlist, PlaylistId, RepeatMode, SmartPlaylistKind, Track, TrackId, TrackMetadata,
 };
-pub use riff::infra::metadata_reader::parse_replaygain_gain;
-pub use riff::infra::{
+pub use riff_backend::infra::metadata_reader::parse_replaygain_gain;
+pub use riff_backend::infra::{
     AudioFileScanner, CpalAudioOutput, FilesystemWatcher, ImageCoverLoader, LoftyMetadataReader,
     LoftyMetadataWriter, SymphoniaDecoder,
 };
-pub use riff::ui::app::{TagEditState, format_duration, lru_insert};
-pub use riff::ui::settings::{expand_tilde, suggest_directories};
+pub use riff_gui::ui::app::{TagEditState, format_duration, lru_insert};
+pub use riff_gui::ui::settings::{expand_tilde, suggest_directories};
 
 // Standard-library names referenced unqualified in some suites.
 pub use std::sync::atomic::AtomicBool;
@@ -128,17 +128,17 @@ pub mod test_utils {
 /// These are intentionally reusable: later suites (e.g. gapless-playback
 /// tests) build on the same scripted decoder/output behavior.
 pub mod mocks {
-    use riff::app::errors::AppError;
-    use riff::app::state::AppState;
-    use riff::app::store::{
+    use riff_backend::app::errors::AppError;
+    use riff_backend::app::state::AppState;
+    use riff_backend::app::store::{
         LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings, SettingsStore,
     };
-    use riff::app::traits::{
+    use riff_backend::app::traits::{
         AudioDecoder, AudioFormatInfo, AudioOutput, CoverImage, CoverLoader, MetadataReader,
         MetadataWriter, TagEdit,
     };
-    use riff::app::transport::clamp_seek;
-    use riff::domain::{
+    use riff_backend::app::transport::clamp_seek;
+    use riff_backend::domain::{
         Album, Artist, CoverSource, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
         TrackMetadata,
     };
@@ -269,7 +269,7 @@ pub mod mocks {
         }
 
         /// Set the value reported by
-        /// [`effective_sample_rate`](riff::app::traits::AudioOutput::effective_sample_rate).
+        /// [`effective_sample_rate`](riff_backend::app::traits::AudioOutput::effective_sample_rate).
         pub fn set_effective_sample_rate(&mut self, rate: u32) {
             self.effective_sample_rate = rate;
         }
@@ -514,7 +514,7 @@ pub mod mocks {
         fn default() -> Self {
             Self {
                 state: Settings {
-                    scalars: riff::app::state::ScalarSettings::default(),
+                    scalars: riff_backend::app::state::ScalarSettings::default(),
                     library_paths: Vec::new(),
                     watch_states: std::collections::HashMap::new(),
                 },
@@ -531,7 +531,7 @@ pub mod mocks {
 
         fn save_scalars(
             &mut self,
-            scalars: &riff::app::state::ScalarSettings,
+            scalars: &riff_backend::app::state::ScalarSettings,
         ) -> Result<(), AppError> {
             if self.fail {
                 return Err(AppError::InvalidOperation("mock settings failure".into()));
@@ -552,7 +552,10 @@ pub mod mocks {
 
         fn save_watch_states(
             &mut self,
-            states: &std::collections::HashMap<std::path::PathBuf, riff::app::state::WatchState>,
+            states: &std::collections::HashMap<
+                std::path::PathBuf,
+                riff_backend::app::state::WatchState,
+            >,
         ) -> Result<(), AppError> {
             if self.fail {
                 return Err(AppError::InvalidOperation("mock settings failure".into()));
@@ -678,7 +681,7 @@ pub mod mocks {
         fn load_playlist_entries(
             &self,
             _id: &PlaylistId,
-        ) -> Result<Vec<riff::app::store::PlaylistEntry>, AppError> {
+        ) -> Result<Vec<riff_backend::app::store::PlaylistEntry>, AppError> {
             if self.fail_loads {
                 return Err(AppError::InvalidOperation("entries boom".to_string()));
             }
@@ -726,10 +729,10 @@ pub mod mocks {
         }
     }
 
-    /// One recorded [`Transport`](riff::app::transport::Transport) intent,
+    /// One recorded [`Transport`](riff_backend::app::transport::Transport) intent,
     /// in issue order. Seek/volume intents carry the ADAPTED values (clamped
     /// target, effective volume), mirroring what
-    /// [`ChannelTransport`](riff::app::transport::ChannelTransport) would
+    /// [`ChannelTransport`](riff_backend::app::transport::ChannelTransport) would
     /// put on the wire.
     #[derive(Debug, Clone, PartialEq)]
     pub enum TransportIntent {
@@ -752,7 +755,7 @@ pub mod mocks {
         ApplyVolumeAfterMute(f32),
     }
 
-    /// Recording [`Transport`](riff::app::transport::Transport) fake: keeps
+    /// Recording [`Transport`](riff_backend::app::transport::Transport) fake: keeps
     /// every issued intent behind an internal mutex so UI-layer tests can
     /// assert on playback intents instead of raw channel bytes. The
     /// state-coupled methods reuse the production clamp/volume math, exactly
@@ -785,7 +788,7 @@ pub mod mocks {
         }
     }
 
-    impl riff::app::transport::Transport for MockTransport {
+    impl riff_backend::app::transport::Transport for MockTransport {
         fn play(&self, track: TrackId) {
             self.record(TransportIntent::Play(track));
         }

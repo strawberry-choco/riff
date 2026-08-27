@@ -6,9 +6,9 @@ use super::*;
 mod tests {
     use super::*;
     use crate::domain::CoverSource;
-    use riff::app::errors::AppError;
-    use riff::app::playlist_manager;
-    use riff::app::traits::{AudioFormatInfo, MetadataReader, MetadataWriter, TagEdit};
+    use riff_backend::app::errors::AppError;
+    use riff_backend::app::playlist_manager;
+    use riff_backend::app::traits::{AudioFormatInfo, MetadataReader, MetadataWriter, TagEdit};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn test_track_is_valid_and_valid_tracks_filter_invalid_entries() {
-        use riff::app::store::PlaylistEntry;
+        use riff_backend::app::store::PlaylistEntry;
 
         let root = tempfile::tempdir().unwrap();
         let real_file = root.path().join("real.mp3");
@@ -388,7 +388,7 @@ mod tests {
 
     // --- build_tracks with a mock MetadataReader ---------------------------------
 
-    /// Minimal [`MetadataReader`](riff::app::traits::MetadataReader) for
+    /// Minimal [`MetadataReader`](riff_backend::app::traits::MetadataReader) for
     /// exercising scan-side Track construction without real audio files.
     /// `fail` simulates unreadable/corrupt input.
     struct MockMetadataReader {
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn test_build_tracks_reads_metadata_and_audio_format() {
         let reader = MockMetadataReader { fail: false };
-        let tracks = riff::app::scan::build_tracks(
+        let tracks = riff_backend::app::scan::build_tracks(
             vec![PathBuf::from("scan/a.mp3"), PathBuf::from("scan/b.mp3")],
             &reader,
         );
@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn test_build_tracks_skips_unreadable_files() {
         let reader = MockMetadataReader { fail: true };
-        let tracks = riff::app::scan::build_tracks(
+        let tracks = riff_backend::app::scan::build_tracks(
             vec![PathBuf::from("bad/a.mp3"), PathBuf::from("bad/b.mp3")],
             &reader,
         );
@@ -496,7 +496,8 @@ mod tests {
     #[test]
     fn test_build_tracks_stamps_date_added_and_zero_plays() {
         let reader = MockMetadataReader { fail: false };
-        let tracks = riff::app::scan::build_tracks(vec![PathBuf::from("scan/fresh.mp3")], &reader);
+        let tracks =
+            riff_backend::app::scan::build_tracks(vec![PathBuf::from("scan/fresh.mp3")], &reader);
 
         let track = &tracks[0];
         assert_eq!(track.play_count, 0);
@@ -599,7 +600,7 @@ mod tests {
 
     #[test]
     fn test_mock_settings_store_drives_hydration_and_persistence() {
-        use riff::app::store::SettingsStore;
+        use riff_backend::app::store::SettingsStore;
         // App-layer orchestration through the port: the same flow
         // `load_persisted_state` + the save call sites use, driven by a mock so
         // no real SQL is involved.
@@ -612,7 +613,7 @@ mod tests {
 
         // The app saves each change as its own small transaction; the mock
         // records the call sequence.
-        mock.save_scalars(&riff::app::state::ScalarSettings {
+        mock.save_scalars(&riff_backend::app::state::ScalarSettings {
             volume: Some(0.3),
             ..Default::default()
         })
@@ -634,7 +635,7 @@ mod tests {
         // A failing port surfaces its error instead of being swallowed.
         mock.fail = true;
         assert!(
-            mock.save_scalars(&riff::app::state::ScalarSettings::default())
+            mock.save_scalars(&riff_backend::app::state::ScalarSettings::default())
                 .is_err()
         );
         assert!(mock.save_library_paths(&[]).is_err());
@@ -649,8 +650,8 @@ mod tests {
     // `StoreGeneration` handle plays the mutation adapter's bumps.
 
     use crate::mocks::{LibraryQueryCall, MockLibraryQueryStore};
-    use riff::app::store::{LibraryQueryStore, StoreGeneration};
-    use riff::app::views::SessionViews;
+    use riff_backend::app::store::{LibraryQueryStore, StoreGeneration};
+    use riff_backend::app::views::SessionViews;
 
     /// Deterministic fixture row for a window slot.
     fn projection_track(n: usize) -> Track {
@@ -1282,7 +1283,7 @@ mod tests {
     // removing the dragged entry and reinserting it at the drop index, with
     // everything else shifting to close/open the gaps.
 
-    use riff::app::playlist_manager::reorder_tracks;
+    use riff_backend::app::playlist_manager::reorder_tracks;
 
     fn ids<const N: usize>(paths: [&str; N]) -> Vec<TrackId> {
         paths.iter().map(|p| TrackId(p.to_string())).collect()
@@ -1343,12 +1344,12 @@ mod tests {
 // fails an assertion instead of hanging CI.
 mod scan_service_tests {
     use super::*;
-    use riff::app::errors::AppError;
-    use riff::app::scan_service::{ScanOutcome, ScanService, Scans};
-    use riff::app::store::{LibraryMutationStore, LibraryQueryStore};
-    use riff::app::traits::{AudioFormatInfo, MetadataReader};
-    use riff::domain::CoverSource;
-    use riff::infra::store::SqliteStore;
+    use riff_backend::app::errors::AppError;
+    use riff_backend::app::scan_service::{ScanOutcome, ScanService, Scans};
+    use riff_backend::app::store::{LibraryMutationStore, LibraryQueryStore};
+    use riff_backend::app::traits::{AudioFormatInfo, MetadataReader};
+    use riff_backend::domain::CoverSource;
+    use riff_backend::infra::store::SqliteStore;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant, SystemTime};
@@ -1484,8 +1485,10 @@ mod scan_service_tests {
         fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
             let db_path = dir.path().join("riff.sqlite3");
-            let store =
-                SqliteStore::open_and_migrate(&db_path).expect("fresh store must open and migrate");
+            let (changes_tx, _changes_rx) =
+                crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+            let store = SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .expect("fresh store must open and migrate");
             let mutations = store.clone();
             let queries = store;
             Self {
@@ -1901,10 +1904,10 @@ mod scan_service_tests {
 mod audio_engine_tests {
     use super::*;
     use crossbeam_channel::{Receiver, unbounded};
-    use riff::app::audio_engine::AudioEngine;
-    use riff::app::errors::AppError;
-    use riff::app::store::LibraryQueryStore;
-    use riff::app::traits::{AudioDecoder, AudioFormatInfo, AudioOutput, DecoderFactory};
+    use riff_backend::app::audio_engine::AudioEngine;
+    use riff_backend::app::errors::AppError;
+    use riff_backend::app::store::LibraryQueryStore;
+    use riff_backend::app::traits::{AudioDecoder, AudioFormatInfo, AudioOutput, DecoderFactory};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2545,10 +2548,12 @@ mod audio_engine_tests {
 mod tag_edit_service_tests {
     use super::*;
     use crate::mocks::{MockLibraryMutationStore, MockLibraryQueryStore, MockMetadataWriter};
-    use riff::app::errors::AppError;
-    use riff::app::store::LibraryQueryStore;
-    use riff::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEditService, TagEdits};
-    use riff::app::traits::{MetadataWriter, TagEdit};
+    use riff_backend::app::errors::AppError;
+    use riff_backend::app::store::LibraryQueryStore;
+    use riff_backend::app::tag_edit_service::{
+        TagEditOutcome, TagEditRequest, TagEditService, TagEdits,
+    };
+    use riff_backend::app::traits::{MetadataWriter, TagEdit};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -2652,13 +2657,13 @@ mod tag_edit_service_tests {
         }
     }
 
-    /// [`riff::app::store::LibraryMutationStore`] view over one recording
+    /// [`riff_backend::app::store::LibraryMutationStore`] view over one recording
     /// [`MockLibraryMutationStore`] owned by the worker; the test keeps the
     /// other handle. Only `apply_tag_refresh` is delegated with its real
     /// behavior — it is the only mutation the save flow issues.
     struct SharedMutations(Arc<Mutex<MockLibraryMutationStore>>);
 
-    impl riff::app::store::LibraryMutationStore for SharedMutations {
+    impl riff_backend::app::store::LibraryMutationStore for SharedMutations {
         fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, AppError> {
             self.0.lock().unwrap().apply_scan_batch(tracks)
         }
@@ -2999,10 +3004,10 @@ mod tag_edit_service_tests {
 // dedup/negative-cache discipline actually suppressed disk I/O.
 mod cover_service_tests {
     use super::*;
-    use riff::app::cover_service::{CoverService, Covers};
-    use riff::app::errors::AppError;
-    use riff::app::traits::{AudioFormatInfo, CoverImage, CoverLoader, MetadataReader};
-    use riff::domain::CoverSource;
+    use riff_backend::app::cover_service::{CoverService, Covers};
+    use riff_backend::app::errors::AppError;
+    use riff_backend::app::traits::{AudioFormatInfo, CoverImage, CoverLoader, MetadataReader};
+    use riff_backend::domain::CoverSource;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3358,9 +3363,9 @@ mod cover_service_tests {
 /// mutations show up on the next view call with zero caller action.
 mod playlist_projection_tests {
     use super::*;
-    use riff::app::errors::AppError;
-    use riff::app::store::{LibraryMutationStore, PlaylistEntry, PlaylistStore};
-    use riff::infra::store::SqliteStore;
+    use riff_backend::app::errors::AppError;
+    use riff_backend::app::store::{LibraryMutationStore, PlaylistEntry, PlaylistStore};
+    use riff_backend::infra::store::SqliteStore;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Counting [`PlaylistStore`] decorator: delegates everything to the
@@ -3444,7 +3449,7 @@ mod playlist_projection_tests {
         dir: tempfile::TempDir,
         shared: SqliteStore,
         mutations: SqliteStore,
-        views: riff::app::views::SessionViews,
+        views: riff_backend::app::views::SessionViews,
         entry_loads: Arc<AtomicUsize>,
     }
 
@@ -3452,11 +3457,13 @@ mod playlist_projection_tests {
         fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
             let db_path = dir.path().join("riff.sqlite3");
-            let store =
-                SqliteStore::open_and_migrate(&db_path).expect("fresh store must open and migrate");
+            let (changes_tx, _changes_rx) =
+                crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+            let store = SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .expect("fresh store must open and migrate");
             let mutations = store.clone();
             let (playlist_queries, entry_loads) = CountingPlaylistStore::new(mutations.clone());
-            let views = riff::app::views::SessionViews::new(
+            let views = riff_backend::app::views::SessionViews::new(
                 Box::new(store.clone()),
                 Box::new(playlist_queries),
                 store.library_generation(),
@@ -3634,9 +3641,9 @@ mod playback_coordinator_tests {
     use super::*;
     use crate::mocks::MockLibraryMutationStore;
     use crossbeam_channel::{Receiver, unbounded};
-    use riff::app::errors::AppError;
-    use riff::app::playback_coordinator::PlaybackCoordinator;
-    use riff::app::store::LibraryMutationStore;
+    use riff_backend::app::errors::AppError;
+    use riff_backend::app::playback_coordinator::PlaybackCoordinator;
+    use riff_backend::app::store::LibraryMutationStore;
     use std::path::Path;
 
     /// [`LibraryMutationStore`] view over one recording
@@ -3821,8 +3828,8 @@ mod playback_coordinator_tests {
 /// and a failed load — which by contract never reaches `store`/`slot` —
 /// leaves the stale-but-present value readable for the retry.
 mod generation_cache_tests {
-    use riff::app::store::StoreGeneration;
-    use riff::app::views::GenerationCache;
+    use riff_backend::app::store::StoreGeneration;
+    use riff_backend::app::views::GenerationCache;
 
     #[test]
     fn test_fresh_load_stamps_the_observed_epoch() {

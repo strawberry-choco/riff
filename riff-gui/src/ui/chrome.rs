@@ -24,6 +24,17 @@ use riff_backend::app::state::{BrowseMode, ViewMode};
 /// Smallest main-stage area kept usable beside/between the fixed chrome.
 pub const MIN_STAGE_SIZE: egui::Vec2 = egui::vec2(520.0, 456.0);
 
+/// Full-texture UV rect for [`egui::Painter::image`] (sidebar precedent).
+const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+
+/// Caption-button hit area: Windows-convention caption buttons are wide,
+/// full-height strips (not floating icon chips), so minimize/close get real
+/// pointer targets and the familiar hover fills.
+const CAPTION_BTN_W: f32 = 44.0;
+const CAPTION_BTN_H: f32 = 36.0;
+/// Gap between the nav-control cluster and the caption-button pair.
+const CAPTION_GAP: f32 = 12.0;
+
 /// Chrome-fitting minimum window size: sidebar + stage across, titlebar +
 /// playerbar + stage down. The window can never shrink below this, so the
 /// fixed 56/280/88 chrome never collapses.
@@ -235,11 +246,54 @@ pub fn show_titlebar(
         );
     }
 
-    // Controls at the right edge, Windows order: minimize left of close.
+    // Window controls at the top-right corner: two caption-style hit strips
+    // flush to the edge (Windows convention — minimize left of close, zero
+    // gap between them). Drawn after the drag region so they win clicks over
+    // their slice of the strip.
+    let btn_top = rect.center().y - CAPTION_BTN_H / 2.0;
+    let close_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - CAPTION_BTN_W, btn_top),
+        egui::vec2(CAPTION_BTN_W, CAPTION_BTN_H),
+    );
+    let minimize_rect = egui::Rect::from_min_size(
+        egui::pos2(close_rect.left() - CAPTION_BTN_W, btn_top),
+        egui::vec2(CAPTION_BTN_W, CAPTION_BTN_H),
+    );
+    if window_control_button(
+        ui,
+        cache,
+        palette,
+        minimize_rect,
+        egui::Id::new("riff_titlebar_minimize"),
+        Icon::Minimize,
+        "Minimize",
+        false,
+    ) {
+        actions.push(TitleBarAction::Minimize);
+    }
+    if window_control_button(
+        ui,
+        cache,
+        palette,
+        close_rect,
+        egui::Id::new("riff_titlebar_close"),
+        Icon::Close,
+        "Close",
+        true,
+    ) {
+        actions.push(TitleBarAction::Close);
+    }
+
+    // Nav controls (theme / Now Playing / Settings / Advanced toggles) at the
+    // right edge, Windows order, ending one gap left of the caption pair.
     // Drawn after the drag region so they take priority over it.
+    let nav_rect = egui::Rect::from_min_max(
+        rect.min,
+        egui::pos2(minimize_rect.left() - CAPTION_GAP, rect.max.y),
+    );
     ui.scope_builder(
         egui::UiBuilder::new()
-            .max_rect(rect)
+            .max_rect(nav_rect)
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
         |ui| {
             show_titlebar_controls(ui, cache, palette, content, actions);
@@ -247,10 +301,54 @@ pub fn show_titlebar(
     );
 }
 
-/// The right-edge control cluster: theme / Now Playing / Settings / Advanced
-/// toggles plus the custom minimize/close pair. Runs inside a right-to-left
-/// scope covering the full titlebar strip; observed actions append to
-/// `actions`.
+/// One caption-style window-control strip: transparent until hovered (then a
+/// surface fill — or the error fill for the destructive close), carrying a
+/// tinted glyph centered in the full hit area. The label doubles as the hover
+/// tooltip and the assistive-tech name.
+#[expect(clippy::too_many_arguments)]
+fn window_control_button(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    rect: egui::Rect,
+    id: egui::Id,
+    icon: Icon,
+    label: &str,
+    danger: bool,
+) -> bool {
+    let response = ui.interact(rect, id, egui::Sense::click());
+    let painter = ui.painter_at(rect);
+
+    if response.hovered() {
+        let fill = if danger {
+            palette.error
+        } else {
+            palette.surface_2
+        };
+        painter.rect_filled(rect, theme::RADIUS_SM, fill);
+    }
+    // On the close hover fill the glyph flips to the on-brand ink so it
+    // stays readable over the error red.
+    let tint = if response.hovered() && danger {
+        palette.on_brand
+    } else if response.hovered() {
+        palette.ink
+    } else {
+        palette.ink_2
+    };
+    let tex_id = cache.texture(ui.ctx(), icon, 16.0, tint);
+    let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
+    painter.image(tex_id, icon_rect, UV_FULL, tint);
+
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    response.on_hover_text(label).clicked()
+}
+
+/// The right-edge nav-control cluster: theme / Now Playing / Settings /
+/// Advanced toggles. The minimize/close caption pair is drawn by
+/// [`show_titlebar`] itself, flush to the window corner. Runs inside a
+/// right-to-left scope covering the strip left of that pair; observed actions
+/// append to `actions`.
 fn show_titlebar_controls(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -260,22 +358,6 @@ fn show_titlebar_controls(
 ) {
     ui.spacing_mut().item_spacing.x = 4.0;
     ui.visuals_mut().button_frame = false;
-
-    for (control, label, glyph) in [
-        (WindowControl::Close, "Close", Icon::Close),
-        (WindowControl::Minimize, "Minimize", Icon::Minimize),
-    ] {
-        if icon_button(ui, cache, glyph, label, 16.0, palette.ink_2)
-            .on_hover_text(label)
-            .clicked()
-        {
-            actions.push(match control {
-                WindowControl::Close => TitleBarAction::Close,
-                WindowControl::Minimize => TitleBarAction::Minimize,
-            });
-        }
-    }
-    ui.add_space(8.0);
 
     let advanced_label = if content.advanced_mode {
         "Advanced: On"

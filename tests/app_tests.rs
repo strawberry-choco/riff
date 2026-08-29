@@ -2185,10 +2185,12 @@ mod audio_engine_tests {
         let out_handle = Arc::clone(&output);
         let dec_handle = Arc::clone(&decoders);
         let thread_state = Arc::clone(&state);
+        let thread_cmd_tx = cmd_tx.clone();
         std::thread::spawn(move || {
             let factory = scripted_factory(primary_script, successor_script, format, dec_handle);
             let engine = AudioEngine::new(
                 cmd_rx,
+                thread_cmd_tx,
                 update_tx,
                 Box::new(library),
                 factory,
@@ -2360,6 +2362,137 @@ mod audio_engine_tests {
             state.lock_or_recover().playback_state,
             PlaybackState::Stopped
         );
+    }
+
+    /// Regression (Queue Fill restoration): playing into an EMPTY queue
+    /// loads the whole Library from the store in canonical order and resets
+    /// shuffle — so the UI resolves the current track and Next/Previous and
+    /// auto-advance have a queue to walk. The mock decodes instantly, so the
+    /// asserted state is read after the whole deterministic event chain
+    /// (play b → EOF → auto-advance c → EOF → stop) has drained.
+    #[test]
+    fn engine_play_into_empty_queue_fills_from_store() {
+        let state = Arc::new(Mutex::new(PlaybackSession::default()));
+        let mut tracks = HashMap::new();
+        for path in ["music/a.wav", "music/b.wav", "music/c.wav"] {
+            let track = crate::test_utils::create_test_track(path, path);
+            tracks.insert(track.id.clone(), track);
+        }
+        let library = FakeLibraryStore { tracks };
+
+        let script = vec![batch(2_400), batch(2_400)];
+        let format = format_with_duration(Some(Duration::from_secs(1)));
+        let h = spawn_engine(state.clone(), library, script, Vec::new(), format);
+
+        h.cmd_tx
+            .send(PlaybackCommand::Play(TrackId("music/b.wav".into())))
+            .unwrap();
+
+        let updates = collect_until(&h, |u| is_track_changed(u, &TrackId("music/c.wav".into())));
+        assert!(
+            updates
+                .iter()
+                .any(|u| is_track_changed(u, &TrackId("music/b.wav".into()))),
+            "expected TrackChanged(b), got {updates:?}"
+        );
+        // Ride out c's EOF: the harness's auto-advance finds nothing after c
+        // and marks playback stopped on the session (no update is emitted).
+        collect_until(&h, |u| matches!(u, PlaybackUpdate::TrackEnded));
+        assert_eq!(
+            state.lock_or_recover().playback_state,
+            PlaybackState::Stopped,
+            "the queue end after auto-advance stops playback"
+        );
+
+        let s = state.lock_or_recover();
+        assert_eq!(
+            s.queue.tracks,
+            vec![
+                TrackId("music/a.wav".into()),
+                TrackId("music/b.wav".into()),
+                TrackId("music/c.wav".into()),
+            ],
+            "the empty queue was filled from the store in canonical order"
+        );
+        assert_eq!(
+            s.queue.current_index,
+            Some(2),
+            "the queue walked b then auto-advanced to c before stopping"
+        );
+        assert!(!s.queue.shuffle, "queue fill resets shuffle");
+        drop(s);
+        release(h);
+    }
+
+    /// Manual skips from a known idle position walk the session queue and
+    /// re-dispatch Play for the new current track: Previous from the last
+    /// entry lands one back, Next from the middle lands one ahead.
+    #[test]
+    fn engine_skips_walk_the_queue_and_announce_the_target() {
+        // Previous from the queue's end announces the second track.
+        let (state, library) =
+            queued_state_and_library(&["music/t1.wav", "music/t2.wav", "music/t3.wav"]);
+        state.lock_or_recover().queue.current_index = Some(2);
+        let script = vec![batch(2_400), batch(2_400)];
+        let format = format_with_duration(Some(Duration::from_secs(1)));
+        let h = spawn_engine(
+            state.clone(),
+            library,
+            script.clone(),
+            Vec::new(),
+            format.clone(),
+        );
+
+        h.cmd_tx.send(PlaybackCommand::Previous).unwrap();
+        let updates = collect_until(&h, |u| is_track_changed(u, &TrackId("music/t2.wav".into())));
+        assert!(
+            updates
+                .iter()
+                .any(|u| is_track_changed(u, &TrackId("music/t2.wav".into()))),
+            "expected Previous to announce t2, got {updates:?}"
+        );
+        release(h);
+
+        // Next from the middle announces the third track.
+        let (state, library) =
+            queued_state_and_library(&["music/t1.wav", "music/t2.wav", "music/t3.wav"]);
+        state.lock_or_recover().queue.current_index = Some(1);
+        let h = spawn_engine(state.clone(), library, script, Vec::new(), format.clone());
+
+        h.cmd_tx.send(PlaybackCommand::Next).unwrap();
+        let updates = collect_until(&h, |u| is_track_changed(u, &TrackId("music/t3.wav".into())));
+        assert!(
+            updates
+                .iter()
+                .any(|u| is_track_changed(u, &TrackId("music/t3.wav".into()))),
+            "expected Next to announce t3, got {updates:?}"
+        );
+        release(h);
+    }
+
+    /// A manual Next past the queue's end stops playback instead of
+    /// silently dropping the command (the engine owns stop-at-queue-end for
+    /// skips, mirroring the coordinator's TrackEnded behavior).
+    #[test]
+    fn engine_next_past_queue_end_stops() {
+        let (state, library) = queued_state_and_library(&["music/t1.wav"]);
+        let script: Vec<Vec<f32>> = (0..200).map(|_| batch(2_400)).collect();
+        let format = format_with_duration(Some(Duration::from_secs(1)));
+        let h = spawn_engine(state.clone(), library, script, Vec::new(), format);
+
+        h.cmd_tx
+            .send(PlaybackCommand::Play(TrackId("music/t1.wav".into())))
+            .unwrap();
+        collect_until(&h, |u| is_track_changed(u, &TrackId("music/t1.wav".into())));
+
+        h.cmd_tx.send(PlaybackCommand::Next).unwrap();
+        let updates = collect_until(&h, |u| is_state(u, PlaybackState::Stopped));
+        assert!(
+            updates.iter().any(|u| is_state(u, PlaybackState::Stopped)),
+            "expected StateChanged(Stopped) at the queue end, got {updates:?}"
+        );
+
+        release(h);
     }
 
     /// The hardest invariant: when a compatible successor was pre-decoded,

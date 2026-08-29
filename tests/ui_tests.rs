@@ -2980,6 +2980,62 @@ mod tests {
         assert_eq!(settings::SECTION_ADVANCED_INFO, "ADVANCED & PLATFORM INFO");
     }
 
+    /// Regression: `truncate_path` cuts at a byte offset, so a multi-byte
+    /// character straddling the cut used to panic the render loop ("byte
+    /// index is not a char boundary") for any library folder whose path
+    /// exceeds 48 bytes with non-ASCII content. The cut must land on a char
+    /// boundary and keep whole characters. The sweeps below place a 2-byte
+    /// and a 3-byte character such that some suffix length puts the byte cut
+    /// squarely inside it — the old code panicked on exactly those inputs.
+    #[test]
+    fn test_truncate_path_cuts_on_char_boundaries() {
+        use riff_gui::ui::settings::truncate_path;
+
+        // Short paths pass through untouched.
+        assert_eq!(
+            truncate_path("C:\\music\\song.mp3", 48),
+            "C:\\music\\song.mp3"
+        );
+
+        // ASCII tail behavior is unchanged: keep the last max_len-3 bytes.
+        let ascii = format!("C:\\music\\{}", "a".repeat(48));
+        let out = truncate_path(&ascii, 48);
+        assert_eq!(out, format!("...{}", "a".repeat(45)));
+
+        // Sweep every alignment for a 2-byte (é) and a 3-byte (乐) character.
+        for n in 0..60usize {
+            let path = format!("{}é{}", "a".repeat(20), "b".repeat(n));
+            if path.len() > 48 {
+                let out = truncate_path(&path, 48);
+                assert!(out.starts_with("..."), "got {out:?}");
+                assert!(
+                    path.ends_with(&out[3..]),
+                    "2-byte tail must stay whole characters: {out:?}"
+                );
+            }
+            let path = format!("{}乐{}", "a".repeat(30), "b".repeat(n));
+            if path.len() > 48 {
+                let out = truncate_path(&path, 48);
+                assert!(out.starts_with("..."), "got {out:?}");
+                assert!(
+                    path.ends_with(&out[3..]),
+                    "3-byte tail must stay whole characters: {out:?}"
+                );
+            }
+        }
+
+        // 4-byte characters (emoji) in the tail.
+        let emoji = format!("{}🎵🎶", "a".repeat(46));
+        let out = truncate_path(&emoji, 48);
+        assert!(
+            emoji.ends_with(&out[3..]),
+            "emoji tail must survive intact: {out:?}"
+        );
+
+        // Degenerate max_len must not underflow.
+        assert_eq!(truncate_path("C:\\music\\song.mp3", 2), "...");
+    }
+
     #[test]
     fn test_preference_rows_match_the_mockup_copy_verbatim() {
         assert_eq!(

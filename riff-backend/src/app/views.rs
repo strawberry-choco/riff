@@ -16,16 +16,16 @@
 //! so the next call retries automatically.
 
 use crate::app::projection::{
-    BrowsingProjection, FolderProjection, PlaybackProjection, PlaylistProjection, ProjectionKey,
+    BrowsingProjection, FolderProjection, PlaylistProjection, ProjectionKey,
     SmartPlaylistsProjection, TrackListProjection, WINDOW_SIZE,
 };
 // The playlist view shapes are part of the seam's public surface: the
 // projection module itself is private, so UI code imports these from here.
 pub use crate::app::projection::{PlaylistEntryRow, PlaylistView};
 use crate::app::store::{LibraryQueryStore, PlaylistStore, StoreGeneration};
-use crate::domain::{
-    Album, Artist, PlaybackQueue, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
-};
+use crate::domain::{Album, Artist, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId};
+use riff_playback::app::projection::PlaybackProjection;
+use riff_playback::domain::PlaybackQueue;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

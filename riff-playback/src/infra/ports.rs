@@ -17,7 +17,10 @@ pub trait AudioDecoder: Send {
 
     /// Initialize the decoder for the given track. Returns the audio format
     /// info (sample rate, channels) or an error if the file cannot be read.
-    fn init(&mut self, path: &std::path::Path) -> Result<AudioFormatInfo, crate::app::errors::PlaybackError>;
+    fn init(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<AudioFormatInfo, crate::app::errors::PlaybackError>;
 
     /// Decode the next chunk of audio into `buf` (interleaved f32 samples).
     /// Returns the number of samples written, or `None` at EOF.

@@ -11,13 +11,13 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use riff_backend::app::DecoderFactory;
 use riff_backend::app::MutexExt;
 use riff_backend::app::audio_engine::AudioEngine;
 use riff_backend::app::facade::BackendFacade;
 use riff_backend::app::playback_coordinator::PlaybackCoordinator;
 use riff_backend::app::state::{LibrarySession, PlaybackSession};
-use riff_backend::app::traits::DecoderFactory;
-use riff_backend::app::transport::FacadeTransport;
+use riff_backend::app::transport::{ChannelTransport, FacadeTransport};
 use riff_backend::app::watcher_manager::WatcherManager;
 use riff_backend::domain::{PlaybackCommand, PlaybackUpdate};
 use riff_backend::infra::{
@@ -62,19 +62,18 @@ fn main() {
         playlist_generation,
     );
 
-    let playback = Arc::new(Mutex::new(PlaybackSession::new()));
-    let library = Arc::new(Mutex::new(LibrarySession::new()));
+    let playback = Arc::new(Mutex::new(PlaybackSession::default()));
+    let library = Arc::new(Mutex::new(LibrarySession::default()));
     let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
     let (update_tx, update_rx) = unbounded::<PlaybackUpdate>();
 
     // Clone senders for different consumers before cmd_tx is moved
     let ui_cmd_tx = cmd_tx.clone();
-    let engine_cmd_tx = cmd_tx.clone();
     let tray_cmd_tx = cmd_tx.clone();
     let app_state = playback.clone();
     let engine_queries = library_query_store.clone();
     let _audio_thread = thread::spawn(move || {
-        run_engine_thread(cmd_rx, engine_cmd_tx, update_tx, app_state, engine_queries);
+        run_engine_thread(cmd_rx, update_tx, app_state, engine_queries);
     });
 
     // Playback Coordinator (CONTEXT.md): applies Playback Updates to session
@@ -127,12 +126,20 @@ fn main() {
 
     // The UI's `Box<dyn Transport>` is a `FacadeTransport` wrapping the
     // shared `Arc<Mutex<BackendFacade>>`, so every UI intent is recorded
+    // synchronously onto the facade's event inbox before it is forwarded.
     let ui_transport: Box<dyn riff_backend::app::transport::Transport> =
-        Box::new(FacadeTransport::new(ui_cmd_tx, facade.clone()));
+        Box::new(FacadeTransport::new(
+            ChannelTransport::new(ui_cmd_tx),
+            facade_recorder(facade.clone()),
+        ));
     // no Arc<Mutex<..>> wrapper is needed around the !Send handle.
     #[cfg(not(target_os = "linux"))]
     let tray_icon = match riff_gui::ui::tray::create_tray(
-        FacadeTransport::new(tray_cmd_tx, facade.clone()),
+        FacadeTransport::new(
+            ChannelTransport::new(tray_cmd_tx),
+            facade_recorder(facade.clone()),
+        ),
+        playback.clone(),
         quit_flag.clone(),
         visibility_tx,
     ) {
@@ -324,13 +331,23 @@ fn build_codec_registry() -> symphonia::core::codecs::registry::CodecRegistry {
     registry
 }
 
+/// Build a `FacadeTransport` recorder that pushes each dispatched command
+/// onto the shared facade's event inbox (the frontend's observable
+/// side-effect surface — issue 02).
+fn facade_recorder(
+    facade: Arc<Mutex<BackendFacade>>,
+) -> Box<dyn Fn(PlaybackCommand) + Send + Sync> {
+    Box::new(move |cmd: PlaybackCommand| {
+        facade.lock_or_recover().record_command(cmd);
+    })
+}
+
 /// Composition-root wiring for the audio engine thread: construct the real
 /// adapters (symphonia decoder factory, cpal output, store query port) and
 /// run the engine loop on the calling thread. `CodecRegistry` is not `Clone`,
 /// so the factory builds a fresh registry for every decoder it mints.
 fn run_engine_thread(
     cmd_rx: crossbeam_channel::Receiver<PlaybackCommand>,
-    cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
     update_tx: crossbeam_channel::Sender<PlaybackUpdate>,
     state: Arc<Mutex<PlaybackSession>>,
     library_queries: riff_backend::infra::store::SqliteStore,
@@ -339,12 +356,11 @@ fn run_engine_thread(
         Box::new(|| Box::new(SymphoniaDecoder::new(build_codec_registry())));
     let engine = AudioEngine::new(
         cmd_rx,
-        cmd_tx,
         update_tx,
-        state,
         Box::new(library_queries),
         decoder_factory,
         Box::new(CpalAudioOutput::new()),
+        state,
     );
     engine.run();
 }

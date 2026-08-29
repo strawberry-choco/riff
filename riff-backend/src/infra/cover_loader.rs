@@ -48,3 +48,30 @@ impl CoverLoader for ImageCoverLoader {
         }
     }
 }
+
+/// The library capability's cover port: hand out the still-encoded image
+/// bytes plus their detected container format, so the decode happens once on
+/// the UI thread when the texture is built.
+impl riff_library::infra::ports::CoverLoader for ImageCoverLoader {
+    fn load_cover(
+        &self,
+        source: &CoverSource,
+    ) -> Result<
+        Option<riff_library::infra::ports::CoverImage>,
+        riff_library::app::errors::LibraryError,
+    > {
+        use riff_library::app::errors::LibraryError as LibraryErrorL;
+        let bytes: &[u8] = match source {
+            CoverSource::Embedded(data) => data,
+            CoverSource::Filesystem(path) => &std::fs::read(path)
+                .map_err(|e| LibraryErrorL::CoverLoad(format!("Cover read error: {e}")))?,
+            CoverSource::None => return Ok(None),
+        };
+        let format = image::guess_format(bytes)
+            .map_err(|e| LibraryErrorL::CoverLoad(format!("Image format error: {e}")))?;
+        Ok(Some(riff_library::infra::ports::CoverImage {
+            data: bytes.to_vec(),
+            format,
+        }))
+    }
+}

@@ -8,7 +8,7 @@ mod tests {
 
     #[test]
     fn test_app_state_mutex_safety() {
-        let state = Arc::new(Mutex::new(PlaybackSession::new()));
+        let state = Arc::new(Mutex::new(PlaybackSession::default()));
 
         // Verify the initial state on the main thread before any mutation.
         {

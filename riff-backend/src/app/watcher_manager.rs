@@ -1,10 +1,10 @@
 use crate::app::scan_service::{ScanService, Scans};
-use crate::infra::watcher::FilesystemWatcher;
+use crate::app::traits::FilesystemWatch;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub struct WatcherManager {
-    watcher: Option<FilesystemWatcher>,
+    watcher: Option<Box<dyn FilesystemWatch>>,
     /// Shared clone of the Library Scan Service front end: rescans are
     /// initiated through [`ScanService::request`] and "is a scan running"
     /// is answered by [`ScanService::is_scanning`] — the service's per-path
@@ -20,7 +20,7 @@ pub struct WatcherManager {
 }
 
 impl WatcherManager {
-    pub fn new(watcher: Option<FilesystemWatcher>, scans: ScanService) -> Self {
+    pub fn new(watcher: Option<Box<dyn FilesystemWatch>>, scans: ScanService) -> Self {
         Self {
             watcher,
             scans,
@@ -59,7 +59,7 @@ impl WatcherManager {
     }
 
     /// Consume one already-debounced batch of changed audio-file paths (the
-    /// coalescing window lives upstream in [`FilesystemWatcher`], so no
+    /// coalescing window lives upstream in the concrete watcher adapter, so no
     /// timing state is kept here). Each distinct watched root gets exactly
     /// one decision per batch:
     ///

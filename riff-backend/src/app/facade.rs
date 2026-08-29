@@ -7,7 +7,7 @@
 //!
 //! - The frontend never constructs raw [`crate::domain::PlaybackCommand`]s.
 //!   Every command flows through a facade method.
-//! - The frontend never holds `Arc<Mutex<AppState>>`; that stays backend-side.
+//! - The frontend never holds either session handle; both stay backend-side.
 //! - Every command the facade accepts is infallible at the call site: command
 //!   failures surface later as [`BackendEvent::TypedNotice`] on the event inbox.
 
@@ -215,6 +215,13 @@ pub struct BackendFacade {
     // --- Tag-edit correlation (issue 09) ---------------------------------
     correlation_counter: u64,
     tag_edit_events: Receiver<BackendEvent>,
+
+    // --- Playback notices (issue 01 seam fix) ----------------------------
+    /// Pre-formatted playback error messages from the Playback Coordinator.
+    /// The coordinator sends plain strings (it owns no facade types), and the
+    /// facade stamps each one with playback source and error severity as a
+    /// [`BackendEvent::TypedNotice`].
+    playback_notices: Receiver<String>,
 }
 
 impl Default for BackendFacade {
@@ -243,6 +250,7 @@ impl Default for BackendFacade {
             cancel_scan_intent: None,
             correlation_counter: 0,
             tag_edit_events: crossbeam_channel::unbounded().1,
+            playback_notices: crossbeam_channel::unbounded().1,
         }
     }
 }
@@ -587,6 +595,14 @@ impl BackendFacade {
         while let Ok(ev) = self.tag_edit_events.try_recv() {
             out.push(ev);
         }
+        // Drain playback-error notices into typed notices (issue 01 seam fix).
+        while let Ok(message) = self.playback_notices.try_recv() {
+            out.push(BackendEvent::TypedNotice(NoticePayload {
+                severity: NoticeSeverity::Error,
+                source: NoticeSource::Playback,
+                message,
+            }));
+        }
         out
     }
 
@@ -632,6 +648,13 @@ impl BackendFacade {
 
     pub fn subscribe_tag_edit_events(&mut self, rx: Receiver<BackendEvent>) {
         self.tag_edit_events = rx;
+    }
+
+    /// Subscribe the coordinator's playback-error notice channel. Each
+    /// drained message becomes a [`BackendEvent::TypedNotice`] with
+    /// [`NoticeSource::Playback`] and [`NoticeSeverity::Error`].
+    pub fn subscribe_playback_notices(&mut self, rx: Receiver<String>) {
+        self.playback_notices = rx;
     }
 
     // --- Scan lifecycle (issue 07) ---------------------------------------
@@ -1096,6 +1119,31 @@ mod issue04_events {
 }
 
 #[cfg(test)]
+mod issue01_playback_notices {
+    use super::{BackendEvent, BackendFacade, NoticeSeverity, NoticeSource};
+
+    #[test]
+    fn playback_notice_surfaces_as_typed_notice_with_playback_source_and_error_severity() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut f = BackendFacade::default();
+        f.subscribe_playback_notices(rx);
+
+        tx.send("Playback error: boom".to_string()).unwrap();
+
+        let evs = f.events();
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            BackendEvent::TypedNotice(payload) => {
+                assert_eq!(payload.severity, NoticeSeverity::Error);
+                assert_eq!(payload.source, NoticeSource::Playback);
+                assert_eq!(payload.message, "Playback error: boom");
+            }
+            other => panic!("expected TypedNotice, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
 mod issue08_library_management {
     use super::{BackendEvent, BackendFacade};
 
@@ -1179,13 +1227,14 @@ mod issue10_shutdown {
 mod issue11_boundary {
     use super::BackendFacade;
 
-    /// Compile-time proof that `BackendFacade` has no `AppState` reference.
-    /// If this compiles, the facade is free of `AppState`.
+    /// Compile-time proof that `BackendFacade` holds no session reference.
+    /// If this compiles, the facade is free of `PlaybackSession` and
+    /// `LibrarySession` alike.
     #[allow(dead_code)]
-    fn facade_compiles_without_appstate(_: &BackendFacade) {
+    fn facade_compiles_without_sessions(_: &BackendFacade) {
         // This function existing and compiling is the proof.
-        // Any reference to AppState in BackendFacade would cause a compile error
-        // because AppState is not imported in this module scope.
+        // Any reference to either session in BackendFacade would cause a
+        // compile error because neither is imported in this module scope.
     }
 
     #[test]

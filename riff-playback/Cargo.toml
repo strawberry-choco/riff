@@ -1,0 +1,31 @@
+# riff-playback - the playback capability slice.
+#
+# Pure-Rust crate owning the playback domain: the queue, commands/updates,
+# decoder/output ports, gapless logic, coordinator, transport, and the
+# Up Next read model. Depends only on riff-persistence + pure-Rust utils.
+# No native or external audio deps.
+#
+# riff-backend re-exports this surface at its historical qualified paths
+# (riff_backend::domain::playback::*, riff_backend::app::transport::*, ...)
+# so the frontend and integration tests keep their existing imports.
+
+[package]
+name = "riff-playback"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+riff-persistence = { path = "../riff-persistence" }
+crossbeam-channel = "0.5"
+fastrand = "2"
+thiserror = "2"
+ringbuf = "0.5"
+# Duration math is in std, no chrono needed.
+
+[dev-dependencies]
+riff-persistence = { path = "../riff-persistence" }
+
+[lints]
+workspace = true

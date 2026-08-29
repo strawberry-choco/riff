@@ -1,4 +1,6 @@
-use crate::domain::TrackId;
+use crate::domain::{PlaybackPosition, PlaybackQueue, PlaybackState, PlaybackUpdate, RepeatMode};
+use riff_persistence::track::TrackId;
+use riff_persistence::store::{ScalarSettings, WatchState};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -42,11 +44,7 @@ pub enum BrowseMode {
     Folders,
 }
 
-/// Re-exported from `riff_playback::domain`.
-pub use riff_playback::domain::{PlaybackCommand, PlaybackState, PlaybackPosition, PlaybackQueue, PlaybackUpdate, RepeatMode};
-
 /// Re-exported from `riff_persistence::store`.
-pub use riff_persistence::store::{ScalarSettings, WatchState};
 
 /// The Playback Session: exactly the fields the audio engine, playback
 /// coordinator, and transport touch. Lives behind its own `Arc<Mutex<>>`,
@@ -64,13 +62,13 @@ pub struct PlaybackSession {
     pub playback_state: PlaybackState,
     pub current_position: PlaybackPosition,
     pub current_volume: f32,
-    /// Mute flag (REQ-UI-003-08): independent of `current_volume` — the slider
-    /// keeps its value while muted. The engine always receives
+    /// Mute flag: independent of `current_volume` — the slider keeps its
+    /// value while muted. The engine always receives
     /// [`Self::effective_volume`], so a muted app stays silent until unmuted.
     pub muted: bool,
-    /// `ReplayGain` flag (Task 4.3): opt-in loudness normalization. When
-    /// `true`, the engine applies each track's `REPLAYGAIN_TRACK_GAIN`
-    /// (peak-capped) in the audio output's volume-scaling step.
+    /// `ReplayGain` flag: opt-in loudness normalization. When `true`, the
+    /// engine applies each track's `REPLAYGAIN_TRACK_GAIN` (peak-capped) in
+    /// the audio output's volume-scaling step.
     pub replaygain_enabled: bool,
 }
 
@@ -123,9 +121,10 @@ pub struct UiFlags {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
-    Library,
-    NowPlaying,
-    Settings,
+    Tracks,
+    Artists,
+    Albums,
+    Playlists,
 }
 
 impl Default for PlaybackSession {
@@ -145,7 +144,7 @@ impl Default for LibrarySession {
     fn default() -> Self {
         Self {
             selected_track: None,
-            view_mode: ViewMode::Library,
+            view_mode: ViewMode::Tracks,
             search_query: String::new(),
             library_paths: Vec::new(),
             library_statuses: HashMap::new(),

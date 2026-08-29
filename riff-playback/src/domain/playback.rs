@@ -20,27 +20,27 @@ pub enum RepeatMode {
 /// Playback position information.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PlaybackPosition {
-    pub current: std::time::Duration,
-    pub total: Option<std::time::Duration>,
+    pub current: Duration,
+    pub total: Option<Duration>,
 }
 
 /// Commands sent to the playback engine.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlaybackCommand {
-    Play(crate::domain::TrackId),
+    Play(riff_persistence::track::TrackId),
     Pause,
     Resume,
     Stop,
-    Seek(std::time::Duration),
+    Seek(Duration),
     SetVolume(f32),
     Next,
     Previous,
-    PlayNext(crate::domain::TrackId),
-    AddToQueue(crate::domain::TrackId),
+    PlayNext(riff_persistence::track::TrackId),
+    AddToQueue(riff_persistence::track::TrackId),
     /// Append a batch of tracks in one command, so the queue mutates once
     /// under one lock (folder "play all" enqueues N tracks without N lock
     /// round-trips and N shuffle regenerations).
-    AddMany(Vec<crate::domain::TrackId>),
+    AddMany(Vec<riff_persistence::track::TrackId>),
     PlayPause,
 }
 
@@ -49,7 +49,7 @@ pub enum PlaybackCommand {
 pub enum PlaybackUpdate {
     StateChanged(PlaybackState),
     PositionChanged(PlaybackPosition),
-    TrackChanged(crate::domain::TrackId),
+    TrackChanged(riff_persistence::track::TrackId),
     TrackEnded,
     Error(String),
 }

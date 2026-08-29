@@ -1,10 +1,7 @@
-pub mod audio_engine;
 pub mod cover_resolver;
 pub mod cover_service;
 pub mod errors;
 pub mod facade;
-pub mod gapless;
-pub mod playback_coordinator;
 pub mod playlist_manager;
 mod projection;
 pub mod scan;
@@ -13,9 +10,18 @@ pub mod state;
 pub mod store;
 pub mod tag_edit_service;
 pub mod traits;
-pub mod transport;
 pub mod views;
 pub mod watcher_manager;
+
+/// Re-export playback capability from riff-playback.
+pub use riff_playback::app::{
+    errors::PlaybackError,
+    gapless::{GaplessConditions, QueueConditions, duration_from_frames, elapsed_from_samples, formats_gapless_compatible, frames_from_duration, is_gapless_eligible, pre_buffer_cap, repeat_one_handoff_eligible, samples_from_duration},
+    playback_coordinator::PlaybackCoordinator,
+    projection::PlaybackProjection,
+    state::PlaybackSession,
+    transport::{ChannelTransport, FacadeTransport, Transport, clamp_seek},
+};
 
 use std::sync::{Mutex, MutexGuard};
 

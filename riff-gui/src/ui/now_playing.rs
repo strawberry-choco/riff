@@ -99,7 +99,7 @@ pub enum NowPlayingAction {
 }
 
 /// Everything the stage needs to render one frame. A plain value struct: the
-/// caller reads it out of `AppState`, the widgets never touch state. The
+/// caller reads it out of the session, the widgets never touch state. The
 /// text fields are `Arc`-shared cache handouts (allocation plan 2.2), so a
 /// fresh frame bumps refcounts instead of rebuilding strings.
 #[derive(Default)]

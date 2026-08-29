@@ -21,12 +21,13 @@ mod tests {
 
     #[test]
     fn test_app_state_new() {
-        let state = AppState::new();
-        assert_eq!(state.playback_state, PlaybackState::Stopped);
-        assert!(crate::test_utils::float_close(state.current_volume, 1.0));
-        assert!(state.library_paths.is_empty());
-        assert!(state.library_statuses.is_empty());
-        assert!(state.watch_states.is_empty());
+        let playback = PlaybackSession::new();
+        let library = LibrarySession::new();
+        assert_eq!(playback.playback_state, PlaybackState::Stopped);
+        assert!(crate::test_utils::float_close(playback.current_volume, 1.0));
+        assert!(library.library_paths.is_empty());
+        assert!(library.library_statuses.is_empty());
+        assert!(library.watch_states.is_empty());
     }
 
     #[test]

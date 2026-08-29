@@ -1,12 +1,12 @@
 use thiserror::Error;
 
-/// Errors that can occur in the application layer.
+/// Re-export of the persistence boundary error.
+pub use riff_persistence::errors::StoreError;
+
+/// Failures raised by the music collection: metadata read and write, cover
+/// loading, filesystem IO, library scanning, and track lookup.
 #[derive(Error, Debug, Clone)]
-pub enum AppError {
-    #[error("Decode error: {0}")]
-    Decode(String),
-    #[error("Audio output error: {0}")]
-    AudioOutput(String),
+pub enum LibraryError {
     #[error("Metadata read error: {0}")]
     MetadataRead(String),
     #[error("Failed to write tags: {0}")]
@@ -19,6 +19,13 @@ pub enum AppError {
     Io(String),
     #[error("Track not found: {0}")]
     TrackNotFound(String),
-    #[error("Invalid operation: {0}")]
-    InvalidOperation(String),
+}
+
+/// Failures raised by playback: decoding and audio output.
+#[derive(Error, Debug, Clone)]
+pub enum PlaybackError {
+    #[error("Decode error: {0}")]
+    Decode(String),
+    #[error("Audio output error: {0}")]
+    AudioOutput(String),
 }

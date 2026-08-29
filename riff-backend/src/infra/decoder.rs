@@ -1,6 +1,6 @@
-use crate::app::errors::AppError;
-use crate::app::gapless::{duration_from_frames, frames_from_duration};
+use crate::app::errors::PlaybackError;
 use crate::app::traits::{AudioDecoder, AudioFormatInfo};
+use riff_playback::domain::{duration_from_frames, frames_from_duration};
 use std::path::Path;
 use std::time::Duration;
 use symphonia::core::audio::AudioSpec;
@@ -44,9 +44,9 @@ impl SymphoniaDecoder {
 }
 
 impl AudioDecoder for SymphoniaDecoder {
-    fn open(&mut self, path: &Path) -> Result<AudioFormatInfo, AppError> {
+    fn open(&mut self, path: &Path) -> Result<AudioFormatInfo, PlaybackError> {
         let source = std::fs::File::open(path)
-            .map_err(|e| AppError::Decode(format!("Failed to open file: {e}")))?;
+            .map_err(|e| PlaybackError::Decode(format!("Failed to open file: {e}")))?;
 
         let mss = symphonia::core::io::MediaSourceStream::new(
             Box::new(source),
@@ -61,7 +61,7 @@ impl AudioDecoder for SymphoniaDecoder {
         // In symphonia 0.6 the probe returns the format reader directly.
         let format: Box<dyn FormatReader> = get_probe()
             .probe(&hint, mss, format_opts, metadata_opts)
-            .map_err(|e| AppError::Decode(format!("Probe error: {e}")))?;
+            .map_err(|e| PlaybackError::Decode(format!("Probe error: {e}")))?;
 
         let tracks = format.tracks();
 
@@ -73,17 +73,17 @@ impl AudioDecoder for SymphoniaDecoder {
                     Some(CodecParameters::Audio(ref p)) if p.codec != CODEC_ID_NULL_AUDIO
                 )
             })
-            .ok_or_else(|| AppError::Decode("No audio track found".to_string()))?;
+            .ok_or_else(|| PlaybackError::Decode("No audio track found".to_string()))?;
 
         let track_id = track.id;
         let audio_params = match track.codec_params.as_ref() {
             Some(CodecParameters::Audio(p)) => p.clone(),
-            _ => return Err(AppError::Decode("No audio track found".to_string())),
+            _ => return Err(PlaybackError::Decode("No audio track found".to_string())),
         };
         let track_channels = audio_params.channels.clone();
         let sample_rate = audio_params
             .sample_rate
-            .ok_or_else(|| AppError::Decode("Unknown sample rate".to_string()))?;
+            .ok_or_else(|| PlaybackError::Decode("Unknown sample rate".to_string()))?;
         let channels = track_channels
             .as_ref()
             .map_or(2, |c| u16::try_from(c.count()).unwrap_or(u16::MAX));
@@ -95,7 +95,7 @@ impl AudioDecoder for SymphoniaDecoder {
         let decoder = self
             .codec_registry
             .make_audio_decoder(&audio_params, &decoder_opts)
-            .map_err(|e| AppError::Decode(format!("Decoder creation failed: {e}")))?;
+            .map_err(|e| PlaybackError::Decode(format!("Decoder creation failed: {e}")))?;
 
         self.track_id = track_id;
         self.duration = duration;
@@ -116,7 +116,7 @@ impl AudioDecoder for SymphoniaDecoder {
         })
     }
 
-    fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, AppError> {
+    fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, PlaybackError> {
         // Drain leftover samples from a previous oversized decode before decoding more.
         if !self.pending_samples.is_empty() {
             let available = self.pending_samples.len();
@@ -131,18 +131,18 @@ impl AudioDecoder for SymphoniaDecoder {
         let format = self
             .format_reader
             .as_mut()
-            .ok_or_else(|| AppError::Decode("Decoder not open".to_string()))?;
+            .ok_or_else(|| PlaybackError::Decode("Decoder not open".to_string()))?;
         let decoder = self
             .decoder
             .as_mut()
-            .ok_or_else(|| AppError::Decode("Decoder not initialized".to_string()))?;
+            .ok_or_else(|| PlaybackError::Decode("Decoder not initialized".to_string()))?;
 
         loop {
             let packet = match format.next_packet() {
                 Ok(Some(packet)) => packet,
                 // In symphonia 0.6 end-of-stream is signalled with `Ok(None)`.
                 Ok(None) => return Ok(0),
-                Err(e) => return Err(AppError::Decode(format!("Packet read error: {e}"))),
+                Err(e) => return Err(PlaybackError::Decode(format!("Packet read error: {e}"))),
             };
 
             if packet.track_id != self.track_id {
@@ -151,7 +151,7 @@ impl AudioDecoder for SymphoniaDecoder {
 
             let decoded_audio = decoder
                 .decode(&packet)
-                .map_err(|e| AppError::Decode(format!("Decode error: {e}")))?;
+                .map_err(|e| PlaybackError::Decode(format!("Decode error: {e}")))?;
 
             let spec = decoded_audio.spec().clone();
             if self.spec.as_ref() != Some(&spec) {
@@ -185,11 +185,11 @@ impl AudioDecoder for SymphoniaDecoder {
         }
     }
 
-    fn seek(&mut self, position: Duration) -> Result<(), AppError> {
+    fn seek(&mut self, position: Duration) -> Result<(), PlaybackError> {
         let format = self
             .format_reader
             .as_mut()
-            .ok_or_else(|| AppError::Decode("Decoder not open".to_string()))?;
+            .ok_or_else(|| PlaybackError::Decode("Decoder not open".to_string()))?;
 
         let sample_rate = self
             .spec
@@ -205,7 +205,7 @@ impl AudioDecoder for SymphoniaDecoder {
                     ts: Timestamp::new(sample.cast_signed()),
                 },
             )
-            .map_err(|e| AppError::Decode(format!("Seek error: {e}")))?;
+            .map_err(|e| PlaybackError::Decode(format!("Seek error: {e}")))?;
 
         self.pending_samples.clear();
 

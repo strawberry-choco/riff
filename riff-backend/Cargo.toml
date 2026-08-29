@@ -15,6 +15,15 @@ rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+# Persistence contract: the stored entities and the Application Store ports
+# (extracted to `riff-persistence` by backend-crate-split issue 04; re-exported
+riff-persistence = { path = "../riff-persistence" }
+
+# Playback capability (extracted to `riff-playback` by backend-crate-split issue 05;
+# re-exported below at the historical `riff_backend::domain::playback` /
+# `app::transport` / `app::playback_coordinator` / `app::state` paths).
+riff-playback = { path = "../riff-playback" }
+
 # Audio decoding (pure Rust)
 symphonia = { version = "0.6", features = ["all"] }
 symphonia-adapter-libopus = "0.3"

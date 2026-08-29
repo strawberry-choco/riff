@@ -8,7 +8,7 @@
 //! - [`ScanService`] is the front-end seam the UI holds boxed as
 //!   `Box<dyn Scans>`: it requests scans, cancels the running one, and polls
 //!   drained [`ScanOutcome`]s. It never blocks on scan work and never
-//!   touches `AppState`. It is cheaply shareable (internal `Arc`), so the
+//!   touches the Library Session. It is cheaply shareable (internal `Arc`), so the
 //!   watcher thread holds its own clone and answers "is this root currently
 //!   scanning" from the same per-path state — the single source of truth.
 //! - [`ScanWorker`] is the blocking back-end that owns the entire Library
@@ -281,7 +281,7 @@ impl ScanWorker {
             // Skip paths the store already knows so rescans don't re-read
             // unchanged metadata. One indexed primary-key lookup per path —
             // cheap next to the tag I/O it saves, and the worker stays off
-            // `AppState` entirely.
+            // the Library Session entirely.
             let mut fresh_paths: Vec<PathBuf> = Vec::with_capacity(chunk.len());
             for p in chunk {
                 match self.queries.get_track(&TrackId::from_path(p)) {

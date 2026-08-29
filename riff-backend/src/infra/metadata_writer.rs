@@ -1,4 +1,4 @@
-use crate::app::errors::AppError;
+use crate::app::errors::LibraryError;
 use crate::app::traits::{MetadataWriter, TagEdit};
 use lofty::config::WriteOptions;
 use lofty::prelude::*;
@@ -22,9 +22,9 @@ impl Default for LoftyMetadataWriter {
 }
 
 impl MetadataWriter for LoftyMetadataWriter {
-    fn write_metadata(&self, path: &Path, edit: &TagEdit) -> Result<(), AppError> {
+    fn write_metadata(&self, path: &Path, edit: &TagEdit) -> Result<(), LibraryError> {
         let mut tagged_file = read_from_path(path)
-            .map_err(|e| AppError::MetadataWrite(format!("failed to read file: {e}")))?;
+            .map_err(|e| LibraryError::MetadataWrite(format!("failed to read file: {e}")))?;
 
         // Prefer the primary tag for the format; fall back to any existing
         // tag; otherwise create a new tag of the format's primary type.
@@ -72,7 +72,7 @@ impl MetadataWriter for LoftyMetadataWriter {
         }
 
         tag.save_to_path(path, WriteOptions::default())
-            .map_err(|e| AppError::MetadataWrite(e.to_string()))?;
+            .map_err(|e| LibraryError::MetadataWrite(e.to_string()))?;
 
         Ok(())
     }

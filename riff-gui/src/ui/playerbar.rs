@@ -149,7 +149,7 @@ fn fraction_at(rect: egui::Rect, pos: egui::Pos2) -> f32 {
 // --- Content & actions ------------------------------------------------------------
 
 /// Everything the playerbar needs to render one frame. A plain value struct:
-/// the caller reads it out of `AppState`, the widgets never touch state.
+/// the caller reads it out of the session, the widgets never touch state.
 #[derive(Clone)]
 pub struct PlayerBarContent<'a> {
     /// Real cover texture from the app's LRU cache; `None` paints the

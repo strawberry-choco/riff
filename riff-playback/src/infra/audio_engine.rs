@@ -47,6 +47,11 @@ const COMMAND_POLL: Duration = Duration::from_millis(10);
 /// [`PlaybackCommand`]s, and drives decode/position/gapless logic.
 pub struct AudioEngine {
     cmd_rx: Receiver<PlaybackCommand>,
+    /// A handle back onto the command channel, so queue-navigation commands
+    /// (Next/Previous, idle auto-play after PlayNext/AddToQueue) can
+    /// re-dispatch a full `Play` instead of duplicating its stream-restart
+    /// logic inline.
+    cmd_tx: Sender<PlaybackCommand>,
     update_tx: Sender<PlaybackUpdate>,
     query: Box<dyn LibraryQueryStore + Send>,
     decoder_factory: DecoderFactory,
@@ -59,6 +64,7 @@ impl AudioEngine {
     #[must_use]
     pub fn new(
         cmd_rx: Receiver<PlaybackCommand>,
+        cmd_tx: Sender<PlaybackCommand>,
         update_tx: Sender<PlaybackUpdate>,
         query: Box<dyn LibraryQueryStore + Send>,
         decoder_factory: DecoderFactory,
@@ -67,6 +73,7 @@ impl AudioEngine {
     ) -> Self {
         Self {
             cmd_rx,
+            cmd_tx,
             update_tx,
             query,
             decoder_factory,
@@ -121,6 +128,30 @@ impl AudioEngine {
             if let Some(cmd) = cmd {
                 match cmd {
                     PlaybackCommand::Play(id) => {
+                        // Queue Fill: playing into an empty queue loads the
+                        // whole Library in canonical flat ordering (path
+                        // ascending) so Next/Previous and auto-advance work;
+                        // the requested track becomes current and shuffle
+                        // resets with the replaced queue.
+                        {
+                            let mut session = self
+                                .session
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if session.queue.tracks.is_empty()
+                                && let Ok(all_ids) = self.query.all_track_ids()
+                                && !all_ids.is_empty()
+                            {
+                                session.queue.tracks = all_ids;
+                                session.queue.current_index = session
+                                    .queue
+                                    .tracks
+                                    .iter()
+                                    .position(|queue_id| queue_id == &id);
+                                session.queue.set_shuffle(false);
+                            }
+                        }
+
                         // A dispatch of the already-current track (the
                         // coordinator's auto-Play after a handoff TrackEnded)
                         // is swallowed: the handoff already switched without a
@@ -276,39 +307,71 @@ impl AudioEngine {
                         // Session volume is updated by the coordinator/transport
                     }
 
-                    PlaybackCommand::Next => {
-                        // Handled by coordinator via TrackEnded; engine just stops current
-                        if primary_decoder.is_some() {
-                            primary_decoder.take();
-                            if output_started {
-                                self.output.stop();
-                                output_started = false;
-                            }
-                        }
-                    }
+                    PlaybackCommand::Next => self.skip(
+                        SkipDirection::Forward,
+                        &mut primary_decoder,
+                        &mut current_format,
+                        &mut output_started,
+                        &mut current_track_id,
+                    ),
 
-                    PlaybackCommand::Previous => {
-                        // Handled by coordinator; engine just stops current
-                        if primary_decoder.is_some() {
-                            primary_decoder.take();
-                            if output_started {
-                                self.output.stop();
-                                output_started = false;
-                            }
-                        }
-                    }
+                    PlaybackCommand::Previous => self.skip(
+                        SkipDirection::Backward,
+                        &mut primary_decoder,
+                        &mut current_format,
+                        &mut output_started,
+                        &mut current_track_id,
+                    ),
 
                     PlaybackCommand::PlayNext(id) => {
-                        // Queue manipulation handled by coordinator; engine just notes
-                        let _ = self.update_tx.send(PlaybackUpdate::TrackChanged(id));
+                        // Queue manipulation lives here in the engine: the
+                        // session queue is the one traversal state, and the
+                        // coordinator only hears about what happened.
+                        let idle = {
+                            let mut session = self
+                                .session
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            session.queue.insert_next(id.clone());
+                            current_track_id.is_none()
+                        };
+                        if idle {
+                            let _ = self.cmd_tx.send(PlaybackCommand::Play(id));
+                        }
                     }
 
-                    PlaybackCommand::AddToQueue(_id) => {
-                        // Queue manipulation handled by coordinator
+                    PlaybackCommand::AddToQueue(id) => {
+                        let idle = {
+                            let mut session = self
+                                .session
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            session.queue.append(id.clone());
+                            current_track_id.is_none()
+                        };
+                        if idle {
+                            let _ = self.cmd_tx.send(PlaybackCommand::Play(id));
+                        }
                     }
 
-                    PlaybackCommand::AddMany(_ids) => {
-                        // Queue manipulation handled by coordinator
+                    PlaybackCommand::AddMany(ids) => {
+                        // One lock, one queue mutation for the whole batch
+                        // (folder "play all" enqueues N tracks without N
+                        // shuffle regenerations). Same idle-auto-play
+                        // contract as AddToQueue: the first id starts
+                        // playback when idle.
+                        let first = ids.first().cloned();
+                        let idle = {
+                            let mut session = self
+                                .session
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            session.queue.append_many(ids);
+                            current_track_id.is_none()
+                        };
+                        if idle && let Some(first) = first {
+                            let _ = self.cmd_tx.send(PlaybackCommand::Play(first));
+                        }
                     }
 
                     PlaybackCommand::PlayPause => {
@@ -533,6 +596,51 @@ impl AudioEngine {
             let _ = self.update_tx.send(PlaybackUpdate::TrackEnded);
         }
     }
+
+    /// Manual skip (Next/Previous): move the session queue — the one
+    /// traversal state — and re-dispatch a full `Play` for the new current
+    /// track, exactly as if the user had started it. When nothing follows in
+    /// the requested direction, stop the stream and mark playback stopped,
+    /// like the coordinator does at a queue end.
+    fn skip(
+        &mut self,
+        direction: SkipDirection,
+        primary_decoder: &mut Option<Box<dyn AudioDecoder>>,
+        current_format: &mut Option<AudioFormatInfo>,
+        output_started: &mut bool,
+        current_track_id: &mut Option<TrackId>,
+    ) {
+        let next_id = {
+            let mut session = self
+                .session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match direction {
+                SkipDirection::Forward => session.queue.advance().cloned(),
+                SkipDirection::Backward => session.queue.previous().cloned(),
+            }
+        };
+        if let Some(id) = next_id {
+            let _ = self.cmd_tx.send(PlaybackCommand::Play(id));
+            return;
+        }
+        if *output_started {
+            self.output.stop();
+            *output_started = false;
+        }
+        primary_decoder.take();
+        *current_format = None;
+        *current_track_id = None;
+        let _ = self
+            .update_tx
+            .send(PlaybackUpdate::StateChanged(PlaybackState::Stopped));
+    }
+}
+
+/// Which way a manual skip moves through the queue.
+enum SkipDirection {
+    Forward,
+    Backward,
 }
 
 /// Gapless pre-decode state (Task 4.1). Purely additive: when a valid,

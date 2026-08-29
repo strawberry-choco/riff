@@ -1,5 +1,4 @@
-use crate::app::errors::PlaybackError;
-use crate::app::traits::{AudioDecoder, AudioFormatInfo};
+use riff_playback::app::errors::PlaybackError;
 use riff_playback::domain::{duration_from_frames, frames_from_duration};
 use riff_playback::infra::ports::AudioDecoder as EngineAudioDecoder;
 use riff_playback::infra::ports::AudioFormatInfo as EngineAudioFormatInfo;
@@ -15,6 +14,15 @@ use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::Timestamp;
 use symphonia::default::get_probe;
+
+/// Format facts reported when a source is opened: the stream's shape plus its
+/// total duration when the container declares one.
+#[derive(Debug, Clone)]
+pub struct DecoderFormat {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub duration: Option<Duration>,
+}
 
 pub struct SymphoniaDecoder {
     codec_registry: CodecRegistry,
@@ -32,6 +40,17 @@ pub struct SymphoniaDecoder {
     scratch: Vec<f32>,
 }
 
+/// Build the shared codec registry: symphonia's enabled defaults plus the
+/// Opus adapter. The native codec dependencies live in this crate, so the
+/// registry is built here and the composition root never names symphonia.
+#[must_use]
+pub fn default_codec_registry() -> CodecRegistry {
+    let mut registry = CodecRegistry::new();
+    symphonia::default::register_enabled_codecs(&mut registry);
+    registry.register_audio_decoder::<symphonia_adapter_libopus::OpusDecoder>();
+    registry
+}
+
 impl SymphoniaDecoder {
     pub fn new(codec_registry: CodecRegistry) -> Self {
         Self {
@@ -46,10 +65,10 @@ impl SymphoniaDecoder {
             scratch: Vec::new(),
         }
     }
-}
 
-impl AudioDecoder for SymphoniaDecoder {
-    fn open(&mut self, path: &Path) -> Result<AudioFormatInfo, PlaybackError> {
+    /// Open the file at `path`, probe its container, and mint a decoder for
+    /// the first audio track.
+    pub fn open(&mut self, path: &Path) -> Result<DecoderFormat, PlaybackError> {
         self.source_path = path.to_path_buf();
         let source = std::fs::File::open(path)
             .map_err(|e| PlaybackError::Decode(format!("Failed to open file: {e}")))?;
@@ -115,14 +134,14 @@ impl AudioDecoder for SymphoniaDecoder {
         self.decoder = Some(decoder);
         self.format_reader = Some(format);
 
-        Ok(AudioFormatInfo {
+        Ok(DecoderFormat {
             sample_rate,
             channels,
             duration,
         })
     }
 
-    fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, PlaybackError> {
+    pub fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, PlaybackError> {
         // Drain leftover samples from a previous oversized decode before decoding more.
         if !self.pending_samples.is_empty() {
             let available = self.pending_samples.len();
@@ -191,7 +210,7 @@ impl AudioDecoder for SymphoniaDecoder {
         }
     }
 
-    fn seek(&mut self, position: Duration) -> Result<(), PlaybackError> {
+    pub fn seek(&mut self, position: Duration) -> Result<(), PlaybackError> {
         let format = self
             .format_reader
             .as_mut()
@@ -222,11 +241,13 @@ impl AudioDecoder for SymphoniaDecoder {
         Ok(())
     }
 
-    fn duration(&self) -> Option<Duration> {
+    pub fn duration(&self) -> Option<Duration> {
         self.duration
     }
 
-    fn close(&mut self) {
+    /// Release the currently open file's resources without opening a new
+    /// file. Safe to call when nothing is open.
+    pub fn close(&mut self) {
         self.format_reader = None;
         self.decoder = None;
         self.spec = None;
@@ -238,9 +259,9 @@ impl AudioDecoder for SymphoniaDecoder {
 }
 
 /// The playback engine's decoder port, served over the same symphonia
-/// internals as the richer backend port above. EOF (`Ok(0)` on the backend
-/// port) maps to `None`; a mid-stream decode error also reads as EOF because
-/// the engine's loop has no error arm.
+/// internals as the richer inherent API above. EOF (`Ok(0)` on the decoder)
+/// maps to `None`; a mid-stream decode error also reads as EOF because the
+/// engine's loop has no error arm.
 impl EngineAudioDecoder for SymphoniaDecoder {
     fn source_path(&self) -> &Path {
         &self.source_path
@@ -250,8 +271,7 @@ impl EngineAudioDecoder for SymphoniaDecoder {
         &mut self,
         path: &Path,
     ) -> Result<EngineAudioFormatInfo, riff_playback::app::errors::PlaybackError> {
-        let info = AudioDecoder::open(self, path)
-            .map_err(|e| riff_playback::app::errors::PlaybackError::Decode(e.to_string()))?;
+        let info = self.open(path)?;
         Ok(EngineAudioFormatInfo {
             sample_rate: info.sample_rate,
             channels: info.channels,
@@ -259,7 +279,7 @@ impl EngineAudioDecoder for SymphoniaDecoder {
     }
 
     fn next_frames(&mut self, buf: &mut [f32]) -> Option<usize> {
-        match AudioDecoder::next_frames(self, buf) {
+        match self.next_frames(buf) {
             Ok(0) => None,
             Ok(n) => Some(n),
             Err(e) => {
@@ -270,7 +290,7 @@ impl EngineAudioDecoder for SymphoniaDecoder {
     }
 
     fn seek(&mut self, position: Duration) -> Duration {
-        let _ = AudioDecoder::seek(self, position);
+        let _ = self.seek(position);
         position
     }
 

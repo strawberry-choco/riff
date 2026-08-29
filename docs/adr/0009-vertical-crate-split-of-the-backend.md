@@ -1,6 +1,6 @@
 # Vertical Crate Split of the Backend
 
-**Status**: Accepted
+**Status**: Accepted (amended 2026-08-29 against the as-built outcome)
 **Date**: 2026-08-28
 
 The headless backend lives in one crate (`riff-backend`) containing four different
@@ -81,3 +81,30 @@ their ports. `riff-backend` depends on all four. The frontend depends only on
 - `riff-infra` preserves clean internal module seams (store / audio / media /
   filesystem) so it can be split further later without redesign if compile times ever
   demand it.
+
+## As-Built Amendments (2026-08-29)
+
+Verification of the shipped layout against this ADR found the decision itself sound
+(five crates, the dependency chain, the persistence-crate criterion, the two seam
+fixes, the Up Next move, the error split, and the frontend depending only on
+`riff-backend` all match). Three placements deviated from the crate bullet lists
+above and are recorded here as the as-built truth:
+
+- **The facade-adjacent services stayed in `riff-backend`.** The ADR's `riff-library`
+  bullet lists "views", "tag editing", and "filesystem watching" among the slice's
+  contents; as built, `riff-library` owns the underlying use cases and ports
+  (Session Projections, the Library Scan Service, playlist management, cover
+  resolution and service, the `MetadataWriter`/`TagEdit`, `CoverLoader`, and
+  `FilesystemWatch` ports), while the orchestration the frontend actually holds —
+  the Session Views read facade (`views.rs`), the Tag Edit service
+  (`tag_edit_service.rs`), the Watcher Manager (`watcher_manager.rs`), and the
+  library half of the session state (`LibrarySession` in `state.rs`) — remained in
+  `riff-backend`, where they are facade surface rather than collection capability.
+- **The facade transport lives in `riff-playback`.** `FacadeTransport` is defined
+  beside `ChannelTransport` and the `Transport` trait in `riff-playback`'s
+  transport module; `riff-backend`'s Composition Root wires it around the shared
+  facade. The crate bullets did not assign the facade transport; the spec had
+  placed it in `riff-backend`.
+- **The `riff-backend` re-export surface serves the test suite as well as the
+  frontend.** Historical `riff_backend::…` import paths resolve for both consumers;
+  the workspace-root test crate imports through it.

@@ -37,8 +37,8 @@ pub mod ui_tests;
 // `crate::app::scan_service::ScanService` resolve from inside the test modules.
 pub use riff_backend::app;
 pub use riff_backend::domain;
-pub use riff_backend::infra;
 pub use riff_gui::ui;
+pub use riff_infra;
 
 // Prelude of bare names used inside the test bodies through `use super::*`.
 // Kept explicit (rather than glob re-exports) to avoid name collisions.
@@ -56,13 +56,12 @@ pub use riff_backend::domain::{
     Album, Artist, PlaybackCommand, PlaybackPosition, PlaybackState, PlaybackUpdate, Playlist,
     PlaylistId, RepeatMode, SmartPlaylistKind, Track, TrackId, TrackMetadata,
 };
-pub use riff_backend::infra::metadata_reader::parse_replaygain_gain;
-pub use riff_backend::infra::{
-    AudioFileScanner, CpalAudioOutput, FilesystemWatcher, ImageCoverLoader, LoftyMetadataReader,
-    LoftyMetadataWriter, SymphoniaDecoder,
-};
 pub use riff_gui::ui::app::{TagEditState, format_duration, lru_insert};
 pub use riff_gui::ui::settings::{expand_tilde, suggest_directories};
+pub use riff_infra::audio::{CpalAudioOutput, SymphoniaDecoder};
+pub use riff_infra::filesystem::{AudioFileScanner, FilesystemWatcher};
+pub use riff_infra::media::metadata_reader::parse_replaygain_gain;
+pub use riff_infra::media::{ImageCoverLoader, LoftyMetadataReader, LoftyMetadataWriter};
 
 // Standard-library names referenced unqualified in some suites.
 pub use std::sync::atomic::AtomicBool;
@@ -131,6 +130,7 @@ pub mod test_utils {
 /// tests) build on the same scripted decoder/output behavior.
 pub mod mocks {
     use riff_backend::app::errors::{LibraryError, PlaybackError, StoreError};
+
     use riff_backend::app::state::PlaybackSession;
     use riff_backend::app::store::{
         LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings, SettingsStore,
@@ -144,6 +144,9 @@ pub mod mocks {
         Album, Artist, CoverSource, Playlist, PlaylistId, RepeatMode, SmartPlaylistKind, Track,
         TrackId, TrackMetadata,
     };
+    /// The library slice's copy of the error enum, used by the library
+    /// slice's [`MetadataWriter`] port that the real lofty writer serves.
+    use riff_library::app::errors::LibraryError as LibraryErrorL;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use std::time::Duration;
@@ -526,10 +529,10 @@ pub mod mocks {
     }
 
     impl MetadataWriter for MockMetadataWriter {
-        fn write_metadata(&self, path: &Path, edit: &TagEdit) -> Result<(), LibraryError> {
+        fn write_tags(&self, path: &Path, edit: &TagEdit) -> Result<(), LibraryErrorL> {
             let spent = self.writes.lock().unwrap().len();
             if self.fail || self.fail_after_writes.is_some_and(|n| spent >= n) {
-                return Err(LibraryError::MetadataWrite(format!(
+                return Err(LibraryErrorL::MetadataWrite(format!(
                     "permission denied: {}",
                     path.display()
                 )));

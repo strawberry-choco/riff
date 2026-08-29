@@ -1,11 +1,16 @@
-# riff-backend — the headless backend: domain, app, infra, worker threads.
+# riff-backend — the application API: Backend Facade, typed events and
+# notices, facade transport, and the Composition Root.
 #
-# Owns audio decoding, audio output, metadata reading/writing, cover loading,
-# filesystem scanning, filesystem watching, and the SQLite Application Store.
-# Contains NO UI crate dependencies (egui/eframe/kittest/resvg).
+# Owns the facade and its event surface, the Composition Root (the one place
+# that names both the slice-defined ports and the concrete `riff-infra`
+# adapters), and the worker threads those adapters run. This crate carries no
+# native dependencies of its own and NO UI crate dependencies
+# (egui/eframe/kittest/resvg).
 #
-# Publicly re-exports every module under app/, domain/, infra/ so the root
-# `riff` package can re-export `riff::app`, `riff::domain`, `riff::infra`.
+# Re-exports the read-side surface the frontend renders (entities, Session
+# Views, projections, Transport) so the frontend keeps one dependency.
+# Concrete adapters are NOT re-exported — only the Composition Root names
+# them.
 
 [package]
 name = "riff-backend"
@@ -30,27 +35,9 @@ riff-playback = { path = "../riff-playback" }
 # / `app::watcher_manager` / `app::projection` / `app::views` paths).
 riff-library = { path = "../riff-library" }
 
-# Audio decoding (pure Rust)
-symphonia = { version = "0.6", features = ["all"] }
-symphonia-adapter-libopus = "0.3"
-
-# Audio output (cross-platform)
-cpal = "0.18"
-
-# Lock-free SPSC ring buffer between the decoder thread and the cpal callback
-ringbuf = "0.5"
-
-# Metadata reading (pure Rust)
-lofty = "0.25"
-
-# Image decoding for cover art
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-
-# File system scanning
-walkdir = "2"
-
-# SQLite Application Store
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+# Adapter crate (extracted to `riff-infra` by backend-crate-split issue 07;
+# named only by the Composition Root in src/composition.rs).
+riff-infra = { path = "../riff-infra" }
 
 # Error handling
 thiserror = "2"
@@ -58,30 +45,15 @@ thiserror = "2"
 # Logging
 tracing = "0.1"
 
-# Config directories
-directories = "6"
-
 # Threading / sync
 crossbeam-channel = "0.5"
-crossbeam-queue = "0.3"
-
-# Filesystem watching
-notify = "8"
-notify-debouncer-full = "0.7"
 
 # Random for shuffle
 fastrand = "2"
 
 [dev-dependencies]
+# The scan_bench example builds a synthetic library fixture in a tempdir.
 tempfile = "3.8"
-crossbeam-channel = "0.5"
 
-
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "allow", priority = -1 }
-needless_pass_by_value = "allow"
-module_name_repetitions = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-must_use_candidate = "allow"
+[lints]
+workspace = true

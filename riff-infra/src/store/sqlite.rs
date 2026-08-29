@@ -6,17 +6,16 @@
 //! set. Open or migrate failures are fatal startup errors surfaced as clear
 //! [`StoreError`]s rather than silent fallbacks.
 
-use crate::app::MutexExt;
-use crate::app::errors::StoreError;
-use crate::app::state::{ScalarSettings, WatchState};
-use crate::app::store::{
-    LOST_GEMS_THRESHOLD, LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings,
-    SettingsStore, StoreChanged, StoreGeneration, StoreMigrations,
-};
-use crate::domain::{
-    Album, Artist, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId, TrackMetadata,
-};
+use crate::MutexExt;
 use crossbeam_channel::Sender;
+use riff_persistence::errors::StoreError;
+use riff_persistence::playlist::{Playlist, PlaylistId};
+use riff_persistence::store::{
+    LOST_GEMS_THRESHOLD, LibraryMutationStore, LibraryQueryStore, PlaylistEntry, PlaylistStore,
+    ScalarSettings, Settings, SettingsStore, StoreChanged, StoreGeneration, StoreMigrations,
+    WatchState,
+};
+use riff_persistence::track::{Album, Artist, SmartPlaylistKind, Track, TrackId, TrackMetadata};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -595,10 +594,7 @@ impl PlaylistStore for SqliteStore {
     /// when the referenced track row exists. Dangling references stay
     /// listed with their track unset (ADR 0001); unknown playlist ids yield
     /// an empty `Vec`.
-    fn load_playlist_entries(
-        &self,
-        id: &PlaylistId,
-    ) -> Result<Vec<crate::app::store::PlaylistEntry>, StoreError> {
+    fn load_playlist_entries(&self, id: &PlaylistId) -> Result<Vec<PlaylistEntry>, StoreError> {
         self.with_connection(|conn| {
             // The two tables share no column names, so the unqualified
             // [`TRACK_COLUMNS`] resolve to `tracks`; the trailing
@@ -620,7 +616,7 @@ impl PlaylistStore for SqliteStore {
                 } else {
                     None
                 };
-                Ok(crate::app::store::PlaylistEntry {
+                Ok(PlaylistEntry {
                     valid: track.is_some(),
                     id: TrackId(entry_id),
                     track,
@@ -1893,99 +1889,5 @@ impl SettingsStore for SqliteStore {
             }
         })
         .map_err(|e| StoreError::InvalidOperation(format!("failed to save watch states: {e}")))
-    }
-}
-
-#[cfg(test)]
-mod issue04_emit_beside_bump {
-    use crossbeam_channel::unbounded;
-
-    use super::{SqliteStore, StoreChanged};
-    use crate::app::store::PlaylistStore;
-    use crate::domain::TrackId;
-    use tempfile::NamedTempFile;
-
-    fn fresh_store() -> (SqliteStore, crossbeam_channel::Receiver<StoreChanged>) {
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.into_temp_path();
-        let (tx, rx) = unbounded();
-        let store = SqliteStore::open_and_migrate(&path, tx).unwrap();
-        (store, rx)
-    }
-
-    #[test]
-    fn committed_playlist_mutation_emits_one_notify_and_bumps() {
-        let (mut store, rx) = fresh_store();
-        let id = TrackId::from_path(std::path::Path::new("track://x/1"));
-
-        let gen_before = store.playlist_generation().current();
-        assert_eq!(gen_before, 0);
-
-        let created = store.create_playlist("A", &[id]).unwrap();
-        let _ = created;
-
-        let gen_after = store.playlist_generation().current();
-        assert_eq!(gen_after, 1);
-
-        // Drain the receiver: exactly one Playlists(1) and nothing else.
-        let mut events: Vec<StoreChanged> = Vec::new();
-        while let Ok(e) = rx.try_recv() {
-            events.push(e);
-        }
-        assert_eq!(events, vec![StoreChanged::Playlists(1)]);
-    }
-
-    #[test]
-    fn failing_playlist_mutation_emits_nothing_and_does_not_bump() {
-        use crate::domain::PlaylistId;
-
-        let (mut store, rx) = fresh_store();
-        // Unknown id cannot be renamed — should return false.
-        let bad_id = PlaylistId("not-a-playlist".to_string());
-
-        let gen_before = store.playlist_generation().current();
-
-        let renamed = store.rename_playlist(&bad_id, "X").unwrap();
-        assert!(!renamed);
-
-        let gen_after = store.playlist_generation().current();
-        assert_eq!(gen_before, gen_after);
-
-        // No StoreChanged should have been sent.
-        assert!(rx.is_empty());
-    }
-
-    #[test]
-    fn committed_library_mutation_emits_one_notify_and_bumps() {
-        use crate::app::store::LibraryMutationStore;
-        use std::path::PathBuf;
-
-        let (mut store, rx) = fresh_store();
-        let track = crate::domain::Track {
-            id: TrackId::from_path(std::path::Path::new("track://x/1")),
-            file_path: PathBuf::from("track://x/1"),
-            metadata: crate::domain::TrackMetadata::default(),
-            duration: None,
-            sample_rate: None,
-            channels: None,
-            play_count: 0,
-            last_played: None,
-            date_added: None,
-            search_text: String::new(),
-        };
-
-        let gen_before = store.library_generation().current();
-        assert_eq!(gen_before, 0);
-
-        store.apply_scan_batch(&[track]).unwrap();
-
-        let gen_after = store.library_generation().current();
-        assert_eq!(gen_after, 1);
-
-        let mut events: Vec<StoreChanged> = Vec::new();
-        while let Ok(e) = rx.try_recv() {
-            events.push(e);
-        }
-        assert_eq!(events, vec![StoreChanged::Library(1)]);
     }
 }

@@ -1,6 +1,5 @@
-use crate::app::errors::PlaybackError;
-use crate::app::traits::AudioOutput;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use riff_playback::app::errors::PlaybackError;
 use ringbuf::{
     HeapCons, HeapProd, HeapRb,
     traits::{Consumer, Observer, Producer, Split},
@@ -15,7 +14,7 @@ use std::time::{Duration, Instant};
 /// samples) always fits, so steady-state writes never block or drop samples.
 const CHUNK_SLACK_SAMPLES: usize = 4096;
 
-/// How long [`AudioOutput::write_samples`] may wait on the callback to free
+/// How long [`CpalAudioOutput::write_samples`] may wait on the callback to free
 /// ring space before giving up. Only trips when the stream is effectively
 /// dead (device gone) while the ring is full.
 const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -195,8 +194,10 @@ fn audio_callback_u16(
     }
 }
 
-impl AudioOutput for CpalAudioOutput {
-    fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), PlaybackError> {
+impl CpalAudioOutput {
+    /// Pick the default output device and build a fresh ring sized to the
+    /// decode loop's backpressure watermark.
+    pub fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), PlaybackError> {
         self.sample_rate = sample_rate;
         self.channels = channels;
 
@@ -218,7 +219,7 @@ impl AudioOutput for CpalAudioOutput {
         Ok(())
     }
 
-    fn start(&mut self) -> Result<(), PlaybackError> {
+    pub fn start(&mut self) -> Result<(), PlaybackError> {
         let device = self
             .device
             .as_ref()
@@ -317,7 +318,7 @@ impl AudioOutput for CpalAudioOutput {
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<(), PlaybackError> {
+    pub fn stop(&mut self) {
         if let Some(ref stream) = self.stream.0 {
             let _ = stream.pause();
         }
@@ -325,16 +326,15 @@ impl AudioOutput for CpalAudioOutput {
         // parked inside its closure. Any samples left in the ring are
         // discarded when the next session's `initialize` builds a fresh ring.
         self.stream = SendStream(None);
-        Ok(())
     }
 
-    fn buffer_len(&self) -> usize {
+    pub fn buffer_len(&self) -> usize {
         // Lock-free: the producer side can observe the fill level while the
         // callback consumes concurrently.
         self.producer.as_ref().map_or(0, Observer::occupied_len)
     }
 
-    fn clear_buffer(&mut self) {
+    pub fn clear_buffer(&mut self) {
         // Producer-side clear: bump the flush generation. The callback notices
         // on its next invocation (and re-checks at the end of the current one,
         // so a mid-callback clear can never play stale samples), drains the
@@ -346,7 +346,7 @@ impl AudioOutput for CpalAudioOutput {
         }
     }
 
-    fn write_samples(&mut self, samples: &[f32]) -> Result<usize, PlaybackError> {
+    pub fn write_samples(&mut self, samples: &[f32]) -> Result<usize, PlaybackError> {
         let Some(producer) = self.producer.as_mut() else {
             return Err(PlaybackError::AudioOutput(
                 "Audio output not initialized".to_string(),
@@ -376,16 +376,16 @@ impl AudioOutput for CpalAudioOutput {
         Ok(written)
     }
 
-    fn set_volume(&mut self, volume: f32) {
+    pub fn set_volume(&mut self, volume: f32) {
         self.volume.store(f32::to_bits(volume), Ordering::Relaxed);
     }
 
-    fn set_replaygain(&mut self, factor: f32) {
+    pub fn set_replaygain(&mut self, factor: f32) {
         self.replaygain
             .store(f32::to_bits(factor), Ordering::Relaxed);
     }
 
-    fn effective_sample_rate(&self) -> u32 {
+    pub fn effective_sample_rate(&self) -> u32 {
         self.effective_sample_rate
     }
 }
@@ -399,22 +399,22 @@ impl riff_playback::infra::ports::AudioOutput for CpalAudioOutput {
         &mut self,
         format: riff_playback::infra::ports::AudioFormatInfo,
     ) -> Result<(), riff_playback::app::errors::PlaybackError> {
-        AudioOutput::initialize(self, format.sample_rate, format.channels)
+        self.initialize(format.sample_rate, format.channels)
             .map_err(|e| riff_playback::app::errors::PlaybackError::AudioOutput(e.to_string()))?;
-        AudioOutput::start(self)
+        self.start()
             .map_err(|e| riff_playback::app::errors::PlaybackError::AudioOutput(e.to_string()))
     }
 
     fn write(&mut self, samples: &[f32]) -> usize {
-        AudioOutput::write_samples(self, samples).unwrap_or(0)
+        self.write_samples(samples).unwrap_or(0)
     }
 
     fn stop(&mut self) {
-        let _ = AudioOutput::stop(self);
+        self.stop();
     }
 
     fn set_volume(&mut self, volume: f32) {
-        AudioOutput::set_volume(self, volume);
+        self.set_volume(volume);
     }
 
     fn latency(&self) -> u32 {

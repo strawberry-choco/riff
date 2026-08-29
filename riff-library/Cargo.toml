@@ -18,16 +18,8 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 riff-persistence = { path = "../riff-persistence" }
 crossbeam-channel = "0.5"
-fastrand = "2"
 thiserror = "2"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-lofty = "0.25"
-walkdir = "2"
 tracing = "0.1"
-
-[dev-dependencies]
-riff-persistence = { path = "../riff-persistence" }
-tempfile = "3.8"
 
 [lints]
 workspace = true

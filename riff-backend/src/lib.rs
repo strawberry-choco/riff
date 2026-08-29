@@ -1,10 +1,13 @@
-//! riff Backend — headless domain, application, and infrastructure.
+//! riff Backend — the application API.
 //!
-//! Owns the domain, use cases, infrastructure adapters, worker threads, and
-//! the Application Store. Contains no UI crate dependency. Publicly re-exports
-//! every module under `domain/`, `app/`, `infra/` so the root `riff` package
-//! can re-export them verbatim.
+//! Owns the Backend Facade, the typed event and notice surface, the facade
+//! transport, and the Composition Root (`composition::AppRuntime::spawn`),
+//! which is the only place that knows both the slice-defined ports and the
+//! concrete `riff-infra` adapters — and the worker threads that run them.
+//! Re-exports the read-side surface the frontend renders (entities, Session
+//! Views, projections, Transport) so the frontend keeps one dependency.
+//! Contains no UI crate dependency and no native dependencies of its own.
 
 pub mod app;
+pub mod composition;
 pub mod domain;
-pub mod infra;

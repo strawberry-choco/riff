@@ -1,10 +1,10 @@
 # Data Model
 
-This document describes the concrete types that make up riff's state: the pure domain entities in `src/domain/`, the application-layer `AppState`, and the port traits that define the boundary to infrastructure. The Application Store (`riff.sqlite3`) is the single authoritative — and single — implementation of collection semantics: there is no second in-memory copy of the library, and views read the store through port queries and Session Projections. See [./persistence.md](./persistence.md) for how each type is stored and [./architecture.md](./architecture.md) for where these types live and how layers may use them.
+This document describes the concrete types that make up riff's state: the stored entities in `riff-persistence`, the playback domain types in `riff-playback`, the two session structs, and the port traits that define the boundaries infrastructure implements. The Application Store (`riff.sqlite3`) is the single authoritative — and single — implementation of collection semantics: there is no second in-memory copy of the library, and views read the store through port queries and Session Projections. See [./persistence.md](./persistence.md) for how each type is stored and [./architecture.md](./architecture.md) for where these types live and how crates may use them.
 
-## Domain Entities (`src/domain/`)
+## Stored Entities (`riff-persistence`)
 
-The domain layer has no external crate dependencies — no serde, no I/O. Its types are plain data plus pure logic.
+The persistence contract has no dependencies at all — no serde, no I/O. Its types are plain data plus pure logic.
 
 ### TrackId
 
@@ -29,10 +29,11 @@ pub struct Track {
     pub play_count: u32,
     pub last_played: Option<SystemTime>,
     pub date_added: Option<SystemTime>,
+    pub search_text: String,
 }
 ```
 
-A single audio file in the library. `duration`, `sample_rate`, and `channels` are optional because they come from metadata probing and may be unavailable for some files. `play_count`, `last_played`, and `date_added` are the per-track play-history facts persisted in the store's `tracks` table.
+A single audio file in the library. `duration`, `sample_rate`, and `channels` are optional because they come from metadata probing and may be unavailable for some files. `play_count`, `last_played`, and `date_added` are the per-track play-history facts persisted in the store's `tracks` table. `search_text` is the derived lowercased search corpus (title, artist, album, album artist) that the store's search queries match against.
 
 ### TrackMetadata
 
@@ -94,7 +95,7 @@ pub enum CoverSource {
 
 Where a track's cover art comes from: bytes embedded in the file's tags, an image file on disk, or nowhere. This type is not serialized; it is a transient value passed to the cover loader.
 
-### PlaybackState, RepeatMode, PlaybackPosition
+### PlaybackState, RepeatMode, PlaybackPosition (`riff-playback`)
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +113,7 @@ pub struct PlaybackPosition {
 
 `PlaybackState` is the playback state machine. `RepeatMode` drives queue repetition (`None -> All -> One -> None` via `toggle_repeat`). `PlaybackPosition` carries the current elapsed time and the optional total; it is not serialized.
 
-### PlaybackCommand and PlaybackUpdate
+### PlaybackCommand and PlaybackUpdate (`riff-playback`)
 
 ```rust
 pub enum PlaybackCommand {
@@ -129,9 +130,9 @@ pub enum PlaybackUpdate {
 }
 ```
 
-These are the messages that cross the playback channels. `PlaybackCommand` flows from the UI and tray to the audio engine; `PlaybackUpdate` flows back from the engine to the update processor. Neither is serialized. See [./threading-model.md](./threading-model.md) for the channel directions.
+These are the messages that cross the playback channels. `PlaybackCommand` flows from the UI and tray (through their `FacadeTransport`s) to the audio engine; `PlaybackUpdate` flows back from the engine to the Playback Coordinator. Neither is serialized. See [./threading-model.md](./threading-model.md) for the channel directions.
 
-### PlaybackQueue
+### PlaybackQueue (`riff-playback`)
 
 ```rust
 #[derive(Debug, Clone, Default)]
@@ -140,27 +141,42 @@ pub struct PlaybackQueue {
     pub current_index: Option<usize>,
     pub shuffle: bool,
     pub repeat: RepeatMode,
-    pub shuffled_indices: Vec<usize>,
+    pub shuffled_indices: VecDeque<usize>,
     pub shuffle_history: Vec<usize>,
 }
 ```
 
-The playback queue and its shuffle/repeat state. `next()` and `previous()` implement ordering, shuffle (using `rand` to permute `shuffled_indices`), and repeat semantics; `shuffle_history` lets `previous()` walk back through a shuffled sequence. Mutation helpers include `append`, `insert_next`, `remove`, `set_shuffle`, `toggle_repeat`, and `clear`.
+The playback queue and its shuffle/repeat state. `next()` and `previous()` implement ordering, shuffle (using `fastrand` to permute `shuffled_indices`), and repeat semantics; `shuffle_history` lets `previous()` walk back through a shuffled sequence. Mutation helpers include `append`, `insert_next`, `remove`, `set_shuffle`, `toggle_repeat`, and `clear`.
 
-## Application State (`src/app/state.rs`)
+## Session State
 
-`AppState` is the single struct that holds all runtime state. It lives behind `Arc<Mutex<_>>`, is read by the UI every frame, and is written mostly by the update processor thread. It is never persisted as a whole: the library collection lives only in the Application Store and is read through port queries and Session Projections; playlists are a Session Projection refreshed from the store after each committed change.
+The former single `AppState` split into two session structs (ADR 0009), each behind its own `Arc<Mutex<_>>` and owned by the capability that mutates it. Neither is persisted as a whole: the library collection lives only in the Application Store and is read through port queries and Session Projections, and playlists are a Session Projection refreshed from the store after each committed change.
+
+### `PlaybackSession` (`riff-playback/src/app/state.rs`)
+
+The half the audio engine, Playback Coordinator, and transports touch:
 
 ```rust
-pub struct AppState {
+pub struct PlaybackSession {
     pub queue: PlaybackQueue,
     pub playback_state: PlaybackState,
     pub current_position: PlaybackPosition,
     pub current_volume: f32,
     pub muted: bool,
+    pub replaygain_enabled: bool,
+}
+```
+
+`muted` is independent of `current_volume` — the slider keeps its value while muted, and the engine always receives `effective_volume()`, so muting never moves the slider. `replaygain_enabled` opts into loudness normalization; the engine applies each track's peak-capped gain during decoding.
+
+### `LibrarySession` (`riff-backend/src/app/state.rs`)
+
+Everything that is not playback — selection, views, search, library roots and their statuses, scan status, browse mode, UI flags, and per-root watch states:
+
+```rust
+pub struct LibrarySession {
     pub selected_track: Option<TrackId>,
     pub view_mode: ViewMode,
-    pub window_visible: bool,
     pub search_query: String,
     pub library_paths: Vec<PathBuf>,
     pub library_statuses: HashMap<PathBuf, LibraryStatus>,
@@ -169,33 +185,21 @@ pub struct AppState {
     pub selected_folder: Option<PathBuf>,
     pub ui_flags: UiFlags,
     pub watch_states: HashMap<PathBuf, WatchState>,
-    pub replaygain_enabled: bool,
-    pub playlists: Vec<Playlist>,
 }
 ```
 
-Field by field:
-
-| Field | Type | Meaning |
-|-------|------|---------|
-| `queue` | `PlaybackQueue` | Current playback queue and shuffle/repeat state. |
-| `playback_state` | `PlaybackState` | Stopped, Playing, or Paused. |
-| `current_position` | `PlaybackPosition` | Elapsed and total time for the current track. |
-| `current_volume` | `f32` | Playback volume (default `1.0`). |
-| `muted` | `bool` | Mute flag; independent of `current_volume` — the engine receives `effective_volume()`, so muting never moves the slider. |
-| `selected_track` | `Option<TrackId>` | The track selected in the UI details panel (view-independent). |
-| `view_mode` | `ViewMode` | Which top-level view is showing: `Library`, `NowPlaying`, or `Settings`. |
-| `window_visible` | `bool` | Whether the main window is visible (toggled from the tray). |
-| `search_query` | `String` | The current search bar text. |
-| `library_paths` | `Vec<PathBuf>` | Registered library root folders. Persisted in the Application Store's typed settings tables. |
-| `library_statuses` | `HashMap<PathBuf, LibraryStatus>` | Per-path scan status. |
-| `scan_status` | `String` (optional) | A human-readable status/error line for the most recent scan or playback error. |
-| `browse_mode` | `BrowseMode` | Whether the sidebar shows the metadata hierarchy (`Library`) or the folder tree (`Folders`). |
-| `selected_folder` | `Option<PathBuf>` | The selected folder in Folders browse mode. |
-| `ui_flags` | `UiFlags` | Library-browser and accessibility flags: `show_artists_view`, `advanced_mode`, `high_contrast`. |
-| `watch_states` | `HashMap<PathBuf, WatchState>` | Per-path folder-watch state. |
-| `replaygain_enabled` | `bool` | Opt-in ReplayGain loudness normalization. |
-| `playlists` | `Vec<Playlist>` | Session Projection of the store's Playlists section; refreshed after each committed change, never authoritative. Playlists survive a Clear Library. |
+| Field | Meaning |
+|-------|---------|
+| `selected_track` | The track selected in the UI details panel (view-independent). |
+| `view_mode` | Which top-level View is showing: `Library`, `NowPlaying`, or `Settings`. |
+| `search_query` | The current search bar text. |
+| `library_paths` | Registered library root folders. Persisted in the Application Store's typed settings tables. |
+| `library_statuses` | Per-path scan status. |
+| `scan_status` | A human-readable status/error line for the most recent scan or playback error (playback errors arrive as typed notices through the facade). |
+| `browse_mode` | Whether the sidebar shows the metadata hierarchy (`Library`) or the folder tree (`Folders`). |
+| `selected_folder` | The selected folder in Folders browse mode. |
+| `ui_flags` | Library-browser and display flags: `show_artists_view`, `advanced_mode`, `high_contrast`, `compact_density`, and per-column toggles (track numbers, artwork, duration, play count, date added). |
+| `watch_states` | Per-path folder-watch state. |
 
 ### Supporting enums
 
@@ -208,62 +212,70 @@ pub enum WatchState { Disabled, Enabled, Warning(String) }  // default: Disabled
 
 `LibraryStatus` tracks a path through its scan lifecycle. `BrowseMode` and `ViewMode` select which UI is rendered. `WatchState` records whether folder watching is active, disabled by the user, or unavailable for a system reason (the `Warning` variant carries a human-readable reason); it persists in the Application Store's watch-state table.
 
-## Application Store Ports (`src/app/store.rs`)
+## Application Store Ports (`riff-persistence`)
 
-The Application Store is riff's single authoritative persistent state — Library collection, Playlists, and Settings in one SQLite database. The app layer defines one port per section, and infrastructure (`SqliteStore` in `src/infra/store.rs`) implements them over a shared connection:
+The Application Store is riff's single authoritative persistent state — Library collection, Playlists, and Settings in one SQLite database. The persistence contract defines one port per section, and the adapter (`SqliteStore` in `riff-infra/src/store/sqlite.rs`) implements them over one shared, mutex-guarded connection:
 
 - `SettingsStore` — load/save preferences: scalar settings, library paths, watch states.
 - `PlaylistStore` — playlist CRUD plus `load_playlist_entries`, which returns each entry as a `PlaylistEntry { id, track, valid }` with its Library validity computed by a SQL LEFT JOIN against tracks (dangling references stay listed with `valid == false`).
-- `LibraryMutationStore` — scan batches, play-history recording, targeted tag refresh, removal by root, and Clear Library. Every committed mutation bumps the session generation inside the mutation adapter, so Session Projections refetch.
+- `LibraryMutationStore` — scan batches, play-history recording, targeted tag refresh, removal by root, and Clear Library. Every committed mutation bumps the session generations (library and playlist) inside the store, so Session Projections refetch.
 - `LibraryQueryStore` — all library reads: single-track lookup, bounded flat/search windows, canonical `all_track_ids()` ordering (path ascending) for Queue Fill, artist/album browsing, folder queries, smart playlists (parameterized by the relocated `LOST_GEMS_THRESHOLD`), and search counts.
 
-Views never query SQLite directly: per-frame reads go through the Session Projections in `src/app/projection.rs` — bounded windows for the flat list and search, browsing/folder/smart-playlist caches, and the playback-side projection holding the current Track, the Up Next window, and the details panel's selected Track. All projections invalidate on generation bumps.
+Views never query SQLite directly: per-frame reads go through the Session Projections — the library-side projections in `riff-library/src/app/projection.rs` (bounded windows for the flat list and search, browsing/folder/smart-playlist caches) and the playback-side projection in `riff-playback/src/app/projection.rs` (current Track, Up Next window, details-panel selection). All projections invalidate on generation bumps; the frontend reaches them through the Session Views facade in `riff-backend`.
 
-## Port Traits (`src/app/traits.rs`)
+## Port Traits (`riff-playback`, `riff-library`, `riff-persistence`)
 
-The application layer defines the contracts that infrastructure implements. These traits are the seam that keeps external crates out of `app/` and `domain/`.
+Each crate defines the contracts that `riff-infra` implements. These traits are the seam that keeps external crates out of the slices.
 
 ```rust
+// riff-playback/src/infra/ports.rs
+pub type DecoderFactory = Box<dyn Fn() -> Box<dyn AudioDecoder> + Send>;
+
 pub trait AudioDecoder: Send {
-    fn open(&mut self, path: &PathBuf) -> Result<AudioFormatInfo, AppError>;
-    fn next_frames(&mut self, samples: usize) -> Result<Option<Vec<f32>>, AppError>;
-    fn seek(&mut self, position: Duration) -> Result<(), AppError>;
+    fn source_path(&self) -> &Path;
+    fn init(&mut self, path: &Path) -> Result<AudioFormatInfo, PlaybackError>;
+    fn next_frames(&mut self, buf: &mut [f32]) -> Option<usize>; // None at EOF
+    fn seek(&mut self, position: Duration) -> Duration;          // returns actual position
     fn duration(&self) -> Option<Duration>;
-    fn close(&mut self) {}
 }
 
 pub trait AudioOutput: Send {
-    fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), AppError>;
-    fn start(&mut self) -> Result<(), AppError>;
-    fn stop(&mut self) -> Result<(), AppError>;
-    fn write_samples(&mut self, samples: &[f32]) -> Result<usize, AppError>;
+    fn start(&mut self, format: AudioFormatInfo) -> Result<(), PlaybackError>;
+    fn write(&mut self, samples: &[f32]) -> usize;
+    fn stop(&mut self);
     fn set_volume(&mut self, volume: f32);
-    fn buffer_len(&self) -> usize;
-    fn clear_buffer(&mut self);
+    fn latency(&self) -> u32;
+}
+```
+
+```rust
+// riff-library/src/infra/ports.rs (re-exported through app/traits.rs)
+pub trait MetadataReader: Send + Sync {
+    fn read_all(
+        &self,
+        path: &Path,
+    ) -> Result<(TrackMetadata, Duration, CoverSource, AudioFormatInfo), LibraryError>;
+    fn read_cover_source(&self, path: &Path) -> Result<CoverSource, LibraryError>;
 }
 
-pub trait MetadataReader: Send + Sync {
-    fn read_metadata(&self, path: &PathBuf) -> Result<TrackMetadata, AppError>;
-    fn read_duration(&self, path: &PathBuf) -> Result<Option<Duration>, AppError>;
-    fn read_cover_source(&self, path: &PathBuf) -> Result<CoverSource, AppError>;
-    fn read_audio_format(&self, path: &PathBuf) -> Result<AudioFormatInfo, AppError>;
-    fn read_all(&self, path: &PathBuf)
-        -> Result<(TrackMetadata, Option<Duration>, CoverSource, AudioFormatInfo), AppError>;
+pub trait MetadataWriter: Send + Sync {
+    fn write_tags(&self, path: &Path, edit: &TagEdit) -> Result<(), LibraryError>;
 }
 
 pub trait CoverLoader: Send + Sync {
-    fn load_cover(&self, source: &CoverSource) -> Result<Option<CoverImage>, AppError>;
+    fn load_cover(&self, source: &CoverSource) -> Result<Option<CoverImage>, LibraryError>;
+}
+
+pub trait FilesystemWatch: Send {
+    fn watch(&mut self, path: &Path) -> Result<(), LibraryError>;
+    fn unwatch(&mut self, path: &Path) -> Result<(), LibraryError>;
+    // ...
 }
 ```
 
-Two supporting data types cross these traits:
+Two supporting data types cross these traits — `AudioFormatInfo` (`sample_rate`, `channels`) and `CoverImage` (`width`, `height`, `rgba`).
 
-```rust
-pub struct AudioFormatInfo { pub sample_rate: u32, pub channels: u16, pub duration: Option<Duration> }
-pub struct CoverImage { pub width: u32, pub height: u32, pub rgba: Vec<u8> }
-```
-
-The concrete implementations are `SymphoniaDecoder`, `CpalAudioOutput`, `LoftyMetadataReader`, and `ImageCoverLoader` in `src/infra/`. See [./dependencies.md](./dependencies.md) for the crates behind them.
+The concrete implementations — `SymphoniaDecoder`, `CpalAudioOutput`, `LoftyMetadataReader`, `LoftyMetadataWriter`, `ImageCoverLoader`, `AudioFileScanner`, `FilesystemWatcher`, and `SqliteStore` — all live in `riff-infra`. `CpalAudioOutput` additionally exposes the richer surface the engine port maps onto (`initialize`/`start`, which owns the device-default-rate fallback, `clear_buffer`, `set_replaygain`, `effective_sample_rate`). See [./dependencies.md](./dependencies.md) for the crates behind them.
 
 ## See also
 

@@ -1,4 +1,4 @@
-use crate::app::errors::AppError;
+use crate::app::errors::LibraryError;
 use crate::app::traits::{AudioFormatInfo, MetadataReader};
 use crate::domain::{CoverSource, TrackMetadata};
 use lofty::file::TaggedFile;
@@ -59,9 +59,9 @@ impl LoftyMetadataReader {
         Self
     }
 
-    fn read_tagged_file(path: &Path) -> Result<TaggedFile, AppError> {
+    fn read_tagged_file(path: &Path) -> Result<TaggedFile, LibraryError> {
         read_from_path(path)
-            .map_err(|e| AppError::MetadataRead(format!("Failed to read file: {e}")))
+            .map_err(|e| LibraryError::MetadataRead(format!("Failed to read file: {e}")))
     }
 
     /// The primary tag of a tagged file, falling back to the first attached
@@ -152,7 +152,7 @@ impl LoftyMetadataReader {
 }
 
 impl MetadataReader for LoftyMetadataReader {
-    fn read_metadata(&self, path: &Path) -> Result<TrackMetadata, AppError> {
+    fn read_metadata(&self, path: &Path) -> Result<TrackMetadata, LibraryError> {
         let tagged_file = Self::read_tagged_file(path)?;
         let Some(tag) = Self::best_tag(&tagged_file) else {
             return Ok(TrackMetadata::default());
@@ -160,12 +160,12 @@ impl MetadataReader for LoftyMetadataReader {
         Ok(Self::metadata_from_tag(tag))
     }
 
-    fn read_duration(&self, path: &Path) -> Result<Option<Duration>, AppError> {
+    fn read_duration(&self, path: &Path) -> Result<Option<Duration>, LibraryError> {
         let tagged_file = Self::read_tagged_file(path)?;
         Ok(Some(tagged_file.properties().duration()))
     }
 
-    fn read_cover_source(&self, path: &Path) -> Result<CoverSource, AppError> {
+    fn read_cover_source(&self, path: &Path) -> Result<CoverSource, LibraryError> {
         let tagged_file = Self::read_tagged_file(path)?;
         Ok(match Self::best_tag(&tagged_file) {
             Some(tag) => Self::cover_from_tag(tag),
@@ -173,7 +173,7 @@ impl MetadataReader for LoftyMetadataReader {
         })
     }
 
-    fn read_audio_format(&self, path: &Path) -> Result<AudioFormatInfo, AppError> {
+    fn read_audio_format(&self, path: &Path) -> Result<AudioFormatInfo, LibraryError> {
         let tagged_file = Self::read_tagged_file(path)?;
         Ok(Self::audio_format_from(&tagged_file))
     }
@@ -188,7 +188,7 @@ impl MetadataReader for LoftyMetadataReader {
             CoverSource,
             AudioFormatInfo,
         ),
-        AppError,
+        LibraryError,
     > {
         let tagged_file = Self::read_tagged_file(path)?;
 

@@ -1,4 +1,4 @@
-use crate::app::errors::AppError;
+use crate::app::errors::LibraryError;
 use crate::app::traits::{CoverImage, CoverLoader, MetadataReader};
 use crate::domain::CoverSource;
 use std::path::Path;
@@ -20,7 +20,7 @@ impl CoverResolver {
         }
     }
 
-    pub fn resolve(&self, track_path: &Path) -> Result<Option<CoverImage>, AppError> {
+    pub fn resolve(&self, track_path: &Path) -> Result<Option<CoverImage>, LibraryError> {
         let source = self.metadata_reader.read_cover_source(track_path)?;
 
         match source {
@@ -37,10 +37,10 @@ impl CoverResolver {
         }
     }
 
-    fn find_filesystem_cover(track_path: &Path) -> Result<CoverSource, AppError> {
+    fn find_filesystem_cover(track_path: &Path) -> Result<CoverSource, LibraryError> {
         let parent = track_path
             .parent()
-            .ok_or_else(|| AppError::Io("Track has no parent directory".to_string()))?;
+            .ok_or_else(|| LibraryError::Io("Track has no parent directory".to_string()))?;
 
         let candidates = [
             "cover.jpg",

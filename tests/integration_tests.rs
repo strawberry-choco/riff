@@ -1,14 +1,14 @@
 #[cfg(test)]
 mod tests {
     use crate::app::MutexExt;
-    use crate::app::state::AppState;
+    use crate::app::state::PlaybackSession;
     use crate::domain::{PlaybackCommand, PlaybackState, TrackId};
     use crossbeam_channel::unbounded;
     use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_app_state_mutex_safety() {
-        let state = Arc::new(Mutex::new(AppState::new()));
+        let state = Arc::new(Mutex::new(PlaybackSession::new()));
 
         // Verify the initial state on the main thread before any mutation.
         {
@@ -244,7 +244,7 @@ mod tests {
         // The event channel stays idle: tests feed synthetic batches that
         // stand in for debouncer flushes arriving over the boundary.
         let watcher = FilesystemWatcher::new(unbounded().0).expect("watcher must build");
-        let mut mgr = WatcherManager::new(Some(watcher), scans);
+        let mut mgr = WatcherManager::new(Some(Box::new(watcher)), scans);
         mgr.start_watching(dir.path()).expect("watchable root");
         (mgr, dir, root)
     }

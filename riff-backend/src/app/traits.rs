@@ -1,4 +1,4 @@
-use crate::app::errors::AppError;
+use crate::app::errors::{LibraryError, PlaybackError};
 use crate::domain::{CoverSource, TrackMetadata};
 use std::path::Path;
 use std::time::Duration;
@@ -10,7 +10,7 @@ pub type DecoderFactory = Box<dyn Fn() -> Box<dyn AudioDecoder> + Send>;
 
 /// Trait for audio decoders (implemented by infrastructure).
 pub trait AudioDecoder: Send {
-    fn open(&mut self, path: &Path) -> Result<AudioFormatInfo, AppError>;
+    fn open(&mut self, path: &Path) -> Result<AudioFormatInfo, PlaybackError>;
     /// Decode the next packet of interleaved f32 samples into `out`,
     /// returning the number of samples written. Callers reuse one buffer
     /// across calls so steady-state decoding performs no per-chunk heap
@@ -18,8 +18,8 @@ pub trait AudioDecoder: Send {
     ///
     /// A short fill (fewer samples than `out.len()`) is normal: one call
     /// never spans more than one decoded packet.
-    fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, AppError>;
-    fn seek(&mut self, position: Duration) -> Result<(), AppError>;
+    fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, PlaybackError>;
+    fn seek(&mut self, position: Duration) -> Result<(), PlaybackError>;
     fn duration(&self) -> Option<Duration>;
     /// Release the currently open file's resources (format reader, decoder,
     /// sample buffer) without opening a new file. Safe to call when nothing is
@@ -37,10 +37,10 @@ pub struct AudioFormatInfo {
 
 /// Trait for audio output (implemented by infrastructure).
 pub trait AudioOutput: Send {
-    fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), AppError>;
-    fn start(&mut self) -> Result<(), AppError>;
-    fn stop(&mut self) -> Result<(), AppError>;
-    fn write_samples(&mut self, samples: &[f32]) -> Result<usize, AppError>;
+    fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), PlaybackError>;
+    fn start(&mut self) -> Result<(), PlaybackError>;
+    fn stop(&mut self) -> Result<(), PlaybackError>;
+    fn write_samples(&mut self, samples: &[f32]) -> Result<usize, PlaybackError>;
     fn set_volume(&mut self, volume: f32);
     /// Set the `ReplayGain` linear factor (Task 4.3) applied alongside volume
     /// in the sample-scaling step. Default no-op so mocks/simple outputs need
@@ -63,10 +63,10 @@ pub trait AudioOutput: Send {
 
 /// Trait for metadata readers (implemented by infrastructure).
 pub trait MetadataReader: Send + Sync {
-    fn read_metadata(&self, path: &Path) -> Result<TrackMetadata, AppError>;
-    fn read_duration(&self, path: &Path) -> Result<Option<Duration>, AppError>;
-    fn read_cover_source(&self, path: &Path) -> Result<CoverSource, AppError>;
-    fn read_audio_format(&self, path: &Path) -> Result<AudioFormatInfo, AppError>;
+    fn read_metadata(&self, path: &Path) -> Result<TrackMetadata, LibraryError>;
+    fn read_duration(&self, path: &Path) -> Result<Option<Duration>, LibraryError>;
+    fn read_cover_source(&self, path: &Path) -> Result<CoverSource, LibraryError>;
+    fn read_audio_format(&self, path: &Path) -> Result<AudioFormatInfo, LibraryError>;
     fn read_all(
         &self,
         path: &Path,
@@ -77,13 +77,13 @@ pub trait MetadataReader: Send + Sync {
             CoverSource,
             AudioFormatInfo,
         ),
-        AppError,
+        LibraryError,
     >;
 }
 
 /// Trait for cover art loaders (implemented by infrastructure).
 pub trait CoverLoader: Send + Sync {
-    fn load_cover(&self, source: &CoverSource) -> Result<Option<CoverImage>, AppError>;
+    fn load_cover(&self, source: &CoverSource) -> Result<Option<CoverImage>, LibraryError>;
 }
 
 /// A requested edit to a track's metadata tags.
@@ -133,7 +133,26 @@ impl TagEdit {
 /// Trait for metadata (tag) writers (implemented by infrastructure).
 pub trait MetadataWriter: Send {
     /// Write the `Some` fields of `edit` to the tags of the file at `path`.
-    fn write_metadata(&self, path: &Path, edit: &TagEdit) -> Result<(), AppError>;
+    fn write_metadata(&self, path: &Path, edit: &TagEdit) -> Result<(), LibraryError>;
+}
+
+/// Trait for filesystem watchers (implemented by infrastructure).
+///
+/// Watches directory roots for audio-file changes; debounced batches of
+/// changed paths are delivered over a channel wired at construction time, not
+/// through these methods. The watcher manager codes against this port and
+/// never names the concrete adapter — the composition root injects the real
+/// watcher. Errors carry a human-readable reason string so no infrastructure
+/// error type leaks into the application layer.
+pub trait FilesystemWatch: Send {
+    /// Register `path` for recursive watching. On failure the `Err` carries
+    /// the raw reason, which the caller prefixes into the user-facing
+    /// `WatchState::Warning` diagnostic.
+    fn watch(&mut self, path: &Path) -> Result<(), String>;
+    /// Stop watching `path`. Failures are surfaced for symmetry but callers
+    /// typically ignore them — unwatching an already-gone root is not a
+    /// user-facing error.
+    fn unwatch(&mut self, path: &Path) -> Result<(), String>;
 }
 
 /// Decoded cover image ready for UI display.

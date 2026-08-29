@@ -1,7 +1,7 @@
 //! Pure helpers for gapless playback (Task 4.1) and sample-exact position
 //! tracking.
 //!
-//! The audio engine (`src/app/audio_engine.rs`) is too hardware-bound to
+//! The audio engine (`infra/audio_engine.rs`) is too hardware-bound to
 //! exercise headlessly in CI (no audio device), so every decision the
 //! engine makes about gapless handoffs is factored into pure functions here
 //! and the engine calls THESE — the tested logic is the real logic.
@@ -13,11 +13,8 @@
 
 use std::time::Duration;
 
-/// Nanoseconds per second, as `u128` so intermediate products of
-/// duration-to-sample conversions cannot overflow.
-const NANOS_PER_SEC: u128 = 1_000_000_000;
-/// Same constant as `u64` for use in contexts that do not need the wide type.
-const NANOS_PER_SEC_U64: u64 = 1_000_000_000;
+use crate::domain::playback::NANOS_PER_SEC;
+pub use crate::domain::playback::{duration_from_frames, frames_from_duration};
 
 /// Gapless handoff keeps the same cpal stream running across the track
 /// boundary, so it requires the current and next track to share the exact
@@ -37,10 +34,9 @@ pub fn formats_gapless_compatible(
 /// decision inputs stay cohesive.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QueueConditions {
-    /// Shuffle mode: the successor is not predictable far enough ahead.
     pub shuffle: bool,
-    /// Repeat-one looping is handled by its own engine EOF branch.
     pub repeat_one: bool,
+    pub has_successor: bool,
 }
 
 /// Conditions that decide whether a gapless handoff may be attempted at EOF.
@@ -48,10 +44,9 @@ pub struct QueueConditions {
 /// [`is_gapless_eligible`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GaplessConditions {
-    pub queue: QueueConditions,
-    /// Current and successor formats share rate/channels.
-    pub formats_compatible: bool,
-    /// A pre-buffered successor exists and is the queue's natural successor.
+    pub shuffle: bool,
+    pub repeat_one: bool,
+    pub format_compatible: bool,
     pub has_successor: bool,
 }
 
@@ -61,9 +56,9 @@ pub struct GaplessConditions {
 /// excluded because the next track is not predictable far enough ahead.
 #[must_use]
 pub fn is_gapless_eligible(conditions: GaplessConditions) -> bool {
-    !conditions.queue.shuffle
-        && !conditions.queue.repeat_one
-        && conditions.formats_compatible
+    !conditions.shuffle
+        && !conditions.repeat_one
+        && conditions.format_compatible
         && conditions.has_successor
 }
 
@@ -89,38 +84,14 @@ pub fn repeat_one_handoff_eligible(
     !shuffle && repeat_one && format_compatible && has_successor
 }
 
-/// Convert a frame count to a [`Duration`] at the given sample rate using
-/// exact integer arithmetic. Degenerate (zero) rates clamp to 1 Hz rather
-/// than dividing by zero.
-#[must_use]
-pub fn duration_from_frames(frames: u64, rate: u32) -> Duration {
-    let rate = u64::from(rate.max(1));
-    let secs = frames / rate;
-    let nanos = (frames % rate).saturating_mul(NANOS_PER_SEC_U64) / rate;
-    // nanos < 1e9 always holds (nanos < NANOS_PER_SEC_U64), so this cannot fail.
-    Duration::new(secs, u32::try_from(nanos).unwrap_or(0))
-}
-
-/// Convert a [`Duration`] to a frame count at the given sample rate using
-/// exact integer arithmetic. Saturates instead of overflowing for durations
-/// beyond ~584 billion years; degenerate (zero) rates clamp to 1 Hz.
-#[must_use]
-pub fn frames_from_duration(position: Duration, rate: u32) -> u64 {
-    let rate = u128::from(u64::from(rate.max(1)));
-    let total_nanos =
-        u128::from(position.as_secs()) * NANOS_PER_SEC + u128::from(position.subsec_nanos());
-    let frames = total_nanos * rate / NANOS_PER_SEC;
-    u64::try_from(frames).unwrap_or(u64::MAX)
-}
-
 /// Interleaved-sample count equivalent of a [`Duration`] at the given format:
 /// `frames_from_duration` times the channel count. Saturates rather than
 /// overflowing.
 #[must_use]
 pub fn samples_from_duration(position: Duration, rate: u32, channels: u16) -> usize {
     let frames = frames_from_duration(position, rate);
-    let samples = frames.saturating_mul(u64::from(channels));
-    usize::try_from(samples).unwrap_or(usize::MAX)
+    let total_samples = u128::from(frames) * u128::from(channels);
+    usize::try_from(total_samples).unwrap_or(usize::MAX)
 }
 
 /// Sample-exact elapsed time from a count of decoded interleaved samples.
@@ -131,8 +102,11 @@ pub fn samples_from_duration(position: Duration, rate: u32, channels: u16) -> us
 /// than dividing by zero.
 #[must_use]
 pub fn elapsed_from_samples(samples: usize, rate: u32, channels: u16) -> Duration {
-    let frame_count = samples / usize::from(channels).max(1);
-    duration_from_frames(frame_count as u64, rate)
+    if rate == 0 || channels == 0 {
+        return Duration::ZERO;
+    }
+    let frames = samples / usize::from(channels);
+    duration_from_frames(frames.try_into().unwrap_or(u64::MAX), rate)
 }
 
 /// Max seconds of pre-buffered successor audio (see the engine's
@@ -147,14 +121,88 @@ pub fn pre_buffer_cap(rate: u32, channels: u16, seconds: f32) -> usize {
     if !seconds.is_finite() || seconds <= 0.0 {
         return 0;
     }
-    // Clamp so the integer conversion below stays in range; a pre-buffer of
-    // more than an hour of audio is never requested.
-    let capped = f64::from(seconds.min(MAX_PRE_BUFFER_SECONDS));
-    let duration = Duration::from_secs_f64(capped);
-    // frames-per-second * seconds, computed as integer nanosecond math.
-    let frames_per_sec = u128::from(rate) * u128::from(channels);
-    let total_nanos =
-        u128::from(duration.as_secs()) * NANOS_PER_SEC + u128::from(duration.subsec_nanos());
-    let samples = total_nanos * frames_per_sec / NANOS_PER_SEC;
-    usize::try_from(samples).unwrap_or(usize::MAX)
+    let capped = seconds.min(MAX_PRE_BUFFER_SECONDS);
+    let samples_per_sec = u64::from(rate) * u64::from(channels);
+    (samples_per_sec as f64 * capped as f64) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::playback::{duration_from_frames, frames_from_duration};
+
+    #[test]
+    fn frames_duration_roundtrip() {
+        let rate = 48000;
+        let frames = 123456789;
+        let d = duration_from_frames(frames, rate);
+        let back = frames_from_duration(d, rate);
+        assert_eq!(back, frames);
+    }
+
+    #[test]
+    fn zero_rate_clamped() {
+        let d = duration_from_frames(100, 0);
+        assert_eq!(d, Duration::from_secs(100));
+    }
+
+    #[test]
+    fn gapless_compatible_same_format() {
+        assert!(formats_gapless_compatible(48000, 2, 48000, 2));
+        assert!(!formats_gapless_compatible(48000, 2, 44100, 2));
+        assert!(!formats_gapless_compatible(48000, 2, 48000, 1));
+    }
+
+    #[test]
+    fn is_gapless_eligible_basic() {
+        assert!(is_gapless_eligible(GaplessConditions {
+            shuffle: false,
+            repeat_one: false,
+            format_compatible: true,
+            has_successor: true,
+        }));
+        assert!(!is_gapless_eligible(GaplessConditions {
+            shuffle: true,
+            repeat_one: false,
+            format_compatible: true,
+            has_successor: true,
+        }));
+        assert!(!is_gapless_eligible(GaplessConditions {
+            shuffle: false,
+            repeat_one: true,
+            format_compatible: true,
+            has_successor: true,
+        }));
+    }
+
+    #[test]
+    fn repeat_one_handoff_eligible_basic() {
+        assert!(repeat_one_handoff_eligible(false, true, true, true));
+        assert!(!repeat_one_handoff_eligible(true, true, true, true));
+        assert!(!repeat_one_handoff_eligible(false, true, false, true));
+        assert!(!repeat_one_handoff_eligible(false, true, true, false));
+    }
+
+    #[test]
+    fn samples_from_duration_matches_manual() {
+        let d = Duration::from_secs(2);
+        let samples = samples_from_duration(d, 48000, 2);
+        assert_eq!(samples, 48000 * 2 * 2);
+    }
+
+    #[test]
+    fn elapsed_from_samples_inverse() {
+        let d = Duration::from_millis(1234);
+        let samples = samples_from_duration(d, 48000, 2);
+        let back = elapsed_from_samples(samples, 48000, 2);
+        assert_eq!(back, d);
+    }
+
+    #[test]
+    fn pre_buffer_cap_clamped() {
+        assert_eq!(pre_buffer_cap(48000, 2, 4.0), 48000 * 2 * 4);
+        assert_eq!(pre_buffer_cap(48000, 2, -1.0), 0);
+        assert_eq!(pre_buffer_cap(48000, 2, f32::NAN), 0);
+        assert_eq!(pre_buffer_cap(48000, 2, 10000.0), 48000 * 2 * 3600);
+    }
 }

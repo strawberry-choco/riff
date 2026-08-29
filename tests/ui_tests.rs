@@ -14,6 +14,7 @@ mod tests {
     // UI holds (`Box<dyn SettingsStore>`) over a real SQLite database,
     // dropping and reopening it to simulate a restart.
 
+    use crate::integration_helpers::create_test_sessions;
     use riff_backend::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
     use std::path::PathBuf;
 
@@ -150,8 +151,10 @@ mod tests {
         std::fs::write(&legacy_path, "{{{ corrupt legacy json").unwrap();
         let legacy_bytes_before = std::fs::read(&legacy_path).unwrap();
 
+        let (playback, library) = create_test_sessions();
         riff_gui::ui::app::load_persisted_state(
-            &mut AppState::new(),
+            &playback,
+            &library,
             boxed_store(&dir).as_ref(),
             &crate::mocks::MockTransport::new(),
         );
@@ -690,11 +693,10 @@ mod tests {
             store.clear_library().expect("clear works");
         }
 
-        // Restore like the UI's first frame: curation comes back intact.
-        // Playlists need no hydration step — the seam reads the store live.
-        let mut state = AppState::new();
+        let (playback, library) = create_test_sessions();
         riff_gui::ui::app::load_persisted_state(
-            &mut state,
+            &playback,
+            &library,
             boxed_store(&dir).as_ref(),
             &crate::mocks::MockTransport::new(),
         );
@@ -2335,21 +2337,25 @@ mod tests {
     use riff_gui::ui::playerbar::PlayerBarAction;
 
     use crate::mocks::TransportIntent;
-
-    /// Apply one action against a fresh state + recording transport + mock
-    /// store, returning all three for inspection.
+    /// Apply one action against fresh `PlaybackSession` + `LibrarySession` +
+    /// recording transport + mock store, returning all four for inspection.
+    /// The two session values are the type the [`apply_player_bar_action`]
+    /// function takes after the two-session split.
+    #[allow(clippy::type_complexity)]
     fn applied(
         action: PlayerBarAction,
     ) -> (
-        AppState,
+        PlaybackSession,
+        LibrarySession,
         crate::mocks::MockTransport,
         crate::mocks::MockSettingsStore,
     ) {
-        let mut state = AppState::new();
+        let mut playback = PlaybackSession::new();
+        let mut library = LibrarySession::new();
         let transport = crate::mocks::MockTransport::new();
         let mut store = crate::mocks::MockSettingsStore::default();
-        apply_player_bar_action(action, &mut state, &transport, &mut store);
-        (state, transport, store)
+        apply_player_bar_action(action, &mut library, &mut playback, &transport, &mut store);
+        (playback, library, transport, store)
     }
 
     #[test]
@@ -2362,7 +2368,7 @@ mod tests {
             (PlayerBarAction::Next, TransportIntent::Next),
             (PlayerBarAction::Stop, TransportIntent::Stop),
         ] {
-            let (_, transport, _) = applied(action);
+            let (_, _, transport, _) = applied(action);
             assert_eq!(
                 transport.recorded(),
                 vec![expected.clone()],
@@ -2373,16 +2379,18 @@ mod tests {
 
     #[test]
     fn test_play_selected_plays_the_selected_track() {
-        let (mut state, transport, mut store) = applied(PlayerBarAction::PlaySelected); // no selection yet
+        let (mut playback, mut library, transport, mut store) =
+            applied(PlayerBarAction::PlaySelected); // no selection yet
         assert!(
             transport.recorded().is_empty(),
             "no selection means no play intent"
         );
 
-        state.selected_track = Some(TrackId("song.flac".to_string()));
+        library.selected_track = Some(TrackId("song.flac".to_string()));
         apply_player_bar_action(
             PlayerBarAction::PlaySelected,
-            &mut state,
+            &mut library,
+            &mut playback,
             &transport,
             &mut store,
         );
@@ -2391,16 +2399,16 @@ mod tests {
             vec![TransportIntent::Play(TrackId("song.flac".to_string()))]
         );
     }
-
     #[test]
     fn test_seek_action_is_clamped_against_the_live_total() {
-        let (mut state, _, mut store) = applied(PlayerBarAction::Pause);
-        state.current_position.total = Some(std::time::Duration::from_secs(245));
+        let (mut playback, _, _, mut store) = applied(PlayerBarAction::Pause);
+        playback.current_position.total = Some(std::time::Duration::from_secs(245));
 
         let transport = crate::mocks::MockTransport::new();
         apply_player_bar_action(
             PlayerBarAction::Seek(std::time::Duration::from_secs_f32(999.0)),
-            &mut state,
+            &mut LibrarySession::new(),
+            &mut playback,
             &transport,
             &mut store,
         );
@@ -2413,10 +2421,10 @@ mod tests {
 
     #[test]
     fn test_volume_action_updates_state_persists_and_sends_effective_volume() {
-        let (state, transport, store) = applied(PlayerBarAction::SetVolume(0.7));
+        let (playback, _, transport, store) = applied(PlayerBarAction::SetVolume(0.7));
 
         assert!(
-            (state.current_volume - 0.7).abs() < 1e-6,
+            (playback.current_volume - 0.7).abs() < 1e-6,
             "slider value lands"
         );
         assert_eq!(
@@ -2432,17 +2440,19 @@ mod tests {
 
     #[test]
     fn test_mute_toggle_sends_zero_and_keeps_slider_value() {
-        let (mut state, _, mut store) = applied(PlayerBarAction::SetVolume(0.7));
+        let (mut playback, _, _, mut store) = applied(PlayerBarAction::SetVolume(0.7));
         let transport = crate::mocks::MockTransport::new();
+        let mut library = LibrarySession::new();
 
         // Muting sends the muted (zero) volume to the engine...
         apply_player_bar_action(
             PlayerBarAction::ToggleMute,
-            &mut state,
+            &mut library,
+            &mut playback,
             &transport,
             &mut store,
         );
-        assert!(state.muted);
+        assert!(playback.muted);
         assert_eq!(
             transport.recorded(),
             vec![
@@ -2452,7 +2462,7 @@ mod tests {
             "muting zeroes what the engine hears"
         );
         assert!(
-            (state.current_volume - 0.7).abs() < 1e-6,
+            (playback.current_volume - 0.7).abs() < 1e-6,
             "slider keeps its value"
         );
 
@@ -2460,11 +2470,12 @@ mod tests {
         // while the engine keeps receiving zero until unmuted.
         apply_player_bar_action(
             PlayerBarAction::SetVolume(0.9),
-            &mut state,
+            &mut library,
+            &mut playback,
             &transport,
             &mut store,
         );
-        assert!((state.current_volume - 0.9).abs() < 1e-6);
+        assert!((playback.current_volume - 0.9).abs() < 1e-6);
         assert_eq!(
             transport.recorded().last(),
             Some(&TransportIntent::ApplyVolume(0.0))
@@ -2473,11 +2484,12 @@ mod tests {
         // Unmuting restores the slider's value to the engine.
         apply_player_bar_action(
             PlayerBarAction::ToggleMute,
-            &mut state,
+            &mut library,
+            &mut playback,
             &transport,
             &mut store,
         );
-        assert!(!state.muted);
+        assert!(!playback.muted);
         assert_eq!(
             transport.recorded().last(),
             Some(&TransportIntent::ApplyVolumeAfterMute(0.9)),
@@ -2487,27 +2499,30 @@ mod tests {
 
     #[test]
     fn test_shuffle_and_repeat_toggles_flip_queue_state() {
-        let (mut state, _, mut store) = applied(PlayerBarAction::Pause);
+        let (mut playback, _, _, mut store) = applied(PlayerBarAction::Pause);
         let transport = crate::mocks::MockTransport::new();
+        let mut library = LibrarySession::new();
 
-        let was = state.queue.shuffle;
+        let was = playback.queue.shuffle;
         apply_player_bar_action(
             PlayerBarAction::ToggleShuffle,
-            &mut state,
+            &mut library,
+            &mut playback,
             &transport,
             &mut store,
         );
-        assert_ne!(state.queue.shuffle, was, "shuffle flips");
+        assert_ne!(playback.queue.shuffle, was, "shuffle flips");
 
-        assert_eq!(state.queue.repeat, RepeatMode::None);
+        assert_eq!(playback.queue.repeat, RepeatMode::None);
         apply_player_bar_action(
             PlayerBarAction::ToggleRepeat,
-            &mut state,
+            &mut library,
+            &mut playback,
             &transport,
             &mut store,
         );
         assert_eq!(
-            state.queue.repeat,
+            playback.queue.repeat,
             RepeatMode::All,
             "repeat cycles off → all"
         );
@@ -2613,15 +2628,20 @@ mod tests {
         use riff_backend::app::state::{BrowseMode, ViewMode};
 
         for start in [ViewMode::Library, ViewMode::NowPlaying, ViewMode::Settings] {
-            let mut state = AppState::new();
-            state.view_mode = start;
-            state.browse_mode = BrowseMode::Folders;
+            let mut library = LibrarySession::new();
+            library.view_mode = start;
+            library.browse_mode = BrowseMode::Folders;
 
             let transport = crate::mocks::MockTransport::new();
-            apply_now_playing_action(NowPlayingAction::Close, &mut state, &transport);
+            apply_now_playing_action(
+                NowPlayingAction::Close,
+                &mut library,
+                &PlaybackSession::new(),
+                &transport,
+            );
 
             assert_eq!(
-                state.view_mode,
+                library.view_mode,
                 ViewMode::Library,
                 "closing Now Playing from {start:?} must land on the Library View"
             );
@@ -2634,11 +2654,11 @@ mod tests {
 
     #[test]
     fn test_now_playing_play_next_queues_the_clicked_track() {
-        let mut state = AppState::new();
         let transport = crate::mocks::MockTransport::new();
         apply_now_playing_action(
             NowPlayingAction::PlayNext(TrackId("t9.mp3".to_string())),
-            &mut state,
+            &mut LibrarySession::new(),
+            &PlaybackSession::new(),
             &transport,
         );
         assert_eq!(
@@ -2650,12 +2670,17 @@ mod tests {
 
     #[test]
     fn test_now_playing_seek_action_clamps_against_the_live_total() {
-        let mut state = AppState::new();
-        state.current_position.total = Some(std::time::Duration::from_secs(100));
+        let playback = PlaybackSession::new();
+        let mut library = LibrarySession::new();
         let transport = crate::mocks::MockTransport::new();
         apply_now_playing_action(
             NowPlayingAction::Seek(std::time::Duration::from_secs_f32(999.0)),
-            &mut state,
+            &mut library,
+            &{
+                let mut p = playback;
+                p.current_position.total = Some(std::time::Duration::from_secs(100));
+                p
+            },
             &transport,
         );
         assert_eq!(
@@ -4006,5 +4031,65 @@ mod background_service_ui_tests {
             "artless results create no texture (the service negative-caches them)"
         );
         assert_eq!(lru_keys, vec!["/music/art.mp3".to_string()]);
+    }
+}
+
+/// Issue 01 seam fix: playback errors no longer write the library session's
+/// scan-status slot from the coordinator. They arrive as typed notices with
+/// playback source, and the UI routes them to the titlebar status line via
+/// [`apply_backend_events`], preserving the exact visible string.
+#[cfg(test)]
+mod playback_notice_ui_tests {
+    use riff_backend::app::facade::{BackendEvent, NoticePayload, NoticeSeverity, NoticeSource};
+    use riff_gui::ui::app::apply_backend_events;
+
+    fn playback_notice(message: &str) -> BackendEvent {
+        BackendEvent::TypedNotice(NoticePayload {
+            severity: NoticeSeverity::Error,
+            source: NoticeSource::Playback,
+            message: message.to_string(),
+        })
+    }
+
+    #[test]
+    fn test_playback_typed_notice_routes_message_to_status_line() {
+        let mut status: Option<String> = None;
+
+        apply_backend_events(vec![playback_notice("Playback error: boom")], &mut status);
+
+        assert_eq!(
+            status.as_deref(),
+            Some("Playback error: boom"),
+            "the exact user-facing string reaches the status line"
+        );
+    }
+
+    #[test]
+    fn test_non_playback_notice_leaves_status_line_untouched() {
+        let mut status: Option<String> = Some("existing".to_string());
+
+        apply_backend_events(
+            vec![BackendEvent::TypedNotice(NoticePayload {
+                severity: NoticeSeverity::Error,
+                source: NoticeSource::Scan,
+                message: "scan failed".to_string(),
+            })],
+            &mut status,
+        );
+
+        assert_eq!(
+            status.as_deref(),
+            Some("existing"),
+            "only playback-sourced notices write the status line here"
+        );
+    }
+
+    #[test]
+    fn test_empty_event_batch_leaves_status_line_untouched() {
+        let mut status: Option<String> = Some("existing".to_string());
+
+        apply_backend_events(Vec::new(), &mut status);
+
+        assert_eq!(status.as_deref(), Some("existing"));
     }
 }

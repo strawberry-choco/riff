@@ -6,7 +6,7 @@ use super::*;
 mod tests {
     use super::*;
     use crate::mocks::{MockAudioDecoder, MockAudioOutput, MockCoverLoader, MockMetadataReader};
-    use riff_backend::app::errors::AppError;
+    use riff_backend::app::errors::{LibraryError, PlaybackError};
     use riff_backend::app::traits::{
         AudioDecoder, AudioFormatInfo, AudioOutput, CoverImage, CoverLoader, MetadataReader,
         MetadataWriter, TagEdit,
@@ -103,7 +103,7 @@ mod tests {
         let err = decoder
             .open(&PathBuf::from("bad.ogg"))
             .expect_err("open must fail");
-        assert!(matches!(err, AppError::Decode(_)));
+        assert!(matches!(err, PlaybackError::Decode(_)));
         assert!(err.to_string().contains("unsupported codec"));
         assert!(decoder.opened.is_empty());
 
@@ -116,7 +116,7 @@ mod tests {
         decoder.decode_error = Some("corrupt frame".to_string());
         assert!(matches!(
             decoder.next_frames(&mut out).unwrap_err(),
-            AppError::Decode(_)
+            PlaybackError::Decode(_)
         ));
     }
 
@@ -152,7 +152,7 @@ mod tests {
         output.initialize_error = Some("no device".to_string());
         assert!(matches!(
             output.initialize(44_100, 2).unwrap_err(),
-            AppError::AudioOutput(_)
+            PlaybackError::AudioOutput(_)
         ));
         assert!(output.initialized.is_empty());
 
@@ -161,7 +161,7 @@ mod tests {
         output.write_error = Some("device lost".to_string());
         assert!(matches!(
             output.write_samples(&[0.1, 0.2]).unwrap_err(),
-            AppError::AudioOutput(_)
+            PlaybackError::AudioOutput(_)
         ));
         // A failed write must not land in the buffer.
         assert_eq!(output.buffer_len(), 0);
@@ -212,23 +212,23 @@ mod tests {
 
         assert!(matches!(
             reader.read_metadata(&path).unwrap_err(),
-            AppError::MetadataRead(_)
+            LibraryError::MetadataRead(_)
         ));
         assert!(matches!(
             reader.read_duration(&path).unwrap_err(),
-            AppError::MetadataRead(_)
+            LibraryError::MetadataRead(_)
         ));
         assert!(matches!(
             reader.read_cover_source(&path).unwrap_err(),
-            AppError::MetadataRead(_)
+            LibraryError::MetadataRead(_)
         ));
         assert!(matches!(
             reader.read_audio_format(&path).unwrap_err(),
-            AppError::MetadataRead(_)
+            LibraryError::MetadataRead(_)
         ));
         assert!(matches!(
             reader.read_all(&path).unwrap_err(),
-            AppError::MetadataRead(_)
+            LibraryError::MetadataRead(_)
         ));
     }
 
@@ -260,7 +260,7 @@ mod tests {
         let err = failing
             .load_cover(&CoverSource::Embedded(vec![9].into()))
             .unwrap_err();
-        assert!(matches!(err, AppError::CoverLoad(_)));
+        assert!(matches!(err, LibraryError::CoverLoad(_)));
         assert!(err.to_string().contains("decode failed"));
     }
 
@@ -394,7 +394,7 @@ mod tests {
         // no panic, no crash.
         assert!(matches!(
             result.expect_err("unsupported format must fail the write"),
-            AppError::MetadataWrite(_)
+            LibraryError::MetadataWrite(_)
         ));
     }
 
@@ -407,7 +407,7 @@ mod tests {
 
         assert!(matches!(
             result.expect_err("missing file must fail the write"),
-            AppError::MetadataWrite(_)
+            LibraryError::MetadataWrite(_)
         ));
     }
 
@@ -485,6 +485,7 @@ mod tests {
 
     #[test]
     fn test_filesystem_watcher_forwards_debounced_audio_batches() {
+        use riff_backend::app::traits::FilesystemWatch;
         use std::time::{Duration, Instant};
 
         let dir = tempfile::tempdir().unwrap();

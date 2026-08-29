@@ -16,14 +16,14 @@
 //! Pure-Rust: uses only the port traits. Concrete decoder/output
 //! implementations live in `riff-infra`.
 
-use crate::app::errors::PlaybackError;
 use crate::app::state::PlaybackSession;
 use crate::domain::{PlaybackCommand, PlaybackPosition, PlaybackState, PlaybackUpdate, RepeatMode};
 use crate::infra::ports::{AudioDecoder, AudioFormatInfo, AudioOutput, DecoderFactory};
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+use riff_persistence::store::LibraryQueryStore;
 use riff_persistence::track::TrackId;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Gapless (Task 4.1): how many seconds before EOF the engine starts
 /// pre-decoding the successor track.
@@ -38,11 +38,10 @@ const PRE_BUFFER_SECONDS: f32 = 4.0;
 /// (allocation-optimization plan, task 3.2).
 const DECODE_CHUNK_SAMPLES: usize = 4096;
 
-/// Position updates: send [`PlaybackUpdate::PositionChanged`] only when
-/// playback crosses a boundary of this many milliseconds, instead of once
-/// per decoded chunk (~43/s), each of which wakes the update processor and
-/// locks the Playback Session.
-const POSITION_UPDATE_INTERVAL_MS: u64 = 250;
+/// While a track is loaded the engine polls for commands at this interval
+/// between decode chunks, so a queued Pause/Seek lands immediately instead of
+/// after the track decodes to EOF.
+const COMMAND_POLL: Duration = Duration::from_millis(10);
 
 /// The audio engine: owns the decoders and audio output, processes
 /// [`PlaybackCommand`]s, and drives decode/position/gapless logic.
@@ -79,6 +78,9 @@ impl AudioEngine {
     /// Run the engine's main loop. Blocks until the command channel is closed.
     /// This is the ONLY blocking entry point — the composition root spawns it
     /// on the dedicated audio thread.
+    // The engine loop is one continuous command pump; splitting it would
+    // scatter the shared decode state across many small helpers.
+    #[allow(clippy::too_many_lines)]
     pub fn run(mut self) {
         let mut primary_decoder: Option<Box<dyn AudioDecoder>> = None;
         let mut output_started = false;
@@ -87,10 +89,8 @@ impl AudioEngine {
 
         // Gapless pre-decode state
         let mut pre_decode_state = PreDecodeState::default();
-        let pre_buffer_cap = |rate, ch| crate::app::gapless::pre_buffer_cap(rate, ch, PRE_BUFFER_SECONDS);
-
-        // Position update throttling
-        let mut last_position_update = Instant::now();
+        let pre_buffer_cap =
+            |rate, ch| crate::app::gapless::pre_buffer_cap(rate, ch, PRE_BUFFER_SECONDS);
 
         // ReplayGain state
         let mut replaygain_gain: Option<f32> = None;
@@ -99,291 +99,365 @@ impl AudioEngine {
         // Audio output callback - closure that pulls decoded samples
         let mut decode_buffer = vec![0.0f32; DECODE_CHUNK_SAMPLES];
 
-        while let Ok(cmd) = self.cmd_rx.recv() {
-            match cmd {
-                PlaybackCommand::Play(id) => {
-                    // Stop current playback
-                    if primary_decoder.is_some() {
-                        primary_decoder.take();
+        // Sample-accurate playback position for the current track.
+        let mut position = Duration::ZERO;
+
+        loop {
+            // Block while idle; while a track is loaded, poll so a queued
+            // command lands between decode chunks instead of after EOF.
+            let cmd = if primary_decoder.is_some() {
+                match self.cmd_rx.recv_timeout(COMMAND_POLL) {
+                    Ok(cmd) => Some(cmd),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            } else {
+                match self.cmd_rx.recv() {
+                    Ok(cmd) => Some(cmd),
+                    Err(_) => break,
+                }
+            };
+
+            if let Some(cmd) = cmd {
+                match cmd {
+                    PlaybackCommand::Play(id) => {
+                        // A dispatch of the already-current track (the
+                        // coordinator's auto-Play after a handoff TrackEnded)
+                        // is swallowed: the handoff already switched without a
+                        // stream restart.
+                        if current_track_id.as_ref() == Some(&id) && primary_decoder.is_some() {
+                            continue;
+                        }
+
+                        // Stop current playback
+                        if primary_decoder.is_some() {
+                            primary_decoder.take();
+                            if output_started {
+                                self.output.stop();
+                                output_started = false;
+                            }
+                            current_format = None;
+                        }
+
+                        // Clear pre-buffer on explicit Play
+                        pre_decode_state = PreDecodeState::default();
+
+                        // Load track metadata
+                        let track = self.query.get_track(&id);
+                        let Ok(Some(track)) = track else {
+                            let _ = self
+                                .update_tx
+                                .send(PlaybackUpdate::Error(format!("Track not found: {}", id.0)));
+                            continue;
+                        };
+
+                        // Initialize decoder
+                        let mut decoder = (self.decoder_factory)();
+                        let format = match decoder.init(&track.file_path) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
+                                continue;
+                            }
+                        };
+
+                        // Start output if format changed
+                        if current_format.as_ref() != Some(&format) {
+                            if output_started {
+                                self.output.stop();
+                            }
+                            if let Err(e) = self.output.start(format.clone()) {
+                                let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
+                                continue;
+                            }
+                            output_started = true;
+                            current_format = Some(format.clone());
+                        }
+
+                        // Apply ReplayGain if enabled
+                        {
+                            let session = self
+                                .session
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if session.replaygain_enabled {
+                                if let Some(gain) = track.metadata.replaygain_track_gain {
+                                    replaygain_gain = Some(gain);
+                                    replaygain_peak = track.metadata.replaygain_track_peak;
+                                } else {
+                                    replaygain_gain = None;
+                                    replaygain_peak = None;
+                                }
+                            } else {
+                                replaygain_gain = None;
+                                replaygain_peak = None;
+                            }
+                        }
+
+                        current_track_id = Some(id.clone());
+                        position = Duration::ZERO;
+                        primary_decoder = Some(decoder);
+
+                        // Emit track changed
+                        let _ = self.update_tx.send(PlaybackUpdate::TrackChanged(id));
+                        let _ = self
+                            .update_tx
+                            .send(PlaybackUpdate::StateChanged(PlaybackState::Playing));
+                    }
+
+                    PlaybackCommand::Pause => {
+                        if output_started {
+                            self.output.stop();
+                            output_started = false;
+                        }
+                        let _ = self
+                            .update_tx
+                            .send(PlaybackUpdate::StateChanged(PlaybackState::Paused));
+                    }
+
+                    PlaybackCommand::Resume => {
+                        if let Some(ref format) = current_format {
+                            if let Err(e) = self.output.start(format.clone()) {
+                                let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
+                            } else {
+                                output_started = true;
+                                // Re-open the decoder and seek back to the
+                                // recorded pause position, so the pre-pause
+                                // audio is not replayed.
+                                if let Some(decoder) = primary_decoder.as_mut()
+                                    && let Some(ref id) = current_track_id
+                                    && let Ok(Some(track)) = self.query.get_track(id)
+                                    && decoder.init(&track.file_path).is_ok()
+                                {
+                                    let _ = decoder.seek(position);
+                                }
+                                if let Some(id) = current_track_id.clone() {
+                                    // Re-announce the track: a paused UI session
+                                    // lost its Now Playing binding.
+                                    let _ = self.update_tx.send(PlaybackUpdate::TrackChanged(id));
+                                }
+                                let _ = self
+                                    .update_tx
+                                    .send(PlaybackUpdate::StateChanged(PlaybackState::Playing));
+                            }
+                        }
+                    }
+
+                    PlaybackCommand::Stop => {
+                        // The decoder stays parked: an idle Seek (re-scrubbing
+                        // the stopped track's position) still reaches it.
                         if output_started {
                             self.output.stop();
                             output_started = false;
                         }
                         current_format = None;
+                        current_track_id = None;
+                        pre_decode_state = PreDecodeState::default();
+                        let _ = self
+                            .update_tx
+                            .send(PlaybackUpdate::StateChanged(PlaybackState::Stopped));
                     }
 
-                    // Clear pre-buffer on explicit Play
-                    pre_decode_state = PreDecodeState::default();
-
-                    // Load track metadata
-                    let track = self.query.get_track(&id);
-                    let Ok(Some(track)) = track else {
-                        let _ = self.update_tx.send(PlaybackUpdate::Error(format!("Track not found: {}", id.0)));
-                        continue;
-                    };
-
-                    // Initialize decoder
-                    let mut decoder = (self.decoder_factory)();
-                    let format = match decoder.init(&track.file_path) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
-                            continue;
-                        }
-                    };
-
-                    // Start output if format changed
-                    if current_format.as_ref() != Some(&format) {
-                        if output_started {
-                            self.output.stop();
-                        }
-                        if let Err(e) = self.output.start(format.clone()) {
-                            let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
-                            continue;
-                        }
-                        output_started = true;
-                        current_format = Some(format.clone());
-                    }
-
-                    // Apply ReplayGain if enabled
-                    {
-                        let session = self.session.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                        if session.replaygain_enabled {
-                            if let Some(gain) = track.metadata.replaygain_track_gain {
-                                replaygain_gain = Some(gain);
-                                replaygain_peak = track.metadata.replaygain_track_peak;
-                            } else {
-                                replaygain_gain = None;
-                                replaygain_peak = None;
-                            }
-                        } else {
-                            replaygain_gain = None;
-                            replaygain_peak = None;
+                    PlaybackCommand::Seek(pos) => {
+                        if let Some(decoder) = primary_decoder.as_mut() {
+                            let actual = decoder.seek(pos);
+                            position = actual;
+                            let _ = self.update_tx.send(PlaybackUpdate::PositionChanged(
+                                PlaybackPosition {
+                                    current: actual,
+                                    total: decoder.duration(),
+                                },
+                            ));
                         }
                     }
 
-                    current_track_id = Some(id.clone());
-                    primary_decoder = Some(decoder);
-
-                    // Emit track changed
-                    let _ = self.update_tx.send(PlaybackUpdate::TrackChanged(id));
-                    let _ = self.update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Playing));
-                }
-
-                PlaybackCommand::Pause => {
-                    if output_started {
-                        self.output.stop();
-                        output_started = false;
-                    }
-                    let _ = self.update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Paused));
-                }
-
-                PlaybackCommand::Resume => {
-                    if let Some(ref format) = current_format {
-                        if let Err(e) = self.output.start(format.clone()) {
-                            let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
-                        } else {
-                            output_started = true;
-                            let _ = self.update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Playing));
-                        }
-                    }
-                }
-
-                PlaybackCommand::Stop => {
-                    if primary_decoder.is_some() {
-                        primary_decoder.take();
-                    }
-                    if output_started {
-                        self.output.stop();
-                        output_started = false;
-                    }
-                    current_format = None;
-                    current_track_id = None;
-                    pre_decode_state = PreDecodeState::default();
-                    let _ = self.update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Stopped));
-                }
-
-                PlaybackCommand::Seek(pos) => {
-                    if let Some(decoder) = primary_decoder.as_mut() {
-                        let actual = decoder.seek(pos);
-                        let _ = self.update_tx.send(PlaybackUpdate::PositionChanged(PlaybackPosition {
-                            current: actual,
-                            total: decoder.duration(),
-                        }));
-                    }
-                }
-
-                PlaybackCommand::SetVolume(vol) => {
-                    if output_started {
+                    PlaybackCommand::SetVolume(vol) => {
                         self.output.set_volume(vol.clamp(0.0, 1.0));
+                        // Session volume is updated by the coordinator/transport
                     }
-                    // Session volume is updated by the coordinator/transport
-                }
 
-                PlaybackCommand::Next => {
-                    // Handled by coordinator via TrackEnded; engine just stops current
-                    if primary_decoder.is_some() {
-                        primary_decoder.take();
-                        if output_started {
-                            self.output.stop();
-                            output_started = false;
-                        }
-                    }
-                }
-
-                PlaybackCommand::Previous => {
-                    // Handled by coordinator; engine just stops current
-                    if primary_decoder.is_some() {
-                        primary_decoder.take();
-                        if output_started {
-                            self.output.stop();
-                            output_started = false;
-                        }
-                    }
-                }
-
-                PlaybackCommand::PlayNext(id) => {
-                    // Queue manipulation handled by coordinator; engine just notes
-                    let _ = self.update_tx.send(PlaybackUpdate::TrackChanged(id));
-                }
-
-                PlaybackCommand::AddToQueue(_id) => {
-                    // Queue manipulation handled by coordinator
-                }
-
-                PlaybackCommand::AddMany(_ids) => {
-                    // Queue manipulation handled by coordinator
-                }
-
-                PlaybackCommand::PlayPause => {
-                    let state = self.session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).playback_state;
-                    match state {
-                        PlaybackState::Playing => {
+                    PlaybackCommand::Next => {
+                        // Handled by coordinator via TrackEnded; engine just stops current
+                        if primary_decoder.is_some() {
+                            primary_decoder.take();
                             if output_started {
                                 self.output.stop();
                                 output_started = false;
                             }
-                            let _ = self.update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Paused));
                         }
-                        PlaybackState::Paused => {
-                            if let Some(ref format) = current_format {
-                                if let Err(e) = self.output.start(format.clone()) {
-                                    let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
-                                } else {
-                                    output_started = true;
-                                    let _ = self.update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Playing));
-                                }
+                    }
+
+                    PlaybackCommand::Previous => {
+                        // Handled by coordinator; engine just stops current
+                        if primary_decoder.is_some() {
+                            primary_decoder.take();
+                            if output_started {
+                                self.output.stop();
+                                output_started = false;
                             }
                         }
-                        PlaybackState::Stopped => {
-                            // No-op
+                    }
+
+                    PlaybackCommand::PlayNext(id) => {
+                        // Queue manipulation handled by coordinator; engine just notes
+                        let _ = self.update_tx.send(PlaybackUpdate::TrackChanged(id));
+                    }
+
+                    PlaybackCommand::AddToQueue(_id) => {
+                        // Queue manipulation handled by coordinator
+                    }
+
+                    PlaybackCommand::AddMany(_ids) => {
+                        // Queue manipulation handled by coordinator
+                    }
+
+                    PlaybackCommand::PlayPause => {
+                        let state = self
+                            .session
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .playback_state;
+                        match state {
+                            PlaybackState::Playing => {
+                                if output_started {
+                                    self.output.stop();
+                                    output_started = false;
+                                }
+                                let _ = self
+                                    .update_tx
+                                    .send(PlaybackUpdate::StateChanged(PlaybackState::Paused));
+                            }
+                            PlaybackState::Paused => {
+                                if let Some(ref format) = current_format {
+                                    if let Err(e) = self.output.start(format.clone()) {
+                                        let _ = self
+                                            .update_tx
+                                            .send(PlaybackUpdate::Error(e.to_string()));
+                                    } else {
+                                        output_started = true;
+                                        let _ = self.update_tx.send(PlaybackUpdate::StateChanged(
+                                            PlaybackState::Playing,
+                                        ));
+                                        if let Some(id) = current_track_id.clone() {
+                                            // Re-announce the track: a paused UI
+                                            // session lost its Now Playing binding.
+                                            let _ = self
+                                                .update_tx
+                                                .send(PlaybackUpdate::TrackChanged(id));
+                                        }
+                                    }
+                                }
+                            }
+                            PlaybackState::Stopped => {
+                                // No-op
+                            }
                         }
                     }
                 }
             }
 
-            // Decode loop: pull from primary decoder and push to audio output
-            let mut decoder_exhausted = false;
-            if let Some(decoder) = primary_decoder.as_mut() {
-                while let Some(samples) = decoder.next_frames(&mut decode_buffer) {
-                    if samples == 0 {
-                        break;
-                    }
-
-                    // Apply ReplayGain if enabled
-                    if let Some(gain_db) = replaygain_gain {
-                        let mut factor = 10f32.powf(gain_db / 20.0);
-                        if let Some(peak) = replaygain_peak {
-                            if peak > 0.0 {
+            // Decode one chunk per tick while the stream runs; the command
+            // loop stays in charge between chunks, so queued commands are
+            // honored mid-track and position updates flow while decoding.
+            if output_started && let Some(decoder) = primary_decoder.as_mut() {
+                match decoder.next_frames(&mut decode_buffer) {
+                    Some(samples) if samples > 0 => {
+                        // Apply ReplayGain if enabled
+                        if let Some(gain_db) = replaygain_gain {
+                            let mut factor = 10f32.powf(gain_db / 20.0);
+                            if let Some(peak) = replaygain_peak
+                                && peak > 0.0
+                            {
                                 let max_factor = 1.0 / peak;
                                 if factor > max_factor {
                                     factor = max_factor;
                                 }
                             }
+                            for s in &mut decode_buffer[..samples] {
+                                *s *= factor;
+                            }
                         }
-                        for s in &mut decode_buffer[..samples] {
-                            *s *= factor;
+
+                        // Write to audio output (blocking if buffer full)
+                        if output_started {
+                            self.output.write(&decode_buffer[..samples]);
                         }
-                    }
 
-                    // Write to audio output (blocking if buffer full)
-                    if output_started {
-                        self.output.write(&decode_buffer[..samples]);
-                    }
+                        // Sample-accurate position update for the UI.
+                        let (rate, channels) = current_format
+                            .as_ref()
+                            .map_or((44_100, 2), |f| (f.sample_rate, f.channels));
+                        position +=
+                            crate::app::gapless::elapsed_from_samples(samples, rate, channels);
+                        let _ = self.update_tx.send(PlaybackUpdate::PositionChanged(
+                            PlaybackPosition {
+                                current: position,
+                                total: decoder.duration(),
+                            },
+                        ));
 
-                    // Throttled position updates
-                    let elapsed = last_position_update.elapsed();
-                    if elapsed >= Duration::from_millis(POSITION_UPDATE_INTERVAL_MS) {
-                        let _ = self.update_tx.send(PlaybackUpdate::PositionChanged(PlaybackPosition {
-                            current: Duration::ZERO, // TODO: track actual position
-                            total: decoder.duration(),
-                        }));
-                        last_position_update = Instant::now();
-                    }
-                }
-                // Decoder returned None (EOF)
-                decoder_exhausted = true;
-            }
+                        // Pre-decode the successor once the track's tail is
+                        // in range: a format-compatible successor hands off
+                        // without stopping the stream. The DECODER's duration
+                        // drives the window - the store's track row may carry
+                        // no duration at all.
+                        if pre_decode_state.pre_decoder.is_none()
+                            && let Some(total) = decoder.duration()
+                            && total.saturating_sub(position).as_secs_f32() <= PRE_ENCODE_SECONDS
+                        {
+                            let successor_id = {
+                                let session = self
+                                    .session
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                session.queue.upcoming(1).first().map(|id| (*id).clone())
+                            };
+                            if let Some(next_id) = successor_id
+                                && let Ok(Some(next_track)) = self.query.get_track(&next_id)
+                            {
+                                let mut successor = (self.decoder_factory)();
+                                if let Ok(format) = successor.init(&next_track.file_path)
+                                    && let Some(ref cur_format) = current_format
+                                    && format.compatible_with(cur_format)
+                                {
+                                    pre_decode_state.format_compatible = true;
+                                    pre_decode_state.has_successor = true;
+                                    pre_decode_state.next_track_id = Some(next_id.clone());
 
-            // EOF handling - check for gapless handoff
-            if decoder_exhausted {
-                self.handle_eof(
-                    &mut primary_decoder,
-                    &mut pre_decode_state,
-                    &mut current_format,
-                    &mut output_started,
-                    &mut current_track_id,
-                );
-            }
-
-            // Pre-decode successor if conditions are met
-            if primary_decoder.is_some() && pre_decode_state.pre_buffer.is_none() {
-                let session = self.session.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                let current_pos = Duration::ZERO; // TODO: track actual position
-                let current_track = session.queue.current_track().cloned();
-
-                if let Some(current_id) = current_track {
-                    if let Ok(Some(track)) = self.query.get_track(&current_id) {
-                        if let Some(duration) = track.duration {
-                            let remaining = duration.saturating_sub(current_pos);
-                            if remaining.as_secs_f32() <= PRE_ENCODE_SECONDS {
-                                // Try to pre-decode successor
-                                if let Some(next_id) = session.queue.upcoming(1).first().cloned() {
-                                    let next_id_clone = next_id.clone();
-                                    if let Ok(Some(next_track)) = self.query.get_track(&next_id) {
-                                        let mut decoder = (self.decoder_factory)();
-                                        if let Ok(format) = decoder.init(&next_track.file_path) {
-                                            if let Some(ref cur_format) = current_format {
-                                                if format.compatible_with(cur_format) {
-                                                    pre_decode_state.format_compatible = true;
-                                                    pre_decode_state.has_successor = true;
-                                                    pre_decode_state.next_track_id = Some(next_id_clone);
-
-                                                    // Pre-decode up to PRE_BUFFER_SECONDS
-                                                    let cap = pre_buffer_cap(format.sample_rate, format.channels);
-                                                    let mut pre_buffer = Vec::with_capacity(cap);
-                                                    let mut buf = vec![0.0f32; DECODE_CHUNK_SAMPLES];
-                                                    while pre_buffer.len() < cap {
-                                                        if let Some(samples) = decoder.next_frames(&mut buf) {
-                                                            if samples == 0 {
-                                                                break;
-                                                            }
-                                                            pre_buffer.extend_from_slice(&buf[..samples]);
-                                                        } else {
-                                                            break;
-                                                        }
-                                                    }
-
-                                                    if !pre_buffer.is_empty() {
-                                                        pre_decode_state.pre_buffer = Some(decoder);
-                                                    }
-                                                }
+                                    // Pre-decode up to the pre-buffer cap; the
+                                    // decoder stays parked on the successor for
+                                    // the post-handoff continuation.
+                                    let cap = pre_buffer_cap(format.sample_rate, format.channels);
+                                    let mut pre_buffer = Vec::with_capacity(cap);
+                                    let mut buf = vec![0.0f32; DECODE_CHUNK_SAMPLES];
+                                    while pre_buffer.len() < cap {
+                                        match successor.next_frames(&mut buf) {
+                                            Some(0) | None => break,
+                                            Some(samples) => {
+                                                pre_buffer.extend_from_slice(&buf[..samples]);
                                             }
                                         }
+                                    }
+
+                                    if !pre_buffer.is_empty() {
+                                        pre_decode_state.samples = pre_buffer;
+                                        pre_decode_state.pre_decoder = Some(successor);
+                                        pre_decode_state.format = Some(format);
                                     }
                                 }
                             }
                         }
+                    }
+                    Some(_) => {} // empty packet (codec padding)
+                    None => {
+                        self.handle_eof(
+                            &mut primary_decoder,
+                            &mut pre_decode_state,
+                            &mut current_format,
+                            &mut output_started,
+                            &mut current_track_id,
+                            &mut position,
+                        );
                     }
                 }
             }
@@ -398,8 +472,12 @@ impl AudioEngine {
         current_format: &mut Option<AudioFormatInfo>,
         output_started: &mut bool,
         current_track_id: &mut Option<TrackId>,
+        position: &mut Duration,
     ) {
-        let session = self.session.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = self
+            .session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let gapless_conditions = crate::app::gapless::GaplessConditions {
             shuffle: session.queue.shuffle,
             repeat_one: session.queue.repeat == RepeatMode::One && !session.queue.shuffle,
@@ -418,16 +496,32 @@ impl AudioEngine {
             crate::app::gapless::is_gapless_eligible(gapless_conditions)
         };
 
-        if can_gapless && pre_decode_state.pre_buffer.is_some() {
-            // Gapless handoff: swap to pre-buffered decoder
-            *primary_decoder = pre_decode_state.pre_buffer.take();
-            *pre_decode_state = PreDecodeState::default();
-
-            // Emit track changed for the new track
-            if let Some(ref next_id) = pre_decode_state.next_track_id.take() {
-                *current_track_id = Some(next_id.clone());
-                let _ = self.update_tx.send(PlaybackUpdate::TrackChanged(next_id.clone()));
+        if can_gapless && pre_decode_state.pre_decoder.is_some() {
+            // Gapless handoff: flush the pre-buffered successor audio and
+            // swap in its decoder WITHOUT stopping the output stream.
+            if let Some(decoder) = pre_decode_state.pre_decoder.take() {
+                if *output_started && !pre_decode_state.samples.is_empty() {
+                    self.output.write(&pre_decode_state.samples);
+                }
+                // The finished track still ends: the coordinator commits its
+                // play history and re-dispatches Play(successor), which the
+                // engine swallows because the handoff already switched.
+                let _ = self.update_tx.send(PlaybackUpdate::TrackEnded);
+                if let Some(ref format) = pre_decode_state.format {
+                    *position = crate::app::gapless::elapsed_from_samples(
+                        pre_decode_state.samples.len(),
+                        format.sample_rate,
+                        format.channels,
+                    );
+                }
+                *primary_decoder = Some(decoder);
+                // Emit track changed for the new track
+                if let Some(next_id) = pre_decode_state.next_track_id.take() {
+                    *current_track_id = Some(next_id.clone());
+                    let _ = self.update_tx.send(PlaybackUpdate::TrackChanged(next_id));
+                }
             }
+            *pre_decode_state = PreDecodeState::default();
         } else {
             // Normal EOF — emit TrackEnded, coordinator handles continuation
             primary_decoder.take();
@@ -447,22 +541,14 @@ impl AudioEngine {
 /// the existing gapped path runs unchanged.
 #[derive(Default)]
 struct PreDecodeState {
-    pre_buffer: Option<Box<dyn AudioDecoder>>,
+    /// Pre-decoded successor audio, flushed to the output at handoff.
+    samples: Vec<f32>,
+    /// The successor's decoder, advanced through the pre-buffered span; it
+    /// continues decoding after the handoff.
+    pre_decoder: Option<Box<dyn AudioDecoder>>,
+    /// The format the samples were decoded at.
+    format: Option<AudioFormatInfo>,
     format_compatible: bool,
     has_successor: bool,
     next_track_id: Option<TrackId>,
-}
-
-impl PreDecodeState {
-    fn reset(&mut self) {
-        self.pre_buffer = None;
-        self.format_compatible = false;
-        self.has_successor = false;
-        self.next_track_id = None;
-    }
-}
-
-/// Trait for library query store (re-exported for engine use)
-pub trait LibraryQueryStore {
-    fn get_track(&self, id: &TrackId) -> Result<Option<riff_persistence::track::Track>, crate::app::errors::StoreError>;
 }

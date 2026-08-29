@@ -49,12 +49,12 @@ pub use riff_backend::app::gapless::{
     repeat_one_handoff_eligible, samples_from_duration,
 };
 pub use riff_backend::app::state::{
-    LibrarySession, LibraryStatus, PlaybackSession, WatchState, replaygain_factor,
+    LibrarySession, LibraryStatus, PlaybackQueue, PlaybackSession, WatchState, replaygain_factor,
 };
 pub use riff_backend::app::transport::clamp_seek;
 pub use riff_backend::domain::{
-    Album, Artist, PlaybackCommand, PlaybackPosition, PlaybackQueue, PlaybackState, PlaybackUpdate,
-    Playlist, PlaylistId, RepeatMode, SmartPlaylistKind, Track, TrackId, TrackMetadata,
+    Album, Artist, PlaybackCommand, PlaybackPosition, PlaybackState, PlaybackUpdate, Playlist,
+    PlaylistId, RepeatMode, SmartPlaylistKind, Track, TrackId, TrackMetadata,
 };
 pub use riff_backend::infra::metadata_reader::parse_replaygain_gain;
 pub use riff_backend::infra::{
@@ -141,8 +141,8 @@ pub mod mocks {
     };
     use riff_backend::app::transport::clamp_seek;
     use riff_backend::domain::{
-        Album, Artist, CoverSource, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
-        TrackMetadata,
+        Album, Artist, CoverSource, Playlist, PlaylistId, RepeatMode, SmartPlaylistKind, Track,
+        TrackId, TrackMetadata,
     };
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
@@ -171,8 +171,8 @@ pub mod mocks {
             Self {
                 open_error: None,
                 decode_error: None,
+                duration: format.duration,
                 format,
-                duration: None,
                 scripted: Vec::new(),
                 queue: Vec::new(),
                 seeks: Vec::new(),
@@ -407,6 +407,50 @@ pub mod mocks {
                 self.duration,
                 self.cover_source.clone(),
                 self.audio_format.clone(),
+            ))
+        }
+    }
+
+    /// The library capability's reader port over the same canned data, so
+    /// the store-backed scan service can consume the mock.
+    impl riff_library::app::traits::MetadataReader for MockMetadataReader {
+        fn read_cover_source(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<CoverSource, riff_library::app::errors::LibraryError> {
+            if self.fail {
+                return Err(riff_library::app::errors::LibraryError::MetadataRead(
+                    "mock failure".to_string(),
+                ));
+            }
+            Ok(self.cover_source.clone())
+        }
+
+        fn read_all(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<
+            (
+                TrackMetadata,
+                std::time::Duration,
+                CoverSource,
+                riff_library::app::traits::AudioFormatInfo,
+            ),
+            riff_library::app::errors::LibraryError,
+        > {
+            if self.fail {
+                return Err(riff_library::app::errors::LibraryError::MetadataRead(
+                    "mock failure".to_string(),
+                ));
+            }
+            Ok((
+                self.metadata.clone(),
+                self.duration.unwrap_or_default(),
+                self.cover_source.clone(),
+                riff_library::app::traits::AudioFormatInfo {
+                    sample_rate: self.audio_format.sample_rate,
+                    channels: self.audio_format.channels,
+                },
             ))
         }
     }
@@ -756,12 +800,12 @@ pub mod mocks {
         Stop,
         /// The clamped seek target.
         Seek(Duration),
-        /// The effective volume applied from state.
+        /// The volume command sent to the engine — the effective volume
+        /// (zero while muted), per the port's `set_volume` contract.
         ApplyVolume(f32),
-        /// The new muted flag after the flip, followed by the resulting
-        /// effective volume.
-        ToggleMute(bool),
-        ApplyVolumeAfterMute(f32),
+        PlayPause,
+        ToggleShuffle(bool),
+        ToggleRepeat(RepeatMode),
     }
 
     /// Recording [`Transport`](riff_backend::app::transport::Transport) fake: keeps
@@ -834,23 +878,32 @@ pub mod mocks {
             self.record(TransportIntent::Stop);
         }
 
-        fn seek(&self, session: &PlaybackSession, position: Duration) {
+        fn seek(&self, session: &PlaybackSession, secs: f32) {
             self.record(TransportIntent::Seek(clamp_seek(
-                position.as_secs_f32(),
+                secs,
                 session.current_position.total,
             )));
         }
 
-        fn apply_volume_from_state(&self, session: &PlaybackSession) {
+        fn set_volume(&self, session: &PlaybackSession, vol: f32) {
+            self.record(TransportIntent::ApplyVolume(vol));
+            let _ = session;
+        }
+
+        fn toggle_mute(&self, session: &PlaybackSession) {
             self.record(TransportIntent::ApplyVolume(session.effective_volume()));
         }
 
-        fn toggle_mute(&self, session: &mut PlaybackSession) {
-            session.muted = !session.muted;
-            self.record(TransportIntent::ToggleMute(session.muted));
-            self.record(TransportIntent::ApplyVolumeAfterMute(
-                session.effective_volume(),
-            ));
+        fn toggle_shuffle(&self, session: &PlaybackSession) {
+            self.record(TransportIntent::ToggleShuffle(session.queue.shuffle));
+        }
+
+        fn toggle_repeat(&self, session: &PlaybackSession) {
+            self.record(TransportIntent::ToggleRepeat(session.queue.repeat));
+        }
+
+        fn play_pause(&self, _session: &PlaybackSession) {
+            self.record(TransportIntent::PlayPause);
         }
     }
 
@@ -1153,8 +1206,8 @@ pub mod integration_helpers {
     #[allow(clippy::type_complexity)]
     pub fn create_test_sessions() -> (Arc<Mutex<PlaybackSession>>, Arc<Mutex<LibrarySession>>) {
         (
-            Arc::new(Mutex::new(PlaybackSession::new())),
-            Arc::new(Mutex::new(LibrarySession::new())),
+            Arc::new(Mutex::new(PlaybackSession::default())),
+            Arc::new(Mutex::new(LibrarySession::default())),
         )
     }
 }

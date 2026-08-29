@@ -11,8 +11,8 @@
 //! every decision lives in [`PlaybackCoordinator::apply_update`], which is
 //! synchronous and callable without threads so tests can drive it directly.
 
-use crate::app::errors::StoreError;
-use crate::domain::{PlaybackCommand, PlaybackPosition, PlaybackQueue, PlaybackState, PlaybackUpdate, RepeatMode};
+use crate::app::state::PlaybackSession;
+use crate::domain::{PlaybackCommand, PlaybackState, PlaybackUpdate, RepeatMode};
 use crossbeam_channel::{Receiver, Sender};
 use riff_persistence::store::LibraryMutationStore;
 use std::sync::{Arc, Mutex};
@@ -29,26 +29,6 @@ pub struct PlaybackCoordinator {
     /// library session's status slot.
     notice_tx: Sender<String>,
 }
-
-/// Playback session state — the fields the audio engine, coordinator, and
-/// transport touch. Lives behind its own `Arc<Mutex<>>`, separate from the
-/// Library Session, so no code path ever holds both session locks at once.
-#[derive(Debug, Clone)]
-pub struct PlaybackSession {
-    pub queue: PlaybackQueue,
-    pub playback_state: PlaybackState,
-    pub current_position: PlaybackPosition,
-    pub current_volume: f32,
-    /// Mute flag: independent of `current_volume` — the slider keeps its
-    /// value while muted. The engine always receives
-    /// [`Self::effective_volume`], so a muted app stays silent until unmuted.
-    pub muted: bool,
-    /// `ReplayGain` flag: opt-in loudness normalization. When `true`, the
-    /// engine applies each track's `REPLAYGAIN_TRACK_GAIN` (peak-capped) in
-    /// the audio output's volume-scaling step.
-    pub replaygain_enabled: bool,
-}
-
 
 impl PlaybackCoordinator {
     /// Wire a coordinator over its shared state, the engine's update stream,
@@ -97,8 +77,11 @@ impl PlaybackCoordinator {
     /// The synchronous core: apply one [`PlaybackUpdate`] to the session
     /// state, driving continuation when a track ends.
     pub fn apply_update(&mut self, update: PlaybackUpdate) {
-        use PlaybackUpdate::*;
-        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        use PlaybackUpdate::{Error, PositionChanged, StateChanged, TrackChanged, TrackEnded};
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         match update {
             StateChanged(s) => state.playback_state = s,
@@ -130,14 +113,20 @@ impl PlaybackCoordinator {
     /// Projections refetch.
     fn handle_track_ended(&mut self) {
         let current_id = {
-            let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.queue.current_track().cloned()
         };
 
         let Some(current_id) = current_id else {
             // No current track — nothing to record, just advance
             {
-                let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 Self::advance_queue(&self.cmd_tx, &mut state);
             }
             return;
@@ -146,12 +135,17 @@ impl PlaybackCoordinator {
         let played_at = std::time::SystemTime::now();
 
         if let Err(e) = self.mutations.record_track_played(&current_id, played_at) {
-            let _ = self.notice_tx.send(format!("Failed to record play history: {e}"));
+            let _ = self
+                .notice_tx
+                .send(format!("Failed to record play history: {e}"));
         }
 
         // Then advance the queue - drop the lock first
         {
-            let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             Self::advance_queue(&self.cmd_tx, &mut state);
         }
     }
@@ -174,40 +168,13 @@ impl PlaybackCoordinator {
             state.queue.advance().cloned()
         };
 
-        match next_track {
-            Some(id) => {
-                // Send Play command for the next track
-                let _ = cmd_tx.send(PlaybackCommand::Play(id.clone()));
-            }
-            None => {
-                // Nothing follows — stop
-                state.playback_state = PlaybackState::Stopped;
-                state.queue.current_index = None;
-            }
-        }
-    }
-}
-
-impl Default for PlaybackSession {
-    fn default() -> Self {
-        Self {
-            queue: PlaybackQueue::default(),
-            playback_state: PlaybackState::Stopped,
-            current_position: PlaybackPosition::default(),
-            current_volume: 1.0,
-            muted: false,
-            replaygain_enabled: false,
-        }
-    }
-}
-
-impl PlaybackSession {
-    /// Effective volume the engine should use (respects mute).
-    pub fn effective_volume(&self) -> f32 {
-        if self.muted {
-            0.0
+        if let Some(id) = next_track {
+            // Send Play command for the next track
+            let _ = cmd_tx.send(PlaybackCommand::Play(id.clone()));
         } else {
-            self.current_volume
+            // Nothing follows — stop
+            state.playback_state = PlaybackState::Stopped;
+            state.queue.current_index = None;
         }
     }
 }

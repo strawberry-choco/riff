@@ -4,6 +4,7 @@ use crate::ui::playerbar::PlayerBarAction;
 use crate::ui::theme;
 use eframe::egui;
 use riff_backend::app::MutexExt;
+use riff_backend::app::Transport;
 pub use riff_backend::app::cover_service::{COVER_CACHE_CAP, Covers, lru_insert};
 use riff_backend::app::facade::BackendFacade;
 use riff_backend::app::scan_service::{ScanOutcome, Scans};
@@ -13,7 +14,6 @@ use riff_backend::app::state::{
 use riff_backend::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
 use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
 use riff_backend::app::traits::TagEdit;
-use riff_backend::app::Transport;
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
 use riff_backend::domain::{
@@ -897,7 +897,7 @@ pub fn apply_now_playing_action(
     match action {
         Action::Close => library.view_mode = ViewMode::Library,
         Action::PlayNext(track_id) => transport.play_next(track_id),
-        Action::Seek(duration) => transport.seek(playback, duration),
+        Action::Seek(duration) => transport.seek(playback, duration.as_secs_f32()),
     }
 }
 
@@ -1024,9 +1024,9 @@ pub fn commit_playlist_reorder(
 /// Apply one restyled player-bar action (Issue 08) through the SAME engine
 /// intents and state paths the pre-restyle controls used. Transport actions
 /// pass straight through to the Transport port; volume routes through the
-/// port's `apply_volume_from_state` (which applies
-/// [`PlaybackSession::effective_volume`]) so a muted app never emits sound;
-/// seek targets re-clamp against the live track duration inside the adapter.
+/// port's `set_volume` with [`PlaybackSession::effective_volume`] so a muted
+/// app never emits sound; seek targets re-clamp against the live track
+/// duration inside the adapter.
 pub fn apply_player_bar_action(
     action: crate::ui::playerbar::PlayerBarAction,
     library: &mut LibrarySession,
@@ -1047,7 +1047,7 @@ pub fn apply_player_bar_action(
         }
         Action::Next => transport.next(),
         Action::Stop => transport.stop(),
-        Action::Seek(target) => transport.seek(playback, target),
+        Action::Seek(target) => transport.seek(playback, target.as_secs_f32()),
         Action::SetVolume(volume) => {
             playback.current_volume = volume;
             persist_scalars(
@@ -1058,9 +1058,14 @@ pub fn apply_player_bar_action(
             );
             // While muted the slider still edits current_volume, but the
             // engine keeps receiving 0 until unmuted.
-            transport.apply_volume_from_state(playback);
+            transport.set_volume(playback, playback.effective_volume());
         }
-        Action::ToggleMute => transport.toggle_mute(playback),
+        Action::ToggleMute => {
+            // Muting never moves the volume slider — it only zeroes the
+            // effective volume sent to the engine; unmuting restores it.
+            playback.muted = !playback.muted;
+            transport.set_volume(playback, playback.effective_volume());
+        }
         Action::ToggleShuffle => {
             let was = playback.queue.shuffle;
             playback.queue.set_shuffle(!was);
@@ -1101,7 +1106,7 @@ pub fn load_persisted_state(
         playback_session.replaygain_enabled = settings.scalars.replaygain_enabled;
         // Route through effective_volume so a muted app (once mute
         // state is restored) never emits sound at startup.
-        transport.apply_volume_from_state(&playback_session);
+        transport.set_volume(&playback_session, playback_session.effective_volume());
     }
     {
         let mut library_session = library.lock_or_recover();
@@ -2523,10 +2528,11 @@ pub fn submit_tag_edit_fields(
     }
 }
 
-/// Consume polled cover results into the UI texture cache: rgba→texture
-/// conversion is the egui-bound work that stays on the main thread (the
-/// texture boundary, ADR 0006); dedup and negative caching live behind the
-/// service seam, so artless results are simply dropped here.
+/// Consume polled cover results into the UI texture cache: decode + rgba→
+/// texture conversion is the egui-bound work that stays on the main thread
+/// (the texture boundary, ADR 0006; the cover port hands out still-encoded
+/// bytes plus their container format); dedup and negative caching live
+/// behind the service seam, so artless results are simply dropped here.
 pub fn cache_polled_covers<S: std::hash::BuildHasher>(
     covers: &dyn Covers,
     textures: &mut std::collections::HashMap<String, egui::TextureHandle, S>,
@@ -2537,10 +2543,16 @@ pub fn cache_polled_covers<S: std::hash::BuildHasher>(
         let Some(cover_image) = cover_image else {
             continue; // artless: the service negative-caches it
         };
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(
-            [cover_image.width as usize, cover_image.height as usize],
-            &cover_image.rgba,
-        );
+        let Ok(decoded) =
+            image::load_from_memory_with_format(&cover_image.data, cover_image.format)
+                .map_err(|e| tracing::warn!("Failed to decode cover for {}: {e}", track_id.0))
+        else {
+            continue;
+        };
+        let rgba = decoded.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        let color_image =
+            egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
         let texture = ctx.load_texture(&track_id.0, color_image, egui::TextureOptions::default());
         textures.insert(track_id.0.clone(), texture);
         for old in lru_insert(lru_keys, track_id.0, COVER_CACHE_CAP) {

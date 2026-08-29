@@ -7,8 +7,7 @@
 //!
 //! - [`ScanService`] is the front-end seam the UI holds boxed as
 //!   `Box<dyn Scans>`: it requests scans, cancels the running one, and polls
-//!   drained [`ScanOutcome`]s. It never blocks on scan work and never
-//!   touches the Library Session. It is cheaply shareable (internal `Arc`), so the
+//!   drained [`ScanOutcome`]s. It never blocks and never touches the Library Session. It is cheaply shareable (internal `Arc`), so the
 //!   watcher thread holds its own clone and answers "is this root currently
 //!   scanning" from the same per-path state — the single source of truth.
 //! - [`ScanWorker`] is the blocking back-end that owns the entire Library
@@ -25,22 +24,21 @@
 //! into the walk closure over the same cancel flag it hands to [`new`] — and
 //! runs [`ScanWorker::run`] on its own dedicated thread.
 
+use crate::app::MutexExt;
 use crate::app::scan::build_tracks;
 use crate::app::store::{LibraryMutationStore, LibraryQueryStore};
 use crate::app::traits::MetadataReader;
-use crate::domain::TrackId;
 use crossbeam_channel::{Receiver, Sender, unbounded};
+use riff_persistence::track::TrackId;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::app::MutexExt;
-
 /// Tracks per durable commit. Every batch commits to the Application Store
 /// as ONE immediate transaction first — an interrupted (or cancelled) scan
 /// keeps all committed batches (spec user story 3).
-const SCAN_BATCH_SIZE: usize = 10;
+pub const SCAN_BATCH_SIZE: usize = 10;
 
 /// The filesystem walk, injected as a plain closure so the app layer stays
 /// free of infrastructure types: the composition root binds the real scanner
@@ -171,7 +169,7 @@ impl Scans for ScanService {
             return;
         }
         // A send fails only when the worker half is gone (shutting down);
-        // dropping mirrors every other fire-and-forget sender.
+        // dropping the request mirrors every other fire-and-forget sender.
         let _ = self.request_tx.send(path);
     }
 
@@ -319,5 +317,196 @@ impl ScanWorker {
         }
 
         ScanEnd::Completed(total)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::errors::LibraryError;
+    use crate::app::store::{LibraryMutationStore, LibraryQueryStore, StoreError};
+    use crate::app::traits::{AudioFormatInfo, MetadataReader};
+    use crate::domain::{Album, Artist, CoverSource, SmartPlaylistKind};
+    use riff_persistence::track::{Track, TrackId, TrackMetadata};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, SystemTime};
+
+    fn make_track(id: &str) -> Track {
+        Track {
+            id: TrackId(id.to_string()),
+            file_path: PathBuf::from(id),
+            metadata: TrackMetadata::default(),
+            duration: None,
+            sample_rate: None,
+            channels: None,
+            play_count: 0,
+            last_played: None,
+            date_added: None,
+            search_text: String::new(),
+        }
+    }
+
+    struct MockReader;
+    impl MetadataReader for MockReader {
+        fn read_all(
+            &self,
+            _path: &Path,
+        ) -> Result<(TrackMetadata, Duration, CoverSource, AudioFormatInfo), LibraryError> {
+            Ok((
+                TrackMetadata::default(),
+                Duration::from_mins(3),
+                CoverSource::None,
+                AudioFormatInfo {
+                    sample_rate: 44100,
+                    channels: 2,
+                },
+            ))
+        }
+
+        fn read_cover_source(&self, _path: &Path) -> Result<CoverSource, LibraryError> {
+            Ok(CoverSource::None)
+        }
+    }
+
+    struct MockQueries {
+        known: Arc<Mutex<HashSet<PathBuf>>>,
+    }
+    impl LibraryQueryStore for MockQueries {
+        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
+            Ok(self
+                .known
+                .lock()
+                .unwrap()
+                .contains(&PathBuf::from(&id.0))
+                .then(|| make_track(&id.0)))
+        }
+
+        fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn track_count(&self) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+        fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn search_window(
+            &self,
+            _query: &str,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn search_count(&self, _query: &str) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+        fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn artist_albums(&self, _artist: &str) -> Result<Vec<Album>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn album_tracks(
+            &self,
+            _album_artist: &str,
+            _title: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn folder_has_audio(&self, _folder: &Path) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        fn folder_has_search_match(
+            &self,
+            _folder: &Path,
+            _query: &str,
+        ) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        fn track_ids_in_folder_tree(&self, _folder: &Path) -> Result<Vec<TrackId>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn tracks_in_folder(&self, _folder: &Path) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn smart_playlist(
+            &self,
+            _kind: SmartPlaylistKind,
+            _limit: usize,
+        ) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct MockMutations;
+    impl LibraryMutationStore for MockMutations {
+        fn apply_scan_batch(&mut self, _tracks: &[Track]) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+        fn record_track_played(
+            &mut self,
+            _id: &TrackId,
+            _played_at: SystemTime,
+        ) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        fn apply_tag_refresh(&mut self, _track: &Track) -> Result<(), StoreError> {
+            Ok(())
+        }
+        fn remove_library_path(&mut self, _root: &Path) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+        fn clear_library(&mut self) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+    }
+
+    #[allow(
+        clippy::type_complexity,
+        reason = "mirrors the walk-closure parameter type of ScanService::new"
+    )]
+    fn make_walk() -> Box<dyn Fn(&Path) -> Vec<PathBuf> + Send> {
+        Box::new(|_path: &Path| vec![PathBuf::from("track1.flac"), PathBuf::from("track2.flac")])
+    }
+
+    #[test]
+    fn scan_service_requests_scan() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (service, _worker) = ScanService::new(
+            Box::new(MockReader),
+            Box::new(MockQueries {
+                known: Arc::new(Mutex::new(HashSet::new())),
+            }),
+            Box::new(MockMutations),
+            Arc::clone(&cancel),
+            make_walk(),
+        );
+        let path = PathBuf::from("/music");
+        service.request(path.clone());
+        assert!(service.is_scanning(&path));
+    }
+
+    #[test]
+    fn scan_service_cancel_clears_active() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (service, _worker) = ScanService::new(
+            Box::new(MockReader),
+            Box::new(MockQueries {
+                known: Arc::new(Mutex::new(HashSet::new())),
+            }),
+            Box::new(MockMutations),
+            Arc::clone(&cancel),
+            make_walk(),
+        );
+        let path = PathBuf::from("/music");
+        service.request(path.clone());
+        service.cancel();
+        assert!(cancel.load(Ordering::Relaxed));
     }
 }

@@ -43,36 +43,17 @@ pub enum BrowseMode {
 }
 
 /// Re-exported from `riff_playback::domain`.
-pub use riff_playback::domain::{PlaybackCommand, PlaybackState, PlaybackPosition, PlaybackQueue, PlaybackUpdate, RepeatMode};
+pub use riff_playback::domain::{
+    PlaybackCommand, PlaybackPosition, PlaybackQueue, PlaybackState, PlaybackUpdate, RepeatMode,
+};
 
 /// Re-exported from `riff_persistence::store`.
 pub use riff_persistence::store::{ScalarSettings, WatchState};
 
-/// The Playback Session: exactly the fields the audio engine, playback
-/// coordinator, and transport touch. Lives behind its own `Arc<Mutex<>>`,
-/// separate from the Library Session, so no code path ever holds both
-/// session locks at once.
-///
-/// The UI reads this through a per-frame [`Clone`] snapshot and writes back
-/// only the UI-owned fields (volume, mute, shuffle, repeat, replay-gain) at
-/// frame end — the engine and coordinator write `playback_state`,
-/// `current_position`, and the queue's traversal index, none of which the UI
-/// ever mutates, so the targeted write-back cannot clobber them.
-#[derive(Debug, Clone)]
-pub struct PlaybackSession {
-    pub queue: PlaybackQueue,
-    pub playback_state: PlaybackState,
-    pub current_position: PlaybackPosition,
-    pub current_volume: f32,
-    /// Mute flag (REQ-UI-003-08): independent of `current_volume` — the slider
-    /// keeps its value while muted. The engine always receives
-    /// [`Self::effective_volume`], so a muted app stays silent until unmuted.
-    pub muted: bool,
-    /// `ReplayGain` flag (Task 4.3): opt-in loudness normalization. When
-    /// `true`, the engine applies each track's `REPLAYGAIN_TRACK_GAIN`
-    /// (peak-capped) in the audio output's volume-scaling step.
-    pub replaygain_enabled: bool,
-}
+/// Re-exported from `riff_playback::app::state` — the canonical playback
+/// session the Transport, coordinator, and engine all take. The backend keeps
+/// the library-side session types (`LibrarySession`, `ViewMode`, `UiFlags`).
+pub use riff_playback::app::state::PlaybackSession;
 
 /// The Library Session: everything that is not playback — selection, views,
 /// search, library roots and their statuses, scan status, browse mode, UI
@@ -95,6 +76,10 @@ pub struct LibrarySession {
 /// UI display flags grouped out of [`LibrarySession`] so the top-level state
 /// struct stays cohesive.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each persisted display preference is an independent toggle"
+)]
 pub struct UiFlags {
     /// Library explorer sub-view: `true` shows the Artists hierarchy instead
     /// of the flat All Tracks list.
@@ -128,19 +113,6 @@ pub enum ViewMode {
     Settings,
 }
 
-impl Default for PlaybackSession {
-    fn default() -> Self {
-        Self {
-            queue: PlaybackQueue::default(),
-            playback_state: PlaybackState::Stopped,
-            current_position: PlaybackPosition::default(),
-            current_volume: 1.0,
-            muted: false,
-            replaygain_enabled: false,
-        }
-    }
-}
-
 impl Default for LibrarySession {
     fn default() -> Self {
         Self {
@@ -154,17 +126,6 @@ impl Default for LibrarySession {
             selected_folder: None,
             ui_flags: UiFlags::default(),
             watch_states: HashMap::new(),
-        }
-    }
-}
-
-impl PlaybackSession {
-    /// Effective volume the engine should use (respects mute).
-    pub fn effective_volume(&self) -> f32 {
-        if self.muted {
-            0.0
-        } else {
-            self.current_volume
         }
     }
 }

@@ -13,7 +13,6 @@
 
 use std::time::Duration;
 
-use crate::domain::playback::NANOS_PER_SEC;
 pub use crate::domain::playback::{duration_from_frames, frames_from_duration};
 
 /// Gapless handoff keeps the same cpal stream running across the track
@@ -43,6 +42,10 @@ pub struct QueueConditions {
 /// Grouped into one value so the decision function stays readable; see
 /// [`is_gapless_eligible`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each condition is an independent handoff gate"
+)]
 pub struct GaplessConditions {
     pub shuffle: bool,
     pub repeat_one: bool,
@@ -102,9 +105,10 @@ pub fn samples_from_duration(position: Duration, rate: u32, channels: u16) -> us
 /// than dividing by zero.
 #[must_use]
 pub fn elapsed_from_samples(samples: usize, rate: u32, channels: u16) -> Duration {
-    if rate == 0 || channels == 0 {
-        return Duration::ZERO;
-    }
+    // Degenerate inputs clamp to 1 so the math stays defined (no divide by
+    // zero, no panic): the result is a defined estimate either way.
+    let rate = rate.max(1);
+    let channels = channels.max(1);
     let frames = samples / usize::from(channels);
     duration_from_frames(frames.try_into().unwrap_or(u64::MAX), rate)
 }
@@ -117,13 +121,19 @@ const MAX_PRE_BUFFER_SECONDS: f32 = 3600.0;
 /// Number of interleaved samples that fit in `seconds` of audio at the given
 /// format — the pre-buffer cap. Negative or non-finite input yields 0.
 #[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "the pre-buffer cap is a bounded estimate; saturation is harmless"
+)]
 pub fn pre_buffer_cap(rate: u32, channels: u16, seconds: f32) -> usize {
     if !seconds.is_finite() || seconds <= 0.0 {
         return 0;
     }
     let capped = seconds.min(MAX_PRE_BUFFER_SECONDS);
     let samples_per_sec = u64::from(rate) * u64::from(channels);
-    (samples_per_sec as f64 * capped as f64) as usize
+    (samples_per_sec as f64 * f64::from(capped)) as usize
 }
 
 #[cfg(test)]
@@ -134,7 +144,7 @@ mod tests {
     #[test]
     fn frames_duration_roundtrip() {
         let rate = 48000;
-        let frames = 123456789;
+        let frames = 123_456_789;
         let d = duration_from_frames(frames, rate);
         let back = frames_from_duration(d, rate);
         assert_eq!(back, frames);

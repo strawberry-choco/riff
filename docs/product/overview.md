@@ -1,6 +1,6 @@
 # riff
 
-riff is a lightweight, offline-first desktop music player written in Rust. It plays the audio files you already own — MP3, AAC, Opus, FLAC, OGG Vorbis, and WAV — directly from your local disks, with no account, no cloud, and no network access required. It ships as a single binary from a single Cargo crate, runs on Linux, Windows, and macOS, and is designed to start fast, stay out of the way, and treat your file system as the source of truth.
+riff is a lightweight, offline-first desktop music player written in Rust. It plays the audio files you already own — MP3, AAC, Opus, FLAC, OGG Vorbis, and WAV — directly from your local disks, with no account, no cloud, and no network access required. It ships as a single binary built from a Cargo workspace, runs on Linux, Windows, and macOS, and is designed to start fast, stay out of the way, and treat your file system as the source of truth.
 
 ## Overview
 
@@ -8,7 +8,7 @@ riff is a player for local music collections. You point it at one or more folder
 
 Everything happens on your machine. The library, playlists, and settings live in one embedded SQLite database — the Application Store (iff.sqlite3) — in your local data directory. Nothing is uploaded, nothing is fetched, and nothing phones home. If you disconnect the network cable, riff behaves exactly the same as it did before.
 
-The project is a single Rust crate with a four-layer architecture: a pure domain layer (tracks, queue, playback state), an application layer that defines the use cases and port traits, an infrastructure layer that implements those traits with real crates (symphonia for decoding, cpal for output, lofty for tags), and an egui-based UI layer. `src/main.rs` is the composition root that wires the layers together with channels and threads. See [../technical/architecture.md](../technical/architecture.md) for the full technical picture, and [./features.md](./features.md) for the complete feature catalog.
+The project is a Rust workspace organized as a vertical capability split: a pure persistence contract crate, two independent capability slices (the library collection and playback) that define their own port traits, one adapter crate that implements those ports with real crates (symphonia for decoding, cpal for output, lofty for tags) and owns every native dependency, a backend crate that exposes the application API and whose composition root wires the ports and adapters together with channels and threads, and an egui-based frontend crate. See [../technical/architecture.md](../technical/architecture.md) for the full technical picture, and [./features.md](./features.md) for the complete feature catalog.
 
 ## Design Philosophy
 
@@ -16,7 +16,7 @@ The project is a single Rust crate with a four-layer architecture: a pure domain
 
 **Your files are the library.** riff does not import, copy, or reorganize your music. It indexes what is on disk and remembers that index in the Application Store so the next launch is instant. Remove a library path and the index entries go away; your files are never touched. Edit your tags or drop a new album into a watched folder, and riff picks the change up on the next scan.
 
-**Lightweight by construction.** One crate, one binary, immediate-mode UI. The Application Store means large collections (tens of thousands of tracks) load in well under a second instead of re-walking the disk on every start. Decoding streams packet by packet rather than loading whole files into memory, and cover art is decoded on a background thread and held in a small LRU cache.
+**Lightweight by construction.** One binary, immediate-mode UI, and a workspace that keeps the core logic in pure-Rust crates. The Application Store means large collections (tens of thousands of tracks) load in well under a second instead of re-walking the disk on every start. Decoding streams packet by packet rather than loading whole files into memory, and cover art is decoded on a background thread and held in a small LRU cache.
 
 **Cross-platform without lowest-common-denominator.** The core experience — scanning, browsing, playing — is identical everywhere. Platform integration is adapted rather than faked: macOS and Windows get a native folder picker and a system tray icon; Linux gets a plain text path input and runs window-only, because the tray dependency stack is not reliably available there.
 
@@ -40,22 +40,22 @@ Setting expectations is as important as listing features. riff deliberately does
 
 ## Technology at a Glance
 
-riff is built from well-established Rust crates, chosen so that the core audio path is pure Rust and the whole product builds from a single crate:
+riff is built from well-established Rust crates, chosen so that the core audio and library paths are pure Rust and the native dependencies are quarantined in one adapter crate:
 
 | Concern | Technology |
 |---|---|
-| Language | Rust (edition 2021, MSRV 1.92) |
-| UI | egui / eframe 0.34 (immediate-mode GUI, window persistence) with egui-elegance styling |
-| Audio decoding | symphonia 0.5 (MP3, AAC, FLAC, OGG Vorbis, WAV) plus symphonia-adapter-libopus for Opus |
+| Language | Rust (edition 2024, MSRV 1.95) |
+| UI | egui / eframe 0.35 (immediate-mode GUI, window persistence) |
+| Audio decoding | symphonia 0.6 (MP3, AAC, FLAC, OGG Vorbis, WAV) plus symphonia-adapter-libopus for Opus |
 | Audio output | cpal 0.18 (ALSA/PipeWire/PulseAudio on Linux, WASAPI on Windows, CoreAudio on macOS) |
-| Metadata | lofty 0.19 (pure-Rust tag and embedded-picture reading) |
+| Metadata | lofty 0.25 (pure-Rust tag and embedded-picture reading and writing) |
 | Cover art images | image 0.25 (JPEG and PNG decoding) |
-| Library scanning | walkdir 2, with notify 7 for folder watching |
-| Concurrency | std threads, crossbeam-channel, parking_lot |
+| Library scanning | walkdir 2, with notify 8 for folder watching |
+| Concurrency | std threads, crossbeam-channel |
 | System integration | tray-icon + muda (tray menu) and rfd (native folder picker) on macOS/Windows only |
-| Persistence | rusqlite (embedded SQLite), directories 5 |
+| Persistence | rusqlite 0.40 (embedded SQLite), directories 6 |
 
-The architecture keeps these crates out of the domain layer entirely: business logic (tracks, queues, playback state) has zero external imports, and the UI talks to hardware only through trait boundaries defined in the app layer. Details are in [../technical/architecture.md](../technical/architecture.md).
+The architecture keeps these crates out of the core entirely: the persistence contract has zero dependencies, the capability slices are pure Rust, and the UI talks to hardware only through port traits defined by the slices and implemented in the adapter crate. Details are in [../technical/architecture.md](../technical/architecture.md).
 
 ## Status
 

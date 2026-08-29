@@ -2,7 +2,7 @@
 
 riff is offline-first and keeps its authoritative persistent state in one embedded `SQLite` database: the **Application Store** (`riff.sqlite3`), which holds the Library, Playlists, and Settings. The store is the single authority — the UI never owns a second copy of persisted state; it reads through bounded **Session Projections** that are invalidated by a session-local generation counter after every committed mutation. This document describes where the data lives, when it is written, how the schema evolves, and how corruption is handled.
 
-For the port traits that define what the store provides see [`src/app/store.rs`](../../src/app/store.rs); for the `rusqlite` implementation see [`src/infra/store.rs`](../../src/infra/store.rs). For the serialized domain types see [./data-model.md](./data-model.md), and for the scan flow that populates the Library see [./threading-model.md](./threading-model.md).
+For the port traits that define what the store provides see `riff-persistence/src/store.rs` (the persistence contract); for the `rusqlite` implementation see `riff-infra/src/store/sqlite.rs`. For the stored entity types see [./data-model.md](./data-model.md), and for the scan flow that populates the Library see [./threading-model.md](./threading-model.md).
 
 ## The Application Store (`riff.sqlite3`)
 
@@ -40,7 +40,7 @@ Because each event commits before it is reported done, a crash right afterward c
 
 ## Migrations
 
-Schema evolution uses ordered, checksummed migrations embedded in `src/infra/store.rs`. Each migration has a stable version number and a SHA-256 content checksum recorded in a `schema_migrations` table. On open, applied versions are verified against their embedded checksums and skipped; pending ones apply exactly once, each inside its own transaction. Editing a shipped migration (or its checksum) makes already-migrated stores fail to open with a clear error instead of silently diverging.
+Schema evolution uses ordered, checksummed migrations embedded in `riff-infra/src/store/sqlite.rs`. Each migration has a stable version number and a SHA-256 content checksum recorded in a `schema_migrations` table. On open, applied versions are verified against their embedded checksums and skipped; pending ones apply exactly once, each inside its own transaction. Editing a shipped migration (or its checksum) makes already-migrated stores fail to open with a clear error instead of silently diverging.
 
 ## Corruption recovery
 
@@ -53,7 +53,7 @@ Opening the store follows a deliberate sequence:
 
 ## Session Projections
 
-The UI does not query SQLite arbitrarily while rendering. Views read through bounded **Session Projections** (`src/app/projection.rs`): small in-memory caches of store query results — visible row windows for the flat list and search, per-folder listings for the folder tree, per-kind lists for smart playlists, and the playback-side projection (current Track, Up Next window, details-panel selection) — stamped with the value of a session-local generation counter. Every committed store mutation bumps that counter inside the mutation adapter, so projections refetch on the next frame without any restart. Stale reads are possible only between a commit and the next refresh, which generation invalidation makes explicit. There is no other in-memory copy of the library: the Application Store is the single implementation of collection semantics.
+The UI does not query SQLite arbitrarily while rendering. Views read through bounded **Session Projections** (library-side in `riff-library/src/app/projection.rs`, playback-side in `riff-playback/src/app/projection.rs`, reached through the Session Views facade in `riff-backend`): small in-memory caches of store query results — visible row windows for the flat list and search, per-folder listings for the folder tree, per-kind lists for smart playlists, and the playback-side projection (current Track, Up Next window, details-panel selection) — stamped with the value of a session-local generation counter. Every committed store mutation bumps that counter inside the store, so projections refetch on the next frame without any restart. Stale reads are possible only between a commit and the next refresh, which generation invalidation makes explicit. There is no other in-memory copy of the library: the Application Store is the single implementation of collection semantics.
 
 ## Clear Library
 
@@ -65,14 +65,14 @@ The former design persisted a non-authoritative Library Cache and Playlists as w
 
 ## Cover Art LRU (in-memory only)
 
-Decoded cover art is cached in memory, not on disk. The UI keeps a `cover_textures` map of egui `TextureHandle`s plus a `cover_lru_keys` vector that records recency, capped at 50 entries with least-recently-used eviction. There is no disk cache for covers — cover bytes are re-read and re-decoded from the source file on a cache miss.
+Decoded cover art is cached in memory, not on disk, in two bounded LRU caches: the cover service (`riff-library`) caches decoded RGBA images (cap 50) so repeated requests never re-decode, and the UI (`riff-gui`) keeps a `cover_textures` map of egui `TextureHandle`s plus a `cover_lru_keys` vector that records recency, capped at 50 entries with least-recently-used eviction. There is no disk cache for covers — cover bytes are re-read and re-decoded from the source file on a cache miss.
 
 ## Architectural Constraints
 
 - **Single authority.** The Application Store is the only persisted application state. In-memory structures are caches or session state, never a second authority.
 - **Per-event durability.** One transaction per logical event; scans batch adjacent chunk work (~10 tracks).
 - **No auto-scan on startup.** Scans remain user-triggered; the app never scans on launch.
-- **Ports over drivers.** App-layer ports (`StoreMigrations`, `SettingsStore`, `PlaylistStore`, `LibraryQueryStore`, `LibraryMutationStore`) are implemented by infrastructure over the shared connection; the UI never imports `rusqlite`.
+- **Ports over drivers.** The store ports (`StoreMigrations`, `SettingsStore`, `PlaylistStore`, `LibraryQueryStore`, `LibraryMutationStore`) are defined in the `riff-persistence` contract and implemented by `SqliteStore` in `riff-infra` over the shared connection; no crate above `riff-infra` imports `rusqlite`.
 - **Append-only migrations.** Shipped migrations are immutable; schema changes arrive as new versions.
 
 ## See also

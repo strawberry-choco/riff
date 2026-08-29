@@ -21,7 +21,6 @@ riff-persistence = { path = "../riff-persistence" }
 crossbeam-channel = "0.5"
 fastrand = "2"
 thiserror = "2"
-ringbuf = "0.5"
 # Duration math is in std, no chrono needed.
 
 [dev-dependencies]

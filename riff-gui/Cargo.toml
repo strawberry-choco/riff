@@ -4,12 +4,10 @@
 # Owns egui/eframe (pinned 0.35 — see root Cargo.toml note on the 0.36
 # headless texture regression), egui_kittest, resvg, rfd, and tray-icon/muda.
 #
-# The composition root (src/main.rs) wires real backend adapters into the
-# audio engine, the scan service, and the tag/cover workers. The proper
-# long-term shape is for that wiring to live inside the backend (a
-# `BackendFacade::run` that owns its threads and exposes events), at which
-# point these adapter deps move out of the frontend. Until then the binary
-# lives here, with the deps it needs.
+# The binary is a thin composition over the backend's Composition Root
+# (`riff_backend::composition::AppRuntime::spawn`, backend-crate-split
+# issue 08): every adapter dependency lives in `riff-infra`, and this crate
+# depends on riff-backend only (plus UI/platform dependencies).
 #
 # The integration test suite and golden snapshots live at the workspace root
 # in `./tests/` (see its own Cargo.toml) and declare this crate as a
@@ -37,26 +35,15 @@ epi = { package = "egui_extras", version = "0.35", features = ["image"] }
 # Lucide icon glyph rasterization for the shell chrome
 resvg = "0.48"
 
-# Composition root deps (transitional; see file header).
-symphonia = { version = "0.6", features = ["all"] }
-symphonia-adapter-libopus = "0.3"
-cpal = "0.18"
-ringbuf = "0.5"
-lofty = "0.25"
+# Cover-byte decoding for egui texture upload (the on-disk cover loader
+# adapter lives in riff-infra; this decode of in-memory bytes is UI work)
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-walkdir = "2"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
-notify = "8"
-notify-debouncer-full = "0.7"
-fastrand = "2"
-directories = "6"
-thiserror = "2"
 
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Threading / sync
+# Threading / sync (frontend-local visibility channel)
 crossbeam-channel = "0.5"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]

@@ -86,74 +86,11 @@ pub trait CoverLoader: Send + Sync {
     fn load_cover(&self, source: &CoverSource) -> Result<Option<CoverImage>, LibraryError>;
 }
 
-/// A requested edit to a track's metadata tags.
-///
-/// Pure application-layer DTO: only `Some` fields are written, `None` fields
-/// leave the existing tag value untouched. Contains no infrastructure types.
-#[derive(Debug, Clone, Default)]
-pub struct TagEdit {
-    pub title: Option<String>,
-    pub artist: Option<String>,
-    pub album: Option<String>,
-    pub album_artist: Option<String>,
-    pub genre: Option<String>,
-    pub year: Option<u32>,
-    pub track_number: Option<u32>,
-}
-
-impl TagEdit {
-    /// Apply only the `Some` fields of this edit to `metadata`, leaving every
-    /// other field untouched. Used to refresh the (derived) library cache
-    /// after a successful write to the (source-of-truth) file tags.
-    pub fn apply_to(&self, metadata: &mut TrackMetadata) {
-        if let Some(ref title) = self.title {
-            metadata.title = Some(title.clone());
-        }
-        if let Some(ref artist) = self.artist {
-            metadata.artist = Some(artist.clone());
-        }
-        if let Some(ref album) = self.album {
-            metadata.album = Some(album.clone());
-        }
-        if let Some(ref album_artist) = self.album_artist {
-            metadata.album_artist = Some(album_artist.clone());
-        }
-        if let Some(ref genre) = self.genre {
-            metadata.genre = Some(genre.clone());
-        }
-        if let Some(year) = self.year {
-            metadata.year = Some(year);
-        }
-        if let Some(track_number) = self.track_number {
-            metadata.track_number = Some(track_number);
-        }
-    }
-}
-
-/// Trait for metadata (tag) writers (implemented by infrastructure).
-pub trait MetadataWriter: Send {
-    /// Write the `Some` fields of `edit` to the tags of the file at `path`.
-    fn write_metadata(&self, path: &Path, edit: &TagEdit) -> Result<(), LibraryError>;
-}
-
-/// Trait for filesystem watchers (implemented by infrastructure).
-///
-/// Watches directory roots for audio-file changes; debounced batches of
-/// changed paths are delivered over a channel wired at construction time, not
-/// through these methods. The watcher manager codes against this port and
-/// never names the concrete adapter — the composition root injects the real
-/// watcher. Errors carry a human-readable reason string so no infrastructure
-/// error type leaks into the application layer.
-pub trait FilesystemWatch: Send {
-    /// Register `path` for recursive watching. On failure the `Err` carries
-    /// the raw reason, which the caller prefixes into the user-facing
-    /// `WatchState::Warning` diagnostic.
-    fn watch(&mut self, path: &Path) -> Result<(), String>;
-    /// Stop watching `path`. Failures are surfaced for symmetry but callers
-    /// typically ignore them — unwatching an already-gone root is not a
-    /// user-facing error.
-    fn unwatch(&mut self, path: &Path) -> Result<(), String>;
-}
+// Ports whose single definitions live in the library slice, re-exported so
+// existing `riff_backend::app::traits::` import paths keep resolving. The
+// real adapter implementations (lofty metadata writer, notify watcher) live
+// in `riff-infra` and implement these through riff-library's definitions.
+pub use riff_library::app::traits::{CoverImageFormat, FilesystemWatch, MetadataWriter, TagEdit};
 
 /// Decoded cover image ready for UI display.
 #[derive(Debug, Clone)]

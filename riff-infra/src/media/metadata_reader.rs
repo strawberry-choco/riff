@@ -1,10 +1,9 @@
-use crate::app::errors::LibraryError;
-use crate::app::traits::{AudioFormatInfo, MetadataReader};
-use crate::domain::{CoverSource, TrackMetadata};
 use lofty::file::TaggedFile;
 use lofty::prelude::*;
 use lofty::read_from_path;
 use lofty::tag::{ItemKey, Tag};
+use riff_library::app::errors::LibraryError;
+use riff_persistence::track::{CoverSource, TrackMetadata};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,6 +25,16 @@ pub fn parse_replaygain_gain(s: &str) -> Option<f32> {
         trimmed
     };
     without_unit.parse::<f32>().ok()
+}
+
+/// Format facts for the richer inherent read API: the stream's shape plus
+/// its total duration. (The library slice's port carries the slim two-field
+/// variant without the duration, which travels in the tuple instead.)
+#[derive(Debug, Clone)]
+pub struct AudioFormatInfo {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub duration: Option<Duration>,
 }
 
 /// Extract a year from a tag text value: a bare `"1959"` parses directly,
@@ -151,8 +160,13 @@ impl LoftyMetadataReader {
     }
 }
 
-impl MetadataReader for LoftyMetadataReader {
-    fn read_metadata(&self, path: &Path) -> Result<TrackMetadata, LibraryError> {
+// The reader is stateless, but the read methods take `&self` so the
+// port implementations can delegate to them one-for-one.
+#[allow(clippy::unused_self)]
+impl LoftyMetadataReader {
+    /// Read all metadata from a file: tags only, defaulting every absent
+    /// field.
+    pub fn read_metadata(&self, path: &Path) -> Result<TrackMetadata, LibraryError> {
         let tagged_file = Self::read_tagged_file(path)?;
         let Some(tag) = Self::best_tag(&tagged_file) else {
             return Ok(TrackMetadata::default());
@@ -160,12 +174,12 @@ impl MetadataReader for LoftyMetadataReader {
         Ok(Self::metadata_from_tag(tag))
     }
 
-    fn read_duration(&self, path: &Path) -> Result<Option<Duration>, LibraryError> {
+    pub fn read_duration(&self, path: &Path) -> Result<Option<Duration>, LibraryError> {
         let tagged_file = Self::read_tagged_file(path)?;
         Ok(Some(tagged_file.properties().duration()))
     }
 
-    fn read_cover_source(&self, path: &Path) -> Result<CoverSource, LibraryError> {
+    pub fn read_cover_source(&self, path: &Path) -> Result<CoverSource, LibraryError> {
         let tagged_file = Self::read_tagged_file(path)?;
         Ok(match Self::best_tag(&tagged_file) {
             Some(tag) => Self::cover_from_tag(tag),
@@ -173,12 +187,14 @@ impl MetadataReader for LoftyMetadataReader {
         })
     }
 
-    fn read_audio_format(&self, path: &Path) -> Result<AudioFormatInfo, LibraryError> {
+    pub fn read_audio_format(&self, path: &Path) -> Result<AudioFormatInfo, LibraryError> {
         let tagged_file = Self::read_tagged_file(path)?;
         Ok(Self::audio_format_from(&tagged_file))
     }
 
-    fn read_all(
+    /// One-pass read: metadata, duration, cover source, and audio format in
+    /// a single file open.
+    pub fn read_all(
         &self,
         path: &Path,
     ) -> Result<
@@ -203,7 +219,7 @@ impl MetadataReader for LoftyMetadataReader {
 }
 
 /// The library capability's reader port, served over the same lofty internals
-/// as the richer backend port above. The library port collapses the optional
+/// as the richer inherent API above. The library port collapses the optional
 /// duration into a default and carries the slim two-field format info.
 impl riff_library::app::traits::MetadataReader for LoftyMetadataReader {
     fn read_all(
@@ -216,10 +232,9 @@ impl riff_library::app::traits::MetadataReader for LoftyMetadataReader {
             CoverSource,
             riff_library::app::traits::AudioFormatInfo,
         ),
-        riff_library::app::errors::LibraryError,
+        LibraryError,
     > {
-        let (metadata, duration, cover_source, audio_format) =
-            MetadataReader::read_all(self, path).map_err(convert_library_error)?;
+        let (metadata, duration, cover_source, audio_format) = self.read_all(path)?;
         Ok((
             metadata,
             duration.unwrap_or_default(),
@@ -231,27 +246,7 @@ impl riff_library::app::traits::MetadataReader for LoftyMetadataReader {
         ))
     }
 
-    fn read_cover_source(
-        &self,
-        path: &Path,
-    ) -> Result<CoverSource, riff_library::app::errors::LibraryError> {
-        MetadataReader::read_cover_source(self, path).map_err(convert_library_error)
-    }
-}
-
-/// Map the backend's library error onto riff-library's copy — the two enums
-/// carry the same variants (modulo one backend-side extra) over `String`.
-fn convert_library_error(
-    e: crate::app::errors::LibraryError,
-) -> riff_library::app::errors::LibraryError {
-    use crate::app::errors::LibraryError as Backend;
-    use riff_library::app::errors::LibraryError as Library;
-    match e {
-        Backend::MetadataRead(s) => Library::MetadataRead(s),
-        Backend::MetadataWrite(s) => Library::MetadataWrite(s),
-        Backend::CoverLoad(s) => Library::CoverLoad(s),
-        Backend::LibraryScan(s) => Library::LibraryScan(s),
-        Backend::Io(s) => Library::Io(s),
-        Backend::TrackNotFound(s) => Library::TrackNotFound(s),
+    fn read_cover_source(&self, path: &Path) -> Result<CoverSource, LibraryError> {
+        self.read_cover_source(path)
     }
 }

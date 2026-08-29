@@ -342,7 +342,12 @@ pub fn show_settings_stage(
         .show(ui, |ui| {
             let avail_w = ui.available_width();
             let col_w = (avail_w - 2.0 * STAGE_PAD).clamp(120.0, COLUMN_MAX_W);
-            let x0 = ((avail_w - col_w) * 0.5).max(0.0);
+            // The centered column's ABSOLUTE left edge: its offset within the
+            // stage plus the stage's own origin (the cursor's left), because
+            // the scope rect below is in screen coordinates. A vertical
+            // ScrollArea never scrolls horizontally, so the cursor's left is
+            // the stage's left edge on every frame.
+            let x0 = ui.cursor().left() + ((avail_w - col_w) * 0.5).max(0.0);
 
             ui.add_space(STAGE_PAD);
             let col_top = ui.cursor().top();
@@ -382,12 +387,19 @@ pub fn show_settings_stage(
 // --- Pure helpers ------------------------------------------------------------------
 
 /// Clip a path string for display, keeping the tail (the distinguishing
-/// segment) rather than the head.
-fn truncate_path(path: &str, max_len: usize) -> String {
+/// segment) rather than the head. The cut advances forward to the nearest
+/// UTF-8 char boundary: `path.len()` counts bytes, and a multi-byte
+/// character straddling the cut would otherwise panic the render loop.
+#[must_use]
+pub fn truncate_path(path: &str, max_len: usize) -> String {
     if path.len() <= max_len {
         path.to_string()
     } else {
-        format!("...{}", &path[path.len().saturating_sub(max_len - 3)..])
+        let mut start = path.len().saturating_sub(max_len.saturating_sub(3));
+        while !path.is_char_boundary(start) {
+            start += 1;
+        }
+        format!("...{}", &path[start..])
     }
 }
 

@@ -126,10 +126,11 @@ impl AppRuntime {
         // Clone senders for different consumers before cmd_tx is moved.
         let ui_cmd_tx = cmd_tx.clone();
         let tray_cmd_tx = cmd_tx.clone();
+        let engine_cmd_tx = cmd_tx.clone();
         let app_state = playback.clone();
         let engine_queries = library_query_store.clone();
         let _audio_thread = thread::spawn(move || {
-            run_engine_thread(cmd_rx, update_tx, app_state, engine_queries);
+            run_engine_thread(cmd_rx, engine_cmd_tx, update_tx, app_state, engine_queries);
         });
 
         // Playback Coordinator: applies Playback Updates to session state
@@ -296,6 +297,7 @@ fn spawn_background_services(
 /// so the factory builds a fresh registry for every decoder it mints.
 fn run_engine_thread(
     cmd_rx: crossbeam_channel::Receiver<riff_playback::domain::PlaybackCommand>,
+    cmd_tx: crossbeam_channel::Sender<riff_playback::domain::PlaybackCommand>,
     update_tx: crossbeam_channel::Sender<riff_playback::domain::PlaybackUpdate>,
     state: Arc<Mutex<PlaybackSession>>,
     library_queries: SqliteStore,
@@ -304,6 +306,7 @@ fn run_engine_thread(
         Box::new(|| Box::new(SymphoniaDecoder::new(default_codec_registry())));
     let engine = AudioEngine::new(
         cmd_rx,
+        cmd_tx,
         update_tx,
         Box::new(library_queries),
         decoder_factory,

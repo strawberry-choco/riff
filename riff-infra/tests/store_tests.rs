@@ -30,10 +30,10 @@ fn test_store_fresh_start_creates_file_and_applies_initial_migration_once() {
         })
         .expect("reading schema_migrations must work");
     // The shipped initial set: v1 (foundation) + v2 (typed settings tables)
-    // + v3 (playlists) + v4 (library collection).
+    // + v3 (playlists) + v4 (library collection) + v5 (playback prefs).
     assert_eq!(
         applied.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4]
+        vec![1, 2, 3, 4, 5]
     );
 }
 
@@ -95,10 +95,10 @@ fn test_store_double_apply_is_idempotent() {
             mapped.collect()
         })
         .expect("reading schema_migrations must work");
-    assert_eq!(rows.len(), 4, "no duplicate migration rows allowed");
+    assert_eq!(rows.len(), 5, "no duplicate migration rows allowed");
     assert_eq!(
         rows.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4]
+        vec![1, 2, 3, 4, 5]
     );
 
     let applied_at: i64 = store
@@ -151,7 +151,7 @@ fn test_store_checksum_tamper_is_fatal() {
         })
         .expect("reading schema_migrations must work");
     assert_eq!(
-        rows, 4,
+        rows, 5,
         "all shipped migration rows must exist, none re-applied"
     );
 }
@@ -385,6 +385,8 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
                 advanced_mode: true,
                 high_contrast: true,
                 replaygain_enabled: true,
+                shuffle: true,
+                repeat_mode: 2,
             })
             .expect("saving scalars must work");
     }
@@ -401,6 +403,8 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
     assert!(settings.scalars.advanced_mode);
     assert!(settings.scalars.high_contrast);
     assert!(settings.scalars.replaygain_enabled);
+    assert!(settings.scalars.shuffle);
+    assert_eq!(settings.scalars.repeat_mode, 2);
 }
 
 #[test]
@@ -2987,6 +2991,7 @@ fn seeded_clear_store(db_path: &std::path::Path) -> riff_infra::store::SqliteSto
             advanced_mode: true,
             high_contrast: false,
             replaygain_enabled: true,
+            ..Default::default()
         })
         .expect("scalars save");
     store

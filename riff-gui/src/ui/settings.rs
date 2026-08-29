@@ -1459,11 +1459,18 @@ impl super::app::RiffApp {
     /// Commit the current scalar preferences as one small durable
     /// transaction.
     fn persist_scalars(&mut self, playback: &PlaybackSession, library: &LibrarySession) {
+        let repeat_mode = match playback.queue.repeat {
+            riff_backend::domain::RepeatMode::None => 0,
+            riff_backend::domain::RepeatMode::All => 1,
+            riff_backend::domain::RepeatMode::One => 2,
+        };
         let scalars = riff_backend::app::state::ScalarSettings {
             volume: Some(playback.current_volume),
             advanced_mode: library.ui_flags.advanced_mode,
             high_contrast: library.ui_flags.high_contrast,
             replaygain_enabled: playback.replaygain_enabled,
+            shuffle: playback.queue.shuffle,
+            repeat_mode,
         };
         if let Err(e) = self.settings_store.save_scalars(&scalars) {
             tracing::warn!("Failed to save settings: {e}");

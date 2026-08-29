@@ -26,12 +26,21 @@ pub enum WatchState {
 /// The single-row scalar preferences persisted in the Application Store's
 /// typed settings table. Volume is `None` while the user has not yet moved
 /// the slider, so the caller applies its own default.
+///
+/// `repeat_mode` encodes the playback repeat cycle as an integer so this
+/// crate stays dependency-free: 0 = off, 1 = repeat all, 2 = repeat one.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the struct mirrors the scalar settings row's typed columns"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ScalarSettings {
     pub volume: Option<f32>,
     pub advanced_mode: bool,
     pub high_contrast: bool,
     pub replaygain_enabled: bool,
+    pub shuffle: bool,
+    pub repeat_mode: i64,
 }
 
 /// Age threshold for the Lost Gems smart playlist: tracks whose last play is

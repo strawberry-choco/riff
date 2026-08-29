@@ -17,7 +17,8 @@ use riff_backend::app::traits::TagEdit;
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
 use riff_backend::domain::{
-    Album, Artist, PlaybackState, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
+    Album, Artist, PlaybackState, Playlist, PlaylistId, RepeatMode, SmartPlaylistKind, Track,
+    TrackId,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -863,6 +864,8 @@ fn apply_titlebar_action(
                 playback.current_volume,
                 library.ui_flags,
                 playback.replaygain_enabled,
+                playback.queue.shuffle,
+                playback.queue.repeat,
             );
         }
         Action::ToggleNowPlaying => {
@@ -910,12 +913,21 @@ fn persist_scalars(
     volume: f32,
     ui_flags: UiFlags,
     replaygain_enabled: bool,
+    shuffle: bool,
+    repeat: RepeatMode,
 ) {
+    let repeat_mode = match repeat {
+        RepeatMode::None => 0,
+        RepeatMode::All => 1,
+        RepeatMode::One => 2,
+    };
     let scalars = riff_backend::app::state::ScalarSettings {
         volume: Some(volume),
         advanced_mode: ui_flags.advanced_mode,
         high_contrast: ui_flags.high_contrast,
         replaygain_enabled,
+        shuffle,
+        repeat_mode,
     };
     if let Err(e) = store.save_scalars(&scalars) {
         tracing::warn!("Failed to save settings: {e}");
@@ -1055,6 +1067,8 @@ pub fn apply_player_bar_action(
                 playback.current_volume,
                 library.ui_flags,
                 playback.replaygain_enabled,
+                playback.queue.shuffle,
+                playback.queue.repeat,
             );
             // While muted the slider still edits current_volume, but the
             // engine keeps receiving 0 until unmuted.
@@ -1069,8 +1083,26 @@ pub fn apply_player_bar_action(
         Action::ToggleShuffle => {
             let was = playback.queue.shuffle;
             playback.queue.set_shuffle(!was);
+            persist_scalars(
+                store,
+                playback.current_volume,
+                library.ui_flags,
+                playback.replaygain_enabled,
+                playback.queue.shuffle,
+                playback.queue.repeat,
+            );
         }
-        Action::ToggleRepeat => playback.queue.toggle_repeat(),
+        Action::ToggleRepeat => {
+            playback.queue.toggle_repeat();
+            persist_scalars(
+                store,
+                playback.current_volume,
+                library.ui_flags,
+                playback.replaygain_enabled,
+                playback.queue.shuffle,
+                playback.queue.repeat,
+            );
+        }
     }
 }
 
@@ -1104,6 +1136,13 @@ pub fn load_persisted_state(
             playback_session.current_volume = vol;
         }
         playback_session.replaygain_enabled = settings.scalars.replaygain_enabled;
+        // Restore the player-bar toggles so shuffle/repeat survive restarts.
+        playback_session.queue.shuffle = settings.scalars.shuffle;
+        playback_session.queue.repeat = match settings.scalars.repeat_mode {
+            1 => RepeatMode::All,
+            2 => RepeatMode::One,
+            _ => RepeatMode::None,
+        };
         // Route through effective_volume so a muted app (once mute
         // state is restored) never emits sound at startup.
         transport.set_volume(&playback_session, playback_session.effective_volume());

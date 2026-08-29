@@ -15,7 +15,7 @@ use riff_backend::app::MutexExt;
 use riff_backend::app::audio_engine::AudioEngine;
 use riff_backend::app::facade::BackendFacade;
 use riff_backend::app::playback_coordinator::PlaybackCoordinator;
-use riff_backend::app::state::AppState;
+use riff_backend::app::state::{LibrarySession, PlaybackSession};
 use riff_backend::app::traits::DecoderFactory;
 use riff_backend::app::transport::FacadeTransport;
 use riff_backend::app::watcher_manager::WatcherManager;
@@ -45,10 +45,14 @@ fn main() {
     // so dispatched commands are recorded onto one observable event inbox.
     // The store's `StoreChanged` stream is the facade's second input.
     let facade = Arc::new(Mutex::new(BackendFacade::default()));
+    // Playback errors surface as typed notices (issue 01 seam fix): the
+    // coordinator sends pre-formatted messages over this channel and the
+    // facade stamps them with playback source + error severity.
+    let (notice_tx, notice_rx) = unbounded::<String>();
     {
         let mut f = facade.lock_or_recover();
         f.subscribe_to_backend_changes(changes_rx);
-        f.bootstrap(generation.current(), playlist_generation.current());
+        f.subscribe_playback_notices(notice_rx);
     }
     // The UI's single read seam over the Application Store (ADR 0002).
     let session_views = wire_session_views(
@@ -58,7 +62,8 @@ fn main() {
         playlist_generation,
     );
 
-    let state = Arc::new(Mutex::new(AppState::new()));
+    let playback = Arc::new(Mutex::new(PlaybackSession::new()));
+    let library = Arc::new(Mutex::new(LibrarySession::new()));
     let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
     let (update_tx, update_rx) = unbounded::<PlaybackUpdate>();
 
@@ -66,8 +71,7 @@ fn main() {
     let ui_cmd_tx = cmd_tx.clone();
     let engine_cmd_tx = cmd_tx.clone();
     let tray_cmd_tx = cmd_tx.clone();
-
-    let app_state = state.clone();
+    let app_state = playback.clone();
     let engine_queries = library_query_store.clone();
     let _audio_thread = thread::spawn(move || {
         run_engine_thread(cmd_rx, engine_cmd_tx, update_tx, app_state, engine_queries);
@@ -76,10 +80,11 @@ fn main() {
     // Playback Coordinator (CONTEXT.md): applies Playback Updates to session
     // state and owns playback continuation, on its dedicated thread.
     let _update_processor = PlaybackCoordinator::spawn(
-        state.clone(),
+        playback.clone(),
         update_rx,
         cmd_tx.clone(),
         Box::new(library_mutation_store.clone()),
+        notice_tx,
     );
 
     // Library Scan Service (ADR 0006 pattern): the whole Library Scan flow —
@@ -143,7 +148,8 @@ fn main() {
 
     #[cfg(not(target_os = "linux"))]
     let app = RiffApp::new(
-        state.clone(),
+        playback.clone(),
+        library.clone(),
         ui_transport,
         Box::new(scans.clone()),
         watcher_manager,
@@ -161,7 +167,8 @@ fn main() {
 
     #[cfg(target_os = "linux")]
     let app = RiffApp::new(
-        state.clone(),
+        playback.clone(),
+        library.clone(),
         ui_transport,
         Box::new(scans),
         watcher_manager,
@@ -198,13 +205,14 @@ fn spawn_fs_watcher(
     scans: riff_backend::app::scan_service::ScanService,
 ) -> Arc<Mutex<Option<WatcherManager>>> {
     let (fs_event_tx, fs_event_rx) = unbounded::<Vec<PathBuf>>();
-    let watcher = match FilesystemWatcher::new(fs_event_tx) {
-        Ok(w) => Some(w),
-        Err(e) => {
-            tracing::warn!("Failed to create filesystem watcher: {}", e);
-            None
-        }
-    };
+    let watcher: Option<Box<dyn riff_backend::app::traits::FilesystemWatch>> =
+        match FilesystemWatcher::new(fs_event_tx) {
+            Ok(w) => Some(Box::new(w)),
+            Err(e) => {
+                tracing::warn!("Failed to create filesystem watcher: {}", e);
+                None
+            }
+        };
 
     let watcher_manager = Arc::new(Mutex::new(Some(WatcherManager::new(watcher, scans))));
 
@@ -324,7 +332,7 @@ fn run_engine_thread(
     cmd_rx: crossbeam_channel::Receiver<PlaybackCommand>,
     cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
     update_tx: crossbeam_channel::Sender<PlaybackUpdate>,
-    state: Arc<Mutex<AppState>>,
+    state: Arc<Mutex<PlaybackSession>>,
     library_queries: riff_backend::infra::store::SqliteStore,
 ) {
     let decoder_factory: DecoderFactory =

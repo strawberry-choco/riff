@@ -6,7 +6,7 @@ use super::*;
 mod tests {
     use super::*;
     use crate::domain::CoverSource;
-    use riff_backend::app::errors::AppError;
+    use riff_backend::app::errors::{LibraryError, StoreError};
     use riff_backend::app::playlist_manager;
     use riff_backend::app::traits::{AudioFormatInfo, MetadataReader, MetadataWriter, TagEdit};
     use std::collections::HashMap;
@@ -29,7 +29,7 @@ mod tests {
     fn test_app_state_advanced_mode_defaults_to_false() {
         // Progressive disclosure (REQ-UI-006): the UI starts minimal; power
         // features stay hidden until the user opts in via the toggle.
-        let state = AppState::new();
+        let state = LibrarySession::new();
         assert!(!state.ui_flags.advanced_mode);
     }
 
@@ -37,21 +37,21 @@ mod tests {
     fn test_app_state_high_contrast_defaults_to_false() {
         // Accessibility (REQ-UI-007): the high-contrast theme is opt-in; the
         // app starts with the regular light/dark palette.
-        let state = AppState::new();
+        let state = LibrarySession::new();
         assert!(!state.ui_flags.high_contrast);
     }
 
     #[test]
     fn test_app_state_muted_defaults_to_false() {
         // Mute (REQ-UI-003-08): the app starts unmuted.
-        let state = AppState::new();
+        let state = PlaybackSession::new();
         assert!(!state.muted);
     }
 
     #[test]
     fn test_app_state_replaygain_defaults_to_disabled() {
         // ReplayGain (Task 4.3) is opt-in.
-        let state = AppState::new();
+        let state = PlaybackSession::new();
         assert!(!state.replaygain_enabled);
     }
 
@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn test_effective_volume_zeroed_while_muted_and_restored_on_unmute() {
-        let mut state = AppState::new();
+        let mut state = PlaybackSession::new();
         state.current_volume = 0.7;
 
         // Unmuted: the engine receives the slider value.
@@ -396,19 +396,19 @@ mod tests {
     }
 
     impl MetadataReader for MockMetadataReader {
-        fn read_metadata(&self, _path: &Path) -> Result<TrackMetadata, AppError> {
+        fn read_metadata(&self, _path: &Path) -> Result<TrackMetadata, LibraryError> {
             Ok(TrackMetadata::default())
         }
 
-        fn read_duration(&self, _path: &Path) -> Result<Option<Duration>, AppError> {
+        fn read_duration(&self, _path: &Path) -> Result<Option<Duration>, LibraryError> {
             Ok(Some(Duration::from_secs(90)))
         }
 
-        fn read_cover_source(&self, _path: &Path) -> Result<CoverSource, AppError> {
+        fn read_cover_source(&self, _path: &Path) -> Result<CoverSource, LibraryError> {
             Ok(CoverSource::None)
         }
 
-        fn read_audio_format(&self, _path: &Path) -> Result<AudioFormatInfo, AppError> {
+        fn read_audio_format(&self, _path: &Path) -> Result<AudioFormatInfo, LibraryError> {
             Ok(AudioFormatInfo {
                 sample_rate: 44_100,
                 channels: 2,
@@ -426,10 +426,12 @@ mod tests {
                 CoverSource,
                 AudioFormatInfo,
             ),
-            AppError,
+            LibraryError,
         > {
             if self.fail {
-                return Err(AppError::MetadataRead(format!("mock failure: {path:?}")));
+                return Err(LibraryError::MetadataRead(format!(
+                    "mock failure: {path:?}"
+                )));
             }
             let title = path
                 .file_stem()
@@ -553,7 +555,7 @@ mod tests {
         let result = writer.write_metadata(&PathBuf::from("locked.mp3"), &TagEdit::default());
 
         let err = result.expect_err("failing writer must return an error");
-        assert!(matches!(err, AppError::MetadataWrite(_)));
+        assert!(matches!(err, LibraryError::MetadataWrite(_)));
         assert!(err.to_string().contains("Failed to write tags"));
         assert!(writer.recorded().is_empty());
     }
@@ -671,19 +673,19 @@ mod tests {
     struct SharedMock(Arc<Mutex<MockLibraryQueryStore>>);
 
     impl LibraryQueryStore for SharedMock {
-        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, AppError> {
+        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
             self.0.lock().unwrap().get_track(id)
         }
 
-        fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, AppError> {
+        fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, StoreError> {
             self.0.lock().unwrap().tracks_window(offset, limit)
         }
 
-        fn track_count(&self) -> Result<usize, AppError> {
+        fn track_count(&self) -> Result<usize, StoreError> {
             self.0.lock().unwrap().track_count()
         }
 
-        fn all_track_ids(&self) -> Result<Vec<TrackId>, AppError> {
+        fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
             self.0.lock().unwrap().all_track_ids()
         }
 
@@ -692,19 +694,19 @@ mod tests {
             query: &str,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Track>, AppError> {
+        ) -> Result<Vec<Track>, StoreError> {
             self.0.lock().unwrap().search_window(query, offset, limit)
         }
 
-        fn search_count(&self, query: &str) -> Result<usize, AppError> {
+        fn search_count(&self, query: &str) -> Result<usize, StoreError> {
             self.0.lock().unwrap().search_count(query)
         }
 
-        fn all_artists(&self) -> Result<Vec<Artist>, AppError> {
+        fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
             self.0.lock().unwrap().all_artists()
         }
 
-        fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, AppError> {
+        fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, StoreError> {
             self.0.lock().unwrap().artist_albums(artist)
         }
 
@@ -712,14 +714,14 @@ mod tests {
             &self,
             album_artist: &str,
             album_title: &str,
-        ) -> Result<Vec<Track>, AppError> {
+        ) -> Result<Vec<Track>, StoreError> {
             self.0
                 .lock()
                 .unwrap()
                 .album_tracks(album_artist, album_title)
         }
 
-        fn folder_has_audio(&self, folder: &std::path::Path) -> Result<bool, AppError> {
+        fn folder_has_audio(&self, folder: &std::path::Path) -> Result<bool, StoreError> {
             self.0.lock().unwrap().folder_has_audio(folder)
         }
 
@@ -727,7 +729,7 @@ mod tests {
             &self,
             folder: &std::path::Path,
             query: &str,
-        ) -> Result<bool, AppError> {
+        ) -> Result<bool, StoreError> {
             self.0
                 .lock()
                 .unwrap()
@@ -737,15 +739,15 @@ mod tests {
         fn track_ids_in_folder_tree(
             &self,
             folder: &std::path::Path,
-        ) -> Result<Vec<TrackId>, AppError> {
+        ) -> Result<Vec<TrackId>, StoreError> {
             self.0.lock().unwrap().track_ids_in_folder_tree(folder)
         }
 
-        fn tracks_in_folder(&self, folder: &std::path::Path) -> Result<Vec<Track>, AppError> {
+        fn tracks_in_folder(&self, folder: &std::path::Path) -> Result<Vec<Track>, StoreError> {
             self.0.lock().unwrap().tracks_in_folder(folder)
         }
 
-        fn subdirs_with_audio(&self, folder: &std::path::Path) -> Result<Vec<PathBuf>, AppError> {
+        fn subdirs_with_audio(&self, folder: &std::path::Path) -> Result<Vec<PathBuf>, StoreError> {
             self.0.lock().unwrap().subdirs_with_audio(folder)
         }
 
@@ -753,7 +755,7 @@ mod tests {
             &self,
             kind: SmartPlaylistKind,
             limit: usize,
-        ) -> Result<Vec<Track>, AppError> {
+        ) -> Result<Vec<Track>, StoreError> {
             self.0.lock().unwrap().smart_playlist(kind, limit)
         }
     }
@@ -1344,7 +1346,7 @@ mod tests {
 // fails an assertion instead of hanging CI.
 mod scan_service_tests {
     use super::*;
-    use riff_backend::app::errors::AppError;
+    use riff_backend::app::errors::{LibraryError, StoreError};
     use riff_backend::app::scan_service::{ScanOutcome, ScanService, Scans};
     use riff_backend::app::store::{LibraryMutationStore, LibraryQueryStore};
     use riff_backend::app::traits::{AudioFormatInfo, MetadataReader};
@@ -1435,19 +1437,19 @@ mod scan_service_tests {
     }
 
     impl MetadataReader for FixtureReader {
-        fn read_metadata(&self, path: &Path) -> Result<TrackMetadata, AppError> {
+        fn read_metadata(&self, path: &Path) -> Result<TrackMetadata, LibraryError> {
             Ok(self.canned_read(path).0)
         }
 
-        fn read_duration(&self, _path: &Path) -> Result<Option<Duration>, AppError> {
+        fn read_duration(&self, _path: &Path) -> Result<Option<Duration>, LibraryError> {
             Ok(Some(Duration::from_secs(90)))
         }
 
-        fn read_cover_source(&self, _path: &Path) -> Result<CoverSource, AppError> {
+        fn read_cover_source(&self, _path: &Path) -> Result<CoverSource, LibraryError> {
             Ok(CoverSource::None)
         }
 
-        fn read_audio_format(&self, _path: &Path) -> Result<AudioFormatInfo, AppError> {
+        fn read_audio_format(&self, _path: &Path) -> Result<AudioFormatInfo, LibraryError> {
             Ok(AudioFormatInfo {
                 sample_rate: 44_100,
                 channels: 2,
@@ -1465,7 +1467,7 @@ mod scan_service_tests {
                 CoverSource,
                 AudioFormatInfo,
             ),
-            AppError,
+            LibraryError,
         > {
             Ok(self.canned_read(path))
         }
@@ -1567,21 +1569,21 @@ mod scan_service_tests {
     struct FailingFreshnessQueries;
 
     impl LibraryQueryStore for FailingFreshnessQueries {
-        fn get_track(&self, _id: &TrackId) -> Result<Option<Track>, AppError> {
-            Err(AppError::InvalidOperation(
+        fn get_track(&self, _id: &TrackId) -> Result<Option<Track>, StoreError> {
+            Err(StoreError::InvalidOperation(
                 "freshness probe boom".to_string(),
             ))
         }
 
-        fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, AppError> {
+        fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn track_count(&self) -> Result<usize, AppError> {
+        fn track_count(&self) -> Result<usize, StoreError> {
             Ok(0)
         }
 
-        fn all_track_ids(&self) -> Result<Vec<TrackId>, AppError> {
+        fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
             Ok(Vec::new())
         }
 
@@ -1590,19 +1592,19 @@ mod scan_service_tests {
             _query: &str,
             _offset: usize,
             _limit: usize,
-        ) -> Result<Vec<Track>, AppError> {
+        ) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn search_count(&self, _query: &str) -> Result<usize, AppError> {
+        fn search_count(&self, _query: &str) -> Result<usize, StoreError> {
             Ok(0)
         }
 
-        fn all_artists(&self) -> Result<Vec<crate::domain::Artist>, AppError> {
+        fn all_artists(&self) -> Result<Vec<crate::domain::Artist>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn artist_albums(&self, _artist: &str) -> Result<Vec<crate::domain::Album>, AppError> {
+        fn artist_albums(&self, _artist: &str) -> Result<Vec<crate::domain::Album>, StoreError> {
             Ok(Vec::new())
         }
 
@@ -1610,27 +1612,31 @@ mod scan_service_tests {
             &self,
             _album_artist: &str,
             _album_title: &str,
-        ) -> Result<Vec<Track>, AppError> {
+        ) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn folder_has_audio(&self, _folder: &Path) -> Result<bool, AppError> {
+        fn folder_has_audio(&self, _folder: &Path) -> Result<bool, StoreError> {
             Ok(false)
         }
 
-        fn folder_has_search_match(&self, _folder: &Path, _query: &str) -> Result<bool, AppError> {
+        fn folder_has_search_match(
+            &self,
+            _folder: &Path,
+            _query: &str,
+        ) -> Result<bool, StoreError> {
             Ok(false)
         }
 
-        fn track_ids_in_folder_tree(&self, _folder: &Path) -> Result<Vec<TrackId>, AppError> {
+        fn track_ids_in_folder_tree(&self, _folder: &Path) -> Result<Vec<TrackId>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn tracks_in_folder(&self, _folder: &Path) -> Result<Vec<Track>, AppError> {
+        fn tracks_in_folder(&self, _folder: &Path) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, AppError> {
+        fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, StoreError> {
             Ok(Vec::new())
         }
 
@@ -1638,7 +1644,7 @@ mod scan_service_tests {
             &self,
             _kind: crate::domain::SmartPlaylistKind,
             _limit: usize,
-        ) -> Result<Vec<Track>, AppError> {
+        ) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
     }
@@ -1648,8 +1654,8 @@ mod scan_service_tests {
     struct FailingCommitMutations;
 
     impl LibraryMutationStore for FailingCommitMutations {
-        fn apply_scan_batch(&mut self, _tracks: &[Track]) -> Result<usize, AppError> {
-            Err(AppError::InvalidOperation(
+        fn apply_scan_batch(&mut self, _tracks: &[Track]) -> Result<usize, StoreError> {
+            Err(StoreError::InvalidOperation(
                 "scan batch commit boom".to_string(),
             ))
         }
@@ -1658,19 +1664,19 @@ mod scan_service_tests {
             &mut self,
             _id: &TrackId,
             _played_at: SystemTime,
-        ) -> Result<bool, AppError> {
+        ) -> Result<bool, StoreError> {
             Ok(false)
         }
 
-        fn apply_tag_refresh(&mut self, _track: &Track) -> Result<(), AppError> {
+        fn apply_tag_refresh(&mut self, _track: &Track) -> Result<(), StoreError> {
             Ok(())
         }
 
-        fn remove_library_path(&mut self, _root: &Path) -> Result<usize, AppError> {
+        fn remove_library_path(&mut self, _root: &Path) -> Result<usize, StoreError> {
             Ok(0)
         }
 
-        fn clear_library(&mut self) -> Result<usize, AppError> {
+        fn clear_library(&mut self) -> Result<usize, StoreError> {
             Ok(0)
         }
     }
@@ -1905,7 +1911,7 @@ mod audio_engine_tests {
     use super::*;
     use crossbeam_channel::{Receiver, unbounded};
     use riff_backend::app::audio_engine::AudioEngine;
-    use riff_backend::app::errors::AppError;
+    use riff_backend::app::errors::{PlaybackError, StoreError};
     use riff_backend::app::store::LibraryQueryStore;
     use riff_backend::app::traits::{AudioDecoder, AudioFormatInfo, AudioOutput, DecoderFactory};
     use std::collections::HashMap;
@@ -1944,15 +1950,15 @@ mod audio_engine_tests {
     struct SharedDecoder(Arc<Mutex<MockAudioDecoder>>);
 
     impl AudioDecoder for SharedDecoder {
-        fn open(&mut self, path: &Path) -> Result<AudioFormatInfo, AppError> {
+        fn open(&mut self, path: &Path) -> Result<AudioFormatInfo, PlaybackError> {
             self.0.lock().unwrap().open(path)
         }
 
-        fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, AppError> {
+        fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, PlaybackError> {
             self.0.lock().unwrap().next_frames(out)
         }
 
-        fn seek(&mut self, position: Duration) -> Result<(), AppError> {
+        fn seek(&mut self, position: Duration) -> Result<(), PlaybackError> {
             self.0.lock().unwrap().seek(position)
         }
 
@@ -1970,19 +1976,19 @@ mod audio_engine_tests {
     struct SharedOutput(Arc<Mutex<MockAudioOutput>>);
 
     impl AudioOutput for SharedOutput {
-        fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), AppError> {
+        fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), PlaybackError> {
             self.0.lock().unwrap().initialize(sample_rate, channels)
         }
 
-        fn start(&mut self) -> Result<(), AppError> {
+        fn start(&mut self) -> Result<(), PlaybackError> {
             self.0.lock().unwrap().start()
         }
 
-        fn stop(&mut self) -> Result<(), AppError> {
+        fn stop(&mut self) -> Result<(), PlaybackError> {
             self.0.lock().unwrap().stop()
         }
 
-        fn write_samples(&mut self, samples: &[f32]) -> Result<usize, AppError> {
+        fn write_samples(&mut self, samples: &[f32]) -> Result<usize, PlaybackError> {
             self.0.lock().unwrap().write_samples(samples)
         }
 
@@ -2042,19 +2048,19 @@ mod audio_engine_tests {
     }
 
     impl LibraryQueryStore for FakeLibraryStore {
-        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, AppError> {
+        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
             Ok(self.tracks.get(id).cloned())
         }
 
-        fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, AppError> {
+        fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn track_count(&self) -> Result<usize, AppError> {
+        fn track_count(&self) -> Result<usize, StoreError> {
             Ok(self.tracks.len())
         }
 
-        fn all_track_ids(&self) -> Result<Vec<TrackId>, AppError> {
+        fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
             let mut ids: Vec<TrackId> = self.tracks.keys().cloned().collect();
             ids.sort_by(|a, b| a.0.cmp(&b.0));
             Ok(ids)
@@ -2065,19 +2071,19 @@ mod audio_engine_tests {
             _query: &str,
             _offset: usize,
             _limit: usize,
-        ) -> Result<Vec<Track>, AppError> {
+        ) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn search_count(&self, _query: &str) -> Result<usize, AppError> {
+        fn search_count(&self, _query: &str) -> Result<usize, StoreError> {
             Ok(0)
         }
 
-        fn all_artists(&self) -> Result<Vec<Artist>, AppError> {
+        fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn artist_albums(&self, _artist: &str) -> Result<Vec<Album>, AppError> {
+        fn artist_albums(&self, _artist: &str) -> Result<Vec<Album>, StoreError> {
             Ok(Vec::new())
         }
 
@@ -2085,27 +2091,31 @@ mod audio_engine_tests {
             &self,
             _album_artist: &str,
             _album_title: &str,
-        ) -> Result<Vec<Track>, AppError> {
+        ) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn folder_has_audio(&self, _folder: &Path) -> Result<bool, AppError> {
+        fn folder_has_audio(&self, _folder: &Path) -> Result<bool, StoreError> {
             Ok(false)
         }
 
-        fn folder_has_search_match(&self, _folder: &Path, _query: &str) -> Result<bool, AppError> {
+        fn folder_has_search_match(
+            &self,
+            _folder: &Path,
+            _query: &str,
+        ) -> Result<bool, StoreError> {
             Ok(false)
         }
 
-        fn track_ids_in_folder_tree(&self, _folder: &Path) -> Result<Vec<TrackId>, AppError> {
+        fn track_ids_in_folder_tree(&self, _folder: &Path) -> Result<Vec<TrackId>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn tracks_in_folder(&self, _folder: &Path) -> Result<Vec<Track>, AppError> {
+        fn tracks_in_folder(&self, _folder: &Path) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, AppError> {
+        fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, StoreError> {
             Ok(Vec::new())
         }
 
@@ -2113,7 +2123,7 @@ mod audio_engine_tests {
             &self,
             _kind: SmartPlaylistKind,
             _limit: usize,
-        ) -> Result<Vec<Track>, AppError> {
+        ) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
     }
@@ -2124,7 +2134,7 @@ mod audio_engine_tests {
     struct Harness {
         cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
         updates: Receiver<PlaybackUpdate>,
-        state: Arc<Mutex<AppState>>,
+        state: Arc<Mutex<PlaybackSession>>,
         output: Arc<Mutex<MockAudioOutput>>,
         decoders: DecoderLog,
     }
@@ -2132,7 +2142,7 @@ mod audio_engine_tests {
     /// Spawn the engine exactly like `main.rs` does (blocking `run()` on its
     /// own thread, ports boxed inside the closure) over mock ports.
     fn spawn_engine(
-        state: Arc<Mutex<AppState>>,
+        state: Arc<Mutex<PlaybackSession>>,
         library: FakeLibraryStore,
         primary_script: Vec<Vec<f32>>,
         successor_script: Vec<Vec<f32>>,
@@ -2242,8 +2252,8 @@ mod audio_engine_tests {
 
     /// Pre-populate the queue so Queue Fill never fires, and register the
     /// matching canned library entries.
-    fn queued_state_and_library(paths: &[&str]) -> (Arc<Mutex<AppState>>, FakeLibraryStore) {
-        let mut state = AppState::new();
+    fn queued_state_and_library(paths: &[&str]) -> (Arc<Mutex<PlaybackSession>>, FakeLibraryStore) {
+        let mut state = PlaybackSession::new();
         let mut tracks = HashMap::new();
         for path in paths {
             let track = crate::test_utils::create_test_track(path, path);
@@ -2548,7 +2558,7 @@ mod audio_engine_tests {
 mod tag_edit_service_tests {
     use super::*;
     use crate::mocks::{MockLibraryMutationStore, MockLibraryQueryStore, MockMetadataWriter};
-    use riff_backend::app::errors::AppError;
+    use riff_backend::app::errors::{LibraryError, StoreError};
     use riff_backend::app::store::LibraryQueryStore;
     use riff_backend::app::tag_edit_service::{
         TagEditOutcome, TagEditRequest, TagEditService, TagEdits,
@@ -2570,7 +2580,7 @@ mod tag_edit_service_tests {
     struct SharedWriter(Arc<Mutex<MockMetadataWriter>>);
 
     impl MetadataWriter for SharedWriter {
-        fn write_metadata(&self, path: &Path, edit: &TagEdit) -> Result<(), AppError> {
+        fn write_metadata(&self, path: &Path, edit: &TagEdit) -> Result<(), LibraryError> {
             self.0.lock().unwrap().write_metadata(path, edit)
         }
     }
@@ -2583,19 +2593,19 @@ mod tag_edit_service_tests {
     struct SharedQueries(Arc<Mutex<MockLibraryQueryStore>>);
 
     impl LibraryQueryStore for SharedQueries {
-        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, AppError> {
+        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
             self.0.lock().unwrap().get_track(id)
         }
 
-        fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, AppError> {
+        fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn track_count(&self) -> Result<usize, AppError> {
+        fn track_count(&self) -> Result<usize, StoreError> {
             Ok(0)
         }
 
-        fn all_track_ids(&self) -> Result<Vec<TrackId>, AppError> {
+        fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
             Ok(Vec::new())
         }
 
@@ -2604,19 +2614,19 @@ mod tag_edit_service_tests {
             _query: &str,
             _offset: usize,
             _limit: usize,
-        ) -> Result<Vec<Track>, AppError> {
+        ) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn search_count(&self, _query: &str) -> Result<usize, AppError> {
+        fn search_count(&self, _query: &str) -> Result<usize, StoreError> {
             Ok(0)
         }
 
-        fn all_artists(&self) -> Result<Vec<Artist>, AppError> {
+        fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn artist_albums(&self, _artist: &str) -> Result<Vec<Album>, AppError> {
+        fn artist_albums(&self, _artist: &str) -> Result<Vec<Album>, StoreError> {
             Ok(Vec::new())
         }
 
@@ -2624,27 +2634,31 @@ mod tag_edit_service_tests {
             &self,
             _album_artist: &str,
             _album_title: &str,
-        ) -> Result<Vec<Track>, AppError> {
+        ) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn folder_has_audio(&self, _folder: &Path) -> Result<bool, AppError> {
+        fn folder_has_audio(&self, _folder: &Path) -> Result<bool, StoreError> {
             Ok(false)
         }
 
-        fn folder_has_search_match(&self, _folder: &Path, _query: &str) -> Result<bool, AppError> {
+        fn folder_has_search_match(
+            &self,
+            _folder: &Path,
+            _query: &str,
+        ) -> Result<bool, StoreError> {
             Ok(false)
         }
 
-        fn track_ids_in_folder_tree(&self, _folder: &Path) -> Result<Vec<TrackId>, AppError> {
+        fn track_ids_in_folder_tree(&self, _folder: &Path) -> Result<Vec<TrackId>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn tracks_in_folder(&self, _folder: &Path) -> Result<Vec<Track>, AppError> {
+        fn tracks_in_folder(&self, _folder: &Path) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
 
-        fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, AppError> {
+        fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, StoreError> {
             Ok(Vec::new())
         }
 
@@ -2652,7 +2666,7 @@ mod tag_edit_service_tests {
             &self,
             _kind: SmartPlaylistKind,
             _limit: usize,
-        ) -> Result<Vec<Track>, AppError> {
+        ) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
     }
@@ -2664,7 +2678,7 @@ mod tag_edit_service_tests {
     struct SharedMutations(Arc<Mutex<MockLibraryMutationStore>>);
 
     impl riff_backend::app::store::LibraryMutationStore for SharedMutations {
-        fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, AppError> {
+        fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, StoreError> {
             self.0.lock().unwrap().apply_scan_batch(tracks)
         }
 
@@ -2672,19 +2686,19 @@ mod tag_edit_service_tests {
             &mut self,
             id: &TrackId,
             played_at: std::time::SystemTime,
-        ) -> Result<bool, AppError> {
+        ) -> Result<bool, StoreError> {
             self.0.lock().unwrap().record_track_played(id, played_at)
         }
 
-        fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), AppError> {
+        fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), StoreError> {
             self.0.lock().unwrap().apply_tag_refresh(track)
         }
 
-        fn remove_library_path(&mut self, root: &Path) -> Result<usize, AppError> {
+        fn remove_library_path(&mut self, root: &Path) -> Result<usize, StoreError> {
             self.0.lock().unwrap().remove_library_path(root)
         }
 
-        fn clear_library(&mut self) -> Result<usize, AppError> {
+        fn clear_library(&mut self) -> Result<usize, StoreError> {
             self.0.lock().unwrap().clear_library()
         }
     }
@@ -3005,7 +3019,7 @@ mod tag_edit_service_tests {
 mod cover_service_tests {
     use super::*;
     use riff_backend::app::cover_service::{CoverService, Covers};
-    use riff_backend::app::errors::AppError;
+    use riff_backend::app::errors::LibraryError;
     use riff_backend::app::traits::{AudioFormatInfo, CoverImage, CoverLoader, MetadataReader};
     use riff_backend::domain::CoverSource;
     use std::path::{Path, PathBuf};
@@ -3035,25 +3049,25 @@ mod cover_service_tests {
     }
 
     impl MetadataReader for SharedReader {
-        fn read_cover_source(&self, _path: &Path) -> Result<CoverSource, AppError> {
+        fn read_cover_source(&self, _path: &Path) -> Result<CoverSource, LibraryError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.source.clone())
         }
 
-        fn read_metadata(&self, _path: &Path) -> Result<TrackMetadata, AppError> {
-            Err(AppError::InvalidOperation(
+        fn read_metadata(&self, _path: &Path) -> Result<TrackMetadata, LibraryError> {
+            Err(LibraryError::Io(
                 "not exercised by CoverResolver".to_string(),
             ))
         }
 
-        fn read_duration(&self, _path: &Path) -> Result<Option<Duration>, AppError> {
-            Err(AppError::InvalidOperation(
+        fn read_duration(&self, _path: &Path) -> Result<Option<Duration>, LibraryError> {
+            Err(LibraryError::Io(
                 "not exercised by CoverResolver".to_string(),
             ))
         }
 
-        fn read_audio_format(&self, _path: &Path) -> Result<AudioFormatInfo, AppError> {
-            Err(AppError::InvalidOperation(
+        fn read_audio_format(&self, _path: &Path) -> Result<AudioFormatInfo, LibraryError> {
+            Err(LibraryError::Io(
                 "not exercised by CoverResolver".to_string(),
             ))
         }
@@ -3068,9 +3082,9 @@ mod cover_service_tests {
                 CoverSource,
                 AudioFormatInfo,
             ),
-            AppError,
+            LibraryError,
         > {
-            Err(AppError::InvalidOperation(
+            Err(LibraryError::Io(
                 "not exercised by CoverResolver".to_string(),
             ))
         }
@@ -3087,12 +3101,12 @@ mod cover_service_tests {
     }
 
     impl CoverLoader for SharedLoader {
-        fn load_cover(&self, _source: &CoverSource) -> Result<Option<CoverImage>, AppError> {
+        fn load_cover(&self, _source: &CoverSource) -> Result<Option<CoverImage>, LibraryError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if let Some(ref gate) = self.gate {
                 let _ = gate.lock().unwrap().recv();
             }
-            self.result.clone().map_err(AppError::CoverLoad)
+            self.result.clone().map_err(LibraryError::CoverLoad)
         }
     }
 
@@ -3363,7 +3377,7 @@ mod cover_service_tests {
 /// mutations show up on the next view call with zero caller action.
 mod playlist_projection_tests {
     use super::*;
-    use riff_backend::app::errors::AppError;
+    use riff_backend::app::errors::StoreError;
     use riff_backend::app::store::{LibraryMutationStore, PlaylistEntry, PlaylistStore};
     use riff_backend::infra::store::SqliteStore;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3390,11 +3404,11 @@ mod playlist_projection_tests {
     }
 
     impl PlaylistStore for CountingPlaylistStore {
-        fn load_playlists(&self) -> Result<Vec<Playlist>, AppError> {
+        fn load_playlists(&self) -> Result<Vec<Playlist>, StoreError> {
             self.inner.load_playlists()
         }
 
-        fn load_playlist_entries(&self, id: &PlaylistId) -> Result<Vec<PlaylistEntry>, AppError> {
+        fn load_playlist_entries(&self, id: &PlaylistId) -> Result<Vec<PlaylistEntry>, StoreError> {
             self.entry_loads.fetch_add(1, Ordering::SeqCst);
             self.inner.load_playlist_entries(id)
         }
@@ -3403,15 +3417,15 @@ mod playlist_projection_tests {
             &mut self,
             name: &str,
             initial_tracks: &[TrackId],
-        ) -> Result<PlaylistId, AppError> {
+        ) -> Result<PlaylistId, StoreError> {
             self.inner.create_playlist(name, initial_tracks)
         }
 
-        fn rename_playlist(&mut self, id: &PlaylistId, new_name: &str) -> Result<bool, AppError> {
+        fn rename_playlist(&mut self, id: &PlaylistId, new_name: &str) -> Result<bool, StoreError> {
             self.inner.rename_playlist(id, new_name)
         }
 
-        fn delete_playlist(&mut self, id: &PlaylistId) -> Result<bool, AppError> {
+        fn delete_playlist(&mut self, id: &PlaylistId) -> Result<bool, StoreError> {
             self.inner.delete_playlist(id)
         }
 
@@ -3419,7 +3433,7 @@ mod playlist_projection_tests {
             &mut self,
             id: &PlaylistId,
             track: &TrackId,
-        ) -> Result<bool, AppError> {
+        ) -> Result<bool, StoreError> {
             self.inner.add_playlist_entry(id, track)
         }
 
@@ -3427,7 +3441,7 @@ mod playlist_projection_tests {
             &mut self,
             id: &PlaylistId,
             track: &TrackId,
-        ) -> Result<bool, AppError> {
+        ) -> Result<bool, StoreError> {
             self.inner.remove_playlist_entries(id, track)
         }
 
@@ -3435,7 +3449,7 @@ mod playlist_projection_tests {
             &mut self,
             id: &PlaylistId,
             ordered: &[TrackId],
-        ) -> Result<bool, AppError> {
+        ) -> Result<bool, StoreError> {
             self.inner.reorder_playlist_entries(id, ordered)
         }
     }
@@ -3641,7 +3655,7 @@ mod playback_coordinator_tests {
     use super::*;
     use crate::mocks::MockLibraryMutationStore;
     use crossbeam_channel::{Receiver, unbounded};
-    use riff_backend::app::errors::AppError;
+    use riff_backend::app::errors::StoreError;
     use riff_backend::app::playback_coordinator::PlaybackCoordinator;
     use riff_backend::app::store::LibraryMutationStore;
     use std::path::Path;
@@ -3652,7 +3666,7 @@ mod playback_coordinator_tests {
     struct SharedMutations(Arc<Mutex<MockLibraryMutationStore>>);
 
     impl LibraryMutationStore for SharedMutations {
-        fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, AppError> {
+        fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, StoreError> {
             self.0.lock().unwrap().apply_scan_batch(tracks)
         }
 
@@ -3660,29 +3674,33 @@ mod playback_coordinator_tests {
             &mut self,
             id: &TrackId,
             played_at: std::time::SystemTime,
-        ) -> Result<bool, AppError> {
+        ) -> Result<bool, StoreError> {
             self.0.lock().unwrap().record_track_played(id, played_at)
         }
 
-        fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), AppError> {
+        fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), StoreError> {
             self.0.lock().unwrap().apply_tag_refresh(track)
         }
 
-        fn remove_library_path(&mut self, root: &Path) -> Result<usize, AppError> {
+        fn remove_library_path(&mut self, root: &Path) -> Result<usize, StoreError> {
             self.0.lock().unwrap().remove_library_path(root)
         }
 
-        fn clear_library(&mut self) -> Result<usize, AppError> {
+        fn clear_library(&mut self) -> Result<usize, StoreError> {
             self.0.lock().unwrap().clear_library()
         }
     }
 
     /// One wired coordinator plus every handle a test inspects: the shared
-    /// state, the command receiver (what the engine would receive), and the
-    /// mutation recordings.
+    /// playback and library sessions (held in two separate `Arc<Mutex<>>`s so
+    /// the test never holds both locks at once), the command receiver (what
+    /// the engine would receive), the playback-error notice receiver (what
+    /// the facade would receive), and the mutation recordings.
     struct Harness {
-        state: Arc<Mutex<AppState>>,
+        state: Arc<Mutex<PlaybackSession>>,
+        library: Arc<Mutex<LibrarySession>>,
         cmd_rx: Receiver<PlaybackCommand>,
+        notice_rx: Receiver<String>,
         mutations: Arc<Mutex<MockLibraryMutationStore>>,
         coordinator: PlaybackCoordinator,
     }
@@ -3692,7 +3710,7 @@ mod playback_coordinator_tests {
     /// update channel stays empty (its sender drops immediately) because the
     /// core is driven by hand.
     fn harness(ids: &[&str], current_index: Option<usize>, repeat: RepeatMode) -> Harness {
-        let state = Arc::new(Mutex::new(AppState::new()));
+        let state = Arc::new(Mutex::new(PlaybackSession::new()));
         {
             let mut locked = state.lock_or_recover();
             locked.queue =
@@ -3700,17 +3718,22 @@ mod playback_coordinator_tests {
             locked.queue.current_index = current_index;
             locked.queue.repeat = repeat;
         }
+        let library = Arc::new(Mutex::new(LibrarySession::new()));
         let (cmd_tx, cmd_rx) = unbounded();
+        let (notice_tx, notice_rx) = unbounded();
         let mutations = Arc::new(Mutex::new(MockLibraryMutationStore::new()));
         let coordinator = PlaybackCoordinator::new(
             state.clone(),
             unbounded().1,
             cmd_tx,
             Box::new(SharedMutations(mutations.clone())),
+            notice_tx,
         );
         Harness {
             state,
+            library,
             cmd_rx,
+            notice_rx,
             mutations,
             coordinator,
         }
@@ -3794,17 +3817,31 @@ mod playback_coordinator_tests {
     }
 
     #[test]
-    fn test_playback_coordinator_error_sets_stopped_and_scan_status() {
+    fn test_playback_coordinator_error_sets_stopped_and_emits_typed_notice() {
         let mut h = harness(&["a.mp3"], Some(0), RepeatMode::None);
 
         h.coordinator
             .apply_update(PlaybackUpdate::Error("boom".to_string()));
 
-        let locked = h.state.lock_or_recover();
-        assert_eq!(locked.playback_state, PlaybackState::Stopped);
+        {
+            let locked = h.state.lock_or_recover();
+            assert_eq!(locked.playback_state, PlaybackState::Stopped);
+        }
+        // The cross-slice state write is gone: the coordinator no longer
+        // touches the library session's scan-status slot. Lock and drop the
+        // library session on its own — never both session guards at once.
+        {
+            let locked = h.library.lock_or_recover();
+            assert_eq!(
+                locked.scan_status, None,
+                "playback errors must not write the library session's scan-status slot"
+            );
+        }
+        // Instead the error surfaces as a notice over the facade's channel,
+        // preserving the exact user-facing string format.
         assert_eq!(
-            locked.scan_status.as_deref(),
-            Some("Playback error: boom"),
+            h.notice_rx.try_recv().as_deref(),
+            Ok("Playback error: boom"),
             "the exact user-facing string format is preserved"
         );
     }

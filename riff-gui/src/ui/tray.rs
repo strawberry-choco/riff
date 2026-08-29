@@ -19,7 +19,7 @@ use tray_icon::Icon;
 use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::ui::window_visibility::{VisibilityMessage, VisibilityTx};
-use riff_backend::app::transport::FacadeTransport;
+use riff_backend::app::FacadeTransport;
 
 /// Create a system tray icon with playback controls.
 /// On Linux this is a no-op (tray-icon requires GTK which isn't always available).

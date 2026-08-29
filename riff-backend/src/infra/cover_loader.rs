@@ -1,4 +1,4 @@
-use crate::app::errors::AppError;
+use crate::app::errors::LibraryError;
 use crate::app::traits::CoverLoader;
 use crate::domain::CoverSource;
 
@@ -20,11 +20,11 @@ impl CoverLoader for ImageCoverLoader {
     fn load_cover(
         &self,
         source: &CoverSource,
-    ) -> Result<Option<crate::app::traits::CoverImage>, AppError> {
+    ) -> Result<Option<crate::app::traits::CoverImage>, LibraryError> {
         match source {
             CoverSource::Embedded(data) => {
                 let image = image::load_from_memory(data)
-                    .map_err(|e| AppError::CoverLoad(format!("Image decode error: {e}")))?;
+                    .map_err(|e| LibraryError::CoverLoad(format!("Image decode error: {e}")))?;
                 let rgba = image.to_rgba8();
                 let (width, height) = rgba.dimensions();
                 Ok(Some(crate::app::traits::CoverImage {
@@ -35,7 +35,7 @@ impl CoverLoader for ImageCoverLoader {
             }
             CoverSource::Filesystem(path) => {
                 let image = image::open(path)
-                    .map_err(|e| AppError::CoverLoad(format!("Image open error: {e}")))?;
+                    .map_err(|e| LibraryError::CoverLoad(format!("Image open error: {e}")))?;
                 let rgba = image.to_rgba8();
                 let (width, height) = rgba.dimensions();
                 Ok(Some(crate::app::traits::CoverImage {

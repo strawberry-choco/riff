@@ -7,11 +7,13 @@ use riff_backend::app::MutexExt;
 pub use riff_backend::app::cover_service::{COVER_CACHE_CAP, Covers, lru_insert};
 use riff_backend::app::facade::BackendFacade;
 use riff_backend::app::scan_service::{ScanOutcome, Scans};
-use riff_backend::app::state::{AppState, BrowseMode, LibraryStatus, ViewMode};
+use riff_backend::app::state::{
+    BrowseMode, LibrarySession, LibraryStatus, PlaybackSession, UiFlags, ViewMode,
+};
 use riff_backend::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
 use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
 use riff_backend::app::traits::TagEdit;
-use riff_backend::app::transport::Transport;
+use riff_backend::app::Transport;
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
 use riff_backend::domain::{
@@ -22,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Transient UI state for the "Edit Tags" modal. Lives on `RiffApp` (not
-/// `AppState`), following the `settings_text_input` precedent. Public so the
+/// the Library Session), following the `settings_text_input` precedent. Public so the
 /// pre-fill contract (REQ-ML-008) is testable; only constructed by the UI.
 pub struct TagEditState {
     pub track_id: TrackId,
@@ -103,7 +105,11 @@ fn label_numbered(track: &Track) -> String {
 /// only exists on Linux (`settings_show_input`), which is where the lint fires.
 #[allow(clippy::struct_excessive_bools)]
 pub struct RiffApp {
-    pub state: Arc<Mutex<AppState>>,
+    pub playback: Arc<Mutex<PlaybackSession>>,
+    /// The library session: selection, view/browse mode, search, library
+    /// roots + per-path statuses, scan status, UI flags, and per-path watch
+    /// state. UI-owned; only the UI thread mutates it.
+    pub library: Arc<Mutex<LibrarySession>>,
     /// The Transport port: the UI's intent-level playback front end. Command
     /// mapping, seek clamping, and volume math live behind it (in the
     /// `ChannelTransport` adapter); the UI never names engine commands.
@@ -214,7 +220,8 @@ impl RiffApp {
     /// by hand, so the parameter count is the wiring surface itself.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        state: Arc<Mutex<AppState>>,
+        playback: Arc<Mutex<PlaybackSession>>,
+        library: Arc<Mutex<LibrarySession>>,
         transport: Box<dyn Transport>,
         scans: Box<dyn Scans>,
         watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
@@ -231,7 +238,8 @@ impl RiffApp {
         visibility_listener: crate::ui::window_visibility::VisibilityListener,
     ) -> Self {
         Self {
-            state,
+            playback,
+            library,
             transport,
             scans,
             cover_textures: std::collections::HashMap::new(),
@@ -317,29 +325,29 @@ impl RiffApp {
     /// Drain polled Library Scan outcomes from the service and map them onto
     /// session state exactly as before the extraction: per-root statuses
     /// plus the titlebar scan-status line. The service NEVER touches
-    /// `AppState` — this mapping is the UI's whole remaining scan
+    /// `LibrarySession` — this mapping is the UI's whole remaining scan
     /// responsibility (ADR 0006). The watcher observes a scan's end itself
     /// via `is_scanning`, so no relay fires here anymore.
-    fn poll_library_updates(&self, state: &mut AppState) {
+    fn poll_library_updates(&self, library: &mut LibrarySession) {
         for outcome in self.scans.poll() {
             match outcome {
                 ScanOutcome::Progress { path, files_found } => {
-                    state
+                    library
                         .library_statuses
                         .insert(path, LibraryStatus::Scanning { files_found });
-                    state.scan_status = Some(format!("{files_found} files"));
+                    library.scan_status = Some(format!("{files_found} files"));
                 }
                 ScanOutcome::Complete { path, total_files } => {
-                    state
+                    library
                         .library_statuses
                         .insert(path, LibraryStatus::Scanned(total_files));
-                    state.scan_status = Some(format!("Scan complete: {total_files} tracks"));
+                    library.scan_status = Some(format!("Scan complete: {total_files} tracks"));
                     // Scan batches already committed through the store as
                     // they progressed; nothing whole-file remains to save.
                 }
                 ScanOutcome::Failed { path, reason } => {
-                    state.library_statuses.insert(path, LibraryStatus::Idle);
-                    state.scan_status = Some(format!("Error: {reason}"));
+                    library.library_statuses.insert(path, LibraryStatus::Idle);
+                    library.scan_status = Some(format!("Error: {reason}"));
                 }
             }
         }
@@ -356,13 +364,13 @@ impl RiffApp {
     /// file; on `Failed` the dialog stays open with the reason — there is
     /// no silent-success path. All outcome application lives in the free
     /// [`apply_tag_edit_outcome`], which is what tests drive.
-    fn poll_tag_edit_outcomes(&mut self, state: &mut AppState) {
+    fn poll_tag_edit_outcomes(&mut self, library: &mut LibrarySession) {
         while let Some(outcome) = self.tag_edits.poll() {
             apply_tag_edit_outcome(
                 outcome,
                 &mut self.tag_edit,
                 &mut self.tag_edit_in_flight,
-                &mut state.scan_status,
+                &mut library.scan_status,
             );
         }
     }
@@ -510,12 +518,12 @@ impl RiffApp {
     fn attach_track_menu(
         &mut self,
         response: &egui::Response,
-        state: &mut AppState,
+        library: &mut LibrarySession,
         track_id: &TrackId,
         track: Option<&Track>,
         remove_from_playlist: Option<&PlaylistId>,
     ) {
-        let advanced = state.ui_flags.advanced_mode;
+        let advanced = library.ui_flags.advanced_mode;
         // Arc clone out of the seam first: no `&self.views` borrow may live
         // across widget rendering.
         let playlists = self.views.playlists();
@@ -542,19 +550,20 @@ impl RiffApp {
     fn render_track_row(
         &mut self,
         ui: &mut egui::Ui,
-        state: &mut AppState,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
         track: &Track,
         current_track: Option<&TrackId>,
         remove_from_playlist: Option<&PlaylistId>,
     ) {
-        let label = label_artist_title(track);
         self.interactive_track_row(
             ui,
-            state,
+            library,
+            playback,
             track,
             current_track,
             remove_from_playlist,
-            &label,
+            &label_artist_title(track),
             0,
         );
     }
@@ -566,7 +575,8 @@ impl RiffApp {
     fn interactive_track_row(
         &mut self,
         ui: &mut egui::Ui,
-        state: &mut AppState,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
         track: &Track,
         current_track: Option<&TrackId>,
         remove_from_playlist: Option<&PlaylistId>,
@@ -574,10 +584,9 @@ impl RiffApp {
         indent_level: usize,
     ) {
         use crate::ui::sidebar::{self, TreeRow};
-
-        let is_selected = state.selected_track.as_ref() == Some(&track.id);
+        let is_selected = library.selected_track.as_ref() == Some(&track.id);
         let is_current = current_track == Some(&track.id);
-        let playing = state.playback_state == PlaybackState::Playing;
+        let playing = playback.playback_state == PlaybackState::Playing;
 
         self.request_cover(&track.id, &track.file_path);
 
@@ -596,15 +605,15 @@ impl RiffApp {
             },
         );
         if response.clicked() {
-            state.selected_track = Some(track.id.clone());
+            library.selected_track = Some(track.id.clone());
         }
         if response.double_clicked() {
-            state.selected_track = Some(track.id.clone());
+            library.selected_track = Some(track.id.clone());
             self.transport.play(track.id.clone());
         }
         self.attach_track_menu(
             &response,
-            state,
+            library,
             &track.id,
             Some(track),
             remove_from_playlist,
@@ -616,9 +625,9 @@ impl RiffApp {
     /// Called at the start of the frame so any dispatch recorded by the tray
     /// thread or by a `FacadeTransport` between frames is observable before
     /// the UI renders. The frontend renders from the real engine updates on
-    /// [`AppState`]; this seam's events are the issue-02 observability surface
-    /// that proves every dispatch path (mouse/keyboard/tray) flows through
-    /// one Transport wrapper.
+    /// the playback session; this seam's events are the issue-02
+    /// observability surface that proves every dispatch path
+    /// (mouse/keyboard/tray) flows through one Transport wrapper.
     pub fn drain_facade_events(&self) -> Vec<riff_backend::app::facade::BackendEvent> {
         use std::sync::PoisonError;
         self.facade
@@ -672,8 +681,7 @@ impl eframe::App for RiffApp {
         // Close-to-tray: veto the OS close request and hide instead (frontend-
         // local; no backend state touched). This only runs when NOT quitting —
         // a quit-initiated close goes through above.
-        if !self.quit_flag.load(Ordering::Relaxed)
-            && ctx.input(|i| i.viewport().close_requested())
+        if !self.quit_flag.load(Ordering::Relaxed) && ctx.input(|i| i.viewport().close_requested())
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -681,38 +689,56 @@ impl eframe::App for RiffApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let state_arc = self.state.clone();
-
-        let mut state = state_arc.lock_or_recover();
-
         if self.quit_flag.load(Ordering::Relaxed) {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
 
+        // Clone both Arcs BEFORE locking: the guards borrow `self`, and the
+        // whole frame below calls `self.<method>(...)` — exactly how the
+        // pre-split frame loop handled `self.state`.
+        let playback_arc = self.playback.clone();
+        let library_arc = self.library.clone();
+
         if self.first_frame {
             load_persisted_state(
-                &mut state,
+                &playback_arc,
+                &library_arc,
                 self.settings_store.as_ref(),
                 self.transport.as_ref(),
             );
             self.first_frame = false;
         }
 
+        // Snapshot playback first (lock → clone → drop), then take the
+        // library guard. The engine and coordinator write playback state on
+        // their own threads, so the frame renders from a plain clone and
+        // writes back only the UI-owned fields at frame end — a whole
+        // session replace here would clobber engine-written position and
+        // traversal index. The library session is UI-owned, so its guard is
+        // held live for the whole frame.
+        let mut playback = playback_arc.lock_or_recover().clone();
+        let mut library = library_arc.lock_or_recover();
+
         // Apply the active theme (REQ-UI-007 accessibility). Done after the
         // first-frame load so a persisted high-contrast choice takes effect on
         // the very first frame. High Contrast is a variant over the active
         // light/dark palette.
-        self.apply_theme(ui.ctx(), state.ui_flags.high_contrast);
+        self.apply_theme(ui.ctx(), library.ui_flags.high_contrast);
 
-        self.poll_library_updates(&mut state);
-        self.poll_tag_edit_outcomes(&mut state);
+        // Drain the facade event inbox and route playback-error typed
+        // notices to the status line (issue 01 seam fix) — the coordinator
+        // no longer writes the library session's status slot directly.
+        apply_backend_events(self.drain_facade_events(), &mut library.scan_status);
+
+        self.poll_library_updates(&mut library);
+        self.poll_tag_edit_outcomes(&mut library);
         self.update_cover_cache(ui.ctx());
         self.poll_watchers();
 
         handle_keyboard_shortcuts(
             ui.ctx(),
-            &mut state,
+            &playback,
             &mut self.search_focus,
             self.transport.as_ref(),
         );
@@ -721,7 +747,7 @@ impl eframe::App for RiffApp {
         // compared against the last-pushed identity first and only rebuilt
         // when the playing track moves; the tooltip shows "Artist - Title"
         // for the current track, else "riff".
-        self.update_window_title(ui.ctx(), &state);
+        self.update_window_title(ui.ctx(), &playback);
 
         // --- SHELL (Issue 06): unified Panel API at exact token dimensions ---
         //
@@ -729,7 +755,7 @@ impl eframe::App for RiffApp {
         // merged with the former top bar — wordmark, scan status, the
         // theme/Now Playing/Settings/Advanced controls, and the custom
         // minimize/close buttons over a full-width drag region.
-        let scan_status = state.scan_status.clone();
+        let scan_status = library.scan_status.clone();
         egui::Panel::top("titlebar")
             .exact_size(theme::TITLEBAR_H)
             .frame(egui::Frame::NONE)
@@ -737,10 +763,10 @@ impl eframe::App for RiffApp {
                 let content = crate::ui::chrome::TitleBarContent {
                     scan_status: scan_status.as_deref(),
                     theme_dark: self.theme.dark,
-                    advanced_mode: state.ui_flags.advanced_mode,
+                    advanced_mode: library.ui_flags.advanced_mode,
                     active_nav: crate::ui::chrome::NavDestination::active(
-                        state.view_mode,
-                        state.browse_mode,
+                        library.view_mode,
+                        library.browse_mode,
                     ),
                 };
                 self.titlebar_actions.clear();
@@ -755,7 +781,8 @@ impl eframe::App for RiffApp {
                     apply_titlebar_action(
                         action,
                         ui.ctx(),
-                        &mut state,
+                        &mut library,
+                        &playback,
                         &mut self.theme,
                         self.settings_store.as_mut(),
                     );
@@ -771,26 +798,42 @@ impl eframe::App for RiffApp {
             .resizable(false)
             .frame(egui::Frame::new().inner_margin(egui::Margin::same(12)))
             .show(ui, |ui| {
-                self.render_library_sidebar(ui, &mut state);
+                self.render_library_sidebar(ui, &mut library, &playback);
             });
 
         // Bottom 88px strip: transport + progress + volume.
-        self.render_control_bar(ui, &mut state);
+        self.render_control_bar(ui, &mut library, &mut playback);
 
         // --- MAIN STAGE: exactly one View visible at a time ---
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(self.theme.active.background))
-            .show(ui, |ui| match state.view_mode {
-                ViewMode::Library => self.render_track_details_panel(ui, &mut state),
-                ViewMode::NowPlaying => self.show_now_playing_view(ui, &mut state),
+            .show(ui, |ui| match library.view_mode {
+                ViewMode::Library => self.render_track_details_panel(ui, &mut library),
+                ViewMode::NowPlaying => self.show_now_playing_view(ui, &mut library, &playback),
                 ViewMode::Settings => {
-                    self.show_settings_view(ui, &mut state);
+                    self.show_settings_view(ui, &mut library, &mut playback);
                 }
             });
 
         // --- EDIT TAGS MODAL ---
         self.show_tag_edit_modal(ui.ctx());
 
+        // --- WRITE BACK: the library guard is no longer live, so the two
+        // session locks never overlap. The snapshot carries every playback
+        // field, but only the UI-owned ones were ever written by the frame —
+        // volume, mute, replay-gain, shuffle, repeat. The engine and
+        // coordinator own `playback_state`, `current_position`, and the
+        // queue's traversal state, so a whole-session replace here would
+        // clobber their work between frames.
+        drop(library);
+        {
+            let mut live = self.playback.lock_or_recover();
+            live.current_volume = playback.current_volume;
+            live.muted = playback.muted;
+            live.replaygain_enabled = playback.replaygain_enabled;
+            live.queue.set_shuffle(playback.queue.shuffle);
+            live.queue.repeat = playback.queue.repeat;
+        }
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
     }
@@ -805,7 +848,8 @@ impl eframe::App for RiffApp {
 fn apply_titlebar_action(
     action: crate::ui::chrome::TitleBarAction,
     ctx: &egui::Context,
-    state: &mut AppState,
+    library: &mut LibrarySession,
+    playback: &PlaybackSession,
     theme: &mut ThemeState,
     store: &mut dyn SettingsStore,
 ) {
@@ -813,19 +857,24 @@ fn apply_titlebar_action(
     match action {
         Action::ToggleTheme => theme.dark = !theme.dark,
         Action::ToggleAdvanced => {
-            state.ui_flags.advanced_mode = !state.ui_flags.advanced_mode;
-            persist_scalars(store, state);
+            library.ui_flags.advanced_mode = !library.ui_flags.advanced_mode;
+            persist_scalars(
+                store,
+                playback.current_volume,
+                library.ui_flags,
+                playback.replaygain_enabled,
+            );
         }
         Action::ToggleNowPlaying => {
             // Now Playing replaces the active view; leaving it returns to the
             // Library view (resolved navigation gap).
-            state.view_mode = match state.view_mode {
+            library.view_mode = match library.view_mode {
                 ViewMode::Library | ViewMode::Settings => ViewMode::NowPlaying,
                 ViewMode::NowPlaying => ViewMode::Library,
             };
         }
         Action::GoSettings => {
-            NavDestination::Settings.apply(&mut state.view_mode, &mut state.browse_mode);
+            NavDestination::Settings.apply(&mut library.view_mode, &mut library.browse_mode);
         }
         Action::Minimize => ctx.send_viewport_cmd(WindowControl::Minimize.viewport_command()),
         Action::Close => ctx.send_viewport_cmd(WindowControl::Close.viewport_command()),
@@ -840,25 +889,33 @@ fn apply_titlebar_action(
 /// against the live track duration exactly like the playerbar's.
 pub fn apply_now_playing_action(
     action: crate::ui::now_playing::NowPlayingAction,
-    state: &mut AppState,
+    library: &mut LibrarySession,
+    playback: &PlaybackSession,
     transport: &dyn Transport,
 ) {
     use crate::ui::now_playing::NowPlayingAction as Action;
     match action {
-        Action::Close => state.view_mode = ViewMode::Library,
+        Action::Close => library.view_mode = ViewMode::Library,
         Action::PlayNext(track_id) => transport.play_next(track_id),
-        Action::Seek(duration) => transport.seek(state, duration),
+        Action::Seek(duration) => transport.seek(playback, duration),
     }
 }
 
-/// Commit `state`'s scalar preferences as one small durable store
-/// transaction; failures are logged, the in-memory change stands.
-fn persist_scalars(store: &mut dyn SettingsStore, state: &AppState) {
+/// Commit the current scalar preferences as one small durable store
+/// transaction; failures are logged, the in-memory change stands. The
+/// scalar values are read from the playback and library sessions by the
+/// caller, so this helper no longer needs a session reference.
+fn persist_scalars(
+    store: &mut dyn SettingsStore,
+    volume: f32,
+    ui_flags: UiFlags,
+    replaygain_enabled: bool,
+) {
     let scalars = riff_backend::app::state::ScalarSettings {
-        volume: Some(state.current_volume),
-        advanced_mode: state.ui_flags.advanced_mode,
-        high_contrast: state.ui_flags.high_contrast,
-        replaygain_enabled: state.replaygain_enabled,
+        volume: Some(volume),
+        advanced_mode: ui_flags.advanced_mode,
+        high_contrast: ui_flags.high_contrast,
+        replaygain_enabled,
     };
     if let Err(e) = store.save_scalars(&scalars) {
         tracing::warn!("Failed to save settings: {e}");
@@ -967,12 +1024,13 @@ pub fn commit_playlist_reorder(
 /// Apply one restyled player-bar action (Issue 08) through the SAME engine
 /// intents and state paths the pre-restyle controls used. Transport actions
 /// pass straight through to the Transport port; volume routes through the
-/// port's `apply_volume_from_state` (which applies [`AppState::
-/// effective_volume`]) so a muted app never emits sound; seek targets
-/// re-clamp against the live track duration inside the adapter.
+/// port's `apply_volume_from_state` (which applies
+/// [`PlaybackSession::effective_volume`]) so a muted app never emits sound;
+/// seek targets re-clamp against the live track duration inside the adapter.
 pub fn apply_player_bar_action(
     action: crate::ui::playerbar::PlayerBarAction,
-    state: &mut AppState,
+    library: &mut LibrarySession,
+    playback: &mut PlaybackSession,
     transport: &dyn Transport,
     store: &mut dyn SettingsStore,
 ) {
@@ -983,26 +1041,31 @@ pub fn apply_player_bar_action(
         Action::Resume => transport.resume(),
         Action::PlaySelected => {
             // Pre-restyle behavior: with nothing selected, play does nothing.
-            if let Some(selected) = state.selected_track.clone() {
+            if let Some(selected) = library.selected_track.clone() {
                 transport.play(selected);
             }
         }
         Action::Next => transport.next(),
         Action::Stop => transport.stop(),
-        Action::Seek(target) => transport.seek(state, target),
+        Action::Seek(target) => transport.seek(playback, target),
         Action::SetVolume(volume) => {
-            state.current_volume = volume;
-            persist_scalars(store, state);
+            playback.current_volume = volume;
+            persist_scalars(
+                store,
+                playback.current_volume,
+                library.ui_flags,
+                playback.replaygain_enabled,
+            );
             // While muted the slider still edits current_volume, but the
             // engine keeps receiving 0 until unmuted.
-            transport.apply_volume_from_state(state);
+            transport.apply_volume_from_state(playback);
         }
-        Action::ToggleMute => transport.toggle_mute(state),
+        Action::ToggleMute => transport.toggle_mute(playback),
         Action::ToggleShuffle => {
-            let was = state.queue.shuffle;
-            state.queue.set_shuffle(!was);
+            let was = playback.queue.shuffle;
+            playback.queue.set_shuffle(!was);
         }
-        Action::ToggleRepeat => state.queue.toggle_repeat(),
+        Action::ToggleRepeat => playback.queue.toggle_repeat(),
     }
 }
 
@@ -1013,7 +1076,8 @@ pub fn apply_player_bar_action(
 /// Store directly on its first call. The legacy JSON cache is never read
 /// or written. Public so the restore contract is testable headlessly.
 pub fn load_persisted_state(
-    state: &mut AppState,
+    playback: &Arc<Mutex<PlaybackSession>>,
+    library: &Arc<Mutex<LibrarySession>>,
     store: &dyn SettingsStore,
     transport: &dyn Transport,
 ) {
@@ -1025,36 +1089,47 @@ pub fn load_persisted_state(
         }
     };
 
-    if !settings.library_paths.is_empty() {
-        for path in &settings.library_paths {
-            let status = if path.exists() {
-                LibraryStatus::Idle
-            } else {
-                LibraryStatus::Unavailable
-            };
-            state.library_statuses.insert(path.clone(), status);
+    // Two session locks in sequence (contract: never both at once).
+    // Playback first so the volume path lands with `replaygain_enabled`
+    // already set; library second for paths, statuses, watch states, and
+    // UI flags.
+    {
+        let mut playback_session = playback.lock_or_recover();
+        if let Some(vol) = settings.scalars.volume {
+            playback_session.current_volume = vol;
         }
-        state.library_paths = settings.library_paths;
-    }
-
-    state.watch_states = settings.watch_states;
-
-    if let Some(vol) = settings.scalars.volume {
-        state.current_volume = vol;
+        playback_session.replaygain_enabled = settings.scalars.replaygain_enabled;
         // Route through effective_volume so a muted app (once mute
         // state is restored) never emits sound at startup.
-        transport.apply_volume_from_state(state);
+        transport.apply_volume_from_state(&playback_session);
     }
+    {
+        let mut library_session = library.lock_or_recover();
+        if !settings.library_paths.is_empty() {
+            for path in &settings.library_paths {
+                let status = if path.exists() {
+                    LibraryStatus::Idle
+                } else {
+                    LibraryStatus::Unavailable
+                };
+                library_session
+                    .library_statuses
+                    .insert(path.clone(), status);
+            }
+            library_session.library_paths = settings.library_paths;
+        }
 
-    state.ui_flags.advanced_mode = settings.scalars.advanced_mode;
-    state.ui_flags.high_contrast = settings.scalars.high_contrast;
-    state.replaygain_enabled = settings.scalars.replaygain_enabled;
+        library_session.watch_states = settings.watch_states;
+
+        library_session.ui_flags.advanced_mode = settings.scalars.advanced_mode;
+        library_session.ui_flags.high_contrast = settings.scalars.high_contrast;
+    }
 }
 
 /// Global keyboard shortcuts: Ctrl+F focuses search, Space toggles playback.
 fn handle_keyboard_shortcuts(
     ctx: &egui::Context,
-    state: &mut AppState,
+    playback: &PlaybackSession,
     search_focus: &mut bool,
     transport: &dyn Transport,
 ) {
@@ -1064,7 +1139,7 @@ fn handle_keyboard_shortcuts(
     if !ctx.egui_wants_keyboard_input()
         && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
     {
-        let playing = state.playback_state == PlaybackState::Playing;
+        let playing = playback.playback_state == PlaybackState::Playing;
         if playing {
             transport.pause();
         } else {
@@ -1091,9 +1166,9 @@ enum TitleKey {
 }
 
 impl RiffApp {
-    fn update_window_title(&mut self, ctx: &egui::Context, state: &AppState) {
+    fn update_window_title(&mut self, ctx: &egui::Context, playback: &PlaybackSession) {
         self.views
-            .sync_playback(&state.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
+            .sync_playback(&playback.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
         let current_id = self.views.playback_current().map(|t| &t.id);
         let unchanged = match &self.last_title_key {
             TitleKey::Set(id) => id.as_ref() == current_id,
@@ -1140,14 +1215,19 @@ impl RiffApp {
     /// playerbar widgets. Every reported [`crate::ui::playerbar::
     /// PlayerBarAction`] routes through [`apply_player_bar_action`], so each
     /// control still emits its engine command.
-    fn render_control_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+    fn render_control_bar(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        playback: &mut PlaybackSession,
+    ) {
         // Cover for the current track, served from the LRU texture cache;
         // misses enqueue a background resolve exactly like the other views.
         // The current Track comes from the Session Views facade over the
         // store's `get_track` query — never the in-memory mirror.
         let mut cover = None;
         self.views
-            .sync_playback(&state.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
+            .sync_playback(&playback.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
         if let Some(track) = self.views.playback_current() {
             let id = track.id.clone();
             let file_path = track.file_path.clone();
@@ -1159,22 +1239,24 @@ impl RiffApp {
         // frame from the live queue shape.
         let queue_position = format!(
             "{}/{}",
-            state.queue.current_index.map_or(0, |i| i + 1),
-            state.queue.tracks.len()
+            playback.queue.current_index.map_or(0, |i| i + 1),
+            playback.queue.tracks.len()
         );
-        self.playerbar_readouts
-            .sync(state.current_position.current, state.current_position.total);
+        self.playerbar_readouts.sync(
+            playback.current_position.current,
+            playback.current_position.total,
+        );
         let content = crate::ui::playerbar::PlayerBarContent {
             cover,
-            playback: state.playback_state,
-            position: state.current_position.current,
-            total: state.current_position.total,
-            volume: state.current_volume,
-            muted: state.muted,
-            shuffle: state.queue.shuffle,
-            repeat: state.queue.repeat,
+            playback: playback.playback_state,
+            position: playback.current_position.current,
+            total: playback.current_position.total,
+            volume: playback.current_volume,
+            muted: playback.muted,
+            shuffle: playback.queue.shuffle,
+            repeat: playback.queue.repeat,
             queue_position: &queue_position,
-            advanced: state.ui_flags.advanced_mode,
+            advanced: library.ui_flags.advanced_mode,
         };
 
         egui::Panel::bottom("playerbar")
@@ -1192,7 +1274,8 @@ impl RiffApp {
         for action in self.playerbar_actions.drain(..) {
             apply_player_bar_action(
                 action,
-                state,
+                library,
+                playback,
                 self.transport.as_ref(),
                 self.settings_store.as_mut(),
             );
@@ -1208,7 +1291,12 @@ impl RiffApp {
     /// present on every view; only the main stage switches. Nav routes
     /// through [`crate::ui::chrome::NavDestination`] so exactly one View is
     /// visible after any click.
-    fn render_library_sidebar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+    fn render_library_sidebar(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
+    ) {
         use crate::ui::chrome::NavDestination;
         use crate::ui::sidebar::{self, SidebarNav};
 
@@ -1218,7 +1306,7 @@ impl RiffApp {
         // same Ctrl+F request-focus shortcut as before; the clear affordance
         // lives inside the widget.
         let search_response =
-            sidebar::search_box(ui, &mut self.icons, &palette, &mut state.search_query);
+            sidebar::search_box(ui, &mut self.icons, &palette, &mut library.search_query);
         if self.search_focus {
             search_response.request_focus();
             self.search_focus = false;
@@ -1228,7 +1316,7 @@ impl RiffApp {
         // Segmented Library/Folders control: each destination lands on the
         // library view with its browse mode, so clicking one from Settings or
         // Now Playing returns to it.
-        let active = NavDestination::active(state.view_mode, state.browse_mode);
+        let active = NavDestination::active(library.view_mode, library.browse_mode);
         let segment = match active {
             Some(NavDestination::Library) => Some(SidebarNav::Library),
             Some(NavDestination::Folders) => Some(SidebarNav::Folders),
@@ -1237,10 +1325,10 @@ impl RiffApp {
         if let Some(dest) = sidebar::segmented_nav(ui, &palette, segment) {
             match dest {
                 SidebarNav::Library => {
-                    NavDestination::Library.apply(&mut state.view_mode, &mut state.browse_mode);
+                    NavDestination::Library.apply(&mut library.view_mode, &mut library.browse_mode);
                 }
                 SidebarNav::Folders => {
-                    NavDestination::Folders.apply(&mut state.view_mode, &mut state.browse_mode);
+                    NavDestination::Folders.apply(&mut library.view_mode, &mut library.browse_mode);
                     self.smart_playlist_view = None;
                     self.playlist_view = None;
                 }
@@ -1248,18 +1336,24 @@ impl RiffApp {
         }
         ui.add_space(12.0);
 
-        let query = state.search_query.clone();
+        let query = library.search_query.clone();
 
-        match state.browse_mode {
-            BrowseMode::Library => self.render_library_browser(ui, state, &query),
-            BrowseMode::Folders => self.render_folder_tree(ui, state, &query),
+        match library.browse_mode {
+            BrowseMode::Library => self.render_library_browser(ui, library, playback, &query),
+            BrowseMode::Folders => self.render_folder_tree(ui, library, playback, &query),
         }
     }
 
     /// Left-panel content in Library browse mode: the All Tracks / Artists
     /// rows, smart playlists, user playlists, and the results dispatch — all
     /// on the restyled 40px tree rows (Issue 07).
-    fn render_library_browser(&mut self, ui: &mut egui::Ui, state: &mut AppState, query: &str) {
+    fn render_library_browser(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
+        query: &str,
+    ) {
         use crate::ui::sidebar::{self, TreeRow};
         let palette = self.theme.active;
 
@@ -1274,14 +1368,14 @@ impl RiffApp {
                 indent_level: 0,
                 icon: Some(crate::ui::icons::Icon::ListMusic),
                 label: "All Tracks",
-                selected: !state.ui_flags.show_artists_view && no_playlist,
+                selected: !library.ui_flags.show_artists_view && no_playlist,
                 now_playing: false,
                 playing: false,
                 disclosure: None,
             },
         );
         if all_tracks.clicked() {
-            state.ui_flags.show_artists_view = false;
+            library.ui_flags.show_artists_view = false;
             self.smart_playlist_view = None;
             self.playlist_view = None;
         }
@@ -1293,14 +1387,14 @@ impl RiffApp {
                 indent_level: 0,
                 icon: Some(crate::ui::icons::Icon::Library),
                 label: "Artists",
-                selected: state.ui_flags.show_artists_view && no_playlist,
+                selected: library.ui_flags.show_artists_view && no_playlist,
                 now_playing: false,
                 playing: false,
                 disclosure: None,
             },
         );
         if artists.clicked() {
-            state.ui_flags.show_artists_view = true;
+            library.ui_flags.show_artists_view = true;
             self.smart_playlist_view = None;
             self.playlist_view = None;
         }
@@ -1310,7 +1404,7 @@ impl RiffApp {
         // derived from local play history. They are virtual, so
         // they never appear while searching. Advanced-only
         // (REQ-UI-006): hidden entirely in the minimal UI.
-        if state.ui_flags.advanced_mode && query.is_empty() {
+        if library.ui_flags.advanced_mode && query.is_empty() {
             sidebar::section_header(ui, &palette, "Smart Playlists")
                 .on_hover_text("Auto-generated, read-only lists built from your play history.");
             for kind in SmartPlaylistKind::ALL {
@@ -1353,7 +1447,7 @@ impl RiffApp {
         // any open smart playlist.
         let open_playlist = self
             .smart_playlist_view
-            .filter(|_| query.is_empty() && state.ui_flags.advanced_mode);
+            .filter(|_| query.is_empty() && library.ui_flags.advanced_mode);
         let open_user_playlist = self.playlist_view.clone().filter(|_| query.is_empty());
 
         if !has_results && !query.is_empty() {
@@ -1361,22 +1455,22 @@ impl RiffApp {
                 ui.label(format!("No tracks found matching '{query}'"));
             });
         } else if let Some(pid) = open_user_playlist {
-            self.render_playlist_view(ui, state, &pid);
+            self.render_playlist_view(ui, library, playback, &pid);
         } else if let Some(kind) = open_playlist {
-            self.render_smart_playlist_view(ui, state, kind);
-        } else if state.ui_flags.show_artists_view {
-            self.render_artist_view(ui, state, query);
+            self.render_smart_playlist_view(ui, library, playback, kind);
+        } else if library.ui_flags.show_artists_view {
+            self.render_artist_view(ui, library, playback, query);
         } else {
-            self.render_flat_view(ui, state, query);
+            self.render_flat_view(ui, library, playback, query);
         }
     }
 
     /// Library-stage content (Issues 06 + 09): selected track metadata +
     /// cover, or the mockup's empty-state hero — the glowing disc circle with
     /// its copy — whenever there are no track details to show.
-    fn render_track_details_panel(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+    fn render_track_details_panel(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
         let palette = self.theme.active;
-        let Some(track_id) = state.selected_track.clone() else {
+        let Some(track_id) = library.selected_track.clone() else {
             crate::ui::library::empty_state_hero(ui, &mut self.icons, &palette);
             return;
         };
@@ -1406,7 +1500,13 @@ impl RiffApp {
         });
     }
 
-    fn render_artist_view(&mut self, ui: &mut egui::Ui, state: &mut AppState, query: &str) {
+    fn render_artist_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
+        query: &str,
+    ) {
         // Browsing reads through the Session Views facade over store queries
         // (ADR 0002/0003): artists A–Z straight from the Application Store,
         // each level cached until the next committed mutation bumps the
@@ -1426,7 +1526,7 @@ impl RiffApp {
                 .filter(|a| a.name.to_lowercase().contains(&q))
                 .collect()
         };
-        let current_track = state.queue.current_track().cloned();
+        let current_track = playback.queue.current_track().cloned();
 
         // Identity of the playing track's album, used to auto-open exactly
         // the collapsed headers containing it — the same outcome as the
@@ -1452,7 +1552,8 @@ impl RiffApp {
                     .is_some_and(|(album_artist, _)| album_artist == &artist.name);
                 self.render_artist_node(
                     ui,
-                    state,
+                    library,
+                    playback,
                     artist,
                     current_album.as_ref(),
                     current_track.as_ref(),
@@ -1471,7 +1572,8 @@ impl RiffApp {
     fn render_artist_node(
         &mut self,
         ui: &mut egui::Ui,
-        state: &mut AppState,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
         artist: &Artist,
         current_album: Option<&(String, String)>,
         current_track: Option<&TrackId>,
@@ -1513,7 +1615,15 @@ impl RiffApp {
                 let album_has_current = current_album.is_some_and(|(album_artist, album_title)| {
                     album_artist == &album.artist && album_title == &album.title
                 });
-                self.render_album_node(ui, state, album, current_track, album_has_current, query);
+                self.render_album_node(
+                    ui,
+                    library,
+                    playback,
+                    album,
+                    current_track,
+                    album_has_current,
+                    query,
+                );
             }
         }) {
             let _ = body;
@@ -1526,7 +1636,8 @@ impl RiffApp {
     fn render_album_node(
         &mut self,
         ui: &mut egui::Ui,
-        state: &mut AppState,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
         album: &Album,
         current_track: Option<&TrackId>,
         album_has_current: bool,
@@ -1565,7 +1676,7 @@ impl RiffApp {
 
         collapsing.show_body_unindented(ui, |ui| {
             let tracks = self.views.album_tracks(&album.artist, &album.title);
-            self.render_album_track_rows(ui, state, &tracks, current_track);
+            self.render_album_track_rows(ui, library, playback, &tracks, current_track);
         });
     }
 
@@ -1576,17 +1687,33 @@ impl RiffApp {
     fn render_album_track_rows(
         &mut self,
         ui: &mut egui::Ui,
-        state: &mut AppState,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
         tracks: &[Track],
         current_track: Option<&TrackId>,
     ) {
         for track in tracks {
             let label = label_numbered(track);
-            self.interactive_track_row(ui, state, track, current_track, None, &label, 2);
+            self.interactive_track_row(
+                ui,
+                library,
+                playback,
+                track,
+                current_track,
+                None,
+                &label,
+                2,
+            );
         }
     }
 
-    fn render_flat_view(&mut self, ui: &mut egui::Ui, state: &mut AppState, query: &str) {
+    fn render_flat_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
+        query: &str,
+    ) {
         // Row-virtualization audit (Issue 12): every UNBOUNDED track listing
         // culls through `ScrollArea::show_rows` — this flat list and search
         // (bounded store windows via `SessionViews::track_list`), smart
@@ -1604,7 +1731,7 @@ impl RiffApp {
         // after committed mutations. The facade owns the window math, the
         // count reads, and the torn-count recount; this view only maps row
         // indices to pages.
-        let current_track = state.queue.current_track().cloned();
+        let current_track = playback.queue.current_track().cloned();
 
         // Anchor read: sizes the row range with the authoritative total.
         let first_page = self.views.track_list(query, 0);
@@ -1623,7 +1750,14 @@ impl RiffApp {
                     }
                     let page = page.as_ref().expect("page fetched above");
                     if let Some(track) = page.rows.get(i - page.start) {
-                        self.render_track_row(ui, state, track, current_track.as_ref(), None);
+                        self.render_track_row(
+                            ui,
+                            library,
+                            playback,
+                            track,
+                            current_track.as_ref(),
+                            None,
+                        );
                     }
                 }
             },
@@ -1637,7 +1771,8 @@ impl RiffApp {
     fn render_smart_playlist_view(
         &mut self,
         ui: &mut egui::Ui,
-        state: &mut AppState,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
         kind: SmartPlaylistKind,
     ) {
         // Bounded playlists cap at 50 entries; open-ended ones list all.
@@ -1646,7 +1781,7 @@ impl RiffApp {
             SmartPlaylistKind::NeverPlayed | SmartPlaylistKind::LostGems => usize::MAX,
         };
         let tracks = self.views.smart_list(kind, limit);
-        let current_track = state.queue.current_track().cloned();
+        let current_track = playback.queue.current_track().cloned();
 
         // Header: name + count, clearly read-only (no edit/delete affordances),
         // with whole-list actions mirroring the album/folder header menu.
@@ -1674,7 +1809,14 @@ impl RiffApp {
             |ui, row_range| {
                 for i in row_range {
                     if let Some(track) = tracks.get(i) {
-                        self.render_track_row(ui, state, track, current_track.as_ref(), None);
+                        self.render_track_row(
+                            ui,
+                            library,
+                            playback,
+                            track,
+                            current_track.as_ref(),
+                            None,
+                        );
                     }
                 }
             },
@@ -1842,7 +1984,8 @@ impl RiffApp {
     fn render_playlist_view(
         &mut self,
         ui: &mut egui::Ui,
-        state: &mut AppState,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
         playlist_id: &PlaylistId,
     ) {
         let playlists = self.views.playlists();
@@ -1853,7 +1996,7 @@ impl RiffApp {
         let playlist_name = &playlist.name;
         let track_count = playlist.tracks.len();
 
-        let current_track = state.queue.current_track().cloned();
+        let current_track = playback.queue.current_track().cloned();
 
         // Ready-to-render rows straight from the seam (ADR 0002): the
         // projection resolves every entry against the Library in one query
@@ -1895,7 +2038,8 @@ impl RiffApp {
                     if let Some(entry) = entries.get(i) {
                         self.render_playlist_entry(
                             ui,
-                            state,
+                            library,
+                            playback,
                             playlist_id,
                             entry,
                             current_track.as_ref(),
@@ -1913,15 +2057,25 @@ impl RiffApp {
     fn render_playlist_entry(
         &mut self,
         ui: &mut egui::Ui,
-        state: &mut AppState,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
         playlist_id: &PlaylistId,
         entry: &(TrackId, Option<Track>, bool),
         current_track: Option<&TrackId>,
         index: usize,
     ) {
+        use std::path::PathBuf;
         let (tid, track, valid) = entry;
         if *valid && let Some(t) = track {
-            self.render_reorderable_playlist_row(ui, state, t, current_track, playlist_id, index);
+            self.render_reorderable_playlist_row(
+                ui,
+                library,
+                playback,
+                t,
+                current_track,
+                playlist_id,
+                index,
+            );
             return;
         }
 
@@ -1942,7 +2096,7 @@ impl RiffApp {
                         .color(ui.visuals().warn_fg_color),
                 )
                 .on_hover_text("File moved or deleted \u{2014} this entry won't play");
-            self.attach_track_menu(&response, state, tid, None, Some(playlist_id));
+            self.attach_track_menu(&response, library, tid, None, Some(playlist_id));
         });
     }
 
@@ -1956,7 +2110,8 @@ impl RiffApp {
     fn render_reorderable_playlist_row(
         &mut self,
         ui: &mut egui::Ui,
-        state: &mut AppState,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
         track: &Track,
         current_track: Option<&TrackId>,
         playlist_id: &PlaylistId,
@@ -1964,9 +2119,9 @@ impl RiffApp {
     ) {
         use crate::ui::sidebar::{self, TreeRow};
 
-        let is_selected = state.selected_track.as_ref() == Some(&track.id);
+        let is_selected = library.selected_track.as_ref() == Some(&track.id);
         let is_current = current_track == Some(&track.id);
-        let playing = state.playback_state == PlaybackState::Playing;
+        let playing = playback.playback_state == PlaybackState::Playing;
         let label = label_artist_title(track);
 
         self.request_cover(&track.id, &track.file_path);
@@ -1989,10 +2144,10 @@ impl RiffApp {
         );
         let response = outcome.response;
         if response.clicked() {
-            state.selected_track = Some(track.id.clone());
+            library.selected_track = Some(track.id.clone());
         }
         if response.double_clicked() {
-            state.selected_track = Some(track.id.clone());
+            library.selected_track = Some(track.id.clone());
             self.transport.play(track.id.clone());
         }
         if let Some(from) = outcome.drop_from {
@@ -2007,7 +2162,13 @@ impl RiffApp {
                 index,
             );
         }
-        self.attach_track_menu(&response, state, &track.id, Some(track), Some(playlist_id));
+        self.attach_track_menu(
+            &response,
+            library,
+            &track.id,
+            Some(track),
+            Some(playlist_id),
+        );
     }
 
     /// The restyled Now Playing stage (Issue 10): the 240px cover with its
@@ -2017,7 +2178,12 @@ impl RiffApp {
     /// [`crate::ui::now_playing::show_now_playing`]; every reported action
     /// routes through [`apply_now_playing_action`], so Close always lands on
     /// the Library View and the transport still emits engine commands.
-    fn show_now_playing_view(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+    fn show_now_playing_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
+    ) {
         let palette = self.theme.active;
 
         // Current track + cover from the LRU texture cache; misses enqueue a
@@ -2027,7 +2193,7 @@ impl RiffApp {
         // key is only re-cloned when the playing track moves, so fresh
         // frames allocate nothing here.
         self.views
-            .sync_playback(&state.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
+            .sync_playback(&playback.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
         let cover_key_changed = self.now_playing_cover_key.as_deref()
             != self.views.playback_current().map(|t| t.id.0.as_str());
         if cover_key_changed {
@@ -2072,8 +2238,8 @@ impl RiffApp {
             title,
             meta_line,
             details,
-            position: state.current_position.current,
-            total: state.current_position.total,
+            position: playback.current_position.current,
+            total: playback.current_position.total,
             up_next,
         };
 
@@ -2087,12 +2253,18 @@ impl RiffApp {
             &mut self.now_playing_actions,
         );
         for action in self.now_playing_actions.drain(..) {
-            apply_now_playing_action(action, state, self.transport.as_ref());
+            apply_now_playing_action(action, library, playback, self.transport.as_ref());
         }
     }
 
-    fn render_folder_tree(&mut self, ui: &mut egui::Ui, state: &mut AppState, query: &str) {
-        if state.library_paths.is_empty() {
+    fn render_folder_tree(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
+        query: &str,
+    ) {
+        if library.library_paths.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(40.0);
                 ui.label("No library paths configured.");
@@ -2104,13 +2276,13 @@ impl RiffApp {
         // queries (ADR 0002/0003): escaped prefix matching over stored track
         // paths, cached until the next committed mutation bumps the
         // generation. No in-memory mirror involved.
-        let lib_paths = state.library_paths.clone();
+        let lib_paths = library.library_paths.clone();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for lib_path in &lib_paths {
                 if !self.views.folder_has_audio(lib_path) {
                     continue;
                 }
-                self.render_folder_node(ui, state, lib_path, 0, query);
+                self.render_folder_node(ui, library, playback, lib_path, 0, query);
             }
         });
     }
@@ -2122,8 +2294,9 @@ impl RiffApp {
     fn render_folder_node(
         &mut self,
         ui: &mut egui::Ui,
-        state: &mut AppState,
-        path: &Path,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
+        path: &std::path::Path,
         level: usize,
         query: &str,
     ) {
@@ -2140,7 +2313,7 @@ impl RiffApp {
         }
 
         let palette = self.theme.active;
-        let current_track = state.queue.current_track().cloned();
+        let current_track = playback.queue.current_track().cloned();
 
         // The playing track's id IS its stored path, so containment is a
         // plain component-wise prefix check — no store round-trip needed.
@@ -2148,7 +2321,7 @@ impl RiffApp {
             .as_ref()
             .is_some_and(|tid| std::path::Path::new(&tid.0).starts_with(path));
 
-        let is_selected = state.selected_folder.as_deref() == Some(path);
+        let is_selected = library.selected_folder.as_deref() == Some(path);
 
         let label = path.file_name().map_or_else(
             || path.to_string_lossy().to_string(),
@@ -2188,7 +2361,7 @@ impl RiffApp {
         // rides on the row.
         if response.clicked() {
             collapsing.toggle(ui);
-            state.selected_folder = Some(path.to_path_buf());
+            library.selected_folder = Some(path.to_path_buf());
         }
         if response.double_clicked() {
             play_folder(&folder_track_ids, self.transport.as_ref());
@@ -2201,7 +2374,7 @@ impl RiffApp {
         collapsing.show_body_unindented(ui, |ui| {
             let children = self.views.folder_children(path);
             for child_path in children.iter() {
-                self.render_folder_node(ui, state, child_path, level + 1, query);
+                self.render_folder_node(ui, library, playback, child_path, level + 1, query);
             }
 
             let direct = self.views.folder_direct_tracks(path);
@@ -2211,7 +2384,8 @@ impl RiffApp {
                 let label = label_numbered(track);
                 self.interactive_track_row(
                     ui,
-                    state,
+                    library,
+                    playback,
                     track,
                     current_track.as_ref(),
                     None,
@@ -2286,6 +2460,25 @@ pub fn apply_tag_edit_outcome(
                 modal.error = Some(reason);
                 modal.saving = false;
             }
+        }
+    }
+}
+
+/// Apply drained facade events to session state (issue 01 seam fix).
+/// Playback errors arrive as typed notices with playback source — the
+/// coordinator no longer writes the library session's status slot directly —
+/// so the UI routes them to the titlebar status line here, preserving the
+/// exact visible string. Other event kinds carry no UI state change yet.
+pub fn apply_backend_events(
+    events: Vec<riff_backend::app::facade::BackendEvent>,
+    scan_status: &mut Option<String>,
+) {
+    use riff_backend::app::facade::{BackendEvent, NoticeSource};
+    for event in events {
+        if let BackendEvent::TypedNotice(payload) = event
+            && payload.source == NoticeSource::Playback
+        {
+            *scan_status = Some(payload.message);
         }
     }
 }

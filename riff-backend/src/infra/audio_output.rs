@@ -1,4 +1,4 @@
-use crate::app::errors::AppError;
+use crate::app::errors::PlaybackError;
 use crate::app::traits::AudioOutput;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::{
@@ -196,14 +196,14 @@ fn audio_callback_u16(
 }
 
 impl AudioOutput for CpalAudioOutput {
-    fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), AppError> {
+    fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), PlaybackError> {
         self.sample_rate = sample_rate;
         self.channels = channels;
 
         let device = self
             .host
             .default_output_device()
-            .ok_or_else(|| AppError::AudioOutput("No default output device".to_string()))?;
+            .ok_or_else(|| PlaybackError::AudioOutput("No default output device".to_string()))?;
 
         // Fresh ring per session, sized to the decode loop's backpressure
         // watermark plus one chunk of slack (see `CHUNK_SLACK_SAMPLES`).
@@ -218,19 +218,19 @@ impl AudioOutput for CpalAudioOutput {
         Ok(())
     }
 
-    fn start(&mut self) -> Result<(), AppError> {
+    fn start(&mut self) -> Result<(), PlaybackError> {
         let device = self
             .device
             .as_ref()
-            .ok_or_else(|| AppError::AudioOutput("Device not initialized".to_string()))?;
+            .ok_or_else(|| PlaybackError::AudioOutput("Device not initialized".to_string()))?;
         let mut consumer = self
             .pending_consumer
             .take()
-            .ok_or_else(|| AppError::AudioOutput("Output not initialized".to_string()))?;
+            .ok_or_else(|| PlaybackError::AudioOutput("Output not initialized".to_string()))?;
 
         let supported_config = device
             .default_output_config()
-            .map_err(|e| AppError::AudioOutput(format!("Config error: {e}")))?;
+            .map_err(|e| PlaybackError::AudioOutput(format!("Config error: {e}")))?;
 
         let sample_format = supported_config.sample_format();
 
@@ -302,22 +302,22 @@ impl AudioOutput for CpalAudioOutput {
                 None,
             ),
             _ => {
-                return Err(AppError::AudioOutput(format!(
+                return Err(PlaybackError::AudioOutput(format!(
                     "Unsupported sample format: {sample_format:?}"
                 )));
             }
         }
-        .map_err(|e| AppError::AudioOutput(format!("Stream error: {e}")))?;
+        .map_err(|e| PlaybackError::AudioOutput(format!("Stream error: {e}")))?;
 
         stream
             .play()
-            .map_err(|e| AppError::AudioOutput(format!("Play error: {e}")))?;
+            .map_err(|e| PlaybackError::AudioOutput(format!("Play error: {e}")))?;
 
         self.stream = SendStream(Some(stream));
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<(), AppError> {
+    fn stop(&mut self) -> Result<(), PlaybackError> {
         if let Some(ref stream) = self.stream.0 {
             let _ = stream.pause();
         }
@@ -346,9 +346,9 @@ impl AudioOutput for CpalAudioOutput {
         }
     }
 
-    fn write_samples(&mut self, samples: &[f32]) -> Result<usize, AppError> {
+    fn write_samples(&mut self, samples: &[f32]) -> Result<usize, PlaybackError> {
         let Some(producer) = self.producer.as_mut() else {
-            return Err(AppError::AudioOutput(
+            return Err(PlaybackError::AudioOutput(
                 "Audio output not initialized".to_string(),
             ));
         };
@@ -366,7 +366,7 @@ impl AudioOutput for CpalAudioOutput {
                 break;
             }
             if Instant::now() >= deadline {
-                return Err(AppError::AudioOutput(format!(
+                return Err(PlaybackError::AudioOutput(format!(
                     "Audio output buffer stalled: wrote {written}/{} samples",
                     samples.len()
                 )));

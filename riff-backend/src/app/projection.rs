@@ -8,7 +8,7 @@
 //! Stale reads are possible only between a committed write and the next
 //! refresh, which generation invalidation makes explicit.
 
-use crate::app::errors::AppError;
+use crate::app::errors::StoreError;
 use crate::app::playlist_manager;
 use crate::app::store::{PlaylistEntry, StoreGeneration};
 use crate::app::views::GenerationCache;
@@ -141,8 +141,8 @@ impl TrackListProjection {
     pub fn refresh(
         &mut self,
         total: usize,
-        loader: &mut dyn FnMut(usize, usize) -> Result<Vec<Track>, AppError>,
-    ) -> Result<(), AppError> {
+        loader: &mut dyn FnMut(usize, usize) -> Result<Vec<Track>, StoreError>,
+    ) -> Result<(), StoreError> {
         let epoch = self.cache.observe();
         let stale = !self.cache.holds(epoch, &self.key);
         let mut targets = std::mem::take(&mut self.pending_requests);
@@ -220,7 +220,7 @@ pub struct BrowsingProjection {
 }
 
 /// Loader signature for one album's tracks (factored out for readability).
-type AlbumTracksLoader<'a> = &'a mut dyn FnMut(&str, &str) -> Result<Vec<Track>, AppError>;
+type AlbumTracksLoader<'a> = &'a mut dyn FnMut(&str, &str) -> Result<Vec<Track>, StoreError>;
 
 impl Default for BrowsingProjection {
     fn default() -> Self {
@@ -243,8 +243,8 @@ impl BrowsingProjection {
     /// Propagates loader failures without touching the cache.
     pub fn artists(
         &mut self,
-        loader: &mut dyn FnMut() -> Result<Vec<Artist>, AppError>,
-    ) -> Result<Arc<[Artist]>, AppError> {
+        loader: &mut dyn FnMut() -> Result<Vec<Artist>, StoreError>,
+    ) -> Result<Arc<[Artist]>, StoreError> {
         let epoch = self.cache.observe();
         let cached = if self.cache.loaded_at(epoch) {
             self.cache.peek().and_then(|levels| levels.artists.clone())
@@ -267,8 +267,8 @@ impl BrowsingProjection {
     pub fn artist_albums(
         &mut self,
         artist: &str,
-        loader: &mut dyn FnMut(&str) -> Result<Vec<Album>, AppError>,
-    ) -> Result<Arc<[Album]>, AppError> {
+        loader: &mut dyn FnMut(&str) -> Result<Vec<Album>, StoreError>,
+    ) -> Result<Arc<[Album]>, StoreError> {
         let epoch = self.cache.observe();
         let cached = if self.cache.loaded_at(epoch) {
             self.cache
@@ -296,7 +296,7 @@ impl BrowsingProjection {
         album_artist: &str,
         album_title: &str,
         loader: AlbumTracksLoader<'_>,
-    ) -> Result<Arc<[Track]>, AppError> {
+    ) -> Result<Arc<[Track]>, StoreError> {
         let key = (album_artist.to_string(), album_title.to_string());
         let epoch = self.cache.observe();
         let cached = if self.cache.loaded_at(epoch) {
@@ -361,8 +361,8 @@ impl FolderProjection {
     pub fn has_audio(
         &mut self,
         folder: &std::path::Path,
-        loader: &mut dyn FnMut(&std::path::Path) -> Result<bool, AppError>,
-    ) -> Result<bool, AppError> {
+        loader: &mut dyn FnMut(&std::path::Path) -> Result<bool, StoreError>,
+    ) -> Result<bool, StoreError> {
         let key = folder.to_string_lossy().into_owned();
         let epoch = self.cache.observe();
         let cached = if self.cache.loaded_at(epoch) {
@@ -389,8 +389,8 @@ impl FolderProjection {
         &mut self,
         folder: &std::path::Path,
         query: &str,
-        loader: &mut dyn FnMut(&std::path::Path, &str) -> Result<bool, AppError>,
-    ) -> Result<bool, AppError> {
+        loader: &mut dyn FnMut(&std::path::Path, &str) -> Result<bool, StoreError>,
+    ) -> Result<bool, StoreError> {
         let key = (folder.to_string_lossy().into_owned(), query.to_string());
         let epoch = self.cache.observe();
         let cached = if self.cache.loaded_at(epoch) {
@@ -420,8 +420,8 @@ impl FolderProjection {
     pub fn subtree_ids(
         &mut self,
         folder: &std::path::Path,
-        loader: &mut dyn FnMut(&std::path::Path) -> Result<Vec<TrackId>, AppError>,
-    ) -> Result<Arc<[TrackId]>, AppError> {
+        loader: &mut dyn FnMut(&std::path::Path) -> Result<Vec<TrackId>, StoreError>,
+    ) -> Result<Arc<[TrackId]>, StoreError> {
         let key = folder.to_string_lossy().into_owned();
         let epoch = self.cache.observe();
         let cached = if self.cache.loaded_at(epoch) {
@@ -450,8 +450,8 @@ impl FolderProjection {
     pub fn direct_tracks(
         &mut self,
         folder: &std::path::Path,
-        loader: &mut dyn FnMut(&std::path::Path) -> Result<Vec<Track>, AppError>,
-    ) -> Result<Arc<[Track]>, AppError> {
+        loader: &mut dyn FnMut(&std::path::Path) -> Result<Vec<Track>, StoreError>,
+    ) -> Result<Arc<[Track]>, StoreError> {
         let key = folder.to_string_lossy().into_owned();
         let epoch = self.cache.observe();
         let cached = if self.cache.loaded_at(epoch) {
@@ -480,8 +480,8 @@ impl FolderProjection {
     pub fn children(
         &mut self,
         folder: &std::path::Path,
-        loader: &mut dyn FnMut(&std::path::Path) -> Result<Vec<PathBuf>, AppError>,
-    ) -> Result<Arc<[PathBuf]>, AppError> {
+        loader: &mut dyn FnMut(&std::path::Path) -> Result<Vec<PathBuf>, StoreError>,
+    ) -> Result<Arc<[PathBuf]>, StoreError> {
         let key = folder.to_string_lossy().into_owned();
         let epoch = self.cache.observe();
         let cached = if self.cache.loaded_at(epoch) {
@@ -544,8 +544,8 @@ impl SmartPlaylistsProjection {
         &mut self,
         kind: SmartPlaylistKind,
         limit: usize,
-        loader: &mut dyn FnMut(SmartPlaylistKind, usize) -> Result<Vec<Track>, AppError>,
-    ) -> Result<Arc<[Track]>, AppError> {
+        loader: &mut dyn FnMut(SmartPlaylistKind, usize) -> Result<Vec<Track>, StoreError>,
+    ) -> Result<Arc<[Track]>, StoreError> {
         let epoch = self.cache.observe();
         let cached = if self.cache.loaded_at(epoch) {
             self.cache
@@ -643,8 +643,8 @@ impl PlaybackProjection {
         &mut self,
         queue: &PlaybackQueue,
         limit: usize,
-        loader: &mut dyn FnMut(&TrackId) -> Result<Option<Track>, AppError>,
-    ) -> Result<(), AppError> {
+        loader: &mut dyn FnMut(&TrackId) -> Result<Option<Track>, StoreError>,
+    ) -> Result<(), StoreError> {
         let epoch = self.slots.observe();
 
         // Fresh-frame fast path: compare the queue's shape lazily, by
@@ -701,8 +701,8 @@ impl PlaybackProjection {
     pub fn selected_track(
         &mut self,
         id: &TrackId,
-        loader: &mut dyn FnMut(&TrackId) -> Result<Option<Track>, AppError>,
-    ) -> Result<Option<Track>, AppError> {
+        loader: &mut dyn FnMut(&TrackId) -> Result<Option<Track>, StoreError>,
+    ) -> Result<Option<Track>, StoreError> {
         let epoch = self.selected.observe();
         if self.selected.holds(epoch, id) {
             return Ok(self
@@ -806,8 +806,8 @@ impl PlaylistProjection {
     /// Propagates loader failures without touching the cache.
     pub fn playlists(
         &mut self,
-        loader: &mut dyn FnMut() -> Result<Vec<Playlist>, AppError>,
-    ) -> Result<Arc<[Playlist]>, AppError> {
+        loader: &mut dyn FnMut() -> Result<Vec<Playlist>, StoreError>,
+    ) -> Result<Arc<[Playlist]>, StoreError> {
         let epoch = self.playlists.observe();
         if self.playlists.loaded_at(epoch)
             && let Some(cached) = self.playlists.peek()
@@ -828,8 +828,8 @@ impl PlaylistProjection {
     pub fn playlist_view(
         &mut self,
         id: &PlaylistId,
-        loader: &mut dyn FnMut(&PlaylistId) -> Result<Vec<PlaylistEntry>, AppError>,
-    ) -> Result<PlaylistView, AppError> {
+        loader: &mut dyn FnMut(&PlaylistId) -> Result<Vec<PlaylistEntry>, StoreError>,
+    ) -> Result<PlaylistView, StoreError> {
         let playlist_epoch = self.playlists.observe();
         let library_epoch = self.views.observe();
         let fresh = self.views.holds(library_epoch, &playlist_epoch)

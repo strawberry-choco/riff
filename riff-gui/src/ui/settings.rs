@@ -2,7 +2,9 @@ use crate::ui::icons::{Icon, IconCache};
 use crate::ui::theme::{self, Palette};
 use eframe::egui;
 use riff_backend::app::MutexExt;
-use riff_backend::app::state::{AppState, LibraryStatus, ViewMode, WatchState};
+use riff_backend::app::state::{
+    LibrarySession, LibraryStatus, PlaybackSession, ViewMode, WatchState,
+};
 use riff_backend::app::store::SettingsStore;
 use std::path::{Path, PathBuf};
 
@@ -79,17 +81,20 @@ pub fn suggest_directories(input: &str, max: usize) -> Vec<PathBuf> {
     matches
 }
 
-/// Register one library root: update `AppState`, then persist the path list
+/// Register one library root: update the Library Session, then persist the path list
 /// to the Application Store. A store write failure is logged (the in-memory
 /// change stands so the session still works).
-fn add_library_path(path: PathBuf, state: &mut AppState, store: &mut dyn SettingsStore) {
+fn add_library_path(path: PathBuf, library: &mut LibrarySession, store: &mut dyn SettingsStore) {
     let canonical = std::fs::canonicalize(&path).unwrap_or(path);
-    if state.library_paths.contains(&canonical) {
+    if library.library_paths.contains(&canonical) {
         return;
     }
-    state.library_paths.push(canonical.clone());
-    state.library_statuses.entry(canonical.clone()).or_default();
-    if let Err(e) = store.save_library_paths(&state.library_paths) {
+    library.library_paths.push(canonical.clone());
+    library
+        .library_statuses
+        .entry(canonical.clone())
+        .or_default();
+    if let Err(e) = store.save_library_paths(&library.library_paths) {
         tracing::warn!("Failed to save library paths: {e}");
     }
 }
@@ -227,7 +232,7 @@ impl LibraryRow {
 }
 
 /// Everything the Settings stage needs to render one frame. A plain value
-/// struct: the caller reads it out of `AppState`, the widgets never touch
+/// struct: the caller reads it out of the session, the widgets never touch
 /// state.
 #[derive(Default)]
 pub struct SettingsContent {
@@ -1178,7 +1183,7 @@ fn info_lines(ui: &mut egui::Ui, palette: &Palette) {
 #[cfg(target_os = "linux")]
 fn pick_folder_ui(
     ui: &mut egui::Ui,
-    state: &mut AppState,
+    library: &mut LibrarySession,
     store: &mut dyn SettingsStore,
     text_input: &mut String,
     show_input: &mut bool,
@@ -1235,36 +1240,41 @@ impl super::app::RiffApp {
     /// renderer ([`show_settings_stage`]); this adapter owns the effects:
     /// watcher start/stop, store mutations, scan requests through the
     /// Library Scan Service, and the platform folder-picker split.
-    pub fn show_settings_view(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+    pub fn show_settings_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        playback: &mut PlaybackSession,
+    ) {
         // Per-root indexed-track counts come from the store through the
         // Session Views facade (component-wise subtree ids, invalidated by
         // generation bumps) — never the former in-memory mirror.
         let content = SettingsContent {
-            libraries: state
+            libraries: library
                 .library_paths
                 .iter()
                 .map(|path| {
                     let indexed_tracks = self.views.folder_subtree_ids(path).len();
                     LibraryRow {
                         path: path.clone(),
-                        status: state
+                        status: library
                             .library_statuses
                             .get(path)
                             .cloned()
                             .unwrap_or_default(),
-                        watch: state.watch_states.get(path).cloned().unwrap_or_default(),
+                        watch: library.watch_states.get(path).cloned().unwrap_or_default(),
                         indexed_tracks,
                     }
                 })
                 .collect(),
-            advanced_mode: state.ui_flags.advanced_mode,
-            high_contrast: state.ui_flags.high_contrast,
-            replaygain_enabled: state.replaygain_enabled,
+            advanced_mode: library.ui_flags.advanced_mode,
+            high_contrast: library.ui_flags.high_contrast,
+            replaygain_enabled: playback.replaygain_enabled,
         };
 
         let palette = self.theme.active;
         for action in show_settings_stage(ui, &mut self.icons, &palette, &content) {
-            self.apply_settings_action(action, state);
+            self.apply_settings_action(action, library, playback);
         }
 
         // Transient rows beneath the stage column.
@@ -1272,7 +1282,7 @@ impl super::app::RiffApp {
         if self.settings_show_input {
             pick_folder_ui(
                 ui,
-                state,
+                library,
                 self.settings_store.as_mut(),
                 &mut self.settings_text_input,
                 &mut self.settings_show_input,
@@ -1280,41 +1290,46 @@ impl super::app::RiffApp {
             );
         }
         if self.clear_library_confirm {
-            self.render_clear_library_confirm(ui, state);
+            self.render_clear_library_confirm(ui, library);
         }
     }
 
     /// Apply one [`SettingsAction`] through the app's state/service/store
     /// paths.
-    fn apply_settings_action(&mut self, action: SettingsAction, state: &mut AppState) {
+    fn apply_settings_action(
+        &mut self,
+        action: SettingsAction,
+        library: &mut LibrarySession,
+        playback: &mut PlaybackSession,
+    ) {
         match action {
-            SettingsAction::Back => state.view_mode = ViewMode::Library,
-            SettingsAction::AddLibrary => self.add_library_via_platform_picker(state),
+            SettingsAction::Back => library.view_mode = ViewMode::Library,
+            SettingsAction::AddLibrary => self.add_library_via_platform_picker(library),
             // Scan intent goes through the Library Scan Service seam (ADR
             // 0006): dedup against in-flight scans and the whole walk/commit
             // flow live behind it.
             SettingsAction::Scan(path) => self.scans.request(path),
             SettingsAction::ScanAll => {
-                for path in &state.library_paths {
+                for path in &library.library_paths {
                     self.scans.request(path.clone());
                 }
             }
-            SettingsAction::Remove(path) => self.remove_library_path(&path, state),
+            SettingsAction::Remove(path) => self.remove_library_path(&path, library),
             SettingsAction::SetWatch(path, watching) => {
-                self.set_watch_state(&path, watching, state);
+                self.set_watch_state(&path, watching, library);
             }
             SettingsAction::ClearLibrary => self.clear_library_confirm = true,
             SettingsAction::SetAdvanced(value) => {
-                state.ui_flags.advanced_mode = value;
-                self.persist_scalars(state);
+                library.ui_flags.advanced_mode = value;
+                self.persist_scalars(playback, library);
             }
             SettingsAction::SetHighContrast(value) => {
-                state.ui_flags.high_contrast = value;
-                self.persist_scalars(state);
+                library.ui_flags.high_contrast = value;
+                self.persist_scalars(playback, library);
             }
             SettingsAction::SetReplayGain(value) => {
-                state.replaygain_enabled = value;
-                self.persist_scalars(state);
+                playback.replaygain_enabled = value;
+                self.persist_scalars(playback, library);
             }
         }
     }
@@ -1322,21 +1337,21 @@ impl super::app::RiffApp {
     /// Register a new library root through the platform picker: the native
     /// folder dialog everywhere except Linux, which opens the text-input row
     /// rendered beneath the stage.
-    fn add_library_via_platform_picker(&mut self, state: &mut AppState) {
+    fn add_library_via_platform_picker(&mut self, library: &mut LibrarySession) {
         #[cfg(not(target_os = "linux"))]
         {
             if let Some(path) = rfd::FileDialog::new()
                 .set_title("Add Music Library")
                 .pick_folder()
             {
-                add_library_path(path, state, self.settings_store.as_mut());
+                add_library_path(path, library, self.settings_store.as_mut());
             }
         }
         #[cfg(target_os = "linux")]
         {
             self.settings_show_input = true;
             self.settings_path_error = None;
-            let _ = state;
+            let _ = library;
         }
     }
 
@@ -1345,13 +1360,16 @@ impl super::app::RiffApp {
     /// survive dangling so they recover when files return); the mutation
     /// adapter bumps the session generation so projections refetch, then the
     /// session state catches up.
-    fn remove_library_path(&mut self, path: &PathBuf, state: &mut AppState) {
+    fn remove_library_path(&mut self, path: &PathBuf, library: &mut LibrarySession) {
         if let Err(e) = self.library_mutations.remove_library_path(path) {
             tracing::error!("Failed to remove {path:?} from store: {e}");
         }
-        state.library_paths.retain(|p| p != path);
-        state.library_statuses.remove(path);
-        if let Err(e) = self.settings_store.save_library_paths(&state.library_paths) {
+        library.library_paths.retain(|p| p != path);
+        library.library_statuses.remove(path);
+        if let Err(e) = self
+            .settings_store
+            .save_library_paths(&library.library_paths)
+        {
             tracing::warn!("Failed to save library paths: {e}");
         }
     }
@@ -1359,7 +1377,7 @@ impl super::app::RiffApp {
     /// Start or stop the filesystem watcher for one root and persist the new
     /// [`WatchState`]. A failed start degrades to a Warning carrying the
     /// diagnostic, exactly as before the restyle.
-    fn set_watch_state(&mut self, path: &Path, watching: bool, state: &mut AppState) {
+    fn set_watch_state(&mut self, path: &Path, watching: bool, library: &mut LibrarySession) {
         if watching {
             let result = {
                 let mut guard = self.watcher_manager.lock_or_recover();
@@ -1370,12 +1388,12 @@ impl super::app::RiffApp {
             };
             match result {
                 Ok(()) => {
-                    state
+                    library
                         .watch_states
                         .insert(path.to_path_buf(), WatchState::Enabled);
                 }
                 Err(reason) => {
-                    state
+                    library
                         .watch_states
                         .insert(path.to_path_buf(), WatchState::Warning(reason));
                 }
@@ -1384,18 +1402,18 @@ impl super::app::RiffApp {
             if let Some(ref mut mgr) = *self.watcher_manager.lock_or_recover() {
                 mgr.stop_watching(path);
             }
-            state
+            library
                 .watch_states
                 .insert(path.to_path_buf(), WatchState::Disabled);
         }
-        if let Err(e) = self.settings_store.save_watch_states(&state.watch_states) {
+        if let Err(e) = self.settings_store.save_watch_states(&library.watch_states) {
             tracing::warn!("Failed to save watch states: {e}");
         }
     }
 
     /// The inline confirmation for the destructive Clear Library action,
     /// rendered beneath the stage until confirmed or cancelled.
-    fn render_clear_library_confirm(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+    fn render_clear_library_confirm(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
         ui.add_space(8.0);
         ui.label(
             egui::RichText::new("Remove every indexed track? Playlists and settings are kept.")
@@ -1408,13 +1426,13 @@ impl super::app::RiffApp {
                     Ok(removed) => {
                         // The mutation adapter bumps the session generation;
                         // the mirror no longer tracks collection data.
-                        state.scan_status = Some(format!(
+                        library.scan_status = Some(format!(
                             "Library cleared ({removed} tracks removed). Rescan to rebuild."
                         ));
                     }
                     Err(e) => {
                         tracing::error!("Failed to clear the library: {e}");
-                        state.scan_status = Some(
+                        library.scan_status = Some(
                             "Failed to clear the library \u{2014} nothing was changed.".to_string(),
                         );
                     }
@@ -1428,12 +1446,12 @@ impl super::app::RiffApp {
 
     /// Commit the current scalar preferences as one small durable
     /// transaction.
-    fn persist_scalars(&mut self, state: &AppState) {
+    fn persist_scalars(&mut self, playback: &PlaybackSession, library: &LibrarySession) {
         let scalars = riff_backend::app::state::ScalarSettings {
-            volume: Some(state.current_volume),
-            advanced_mode: state.ui_flags.advanced_mode,
-            high_contrast: state.ui_flags.high_contrast,
-            replaygain_enabled: state.replaygain_enabled,
+            volume: Some(playback.current_volume),
+            advanced_mode: library.ui_flags.advanced_mode,
+            high_contrast: library.ui_flags.high_contrast,
+            replaygain_enabled: playback.replaygain_enabled,
         };
         if let Err(e) = self.settings_store.save_scalars(&scalars) {
             tracing::warn!("Failed to save settings: {e}");

@@ -8,8 +8,8 @@
 //! # Test Organization
 //!
 //! - `domain_tests.rs`: Tests for domain objects like Track, `TrackId`, `PlaybackState`, etc.
-//! - `app_tests.rs`: Tests for application logic like `AppState`, the Session
-//!   Projections, and scan-side Track construction.
+//! - `app_tests.rs`: Tests for application logic like `PlaybackSession` /
+//!   `LibrarySession`, the Session Projections, and scan-side Track construction.
 //! - `infra_tests.rs`: Tests for infrastructure components like audio decoders, metadata readers, etc.
 //! - `ui_tests.rs`: Tests for UI-related functionality like settings storage, etc.
 //! - `golden_tests.rs`: Golden-image snapshot tests rendering real egui frames headlessly.
@@ -33,7 +33,7 @@ pub mod ui_tests;
 // --- Library re-exports ---------------------------------------------------
 //
 // Bring the library modules into the test crate root so qualified paths such as
-// `crate::domain::TrackMetadata`, `crate::app::state::AppState` and
+// `crate::domain::TrackMetadata`, `crate::app::state::PlaybackSession` and
 // `crate::app::scan_service::ScanService` resolve from inside the test modules.
 pub use riff_backend::app;
 pub use riff_backend::domain;
@@ -48,7 +48,9 @@ pub use riff_backend::app::gapless::{
     formats_gapless_compatible, frames_from_duration, is_gapless_eligible, pre_buffer_cap,
     repeat_one_handoff_eligible, samples_from_duration,
 };
-pub use riff_backend::app::state::{AppState, LibraryStatus, WatchState, replaygain_factor};
+pub use riff_backend::app::state::{
+    LibrarySession, LibraryStatus, PlaybackSession, WatchState, replaygain_factor,
+};
 pub use riff_backend::app::transport::clamp_seek;
 pub use riff_backend::domain::{
     Album, Artist, PlaybackCommand, PlaybackPosition, PlaybackQueue, PlaybackState, PlaybackUpdate,
@@ -128,8 +130,8 @@ pub mod test_utils {
 /// These are intentionally reusable: later suites (e.g. gapless-playback
 /// tests) build on the same scripted decoder/output behavior.
 pub mod mocks {
-    use riff_backend::app::errors::AppError;
-    use riff_backend::app::state::AppState;
+    use riff_backend::app::errors::{LibraryError, PlaybackError, StoreError};
+    use riff_backend::app::state::PlaybackSession;
     use riff_backend::app::store::{
         LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings, SettingsStore,
     };
@@ -188,9 +190,9 @@ pub mod mocks {
     }
 
     impl AudioDecoder for MockAudioDecoder {
-        fn open(&mut self, path: &std::path::Path) -> Result<AudioFormatInfo, AppError> {
+        fn open(&mut self, path: &std::path::Path) -> Result<AudioFormatInfo, PlaybackError> {
             if let Some(ref msg) = self.open_error {
-                return Err(AppError::Decode(msg.clone()));
+                return Err(PlaybackError::Decode(msg.clone()));
             }
             self.opened.push(path.to_path_buf());
             self.closed = false;
@@ -198,9 +200,9 @@ pub mod mocks {
             Ok(self.format.clone())
         }
 
-        fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, AppError> {
+        fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, PlaybackError> {
             if let Some(ref msg) = self.decode_error {
-                return Err(AppError::Decode(msg.clone()));
+                return Err(PlaybackError::Decode(msg.clone()));
             }
             let Some(batch) = self.queue.first_mut() else {
                 return Ok(0);
@@ -218,7 +220,7 @@ pub mod mocks {
             Ok(n)
         }
 
-        fn seek(&mut self, position: Duration) -> Result<(), AppError> {
+        fn seek(&mut self, position: Duration) -> Result<(), PlaybackError> {
             self.seeks.push(position);
             self.queue = self.scripted.clone();
             Ok(())
@@ -282,27 +284,27 @@ pub mod mocks {
     }
 
     impl AudioOutput for MockAudioOutput {
-        fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), AppError> {
+        fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), PlaybackError> {
             if let Some(ref msg) = self.initialize_error {
-                return Err(AppError::AudioOutput(msg.clone()));
+                return Err(PlaybackError::AudioOutput(msg.clone()));
             }
             self.initialized.push((sample_rate, channels));
             Ok(())
         }
 
-        fn start(&mut self) -> Result<(), AppError> {
+        fn start(&mut self) -> Result<(), PlaybackError> {
             self.start_count += 1;
             Ok(())
         }
 
-        fn stop(&mut self) -> Result<(), AppError> {
+        fn stop(&mut self) -> Result<(), PlaybackError> {
             self.stop_count += 1;
             Ok(())
         }
 
-        fn write_samples(&mut self, samples: &[f32]) -> Result<usize, AppError> {
+        fn write_samples(&mut self, samples: &[f32]) -> Result<usize, PlaybackError> {
             if let Some(ref msg) = self.write_error {
-                return Err(AppError::AudioOutput(msg.clone()));
+                return Err(PlaybackError::AudioOutput(msg.clone()));
             }
             self.buffer.extend_from_slice(samples);
             self.written.push(samples.to_vec());
@@ -328,7 +330,7 @@ pub mod mocks {
     }
 
     /// Canned [`MetadataReader`]: returns configured values, or an injected
-    /// `AppError::MetadataRead` from every method when `fail` is set.
+    /// `LibraryError::MetadataRead` from every method when `fail` is set.
     pub struct MockMetadataReader {
         pub fail: bool,
         pub metadata: TrackMetadata,
@@ -354,30 +356,33 @@ pub mod mocks {
     }
 
     impl MetadataReader for MockMetadataReader {
-        fn read_metadata(&self, _path: &std::path::Path) -> Result<TrackMetadata, AppError> {
+        fn read_metadata(&self, _path: &std::path::Path) -> Result<TrackMetadata, LibraryError> {
             if self.fail {
-                return Err(AppError::MetadataRead("mock failure".to_string()));
+                return Err(LibraryError::MetadataRead("mock failure".to_string()));
             }
             Ok(self.metadata.clone())
         }
 
-        fn read_duration(&self, _path: &std::path::Path) -> Result<Option<Duration>, AppError> {
+        fn read_duration(&self, _path: &std::path::Path) -> Result<Option<Duration>, LibraryError> {
             if self.fail {
-                return Err(AppError::MetadataRead("mock failure".to_string()));
+                return Err(LibraryError::MetadataRead("mock failure".to_string()));
             }
             Ok(self.duration)
         }
 
-        fn read_cover_source(&self, _path: &std::path::Path) -> Result<CoverSource, AppError> {
+        fn read_cover_source(&self, _path: &std::path::Path) -> Result<CoverSource, LibraryError> {
             if self.fail {
-                return Err(AppError::MetadataRead("mock failure".to_string()));
+                return Err(LibraryError::MetadataRead("mock failure".to_string()));
             }
             Ok(self.cover_source.clone())
         }
 
-        fn read_audio_format(&self, _path: &std::path::Path) -> Result<AudioFormatInfo, AppError> {
+        fn read_audio_format(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<AudioFormatInfo, LibraryError> {
             if self.fail {
-                return Err(AppError::MetadataRead("mock failure".to_string()));
+                return Err(LibraryError::MetadataRead("mock failure".to_string()));
             }
             Ok(self.audio_format.clone())
         }
@@ -392,10 +397,10 @@ pub mod mocks {
                 CoverSource,
                 AudioFormatInfo,
             ),
-            AppError,
+            LibraryError,
         > {
             if self.fail {
-                return Err(AppError::MetadataRead("mock failure".to_string()));
+                return Err(LibraryError::MetadataRead("mock failure".to_string()));
             }
             Ok((
                 self.metadata.clone(),
@@ -407,20 +412,20 @@ pub mod mocks {
     }
 
     /// Canned [`CoverLoader`]: returns a configured image, `None`, or an
-    /// injected `AppError::CoverLoad`.
+    /// injected `LibraryError::CoverLoad`.
     pub struct MockCoverLoader {
         pub result: Result<Option<CoverImage>, String>,
     }
 
     impl CoverLoader for MockCoverLoader {
-        fn load_cover(&self, _source: &CoverSource) -> Result<Option<CoverImage>, AppError> {
-            self.result.clone().map_err(AppError::CoverLoad)
+        fn load_cover(&self, _source: &CoverSource) -> Result<Option<CoverImage>, LibraryError> {
+            self.result.clone().map_err(LibraryError::CoverLoad)
         }
     }
 
     /// Recording [`MetadataWriter`]: successful writes are kept (path + edit)
     /// for assertions; when `fail` is set every write returns an
-    /// `AppError::MetadataWrite`, simulating an unwritable file (permission
+    /// `LibraryError::MetadataWrite`, simulating an unwritable file (permission
     /// denied, disk full, etc.).
     pub struct MockMetadataWriter {
         pub fail: bool,
@@ -477,10 +482,10 @@ pub mod mocks {
     }
 
     impl MetadataWriter for MockMetadataWriter {
-        fn write_metadata(&self, path: &Path, edit: &TagEdit) -> Result<(), AppError> {
+        fn write_metadata(&self, path: &Path, edit: &TagEdit) -> Result<(), LibraryError> {
             let spent = self.writes.lock().unwrap().len();
             if self.fail || self.fail_after_writes.is_some_and(|n| spent >= n) {
-                return Err(AppError::MetadataWrite(format!(
+                return Err(LibraryError::MetadataWrite(format!(
                     "permission denied: {}",
                     path.display()
                 )));
@@ -525,25 +530,25 @@ pub mod mocks {
     }
 
     impl SettingsStore for MockSettingsStore {
-        fn load_settings(&self) -> Result<Settings, AppError> {
+        fn load_settings(&self) -> Result<Settings, StoreError> {
             Ok(self.state.clone())
         }
 
         fn save_scalars(
             &mut self,
             scalars: &riff_backend::app::state::ScalarSettings,
-        ) -> Result<(), AppError> {
+        ) -> Result<(), StoreError> {
             if self.fail {
-                return Err(AppError::InvalidOperation("mock settings failure".into()));
+                return Err(StoreError::InvalidOperation("mock settings failure".into()));
             }
             self.state.scalars = *scalars;
             self.calls.push(SettingsCall::Scalars);
             Ok(())
         }
 
-        fn save_library_paths(&mut self, paths: &[std::path::PathBuf]) -> Result<(), AppError> {
+        fn save_library_paths(&mut self, paths: &[std::path::PathBuf]) -> Result<(), StoreError> {
             if self.fail {
-                return Err(AppError::InvalidOperation("mock settings failure".into()));
+                return Err(StoreError::InvalidOperation("mock settings failure".into()));
             }
             self.state.library_paths = paths.to_vec();
             self.calls.push(SettingsCall::LibraryPaths);
@@ -556,9 +561,9 @@ pub mod mocks {
                 std::path::PathBuf,
                 riff_backend::app::state::WatchState,
             >,
-        ) -> Result<(), AppError> {
+        ) -> Result<(), StoreError> {
             if self.fail {
-                return Err(AppError::InvalidOperation("mock settings failure".into()));
+                return Err(StoreError::InvalidOperation("mock settings failure".into()));
             }
             self.state.watch_states.clone_from(states);
             self.calls.push(SettingsCall::WatchStates);
@@ -626,7 +631,7 @@ pub mod mocks {
     }
 
     impl LibraryMutationStore for MockLibraryMutationStore {
-        fn apply_scan_batch(&mut self, _tracks: &[Track]) -> Result<usize, AppError> {
+        fn apply_scan_batch(&mut self, _tracks: &[Track]) -> Result<usize, StoreError> {
             Ok(0)
         }
 
@@ -634,14 +639,14 @@ pub mod mocks {
             &mut self,
             id: &TrackId,
             played_at: std::time::SystemTime,
-        ) -> Result<bool, AppError> {
+        ) -> Result<bool, StoreError> {
             self.played.lock().unwrap().push((id.clone(), played_at));
             Ok(true)
         }
 
-        fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), AppError> {
+        fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), StoreError> {
             if self.fail_tag_refresh {
-                return Err(AppError::InvalidOperation(
+                return Err(StoreError::InvalidOperation(
                     "mock tag refresh failure".to_string(),
                 ));
             }
@@ -649,11 +654,11 @@ pub mod mocks {
             Ok(())
         }
 
-        fn remove_library_path(&mut self, _root: &Path) -> Result<usize, AppError> {
+        fn remove_library_path(&mut self, _root: &Path) -> Result<usize, StoreError> {
             Ok(0)
         }
 
-        fn clear_library(&mut self) -> Result<usize, AppError> {
+        fn clear_library(&mut self) -> Result<usize, StoreError> {
             Ok(0)
         }
     }
@@ -671,9 +676,9 @@ pub mod mocks {
     }
 
     impl PlaylistStore for MockPlaylistStore {
-        fn load_playlists(&self) -> Result<Vec<Playlist>, AppError> {
+        fn load_playlists(&self) -> Result<Vec<Playlist>, StoreError> {
             if self.fail_loads {
-                return Err(AppError::InvalidOperation("playlists boom".to_string()));
+                return Err(StoreError::InvalidOperation("playlists boom".to_string()));
             }
             Ok(Vec::new())
         }
@@ -681,9 +686,9 @@ pub mod mocks {
         fn load_playlist_entries(
             &self,
             _id: &PlaylistId,
-        ) -> Result<Vec<riff_backend::app::store::PlaylistEntry>, AppError> {
+        ) -> Result<Vec<riff_backend::app::store::PlaylistEntry>, StoreError> {
             if self.fail_loads {
-                return Err(AppError::InvalidOperation("entries boom".to_string()));
+                return Err(StoreError::InvalidOperation("entries boom".to_string()));
             }
             Ok(Vec::new())
         }
@@ -692,15 +697,19 @@ pub mod mocks {
             &mut self,
             _name: &str,
             _initial_tracks: &[TrackId],
-        ) -> Result<PlaylistId, AppError> {
+        ) -> Result<PlaylistId, StoreError> {
             Ok(PlaylistId::new("mock"))
         }
 
-        fn rename_playlist(&mut self, _id: &PlaylistId, _new_name: &str) -> Result<bool, AppError> {
+        fn rename_playlist(
+            &mut self,
+            _id: &PlaylistId,
+            _new_name: &str,
+        ) -> Result<bool, StoreError> {
             Ok(false)
         }
 
-        fn delete_playlist(&mut self, _id: &PlaylistId) -> Result<bool, AppError> {
+        fn delete_playlist(&mut self, _id: &PlaylistId) -> Result<bool, StoreError> {
             Ok(false)
         }
 
@@ -708,7 +717,7 @@ pub mod mocks {
             &mut self,
             _id: &PlaylistId,
             _track: &TrackId,
-        ) -> Result<bool, AppError> {
+        ) -> Result<bool, StoreError> {
             Ok(false)
         }
 
@@ -716,7 +725,7 @@ pub mod mocks {
             &mut self,
             _id: &PlaylistId,
             _track: &TrackId,
-        ) -> Result<bool, AppError> {
+        ) -> Result<bool, StoreError> {
             Ok(false)
         }
 
@@ -724,7 +733,7 @@ pub mod mocks {
             &mut self,
             _id: &PlaylistId,
             _ordered: &[TrackId],
-        ) -> Result<bool, AppError> {
+        ) -> Result<bool, StoreError> {
             Ok(false)
         }
     }
@@ -825,22 +834,22 @@ pub mod mocks {
             self.record(TransportIntent::Stop);
         }
 
-        fn seek(&self, state: &AppState, position: Duration) {
+        fn seek(&self, session: &PlaybackSession, position: Duration) {
             self.record(TransportIntent::Seek(clamp_seek(
                 position.as_secs_f32(),
-                state.current_position.total,
+                session.current_position.total,
             )));
         }
 
-        fn apply_volume_from_state(&self, state: &AppState) {
-            self.record(TransportIntent::ApplyVolume(state.effective_volume()));
+        fn apply_volume_from_state(&self, session: &PlaybackSession) {
+            self.record(TransportIntent::ApplyVolume(session.effective_volume()));
         }
 
-        fn toggle_mute(&self, state: &mut AppState) {
-            state.muted = !state.muted;
-            self.record(TransportIntent::ToggleMute(state.muted));
+        fn toggle_mute(&self, session: &mut PlaybackSession) {
+            session.muted = !session.muted;
+            self.record(TransportIntent::ToggleMute(session.muted));
             self.record(TransportIntent::ApplyVolumeAfterMute(
-                state.effective_volume(),
+                session.effective_volume(),
             ));
         }
     }
@@ -1011,28 +1020,28 @@ pub mod mocks {
     }
 
     impl LibraryQueryStore for MockLibraryQueryStore {
-        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, AppError> {
+        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
             self.record(LibraryQueryCall::GetTrack(id.clone()));
             if self.failing.contains(&FailingQuery::GetTrack) {
-                return Err(AppError::InvalidOperation("store boom".to_string()));
+                return Err(StoreError::InvalidOperation("store boom".to_string()));
             }
             Ok(self.library.get(id).cloned())
         }
 
-        fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, AppError> {
+        fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, StoreError> {
             self.record(LibraryQueryCall::TracksWindow(offset, limit));
             if self.failing.contains(&FailingQuery::TracksWindow) {
-                return Err(AppError::InvalidOperation("loader boom".to_string()));
+                return Err(StoreError::InvalidOperation("loader boom".to_string()));
             }
             Ok(self.flat.iter().skip(offset).take(limit).cloned().collect())
         }
 
-        fn track_count(&self) -> Result<usize, AppError> {
+        fn track_count(&self) -> Result<usize, StoreError> {
             self.record(LibraryQueryCall::TrackCount);
             Ok(self.flat.len())
         }
 
-        fn all_track_ids(&self) -> Result<Vec<TrackId>, AppError> {
+        fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
             self.record(LibraryQueryCall::AllTrackIds);
             Ok(self.flat.iter().map(|t| t.id.clone()).collect())
         }
@@ -1042,7 +1051,7 @@ pub mod mocks {
             query: &str,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Track>, AppError> {
+        ) -> Result<Vec<Track>, StoreError> {
             self.record(LibraryQueryCall::SearchWindow(offset, limit));
             if !self.search_matches(query) {
                 return Ok(Vec::new());
@@ -1056,7 +1065,7 @@ pub mod mocks {
                 .collect())
         }
 
-        fn search_count(&self, query: &str) -> Result<usize, AppError> {
+        fn search_count(&self, query: &str) -> Result<usize, StoreError> {
             self.record(LibraryQueryCall::SearchCount);
             if !self.search_matches(query) {
                 return Ok(0);
@@ -1064,15 +1073,15 @@ pub mod mocks {
             Ok(self.search.len())
         }
 
-        fn all_artists(&self) -> Result<Vec<Artist>, AppError> {
+        fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
             self.record(LibraryQueryCall::AllArtists);
             if self.failing.contains(&FailingQuery::AllArtists) {
-                return Err(AppError::InvalidOperation("artists boom".to_string()));
+                return Err(StoreError::InvalidOperation("artists boom".to_string()));
             }
             Ok(self.artists.clone())
         }
 
-        fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, AppError> {
+        fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, StoreError> {
             self.record(LibraryQueryCall::ArtistAlbums(artist.to_string()));
             Ok(self.albums.clone())
         }
@@ -1081,7 +1090,7 @@ pub mod mocks {
             &self,
             album_artist: &str,
             album_title: &str,
-        ) -> Result<Vec<Track>, AppError> {
+        ) -> Result<Vec<Track>, StoreError> {
             self.record(LibraryQueryCall::AlbumTracks(
                 album_artist.to_string(),
                 album_title.to_string(),
@@ -1089,12 +1098,12 @@ pub mod mocks {
             Ok(self.album_tracks.clone())
         }
 
-        fn folder_has_audio(&self, folder: &Path) -> Result<bool, AppError> {
+        fn folder_has_audio(&self, folder: &Path) -> Result<bool, StoreError> {
             self.record(LibraryQueryCall::FolderHasAudio(folder.to_path_buf()));
             Ok(self.folder_has_audio)
         }
 
-        fn folder_has_search_match(&self, folder: &Path, query: &str) -> Result<bool, AppError> {
+        fn folder_has_search_match(&self, folder: &Path, query: &str) -> Result<bool, StoreError> {
             self.record(LibraryQueryCall::FolderHasSearchMatch(
                 folder.to_path_buf(),
                 query.to_string(),
@@ -1102,17 +1111,17 @@ pub mod mocks {
             Ok(self.folder_search_match)
         }
 
-        fn track_ids_in_folder_tree(&self, folder: &Path) -> Result<Vec<TrackId>, AppError> {
+        fn track_ids_in_folder_tree(&self, folder: &Path) -> Result<Vec<TrackId>, StoreError> {
             self.record(LibraryQueryCall::TrackIdsInFolderTree(folder.to_path_buf()));
             Ok(self.folder_tree_ids.clone())
         }
 
-        fn tracks_in_folder(&self, folder: &Path) -> Result<Vec<Track>, AppError> {
+        fn tracks_in_folder(&self, folder: &Path) -> Result<Vec<Track>, StoreError> {
             self.record(LibraryQueryCall::TracksInFolder(folder.to_path_buf()));
             Ok(self.folder_direct_tracks.clone())
         }
 
-        fn subdirs_with_audio(&self, folder: &Path) -> Result<Vec<PathBuf>, AppError> {
+        fn subdirs_with_audio(&self, folder: &Path) -> Result<Vec<PathBuf>, StoreError> {
             self.record(LibraryQueryCall::SubdirsWithAudio(folder.to_path_buf()));
             Ok(self.folder_children.clone())
         }
@@ -1121,10 +1130,10 @@ pub mod mocks {
             &self,
             kind: SmartPlaylistKind,
             limit: usize,
-        ) -> Result<Vec<Track>, AppError> {
+        ) -> Result<Vec<Track>, StoreError> {
             self.record(LibraryQueryCall::SmartPlaylist(kind, limit));
             if self.failing.contains(&FailingQuery::SmartPlaylist) {
-                return Err(AppError::InvalidOperation(
+                return Err(StoreError::InvalidOperation(
                     "smart playlist boom".to_string(),
                 ));
             }
@@ -1135,12 +1144,17 @@ pub mod mocks {
 
 // Integration test helper functions
 pub mod integration_helpers {
-    use crate::app::state::AppState;
+    use crate::app::state::{LibrarySession, PlaybackSession};
     use std::sync::{Arc, Mutex};
 
-    /// Create a test `AppState` with some pre-populated data
-    pub fn create_test_app_state() -> Arc<Mutex<AppState>> {
-        let state = AppState::new();
-        Arc::new(Mutex::new(state))
+    /// Create paired test sessions: a `PlaybackSession` and a `LibrarySession`,
+    /// each in their own `Arc<Mutex<>>`. Callers unpack with
+    /// `let (playback, library) = create_test_sessions();`.
+    #[allow(clippy::type_complexity)]
+    pub fn create_test_sessions() -> (Arc<Mutex<PlaybackSession>>, Arc<Mutex<LibrarySession>>) {
+        (
+            Arc::new(Mutex::new(PlaybackSession::new())),
+            Arc::new(Mutex::new(LibrarySession::new())),
+        )
     }
 }

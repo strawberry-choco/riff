@@ -47,6 +47,10 @@ static MIGRATION_CHECKSUMS: &[(&str, &str)] = &[
         "004_library_collection",
         "15b0d88e8583d3744ac23193b63a387784053bc42f885c53cdb93ff8321bc778",
     ),
+    (
+        "005_playback_prefs",
+        "64cb710aa547f4fd5bdf57aacbc65f5444a7f256fc71b018f45eed80f0ca3a7c",
+    ),
 ];
 
 /// Embedded, ordered, checksummed migrations. Append-only once shipped:
@@ -155,6 +159,17 @@ const MIGRATIONS: &[Migration] = &[
           FOREIGN KEY (album_artist_key, album_title_key)
             REFERENCES albums(album_artist, title)
         );",
+    },
+    Migration {
+        version: 5,
+        name: "005_playback_prefs",
+        // Shuffle and repeat round-trip through the scalar settings row so
+        // the player-bar toggles survive restarts. repeat_mode encodes the
+        // cycle 0 = off, 1 = all, 2 = one (see `ScalarSettings`).
+        sql: "ALTER TABLE app_settings
+          ADD COLUMN shuffle INTEGER NOT NULL DEFAULT 0 CHECK (shuffle IN (0, 1));
+        ALTER TABLE app_settings
+          ADD COLUMN repeat_mode INTEGER NOT NULL DEFAULT 0 CHECK (repeat_mode IN (0, 1, 2));",
     },
 ];
 
@@ -1754,7 +1769,8 @@ impl SettingsStore for SqliteStore {
         let scalars = self
             .with_connection(|conn| {
                 conn.query_row(
-                    "SELECT volume, advanced_mode, high_contrast, replaygain_enabled
+                    "SELECT volume, advanced_mode, high_contrast, replaygain_enabled,
+                            shuffle, repeat_mode
                      FROM app_settings WHERE id = 1",
                     [],
                     |row| {
@@ -1763,6 +1779,8 @@ impl SettingsStore for SqliteStore {
                             advanced_mode: row.get::<_, i64>(1)? != 0,
                             high_contrast: row.get::<_, i64>(2)? != 0,
                             replaygain_enabled: row.get::<_, i64>(3)? != 0,
+                            shuffle: row.get::<_, i64>(4)? != 0,
+                            repeat_mode: row.get(5)?,
                         })
                     },
                 )
@@ -1809,13 +1827,15 @@ impl SettingsStore for SqliteStore {
             let result = conn.execute(
                 "UPDATE app_settings
                  SET volume = ?1, advanced_mode = ?2, high_contrast = ?3,
-                     replaygain_enabled = ?4
+                     replaygain_enabled = ?4, shuffle = ?5, repeat_mode = ?6
                  WHERE id = 1",
                 rusqlite::params![
                     scalars.volume,
                     i64::from(scalars.advanced_mode),
                     i64::from(scalars.high_contrast),
                     i64::from(scalars.replaygain_enabled),
+                    i64::from(scalars.shuffle),
+                    scalars.repeat_mode,
                 ],
             );
             match result {

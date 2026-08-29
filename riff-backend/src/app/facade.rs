@@ -805,11 +805,18 @@ impl BackendFacade {
         let Some(ref mut store) = self.settings_store else {
             return;
         };
+        let repeat_mode = match self.repeat {
+            RepeatMode::None => 0,
+            RepeatMode::All => 1,
+            RepeatMode::One => 2,
+        };
         let scalars = ScalarSettings {
             volume: Some(self.volume),
             advanced_mode: false,
             high_contrast: false,
             replaygain_enabled: self.replaygain_enabled,
+            shuffle: self.shuffle,
+            repeat_mode,
         };
         if let Err(e) = store.save_scalars(&scalars) {
             self.events

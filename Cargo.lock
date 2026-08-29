@@ -905,15 +905,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossbeam-queue"
-version = "0.3.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "803d13fb3b09d88be9f4dbc29062c66b19bf7170867ceb746d2a8689bf6c7a26"
-dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
 name = "crossbeam-utils"
 version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4014,11 +4005,44 @@ dependencies = [
 name = "riff-backend"
 version = "0.2.0"
 dependencies = [
+ "crossbeam-channel",
+ "fastrand",
+ "riff-infra",
+ "riff-library",
+ "riff-persistence",
+ "riff-playback",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "riff-gui"
+version = "0.2.0"
+dependencies = [
+ "crossbeam-channel",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "egui_kittest",
+ "image",
+ "muda",
+ "resvg",
+ "rfd",
+ "riff-backend",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "tray-icon",
+]
+
+[[package]]
+name = "riff-infra"
+version = "0.2.0"
+dependencies = [
  "cpal",
  "crossbeam-channel",
- "crossbeam-queue",
  "directories",
- "fastrand",
  "image",
  "lofty",
  "notify",
@@ -4031,40 +4055,7 @@ dependencies = [
  "symphonia",
  "symphonia-adapter-libopus",
  "tempfile",
- "thiserror 2.0.20",
  "tracing",
- "walkdir",
-]
-
-[[package]]
-name = "riff-gui"
-version = "0.2.0"
-dependencies = [
- "cpal",
- "crossbeam-channel",
- "directories",
- "eframe",
- "egui",
- "egui_extras",
- "egui_kittest",
- "fastrand",
- "image",
- "lofty",
- "muda",
- "notify",
- "notify-debouncer-full",
- "resvg",
- "rfd",
- "riff-backend",
- "ringbuf",
- "rusqlite",
- "symphonia",
- "symphonia-adapter-libopus",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
- "tracing-subscriber",
- "tray-icon",
  "walkdir",
 ]
 
@@ -4073,14 +4064,9 @@ name = "riff-library"
 version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
- "fastrand",
- "image",
- "lofty",
  "riff-persistence",
- "tempfile",
  "thiserror 2.0.20",
  "tracing",
- "walkdir",
 ]
 
 [[package]]
@@ -4094,7 +4080,6 @@ dependencies = [
  "crossbeam-channel",
  "fastrand",
  "riff-persistence",
- "ringbuf",
  "thiserror 2.0.20",
 ]
 
@@ -4106,14 +4091,11 @@ dependencies = [
  "egui",
  "egui_kittest",
  "image",
- "notify",
- "notify-debouncer-full",
  "riff-backend",
  "riff-gui",
+ "riff-infra",
  "riff-library",
  "riff-playback",
- "rusqlite",
- "symphonia",
  "tempfile",
 ]
 

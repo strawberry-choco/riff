@@ -7,7 +7,7 @@
 //! watcher) live in `riff-infra` and implement these traits.
 
 pub use crate::infra::ports::{
-    AudioFormatInfo, CoverImage, CoverLoader, FilesystemWatch, MetadataReader, MetadataWriter,
-    TagEdit,
+    AudioFormatInfo, CoverImage, CoverImageFormat, CoverLoader, FilesystemWatch, MetadataReader,
+    MetadataWriter, TagEdit,
 };
 pub use riff_persistence::track::CoverSource;

@@ -146,7 +146,7 @@ impl TagEditWorker {
     fn process(&mut self, request: TagEditRequest) -> TagEditOutcome {
         // File tags first: they are the source of truth. A failed write
         // ends the flow here — nothing is resolved or persisted.
-        if let Err(e) = self.writer.write_metadata(&request.path, &request.edit) {
+        if let Err(e) = self.writer.write_tags(&request.path, &request.edit) {
             tracing::warn!("Tag write failed for {:?}: {e}", request.path);
             return TagEditOutcome::Failed {
                 reason: e.to_string(),

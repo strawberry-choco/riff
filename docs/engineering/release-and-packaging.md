@@ -2,13 +2,13 @@
 
 This document describes how riff is built for distribution today and how releases could be produced and packaged in the future. It is split into **Current State**, which reflects the verified repository configuration, and **Recommendations**, which are clearly marked suggestions that are not yet implemented. For the development build workflow and profiles, see [development-setup.md](./development-setup.md).
 
-riff is a single Cargo crate that compiles to a single standalone binary. It has no feature flags, no runtime plugin system, and no external assets that must ship alongside the executable, which keeps packaging straightforward: in principle, distributing riff means distributing one binary per platform.
+riff is a Cargo workspace that compiles to a single standalone binary (the `riff` binary in `riff-gui`). It has no feature flags, no runtime plugin system, and no external assets that must ship alongside the executable, which keeps packaging straightforward: in principle, distributing riff means distributing one binary per platform.
 
 ## Current State
 
 ### Release profile
 
-The release build is configured in `Cargo.toml` for maximum optimization and a small binary:
+The release build is configured in the root `Cargo.toml` (workspace-level, so it applies to every member) for maximum optimization and a small binary:
 
 ```toml
 [profile.release]
@@ -28,7 +28,7 @@ strip = true
 Produce a release binary with:
 
 ```bash
-cargo build --release
+cargo build --release -p riff-gui
 ```
 
 The resulting binary is written to `target/release/` (for example `target/release/riff` on Linux/macOS or `target/release/riff.exe` on Windows).
@@ -36,7 +36,7 @@ The resulting binary is written to `target/release/` (for example `target/releas
 ### Binary characteristics
 
 - **Single standalone binary.** riff links its dependencies statically into one executable; there is no separate runtime or library to install.
-- **Single crate.** The whole application is one Cargo package, so there is no workspace coordination or multi-artifact assembly.
+- **One workspace, one shipped artifact.** The workspace splits the backend into capability crates, but only `riff-gui` produces a binary (the `riff` package target); the other members are libraries, so there is no multi-artifact assembly.
 - **No feature flags.** Every build includes the same set of capabilities; the only conditional compilation is per-target-OS for system integration (tray icon and native file dialogs on non-Linux platforms).
 - **Stripped.** Debug symbols are removed, reducing binary size.
 

@@ -2,48 +2,52 @@
 
 This document describes how riff is tested today and where the test suite should go next. It is split into two clearly labeled parts: **Current State**, which documents the verified reality of the repository, and **Recommendations**, which are suggestions for improvement that are not yet implemented. For the commands used to run tests, see [development-setup.md](./development-setup.md).
 
-riff is tested by a single integration-test crate rooted at `tests/mod.rs` (declared in `Cargo.toml` as one `[[test]]` target named `integration` with `autotests = false`), organized into one suite per architectural layer plus an integration suite, running green under `cargo test`. The production module tree lives in the library crate (`src/lib.rs`), which the test crate references through `riff::` re-exports. The `tempfile` crate is declared as a dev-dependency for tests that need a scratch directory.
+riff is a Cargo workspace, and its tests live at two levels, mirroring the crate split (ADR 0009):
+
+- **Per-crate suites**, placed with the code they cover. Today that is `riff-infra`, which hosts its own integration-test crate (`riff-infra/tests/mod.rs`, `autotests = false`, one `[[test]]` target named `integration`) for the real-SQLite store tests and the adapter tests. The pure crates (`riff-persistence`, `riff-library`, `riff-playback`) and `riff-backend`/`riff-gui` currently have no in-crate suites; their behavior is exercised through the workspace-root suite at the seams.
+- **A single workspace-root integration crate** (`tests/`, package `riff-tests`, `autotests = false`, one `[[test]]` target named `integration`) that holds the cross-crate integration, UI, and golden-image suites and runs green under `cargo test`. It depends on every workspace crate by name (per-crate imports) so each suite reaches the type it needs directly, and it provides the shared `test_utils`/`mocks`/`integration_helpers` modules. The `tempfile` crate is a dev-dependency for tests that need a scratch directory.
 
 ## Current State
 
-`tests/mod.rs` declares the six suites and provides shared helpers. The suite currently contains 301 `#[test]` functions: 36 in `domain_tests.rs`, 70 in `app_tests.rs`, 68 in `infra_tests.rs`, 115 in `ui_tests.rs`, 8 in `golden_tests.rs`, and 4 in `integration_tests.rs`.
+The workspace currently contains 357 `#[test]` functions: 288 in the workspace-root suite (41 in `domain_tests.rs`, 93 in `app_tests.rs`, 8 in `infra_tests.rs`, 127 in `ui_tests.rs`, 8 in `golden_tests.rs`, 11 in `integration_tests.rs`) and 69 in the `riff-infra` suite (54 in `store_tests.rs`, 15 in `adapter_tests.rs`).
 
 ### Build status
 
-The suite compiles and runs green: `cargo test --all-targets` builds the library, the binary, and the `integration` test crate and executes all 301 tests (0 failed, 0 ignored). `cargo fmt --check` and `cargo clippy --all-targets` (pedantic, `-D warnings` in CI) are part of the same quality gate.
+The suites compile and run green: `cargo test --all-targets` builds every workspace crate and both integration-test targets and executes all 357 tests (0 failed, 0 ignored). `cargo fmt --check` and `cargo clippy --all-targets` (pedantic, `-D warnings` in CI) are part of the same quality gate, run on Linux and Windows runners by CI (`.github/workflows/ci.yml`).
 
-This was not always the case: the original test files referenced application internals through `crate::` paths while riff was a binary-only crate, so nothing under `tests/` could compile. The resolution was path (a) from the old P0 recommendations: the module tree moved into a thin library crate (`src/lib.rs` re-exporting `domain`, `app`, `infra`, `ui`), the binary became a wrapper over it, and the tests were wired into a single integration crate with shared `test_utils`/`mocks`/`integration_helpers` modules. The CI workflow (`.github/workflows/ci.yml`) now runs the full gate on Linux and Windows runners.
+### The `riff-infra` suite (adapters live with their tests)
 
-### Test organization
+`riff-infra/tests/mod.rs` mirrors the workspace-root crate's layout (single crate root, module suites, a prelude of re-exports) and hosts the tests that moved with the adapter crate during the backend crate split:
+
+- `store_tests.rs` (54 tests) — the Application Store at the port seam over real SQLite in tempfile databases: migrations (apply/reopen idempotency, checksum tampering rejected), corruption recovery (quick_check probe, rename-aside, fresh DB), settings/playlists round-trips across restarts, playlist entries with SQL LEFT JOIN validity flags, canonical `all_track_ids` ordering, scan batches committing incrementally, tag refresh preserving history, Clear Library (curation preserved, atomic rollback), and browsing/folder/smart-playlist SQL parity against independent Rust reference oracles.
+- `adapter_tests.rs` (15 tests) — real lofty tag round-trips on scratch files, construction smoke tests for the decoder/output/scanner/watcher adapters, and ReplayGain tag parsing.
+
+### The workspace-root suite (cross-crate behavior lives in one place)
 
 `tests/mod.rs` is the single crate root. Beyond declaring the six suite modules, it provides three helper modules:
 
 - `test_utils` — factory functions `create_test_track`, `create_test_track_with_metadata`, and `float_close` (approximate `f32` comparison for audio-parameter assertions).
-- `mocks` — scripted implementations of the port traits from `src/app/traits.rs` (`MockAudioDecoder`, `MockAudioOutput`, `MockMetadataReader`, `MockCoverLoader`) so app-layer behavior is tested at the seams without real audio hardware or media files.
-- `integration_helpers` — `create_test_app_state` (an `Arc<Mutex<AppState>>`).
+- `mocks` — scripted implementations of the port traits (`MockAudioDecoder`, `MockAudioOutput`, `MockMetadataReader`, `MockCoverLoader`, `MockMetadataWriter`, `MockTransport`, and store fakes) so app-layer behavior is tested at the seams without real audio hardware or media files. Mocks implement the ports through the `riff-backend` re-export surface.
+- `integration_helpers` — paired `PlaybackSession`/`LibrarySession` test fixtures.
 
-Suite modules bring these into scope with `use super::*` and refer to production code through the crate-root re-exports.
-
-### What each suite contains
-
-The table summarizes the verified contents of each suite.
+Suite modules bring these into scope with `use super::*` and refer to production code through per-crate imports (`riff_backend::`, `riff_infra::`, `riff_library::`, `riff_gui::`).
 
 | Suite | Test count | What it actually covers |
 |---|---|---|
-| `domain_tests.rs` | 36 | `PlaybackQueue` edge cases (empty queue, single track, ordered advance to the end, wrap-around with repeat-all incl. single-track wrap, repeat-one stopping, previous at the boundaries, shuffle multiset preservation, clear, upcoming), repeat-mode cycling, `TrackId` derivation/equality/hashing, `PlaybackState` distinction, playlist id slugging, smart-playlist kinds, metadata display/search helpers. |
-| `app_tests.rs` | 70 | Scan-side Track construction (`build_tracks` with a mock reader: metadata/format round-trip, skipping unreadable files, date-added stamping), playlist entry validity over store-resolved entries (real file, scanned-but-missing, dangling), tag-edit apply semantics + a mock `MetadataWriter`, `ReplayGain` factor math, gapless helpers, mute/effective volume, mutex recovery, and all five Session Projections (bounded windows, browsing/folder/smart-playlist caches, and the playback-side projection: queue-change and generation invalidation, skip-unresolved ids, stale-cache-on-error, selected-track caching). |
-| `infra_tests.rs` | 68 | The Application Store at the port seam over real SQLite in tempfile databases: migrations (apply/reopen idempotently, checksum tampering rejected), corruption recovery (quick_check probe, rename-aside with nanosecond suffixes, fresh DB), settings/playlists round-trips across restarts, playlist entries with SQL LEFT JOIN validity flags (dangling refs stay listed, flip invalid on removal), canonical `all_track_ids` ordering, scan batches committing incrementally, tag refresh preserving history, Clear Library (curation preserved, atomic rollback on a simulated mid-clear failure), browsing/folder/smart-playlist SQL parity against independent Rust reference oracles, plus port-seam behavior through the shared mocks and construction smoke tests for the real adapters. |
-| `ui_tests.rs` | 115 | First-frame restore through the real ports (settings, playlists; legacy JSON ignored — the library collection needs no hydration and is read live from the store), settings round-trips across simulated restarts over real SQLite, playlist mutations committing through the store and patching their projection, high-contrast visuals, seek clamping, duration formatting, tilde expansion, directory autocomplete, Now Playing actions, and the cover-texture LRU bound. |
+| `domain_tests.rs` | 41 | `PlaybackQueue` edge cases (empty queue, single track, ordered advance to the end, wrap-around with repeat-all incl. single-track wrap, repeat-one stopping, previous at the boundaries, shuffle multiset preservation, clear, upcoming), repeat-mode cycling, `TrackId` derivation/equality/hashing, session defaults, playlist id slugging, smart-playlist kinds, metadata display/search helpers. |
+| `app_tests.rs` | 93 | The two session structs and `replaygain_factor` math, gapless eligibility/handoff and frame/duration math, scan-side Track construction (`build_tracks` with a mock reader), the Library Scan Service end to end over real stores (batching, cancellation keeping committed batches, idempotent rescans, failure surfacing), the Tag Edit service outcomes (write/commit failures, play-history preservation), the Cover service (resolution, negative caching, duplicate coalescing, LRU eviction), the Session Views facade over the store ports (bounded windows, browsing/folder/smart-playlist and playback-side projections, generation invalidation, stale-cache-on-error), the playlist projection and reorder rules, and the Playback Coordinator (history committed before advancing, repeat-one replay, stop at the end, typed error notices). |
+| `infra_tests.rs` | 8 | Port-seam boundary behavior driven through the shared mocks: decoder open/decode/seek/EOF scripting, output write/volume/buffer semantics, metadata-reader failure injection, and cover-loader result handling. (The real-SQLite and real-adapter tests live in the `riff-infra` suite.) |
+| `ui_tests.rs` | 127 | First-frame restore through the real ports (settings, playlists; legacy JSON ignored — the library collection needs no hydration and is read live from the store), settings round-trips across simulated restarts over real SQLite, playlist mutations committing through the store and patching their projection, high-contrast visuals, seek clamping, duration formatting, tilde expansion, directory autocomplete, Now Playing actions, and the cover-texture LRU bound. |
 | `golden_tests.rs` | 8 | Golden-image snapshot tests: render real egui frames headlessly through `egui_kittest` and pin them pixel-for-pixel against committed baselines under `tests/snapshots/` (dark-palette Play card, library hero, track list, sidebar, shell chrome, Now Playing, settings, playerbar). Authoring, re-baselining, and diff-review workflow in [golden-image-testing.md](./golden-image-testing.md). |
-| `integration_tests.rs` | 4 | `AppState` mutex safety across threads; playback command channel send/receive; a simulated library scan updating state; and a simulated audio buffer write/read. |
+| `integration_tests.rs` | 11 | `MutexExt` poison recovery; playback command channel round-trip; a real scan driven through the `ScanService` seam end to end; `WatcherManager` debounce/rescan behavior across burst, deferred, and unwatchable-path scenarios; an audio-buffer write/read simulation; and the Composition Root end-to-end test: `AppRuntime::spawn` wires the real `riff-infra` adapters into the slice-defined ports and the worker threads run. |
 
 A few observations about the current coverage, stated neutrally:
 
-- The `infra_tests.rs` suite exercises the real infrastructure types at the store port seam over real SQLite; decoding real audio, reading real tags, and loading real images would need sample media files, which are not checked in. Behavior at the media ports is covered through the mocks instead.
-- Several integration tests are simulations of the real flows (scan, audio buffer) rather than end-to-end runs through the actual threads and channels; persistence flows, by contrast, run against real SQLite.
-- The `domain_tests.rs` suite includes an `AppState` test even though `AppState` lives in the application layer, so the suite boundaries are pragmatic rather than strict.
+- The real-infrastructure tests live in `riff-infra/tests/` because that is where the adapters live; the root suite reaches real adapters only through the Composition Root test and the UI restore tests.
+- The root `infra_tests.rs` suite is mock-driven by design: it pins the port contracts the app layer codes against, while the `riff-infra` suite pins what the real adapters do.
+- Decoding real audio end to end would need sample media files, which are not checked in; behavior at the media ports is covered through the mocks and the lofty round-trip tests.
 
-Commands: run everything with `cargo test`, a single suite with `cargo test domain_tests`, and see output with `cargo test -- --nocapture`.
+Commands: run everything with `cargo test --all-targets`; run one crate's suite with `cargo test -p riff-infra` or `cargo test -p riff-tests`; run one module with `cargo test domain_tests`; see output with `cargo test -- --nocapture`.
 
 ## Recommendations
 
@@ -51,14 +55,14 @@ The following are suggestions for further strengthening the test suite and the s
 
 ### P1 — Medium priority
 
-- **Add real integration tests for scan-to-play and cover resolution.** Today these flows are simulated. Where feasible, check in tiny sample audio files (or generate them in a test fixture) so that scanning, metadata extraction, and cover resolution can be exercised end to end.
-- **Use the port traits to mock infrastructure in app-layer tests.** The `AudioDecoder`, `AudioOutput`, `MetadataReader`, and `CoverLoader` traits exist precisely so the application layer can be tested without `symphonia` or `cpal`. Mock implementations now exist in `tests/mod.rs`; extend their use to drive more app flows through them.
-- **Add property tests for queue shuffle.** Shuffle uses `rand`; property-based tests (for example with `proptest`) can assert invariants such as "shuffle preserves the multiset of tracks" and "shuffle does not drop or duplicate entries" across many random seeds. The multiset invariant is already covered by a deterministic test.
-- **Measure coverage.** Introduce `cargo-tarpaulin` or `cargo-llvm-cov` to quantify coverage and highlight untested paths, and report it in CI.
+- **Give the pure crates their own suites as they earn them.** `riff-persistence`, `riff-library`, and `riff-playback` currently carry no in-crate tests; their logic is covered from the root suite through the re-export surface. As slice logic grows, move (or add) the pure logic tests into each slice's own suite so they run without compiling the adapter stack — that compile isolation is one of the split's payoffs. When they do, keep the cross-crate integration and golden suites at the workspace root.
+- **Add real integration tests for cover resolution over real image files.** Scan-to-play has a real end-to-end test; cover resolution against real JPEG/PNG fixtures on disk is still mock-based at the root.
+- **Add property tests for queue shuffle.** Shuffle uses `fastrand`; property-based tests (for example with `proptest`) can assert invariants such as "shuffle preserves the multiset of tracks" and "shuffle does not drop or duplicate entries" across many random seeds. The multiset invariant is already covered by a deterministic test.
+- **Measure coverage.** Introduce `cargo-llvm-cov` to quantify coverage and highlight untested paths, and report it in CI.
 
 ### Suggested next steps, in order
 
-1. Add sample-media fixtures and real scan/cover/metadata integration tests.
-2. Extend the port mocks to cover more app-layer flows (e.g. queue advancement driven by the update-processor logic).
+1. Seed per-crate suites for the slices as their logic grows, keeping integration and goldens at the root.
+2. Add sample-media fixtures for real cover/metadata integration tests.
 3. Add property-based shuffle tests.
 4. Wire in coverage reporting.

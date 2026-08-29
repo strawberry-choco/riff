@@ -1,20 +1,34 @@
-# Workspace: riff music player split into backend + frontend crates.
+# Workspace: riff music player split into backend capability crates + frontend.
 #
 # Pure virtual workspace: this directory owns no source files, no library,
 # no binary, and no integration tests. The actual code lives in:
-#   * `riff-backend` — headless backend (domain, app, infra, store, workers)
-#   * `riff-gui`     — frontend (egui UI, tray, native dialogs) + the `riff`
-#                       binary entry point (composition root in
-#                       `riff-gui/src/main.rs`)
-#   * `tests`        — the integration-test crate (package `riff-tests`)
+#   * `riff-persistence` — stored entities + Application Store contract (std-only)
+#   * `riff-library`     — collection capability slice (pure Rust)
+#   * `riff-playback`    — playback capability slice (pure Rust)
+#   * `riff-infra`       — every port implementation + every native dependency
+#   * `riff-backend`     — application API: facade, services, Composition Root
+#   * `riff-gui`         — frontend (egui UI, tray, native dialogs) + the `riff`
+#                          binary entry point (a thin composition over
+#                          `riff_backend::composition::AppRuntime::spawn`)
+#   * `tests`            — the workspace-root integration-test crate (package
+#                          `riff-tests`); per-crate adapter tests live in
+#                          `riff-infra/tests/`
 #
 # Build / run from here:
-#   cargo run              -p riff-gui
+#   cargo run -p riff-gui
 #   cargo test --all-targets
-#   cargo build --release  -p riff-gui
+#   cargo build --release -p riff-gui
 
 [workspace]
-members = ["riff-persistence", "riff-playback", "riff-library", "riff-backend", "riff-gui", "tests"]
+members = [
+    "riff-persistence",
+    "riff-playback",
+    "riff-library",
+    "riff-infra",
+    "riff-backend",
+    "riff-gui",
+    "tests",
+]
 resolver = "2"
 
 # Workspace-level profiles and lints apply to every member.

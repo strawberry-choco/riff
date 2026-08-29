@@ -25,7 +25,7 @@ mod tests {
         let (changes_tx, _changes_rx) =
             crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
         Box::new(
-            riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
                 .expect("opening a fresh store must work"),
         )
     }
@@ -37,7 +37,7 @@ mod tests {
         let (changes_tx, _changes_rx) =
             crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
         Box::new(
-            riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
                 .expect("opening a fresh store must work"),
         )
     }
@@ -55,7 +55,7 @@ mod tests {
         let db_path = dir.path().join("riff.sqlite3");
         let (changes_tx, _changes_rx) =
             crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
-        let store = riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+        let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
             .expect("opening a fresh store must work");
         let views = riff_backend::app::views::SessionViews::new(
             Box::new(store.clone()),
@@ -72,7 +72,7 @@ mod tests {
         let db_path = dir.path().join("riff.sqlite3");
         let (changes_tx, _changes_rx) =
             crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
-        let store = riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+        let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
             .expect("opening a fresh store must work");
         riff_backend::app::views::SessionViews::new(
             Box::new(store.clone()),
@@ -672,8 +672,7 @@ mod tests {
             let (changes_tx, _changes_rx) =
                 crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
             let mut store =
-                riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
-                    .unwrap();
+                riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
             store
                 .apply_scan_batch(&[crate::test_utils::create_test_track_with_metadata(
                     "f:\\cl\\a.mp3",
@@ -3216,7 +3215,7 @@ mod tests {
     /// LAST frame rendered them.
     struct ReorderRenderState {
         views: riff_backend::app::views::SessionViews,
-        store: riff_backend::infra::store::SqliteStore,
+        store: riff_infra::store::SqliteStore,
         pid: PlaylistId,
         rendered: Vec<String>,
         cache: icons::IconCache,
@@ -3300,9 +3299,8 @@ mod tests {
         let db_path = dir.path().join("riff.sqlite3");
         let (changes_tx, _changes_rx) =
             crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
-        let mut store =
-            riff_backend::infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
-                .expect("opening a fresh store must work");
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("opening a fresh store must work");
 
         // Three real audio files indexed into the Library, so every entry
         // resolves valid and renders as a reorderable row.
@@ -4009,7 +4007,7 @@ mod background_service_ui_tests {
             .unwrap();
         let image = CoverImage {
             data: png_bytes.into_inner(),
-            format: image::ImageFormat::Png,
+            format: riff_library::app::traits::CoverImageFormat::Png,
         };
         let covers = CannedCovers(vec![
             (

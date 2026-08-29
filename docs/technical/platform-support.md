@@ -1,6 +1,6 @@
 # Platform Support
 
-riff targets the three major desktop platforms — macOS, Windows, and Linux — from a single codebase. Most of the application is platform-independent: the domain, application, and infrastructure layers behave identically everywhere, and audio output is abstracted by cpal. The platform differences are confined to a few UI-level integrations — the system tray and the folder picker — which are conditionally compiled, and to the OS-specific location of the Application Store. This document captures the feature matrix, the conditional-compilation strategy, and the platform-specific behaviors worth knowing.
+riff targets the three major desktop platforms — macOS, Windows, and Linux — from a single codebase. Most of the application is platform-independent: the persistence contract, the capability slices, and the adapter/API crates behave identically everywhere, and audio output is abstracted by cpal in `riff-infra`. The platform differences are confined to a few frontend integrations — the system tray and the folder picker — which are conditionally compiled, and to the OS-specific location of the Application Store. This document captures the feature matrix, the conditional-compilation strategy, and the platform-specific behaviors worth knowing.
 
 For the crates behind each feature, see [./dependencies.md](./dependencies.md). For where state is persisted, see [./persistence.md](./persistence.md).
 
@@ -16,7 +16,7 @@ For the crates behind each feature, see [./dependencies.md](./dependencies.md). 
 | Application Store path | `~/Library/Application Support/com.riff.riff/riff.sqlite3` | `%LOCALAPPDATA%\riff\riff\riff.sqlite3` | `~/.local/share/riff/riff.sqlite3` |
 | Window / UI | egui via eframe | egui via eframe | egui via eframe |
 
-Playback, library scanning, metadata reading, cover art, search, the queue, and persistence all work the same on every platform. Only the tray and the folder-picker affordance differ, plus the frameless window's platform-specific caveats: the custom titlebar ships everywhere from one code path (`src/ui/chrome.rs`), validated end-to-end on Windows; macOS and Linux carry documented risk with a per-platform native-decorations fallback — see the [spike findings](../engineering/spikes/frameless-window-chrome-spike.md).
+Playback, library scanning, metadata reading, cover art, search, the queue, and persistence all work the same on every platform. Only the tray and the folder-picker affordance differ, plus the frameless window's platform-specific caveats: the custom titlebar ships everywhere from one code path (`riff-gui/src/ui/chrome.rs`), validated end-to-end on Windows; macOS and Linux carry documented risk with a per-platform native-decorations fallback — see the [spike findings](../engineering/spikes/frameless-window-chrome-spike.md).
 
 ## Conditional Compilation
 
@@ -24,8 +24,8 @@ Platform-specific code is gated with `#[cfg(target_os = "linux")]` and `#[cfg(no
 
 The split shows up in two places:
 
-- **`src/main.rs`** constructs the tray icon and passes it into `RiffApp::new` only on non-Linux targets. The `RiffApp::new` signature itself differs: the non-Linux build takes an extra `tray_icon` argument, while the Linux build omits it.
-- **`src/ui/settings.rs`** uses the `rfd` native folder picker on non-Linux targets and falls back to an inline egui text input on Linux, where the user types a path and confirms it.
+- **`riff-gui/src/main.rs`** constructs the tray icon and passes it into `RiffApp::new` only on non-Linux targets. The `RiffApp::new` signature itself differs: the non-Linux build takes an extra `tray_icon` argument, while the Linux build omits it.
+- **`riff-gui/src/ui/settings.rs`** uses the `rfd` native folder picker on non-Linux targets and falls back to an inline egui text input on Linux, where the user types a path and confirms it.
 
 The `RiffApp` struct carries the tray handle behind the same `cfg`, so the field simply does not exist in a Linux build.
 
@@ -35,7 +35,7 @@ On macOS and Windows, adding a library path opens the native OS folder dialog th
 
 ### The tray menu
 
-Where the tray is present (macOS and Windows), it is built with `tray-icon` and `muda` and offers quick playback controls — play/pause, next, previous, show/hide window, and quit. Tray menu events are dispatched on a dedicated thread (`src/ui/tray.rs`) that translates them into `PlaybackCommand`s on the shared command channel, so the tray drives exactly the same playback path as the main window. A shared `AtomicBool` quit flag coordinates shutdown between the tray and the egui event loop.
+Where the tray is present (macOS and Windows), it is built with `tray-icon` and `muda` and offers quick playback controls — play/pause, next, previous, show/hide window, and quit. Tray menu events are dispatched on a dedicated thread (`riff-gui/src/ui/tray.rs`) that translates them into `PlaybackCommand`s on the shared command channel (through the tray's `FacadeTransport`), so the tray drives exactly the same playback path as the main window. A shared `AtomicBool` quit flag coordinates shutdown between the tray and the egui event loop.
 
 ## Why Linux Has No Tray
 
@@ -58,8 +58,8 @@ Folder watching uses the `notify` crate, which auto-selects the platform mechani
 The build commands are identical on every platform:
 
 ```bash
-cargo build --release    # optimized binary (LTO, codegen-units=1, stripped)
-cargo run                # dev build (opt-level=1)
+cargo build --release -p riff-gui    # optimized binary (LTO, codegen-units=1, stripped)
+cargo run -p riff-gui                # dev build (opt-level=1)
 ```
 
 The practical differences are in the toolchain prerequisites:
@@ -87,4 +87,4 @@ For platform-specific diagnostics - missing GTK libraries on Linux, audio device
 
 - [./dependencies.md](./dependencies.md) — the platform-conditional dependency declarations.
 - [./persistence.md](./persistence.md) - platform-specific store path resolution.
-- [./architecture.md](./architecture.md) — how platform-specific code is kept in the presentation layer.
+- [./architecture.md](./architecture.md) — how platform-specific code is kept in the frontend crate.

@@ -68,8 +68,8 @@ mod tests {
         use crate::mocks::MockMetadataReader;
         use riff_backend::app::scan_service::{ScanOutcome, ScanService, Scans};
         use riff_backend::app::store::LibraryQueryStore;
-        use riff_backend::infra::AudioFileScanner;
-        use riff_backend::infra::store::SqliteStore;
+        use riff_infra::filesystem::AudioFileScanner;
+        use riff_infra::store::SqliteStore;
         use std::sync::atomic::AtomicBool;
         use std::time::{Duration, Instant};
 
@@ -237,7 +237,7 @@ mod tests {
         std::path::PathBuf,
     ) {
         use riff_backend::app::watcher_manager::WatcherManager;
-        use riff_backend::infra::FilesystemWatcher;
+        use riff_infra::filesystem::FilesystemWatcher;
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -463,5 +463,140 @@ mod tests {
             assert!(crate::test_utils::float_close(buf[0], 0.1));
             assert!(crate::test_utils::float_close(buf[3], 0.4));
         }
+    }
+}
+
+/// End-to-end proof for the Composition Root seam (backend-crate-split
+/// issue 08): one constructor call wires real adapters into real ports,
+/// spawns the worker threads, and the frontend-facing handles observe the
+/// results through their existing public seams — never through internals.
+#[cfg(test)]
+mod composition_root_tests {
+    use crate::app::MutexExt;
+    use crate::domain::TrackId;
+    use riff_backend::app::facade::{BackendEvent, NoticeSeverity, NoticeSource};
+    use riff_backend::app::scan_service::{ScanOutcome, Scans};
+    use riff_backend::composition::AppRuntime;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    /// Write a tiny but fully valid PCM WAV file (0.1 s of mono 8 kHz audio)
+    /// so the real scanner and metadata-reader adapters have a real audio
+    /// file to work on.
+    fn write_minimal_wav(path: &Path) {
+        const SAMPLES: u32 = 800; // 0.1 s at 8 kHz
+        let data_size = SAMPLES * 2; // 16-bit mono
+        let mut bytes = Vec::with_capacity(44 + data_size as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // mono
+        bytes.extend_from_slice(&8000u32.to_le_bytes()); // sample rate
+        bytes.extend_from_slice(&16000u32.to_le_bytes()); // byte rate
+        bytes.extend_from_slice(&2u16.to_le_bytes()); // block align
+        bytes.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_size.to_le_bytes());
+        for i in 0..SAMPLES {
+            let sample = ((i % 100) as i16).wrapping_mul(64);
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(path, bytes).expect("temp WAV fixture must be writable");
+    }
+
+    /// Poll `probe` until it yields a value, bounded so a wedged worker
+    /// thread fails the test instead of hanging it.
+    fn poll_until<T>(budget: Duration, what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
+        let start = Instant::now();
+        loop {
+            if let Some(value) = probe() {
+                return value;
+            }
+            assert!(
+                start.elapsed() < budget,
+                "never observed {what} within budget"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn test_composition_root_spawns_real_adapters_and_worker_threads_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let music = dir.path().join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        write_minimal_wav(&music.join("song_a.wav"));
+        write_minimal_wav(&music.join("song_b.wav"));
+
+        // The seam under test: one spawn over a scratch Application Store.
+        let mut rt = AppRuntime::spawn(&db_path).expect("runtime must spawn over a fresh store");
+
+        // The audio pipeline runs: a Play command for a missing track travels
+        // the UI transport into the audio-engine thread, comes back as a
+        // playback error, and lands on the facade as a typed notice relayed
+        // by the coordinator thread.
+        rt.ui_transport
+            .play(TrackId("missing-track.mp3".to_string()));
+        let notice = poll_until(
+            Duration::from_secs(10),
+            "typed playback error notice",
+            || {
+                rt.facade
+                    .lock_or_recover()
+                    .events()
+                    .into_iter()
+                    .find_map(|ev| match ev {
+                        BackendEvent::TypedNotice(payload)
+                            if payload.source == NoticeSource::Playback =>
+                        {
+                            Some(payload)
+                        }
+                        _ => None,
+                    })
+            },
+        );
+        assert_eq!(notice.severity, NoticeSeverity::Error);
+
+        // The scan pipeline runs: real walker, real metadata reader, and
+        // real durable SQLite commits on the scan-worker thread, driven
+        // through the same `Scans` seam the UI holds.
+        rt.scans.request(music.clone());
+        let total = poll_until(Duration::from_secs(10), "scan complete", || {
+            rt.scans
+                .poll()
+                .into_iter()
+                .find_map(|outcome| match outcome {
+                    ScanOutcome::Complete { path, total_files } if path == music => {
+                        Some(total_files)
+                    }
+                    _ => None,
+                })
+        });
+        assert_eq!(total, 2, "every fixture file discovered");
+
+        // The read seam observes the committed scan through the store's
+        // session generations, and the facade relays the library change the
+        // store announced on its change channel.
+        poll_until(
+            Duration::from_secs(10),
+            "committed tracks in SessionViews",
+            || (rt.session_views.track_list("", 0).total == 2).then_some(()),
+        );
+        poll_until(
+            Duration::from_secs(10),
+            "LibraryChanged on the facade",
+            || {
+                rt.facade
+                    .lock_or_recover()
+                    .events()
+                    .into_iter()
+                    .any(|ev| matches!(ev, BackendEvent::LibraryChanged { .. }))
+                    .then_some(())
+            },
+        );
     }
 }

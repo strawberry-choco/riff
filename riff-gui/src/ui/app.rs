@@ -2517,6 +2517,7 @@ pub fn submit_tag_edit_fields(
                     genre: Some(tag_edit.genre.clone()),
                     year,
                     track_number,
+                    ..Default::default()
                 },
             };
             *in_flight = Some((request.track_id.clone(), request.path.clone()));
@@ -2543,9 +2544,12 @@ pub fn cache_polled_covers<S: std::hash::BuildHasher>(
         let Some(cover_image) = cover_image else {
             continue; // artless: the service negative-caches it
         };
-        let Ok(decoded) =
-            image::load_from_memory_with_format(&cover_image.data, cover_image.format)
-                .map_err(|e| tracing::warn!("Failed to decode cover for {}: {e}", track_id.0))
+        let image_format = match cover_image.format {
+            riff_backend::app::traits::CoverImageFormat::Jpeg => image::ImageFormat::Jpeg,
+            riff_backend::app::traits::CoverImageFormat::Png => image::ImageFormat::Png,
+        };
+        let Ok(decoded) = image::load_from_memory_with_format(&cover_image.data, image_format)
+            .map_err(|e| tracing::warn!("Failed to decode cover for {}: {e}", track_id.0))
         else {
             continue;
         };

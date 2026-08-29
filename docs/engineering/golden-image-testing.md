@@ -16,7 +16,7 @@ later visual-parity ticket builds on it.
   [ADR 0004](../adr/0004-dual-theme-tokens.md).
 - **First component**: `play_card_dark.png` — a primary "Play" button on a
   surface card, styled entirely from the token constants in
-  `src/ui/theme.rs`.
+  `riff-gui/src/ui/theme.rs`.
 
 ## Running
 
@@ -30,7 +30,7 @@ A mismatch fails the test and prints the absolute path of the diff image.
 ## Authoring a new golden
 
 1. Draw the component in a function taking `&mut egui::Ui`, styling every
-   color from `riff::ui::theme` tokens (never hardcoded values).
+   color from `riff_gui::ui::theme` tokens (never hardcoded values).
 2. Render it through the shared helper (`snapshot_dark_play_card` shows the
    pattern): fixed harness size, fixed `pixels_per_point(1.0)`, dark palette
    installed, then `harness.snapshot("<name>")`.

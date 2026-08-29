@@ -79,11 +79,12 @@ fn generate_fixture(root: &std::path::Path) -> std::io::Result<()> {
 /// walker closure over the shared cancel flag, real Lofty reader, real
 /// `SQLite` store ports, serial worker thread. Returns the front end.
 fn wire_pipeline(
-    queries: riff_backend::infra::store::SqliteStore,
-    mutations: riff_backend::infra::store::SqliteStore,
+    queries: riff_infra::store::SqliteStore,
+    mutations: riff_infra::store::SqliteStore,
     cancel_flag: Arc<AtomicBool>,
 ) -> riff_library::app::scan_service::ScanService {
-    use riff_backend::infra::{AudioFileScanner, LoftyMetadataReader};
+    use riff_infra::filesystem::AudioFileScanner;
+    use riff_infra::media::LoftyMetadataReader;
 
     let scanner = AudioFileScanner::new(cancel_flag.clone());
     let (scans, worker) = riff_library::app::scan_service::ScanService::new(
@@ -130,7 +131,7 @@ fn timed_scan(
 
 fn main() {
     use riff_backend::app::store::LibraryQueryStore;
-    use riff_backend::infra::store::SqliteStore;
+    use riff_infra::store::SqliteStore;
 
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("bench.sqlite3");
@@ -171,7 +172,7 @@ fn main() {
 
     // 3. Walk alone (cache-warm): the ceiling on what a parallel walker
     //    could save from the end-to-end time.
-    let scanner = riff_backend::infra::AudioFileScanner::new(cancel_flag);
+    let scanner = riff_infra::filesystem::AudioFileScanner::new(cancel_flag);
     let walk_start = Instant::now();
     let walked = scanner.scan(&root);
     println!(

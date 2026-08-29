@@ -1,0 +1,71 @@
+# riff-infra — the adapter crate: every port implementation and every
+# native/external dependency.
+#
+# Implements the ports defined in the lower crates: the SQLite Application
+# Store (riff-persistence's store ports), the symphonia decoder and cpal
+# output (riff-playback's audio ports), and the lofty metadata reader/writer,
+# image cover loader, walkdir scanner, and notify watcher (riff-library's
+# ports). Internal seams (store / audio / media / filesystem) are preserved
+# so the crate can be split further later without redesign.
+#
+# Membership rule: an item belongs here iff it implements a port defined in
+# another crate or wraps a native/external dependency — nothing else.
+
+[package]
+name = "riff-infra"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/mod.rs"
+
+[dependencies]
+riff-persistence = { path = "../riff-persistence" }
+riff-library = { path = "../riff-library" }
+riff-playback = { path = "../riff-playback" }
+
+# Audio decoding (pure Rust)
+symphonia = { version = "0.6", features = ["all"] }
+symphonia-adapter-libopus = "0.3"
+
+# Audio output (cross-platform)
+cpal = "0.18"
+
+# Lock-free SPSC ring buffer between the decoder thread and the cpal callback
+ringbuf = "0.5"
+
+# Metadata reading/writing
+lofty = "0.25"
+
+# Image format detection for cover art
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+# File system scanning
+walkdir = "2"
+
+# SQLite Application Store
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+# Logging
+tracing = "0.1"
+
+# Config directories (Application Store data location)
+directories = "6"
+
+# Threading / sync
+crossbeam-channel = "0.5"
+
+# Filesystem watching
+notify = "8"
+notify-debouncer-full = "0.7"
+
+[dev-dependencies]
+tempfile = "3.8"
+crossbeam-channel = "0.5"
+
+[lints]
+workspace = true

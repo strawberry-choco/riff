@@ -1,6 +1,7 @@
-use crate::app::traits::FilesystemWatch;
 use crossbeam_channel::Sender;
 use notify_debouncer_full::{DebouncedEvent, Debouncer, RecommendedCache, new_debouncer};
+use riff_library::app::errors::LibraryError;
+use riff_library::infra::ports::FilesystemWatch;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -64,13 +65,15 @@ impl FilesystemWatcher {
 }
 
 impl FilesystemWatch for FilesystemWatcher {
-    fn watch(&mut self, path: &Path) -> Result<(), String> {
+    fn watch(&mut self, path: &Path) -> Result<(), LibraryError> {
         self.inner
             .watch(path, notify::RecursiveMode::Recursive)
-            .map_err(|e| e.to_string())
+            .map_err(|e| LibraryError::Io(e.to_string()))
     }
 
-    fn unwatch(&mut self, path: &Path) -> Result<(), String> {
-        self.inner.unwatch(path).map_err(|e| e.to_string())
+    fn unwatch(&mut self, path: &Path) -> Result<(), LibraryError> {
+        self.inner
+            .unwatch(path)
+            .map_err(|e| LibraryError::Io(e.to_string()))
     }
 }

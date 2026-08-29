@@ -517,7 +517,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(writer.write_metadata(&path, &edit).is_ok());
+        assert!(writer.write_tags(&path, &edit).is_ok());
 
         let recorded = writer.recorded();
         assert_eq!(recorded.len(), 1);
@@ -533,12 +533,12 @@ mod tests {
     fn test_metadata_writer_failure_returns_metadata_write_error() {
         let writer = MockMetadataWriter::failing();
 
-        let result = writer.write_metadata(&PathBuf::from("locked.mp3"), &TagEdit::default());
+        let result = writer.write_tags(&PathBuf::from("locked.mp3"), &TagEdit::default());
 
         let err = result.expect_err("failing writer must return an error");
         assert!(matches!(
             err,
-            riff_backend::app::errors::LibraryError::MetadataWrite(_)
+            riff_library::app::errors::LibraryError::MetadataWrite(_)
         ));
         assert!(err.to_string().contains("Failed to write tags"));
         assert!(writer.recorded().is_empty());
@@ -1334,7 +1334,7 @@ mod scan_service_tests {
     use riff_backend::app::scan_service::{ScanOutcome, ScanService, Scans};
     use riff_backend::app::store::{LibraryMutationStore, LibraryQueryStore};
     use riff_backend::domain::CoverSource;
-    use riff_backend::infra::store::SqliteStore;
+    use riff_infra::store::SqliteStore;
     use riff_library::app::errors::LibraryError;
     use riff_library::app::traits::{AudioFormatInfo, MetadataReader};
     use std::path::{Path, PathBuf};
@@ -2585,12 +2585,15 @@ mod audio_engine_tests {
 mod tag_edit_service_tests {
     use super::*;
     use crate::mocks::{MockLibraryMutationStore, MockLibraryQueryStore, MockMetadataWriter};
-    use riff_backend::app::errors::{LibraryError, StoreError};
+    use riff_backend::app::errors::StoreError;
+    // The tag-edit save flow consumes the library slice's `MetadataWriter`
+    // port, whose errors are the library slice's `LibraryError`.
     use riff_backend::app::store::LibraryQueryStore;
     use riff_backend::app::tag_edit_service::{
         TagEditOutcome, TagEditRequest, TagEditService, TagEdits,
     };
     use riff_backend::app::traits::{MetadataWriter, TagEdit};
+    use riff_library::app::errors::LibraryError;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -2607,8 +2610,8 @@ mod tag_edit_service_tests {
     struct SharedWriter(Arc<Mutex<MockMetadataWriter>>);
 
     impl MetadataWriter for SharedWriter {
-        fn write_metadata(&self, path: &Path, edit: &TagEdit) -> Result<(), LibraryError> {
-            self.0.lock().unwrap().write_metadata(path, edit)
+        fn write_tags(&self, path: &Path, edit: &TagEdit) -> Result<(), LibraryError> {
+            self.0.lock().unwrap().write_tags(path, edit)
         }
     }
 
@@ -3062,7 +3065,7 @@ mod cover_service_tests {
     fn test_image() -> CoverImage {
         CoverImage {
             data: vec![7; 4 * 4 * 4],
-            format: image::ImageFormat::Png,
+            format: riff_library::app::traits::CoverImageFormat::Png,
         }
     }
 
@@ -3379,7 +3382,7 @@ mod playlist_projection_tests {
     use super::*;
     use riff_backend::app::errors::StoreError;
     use riff_backend::app::store::{LibraryMutationStore, PlaylistEntry, PlaylistStore};
-    use riff_backend::infra::store::SqliteStore;
+    use riff_infra::store::SqliteStore;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Counting [`PlaylistStore`] decorator: delegates everything to the

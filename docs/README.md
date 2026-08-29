@@ -2,7 +2,7 @@
 
 Welcome to the documentation for **riff** — a lightweight, offline-first desktop music player built in Rust with egui. This is the single home for everything you need to understand the product, its architecture, and how to work on it.
 
-riff is a single Cargo crate that plays local audio files (MP3, AAC, Opus, FLAC, OGG Vorbis, WAV) using pure-Rust libraries, manages a music library from one or more folders, and runs cross-platform on Linux, Windows, and macOS. It keeps no cloud dependencies by design.
+riff is a Cargo workspace — five backend capability crates, the frontend crate, and the integration-test crate — that plays local audio files (MP3, AAC, Opus, FLAC, OGG Vorbis, WAV) using pure-Rust libraries, manages a music library from one or more folders, and runs cross-platform on Linux, Windows, and macOS. It keeps no cloud dependencies by design.
 
 ## How this documentation is organized
 
@@ -62,12 +62,12 @@ What riff is, what it does, and how to use it.
 
 How riff is built and how it works at runtime.
 
-- [Architecture](technical/architecture.md) — the four-layer structure, dependency rules, boundary rules, per-layer rules, validation checklist, and anti-patterns.
+- [Architecture](technical/architecture.md) — the workspace crate split, the dependency chain, each crate's membership criterion, boundary rules, validation checklist, and anti-patterns.
 - [Deepening plan](technical/deepening-plan.md) — the settled two-part refactor plan from the 2026-08-23 architecture review (One Library, playback engine seam) with per-step status tracking for resumability.
-- [Threading model](technical/threading-model.md) — the seven threads, the crossbeam channels between them, shared state, and real-time constraints.
+- [Threading model](technical/threading-model.md) — the threads (all workers spawned by the Composition Root), the crossbeam channels between them, shared state, and real-time constraints.
 - [Data flow](technical/data-flow.md) — step-by-step sequences for the three primary flows: play a track, scan a library, resolve cover art.
 - [Data model](technical/data-model.md) — the domain entities, `AppState`, the Application Store ports, and the port traits.
-- [Dependencies](technical/dependencies.md) — every crate in `Cargo.toml` grouped by concern, with versions and purpose.
+- [Dependencies](technical/dependencies.md) — every workspace dependency grouped by owning crate, with versions and purpose.
 - [Persistence](technical/persistence.md) — the Application Store (`riff.sqlite3`): schema, migrations, corruption recovery, save timing, Session Projections, Clear Library, and the in-memory cover-art LRU.
 - [Platform support](technical/platform-support.md) — the macOS/Windows/Linux feature matrix, conditional compilation, and why Linux omits the tray.
 
@@ -78,7 +78,7 @@ How to work on riff correctly.
 - [Development setup](engineering/development-setup.md) — prerequisites, the command set, and build-profile notes.
 - [Coding standards](engineering/coding-standards.md) — layering rules, clippy and formatting configuration, the error-handling pattern, and the implementation gotchas.
 - [Contributing](engineering/contributing.md) — how to orient yourself and the pull-request checklist.
-- [Testing strategy](engineering/testing-strategy.md) — the current test suite (and the known build issue), plus prioritized recommendations including CI.
+- [Testing strategy](engineering/testing-strategy.md) — the per-crate suites and the workspace-root integration/golden suite, plus prioritized recommendations.
 - [Golden-image testing](engineering/golden-image-testing.md) — the snapshot-test harness for visual parity: authoring goldens, re-baselining, and reviewing image diffs.
 - [Release and packaging](engineering/release-and-packaging.md) — the release profile, the manual release process today, and recommendations for release automation.
 
@@ -102,4 +102,4 @@ This `docs/` tree **supersedes** the older `.lattice/` directory (`standards/arc
 - All documents are plain Markdown with no YAML front-matter.
 - Cross-links are relative, so the tree renders correctly anywhere Markdown is supported.
 - "Current State" sections describe the repository as verified; "Recommendations" sections are clearly labeled suggestions that are not yet implemented.
-- Source filenames in examples are the real ones from `src/`.
+- Source filenames in examples are the real ones from the workspace crates (`riff-backend/src/`, `riff-gui/src/`, and so on).

@@ -24,6 +24,12 @@ riff-persistence = { path = "../riff-persistence" }
 # `app::transport` / `app::playback_coordinator` / `app::state` paths).
 riff-playback = { path = "../riff-playback" }
 
+# Library capability (extracted to `riff-library` by backend-crate-split issue 06;
+# re-exported below at the historical `riff_backend::app::scan` / `app::scan_service`
+# / `app::playlist_manager` / `app::tag_edit_service` / `app::cover_service`
+# / `app::watcher_manager` / `app::projection` / `app::views` paths).
+riff-library = { path = "../riff-library" }
+
 # Audio decoding (pure Rust)
 symphonia = { version = "0.6", features = ["all"] }
 symphonia-adapter-libopus = "0.3"

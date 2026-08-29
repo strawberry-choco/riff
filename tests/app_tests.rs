@@ -6,9 +6,11 @@ use super::*;
 mod tests {
     use super::*;
     use crate::domain::CoverSource;
-    use riff_backend::app::errors::{LibraryError, StoreError};
+    use riff_backend::app::errors::StoreError;
     use riff_backend::app::playlist_manager;
-    use riff_backend::app::traits::{AudioFormatInfo, MetadataReader, MetadataWriter, TagEdit};
+    use riff_backend::app::traits::{MetadataWriter, TagEdit};
+    use riff_library::app::errors::LibraryError;
+    use riff_library::app::traits::{AudioFormatInfo, MetadataReader};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -29,7 +31,7 @@ mod tests {
     fn test_app_state_advanced_mode_defaults_to_false() {
         // Progressive disclosure (REQ-UI-006): the UI starts minimal; power
         // features stay hidden until the user opts in via the toggle.
-        let state = LibrarySession::new();
+        let state = LibrarySession::default();
         assert!(!state.ui_flags.advanced_mode);
     }
 
@@ -37,21 +39,21 @@ mod tests {
     fn test_app_state_high_contrast_defaults_to_false() {
         // Accessibility (REQ-UI-007): the high-contrast theme is opt-in; the
         // app starts with the regular light/dark palette.
-        let state = LibrarySession::new();
+        let state = LibrarySession::default();
         assert!(!state.ui_flags.high_contrast);
     }
 
     #[test]
     fn test_app_state_muted_defaults_to_false() {
         // Mute (REQ-UI-003-08): the app starts unmuted.
-        let state = PlaybackSession::new();
+        let state = PlaybackSession::default();
         assert!(!state.muted);
     }
 
     #[test]
     fn test_app_state_replaygain_defaults_to_disabled() {
         // ReplayGain (Task 4.3) is opt-in.
-        let state = PlaybackSession::new();
+        let state = PlaybackSession::default();
         assert!(!state.replaygain_enabled);
     }
 
@@ -204,8 +206,9 @@ mod tests {
         has_successor: bool,
     ) -> GaplessConditions {
         GaplessConditions {
-            queue,
-            formats_compatible,
+            shuffle: queue.shuffle,
+            repeat_one: queue.repeat_one,
+            format_compatible: formats_compatible,
             has_successor,
         }
     }
@@ -215,6 +218,7 @@ mod tests {
         QueueConditions {
             shuffle,
             repeat_one,
+            has_successor: true,
         }
     }
 
@@ -324,8 +328,10 @@ mod tests {
 
     #[test]
     fn test_effective_volume_zeroed_while_muted_and_restored_on_unmute() {
-        let mut state = PlaybackSession::new();
-        state.current_volume = 0.7;
+        let mut state = PlaybackSession {
+            current_volume: 0.7,
+            ..PlaybackSession::default()
+        };
 
         // Unmuted: the engine receives the slider value.
         assert!((state.effective_volume() - 0.7).abs() < f32::EPSILON);
@@ -396,38 +402,14 @@ mod tests {
     }
 
     impl MetadataReader for MockMetadataReader {
-        fn read_metadata(&self, _path: &Path) -> Result<TrackMetadata, LibraryError> {
-            Ok(TrackMetadata::default())
-        }
-
-        fn read_duration(&self, _path: &Path) -> Result<Option<Duration>, LibraryError> {
-            Ok(Some(Duration::from_secs(90)))
-        }
-
         fn read_cover_source(&self, _path: &Path) -> Result<CoverSource, LibraryError> {
             Ok(CoverSource::None)
-        }
-
-        fn read_audio_format(&self, _path: &Path) -> Result<AudioFormatInfo, LibraryError> {
-            Ok(AudioFormatInfo {
-                sample_rate: 44_100,
-                channels: 2,
-                duration: Some(Duration::from_secs(90)),
-            })
         }
 
         fn read_all(
             &self,
             path: &Path,
-        ) -> Result<
-            (
-                TrackMetadata,
-                Option<Duration>,
-                CoverSource,
-                AudioFormatInfo,
-            ),
-            LibraryError,
-        > {
+        ) -> Result<(TrackMetadata, Duration, CoverSource, AudioFormatInfo), LibraryError> {
             if self.fail {
                 return Err(LibraryError::MetadataRead(format!(
                     "mock failure: {path:?}"
@@ -446,12 +428,11 @@ mod tests {
             };
             Ok((
                 metadata,
-                Some(Duration::from_secs(90)),
+                Duration::from_secs(90),
                 CoverSource::None,
                 AudioFormatInfo {
                     sample_rate: 44_100,
                     channels: 2,
-                    duration: Some(Duration::from_secs(90)),
                 },
             ))
         }
@@ -555,7 +536,10 @@ mod tests {
         let result = writer.write_metadata(&PathBuf::from("locked.mp3"), &TagEdit::default());
 
         let err = result.expect_err("failing writer must return an error");
-        assert!(matches!(err, LibraryError::MetadataWrite(_)));
+        assert!(matches!(
+            err,
+            riff_backend::app::errors::LibraryError::MetadataWrite(_)
+        ));
         assert!(err.to_string().contains("Failed to write tags"));
         assert!(writer.recorded().is_empty());
     }
@@ -1346,12 +1330,13 @@ mod tests {
 // fails an assertion instead of hanging CI.
 mod scan_service_tests {
     use super::*;
-    use riff_backend::app::errors::{LibraryError, StoreError};
+    use riff_backend::app::errors::StoreError;
     use riff_backend::app::scan_service::{ScanOutcome, ScanService, Scans};
     use riff_backend::app::store::{LibraryMutationStore, LibraryQueryStore};
-    use riff_backend::app::traits::{AudioFormatInfo, MetadataReader};
     use riff_backend::domain::CoverSource;
     use riff_backend::infra::store::SqliteStore;
+    use riff_library::app::errors::LibraryError;
+    use riff_library::app::traits::{AudioFormatInfo, MetadataReader};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant, SystemTime};
@@ -1400,12 +1385,7 @@ mod scan_service_tests {
         fn canned_read(
             &self,
             path: &Path,
-        ) -> (
-            TrackMetadata,
-            Option<Duration>,
-            CoverSource,
-            AudioFormatInfo,
-        ) {
+        ) -> (TrackMetadata, Duration, CoverSource, AudioFormatInfo) {
             let n = self.served.fetch_add(1, Ordering::SeqCst);
             if n >= self.permit_first {
                 let gate = self.gate.as_ref().expect("gated reader has a gate");
@@ -1425,50 +1405,25 @@ mod scan_service_tests {
                     album: Some("Scan Album".to_string()),
                     ..Default::default()
                 },
-                Some(Duration::from_secs(90)),
+                Duration::from_secs(90),
                 CoverSource::None,
                 AudioFormatInfo {
                     sample_rate: 44_100,
                     channels: 2,
-                    duration: Some(Duration::from_secs(90)),
                 },
             )
         }
     }
 
     impl MetadataReader for FixtureReader {
-        fn read_metadata(&self, path: &Path) -> Result<TrackMetadata, LibraryError> {
-            Ok(self.canned_read(path).0)
-        }
-
-        fn read_duration(&self, _path: &Path) -> Result<Option<Duration>, LibraryError> {
-            Ok(Some(Duration::from_secs(90)))
-        }
-
         fn read_cover_source(&self, _path: &Path) -> Result<CoverSource, LibraryError> {
             Ok(CoverSource::None)
-        }
-
-        fn read_audio_format(&self, _path: &Path) -> Result<AudioFormatInfo, LibraryError> {
-            Ok(AudioFormatInfo {
-                sample_rate: 44_100,
-                channels: 2,
-                duration: Some(Duration::from_secs(90)),
-            })
         }
 
         fn read_all(
             &self,
             path: &Path,
-        ) -> Result<
-            (
-                TrackMetadata,
-                Option<Duration>,
-                CoverSource,
-                AudioFormatInfo,
-            ),
-            LibraryError,
-        > {
+        ) -> Result<(TrackMetadata, Duration, CoverSource, AudioFormatInfo), LibraryError> {
             Ok(self.canned_read(path))
         }
     }
@@ -1913,7 +1868,12 @@ mod audio_engine_tests {
     use riff_backend::app::audio_engine::AudioEngine;
     use riff_backend::app::errors::{PlaybackError, StoreError};
     use riff_backend::app::store::LibraryQueryStore;
-    use riff_backend::app::traits::{AudioDecoder, AudioFormatInfo, AudioOutput, DecoderFactory};
+    use riff_backend::app::traits::{AudioDecoder, AudioFormatInfo, AudioOutput};
+    use riff_playback::app::errors::PlaybackError as EnginePlaybackError;
+    use riff_playback::infra::ports::AudioDecoder as EngineAudioDecoder;
+    use riff_playback::infra::ports::AudioFormatInfo as EngineAudioFormatInfo;
+    use riff_playback::infra::ports::AudioOutput as EngineAudioOutput;
+    use riff_playback::infra::ports::DecoderFactory;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1947,33 +1907,97 @@ mod audio_engine_tests {
 
     /// [`AudioDecoder`] view over one scripted [`MockAudioDecoder`] owned by
     /// the engine; the test keeps the other handle for counter checks.
-    struct SharedDecoder(Arc<Mutex<MockAudioDecoder>>);
+    struct SharedDecoder {
+        mock: Arc<Mutex<MockAudioDecoder>>,
+        path: PathBuf,
+    }
 
-    impl AudioDecoder for SharedDecoder {
-        fn open(&mut self, path: &Path) -> Result<AudioFormatInfo, PlaybackError> {
-            self.0.lock().unwrap().open(path)
+    impl EngineAudioDecoder for SharedDecoder {
+        fn source_path(&self) -> &Path {
+            &self.path
         }
 
-        fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, PlaybackError> {
-            self.0.lock().unwrap().next_frames(out)
+        fn init(&mut self, path: &Path) -> Result<EngineAudioFormatInfo, EnginePlaybackError> {
+            self.path = path.to_path_buf();
+            let info = AudioDecoder::open(&mut *self.mock.lock().unwrap(), path)
+                .map_err(|e| EnginePlaybackError::Decode(e.to_string()))?;
+            Ok(EngineAudioFormatInfo {
+                sample_rate: info.sample_rate,
+                channels: info.channels,
+            })
         }
 
-        fn seek(&mut self, position: Duration) -> Result<(), PlaybackError> {
-            self.0.lock().unwrap().seek(position)
+        fn next_frames(&mut self, buf: &mut [f32]) -> Option<usize> {
+            match AudioDecoder::next_frames(&mut *self.mock.lock().unwrap(), buf) {
+                Ok(0) | Err(_) => None,
+                Ok(n) => Some(n),
+            }
+        }
+
+        fn seek(&mut self, position: Duration) -> Duration {
+            let _ = AudioDecoder::seek(&mut *self.mock.lock().unwrap(), position);
+            position
         }
 
         fn duration(&self) -> Option<Duration> {
-            self.0.lock().unwrap().duration()
+            AudioDecoder::duration(&*self.mock.lock().unwrap())
+        }
+    }
+
+    impl AudioDecoder for SharedDecoder {
+        fn open(&mut self, path: &Path) -> Result<AudioFormatInfo, PlaybackError> {
+            self.mock.lock().unwrap().open(path)
+        }
+
+        fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, PlaybackError> {
+            self.mock.lock().unwrap().next_frames(out)
+        }
+
+        fn seek(&mut self, position: Duration) -> Result<(), PlaybackError> {
+            self.mock.lock().unwrap().seek(position)
+        }
+
+        fn duration(&self) -> Option<Duration> {
+            self.mock.lock().unwrap().duration()
         }
 
         fn close(&mut self) {
-            self.0.lock().unwrap().close();
+            self.mock.lock().unwrap().close();
         }
     }
 
     /// [`AudioOutput`] view over one recording [`MockAudioOutput`] owned by
     /// the engine; the test keeps the other handle for counter checks.
     struct SharedOutput(Arc<Mutex<MockAudioOutput>>);
+
+    impl EngineAudioOutput for SharedOutput {
+        fn start(&mut self, format: EngineAudioFormatInfo) -> Result<(), EnginePlaybackError> {
+            AudioOutput::initialize(
+                &mut *self.0.lock().unwrap(),
+                format.sample_rate,
+                format.channels,
+            )
+            .map_err(|e| EnginePlaybackError::AudioOutput(e.to_string()))?;
+            AudioOutput::start(&mut *self.0.lock().unwrap())
+                .map_err(|e| EnginePlaybackError::AudioOutput(e.to_string()))
+        }
+
+        fn write(&mut self, samples: &[f32]) -> usize {
+            AudioOutput::write_samples(&mut *self.0.lock().unwrap(), samples).unwrap_or(0)
+        }
+
+        fn stop(&mut self) {
+            let _ = AudioOutput::stop(&mut *self.0.lock().unwrap());
+        }
+
+        fn set_volume(&mut self, volume: f32) {
+            AudioOutput::set_volume(&mut *self.0.lock().unwrap(), volume);
+        }
+
+        fn latency(&self) -> u32 {
+            0
+        }
+    }
 
     impl AudioOutput for SharedOutput {
         fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), PlaybackError> {
@@ -2036,7 +2060,10 @@ mod audio_engine_tests {
                 MockAudioDecoder::new(format.clone()).with_batches(script),
             ));
             log.lock().unwrap().push(Arc::clone(&mock));
-            Box::new(SharedDecoder(mock))
+            Box::new(SharedDecoder {
+                mock,
+                path: PathBuf::new(),
+            })
         })
     }
 
@@ -2155,7 +2182,6 @@ mod audio_engine_tests {
         output.lock().unwrap().set_effective_sample_rate(RATE);
         let decoders: DecoderLog = Arc::new(Mutex::new(Vec::new()));
 
-        let engine_cmd_tx = cmd_tx.clone();
         let out_handle = Arc::clone(&output);
         let dec_handle = Arc::clone(&decoders);
         let thread_state = Arc::clone(&state);
@@ -2163,12 +2189,11 @@ mod audio_engine_tests {
             let factory = scripted_factory(primary_script, successor_script, format, dec_handle);
             let engine = AudioEngine::new(
                 cmd_rx,
-                engine_cmd_tx,
                 update_tx,
-                thread_state,
                 Box::new(library),
                 factory,
                 Box::new(SharedOutput(out_handle)),
+                thread_state,
             );
             engine.run();
         });
@@ -2253,7 +2278,7 @@ mod audio_engine_tests {
     /// Pre-populate the queue so Queue Fill never fires, and register the
     /// matching canned library entries.
     fn queued_state_and_library(paths: &[&str]) -> (Arc<Mutex<PlaybackSession>>, FakeLibraryStore) {
-        let mut state = PlaybackSession::new();
+        let mut state = PlaybackSession::default();
         let mut tracks = HashMap::new();
         for path in paths {
             let track = crate::test_utils::create_test_track(path, path);
@@ -2303,19 +2328,19 @@ mod audio_engine_tests {
         );
 
         // Mock substitution proof: the primary decoder was opened for the
-        // requested track and the output mock recorded the writes. (The
-        // constructor always mints two decoders — primary + gapless
-        // pre-decode slot — but only the primary is ever opened here.)
+        // requested track and the output mock recorded the writes. (Decoders
+        // are minted on demand: with no successor queued, the gapless
+        // pre-decode slot never mints its decoder.)
         let decoders = h.decoders.lock().unwrap();
-        assert_eq!(decoders.len(), 2, "primary + pre-decode slot, no more");
+        assert_eq!(
+            decoders.len(),
+            1,
+            "primary only - no successor to pre-decode"
+        );
         let d = decoders[0].lock().unwrap();
         assert_eq!(d.opened, vec![PathBuf::from("music/t1.wav")]);
         assert_eq!(d.seeks.len(), 0, "no seek without Resume/Seek commands");
         drop(d);
-        assert!(
-            decoders[1].lock().unwrap().opened.is_empty(),
-            "no gapless pre-decode without a successor"
-        );
         drop(decoders);
         let out = h.output.lock().unwrap();
         assert_eq!(out.initialized, vec![(RATE, CHANNELS)]);
@@ -2520,7 +2545,9 @@ mod audio_engine_tests {
         drop(out);
 
         let decoders = h.decoders.lock().unwrap();
-        assert_eq!(decoders.len(), 2, "primary + pre-decode slot");
+        // Decoders are minted on demand: with no successor queued, only the
+        // primary exists (the resume re-opens it rather than minting one).
+        assert_eq!(decoders.len(), 1, "primary only");
         let d = decoders[0].lock().unwrap();
         assert_eq!(d.opened.len(), 2, "initial open + resume re-open");
         assert!(
@@ -3019,9 +3046,9 @@ mod tag_edit_service_tests {
 mod cover_service_tests {
     use super::*;
     use riff_backend::app::cover_service::{CoverService, Covers};
-    use riff_backend::app::errors::LibraryError;
-    use riff_backend::app::traits::{AudioFormatInfo, CoverImage, CoverLoader, MetadataReader};
     use riff_backend::domain::CoverSource;
+    use riff_library::app::errors::LibraryError;
+    use riff_library::app::traits::{AudioFormatInfo, CoverImage, CoverLoader, MetadataReader};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3034,9 +3061,8 @@ mod cover_service_tests {
     /// One decoded cover image, distinct enough to assert identity.
     fn test_image() -> CoverImage {
         CoverImage {
-            width: 4,
-            height: 4,
-            rgba: vec![7; 4 * 4 * 4],
+            data: vec![7; 4 * 4 * 4],
+            format: image::ImageFormat::Png,
         }
     }
 
@@ -3054,36 +3080,10 @@ mod cover_service_tests {
             Ok(self.source.clone())
         }
 
-        fn read_metadata(&self, _path: &Path) -> Result<TrackMetadata, LibraryError> {
-            Err(LibraryError::Io(
-                "not exercised by CoverResolver".to_string(),
-            ))
-        }
-
-        fn read_duration(&self, _path: &Path) -> Result<Option<Duration>, LibraryError> {
-            Err(LibraryError::Io(
-                "not exercised by CoverResolver".to_string(),
-            ))
-        }
-
-        fn read_audio_format(&self, _path: &Path) -> Result<AudioFormatInfo, LibraryError> {
-            Err(LibraryError::Io(
-                "not exercised by CoverResolver".to_string(),
-            ))
-        }
-
         fn read_all(
             &self,
             _path: &Path,
-        ) -> Result<
-            (
-                TrackMetadata,
-                Option<Duration>,
-                CoverSource,
-                AudioFormatInfo,
-            ),
-            LibraryError,
-        > {
+        ) -> Result<(TrackMetadata, Duration, CoverSource, AudioFormatInfo), LibraryError> {
             Err(LibraryError::Io(
                 "not exercised by CoverResolver".to_string(),
             ))
@@ -3190,10 +3190,10 @@ mod cover_service_tests {
         assert_eq!(results[0].0, TrackId::from_path(Path::new("/music/t1.mp3")));
         let delivered = results[0].1.as_ref().expect("cover should resolve");
         assert_eq!(
-            (delivered.width, delivered.height),
-            (image.width, image.height)
+            (delivered.data.as_slice(), delivered.format),
+            (image.data.as_slice(), image.format)
         );
-        assert_eq!(delivered.rgba, image.rgba);
+        assert_eq!(delivered.data, image.data);
 
         // The resolver chain drove the real ports: one tag read, one load.
         assert_eq!(h.reader_calls.load(Ordering::SeqCst), 1);
@@ -3710,7 +3710,7 @@ mod playback_coordinator_tests {
     /// update channel stays empty (its sender drops immediately) because the
     /// core is driven by hand.
     fn harness(ids: &[&str], current_index: Option<usize>, repeat: RepeatMode) -> Harness {
-        let state = Arc::new(Mutex::new(PlaybackSession::new()));
+        let state = Arc::new(Mutex::new(PlaybackSession::default()));
         {
             let mut locked = state.lock_or_recover();
             locked.queue =
@@ -3718,7 +3718,7 @@ mod playback_coordinator_tests {
             locked.queue.current_index = current_index;
             locked.queue.repeat = repeat;
         }
-        let library = Arc::new(Mutex::new(LibrarySession::new()));
+        let library = Arc::new(Mutex::new(LibrarySession::default()));
         let (cmd_tx, cmd_rx) = unbounded();
         let (notice_tx, notice_rx) = unbounded();
         let mutations = Arc::new(Mutex::new(MockLibraryMutationStore::new()));

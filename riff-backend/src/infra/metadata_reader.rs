@@ -201,3 +201,57 @@ impl MetadataReader for LoftyMetadataReader {
         Ok((metadata, audio_format.duration, cover_source, audio_format))
     }
 }
+
+/// The library capability's reader port, served over the same lofty internals
+/// as the richer backend port above. The library port collapses the optional
+/// duration into a default and carries the slim two-field format info.
+impl riff_library::app::traits::MetadataReader for LoftyMetadataReader {
+    fn read_all(
+        &self,
+        path: &Path,
+    ) -> Result<
+        (
+            TrackMetadata,
+            Duration,
+            CoverSource,
+            riff_library::app::traits::AudioFormatInfo,
+        ),
+        riff_library::app::errors::LibraryError,
+    > {
+        let (metadata, duration, cover_source, audio_format) =
+            MetadataReader::read_all(self, path).map_err(convert_library_error)?;
+        Ok((
+            metadata,
+            duration.unwrap_or_default(),
+            cover_source,
+            riff_library::app::traits::AudioFormatInfo {
+                sample_rate: audio_format.sample_rate,
+                channels: audio_format.channels,
+            },
+        ))
+    }
+
+    fn read_cover_source(
+        &self,
+        path: &Path,
+    ) -> Result<CoverSource, riff_library::app::errors::LibraryError> {
+        MetadataReader::read_cover_source(self, path).map_err(convert_library_error)
+    }
+}
+
+/// Map the backend's library error onto riff-library's copy — the two enums
+/// carry the same variants (modulo one backend-side extra) over `String`.
+fn convert_library_error(
+    e: crate::app::errors::LibraryError,
+) -> riff_library::app::errors::LibraryError {
+    use crate::app::errors::LibraryError as Backend;
+    use riff_library::app::errors::LibraryError as Library;
+    match e {
+        Backend::MetadataRead(s) => Library::MetadataRead(s),
+        Backend::MetadataWrite(s) => Library::MetadataWrite(s),
+        Backend::CoverLoad(s) => Library::CoverLoad(s),
+        Backend::LibraryScan(s) => Library::LibraryScan(s),
+        Backend::Io(s) => Library::Io(s),
+        Backend::TrackNotFound(s) => Library::TrackNotFound(s),
+    }
+}

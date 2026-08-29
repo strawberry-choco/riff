@@ -14,7 +14,7 @@
 #   cargo build --release  -p riff-gui
 
 [workspace]
-members = ["riff-backend", "riff-gui", "tests"]
+members = ["riff-persistence", "riff-playback", "riff-library", "riff-backend", "riff-gui", "tests"]
 resolver = "2"
 
 # Workspace-level profiles and lints apply to every member.

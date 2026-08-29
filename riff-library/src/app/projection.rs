@@ -8,19 +8,124 @@
 //! Stale reads are possible only between a committed write and the next
 //! refresh, which generation invalidation makes explicit.
 
-use crate::app::errors::StoreError;
 use crate::app::playlist_manager;
-use crate::app::store::{PlaylistEntry, StoreGeneration};
-use crate::app::views::GenerationCache;
+use crate::app::store::PlaylistEntry;
+use crate::app::store::{StoreError, StoreGeneration};
 use crate::domain::{
-    Album, Artist, PlaybackQueue, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
+    Album, Artist, Playlist, PlaylistId, RepeatMode, SmartPlaylistKind, Track, TrackId,
 };
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Rows fetched per window. The projection owns the window-size policy so
-/// callers declare visible offsets without duplicating page math.
+/// Minimal playback queue for projection use (avoids riff-playback dependency).
+pub struct PlaybackQueue {
+    pub tracks: Vec<TrackId>,
+    pub current_index: Option<usize>,
+    pub shuffle: bool,
+    pub repeat: RepeatMode,
+    pub shuffled_indices: VecDeque<usize>,
+    pub shuffle_history: Vec<usize>,
+    #[allow(dead_code, reason = "mirrors riff-playback's queue shape")]
+    shuffle_dirty: bool,
+}
+
+impl PlaybackQueue {
+    pub fn current_track(&self) -> Option<&TrackId> {
+        self.current_index.and_then(|i| self.tracks.get(i))
+    }
+
+    pub fn upcoming(&self, limit: usize) -> Vec<&TrackId> {
+        let mut out = Vec::with_capacity(limit);
+        if self.tracks.is_empty() {
+            return out;
+        }
+        if self.shuffle {
+            let mut iter = self.shuffled_indices.iter();
+            if let Some(_ci) = self.current_index {
+                iter.next();
+            }
+            for idx in iter.take(limit) {
+                if let Some(t) = self.tracks.get(*idx) {
+                    out.push(t);
+                }
+            }
+        } else {
+            let start = self.current_index.map_or(0, |i| i + 1);
+            for t in self.tracks.iter().skip(start).take(limit) {
+                out.push(t);
+            }
+        }
+        out
+    }
+}
+
+/// Generation-keyed cache with freshness validation.
+#[derive(Default)]
+struct GenerationCache<K, V> {
+    generation: StoreGeneration,
+    /// The generation epoch at which `value` was loaded — staleness is a
+    /// mismatch against a fresh observation of the counter.
+    epoch: u64,
+    key: Option<K>,
+    value: Option<V>,
+}
+
+impl<K, V> GenerationCache<K, V>
+where
+    K: Clone + PartialEq,
+    V: Clone + Default,
+{
+    fn new(generation: StoreGeneration) -> Self {
+        Self {
+            epoch: generation.current(),
+            generation,
+            key: None,
+            value: None,
+        }
+    }
+
+    fn peek(&self) -> Option<&V> {
+        self.value.as_ref()
+    }
+
+    fn store(&mut self, epoch: u64, key: K, value: V) {
+        self.epoch = epoch;
+        self.key = Some(key);
+        self.value = Some(value);
+    }
+
+    fn observe(&self) -> u64 {
+        self.generation.current()
+    }
+
+    fn loaded_at(&self, epoch: u64) -> bool {
+        self.epoch == epoch
+    }
+
+    fn holds(&self, epoch: u64, key: &K) -> bool {
+        self.epoch == epoch && self.key.as_ref() == Some(key)
+    }
+
+    fn take_value(&mut self) -> Option<V> {
+        self.value.take()
+    }
+
+    fn invalidate(&mut self) {
+        self.key = None;
+        self.value = None;
+    }
+
+    /// The mutable entry slot for `key`: adopts the key and hands out a
+    /// freshly initialized value when absent — the commit step for lazily
+    /// filled multi-level bundles. Callers assign the loaded fields through
+    /// the returned slot only after a successful fetch.
+    fn slot(&mut self, epoch: u64, key: &K) -> &mut V {
+        self.epoch = epoch;
+        self.key = Some(key.clone());
+        self.value.get_or_insert_with(V::default)
+    }
+}
 pub const WINDOW_SIZE: usize = 50;
 
 /// Cached-window bound before FIFO eviction kicks in. Generous for one
@@ -40,7 +145,7 @@ pub enum ProjectionKey {
 
 /// The cached payload of one track-list query signature: the authoritative
 /// total plus the bounded window map.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct TrackListRows {
     total: usize,
     windows: HashMap<usize, Arc<[Track]>>,
@@ -194,7 +299,7 @@ impl TrackListProjection {
 }
 
 /// The three lazily-filled levels of the browsing hierarchy.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct BrowsingLevels {
     artists: Option<Arc<[Artist]>>,
     albums: HashMap<String, Arc<[Album]>>,
@@ -317,7 +422,7 @@ impl BrowsingProjection {
 }
 
 /// The five lazily-filled folder query shapes, keyed by folder.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct FolderLevels {
     has_audio: HashMap<String, bool>,
     search_matches: HashMap<(String, String), bool>,
@@ -567,10 +672,10 @@ impl SmartPlaylistsProjection {
     }
 }
 
-/// The playback slots plus the queue shape they were loaded for.
+#[derive(Clone, Default)]
 struct PlaybackSlots {
-    /// Queue shape the slots were loaded for: `(current_index, upcoming ids
-    /// at the window limit)`. Recomputing this cheap stamp per frame detects
+    /// Queue shape the slots were loaded for: the (current index, upcoming
+    /// ids at the window limit) pair. Recomputing this cheap stamp detects
     /// every queue mutation (advance, previous, insert-next, append,
     /// shuffle regeneration) without hooking each mutator.
     stamp: (Option<usize>, Vec<TrackId>),

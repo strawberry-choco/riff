@@ -30,6 +30,8 @@ path = "mod.rs"
 
 [dependencies]
 riff-backend = { path = "../riff-backend" }
+riff-library = { path = "../riff-library" }
+riff-playback = { path = "../riff-playback" }
 riff-gui     = { path = "../riff-gui" }
 
 # Golden-image tests render real egui frames headlessly (kittest + wgpu).
@@ -40,6 +42,8 @@ egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
 tempfile = "3.8"
 crossbeam-channel = "0.5"
 rusqlite = "0.40.2"
+# Decoding canned cover bytes in the UI cache test.
+image = { version = "0.25", default-features = false, features = ["png"] }
 # Backend-only deps used directly by infra suite tests.
 notify = "8"
 notify-debouncer-full = "0.7"

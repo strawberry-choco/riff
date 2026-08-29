@@ -2350,8 +2350,8 @@ mod tests {
         crate::mocks::MockTransport,
         crate::mocks::MockSettingsStore,
     ) {
-        let mut playback = PlaybackSession::new();
-        let mut library = LibrarySession::new();
+        let mut playback = PlaybackSession::default();
+        let mut library = LibrarySession::default();
         let transport = crate::mocks::MockTransport::new();
         let mut store = crate::mocks::MockSettingsStore::default();
         apply_player_bar_action(action, &mut library, &mut playback, &transport, &mut store);
@@ -2407,7 +2407,7 @@ mod tests {
         let transport = crate::mocks::MockTransport::new();
         apply_player_bar_action(
             PlayerBarAction::Seek(std::time::Duration::from_secs_f32(999.0)),
-            &mut LibrarySession::new(),
+            &mut LibrarySession::default(),
             &mut playback,
             &transport,
             &mut store,
@@ -2442,7 +2442,7 @@ mod tests {
     fn test_mute_toggle_sends_zero_and_keeps_slider_value() {
         let (mut playback, _, _, mut store) = applied(PlayerBarAction::SetVolume(0.7));
         let transport = crate::mocks::MockTransport::new();
-        let mut library = LibrarySession::new();
+        let mut library = LibrarySession::default();
 
         // Muting sends the muted (zero) volume to the engine...
         apply_player_bar_action(
@@ -2455,10 +2455,7 @@ mod tests {
         assert!(playback.muted);
         assert_eq!(
             transport.recorded(),
-            vec![
-                TransportIntent::ToggleMute(true),
-                TransportIntent::ApplyVolumeAfterMute(0.0)
-            ],
+            vec![TransportIntent::ApplyVolume(0.0)],
             "muting zeroes what the engine hears"
         );
         assert!(
@@ -2492,7 +2489,7 @@ mod tests {
         assert!(!playback.muted);
         assert_eq!(
             transport.recorded().last(),
-            Some(&TransportIntent::ApplyVolumeAfterMute(0.9)),
+            Some(&TransportIntent::ApplyVolume(0.9)),
             "unmuting restores the slider's volume"
         );
     }
@@ -2501,7 +2498,7 @@ mod tests {
     fn test_shuffle_and_repeat_toggles_flip_queue_state() {
         let (mut playback, _, _, mut store) = applied(PlayerBarAction::Pause);
         let transport = crate::mocks::MockTransport::new();
-        let mut library = LibrarySession::new();
+        let mut library = LibrarySession::default();
 
         let was = playback.queue.shuffle;
         apply_player_bar_action(
@@ -2628,15 +2625,17 @@ mod tests {
         use riff_backend::app::state::{BrowseMode, ViewMode};
 
         for start in [ViewMode::Library, ViewMode::NowPlaying, ViewMode::Settings] {
-            let mut library = LibrarySession::new();
-            library.view_mode = start;
-            library.browse_mode = BrowseMode::Folders;
+            let mut library = LibrarySession {
+                view_mode: start,
+                browse_mode: BrowseMode::Folders,
+                ..LibrarySession::default()
+            };
 
             let transport = crate::mocks::MockTransport::new();
             apply_now_playing_action(
                 NowPlayingAction::Close,
                 &mut library,
-                &PlaybackSession::new(),
+                &PlaybackSession::default(),
                 &transport,
             );
 
@@ -2657,8 +2656,8 @@ mod tests {
         let transport = crate::mocks::MockTransport::new();
         apply_now_playing_action(
             NowPlayingAction::PlayNext(TrackId("t9.mp3".to_string())),
-            &mut LibrarySession::new(),
-            &PlaybackSession::new(),
+            &mut LibrarySession::default(),
+            &PlaybackSession::default(),
             &transport,
         );
         assert_eq!(
@@ -2670,8 +2669,8 @@ mod tests {
 
     #[test]
     fn test_now_playing_seek_action_clamps_against_the_live_total() {
-        let playback = PlaybackSession::new();
-        let mut library = LibrarySession::new();
+        let playback = PlaybackSession::default();
+        let mut library = LibrarySession::default();
         let transport = crate::mocks::MockTransport::new();
         apply_now_playing_action(
             NowPlayingAction::Seek(std::time::Duration::from_secs_f32(999.0)),
@@ -3726,10 +3725,10 @@ mod background_service_ui_tests {
     use super::*;
     use riff_backend::app::cover_service::Covers;
     use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
-    use riff_backend::app::traits::CoverImage;
     use riff_gui::ui::app::{
         apply_tag_edit_outcome, cache_polled_covers, request_cover_intent, submit_tag_edit_fields,
     };
+    use riff_library::app::traits::CoverImage;
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -4001,18 +4000,23 @@ mod background_service_ui_tests {
     #[test]
     fn test_cache_polled_covers_inserts_textures_and_skips_artless() {
         let ctx = egui::Context::default();
+        // A real 2x2 PNG: cache_polled_covers decodes the port's encoded
+        // bytes on the UI thread before building the texture.
+        let png: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+            image::ImageBuffer::from_pixel(2, 2, image::Rgba([9, 9, 9, 255]));
+        let mut png_bytes = std::io::Cursor::new(Vec::new());
+        png.write_to(&mut png_bytes, image::ImageFormat::Png)
+            .unwrap();
         let image = CoverImage {
-            width: 2,
-            height: 2,
-            rgba: vec![9; 2 * 2 * 4],
+            data: png_bytes.into_inner(),
+            format: image::ImageFormat::Png,
         };
         let covers = CannedCovers(vec![
             (
                 TrackId("/music/art.mp3".to_string()),
                 Some(CoverImage {
-                    width: 2,
-                    height: 2,
-                    rgba: image.rgba.clone(),
+                    data: image.data.clone(),
+                    format: image.format,
                 }),
             ),
             (TrackId("/music/artless.mp3".to_string()), None),

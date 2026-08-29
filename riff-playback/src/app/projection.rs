@@ -7,15 +7,16 @@
 //! frame is served from cache without touching the store. Loader errors
 //! propagate and leave the previous cache untouched — the next call retries.
 
-use crate::domain::PlaybackQueue;
 use crate::app::errors::StoreError;
-use riff_persistence::track::{Track, TrackId};
+use crate::domain::PlaybackQueue;
 use riff_persistence::store::StoreGeneration;
+use riff_persistence::track::{Track, TrackId};
 
 /// The playback slots plus the queue shape they were loaded for.
 #[derive(Clone)]
 struct PlaybackSlots {
-    /// at the window limit)`. Recomputing this cheap stamp per frame detects
+    /// Queue shape the slots were loaded for: the (current index, upcoming
+    /// ids at the window limit) pair. Recomputing this cheap stamp detects
     /// every queue mutation (advance, previous, insert-next, append,
     /// shuffle regeneration) without hooking each mutator.
     stamp: (Option<usize>, Vec<TrackId>),
@@ -43,6 +44,9 @@ pub struct PlaybackProjection {
 /// is stale and `peek` returns `None`.
 struct GenerationCache<K, V> {
     generation: StoreGeneration,
+    /// The generation epoch at which `value` was loaded — staleness is a
+    /// mismatch against a fresh observation of the counter.
+    epoch: u64,
     key: Option<K>,
     value: Option<V>,
 }
@@ -54,6 +58,7 @@ where
 {
     fn new(generation: StoreGeneration) -> Self {
         Self {
+            epoch: generation.current(),
             generation,
             key: None,
             value: None,
@@ -62,15 +67,16 @@ where
 
     /// Get a reference to the cached value if it's still fresh.
     fn peek(&self) -> Option<&V> {
-        if self.generation.current() == self.generation.current() {
+        if self.epoch == self.generation.current() {
             self.value.as_ref()
         } else {
             None
         }
     }
 
-    /// Store a new value at the current generation with the given key.
+    /// Store a new value stamped with the observed generation.
     fn store(&mut self, epoch: u64, key: K, value: V) {
+        self.epoch = epoch;
         self.key = Some(key);
         self.value = Some(value);
     }
@@ -82,7 +88,7 @@ where
 
     /// Check if the cache was loaded at the given epoch.
     fn loaded_at(&self, epoch: u64) -> bool {
-        self.generation.current() == epoch
+        self.epoch == epoch
     }
 }
 
@@ -217,7 +223,6 @@ mod tests {
     use crate::domain::PlaybackQueue;
     use riff_persistence::track::{Track, TrackId, TrackMetadata};
     use std::path::PathBuf;
-    use std::time::SystemTime;
 
     fn make_track(id: &str) -> Track {
         Track {
@@ -277,7 +282,7 @@ mod tests {
         proj.refresh(&queue, 2, &mut loader).unwrap();
 
         // Queue shape changed (track removed)
-        let mut new_queue = PlaybackQueue::new(vec![TrackId("a".into())]);
+        let new_queue = PlaybackQueue::new(vec![TrackId("a".into())]);
         proj.refresh(&new_queue, 2, &mut loader).unwrap();
         assert_eq!(proj.up_next().len(), 0);
     }

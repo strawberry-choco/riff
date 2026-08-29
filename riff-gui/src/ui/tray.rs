@@ -3,16 +3,15 @@
 //! Issue 03 — window visibility is frontend-local. The tray icon does NOT
 //! construct backend playback commands for the "Show Window" / left-click
 //! path: those go over a frontend-only [`window_visibility::VisibilityTx`]
-//! channel that the UI thread drains on every logic tick. Playback commands
-//! (Play/Pause, Next, Previous, Stop) still go through the facade transport
-//! like the mouse and keyboard paths.
+//! channel that the UI thread drains on every logic tick. Playback intents
+//! (Play/Pause, Next, Previous, Stop) go through the facade transport's
+//! [`Transport`] port exactly like the mouse and keyboard paths, so every
+//! tray dispatch is recorded onto the facade's event inbox too.
 
 #[cfg(not(target_os = "linux"))]
 use muda::{Menu, MenuId, MenuItem, PredefinedMenuItem};
 #[cfg(not(target_os = "linux"))]
-use riff_backend::domain::PlaybackCommand;
-#[cfg(not(target_os = "linux"))]
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
 #[cfg(not(target_os = "linux"))]
 use tray_icon::Icon;
 #[cfg(not(target_os = "linux"))]
@@ -20,12 +19,16 @@ use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::ui::window_visibility::{VisibilityMessage, VisibilityTx};
 use riff_backend::app::FacadeTransport;
+use riff_backend::app::MutexExt;
+use riff_backend::app::state::PlaybackSession;
+use riff_backend::app::transport::Transport;
 
 /// Create a system tray icon with playback controls.
 /// On Linux this is a no-op (tray-icon requires GTK which isn't always available).
 #[cfg(not(target_os = "linux"))]
 pub fn create_tray(
     transport: FacadeTransport,
+    playback: Arc<Mutex<PlaybackSession>>,
     quit_flag: Arc<AtomicBool>,
     visibility_tx: VisibilityTx,
 ) -> Result<TrayIcon, Box<dyn std::error::Error>> {
@@ -61,10 +64,6 @@ pub fn create_tray(
     let show_window_id: MenuId = show_window.id().clone();
     let quit_id: MenuId = quit.id().clone();
 
-    // Tray's own channel sender reaches the audio engine through the facade's
-    // inner ChannelTransport.
-    let cmd_tx = transport.inner().cmd_tx().clone();
-
     std::thread::spawn(move || {
         let menu_channel = muda::MenuEvent::receiver();
         let tray_channel = TrayIconEvent::receiver();
@@ -77,22 +76,22 @@ pub fn create_tray(
             if let Ok(event) = menu_channel.recv_timeout(std::time::Duration::from_millis(200)) {
                 let id = event.id;
                 if id == play_pause_id {
-                    transport.record_raw(PlaybackCommand::PlayPause);
-                    let _ = cmd_tx.send(PlaybackCommand::PlayPause);
+                    // Play/pause reads the live playback state (play vs
+                    // resume vs pause), so it holds the playback session
+                    // lock alone — never together with any other lock.
+                    let session = playback.lock_or_recover();
+                    transport.play_pause(&session);
                 } else if id == next_track_id {
-                    transport.record_raw(PlaybackCommand::Next);
-                    let _ = cmd_tx.send(PlaybackCommand::Next);
+                    transport.next();
                 } else if id == prev_track_id {
-                    transport.record_raw(PlaybackCommand::Previous);
-                    let _ = cmd_tx.send(PlaybackCommand::Previous);
+                    transport.previous();
                 } else if id == show_window_id {
                     // Frontend-local: never touches backend state or the audio
                     // engine. Even mid-decode, the UI thread picks this up on
                     // its next logic tick (~200ms while hidden, <16ms visible).
                     let _ = visibility_tx.send(VisibilityMessage(true));
                 } else if id == quit_id {
-                    transport.record_raw(PlaybackCommand::Stop);
-                    let _ = cmd_tx.send(PlaybackCommand::Stop);
+                    transport.stop();
                     quit_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }

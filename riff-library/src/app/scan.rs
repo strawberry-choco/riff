@@ -1,6 +1,6 @@
 //! Scan-side Track construction: drives the [`MetadataReader`] port over
 //! discovered file paths to produce domain [`Track`]s ready for an
-//! [`crate::app::store::LibraryMutationStore`] batch commit.
+//! [`LibraryMutationStore`] batch commit.
 //!
 //! This is app-layer logic on purpose: it orchestrates a port over pure
 //! domain values and owns scan policy (per-file failures never abort a
@@ -9,7 +9,7 @@
 //! lives behind the mutation port.
 
 use crate::app::traits::MetadataReader;
-use crate::domain::{Track, TrackId};
+use riff_persistence::track::{Track, TrackId};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -27,7 +27,7 @@ pub fn build_tracks(paths: Vec<PathBuf>, reader: &dyn MetadataReader) -> Vec<Tra
                     id,
                     file_path: path,
                     metadata,
-                    duration,
+                    duration: Some(duration),
                     sample_rate: Some(audio_format.sample_rate),
                     channels: Some(audio_format.channels),
                     play_count: 0,

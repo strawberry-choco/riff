@@ -1,4 +1,4 @@
-use crate::domain::playback::{RepeatMode};
+use crate::domain::playback::RepeatMode;
 use fastrand::Rng;
 use riff_persistence::track::TrackId;
 use std::collections::VecDeque;
@@ -32,8 +32,10 @@ pub struct PlaybackQueue {
 impl PlaybackQueue {
     /// Create a new queue from the given tracks.
     pub fn new(tracks: Vec<TrackId>) -> Self {
-        let mut q = Self::default();
-        q.tracks = tracks;
+        let mut q = Self {
+            tracks,
+            ..Self::default()
+        };
         if !q.tracks.is_empty() {
             q.current_index = Some(0);
         }
@@ -93,13 +95,13 @@ impl PlaybackQueue {
         if self.shuffle {
             self.touch_shuffle();
         }
-        if let Some(ci) = self.current_index {
-            if ci >= index {
-                if ci == index && self.tracks.is_empty() {
-                    self.current_index = None;
-                } else if ci > 0 {
-                    self.current_index = Some(ci - 1);
-                }
+        if let Some(ci) = self.current_index
+            && ci >= index
+        {
+            if ci == index && self.tracks.is_empty() {
+                self.current_index = None;
+            } else if ci > 0 {
+                self.current_index = Some(ci - 1);
             }
         }
     }
@@ -196,8 +198,7 @@ impl PlaybackQueue {
             }
             self.shuffle_history.last().copied()
         } else {
-            self.current_index
-                .and_then(|i| i.checked_sub(1))
+            self.current_index.and_then(|i| i.checked_sub(1))
         };
 
         if let Some(idx) = prev_idx {
@@ -236,12 +237,10 @@ impl PlaybackQueue {
             return out;
         }
         if self.shuffle {
-            let mut iter = self.shuffled_indices.iter();
-            if let Some(ci) = self.current_index {
-                // Skip the current track in shuffled order
-                iter.next();
-            }
-            for idx in iter.take(count) {
+            // The shuffled order never holds the current track (the builder
+            // pins it outside and `advance` pops as it goes), so every index
+            // maps to an upcoming track.
+            for idx in self.shuffled_indices.iter().take(count) {
                 if let Some(t) = self.tracks.get(*idx) {
                     out.push(t);
                 }

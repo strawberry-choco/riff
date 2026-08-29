@@ -1,7 +1,9 @@
 use crate::app::errors::PlaybackError;
 use crate::app::traits::{AudioDecoder, AudioFormatInfo};
 use riff_playback::domain::{duration_from_frames, frames_from_duration};
-use std::path::Path;
+use riff_playback::infra::ports::AudioDecoder as EngineAudioDecoder;
+use riff_playback::infra::ports::AudioFormatInfo as EngineAudioFormatInfo;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use symphonia::core::audio::AudioSpec;
 use symphonia::core::audio::layouts::CHANNEL_LAYOUT_STEREO;
@@ -20,6 +22,8 @@ pub struct SymphoniaDecoder {
     decoder: Option<Box<dyn symphonia::core::codecs::audio::AudioDecoder>>,
     track_id: u32,
     spec: Option<AudioSpec>,
+    /// The file this decoder was initialized with (empty when closed).
+    source_path: PathBuf,
     duration: Option<Duration>,
     pending_samples: Vec<f32>,
     /// Reusable interleaved-samples scratch for decoded packets. Kept across
@@ -36,6 +40,7 @@ impl SymphoniaDecoder {
             decoder: None,
             track_id: 0,
             spec: None,
+            source_path: PathBuf::new(),
             duration: None,
             pending_samples: Vec::new(),
             scratch: Vec::new(),
@@ -45,6 +50,7 @@ impl SymphoniaDecoder {
 
 impl AudioDecoder for SymphoniaDecoder {
     fn open(&mut self, path: &Path) -> Result<AudioFormatInfo, PlaybackError> {
+        self.source_path = path.to_path_buf();
         let source = std::fs::File::open(path)
             .map_err(|e| PlaybackError::Decode(format!("Failed to open file: {e}")))?;
 
@@ -225,7 +231,50 @@ impl AudioDecoder for SymphoniaDecoder {
         self.decoder = None;
         self.spec = None;
         self.duration = None;
+        self.source_path = PathBuf::new();
         self.pending_samples.clear();
         self.scratch.clear();
+    }
+}
+
+/// The playback engine's decoder port, served over the same symphonia
+/// internals as the richer backend port above. EOF (`Ok(0)` on the backend
+/// port) maps to `None`; a mid-stream decode error also reads as EOF because
+/// the engine's loop has no error arm.
+impl EngineAudioDecoder for SymphoniaDecoder {
+    fn source_path(&self) -> &Path {
+        &self.source_path
+    }
+
+    fn init(
+        &mut self,
+        path: &Path,
+    ) -> Result<EngineAudioFormatInfo, riff_playback::app::errors::PlaybackError> {
+        let info = AudioDecoder::open(self, path)
+            .map_err(|e| riff_playback::app::errors::PlaybackError::Decode(e.to_string()))?;
+        Ok(EngineAudioFormatInfo {
+            sample_rate: info.sample_rate,
+            channels: info.channels,
+        })
+    }
+
+    fn next_frames(&mut self, buf: &mut [f32]) -> Option<usize> {
+        match AudioDecoder::next_frames(self, buf) {
+            Ok(0) => None,
+            Ok(n) => Some(n),
+            Err(e) => {
+                tracing::warn!("Decode error treated as end of stream: {e}");
+                None
+            }
+        }
+    }
+
+    fn seek(&mut self, position: Duration) -> Duration {
+        let _ = AudioDecoder::seek(self, position);
+        position
+    }
+
+    fn duration(&self) -> Option<Duration> {
+        self.duration
     }
 }

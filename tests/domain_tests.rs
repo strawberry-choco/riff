@@ -21,8 +21,8 @@ mod tests {
 
     #[test]
     fn test_app_state_new() {
-        let playback = PlaybackSession::new();
-        let library = LibrarySession::new();
+        let playback = PlaybackSession::default();
+        let library = LibrarySession::default();
         assert_eq!(playback.playback_state, PlaybackState::Stopped);
         assert!(crate::test_utils::float_close(playback.current_volume, 1.0));
         assert!(library.library_paths.is_empty());
@@ -41,16 +41,11 @@ mod tests {
         assert!(queue.advance().is_none());
         assert!(queue.previous().is_none());
 
-        // Test adding tracks
+        // Test adding tracks: the first append makes its track current.
         queue.append(track1.clone());
         queue.append(track2.clone());
 
         assert_eq!(queue.tracks.len(), 2);
-        assert_eq!(queue.current_index, None);
-
-        // Test setting current track (`current_index` is a public field; the
-        // old `set_current_index` helper no longer exists).
-        queue.current_index = Some(0);
         assert_eq!(queue.current_index, Some(0));
         assert_eq!(queue.current_track(), Some(&track1));
 
@@ -58,7 +53,6 @@ mod tests {
         assert_eq!(queue.advance(), Some(&track2));
 
         // Test previous track
-        queue.current_index = Some(1);
         assert_eq!(queue.previous(), Some(&track1));
     }
 
@@ -119,8 +113,9 @@ mod tests {
         assert_eq!(queue.current_track(), Some(&track));
         // Without repeat, there is nowhere to advance to.
         assert!(queue.advance().is_none());
-        // `previous` at the first track stays on it.
-        assert_eq!(queue.previous(), Some(&track));
+        // `previous` at the first track has nowhere to go either; the
+        // position stays.
+        assert!(queue.previous().is_none());
         assert_eq!(queue.current_index, Some(0));
         // Nothing follows the only track.
         assert!(queue.upcoming(3).is_empty());
@@ -133,7 +128,8 @@ mod tests {
             TrackId("b.mp3".to_string()),
         ]);
         assert_eq!(queue.tracks.len(), 2);
-        assert_eq!(queue.current_index, None);
+        // The constructor starts a non-empty queue at its first track.
+        assert_eq!(queue.current_index, Some(0));
         assert!(!queue.shuffle);
         assert_eq!(queue.repeat, RepeatMode::None);
         assert!(queue.shuffled_indices.is_empty());
@@ -152,13 +148,12 @@ mod tests {
         let mut queue = PlaybackQueue::default();
         queue.append(a.clone());
         queue.append(b.clone());
-        // With no current track, `insert_next` inserts at index 0.
+        // The first append made `a` current; `insert_next` inserts after it.
         queue.insert_next(c.clone());
-        assert_eq!(queue.tracks, vec![c.clone(), a.clone(), b.clone()]);
+        assert_eq!(queue.tracks, vec![a.clone(), c.clone(), b.clone()]);
 
-        queue.current_index = Some(0); // current = c
         queue.insert_next(d.clone());
-        assert_eq!(queue.tracks, vec![c, d, a, b]);
+        assert_eq!(queue.tracks, vec![a, d, c, b]);
         // Inserting does not move the current index.
         assert_eq!(queue.current_index, Some(0));
     }
@@ -179,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_current_clears_current() {
+    fn test_remove_current_falls_back_to_previous() {
         let mut queue = PlaybackQueue::new(vec![
             TrackId("a.mp3".to_string()),
             TrackId("b.mp3".to_string()),
@@ -189,8 +184,10 @@ mod tests {
 
         queue.remove(1);
         assert_eq!(queue.tracks.len(), 2);
-        assert_eq!(queue.current_index, None);
-        assert!(queue.current_track().is_none());
+        // Removing the current track keeps the position sensible: it falls
+        // back to the previous track.
+        assert_eq!(queue.current_index, Some(0));
+        assert_eq!(queue.current_track(), Some(&TrackId("a.mp3".to_string())));
     }
 
     #[test]
@@ -303,18 +300,18 @@ mod tests {
         let mut queue = PlaybackQueue::new(vec![a.clone(), TrackId("b.mp3".to_string())]);
         queue.current_index = Some(0);
 
-        assert_eq!(queue.previous(), Some(&a));
+        // `previous` at the first track has nowhere to go; the position
+        // stays put.
+        assert!(queue.previous().is_none());
         assert_eq!(queue.current_index, Some(0));
     }
 
     #[test]
-    fn test_previous_with_no_current_starts_at_first() {
+    fn test_queue_new_starts_at_the_first_track() {
         let a = TrackId("a.mp3".to_string());
-        let mut queue = PlaybackQueue::new(vec![a.clone(), TrackId("b.mp3".to_string())]);
-        assert_eq!(queue.current_index, None);
-
-        assert_eq!(queue.previous(), Some(&a));
+        let queue = PlaybackQueue::new(vec![a.clone(), TrackId("b.mp3".to_string())]);
         assert_eq!(queue.current_index, Some(0));
+        assert_eq!(queue.current_track(), Some(&a));
     }
 
     #[test]
@@ -342,7 +339,11 @@ mod tests {
         queue.current_index = Some(0);
         queue.set_shuffle(true);
         assert!(queue.shuffle);
-        assert_eq!(queue.shuffled_indices.len(), 2); // excludes current
+        // Lazy regeneration: the order builds on the next advance, not on
+        // enabling shuffle.
+        assert!(queue.shuffled_indices.is_empty());
+        assert!(queue.advance().is_some());
+        assert!(!queue.shuffled_indices.is_empty());
 
         queue.set_shuffle(false);
         assert!(!queue.shuffle);
@@ -355,14 +356,17 @@ mod tests {
         let mut queue = PlaybackQueue::new((0..4).map(|i| TrackId(format!("t{i}.mp3"))).collect());
         queue.current_index = Some(2);
         queue.set_shuffle(true);
+        assert!(queue.advance().is_some()); // builds the order, consumes its head
 
-        // Deterministic invariant (order itself is random): the current index
-        // is never queued, every other index appears exactly once.
-        assert_eq!(queue.shuffled_indices.len(), 3);
+        // Deterministic invariant (order itself is random): the current
+        // index at build time (2) is never part of the order, and the
+        // consumed head plus the remaining order cover every other index
+        // exactly once.
         assert!(!queue.shuffled_indices.contains(&2));
-        let mut sorted: Vec<usize> = queue.shuffled_indices.iter().copied().collect();
-        sorted.sort_unstable();
-        assert_eq!(sorted, vec![0, 1, 3]);
+        let mut seen: Vec<usize> = vec![queue.current_index.unwrap()];
+        seen.extend(queue.shuffled_indices.iter().copied());
+        seen.sort_unstable();
+        assert_eq!(seen, vec![0, 1, 3]);
     }
 
     #[test]
@@ -533,8 +537,8 @@ mod tests {
             .collect();
         let mut queue = PlaybackQueue::new(ids.clone());
 
-        // With no current track, upcoming starts at the front.
-        assert_eq!(queue.upcoming(2), vec![&ids[0], &ids[1]]);
+        // `new` starts at the first track, so upcoming follows from there.
+        assert_eq!(queue.upcoming(2), vec![&ids[1], &ids[2]]);
 
         queue.current_index = Some(1);
         assert_eq!(queue.upcoming(2), vec![&ids[2], &ids[3]]);

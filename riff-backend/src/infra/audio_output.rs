@@ -390,6 +390,39 @@ impl AudioOutput for CpalAudioOutput {
     }
 }
 
+/// The playback engine's output port, served over the richer backend port
+/// above: the engine's single `start(format)` maps onto the backend's
+/// `initialize` + `start` pair (which owns the device-default-rate fallback),
+/// and a stalled ring write surfaces as a short-write instead of an error.
+impl riff_playback::infra::ports::AudioOutput for CpalAudioOutput {
+    fn start(
+        &mut self,
+        format: riff_playback::infra::ports::AudioFormatInfo,
+    ) -> Result<(), riff_playback::app::errors::PlaybackError> {
+        AudioOutput::initialize(self, format.sample_rate, format.channels)
+            .map_err(|e| riff_playback::app::errors::PlaybackError::AudioOutput(e.to_string()))?;
+        AudioOutput::start(self)
+            .map_err(|e| riff_playback::app::errors::PlaybackError::AudioOutput(e.to_string()))
+    }
+
+    fn write(&mut self, samples: &[f32]) -> usize {
+        AudioOutput::write_samples(self, samples).unwrap_or(0)
+    }
+
+    fn stop(&mut self) {
+        let _ = AudioOutput::stop(self);
+    }
+
+    fn set_volume(&mut self, volume: f32) {
+        AudioOutput::set_volume(self, volume);
+    }
+
+    fn latency(&self) -> u32 {
+        // Approximate the buffered latency in frames from the ring fill level.
+        u32::try_from(self.buffer_len() / usize::from(self.channels.max(1))).unwrap_or(u32::MAX)
+    }
+}
+
 /// Build a `StreamConfig` that tries to match the requested sample rate and
 /// channels. Falls back to the device's default config when the requested
 /// values are outside the device's supported range (common on Windows WASAPI

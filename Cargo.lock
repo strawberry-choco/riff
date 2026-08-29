@@ -4023,6 +4023,7 @@ dependencies = [
  "lofty",
  "notify",
  "notify-debouncer-full",
+ "riff-library",
  "riff-persistence",
  "riff-playback",
  "ringbuf",
@@ -4068,6 +4069,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "riff-library"
+version = "0.2.0"
+dependencies = [
+ "crossbeam-channel",
+ "fastrand",
+ "image",
+ "lofty",
+ "riff-persistence",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
 name = "riff-persistence"
 version = "0.2.0"
 
@@ -4089,10 +4105,13 @@ dependencies = [
  "crossbeam-channel",
  "egui",
  "egui_kittest",
+ "image",
  "notify",
  "notify-debouncer-full",
  "riff-backend",
  "riff-gui",
+ "riff-library",
+ "riff-playback",
  "rusqlite",
  "symphonia",
  "tempfile",

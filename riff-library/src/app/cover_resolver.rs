@@ -1,6 +1,8 @@
+//! Cover art resolution: embedded first, then filesystem fallback.
+
 use crate::app::errors::LibraryError;
-use crate::app::traits::{CoverImage, CoverLoader, MetadataReader};
-use crate::domain::CoverSource;
+use crate::infra::ports::{CoverImage, CoverLoader, MetadataReader};
+use riff_persistence::track::CoverSource;
 use std::path::Path;
 
 /// Resolves cover art for a track using the priority: embedded > filesystem fallback.
@@ -24,9 +26,6 @@ impl CoverResolver {
         let source = self.metadata_reader.read_cover_source(track_path)?;
 
         match source {
-            // Both embedded and already-located filesystem sources go
-            // straight to the loader; only "no cover" falls back to a
-            // directory scan.
             CoverSource::Embedded(_) | CoverSource::Filesystem(_) => {
                 self.cover_loader.load_cover(&source)
             }

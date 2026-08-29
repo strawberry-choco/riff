@@ -29,8 +29,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-/// One tiny but fully valid PCM WAV (0.1 s mono 8 kHz, 16-bit) — identical
-/// layout to the suite's `write_minimal_wav` fixture helper.
 fn minimal_wav_bytes() -> Vec<u8> {
     const SAMPLES: u32 = 800; // 0.1 s at 8 kHz
     let data_size = SAMPLES * 2; // 16-bit mono
@@ -84,11 +82,11 @@ fn wire_pipeline(
     queries: riff_backend::infra::store::SqliteStore,
     mutations: riff_backend::infra::store::SqliteStore,
     cancel_flag: Arc<AtomicBool>,
-) -> riff_backend::app::scan_service::ScanService {
+) -> riff_library::app::scan_service::ScanService {
     use riff_backend::infra::{AudioFileScanner, LoftyMetadataReader};
 
     let scanner = AudioFileScanner::new(cancel_flag.clone());
-    let (scans, worker) = riff_backend::app::scan_service::ScanService::new(
+    let (scans, worker) = riff_library::app::scan_service::ScanService::new(
         Box::new(LoftyMetadataReader::new()),
         Box::new(queries),
         Box::new(mutations),
@@ -102,11 +100,11 @@ fn wire_pipeline(
 /// Request a scan of `root` and block until its `Complete` outcome lands,
 /// returning the wall-clock duration and the reported file total.
 fn timed_scan(
-    scans: &riff_backend::app::scan_service::ScanService,
+    scans: &riff_library::app::scan_service::ScanService,
     root: &std::path::Path,
     label: &str,
 ) -> (Duration, usize) {
-    use riff_backend::app::scan_service::{ScanOutcome, Scans};
+    use riff_library::app::scan_service::{ScanOutcome, Scans};
 
     let start = Instant::now();
     scans.request(root.to_path_buf());

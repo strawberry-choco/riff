@@ -1302,6 +1302,7 @@ mod tests {
         scan_dir(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("..")
+                .join("crates")
                 .join("riff-gui")
                 .join("src")
                 .join("ui"),

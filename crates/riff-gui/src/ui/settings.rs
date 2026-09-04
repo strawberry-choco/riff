@@ -1215,7 +1215,7 @@ fn pick_folder_ui(
                 } else if !path.is_dir() {
                     *path_error = Some(format!("Not a directory: {}", path.display()));
                 } else {
-                    add_library_path(path, state, store);
+                    add_library_path(path, library, store);
                     *text_input = String::new();
                     *show_input = false;
                     *path_error = None;

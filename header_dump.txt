@@ -1,0 +1,8 @@
+=== C:\Windows\Minidump\090426-18078-01.dmp ===
+  size: 5779836 bytes
+  first 16 hex: 50414745445536340f0000005d580000
+  first 16 ascii: b'PAGEDU64\x0f\x00\x00\x00]X\x00\x00'
+=== C:\Windows\Minidump\082926-17562-01.dmp ===
+  size: 5047480 bytes
+  first 16 hex: 50414745445536340f0000005d580000
+  first 16 ascii: b'PAGEDU64\x0f\x00\x00\x00]X\x00\x00'

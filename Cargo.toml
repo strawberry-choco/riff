@@ -21,12 +21,12 @@
 
 [workspace]
 members = [
-    "riff-persistence",
-    "riff-playback",
-    "riff-library",
-    "riff-infra",
-    "riff-backend",
-    "riff-gui",
+    "crates/riff-persistence",
+    "crates/riff-playback",
+    "crates/riff-library",
+    "crates/riff-infra",
+    "crates/riff-backend",
+    "crates/riff-gui",
     "tests",
 ]
 resolver = "2"

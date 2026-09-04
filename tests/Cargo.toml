@@ -29,11 +29,11 @@ name = "integration"
 path = "mod.rs"
 
 [dependencies]
-riff-backend = { path = "../riff-backend" }
-riff-infra = { path = "../riff-infra" }
-riff-library = { path = "../riff-library" }
-riff-playback = { path = "../riff-playback" }
-riff-gui     = { path = "../riff-gui" }
+riff-backend = { path = "../crates/riff-backend" }
+riff-infra = { path = "../crates/riff-infra" }
+riff-library = { path = "../crates/riff-library" }
+riff-playback = { path = "../crates/riff-playback" }
+riff-gui     = { path = "../crates/riff-gui" }
 
 # Golden-image tests render real egui frames headlessly (kittest + wgpu).
 egui = "0.35"

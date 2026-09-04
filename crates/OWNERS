@@ -1,0 +1,13 @@
+# Guardrails for crates/
+#
+# All backend capability crates live here. To add a new one:
+#
+# 1. Run `cargo init crates/riff-<name>`
+# 2. Add the workspace-relative path to the `members` list in root `Cargo.toml`.
+# 3. Add any path-dependency overrides needed in `tests/Cargo.toml`.
+#
+# The `tests` crate (integration tests) intentionally stays at the workspace root.
+#
+# A CI check (ci/no-solo-crate.sh) rejects workspace crates that live outside
+# this directory or the workspace root, so ad-hoc top-level crate dirs will
+# fail the build.

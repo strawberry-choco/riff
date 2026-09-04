@@ -8,6 +8,7 @@ use riff_gui::ui::RiffApp;
 use riff_gui::ui::window_visibility::spawn_visibility_listener;
 
 fn main() {
+    color_eyre::install().expect("failed to install color_eyre");
     tracing_subscriber::fmt::init();
     let store_path = riff_backend::composition::default_store_path().unwrap_or_else(|e| {
         panic!(

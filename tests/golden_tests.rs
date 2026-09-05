@@ -328,8 +328,7 @@ mod tests {
 
     // --- Sidebar baseline (design-handoff issue 07) ------------------------------
 
-    /// The restructured sidebar at its exact 280px token width: search box
-    /// with focus-ring border, the flat sectioned nav (LIBRARY / SMART LISTS
+    /// The restructured sidebar at its exact 280px token width: the flat sectioned nav (LIBRARY / SMART LISTS
     /// / PLAYLISTS) with right-aligned live counts, playlist rows, and the
     /// Add-folder / last-scan footer. Rendered idle (no hover, nothing
     /// playing) so the snapshot is deterministic; the equalizer animation
@@ -363,11 +362,8 @@ mod tests {
             .resizable(false)
             .frame(egui::Frame::new().inner_margin(egui::Margin::same(12)))
             .show(ui, |ui| {
-                let mut query = String::new();
-                sidebar::search_box(ui, &mut cache, &palette, &mut query);
-                ui.add_space(10.0);
-
                 sidebar::section_header(ui, &palette, "Library");
+
                 for (label, icon, count, selected) in [
                     ("All Tracks", Some(Icon::ListMusic), 128, true),
                     ("Artists", Some(Icon::Library), 23, false),

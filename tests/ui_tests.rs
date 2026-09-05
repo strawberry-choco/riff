@@ -2359,32 +2359,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_search_box_clear_button_clears_the_query() {
-        use egui_kittest::kittest::Queryable;
-
-        let palette = theme::Palette::dark();
-        let mut cache = icons::IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(theme::SIDEBAR_W - 24.0, 40.0))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, query: &mut String| {
-                    sidebar::search_box(ui, &mut cache, &palette, query);
-                },
-                "beethoven".to_string(),
-            );
-        harness.run();
-
-        harness.get_by_label("Clear search").click();
-        harness.run();
-        assert_eq!(
-            harness.state().as_str(),
-            "",
-            "the clear affordance empties the search query"
-        );
-    }
-
     // --- Playlist hover actions drive the existing Store flows -----------------
     //
     // ADR 0002: writes commit to the Store and nothing else — the seam's
@@ -5511,42 +5485,42 @@ mod top_bar_ui_tests {
     }
 
     #[test]
-    fn test_ctrl_k_focuses_global_search_and_ctrl_f_the_sidebar() {
+    fn test_ctrl_k_focuses_global_search() {
         use riff_backend::app::state::PlaybackSession;
         use riff_gui::ui::app::handle_keyboard_shortcuts;
+        use riff_gui::ui::topbar::{TopBarContent, show_top_bar};
 
+        let content = TopBarContent {
+            layout: riff_backend::app::state::BrowserLayout::List,
+        };
+        let palette = riff_gui::ui::theme::Palette::dark();
+        let mut cache = riff_gui::ui::icons::IconCache::new();
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(400.0, 100.0))
+            .with_size(egui::vec2(800.0, riff_gui::ui::theme::TOPBAR_H))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, state| {
-                    // Accumulate the per-frame focus flags: a consumed key
-                    // sets its flag on exactly one frame, and harness.run()
-                    // settles over further no-op frames afterwards.
-                    let mut sidebar_focus = false;
-                    let mut global_focus = false;
+                    let mut actions = Vec::new();
+                    let mut q = String::new();
+                    let _ = show_top_bar(ui, &mut cache, &palette, &mut q, content, &mut actions);
                     handle_keyboard_shortcuts(
                         ui.ctx(),
                         &PlaybackSession::default(),
-                        &mut sidebar_focus,
-                        &mut global_focus,
+                        state,
                         &crate::mocks::MockTransport::new(),
                     );
-                    *state = (state.0 || sidebar_focus, state.1 || global_focus);
                 },
-                (false, false),
+                false,
             );
+        harness
+            .ctx
+            .set_fonts(riff_gui::ui::fonts::font_definitions());
         harness.run();
 
-        // Ctrl+K targets the GLOBAL search field, never the sidebar one.
+        // Ctrl+K targets the global search field.
         harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::K);
         harness.run();
-        assert_eq!(*harness.state(), (false, true));
-
-        // Ctrl+F keeps focusing the sidebar search (preserved behavior).
-        harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::F);
-        harness.run();
-        assert_eq!(*harness.state(), (true, true));
+        assert!(*harness.state());
     }
 
     #[test]

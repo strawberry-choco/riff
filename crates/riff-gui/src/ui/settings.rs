@@ -1574,7 +1574,7 @@ fn modal_header(
     // Close control at the header's right edge, hugging its content.
     let body_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM);
     let label_galley = painter.layout_no_wrap("Back".to_owned(), body_font, palette.ink_2);
-    let btn_w = 16.0 + 8.0 + label_galley.size().x + 12.0;
+    let btn_w = 12.0 + 16.0 + 8.0 + label_galley.size().x + 12.0;
     let btn_rect = egui::Rect::from_min_size(
         egui::pos2(rect.right() - btn_w - 12.0, rect.center().y - 16.0),
         egui::vec2(btn_w, 32.0),

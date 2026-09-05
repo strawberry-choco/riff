@@ -36,10 +36,10 @@ Inside the slices, the layering is preserved as module convention: `domain/` (pu
 
 ## Threading Model
 
-Worker threads are spawned by the Composition Root (`riff-backend/src/composition.rs`):
+Worker threads are spawned by the Composition Root (`crates/riff-backend/src/composition.rs`):
 
 - **Main thread** — egui event loop (`riff-gui`). Must not block.
-- **Audio engine thread** — `AudioEngine::run` (`riff-playback/src/infra/audio_engine.rs`). Reads `PlaybackCommand` from a channel, sends `PlaybackUpdate` back.
+- **Audio engine thread** — `AudioEngine::run` (`crates/riff-playback/src/infra/audio_engine.rs`). Reads `PlaybackCommand` from a channel, sends `PlaybackUpdate` back.
 - **Playback Coordinator thread** — `PlaybackCoordinator::spawn` (`riff-playback`). Applies `PlaybackUpdate`s to the playback session, commits play history, and owns auto-advance; playback failures surface as typed notices through the facade.
 - **Library scan worker thread** — runs the `ScanService` worker (`riff-library`); the scan flow never touches the sessions directly.
 - **Filesystem-event forwarder thread** — forwards `notify` events to the `WatcherManager` (`riff-backend`), which debounces and triggers rescans through the scan service.
@@ -78,13 +78,13 @@ cargo build --release -p riff-gui          # release build (LTO, stripped)
 ## Important Gotchas
 
 - **msrv**: `rust-version = "1.95"` in every crate manifest (edition 2024). CI uses the stable toolchain.
-- **egui pinned to 0.35**: egui 0.36 regressed headless texture rendering — kittest golden snapshots lose all user-loaded textures (`ctx.load_texture` + painter/image widgets paint nothing; text/shapes still render). The app itself renders fine windowed, but goldens would bake in icon-less UI. Revisit when upgrading past 0.35 (check upstream fix status first). See the note in `riff-gui/Cargo.toml`.
+- **egui pinned to 0.35**: egui 0.36 regressed headless texture rendering — kittest golden snapshots lose all user-loaded textures (`ctx.load_texture` + painter/image widgets paint nothing; text/shapes still render). The app itself renders fine windowed, but goldens would bake in icon-less UI. Revisit when upgrading past 0.35 (check upstream fix status first). See the note in `crates/riff-gui/Cargo.toml`.
 - **Release profile**: workspace-level LTO, codegen-units=1, strip=true. `cargo build --release` takes longer but produces smaller binaries.
 - **Audio device**: Falls back to device default sample rate if the track's rate is unsupported (common on Windows WASAPI shared mode at 48 kHz) — reported through the `AudioOutput::effective_sample_rate` port method.
-- **Tests live in `riff-infra/tests/` and `tests/`** — the adapter/store tests live with `riff-infra`; cross-crate integration, UI, and golden tests live in the single workspace-root crate (`tests/mod.rs`, per-suite files are modules of it). App-layer tests drive the port traits via the shared mocks module; store tests run against real SQLite in `tempfile` scratch dirs at the infra seam.
+- **Tests live in `crates/riff-infra/tests/` and `tests/`** — the adapter/store tests live with `riff-infra`; cross-crate integration, UI, and golden tests live in the single workspace-root crate (`tests/mod.rs`, per-suite files are modules of it). App-layer tests drive the port traits via the shared mocks module; store tests run against real SQLite in `tempfile` scratch dirs at the infra seam.
 - **Session state is two structs**: `PlaybackSession` (`riff-playback`) and `LibrarySession` (`riff-backend`), each behind its own `Arc<Mutex<>>`. Plan lock ordering carefully; never hold one session's lock while acquiring the other's. The one cross-slice interaction (a playback failure setting a scan-status message) is a typed notice through the facade, not a state write.
-- **Cover caches**: the decoded-cover LRU (cap 50) lives in the `CoverService` (`riff-library`); the egui texture LRU (max 50 `TextureHandle`s in `cover_textures` with manual LRU eviction in `cover_lru_keys`) lives in `riff-gui/src/ui/app.rs`.
-- **No DI framework** — manual constructor injection in `riff-backend/src/composition.rs` only.
+- **Cover caches**: the decoded-cover LRU (cap 50) lives in the `CoverService` (`riff-library`); the egui texture LRU (max 50 `TextureHandle`s in `cover_textures` with manual LRU eviction in `cover_lru_keys`) lives in `crates/riff-gui/src/ui/app.rs`.
+- **No DI framework** — manual constructor injection in `crates/riff-backend/src/composition.rs` only.
 - **Buffer management**: `SymphoniaDecoder` (`riff-infra`) buffers oversize decoded packets in `pending_samples`. `CpalAudioOutput` uses a lock-free SPSC ring buffer (`ringbuf`) between the producer (decode loop) and the consumer (cpal callback).
 
 ## Config Files

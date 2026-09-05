@@ -70,6 +70,7 @@ mod tests {
         use riff_backend::app::store::LibraryQueryStore;
         use riff_infra::filesystem::AudioFileScanner;
         use riff_infra::store::SqliteStore;
+        use riff_persistence::store::ScanOptions;
         use std::sync::atomic::AtomicBool;
         use std::time::{Duration, Instant};
 
@@ -95,7 +96,7 @@ mod tests {
             Box::new(queries.clone()),
             Box::new(mutations),
             cancel_flag,
-            move |path| scanner.scan(path),
+            move |path| scanner.scan(path, &ScanOptions::default()),
         );
         std::thread::spawn(move || worker.run());
 
@@ -521,6 +522,63 @@ mod composition_root_tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// The Settings Library pane's persisted scan options flow through the
+    /// real composition into the scan pipeline (design-handoff issue 12):
+    /// disabled formats are never indexed, hidden entries are skipped, and
+    /// the completed scan records its summary for the pane's LAST FULL SCAN
+    /// card. No restart, no extra wiring — the pane writes the store, the
+    /// scan worker reads it.
+    #[test]
+    fn test_persisted_scan_options_drive_the_real_scan_pipeline() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let music = dir.path().join("music");
+        let hidden = music.join(".hidden");
+        std::fs::create_dir_all(&hidden).unwrap();
+        write_minimal_wav(&music.join("kept.wav"));
+        write_minimal_wav(&music.join("dropped.mp3"));
+        write_minimal_wav(&hidden.join("buried.wav"));
+
+        let mut rt = AppRuntime::spawn(&db_path).expect("runtime must spawn over a fresh store");
+
+        // The pane's persisted options: index WAV only, keep the historical
+        // skip-hidden default.
+        rt.settings
+            .save_scalars(&riff_backend::app::state::ScalarSettings {
+                scan_formats: vec!["wav".to_string()],
+                ..Default::default()
+            })
+            .expect("saving the scan options must work");
+
+        rt.scans.request(music.clone());
+        poll_until(Duration::from_secs(10), "scan Complete", || {
+            rt.scans.poll().into_iter().any(|outcome| {
+                matches!(outcome, ScanOutcome::Complete { ref path, .. } if path.as_path() == music)
+            })
+            .then_some(())
+        });
+
+        // Only the enabled format inside the walk got indexed; the hidden
+        // directory stayed out.
+        let counts = rt.session_views.sidebar_counts(1);
+        assert_eq!(
+            counts.tracks, 1,
+            "disabled formats and hidden entries are not indexed"
+        );
+
+        // The completed scan's summary is what the pane's LAST FULL SCAN
+        // card renders.
+        let summary = rt
+            .session_views
+            .last_full_scan_summary()
+            .expect("a completed scan records its summary");
+        assert_eq!(
+            summary.files, 1,
+            "the summary counts what the walk discovered"
+        );
+        assert_eq!(summary.errors, 0, "real audio files index cleanly");
     }
 
     #[test]

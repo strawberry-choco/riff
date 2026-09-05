@@ -33,6 +33,12 @@ pub trait Covers: Send {
     fn poll(&self) -> Vec<(TrackId, Option<CoverImage>)>;
 }
 
+/// Whether embedded artwork may be read, answered fresh for every
+/// resolution so the Settings Library pane's "Read embedded artwork"
+/// toggle applies immediately (design-handoff issue 12). The composition
+/// root binds the Application Store's scalar settings behind this closure.
+pub type CoverPolicy = Box<dyn Fn() -> bool + Send>;
+
 /// Front-end of the Cover Service.
 pub struct CoverService {
     request_tx: Sender<(TrackId, PathBuf)>,
@@ -44,6 +50,7 @@ impl CoverService {
     pub fn new(
         metadata_reader: Box<dyn MetadataReader>,
         cover_loader: Box<dyn CoverLoader>,
+        policy: CoverPolicy,
     ) -> (Self, CoverWorker) {
         let (request_tx, request_rx) = unbounded();
         let (result_tx, result_rx) = unbounded();
@@ -56,6 +63,7 @@ impl CoverService {
                 request_rx,
                 result_tx,
                 resolver: CoverResolver::new(metadata_reader, cover_loader),
+                policy,
                 backlog: VecDeque::new(),
                 pending: HashSet::new(),
                 negative: Vec::new(),
@@ -83,6 +91,8 @@ pub struct CoverWorker {
     request_rx: Receiver<(TrackId, PathBuf)>,
     result_tx: Sender<(TrackId, Option<CoverImage>)>,
     resolver: CoverResolver,
+    /// The read-embedded-artwork policy, evaluated fresh per resolution.
+    policy: CoverPolicy,
     backlog: VecDeque<(TrackId, PathBuf)>,
     pending: HashSet<TrackId>,
     negative: Vec<TrackId>,
@@ -91,7 +101,8 @@ pub struct CoverWorker {
 impl CoverWorker {
     pub fn run(mut self) {
         while let Some((track_id, path)) = self.next_accepted() {
-            let result = match self.resolver.resolve(&path) {
+            let read_embedded = (self.policy)();
+            let result = match self.resolver.resolve(&path, read_embedded) {
                 Ok(resolved) => resolved,
                 Err(e) => {
                     tracing::warn!("Cover resolution failed for {:?}: {}", path, e);

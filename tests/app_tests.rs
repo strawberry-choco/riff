@@ -5,7 +5,7 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::CoverSource;
+    use crate::domain::{CoverSource, GenreCount};
     use riff_backend::app::errors::StoreError;
     use riff_backend::app::playlist_manager;
     use riff_backend::app::traits::{MetadataWriter, TagEdit};
@@ -501,7 +501,7 @@ mod tests {
         assert!(!missing.exists());
 
         let scanner = AudioFileScanner::new(Arc::new(AtomicBool::new(false)));
-        assert!(scanner.scan(&missing).is_empty());
+        assert!(scanner.scan(&missing, &ScanOptions::default()).is_empty());
     }
     // --- metadata writing with a mock MetadataWriter --------------------------------
 
@@ -636,7 +636,7 @@ mod tests {
     // `StoreGeneration` handle plays the mutation adapter's bumps.
 
     use crate::mocks::{LibraryQueryCall, MockLibraryQueryStore};
-    use riff_backend::app::store::{LibraryQueryStore, StoreGeneration};
+    use riff_backend::app::store::{LibraryQueryStore, PlaylistStore, StoreGeneration};
     use riff_backend::app::views::SessionViews;
 
     /// Deterministic fixture row for a window slot.
@@ -667,6 +667,10 @@ mod tests {
 
         fn track_count(&self) -> Result<usize, StoreError> {
             self.0.lock().unwrap().track_count()
+        }
+
+        fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
+            self.0.lock().unwrap().library_counts()
         }
 
         fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
@@ -731,6 +735,16 @@ mod tests {
             self.0.lock().unwrap().tracks_in_folder(folder)
         }
 
+        fn folder_track_count(&self, folder: &std::path::Path) -> Result<usize, StoreError> {
+            self.0.lock().unwrap().folder_track_count(folder)
+        }
+
+        fn last_full_scan(
+            &self,
+        ) -> Result<Option<riff_backend::app::store::FullScanSummary>, StoreError> {
+            self.0.lock().unwrap().last_full_scan()
+        }
+
         fn subdirs_with_audio(&self, folder: &std::path::Path) -> Result<Vec<PathBuf>, StoreError> {
             self.0.lock().unwrap().subdirs_with_audio(folder)
         }
@@ -741,6 +755,38 @@ mod tests {
             limit: usize,
         ) -> Result<Vec<Track>, StoreError> {
             self.0.lock().unwrap().smart_playlist(kind, limit)
+        }
+
+        fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
+            self.0.lock().unwrap().smart_list_counts()
+        }
+
+        fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
+            self.0.lock().unwrap().genre_counts()
+        }
+
+        fn artists_in_genre(&self, genre: &str) -> Result<Vec<Artist>, StoreError> {
+            self.0.lock().unwrap().artists_in_genre(genre)
+        }
+
+        fn artist_albums_in_genre(
+            &self,
+            artist: &str,
+            genre: &str,
+        ) -> Result<Vec<Album>, StoreError> {
+            self.0.lock().unwrap().artist_albums_in_genre(artist, genre)
+        }
+
+        fn album_tracks_in_genre(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+            genre: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .album_tracks_in_genre(album_artist, album_title, genre)
         }
     }
 
@@ -985,6 +1031,119 @@ mod tests {
         );
     }
 
+    // --- Genre views: aggregation + genre-filtered browsing levels -----------
+
+    #[test]
+    fn test_genre_counts_view_fetches_once_per_generation_and_serves_the_cache() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            genre_counts: vec![
+                GenreCount {
+                    genre: "Jazz".to_string(),
+                    tracks: 1,
+                },
+                GenreCount {
+                    genre: "Rock".to_string(),
+                    tracks: 2,
+                },
+            ],
+            ..Default::default()
+        });
+
+        // Two frames at the same generation: the second serves the cache.
+        assert_eq!(views.genres()[0].genre, "Jazz");
+        assert_eq!(views.genres().len(), 2, "the sidebar's total-genres count");
+        assert_eq!(views.genres()[1].tracks, 2);
+
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::GenreCounts),
+            1,
+            "genre counts fetch once per generation"
+        );
+    }
+
+    #[test]
+    fn test_genre_views_refetch_after_a_generation_bump() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            genre_counts: vec![GenreCount {
+                genre: "Jazz".to_string(),
+                tracks: 1,
+            }],
+            ..Default::default()
+        });
+        let _ = views.genres();
+
+        // A committed mutation bumps the generation: the stale rows drop and
+        // the next frame refetches.
+        generation.bump();
+        let _ = views.genres();
+
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::GenreCounts),
+            2,
+            "a generation bump drops the cached genre rows"
+        );
+    }
+
+    #[test]
+    fn test_genre_filtered_browsing_views_fetch_each_level_once_per_generation() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            genre_artists: vec![Artist {
+                name: "Alpha".to_string(),
+                albums: vec!["Alpha - One".to_string()],
+            }],
+            genre_albums: vec![Album {
+                title: "One".to_string(),
+                artist: "Alpha".to_string(),
+                tracks: vec![TrackId("f:\\a\\1.mp3".to_string())],
+                year: Some(1999),
+                genre: Some("Rock".to_string()),
+            }],
+            genre_album_tracks: vec![crate::test_utils::create_test_track_with_metadata(
+                "f:\\a\\1.mp3",
+                "f:\\a\\1.mp3",
+                "Alpha",
+                "One",
+                "Song",
+            )],
+            ..Default::default()
+        });
+
+        // Every genre-filtered level queried twice at the same generation
+        // serves the cache.
+        assert_eq!(views.artists_in_genre("Rock")[0].name, "Alpha");
+        assert_eq!(views.artists_in_genre("Rock").len(), 1);
+        assert_eq!(
+            views.artist_albums_in_genre("Alpha", "Rock")[0].title,
+            "One"
+        );
+        assert_eq!(views.artist_albums_in_genre("Alpha", "Rock").len(), 1);
+        assert_eq!(views.album_tracks_in_genre("Alpha", "One", "Rock").len(), 1);
+        assert_eq!(views.album_tracks_in_genre("Alpha", "One", "Rock").len(), 1);
+
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::ArtistsInGenre("Rock".to_string())),
+            1,
+            "genre-filtered artists fetch once per generation"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::ArtistAlbumsInGenre(
+                "Alpha".to_string(),
+                "Rock".to_string()
+            )),
+            1,
+            "one artist's genre-filtered albums fetch once per generation"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::AlbumTracksInGenre(
+                "Alpha".to_string(),
+                "One".to_string(),
+                "Rock".to_string()
+            )),
+            1,
+            "one album's genre-filtered tracks fetch once per generation"
+        );
+    }
+
     // --- Folder views: five folder query shapes over store queries -----------
 
     #[test]
@@ -1066,6 +1225,378 @@ mod tests {
                 LibraryQueryCall::SmartPlaylist(SmartPlaylistKind::MostPlayed, 100),
             ],
             "bumps and limit growth refetch; equal limits do not"
+        );
+    }
+
+    #[test]
+    fn test_recently_played_list_refreshes_on_generation_like_other_smart_lists() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            smart: vec![
+                crate::test_utils::create_test_track("f:\\rp\\newest.mp3", "f:\\rp\\newest.mp3"),
+                crate::test_utils::create_test_track("f:\\rp\\older.mp3", "f:\\rp\\older.mp3"),
+            ],
+            ..Default::default()
+        });
+
+        // The list serves the store rows in store order (newest-played
+        // first, already bounded by the store).
+        let first = views.smart_list(SmartPlaylistKind::RecentlyPlayed, 50);
+        assert_eq!(
+            first.iter().map(|t| t.id.0.as_str()).collect::<Vec<_>>(),
+            ["f:\\rp\\newest.mp3", "f:\\rp\\older.mp3"],
+            "store ordering passes through untouched"
+        );
+
+        // Repeat frames within a generation are served from cache; a
+        // committed mutation bumps the generation: refetch.
+        generation.bump();
+        let _ = views.smart_list(SmartPlaylistKind::RecentlyPlayed, 50);
+
+        // A larger limit than the cache holds also refetches even when
+        // fresh, and the requested limit reaches the store verbatim.
+        let _ = views.smart_list(SmartPlaylistKind::RecentlyPlayed, 100);
+
+        assert_eq!(
+            mock.calls(),
+            vec![
+                LibraryQueryCall::SmartPlaylist(SmartPlaylistKind::RecentlyPlayed, 50),
+                LibraryQueryCall::SmartPlaylist(SmartPlaylistKind::RecentlyPlayed, 50),
+                LibraryQueryCall::SmartPlaylist(SmartPlaylistKind::RecentlyPlayed, 100),
+            ],
+            "bumps and limit growth refetch; equal limits do not"
+        );
+    }
+
+    // --- Sidebar counts: one read model for every sidebar row -----------------
+    //
+    // One aggregate read model serves every count the sidebar renders (and
+    // the per-folder counts the Settings pane adds). Library-side counts
+    // cache per Library generation; playlist counts ride the playlist
+    // generation; folder roots arrive from the caller (the UI holds them).
+
+    /// Shared [`PlaylistStore`] fake over a mutex-guarded playlist list, so
+    /// a test can mutate the Playlists section behind the facade's back and
+    /// invalidate via the playlist generation.
+    struct SharedPlaylists(Arc<Mutex<Vec<Playlist>>>);
+
+    impl PlaylistStore for SharedPlaylists {
+        fn load_playlists(&self) -> Result<Vec<Playlist>, StoreError> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+
+        fn load_playlist_entries(
+            &self,
+            _id: &PlaylistId,
+        ) -> Result<Vec<riff_backend::app::store::PlaylistEntry>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn create_playlist(
+            &mut self,
+            _name: &str,
+            _initial_tracks: &[TrackId],
+        ) -> Result<PlaylistId, StoreError> {
+            Ok(PlaylistId("mock".to_string()))
+        }
+
+        fn rename_playlist(
+            &mut self,
+            _id: &PlaylistId,
+            _new_name: &str,
+        ) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        fn delete_playlist(&mut self, _id: &PlaylistId) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        fn add_playlist_entry(
+            &mut self,
+            _id: &PlaylistId,
+            _track: &TrackId,
+        ) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        fn remove_playlist_entries(
+            &mut self,
+            _id: &PlaylistId,
+            _track: &TrackId,
+        ) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        fn reorder_playlist_entries(
+            &mut self,
+            _id: &PlaylistId,
+            _ordered: &[TrackId],
+        ) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+    }
+
+    /// Wire a `SessionViews` facade over the given Library mock and an
+    /// explicit Playlists section (a shared, mutex-guarded playlist list so
+    /// a test can mutate it behind the facade's back), returning both
+    /// session generations so a test can bump either independently.
+    fn wire_with_playlists(
+        mock: MockLibraryQueryStore,
+        playlists: Arc<Mutex<Vec<Playlist>>>,
+    ) -> (SessionViews, MockHandle, StoreGeneration, StoreGeneration) {
+        let mock = Arc::new(Mutex::new(mock));
+        let generation = StoreGeneration::new();
+        let playlist_generation = StoreGeneration::new();
+        let views = SessionViews::new(
+            Box::new(SharedMock(Arc::clone(&mock))),
+            Box::new(SharedPlaylists(playlists)),
+            generation.clone(),
+            playlist_generation.clone(),
+        );
+        (views, MockHandle(mock), generation, playlist_generation)
+    }
+
+    #[test]
+    fn test_sidebar_counts_answers_every_count_the_sidebar_needs() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            library_counts: riff_backend::app::store::LibraryCounts {
+                tracks: 42,
+                artists: 7,
+                albums: 12,
+                genres: 5,
+            },
+            smart_list_counts: vec![
+                (SmartPlaylistKind::Favorites, 3),
+                (SmartPlaylistKind::RecentlyAdded, 10),
+                (SmartPlaylistKind::MostPlayed, 8),
+                (SmartPlaylistKind::RecentlyPlayed, 6),
+                (SmartPlaylistKind::NeverPlayed, 4),
+                (SmartPlaylistKind::LostGems, 2),
+            ],
+            ..Default::default()
+        });
+
+        let counts = views.sidebar_counts(2);
+
+        assert_eq!(counts.tracks, 42);
+        assert_eq!(counts.artists, 7);
+        assert_eq!(counts.albums, 12);
+        assert_eq!(counts.genres, 5);
+        assert_eq!(
+            counts.folder_roots, 2,
+            "the folder-roots count passes through from the caller"
+        );
+        assert_eq!(
+            counts.smart_lists.to_vec(),
+            vec![
+                (SmartPlaylistKind::Favorites, 3),
+                (SmartPlaylistKind::RecentlyAdded, 10),
+                (SmartPlaylistKind::MostPlayed, 8),
+                (SmartPlaylistKind::RecentlyPlayed, 6),
+                (SmartPlaylistKind::NeverPlayed, 4),
+                (SmartPlaylistKind::LostGems, 2),
+            ]
+        );
+        assert!(
+            counts.playlists.is_empty(),
+            "no playlists are registered in this fixture"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::LibraryCounts),
+            1,
+            "the whole library side costs ONE counts query"
+        );
+    }
+
+    #[test]
+    fn test_sidebar_counts_refetch_after_a_generation_bump() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            library_counts: riff_backend::app::store::LibraryCounts {
+                tracks: 42,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        assert_eq!(views.sidebar_counts(0).tracks, 42);
+        generation.bump();
+        {
+            let mut mock = mock.lock();
+            mock.library_counts.tracks = 50;
+        }
+        assert_eq!(
+            views.sidebar_counts(0).tracks,
+            50,
+            "a committed mutation drops the cached counts"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::LibraryCounts),
+            2,
+            "the invalidated frame refetched the counts"
+        );
+    }
+
+    #[test]
+    fn test_sidebar_counts_serve_the_cache_while_fresh() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            library_counts: riff_backend::app::store::LibraryCounts {
+                tracks: 42,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        views.sidebar_counts(1);
+        views.sidebar_counts(1);
+        views.sidebar_counts(1);
+
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::LibraryCounts),
+            1,
+            "fresh frames serve the cached counts"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::SmartListCounts),
+            1,
+            "smart-list counts fetch once per generation"
+        );
+    }
+
+    #[test]
+    fn test_sidebar_counts_carry_per_playlist_sizes() {
+        let playlist_a = Playlist {
+            id: PlaylistId("alpha-mix".to_string()),
+            name: "Alpha Mix".to_string(),
+            tracks: vec![
+                TrackId("f:\\a\\1.mp3".to_string()),
+                TrackId("f:\\a\\2.mp3".to_string()),
+            ],
+            created: None,
+        };
+        let playlist_b = Playlist {
+            id: PlaylistId("beta-mix".to_string()),
+            name: "Beta Mix".to_string(),
+            tracks: vec![TrackId("f:\\b\\1.mp3".to_string())],
+            created: None,
+        };
+        let playlists = Arc::new(Mutex::new(vec![playlist_a, playlist_b]));
+        let (mut views, mock, _library_gen, playlist_generation) =
+            wire_with_playlists(MockLibraryQueryStore::default(), Arc::clone(&playlists));
+
+        let counts = views.sidebar_counts(0);
+        assert_eq!(
+            counts
+                .playlists
+                .iter()
+                .map(|(id, size)| (id.clone(), *size))
+                .collect::<Vec<_>>(),
+            vec![
+                (PlaylistId("alpha-mix".to_string()), 2),
+                (PlaylistId("beta-mix".to_string()), 1),
+            ],
+            "per-playlist counts ride the playlists read model, in creation order"
+        );
+
+        // Adding a track to a playlist bumps the PLAYLIST generation: the
+        // sizes refresh without a library-side refetch.
+        playlists.lock().unwrap()[0]
+            .tracks
+            .push(TrackId("f:\\a\\3.mp3".to_string()));
+        playlist_generation.bump();
+        let counts = views.sidebar_counts(0);
+        assert_eq!(
+            counts.playlists[0].1, 3,
+            "the playlist count followed the edit"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::LibraryCounts),
+            1,
+            "a playlist edit does not refetch the library counts"
+        );
+    }
+
+    #[test]
+    fn test_folder_track_count_reads_through_the_store_once_per_generation() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            folder_track_counts: HashMap::from([(PathBuf::from("f:\\music"), 12)]),
+            ..Default::default()
+        });
+
+        assert_eq!(views.folder_track_count(Path::new("f:\\music")), 12);
+        assert_eq!(
+            views.folder_track_count(Path::new("f:\\music")),
+            12,
+            "a fresh frame serves the cached count"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::FolderTrackCount(PathBuf::from(
+                "f:\\music"
+            ))),
+            1,
+            "the per-folder count costs one query per generation"
+        );
+
+        generation.bump();
+        assert_eq!(
+            views.folder_track_count(Path::new("f:\\music")),
+            12,
+            "the invalidated frame refetches"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::FolderTrackCount(PathBuf::from(
+                "f:\\music"
+            ))),
+            2
+        );
+    }
+
+    #[test]
+    fn test_folder_track_count_answers_zero_for_an_unknown_folder() {
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore::default());
+        assert_eq!(
+            views.folder_track_count(Path::new("f:\\nowhere")),
+            0,
+            "a folder the store knows nothing about counts nothing"
+        );
+    }
+
+    #[test]
+    fn test_last_scan_reads_through_the_store_and_refreshes_per_generation() {
+        let first = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            last_full_scan: Some(first),
+            ..Default::default()
+        });
+
+        assert_eq!(views.last_scan(), Some(first));
+        assert_eq!(views.last_scan(), Some(first), "fresh frames stay cached");
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::LastFullScan),
+            1,
+            "one store read per generation"
+        );
+
+        // A recorded scan bumps the generation and stamps a later time.
+        let second = first + Duration::from_secs(60);
+        {
+            let mut mock = mock.lock();
+            mock.last_full_scan = Some(second);
+        }
+        generation.bump();
+        assert_eq!(
+            views.last_scan(),
+            Some(second),
+            "the invalidated frame reads the new stamp"
+        );
+    }
+
+    #[test]
+    fn test_last_scan_answers_none_before_any_scan_completes() {
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore::default());
+        assert_eq!(
+            views.last_scan(),
+            None,
+            "a store that has never scanned answers no timestamp"
         );
     }
 
@@ -1334,6 +1865,7 @@ mod scan_service_tests {
     use riff_backend::app::scan_service::{ScanOutcome, ScanService, Scans};
     use riff_backend::app::store::{LibraryMutationStore, LibraryQueryStore};
     use riff_backend::domain::CoverSource;
+    use riff_backend::domain::GenreCount;
     use riff_infra::store::SqliteStore;
     use riff_library::app::errors::LibraryError;
     use riff_library::app::traits::{AudioFormatInfo, MetadataReader};
@@ -1478,7 +2010,7 @@ mod scan_service_tests {
     /// blocking worker on its own thread, exactly like the composition root
     /// (ADR 0006). The walk closure binds a real [`AudioFileScanner`] to the
     /// same cancel flag the service cancels through.
-    fn spawn_service(reader: FixtureReader, scratch: &ScratchStore) -> ScanService {
+    fn spawn_service(reader: impl MetadataReader + 'static, scratch: &ScratchStore) -> ScanService {
         let cancel_flag = std::sync::Arc::new(AtomicBool::new(false));
         let scanner = AudioFileScanner::new(cancel_flag.clone());
         let (service, worker) = ScanService::new(
@@ -1486,7 +2018,7 @@ mod scan_service_tests {
             Box::new(scratch.queries.clone()),
             Box::new(scratch.mutations.clone()),
             cancel_flag,
-            move |path| scanner.scan(path),
+            move |path| scanner.scan(path, &ScanOptions::default()),
         );
         std::thread::spawn(move || worker.run());
         service
@@ -1536,6 +2068,10 @@ mod scan_service_tests {
 
         fn track_count(&self) -> Result<usize, StoreError> {
             Ok(0)
+        }
+
+        fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
+            Ok(riff_backend::app::store::LibraryCounts::default())
         }
 
         fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
@@ -1591,6 +2127,16 @@ mod scan_service_tests {
             Ok(Vec::new())
         }
 
+        fn folder_track_count(&self, _folder: &Path) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn last_full_scan(
+            &self,
+        ) -> Result<Option<riff_backend::app::store::FullScanSummary>, StoreError> {
+            Ok(None)
+        }
+
         fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, StoreError> {
             Ok(Vec::new())
         }
@@ -1599,6 +2145,37 @@ mod scan_service_tests {
             &self,
             _kind: crate::domain::SmartPlaylistKind,
             _limit: usize,
+        ) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn smart_list_counts(
+            &self,
+        ) -> Result<Vec<(crate::domain::SmartPlaylistKind, usize)>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn artists_in_genre(&self, _genre: &str) -> Result<Vec<Artist>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn artist_albums_in_genre(
+            &self,
+            _artist: &str,
+            _genre: &str,
+        ) -> Result<Vec<Album>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn album_tracks_in_genre(
+            &self,
+            _album_artist: &str,
+            _album_title: &str,
+            _genre: &str,
         ) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
@@ -1623,6 +2200,14 @@ mod scan_service_tests {
             Ok(false)
         }
 
+        fn set_track_favorite(
+            &mut self,
+            _id: &TrackId,
+            _favorite: bool,
+        ) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
         fn apply_tag_refresh(&mut self, _track: &Track) -> Result<(), StoreError> {
             Ok(())
         }
@@ -1633,6 +2218,13 @@ mod scan_service_tests {
 
         fn clear_library(&mut self) -> Result<usize, StoreError> {
             Ok(0)
+        }
+
+        fn record_full_scan_completed(
+            &mut self,
+            _summary: riff_backend::app::store::FullScanSummary,
+        ) -> Result<(), StoreError> {
+            Ok(())
         }
     }
 
@@ -1717,7 +2309,7 @@ mod scan_service_tests {
             Box::new(FailingFreshnessQueries),
             Box::new(scratch.mutations.clone()),
             cancel_flag,
-            move |path| scanner.scan(path),
+            move |path| scanner.scan(path, &ScanOptions::default()),
         );
         std::thread::spawn(move || worker.run());
 
@@ -1819,7 +2411,7 @@ mod scan_service_tests {
             Box::new(FailingFreshnessQueries),
             Box::new(FailingCommitMutations),
             cancel_flag,
-            move |path| scanner.scan(path),
+            move |path| scanner.scan(path, &ScanOptions::default()),
         );
         std::thread::spawn(move || worker.run());
 
@@ -1845,6 +2437,151 @@ mod scan_service_tests {
                 .iter()
                 .any(|o| matches!(o, ScanOutcome::Complete { .. })),
             "a scan whose commit failed must not report Complete: {outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn test_completed_scan_records_the_last_scan_timestamp() {
+        let scratch = ScratchStore::new();
+        assert!(
+            scratch.queries.last_full_scan().unwrap().is_none(),
+            "a fresh store has no last-scan timestamp"
+        );
+
+        let (_dir, root) = seed_audio_dir("stamped", 3);
+        let scans = spawn_service(FixtureReader::open(), &scratch);
+        scans.request(root.clone());
+        poll_until_complete(&scans, &root);
+
+        let summary = scratch
+            .queries
+            .last_full_scan()
+            .expect("the last-scan read must not fail")
+            .expect("a completed scan records the last-scan timestamp");
+        assert!(
+            summary.at.elapsed().unwrap() < Duration::from_secs(10),
+            "the recorded stamp is the scan that just finished: {summary:?}"
+        );
+        assert_eq!(
+            summary.files, 3,
+            "the summary counts the files the scan discovered"
+        );
+    }
+
+    /// A reader whose metadata reads fail for files whose stem starts with
+    /// `fail_prefix` — the unreadable-file injection for the error-count
+    /// tests.
+    struct PartiallyFailingReader {
+        fail_prefix: &'static str,
+    }
+
+    impl MetadataReader for PartiallyFailingReader {
+        fn read_cover_source(&self, _path: &Path) -> Result<CoverSource, LibraryError> {
+            Ok(CoverSource::None)
+        }
+
+        fn read_all(
+            &self,
+            path: &Path,
+        ) -> Result<(TrackMetadata, Duration, CoverSource, AudioFormatInfo), LibraryError> {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if stem.starts_with(self.fail_prefix) {
+                return Err(LibraryError::MetadataRead(format!("unreadable: {stem}")));
+            }
+            let metadata = TrackMetadata {
+                title: Some(stem.to_string()),
+                ..TrackMetadata::default()
+            };
+            Ok((
+                metadata,
+                Duration::from_secs(180),
+                CoverSource::None,
+                AudioFormatInfo {
+                    sample_rate: 44100,
+                    channels: 2,
+                },
+            ))
+        }
+    }
+
+    #[test]
+    fn test_completed_scan_counts_unreadable_files_as_errors() {
+        let scratch = ScratchStore::new();
+
+        // Four discoverable files, two of whose metadata reads fail.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("errors");
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["good_1.mp3", "good_2.mp3", "bad_1.mp3", "bad_2.mp3"] {
+            std::fs::write(root.join(name), b"content irrelevant").unwrap();
+        }
+
+        let scans = spawn_service(
+            PartiallyFailingReader {
+                fail_prefix: "bad_",
+            },
+            &scratch,
+        );
+        scans.request(root.clone());
+        poll_until_complete(&scans, &root);
+
+        let summary = scratch
+            .queries
+            .last_full_scan()
+            .expect("the last-scan read must not fail")
+            .expect("a completed scan records its summary");
+        assert_eq!(
+            summary.files, 4,
+            "the file count is what the walk discovered, failures included"
+        );
+        assert_eq!(
+            summary.errors, 2,
+            "the files that could not be indexed are the error count"
+        );
+        assert_eq!(
+            scratch.track_count(),
+            2,
+            "only the readable files are committed"
+        );
+    }
+
+    #[test]
+    fn test_cancelled_scan_never_records_the_last_scan_timestamp() {
+        let scratch = ScratchStore::new();
+        let (_dir, root) = seed_audio_dir("cancel-stamp", 25);
+        // Freeze the worker inside the SECOND batch (see the cancel test
+        // above), then cancel before any Complete can publish.
+        let (reader, gate) = FixtureReader::gated_after(10);
+        let scans = spawn_service(reader, &scratch);
+
+        scans.request(root.clone());
+        poll_until(&scans, |outcomes| {
+            outcomes.iter().any(|o| {
+                matches!(
+                    o,
+                    ScanOutcome::Progress {
+                        files_found: 10,
+                        ..
+                    }
+                )
+            })
+        });
+        scans.cancel();
+        gate.store(true, Ordering::SeqCst);
+
+        // Quiesce.
+        let start = Instant::now();
+        while scans.is_scanning(&root) && start.elapsed() < TIMEOUT {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        assert_eq!(
+            scratch.queries.last_full_scan().unwrap(),
+            None,
+            "a cancelled scan never counts as the last full scan"
         );
     }
 }
@@ -2087,6 +2824,13 @@ mod audio_engine_tests {
             Ok(self.tracks.len())
         }
 
+        fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
+            Ok(riff_backend::app::store::LibraryCounts {
+                tracks: self.tracks.len(),
+                ..riff_backend::app::store::LibraryCounts::default()
+            })
+        }
+
         fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
             let mut ids: Vec<TrackId> = self.tracks.keys().cloned().collect();
             ids.sort_by(|a, b| a.0.cmp(&b.0));
@@ -2142,6 +2886,16 @@ mod audio_engine_tests {
             Ok(Vec::new())
         }
 
+        fn folder_track_count(&self, _folder: &Path) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn last_full_scan(
+            &self,
+        ) -> Result<Option<riff_backend::app::store::FullScanSummary>, StoreError> {
+            Ok(None)
+        }
+
         fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, StoreError> {
             Ok(Vec::new())
         }
@@ -2150,6 +2904,35 @@ mod audio_engine_tests {
             &self,
             _kind: SmartPlaylistKind,
             _limit: usize,
+        ) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn genre_counts(&self) -> Result<Vec<crate::domain::GenreCount>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn artists_in_genre(&self, _genre: &str) -> Result<Vec<Artist>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn artist_albums_in_genre(
+            &self,
+            _artist: &str,
+            _genre: &str,
+        ) -> Result<Vec<Album>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn album_tracks_in_genre(
+            &self,
+            _album_artist: &str,
+            _album_title: &str,
+            _genre: &str,
         ) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
@@ -2768,6 +3551,10 @@ mod tag_edit_service_tests {
             Ok(0)
         }
 
+        fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
+            Ok(riff_backend::app::store::LibraryCounts::default())
+        }
+
         fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
             Ok(Vec::new())
         }
@@ -2821,6 +3608,16 @@ mod tag_edit_service_tests {
             Ok(Vec::new())
         }
 
+        fn folder_track_count(&self, _folder: &Path) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn last_full_scan(
+            &self,
+        ) -> Result<Option<riff_backend::app::store::FullScanSummary>, StoreError> {
+            Ok(None)
+        }
+
         fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, StoreError> {
             Ok(Vec::new())
         }
@@ -2829,6 +3626,35 @@ mod tag_edit_service_tests {
             &self,
             _kind: SmartPlaylistKind,
             _limit: usize,
+        ) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn genre_counts(&self) -> Result<Vec<crate::domain::GenreCount>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn artists_in_genre(&self, _genre: &str) -> Result<Vec<Artist>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn artist_albums_in_genre(
+            &self,
+            _artist: &str,
+            _genre: &str,
+        ) -> Result<Vec<Album>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn album_tracks_in_genre(
+            &self,
+            _album_artist: &str,
+            _album_title: &str,
+            _genre: &str,
         ) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
@@ -2853,8 +3679,19 @@ mod tag_edit_service_tests {
             self.0.lock().unwrap().record_track_played(id, played_at)
         }
 
+        fn record_full_scan_completed(
+            &mut self,
+            _summary: riff_backend::app::store::FullScanSummary,
+        ) -> Result<(), StoreError> {
+            Ok(())
+        }
+
         fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), StoreError> {
             self.0.lock().unwrap().apply_tag_refresh(track)
+        }
+
+        fn set_track_favorite(&mut self, id: &TrackId, favorite: bool) -> Result<bool, StoreError> {
+            self.0.lock().unwrap().set_track_favorite(id, favorite)
         }
 
         fn remove_library_path(&mut self, root: &Path) -> Result<usize, StoreError> {
@@ -3284,6 +4121,7 @@ mod cover_service_tests {
                 calls: Arc::clone(&loader_calls),
                 gate: gate.map(Mutex::new),
             }),
+            Box::new(|| true),
         );
         std::thread::spawn(move || worker.run());
         Harness {
@@ -3368,6 +4206,66 @@ mod cover_service_tests {
         assert!(
             h.service.poll().is_empty(),
             "a suppressed request must not produce a second result"
+        );
+    }
+
+    /// [`CoverLoader`] fake that records every [`CoverSource`] it was asked
+    /// to load, so the policy tests can pin which source reached the loader.
+    struct RecordingLoader {
+        seen: std::sync::Arc<Mutex<Vec<CoverSource>>>,
+        result: Result<Option<CoverImage>, String>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CoverLoader for RecordingLoader {
+        fn load_cover(&self, source: &CoverSource) -> Result<Option<CoverImage>, LibraryError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.seen.lock().unwrap().push(source.clone());
+            self.result.clone().map_err(LibraryError::CoverLoad)
+        }
+    }
+
+    #[test]
+    fn test_cover_worker_skips_embedded_art_while_read_embedded_is_off() {
+        // The "Read embedded artwork" setting is off: the worker must not
+        // even read the tags for art, and the loader must see the
+        // filesystem fallback instead of the embedded payload.
+        let reader_calls = Arc::new(AtomicUsize::new(0));
+        let loader_calls = Arc::new(AtomicUsize::new(0));
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (service, worker) = CoverService::new(
+            Box::new(SharedReader {
+                source: CoverSource::Embedded(vec![1, 2, 3].into()),
+                calls: Arc::clone(&reader_calls),
+            }),
+            Box::new(RecordingLoader {
+                seen: std::sync::Arc::clone(&seen),
+                result: Ok(Some(test_image())),
+                calls: Arc::clone(&loader_calls),
+            }),
+            Box::new(|| false),
+        );
+        std::thread::spawn(move || worker.run());
+
+        let path = PathBuf::from("/music/t1.mp3");
+        service.request(TrackId::from_path(&path), path);
+        let results = poll_until(&service, 1);
+
+        assert_eq!(results.len(), 1, "the resolve still delivers");
+        assert!(
+            results[0].1.is_some(),
+            "a filesystem fallback image still resolves"
+        );
+        assert_eq!(
+            reader_calls.load(Ordering::SeqCst),
+            0,
+            "embedded art is off: the tags are never opened for art"
+        );
+        let seen = seen.lock().unwrap().clone();
+        assert!(
+            seen.iter()
+                .all(|source| !matches!(source, CoverSource::Embedded(_))),
+            "no embedded payload may reach the loader: {seen:?}"
         );
     }
 
@@ -3814,8 +4712,19 @@ mod playback_coordinator_tests {
             self.0.lock().unwrap().record_track_played(id, played_at)
         }
 
+        fn record_full_scan_completed(
+            &mut self,
+            _summary: riff_backend::app::store::FullScanSummary,
+        ) -> Result<(), StoreError> {
+            Ok(())
+        }
+
         fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), StoreError> {
             self.0.lock().unwrap().apply_tag_refresh(track)
+        }
+
+        fn set_track_favorite(&mut self, id: &TrackId, favorite: bool) -> Result<bool, StoreError> {
+            self.0.lock().unwrap().set_track_favorite(id, favorite)
         }
 
         fn remove_library_path(&mut self, root: &Path) -> Result<usize, StoreError> {

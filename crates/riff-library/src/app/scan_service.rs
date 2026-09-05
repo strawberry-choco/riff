@@ -26,7 +26,7 @@
 
 use crate::app::MutexExt;
 use crate::app::scan::build_tracks;
-use crate::app::store::{LibraryMutationStore, LibraryQueryStore};
+use crate::app::store::{FullScanSummary, LibraryMutationStore, LibraryQueryStore};
 use crate::app::traits::MetadataReader;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use riff_persistence::track::TrackId;
@@ -34,6 +34,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 /// Tracks per durable commit. Every batch commits to the Application Store
 /// as ONE immediate transaction first — an interrupted (or cancelled) scan
@@ -208,8 +209,10 @@ pub struct ScanWorker {
 
 /// How one directory scan ended, before mapping onto published outcomes.
 enum ScanEnd {
-    /// Walk finished; `usize` is the total file count.
-    Completed(usize),
+    /// Walk finished; `files` is the total discovered count and `errors`
+    /// the discovered files that could not be indexed (design-handoff
+    /// issue 12).
+    Completed { files: usize, errors: usize },
     /// Cancelled between batches: committed batches stay, nothing publishes.
     Cancelled,
     /// A store commit failed; the scan aborted with the reason.
@@ -235,10 +238,24 @@ impl ScanWorker {
         self.cancel.store(false, Ordering::Relaxed);
 
         match self.scan_directory(&path) {
-            ScanEnd::Completed(total) => {
+            ScanEnd::Completed { files, errors } => {
+                // A completed full scan records its summary (design-handoff
+                // issues 05 and 12) so the sidebar footer and the Settings
+                // Library pane can answer "when did I last scan, and what
+                // did it see". The batches are already committed, so a
+                // record failure only warns: it must not turn a landed scan
+                // into a reported failure.
+                let summary = FullScanSummary {
+                    at: SystemTime::now(),
+                    files,
+                    errors,
+                };
+                if let Err(e) = self.mutations.record_full_scan_completed(summary) {
+                    tracing::warn!("Failed to record the last-scan summary: {e}");
+                }
                 let _ = self.outcome_tx.send(ScanOutcome::Complete {
                     path: path.clone(),
-                    total_files: total,
+                    total_files: files,
                 });
             }
             ScanEnd::Cancelled => {
@@ -264,10 +281,13 @@ impl ScanWorker {
     /// Walk one directory in ~10-track batches. Every batch commits to the
     /// Application Store as ONE durable transaction first — an interrupted
     /// scan keeps all committed batches — and the mutation adapter bumps the
-    /// session generation so Session Projections refetch.
+    /// session generation so Session Projections refetch. Returns the total
+    /// discovered file count plus how many of those could not be indexed
+    /// (design-handoff issue 12).
     fn scan_directory(&mut self, path: &Path) -> ScanEnd {
         let files = (self.walk)(path);
         let total = files.len();
+        let mut errors = 0usize;
 
         for (i, chunk) in files.chunks(SCAN_BATCH_SIZE).enumerate() {
             if self.cancel.load(Ordering::Relaxed) {
@@ -297,8 +317,11 @@ impl ScanWorker {
 
             if !fresh_paths.is_empty() {
                 // Per-file read failures are skipped inside `build_tracks`,
-                // so a scan never aborts on one bad file.
+                // so a scan never aborts on one bad file; they are counted
+                // as the scan's error tally instead.
+                let fresh_count = fresh_paths.len();
                 let tracks = build_tracks(fresh_paths, self.reader.as_ref());
+                errors += fresh_count - tracks.len();
                 if !tracks.is_empty() {
                     // A failed commit aborts the scan and surfaces as a
                     // `Failed` outcome — never a silent success behind a
@@ -316,7 +339,10 @@ impl ScanWorker {
             });
         }
 
-        ScanEnd::Completed(total)
+        ScanEnd::Completed {
+            files: total,
+            errors,
+        }
     }
 }
 
@@ -324,9 +350,9 @@ impl ScanWorker {
 mod tests {
     use super::*;
     use crate::app::errors::LibraryError;
-    use crate::app::store::{LibraryMutationStore, LibraryQueryStore, StoreError};
+    use crate::app::store::{LibraryCounts, LibraryMutationStore, LibraryQueryStore, StoreError};
     use crate::app::traits::{AudioFormatInfo, MetadataReader};
-    use crate::domain::{Album, Artist, CoverSource, SmartPlaylistKind};
+    use crate::domain::{Album, Artist, CoverSource, GenreCount, SmartPlaylistKind};
     use riff_persistence::track::{Track, TrackId, TrackMetadata};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -344,6 +370,7 @@ mod tests {
             play_count: 0,
             last_played: None,
             date_added: None,
+            favorite: false,
             search_text: String::new(),
         }
     }
@@ -389,6 +416,9 @@ mod tests {
         fn track_count(&self) -> Result<usize, StoreError> {
             Ok(0)
         }
+        fn library_counts(&self) -> Result<LibraryCounts, StoreError> {
+            Ok(LibraryCounts::default())
+        }
         fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
             Ok(Vec::new())
         }
@@ -432,6 +462,14 @@ mod tests {
         fn tracks_in_folder(&self, _folder: &Path) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
+
+        fn folder_track_count(&self, _folder: &Path) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn last_full_scan(&self) -> Result<Option<FullScanSummary>, StoreError> {
+            Ok(None)
+        }
         fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, StoreError> {
             Ok(Vec::new())
         }
@@ -439,6 +477,35 @@ mod tests {
             &self,
             _kind: SmartPlaylistKind,
             _limit: usize,
+        ) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn artists_in_genre(&self, _genre: &str) -> Result<Vec<Artist>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn artist_albums_in_genre(
+            &self,
+            _artist: &str,
+            _genre: &str,
+        ) -> Result<Vec<Album>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn album_tracks_in_genre(
+            &self,
+            _album_artist: &str,
+            _album_title: &str,
+            _genre: &str,
         ) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
@@ -459,11 +526,25 @@ mod tests {
         fn apply_tag_refresh(&mut self, _track: &Track) -> Result<(), StoreError> {
             Ok(())
         }
+        fn set_track_favorite(
+            &mut self,
+            _id: &TrackId,
+            _favorite: bool,
+        ) -> Result<bool, StoreError> {
+            Ok(false)
+        }
         fn remove_library_path(&mut self, _root: &Path) -> Result<usize, StoreError> {
             Ok(0)
         }
         fn clear_library(&mut self) -> Result<usize, StoreError> {
             Ok(0)
+        }
+
+        fn record_full_scan_completed(
+            &mut self,
+            _summary: FullScanSummary,
+        ) -> Result<(), StoreError> {
+            Ok(())
         }
     }
 

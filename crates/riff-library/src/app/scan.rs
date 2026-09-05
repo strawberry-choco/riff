@@ -35,6 +35,9 @@ pub fn build_tracks(paths: Vec<PathBuf>, reader: &dyn MetadataReader) -> Vec<Tra
                     // Stamp first-add time once, at scan time. This (not
                     // the file mtime) drives "Recently Added".
                     date_added: Some(SystemTime::now()),
+                    // A fresh scan never marks favorites; the flag is a user
+                    // fact the store preserves across rescans.
+                    favorite: false,
                     // The store derives search_text from metadata at write
                     // time; freshly scanned tracks carry none yet.
                     search_text: String::new(),

@@ -30,10 +30,11 @@ fn test_store_fresh_start_creates_file_and_applies_initial_migration_once() {
         })
         .expect("reading schema_migrations must work");
     // The shipped initial set: v1 (foundation) + v2 (typed settings tables)
-    // + v3 (playlists) + v4 (library collection) + v5 (playback prefs).
+    // + v3 (playlists) + v4 (library collection) + v5 (playback prefs)
+    // + v6 (track favorites) + v7 (browser layout) + v8 (library scan prefs).
     assert_eq!(
         applied.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5]
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
     );
 }
 
@@ -95,10 +96,10 @@ fn test_store_double_apply_is_idempotent() {
             mapped.collect()
         })
         .expect("reading schema_migrations must work");
-    assert_eq!(rows.len(), 5, "no duplicate migration rows allowed");
+    assert_eq!(rows.len(), 8, "no duplicate migration rows allowed");
     assert_eq!(
         rows.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5]
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
     );
 
     let applied_at: i64 = store
@@ -151,7 +152,7 @@ fn test_store_checksum_tamper_is_fatal() {
         })
         .expect("reading schema_migrations must work");
     assert_eq!(
-        rows, 5,
+        rows, 8,
         "all shipped migration rows must exist, none re-applied"
     );
 }
@@ -387,6 +388,8 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
                 replaygain_enabled: true,
                 shuffle: true,
                 repeat_mode: 2,
+                browser_layout: 1,
+                ..riff_persistence::store::ScalarSettings::default()
             })
             .expect("saving scalars must work");
     }
@@ -405,6 +408,7 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
     assert!(settings.scalars.replaygain_enabled);
     assert!(settings.scalars.shuffle);
     assert_eq!(settings.scalars.repeat_mode, 2);
+    assert_eq!(settings.scalars.browser_layout, 1);
 }
 
 #[test]
@@ -470,6 +474,130 @@ fn test_store_library_paths_and_watch_states_roundtrip_across_reopen() {
         after.watch_states,
         std::collections::HashMap::from([(PathBuf::from("music/c"), WatchState::Disabled)])
     );
+}
+
+// --- Application Store: Library scan settings (design-handoff issue 12) ------
+
+use riff_persistence::store::{AUDIO_EXTENSIONS, FullScanSummary, MissingArtworkStrategy};
+
+#[test]
+fn test_store_library_scan_settings_roundtrip_across_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+
+    // Fresh store: the scanner defaults — hidden files skipped, every
+    // supported format indexed, embedded artwork read, generated-colour
+    // placeholder for missing art.
+    {
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+        let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+        let settings = store
+            .load_settings()
+            .expect("loading settings from a fresh store must work");
+        assert!(settings.scalars.skip_hidden_files);
+        assert_eq!(settings.scalars.scan_formats.len(), AUDIO_EXTENSIONS.len());
+        assert!(settings.scalars.read_embedded_artwork);
+        assert_eq!(
+            settings.scalars.missing_artwork_strategy,
+            MissingArtworkStrategy::GeneratedColour
+        );
+    }
+
+    // Change the library scan settings and drop the connection ("restart").
+    {
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+        let mut store =
+            riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+        let scalars = riff_persistence::store::ScalarSettings {
+            skip_hidden_files: false,
+            scan_formats: vec!["flac".to_string(), "mp3".to_string()],
+            read_embedded_artwork: false,
+            ..Default::default()
+        };
+        store
+            .save_scalars(&scalars)
+            .expect("saving scalars must work");
+    }
+
+    // Reopen: every library scan setting survives in its typed column.
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let reopened = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+        .expect("reopening must succeed");
+    let settings = reopened
+        .load_settings()
+        .expect("loading settings must work");
+    assert!(!settings.scalars.skip_hidden_files);
+    assert_eq!(
+        settings.scalars.scan_formats,
+        vec!["flac".to_string(), "mp3".to_string()]
+    );
+    assert!(!settings.scalars.read_embedded_artwork);
+}
+
+#[test]
+fn test_store_last_full_scan_summary_roundtrip_across_reopen() {
+    use riff_persistence::store::FullScanSummary;
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+
+    // A fresh store has never scanned.
+    {
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+        let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+        assert!(store.last_full_scan().unwrap().is_none());
+    }
+
+    // Record one completed full scan with its counts and drop the
+    // connection ("restart").
+    let at = std::time::SystemTime::now();
+    {
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+        let mut store =
+            riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+        store
+            .record_full_scan_completed(FullScanSummary {
+                at,
+                files: 128,
+                errors: 3,
+            })
+            .expect("recording the scan summary must work");
+    }
+
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let reopened = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+        .expect("reopening must succeed");
+    let summary = reopened
+        .last_full_scan()
+        .expect("reading the scan summary must work")
+        .expect("the recorded scan survives the restart");
+    assert_eq!(summary.files, 128);
+    assert_eq!(summary.errors, 3);
+    assert!(
+        summary
+            .at
+            .duration_since(at - std::time::Duration::from_secs(1))
+            .is_ok(),
+        "the timestamp round-trips"
+    );
+
+    // A later scan overwrites the previous summary.
+    let mut store = reopened;
+    store
+        .record_full_scan_completed(FullScanSummary {
+            at,
+            files: 200,
+            errors: 0,
+        })
+        .unwrap();
+    let summary = store.last_full_scan().unwrap().unwrap();
+    assert_eq!(summary.files, 200);
+    assert_eq!(summary.errors, 0);
 }
 
 // --- Application Store: Playlists, atomic per-mutation durability ------------
@@ -908,6 +1036,7 @@ fn library_track(
         play_count: 0,
         last_played: None,
         date_added: None,
+        favorite: false,
         search_text: String::new(),
     }
 }
@@ -1366,6 +1495,7 @@ fn test_get_track_roundtrips_all_fields() {
         play_count: 4,
         last_played: Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000)),
         date_added: Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(500)),
+        favorite: false,
         search_text: String::new(),
     };
     store
@@ -1826,6 +1956,7 @@ fn browsing_track(
         play_count: 0,
         last_played: None,
         date_added: None,
+        favorite: false,
         search_text: String::new(),
     }
 }
@@ -2200,6 +2331,456 @@ fn test_browsing_works_straight_from_a_freshly_reopened_store() {
     assert_eq!(tracks.len(), 2);
     assert_eq!(tracks[0].metadata.title.as_deref(), Some("One"));
     assert_eq!(tracks[1].metadata.title.as_deref(), Some("Two"));
+}
+
+// --- Application Store: genre read-model queries (design-handoff issue 02) --
+
+/// A browsing fixture with explicit per-track genre control (the genre read
+/// model derives from per-track genre metadata, not the album's derived
+/// genre column).
+fn genre_track(
+    path: &str,
+    title: &str,
+    album_artist: &str,
+    album: &str,
+    genre: Option<&str>,
+) -> Track {
+    Track {
+        metadata: TrackMetadata {
+            genre: genre.map(str::to_string),
+            ..browsing_track(path, title, album_artist, album, None, None).metadata
+        },
+        ..browsing_track(path, title, album_artist, album, None, None)
+    }
+}
+
+#[test]
+fn test_genre_counts_aggregate_per_track_genres_and_skip_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    // A fresh store answers with no genre rows at all — no phantom entries.
+    assert!(
+        store
+            .genre_counts()
+            .expect("fresh store genre counts")
+            .is_empty(),
+        "a fresh store has no genres"
+    );
+
+    store
+        .apply_scan_batch(&[
+            genre_track("f:\\g\\1.mp3", "One", "Alpha", "LP", Some("Rock")),
+            genre_track("f:\\g\\2.mp3", "Two", "Alpha", "LP", Some("Rock")),
+            genre_track("f:\\g\\3.mp3", "Three", "Beta", "EP", Some("Jazz")),
+            // Tracks without a genre (None or empty) aggregate into nothing.
+            genre_track("f:\\g\\4.mp3", "Four", "Gamma", "Single", None),
+            genre_track("f:\\g\\5.mp3", "Five", "Gamma", "Single", Some("")),
+        ])
+        .expect("batch applies");
+
+    let counts = store.genre_counts().expect("genre counts query");
+    assert_eq!(
+        counts
+            .iter()
+            .map(|g| (g.genre.as_str(), g.tracks))
+            .collect::<Vec<_>>(),
+        [("Jazz", 1), ("Rock", 2)],
+        "genres name-ascending with per-track counts; missing/empty genres excluded"
+    );
+
+    // The sidebar's total-genres count is the number of aggregated rows.
+    assert_eq!(counts.len(), 2, "total genre count for the sidebar");
+}
+
+#[test]
+fn test_artists_in_genre_returns_only_matching_artists_and_album_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    store
+        .apply_scan_batch(&[
+            // Alpha: one Rock album plus a Jazz album — only the Rock key
+            // survives the filter.
+            genre_track("f:\\g\\1.mp3", "One", "Alpha", "Rock LP", Some("Rock")),
+            genre_track("f:\\g\\2.mp3", "Two", "Alpha", "Rock LP", Some("Rock")),
+            genre_track("f:\\g\\3.mp3", "Three", "Alpha", "Jazz EP", Some("Jazz")),
+            // Beta has Rock too and sorts after Alpha.
+            genre_track("f:\\g\\4.mp3", "Four", "Beta", "B LP", Some("Rock")),
+            // Gamma is Jazz-only: absent from the Rock listing.
+            genre_track("f:\\g\\5.mp3", "Five", "Gamma", "G EP", Some("Jazz")),
+        ])
+        .expect("batch applies");
+
+    let artists = store.artists_in_genre("Rock").expect("genre artists query");
+    assert_eq!(
+        artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+        ["Alpha", "Beta"],
+        "only artists with a Rock track, name-ascending"
+    );
+    assert_eq!(
+        artists[0].albums,
+        vec!["Alpha - Rock LP".to_string()],
+        "an artist's album keys carry only albums holding a matching track"
+    );
+    assert_eq!(artists[1].albums, vec!["Beta - B LP".to_string()]);
+
+    // An unknown genre lists nothing rather than erroring.
+    assert!(
+        store
+            .artists_in_genre("Techno")
+            .expect("unknown genre")
+            .is_empty(),
+        "unknown genres yield no artists"
+    );
+}
+
+#[test]
+fn test_artist_albums_in_genre_returns_matching_albums_with_matching_track_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    store
+        .apply_scan_batch(&[
+            // Rock LP: two Rock tracks and one Jazz track — the album lists
+            // with only its two Rock track ids.
+            genre_track("f:\\g\\2.mp3", "Two", "Alpha", "Rock LP", Some("Rock")),
+            genre_track("f:\\g\\1.mp3", "One", "Alpha", "Rock LP", Some("Rock")),
+            genre_track("f:\\g\\3.mp3", "Three", "Alpha", "Rock LP", Some("Jazz")),
+            // Jazz EP: no Rock tracks — absent from the Rock listing.
+            genre_track("f:\\g\\4.mp3", "Four", "Alpha", "Jazz EP", Some("Jazz")),
+        ])
+        .expect("batch applies");
+
+    let albums = store
+        .artist_albums_in_genre("Alpha", "Rock")
+        .expect("genre albums query");
+    assert_eq!(albums.len(), 1, "only albums holding a matching track");
+    assert_eq!(albums[0].title, "Rock LP");
+    assert_eq!(
+        albums[0].tracks,
+        vec![
+            TrackId("f:\\g\\1.mp3".to_string()),
+            TrackId("f:\\g\\2.mp3".to_string()),
+        ],
+        "matching track ids in album-track order, non-matching ids excluded"
+    );
+
+    // Unknown artists or genres browse to an empty list, not an error.
+    assert!(
+        store
+            .artist_albums_in_genre("Beta", "Rock")
+            .expect("unknown artist")
+            .is_empty()
+    );
+    assert!(
+        store
+            .artist_albums_in_genre("Alpha", "Techno")
+            .expect("unknown genre")
+            .is_empty()
+    );
+}
+
+#[test]
+fn test_album_tracks_in_genre_returns_matching_tracks_in_canonical_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    // Insertion order deliberately scrambled relative to track number; the
+    // genre-filtered query must impose the canonical album-track order.
+    store
+        .apply_scan_batch(&[
+            genre_track("f:\\g\\09.mp3", "Nine", "Alpha", "LP", Some("Rock")),
+            genre_track("f:\\g\\05_beta.mp3", "Five B", "Alpha", "LP", Some("Rock")),
+            genre_track("f:\\g\\01.mp3", "One", "Alpha", "LP", Some("Jazz")),
+        ])
+        .expect("batch applies");
+
+    let tracks = store
+        .album_tracks_in_genre("Alpha", "LP", "Rock")
+        .expect("genre album tracks query");
+    assert_eq!(
+        tracks.iter().map(|t| t.id.0.as_str()).collect::<Vec<_>>(),
+        ["f:\\g\\05_beta.mp3", "f:\\g\\09.mp3"],
+        "matching tracks in canonical order; the Jazz track is excluded"
+    );
+
+    // Unknown albums or genres yield no rows.
+    assert!(
+        store
+            .album_tracks_in_genre("Alpha", "Nonexistent", "Rock")
+            .expect("unknown album")
+            .is_empty()
+    );
+    assert!(
+        store
+            .album_tracks_in_genre("Alpha", "LP", "Techno")
+            .expect("unknown genre")
+            .is_empty()
+    );
+}
+
+// --- Application Store: counts + status read models (design-handoff issue 05) --
+
+#[test]
+fn test_library_counts_answers_track_artist_album_and_genre_totals() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    // A fresh store counts nothing — no phantom rows for the empty sidebar.
+    let fresh = store.library_counts().expect("fresh store counts");
+    assert_eq!(
+        (fresh.tracks, fresh.artists, fresh.albums, fresh.genres),
+        (0, 0, 0, 0),
+        "a fresh store counts no tracks, artists, albums, or genres"
+    );
+
+    // 5 tracks; Alpha holds two albums, Beta one; Rock and Jazz are the only
+    // genres (the empty-tag track aggregates into no genre row).
+    store
+        .apply_scan_batch(&[
+            genre_track("f:\\c\\1.mp3", "One", "Alpha", "LP", Some("Rock")),
+            genre_track("f:\\c\\2.mp3", "Two", "Alpha", "LP", Some("Rock")),
+            genre_track("f:\\c\\3.mp3", "Three", "Alpha", "B-Sides", Some("Rock")),
+            genre_track("f:\\c\\4.mp3", "Four", "Beta", "EP", Some("Jazz")),
+            genre_track("f:\\c\\5.mp3", "Five", "Beta", "EP", Some("")),
+        ])
+        .expect("batch applies");
+
+    let counts = store.library_counts().expect("library counts query");
+    assert_eq!(counts.tracks, 5, "total track count");
+    assert_eq!(counts.artists, 2, "distinct album artists");
+    assert_eq!(counts.albums, 3, "distinct (album artist, title) albums");
+    assert_eq!(counts.genres, 2, "distinct non-empty per-track genres");
+}
+
+/// A smart-list fixture with explicit history control: `favorite`,
+/// `play_count`, `last_played`, and `date_added` decide every smart list's
+/// membership, exactly like the SQL smart-list queries do. (Distinct from
+/// the smart-playlist section's `smart_track`, whose second parameter is a
+/// title.)
+fn count_track(
+    path: &str,
+    title: &str,
+    favorite: bool,
+    play_count: u32,
+    last_played: Option<SystemTime>,
+    date_added: Option<SystemTime>,
+) -> Track {
+    Track {
+        favorite,
+        play_count,
+        last_played,
+        date_added,
+        ..browsing_track(path, title, "Alpha", "LP", None, None)
+    }
+}
+
+#[test]
+fn test_smart_list_counts_match_the_smart_list_membership() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    // A fresh store counts nothing for every smart list.
+    assert!(
+        store
+            .smart_list_counts()
+            .expect("fresh store smart list counts")
+            .iter()
+            .all(|(_, count)| *count == 0),
+        "a fresh store has empty smart lists"
+    );
+
+    let now = SystemTime::now();
+    let long_ago = now - LOST_GEMS_THRESHOLD * 3;
+    // Scan batches persist metadata + `date_added` but deliberately never
+    // touch history columns; favorites and play history are seeded exactly
+    // like the smart-playlist tests seed them.
+    let fixtures = [
+        // Favorite, played just now, added just now: qualifies for
+        // Favorites, Most Played, Recently Played, Recently Added.
+        count_track("f:\\s\\1.mp3", "One", true, 2, Some(now), Some(now)),
+        // Never played, added just now: Recently Added + Never Played.
+        count_track("f:\\s\\2.mp3", "Two", false, 0, None, Some(now)),
+        // Played once, long ago: Most Played, Recently Played (any play
+        // stamp qualifies), Lost Gems (older than the threshold), and
+        // Recently Added.
+        count_track("f:\\s\\3.mp3", "Three", false, 1, Some(long_ago), Some(now)),
+    ];
+    store.apply_scan_batch(&fixtures).expect("batch applies");
+
+    for track in &fixtures {
+        let last_nanos = track.last_played.map(|t| {
+            i64::try_from(t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos()).unwrap()
+        });
+        store
+            .with_connection(|conn| {
+                conn.execute(
+                    "UPDATE tracks SET play_count = ?1, last_played_nanos = ?2 WHERE path = ?3",
+                    rusqlite::params![i64::from(track.play_count), last_nanos, track.id.0],
+                )
+            })
+            .expect("seeding history must work");
+        if track.favorite {
+            use riff_persistence::store::LibraryMutationStore as _;
+            store
+                .set_track_favorite(&track.id, true)
+                .expect("seeding favorite must work");
+        }
+    }
+
+    let counts = store.smart_list_counts().expect("smart list counts");
+    assert_eq!(
+        counts,
+        vec![
+            (SmartPlaylistKind::Favorites, 1),
+            (SmartPlaylistKind::RecentlyAdded, 3),
+            (SmartPlaylistKind::MostPlayed, 2),
+            (SmartPlaylistKind::RecentlyPlayed, 2),
+            (SmartPlaylistKind::NeverPlayed, 1),
+            // The never-played track qualifies for Lost Gems too — unheard
+            // tracks are gems by definition.
+            (SmartPlaylistKind::LostGems, 2),
+        ],
+        "per-smart-list totals in stable SmartPlaylistKind::ALL order"
+    );
+}
+
+#[test]
+fn test_folder_track_count_scopes_to_the_component_wise_subtree() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = seeded_folder_store(&dir);
+
+    // The fixture library holds 4 tracks directly under "a", 1 under "ab"
+    // (the sibling-prefix trap: "a" must not match "ab"/"a_b"/"axb"/"a#b"),
+    // and 1 under "deep/only".
+    let base = dir.path();
+    assert_eq!(
+        store
+            .folder_track_count(&base.join("a"))
+            .expect("count under a"),
+        4,
+        "every track under the folder counts, not just direct children"
+    );
+    assert_eq!(
+        store
+            .folder_track_count(&base.join("ab"))
+            .expect("count under ab"),
+        1,
+        "a sibling sharing a byte-prefix never matches"
+    );
+    assert_eq!(
+        store
+            .folder_track_count(&base.join("deep").join("only"))
+            .expect("count under deep/only"),
+        1
+    );
+    assert_eq!(
+        store
+            .folder_track_count(base)
+            .expect("count under the root"),
+        10,
+        "the root counts the whole subtree"
+    );
+    assert_eq!(
+        store
+            .folder_track_count(&base.join("nowhere"))
+            .expect("count under an unknown folder"),
+        0,
+        "an unknown folder counts nothing"
+    );
+}
+
+#[test]
+fn test_last_full_scan_round_trips_and_records_as_a_library_mutation() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let (tx, rx) = crossbeam_channel::unbounded::<StoreChanged>();
+    let mut store = SqliteStore::open_and_migrate(tmp.path(), tx).unwrap();
+
+    // A fresh store has never scanned — no timestamp, no phantom epoch.
+    assert_eq!(
+        store.last_full_scan().expect("fresh store read"),
+        None,
+        "a fresh store has no last-scan timestamp"
+    );
+
+    let first = FullScanSummary {
+        at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        files: 10,
+        errors: 1,
+    };
+    store
+        .record_full_scan_completed(first)
+        .expect("recording a scan must commit");
+    assert_eq!(
+        store.last_full_scan().expect("read after first record"),
+        Some(first),
+        "the recorded summary round-trips through the store"
+    );
+
+    // Recording again overwrites: the value answers for the LAST full scan.
+    let second = FullScanSummary {
+        at: first.at + Duration::from_mins(1),
+        files: 20,
+        errors: 0,
+    };
+    store
+        .record_full_scan_completed(second)
+        .expect("recording again must commit");
+    assert_eq!(
+        store.last_full_scan().expect("read after second record"),
+        Some(second),
+        "a later scan overwrites the earlier summary"
+    );
+
+    // Recording is a committed Library mutation: each commit bumps the
+    // session Library generation and emits exactly one Library event beside
+    // the bump, so the read models refetch after a scan.
+    let gen_before = store.library_generation().current();
+    let third = FullScanSummary {
+        at: second.at + Duration::from_mins(1),
+        files: 30,
+        errors: 2,
+    };
+    store
+        .record_full_scan_completed(third)
+        .expect("third record must commit");
+    assert_eq!(
+        store.library_generation().current(),
+        gen_before + 1,
+        "recording a scan bumps the Library generation"
+    );
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    assert_eq!(
+        events,
+        vec![
+            StoreChanged::Library(1),
+            StoreChanged::Library(2),
+            StoreChanged::Library(3),
+        ],
+        "one Library event per recorded scan, carrying the new generation"
+    );
 }
 
 // --- Application Store: folder navigation queries (ticket 08) ---------------
@@ -2597,6 +3178,7 @@ fn smart_track(
         play_count,
         last_played,
         date_added,
+        favorite: false,
         search_text: String::new(),
     }
 }
@@ -2736,6 +3318,11 @@ mod smart_reference {
 
     pub fn playlist(tracks: &[Track], kind: SmartPlaylistKind, limit: usize) -> Vec<TrackId> {
         let mut selected: Vec<&Track> = match kind {
+            SmartPlaylistKind::Favorites => {
+                let mut favorites: Vec<&Track> = tracks.iter().filter(|t| t.favorite).collect();
+                favorites.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+                favorites
+            }
             SmartPlaylistKind::RecentlyAdded => {
                 // Sorted by the stored `date_added`, deliberately NOT the
                 // filesystem mtime; newest first, path tiebreak.
@@ -2749,6 +3336,20 @@ mod smart_reference {
                         .then_with(|| a.file_path.cmp(&b.file_path))
                 });
                 dated.into_iter().map(|(_, t)| t).collect()
+            }
+            SmartPlaylistKind::RecentlyPlayed => {
+                // Newest finished-play first; never-played rows are excluded
+                // outright. Ties break by path for a stable order.
+                let mut played: Vec<(SystemTime, &Track)> = tracks
+                    .iter()
+                    .filter_map(|t| t.last_played.map(|last| (last, t)))
+                    .collect();
+                played.sort_by(|(last_a, a), (last_b, b)| {
+                    last_b
+                        .cmp(last_a)
+                        .then_with(|| a.file_path.cmp(&b.file_path))
+                });
+                played.into_iter().map(|(_, t)| t).collect()
             }
             SmartPlaylistKind::MostPlayed => {
                 let mut played: Vec<&Track> = tracks.iter().filter(|t| t.play_count > 0).collect();
@@ -2811,6 +3412,7 @@ fn test_smart_playlists_match_independent_reference_logic() {
     for kind in [
         SmartPlaylistKind::MostPlayed,
         SmartPlaylistKind::RecentlyAdded,
+        SmartPlaylistKind::RecentlyPlayed,
         SmartPlaylistKind::NeverPlayed,
         SmartPlaylistKind::LostGems,
     ] {
@@ -2871,6 +3473,91 @@ fn test_smart_playlists_match_independent_reference_logic() {
         "longest-unheard gems first, then never-played in path order; \
          recently played tracks are excluded"
     );
+}
+
+#[test]
+fn test_recently_played_orders_newest_first_excludes_never_played_and_bounds() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+        .expect("fresh store must open");
+
+    let at = |secs: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+    let fixtures = vec![
+        smart_track(
+            "f:\\rp\\old.mp3",
+            Some("Old"),
+            1,
+            Some(at(1_000)),
+            Some(at(10)),
+        ),
+        // A last-played tie broken by path: "tie_a" leads despite sorting
+        // after "tie_b" by insertion.
+        smart_track(
+            "f:\\rp\\tie_b.mp3",
+            Some("Tie B"),
+            1,
+            Some(at(2_000)),
+            Some(at(20)),
+        ),
+        smart_track(
+            "f:\\rp\\tie_a.mp3",
+            Some("Tie A"),
+            1,
+            Some(at(2_000)),
+            Some(at(30)),
+        ),
+        smart_track(
+            "f:\\rp\\newest.mp3",
+            Some("Newest"),
+            1,
+            Some(at(3_000)),
+            Some(at(40)),
+        ),
+        smart_track("f:\\rp\\never.mp3", Some("Never"), 0, None, Some(at(50))),
+    ];
+    store.apply_scan_batch(&fixtures).expect("fixtures apply");
+    for track in &fixtures {
+        let last_nanos =
+            track
+                .last_played
+                .map(|t| match t.duration_since(SystemTime::UNIX_EPOCH) {
+                    Ok(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
+                    Err(e) => -i64::try_from(e.duration().as_nanos()).unwrap_or(i64::MAX),
+                });
+        store
+            .with_connection(|conn| {
+                conn.execute(
+                    "UPDATE tracks SET play_count = ?1, last_played_nanos = ?2 WHERE path = ?3",
+                    rusqlite::params![i64::from(track.play_count), last_nanos, track.id.0],
+                )
+            })
+            .expect("seeding history must work");
+    }
+
+    let titles = |tracks: &[Track]| {
+        tracks
+            .iter()
+            .map(|t| t.metadata.title.as_deref().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let all = store
+        .smart_playlist(SmartPlaylistKind::RecentlyPlayed, usize::MAX)
+        .expect("recently played");
+    assert_eq!(
+        titles(&all),
+        vec!["Newest", "Tie A", "Tie B", "Old"],
+        "most recent last-played leads, ties break by path, never-played excluded"
+    );
+
+    // The limit truncates the fully ordered list.
+    let bounded = store
+        .smart_playlist(SmartPlaylistKind::RecentlyPlayed, 2)
+        .expect("bounded recently played");
+    assert_eq!(titles(&bounded), vec!["Newest", "Tie A"]);
 }
 
 #[test]
@@ -3035,6 +3722,7 @@ fn test_clear_library_wipes_collection_and_preserves_curation() {
     for kind in [
         SmartPlaylistKind::MostPlayed,
         SmartPlaylistKind::RecentlyAdded,
+        SmartPlaylistKind::RecentlyPlayed,
         SmartPlaylistKind::NeverPlayed,
         SmartPlaylistKind::LostGems,
     ] {
@@ -3415,6 +4103,7 @@ mod emit_beside_bump {
             play_count: 0,
             last_played: None,
             date_added: None,
+            favorite: false,
             search_text: String::new(),
         };
 
@@ -3432,4 +4121,293 @@ mod emit_beside_bump {
         }
         assert_eq!(events, vec![StoreChanged::Library(1)]);
     }
+}
+
+// --- Application Store: favorites flag + Favorites smart list (issue 03) ----
+
+#[test]
+fn set_track_favorite_round_trips_through_get_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    let track = library_track("m:\\music\\fav\\01.mp3", "Song", None, "Album", None);
+    store.apply_scan_batch(&[track]).unwrap();
+    let id = TrackId::from_path(std::path::Path::new("m:\\music\\fav\\01.mp3"));
+
+    // Freshly scanned tracks start un-favorited.
+    let fresh = store.get_track(&id).unwrap().expect("known track resolves");
+    assert!(!fresh.favorite, "a scanned track is not a favorite yet");
+
+    let changed = store.set_track_favorite(&id, true).unwrap();
+    assert!(changed, "favoriting a known track commits a change");
+    assert!(
+        store.get_track(&id).unwrap().expect("still known").favorite,
+        "the favorite flag reads back true after setting it"
+    );
+
+    let changed = store.set_track_favorite(&id, false).unwrap();
+    assert!(changed, "un-favoriting a favorite flips the flag back");
+    assert!(
+        !store.get_track(&id).unwrap().expect("still known").favorite,
+        "the favorite flag reads back false after clearing it"
+    );
+}
+
+#[test]
+fn favorites_smart_list_returns_exactly_the_favorited_tracks() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    store
+        .apply_scan_batch(&[
+            library_track("m:\\music\\a.mp3", "A", None, "Album", None),
+            library_track("m:\\music\\b.mp3", "B", None, "Album", None),
+            library_track("m:\\music\\c.mp3", "C", None, "Album", None),
+        ])
+        .unwrap();
+    let a = TrackId::from_path(std::path::Path::new("m:\\music\\a.mp3"));
+    let c = TrackId::from_path(std::path::Path::new("m:\\music\\c.mp3"));
+
+    // An empty favorites list before anything is marked.
+    let empty = store
+        .smart_playlist(SmartPlaylistKind::Favorites, usize::MAX)
+        .unwrap();
+    assert!(empty.is_empty(), "nothing is favorited yet");
+
+    store.set_track_favorite(&c, true).unwrap();
+    store.set_track_favorite(&a, true).unwrap();
+
+    let favorites = store
+        .smart_playlist(SmartPlaylistKind::Favorites, usize::MAX)
+        .unwrap();
+    assert_eq!(
+        favorites
+            .iter()
+            .map(|t| t.id.0.as_str())
+            .collect::<Vec<_>>(),
+        vec!["m:\\music\\a.mp3", "m:\\music\\c.mp3"],
+        "exactly the marked tracks, in canonical path order"
+    );
+}
+
+#[test]
+fn favorite_flag_survives_store_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let id = TrackId::from_path(std::path::Path::new("m:\\music\\fav\\01.mp3"));
+
+    {
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+        let mut store =
+            riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+        store
+            .apply_scan_batch(&[library_track(
+                "m:\\music\\fav\\01.mp3",
+                "Song",
+                None,
+                "Album",
+                None,
+            )])
+            .unwrap();
+        store.set_track_favorite(&id, true).unwrap();
+    }
+
+    // A whole new store handle over the same file — the restart path.
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+        .expect("reopening the store must succeed");
+    assert!(
+        store.get_track(&id).unwrap().expect("still known").favorite,
+        "the favorite flag reads back true after a restart"
+    );
+}
+
+#[test]
+fn rescanning_and_tag_refreshing_a_favorited_track_preserve_the_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    let path = "m:\\music\\fav\\01.mp3";
+    let id = TrackId::from_path(std::path::Path::new(path));
+    store
+        .apply_scan_batch(&[library_track(path, "Song", None, "Album", None)])
+        .unwrap();
+    store.set_track_favorite(&id, true).unwrap();
+
+    // A rescan re-upserts the track from scan-side data (favorite: false
+    // there) — the stored flag must survive untouched, like play history.
+    store
+        .apply_scan_batch(&[library_track(path, "Song", None, "Album", None)])
+        .unwrap();
+    assert!(
+        store.get_track(&id).unwrap().expect("still known").favorite,
+        "a rescan must not clear the favorite flag"
+    );
+
+    // The tag-edit refresh shares the upsert; it must preserve the flag too.
+    store
+        .apply_tag_refresh(&library_track(path, "Renamed", None, "Album", None))
+        .unwrap();
+    assert!(
+        store.get_track(&id).unwrap().expect("still known").favorite,
+        "a tag edit must not clear the favorite flag"
+    );
+}
+
+#[test]
+fn favorites_query_orders_by_path_regardless_of_marking_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    store
+        .apply_scan_batch(&[
+            library_track("m:\\music\\zeta.mp3", "Z", None, "Album", None),
+            library_track("m:\\music\\mid.mp3", "M", None, "Album", None),
+            library_track("m:\\music\\alpha.mp3", "A", None, "Album", None),
+        ])
+        .unwrap();
+    let zeta = TrackId::from_path(std::path::Path::new("m:\\music\\zeta.mp3"));
+    let mid = TrackId::from_path(std::path::Path::new("m:\\music\\mid.mp3"));
+    let alpha = TrackId::from_path(std::path::Path::new("m:\\music\\alpha.mp3"));
+
+    // Mark in an order deliberately opposite to the canonical path order.
+    store.set_track_favorite(&zeta, true).unwrap();
+    store.set_track_favorite(&alpha, true).unwrap();
+    store.set_track_favorite(&mid, true).unwrap();
+
+    let favorites = store
+        .smart_playlist(SmartPlaylistKind::Favorites, usize::MAX)
+        .unwrap();
+    assert_eq!(
+        favorites
+            .iter()
+            .map(|t| t.id.0.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "m:\\music\\alpha.mp3",
+            "m:\\music\\mid.mp3",
+            "m:\\music\\zeta.mp3"
+        ],
+        "favorites list in path-ascending order, not marking order"
+    );
+
+    // The limit truncates the already-ordered list.
+    let bounded = store
+        .smart_playlist(SmartPlaylistKind::Favorites, 2)
+        .unwrap();
+    assert_eq!(bounded.len(), 2);
+    assert_eq!(bounded[0].id.0, "m:\\music\\alpha.mp3");
+}
+
+#[test]
+fn removing_and_clearing_the_library_drop_their_favorites() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    store
+        .apply_scan_batch(&[
+            library_track("m:\\lib\\keep\\01.mp3", "Keep", None, "Album", None),
+            library_track("m:\\lib\\gone\\01.mp3", "Gone", None, "Album", None),
+        ])
+        .unwrap();
+    let keep = TrackId::from_path(std::path::Path::new("m:\\lib\\keep\\01.mp3"));
+    let gone = TrackId::from_path(std::path::Path::new("m:\\lib\\gone\\01.mp3"));
+    store.set_track_favorite(&keep, true).unwrap();
+    store.set_track_favorite(&gone, true).unwrap();
+
+    store
+        .remove_library_path(std::path::Path::new("m:\\lib\\gone"))
+        .unwrap();
+
+    let favorites = store
+        .smart_playlist(SmartPlaylistKind::Favorites, usize::MAX)
+        .unwrap();
+    assert_eq!(
+        favorites
+            .iter()
+            .map(|t| t.id.0.as_str())
+            .collect::<Vec<_>>(),
+        vec!["m:\\lib\\keep\\01.mp3"],
+        "the removed root's favorite is gone; the other survives"
+    );
+
+    // The maintenance wipe leaves no favorites at all.
+    store.clear_library().unwrap();
+    let favorites = store
+        .smart_playlist(SmartPlaylistKind::Favorites, usize::MAX)
+        .unwrap();
+    assert!(
+        favorites.is_empty(),
+        "clearing the library clears favorites"
+    );
+}
+
+#[test]
+fn committing_a_favorite_toggle_bumps_library_generation_and_emits_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    store
+        .apply_scan_batch(&[library_track(
+            "m:\\music\\fav\\01.mp3",
+            "Song",
+            None,
+            "Album",
+            None,
+        )])
+        .unwrap();
+    let _ = changes_rx.try_recv(); // drain the scan-batch notification
+    let id = TrackId::from_path(std::path::Path::new("m:\\music\\fav\\01.mp3"));
+
+    let gen_before = store.library_generation().current();
+    store.set_track_favorite(&id, true).unwrap();
+    assert_eq!(
+        store.library_generation().current(),
+        gen_before + 1,
+        "a committed favorite toggle bumps the Library generation"
+    );
+    let events: Vec<StoreChanged> = {
+        let mut events = Vec::new();
+        while let Ok(e) = changes_rx.try_recv() {
+            events.push(e);
+        }
+        events
+    };
+    assert_eq!(
+        events,
+        vec![StoreChanged::Library(gen_before + 1)],
+        "exactly one Library notification rides beside the bump"
+    );
+
+    // A redundant set and an unknown id change nothing and emit nothing.
+    store.set_track_favorite(&id, true).unwrap();
+    let unknown = TrackId::from_path(std::path::Path::new("m:\\music\\missing.mp3"));
+    let changed = store.set_track_favorite(&unknown, true).unwrap();
+    assert!(!changed, "an unknown track reports no change");
+    assert_eq!(
+        store.library_generation().current(),
+        gen_before + 1,
+        "no-ops must not bump the generation"
+    );
+    assert!(changes_rx.is_empty(), "no-ops must not emit");
 }

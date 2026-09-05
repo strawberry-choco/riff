@@ -16,18 +16,22 @@
 //! so the next call retries automatically.
 
 use crate::app::projection::{
-    BrowsingProjection, FolderProjection, PlaylistProjection, ProjectionKey,
+    BrowsingProjection, FolderProjection, GenreProjection, PlaylistProjection, ProjectionKey,
     SmartPlaylistsProjection, TrackListProjection, WINDOW_SIZE,
 };
 // The playlist view shapes are part of the seam's public surface: the
 // projection module itself is private, so UI code imports these from here.
 pub use crate::app::projection::{PlaylistEntryRow, PlaylistView};
-use crate::app::store::{LibraryQueryStore, PlaylistStore, StoreGeneration};
-use crate::domain::{Album, Artist, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId};
+use crate::app::store::{LibraryCounts, LibraryQueryStore, PlaylistStore, StoreGeneration};
+use crate::domain::{
+    Album, Artist, GenreCount, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
+};
+use riff_library::app::projection::CountsProjection;
 use riff_playback::app::projection::PlaybackProjection;
 use riff_playback::domain::PlaybackQueue;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 /// Generic generation-keyed cache slot — the ONE implementation of "drop
 /// when the epoch moved" behind every Session Projection (ADR 0002).
@@ -147,6 +151,28 @@ pub struct TrackListPage {
     pub rows: Arc<[Track]>,
 }
 
+/// The counts read model behind every sidebar row (design-handoff issue
+/// 05). Library-side fields carry the store's answer as of the latest
+/// generation; `folder_roots` mirrors the session's library-path list; the
+/// playlist sizes are entry counts in creation order.
+pub struct SidebarCounts {
+    /// Total tracks in the Library collection.
+    pub tracks: usize,
+    /// Distinct artists.
+    pub artists: usize,
+    /// Distinct `(album artist, title)` albums.
+    pub albums: usize,
+    /// Distinct non-empty per-track genres.
+    pub genres: usize,
+    /// Registered library root paths, as passed by the caller.
+    pub folder_roots: usize,
+    /// Each smart playlist's unbounded total, in `SmartPlaylistKind::ALL`
+    /// order.
+    pub smart_lists: Arc<[(SmartPlaylistKind, usize)]>,
+    /// Each user playlist's entry count, in creation order.
+    pub playlists: Vec<(PlaylistId, usize)>,
+}
+
 /// Flat facade over the Session Projections and the Library query port
 /// (ADR 0002). One instance per UI session; constructed by composition root
 /// injection in `main.rs`.
@@ -160,6 +186,8 @@ pub struct SessionViews {
     browsing: BrowsingProjection,
     folders: FolderProjection,
     smart_playlists: SmartPlaylistsProjection,
+    genres: GenreProjection,
+    counts: CountsProjection,
     playback: PlaybackProjection,
     playlists: PlaylistProjection,
 }
@@ -183,6 +211,8 @@ impl SessionViews {
         let browsing = BrowsingProjection::new(generation.clone());
         let folders = FolderProjection::new(generation.clone());
         let smart_playlists = SmartPlaylistsProjection::new(generation.clone());
+        let genres = GenreProjection::new(generation.clone());
+        let counts = CountsProjection::new(generation.clone());
         let playback = PlaybackProjection::new(generation.clone());
         let playlists = PlaylistProjection::new(playlist_generation.clone(), generation.clone());
         Self {
@@ -192,6 +222,8 @@ impl SessionViews {
             browsing,
             folders,
             smart_playlists,
+            genres,
+            counts,
             playback,
             playlists,
         }
@@ -321,6 +353,65 @@ impl SessionViews {
             })
     }
 
+    // --- Genre read model -------------------------------------------------------
+
+    /// Every genre with its per-track count, name-ascending, cached per
+    /// generation. The sidebar's total-genres count is the list's length.
+    /// Fresh frames hand out an `Arc` clone of the cached list.
+    pub fn genres(&mut self) -> Arc<[GenreCount]> {
+        self.genres
+            .counts(&mut || self.queries.genre_counts())
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to load genre counts from the store: {e}");
+                Arc::from([])
+            })
+    }
+
+    /// Artists having at least one track with `genre`, name-ascending, each
+    /// with their genre-matching album keys, cached per generation. Fresh
+    /// frames hand out an `Arc` clone of the cached list.
+    pub fn artists_in_genre(&mut self, genre: &str) -> Arc<[Artist]> {
+        self.genres
+            .artists_in_genre(genre, &mut |g| self.queries.artists_in_genre(g))
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to load artists for genre {genre:?}: {e}");
+                Arc::from([])
+            })
+    }
+
+    /// One artist's albums holding a track with `genre`, in canonical
+    /// browsing order with genre-matching track membership, cached per
+    /// generation. Fresh frames hand out an `Arc` clone of the cached list.
+    pub fn artist_albums_in_genre(&mut self, artist: &str, genre: &str) -> Arc<[Album]> {
+        self.genres
+            .artist_albums_in_genre(artist, genre, &mut |a, g| {
+                self.queries.artist_albums_in_genre(a, g)
+            })
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to load albums for {artist} in genre {genre:?}: {e}");
+                Arc::from([])
+            })
+    }
+
+    /// One album's tracks with `genre`, in canonical album-track order,
+    /// cached per generation. Fresh frames hand out an `Arc` clone of the
+    /// cached list.
+    pub fn album_tracks_in_genre(
+        &mut self,
+        album_artist: &str,
+        album_title: &str,
+        genre: &str,
+    ) -> Arc<[Track]> {
+        self.genres
+            .album_tracks_in_genre(album_artist, album_title, genre, &mut |a, t, g| {
+                self.queries.album_tracks_in_genre(a, t, g)
+            })
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to load tracks for {album_title} in genre {genre:?}: {e}");
+                Arc::from([])
+            })
+    }
+
     // --- Folder tree ----------------------------------------------------------
 
     /// Whether `folder` contains any audio, cached per generation.
@@ -395,6 +486,88 @@ impl SessionViews {
                 );
                 Arc::from([])
             })
+    }
+
+    // --- Sidebar counts ----------------------------------------------------------
+
+    /// Every count the sidebar renders (design-handoff issue 05), in one
+    /// ready-to-render shape: the library totals (tracks, artists, albums,
+    /// genres), the registered folder roots, each smart playlist's total,
+    /// and each user playlist's size. The library-side counts cache per
+    /// generation (one store query per generation, not per frame); the
+    /// playlist sizes ride the playlists read model; `folder_roots`
+    /// passes through from the caller, which owns the session's library
+    /// paths. On a store error the affected counts answer their defaults
+    /// (`0`, an empty list) so the sidebar still renders.
+    pub fn sidebar_counts(&mut self, folder_roots: usize) -> SidebarCounts {
+        let library = match self
+            .counts
+            .library_counts(&mut || self.queries.library_counts())
+        {
+            Ok(counts) => *counts,
+            Err(e) => {
+                tracing::warn!("Failed to load the library counts from the store: {e}");
+                LibraryCounts::default()
+            }
+        };
+        let smart_lists = self
+            .counts
+            .smart_list_counts(&mut || self.queries.smart_list_counts())
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to load the smart-list counts from the store: {e}");
+                Arc::from([])
+            });
+        let playlists = self
+            .playlists()
+            .iter()
+            .map(|playlist| (playlist.id.clone(), playlist.tracks.len()))
+            .collect();
+        SidebarCounts {
+            tracks: library.tracks,
+            artists: library.artists,
+            albums: library.albums,
+            genres: library.genres,
+            folder_roots,
+            smart_lists,
+            playlists,
+        }
+    }
+
+    /// How many tracks live under `folder` (component-wise subtree), cached
+    /// per (generation, folder) — the per-music-folder count the Settings
+    /// Library pane shows. `0` on a store error so the pane still renders.
+    pub fn folder_track_count(&mut self, folder: &Path) -> usize {
+        match self
+            .counts
+            .folder_count(folder, &mut |f| self.queries.folder_track_count(f))
+        {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!("Failed to count tracks under {}: {e}", folder.display());
+                0
+            }
+        }
+    }
+
+    /// The timestamp of the last completed full library scan, cached per
+    /// generation (a cached absence included). `None` when no scan has ever
+    /// completed or the read failed — the footer just shows no stamp.
+    pub fn last_scan(&mut self) -> Option<SystemTime> {
+        self.last_full_scan_summary().map(|summary| summary.at)
+    }
+
+    /// The last completed full scan's summary — when it finished plus its
+    /// file/error counts — cached per generation (a cached absence
+    /// included). `None` when no scan has ever completed or the read failed
+    /// (design-handoff issue 12).
+    pub fn last_full_scan_summary(&mut self) -> Option<crate::app::store::FullScanSummary> {
+        match self.counts.last_scan(&mut || self.queries.last_full_scan()) {
+            Ok(scan) => scan,
+            Err(e) => {
+                tracing::warn!("Failed to read the last-scan summary from the store: {e}");
+                None
+            }
+        }
     }
 
     // --- User playlists ---------------------------------------------------------

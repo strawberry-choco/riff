@@ -32,8 +32,8 @@ pub use riff_persistence::errors::StoreError;
 pub use riff_persistence::playlist::{Playlist, PlaylistId};
 pub use riff_persistence::store::{
     LOST_GEMS_THRESHOLD, LibraryMutationStore, LibraryQueryStore, PlaylistEntry, PlaylistStore,
-    ScalarSettings, Settings, SettingsStore, StoreChanged, StoreGeneration, StoreMigrations,
-    WatchState,
+    ScalarSettings, ScanOptions, Settings, SettingsStore, StoreChanged, StoreGeneration,
+    StoreMigrations, WatchState,
 };
 pub use riff_persistence::track::{
     Album, Artist, CoverSource, SmartPlaylistKind, Track, TrackId, TrackMetadata,

@@ -489,6 +489,7 @@ fn up_next_section(
                             indent_level: 0,
                             icon: None,
                             label: &entry.label,
+                            count: None,
                             selected: false,
                             now_playing: false,
                             playing: false,

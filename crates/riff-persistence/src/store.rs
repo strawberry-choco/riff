@@ -7,7 +7,7 @@
 
 use crate::errors::StoreError;
 use crate::playlist::{Playlist, PlaylistId};
-use crate::track::{Album, Artist, SmartPlaylistKind, Track, TrackId};
+use crate::track::{Album, Artist, GenreCount, SmartPlaylistKind, Track, TrackId};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,17 +23,89 @@ pub enum WatchState {
     Warning(String),
 }
 
+/// The audio file extensions the Library Scan indexes, lowercase, no dots —
+/// the single source shared by the scanner and the Settings Library pane's
+/// format chips (design-handoff issue 12).
+pub const AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "aac", "opus", "ogg", "flac", "wav"];
+
+/// The Library Scan's behavior knobs, projected from the persisted
+/// [`ScalarSettings`] and handed to the filesystem walk as an explicit
+/// value (design-handoff issue 12). The default mirrors the scanner's
+/// historical behavior: hidden entries skipped, every [`AUDIO_EXTENSIONS`]
+/// format indexed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanOptions {
+    /// Leave dot-prefixed files and directories out of the walk.
+    pub skip_hidden_files: bool,
+    /// The enabled audio extensions, lowercase without dots.
+    pub formats: Vec<String>,
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self {
+            skip_hidden_files: true,
+            formats: AUDIO_EXTENSIONS
+                .iter()
+                .map(|extension| (*extension).to_string())
+                .collect(),
+        }
+    }
+}
+
+impl From<&ScalarSettings> for ScanOptions {
+    fn from(scalars: &ScalarSettings) -> Self {
+        Self {
+            skip_hidden_files: scalars.skip_hidden_files,
+            formats: scalars.scan_formats.clone(),
+        }
+    }
+}
+
+/// How artwork stands in for Tracks and Albums that have none — the
+/// Settings Library pane's "Missing artwork" choice (design-handoff issue
+/// 12). One strategy ships today; the enum leaves room for more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MissingArtworkStrategy {
+    /// A solid colour derived deterministically from the item's own
+    /// identity, so covers read as part of the palette rather than a
+    /// fallback glyph.
+    #[default]
+    GeneratedColour,
+}
+
+/// One completed full Library Scan's recorded summary (design-handoff
+/// issue 12): when it finished and what it saw, served back by
+/// [`LibraryQueryStore::last_full_scan`] for the Settings Library pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FullScanSummary {
+    /// When the scan completed.
+    pub at: SystemTime,
+    /// Audio files the scan discovered under the scanned root(s).
+    pub files: usize,
+    /// Discovered files that could not be indexed (unreadable metadata);
+    /// they are skipped, never committed.
+    pub errors: usize,
+}
+
 /// The single-row scalar preferences persisted in the Application Store's
 /// typed settings table. Volume is `None` while the user has not yet moved
 /// the slider, so the caller applies its own default.
 ///
 /// `repeat_mode` encodes the playback repeat cycle as an integer so this
 /// crate stays dependency-free: 0 = off, 1 = repeat all, 2 = repeat one.
+/// `browser_layout` likewise encodes the library browser column's render
+/// mode: 0 = list, 1 = grid (design-handoff issue 06).
+///
+/// The Library scan preferences (design-handoff issue 12): `skip_hidden_files`
+/// leaves dot-entries out of the scan walk, `scan_formats` lists the enabled
+/// audio extensions (subsets of [`AUDIO_EXTENSIONS`]), and the artwork pair
+/// drives cover resolution.
 #[allow(
     clippy::struct_excessive_bools,
     reason = "the struct mirrors the scalar settings row's typed columns"
 )]
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ScalarSettings {
     pub volume: Option<f32>,
     pub advanced_mode: bool,
@@ -41,6 +113,39 @@ pub struct ScalarSettings {
     pub replaygain_enabled: bool,
     pub shuffle: bool,
     pub repeat_mode: i64,
+    pub browser_layout: i64,
+    /// Skip hidden (dot-prefixed) files and directories during scans.
+    pub skip_hidden_files: bool,
+    /// The enabled audio extensions, lowercase without dots. Defaults to
+    /// every entry of [`AUDIO_EXTENSIONS`].
+    pub scan_formats: Vec<String>,
+    /// Read artwork embedded in track tags before filesystem fallbacks.
+    pub read_embedded_artwork: bool,
+    /// What renders for Tracks and Albums with no artwork.
+    pub missing_artwork_strategy: MissingArtworkStrategy,
+}
+
+impl Default for ScalarSettings {
+    /// The scanner's historical behavior: hidden files skipped, every
+    /// supported format indexed, embedded artwork read.
+    fn default() -> Self {
+        Self {
+            volume: None,
+            advanced_mode: false,
+            high_contrast: false,
+            replaygain_enabled: false,
+            shuffle: false,
+            repeat_mode: 0,
+            browser_layout: 0,
+            skip_hidden_files: true,
+            scan_formats: AUDIO_EXTENSIONS
+                .iter()
+                .map(|extension| (*extension).to_string())
+                .collect(),
+            read_embedded_artwork: true,
+            missing_artwork_strategy: MissingArtworkStrategy::default(),
+        }
+    }
 }
 
 /// Age threshold for the Lost Gems smart playlist: tracks whose last play is
@@ -247,6 +352,13 @@ pub trait LibraryMutationStore {
         played_at: SystemTime,
     ) -> Result<bool, StoreError>;
 
+    /// Set or clear `id`'s favorite flag as ONE immediate durable
+    /// transaction, so a crash right after a toggle cannot lose it. Returns
+    /// whether a change was committed: the track was known AND its flag
+    /// state actually moved — unknown ids and redundant sets change nothing
+    /// (and invalidate no projections).
+    fn set_track_favorite(&mut self, id: &TrackId, favorite: bool) -> Result<bool, StoreError>;
+
     /// The targeted tag-edit refresh: upsert `track`'s metadata as ONE
     /// immediate durable transaction without ever touching its play history
     /// (`play_count`, `last_played`, `date_added`). Unlike a plain rescan,
@@ -273,6 +385,29 @@ pub trait LibraryMutationStore {
     /// listed until the files return via a rescan. Returns the number of
     /// tracks removed.
     fn clear_library(&mut self) -> Result<usize, StoreError>;
+
+    /// Record the completion of one full library scan as ONE immediate
+    /// durable transaction: the summary overwrites any previous one in the
+    /// store's metadata table, and the committed write bumps + notifies the
+    /// session Library generation like every Library mutation, so the read
+    /// models refetch (design-handoff issues 05 and 12).
+    fn record_full_scan_completed(&mut self, summary: FullScanSummary) -> Result<(), StoreError>;
+}
+
+/// The sidebar-count totals for the Library collection, answered by ONE
+/// store query (design-handoff issue 05): total tracks, distinct artists,
+/// distinct `(album artist, title)` albums, and distinct non-empty per-track
+/// genres. A fresh store answers all zeros.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LibraryCounts {
+    /// Total number of stored Tracks.
+    pub tracks: usize,
+    /// Distinct album artists (the sidebar's Artists rows).
+    pub artists: usize,
+    /// Distinct `(album artist, title)` albums (the sidebar's Albums rows).
+    pub albums: usize,
+    /// Distinct non-empty per-track genres (the sidebar's Genres rows).
+    pub genres: usize,
 }
 
 /// Port for reading the Library collection section of the Application Store.
@@ -293,6 +428,20 @@ pub trait LibraryQueryStore {
 
     /// Total number of stored Tracks (for the flat list projection).
     fn track_count(&self) -> Result<usize, StoreError>;
+
+    /// The Library-count totals — tracks, artists, albums, genres — in ONE
+    /// query (design-handoff issue 05), so the sidebar-counts read model
+    /// costs one store round trip per generation instead of four queries.
+    /// Genre semantics match [`Self::genre_counts`]: distinct non-empty
+    /// per-track genres.
+    fn library_counts(&self) -> Result<LibraryCounts, StoreError>;
+
+    /// Every smart playlist's unbounded total in [`SmartPlaylistKind::ALL`]
+    /// order — how many tracks each list would contain with no limit
+    /// (design-handoff issue 05). Membership semantics are exactly the
+    /// [`Self::smart_playlist`] queries' filters; the `Lost Gems` count is
+    /// relative to the current clock like the list itself.
+    fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError>;
 
     /// Every Track id in the collection, ordered by full path ascending —
     /// the canonical flat ordering (ADR 0003). Serves Queue Fill: the whole
@@ -365,6 +514,18 @@ pub trait LibraryQueryStore {
     /// first, then filename — the former in-memory direct-listing order.
     fn tracks_in_folder(&self, folder: &std::path::Path) -> Result<Vec<Track>, StoreError>;
 
+    /// How many tracks live under `folder` (component-wise path prefix, the
+    /// same membership as [`Self::track_ids_in_folder_tree`]) — the
+    /// per-music-folder count the Settings Library pane shows
+    /// (design-handoff issue 05).
+    fn folder_track_count(&self, folder: &std::path::Path) -> Result<usize, StoreError>;
+
+    /// The last completed full library scan's summary — when it finished and
+    /// what it saw — as recorded by
+    /// [`LibraryMutationStore::record_full_scan_completed`]. `None` when no
+    /// scan has ever completed in this store (design-handoff issue 12).
+    fn last_full_scan(&self) -> Result<Option<FullScanSummary>, StoreError>;
+
     /// The direct child directories of `folder` that contain at least one
     /// stored Track anywhere beneath them, name-ascending (`PathBuf` order,
     /// like the former in-memory tree walk). Derived purely from stored
@@ -381,6 +542,37 @@ pub trait LibraryQueryStore {
         &self,
         kind: SmartPlaylistKind,
         limit: usize,
+    ) -> Result<Vec<Track>, StoreError>;
+
+    /// Every genre carrying at least one stored Track, name-ascending
+    /// (byte-wise), each with its per-track count aggregated from the
+    /// tracks' own genre metadata — not the albums' derived genre column.
+    /// Tracks whose genre is missing or empty aggregate into nothing: there
+    /// is no row for them. The sidebar's total-genres count is this list's
+    /// length.
+    fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError>;
+
+    /// Every artist having at least one Track with genre `genre`,
+    /// name-ascending, each with only the album keys of albums holding at
+    /// least one matching track, in canonical browsing order. Matching is an
+    /// exact comparison against the stored per-track genre. Unknown genres
+    /// yield an empty `Vec`.
+    fn artists_in_genre(&self, genre: &str) -> Result<Vec<Artist>, StoreError>;
+
+    /// One artist's albums holding at least one Track with genre `genre`,
+    /// in canonical browsing order, each carrying only its matching track
+    /// ids in album-track order. Unknown artists or genres yield an empty
+    /// `Vec`.
+    fn artist_albums_in_genre(&self, artist: &str, genre: &str) -> Result<Vec<Album>, StoreError>;
+
+    /// One album's Tracks with genre `genre`, in canonical album-track
+    /// order: track number ascending with missing numbers first, then path
+    /// tiebreak. Unknown albums or genres yield an empty `Vec`.
+    fn album_tracks_in_genre(
+        &self,
+        album_artist: &str,
+        album_title: &str,
+        genre: &str,
     ) -> Result<Vec<Track>, StoreError>;
 }
 

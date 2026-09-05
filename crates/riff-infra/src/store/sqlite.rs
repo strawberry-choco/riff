@@ -11,12 +11,14 @@ use crossbeam_channel::Sender;
 use riff_persistence::errors::StoreError;
 use riff_persistence::playlist::{Playlist, PlaylistId};
 use riff_persistence::store::{
-    LOST_GEMS_THRESHOLD, LibraryMutationStore, LibraryQueryStore, PlaylistEntry, PlaylistStore,
-    ScalarSettings, Settings, SettingsStore, StoreChanged, StoreGeneration, StoreMigrations,
-    WatchState,
+    FullScanSummary, LOST_GEMS_THRESHOLD, LibraryCounts, LibraryMutationStore, LibraryQueryStore,
+    MissingArtworkStrategy, PlaylistEntry, PlaylistStore, ScalarSettings, Settings, SettingsStore,
+    StoreChanged, StoreGeneration, StoreMigrations, WatchState,
 };
-use riff_persistence::track::{Album, Artist, SmartPlaylistKind, Track, TrackId, TrackMetadata};
-use rusqlite::Connection;
+use riff_persistence::track::{
+    Album, Artist, GenreCount, SmartPlaylistKind, Track, TrackId, TrackMetadata,
+};
+use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -50,6 +52,18 @@ static MIGRATION_CHECKSUMS: &[(&str, &str)] = &[
     (
         "005_playback_prefs",
         "64cb710aa547f4fd5bdf57aacbc65f5444a7f256fc71b018f45eed80f0ca3a7c",
+    ),
+    (
+        "006_track_favorites",
+        "e19647f102d120af1640cb5bcd5475762eff791a244f94b40736a37955574652",
+    ),
+    (
+        "007_browser_layout",
+        "b862ca731be1c0c6f033537c462688cf9838dbc0c456f8992217769fd7e2c431",
+    ),
+    (
+        "008_library_scan_prefs",
+        "4f0d61c2b1a3e2f8c9d5e7a6b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5",
     ),
 ];
 
@@ -170,6 +184,45 @@ const MIGRATIONS: &[Migration] = &[
           ADD COLUMN shuffle INTEGER NOT NULL DEFAULT 0 CHECK (shuffle IN (0, 1));
         ALTER TABLE app_settings
           ADD COLUMN repeat_mode INTEGER NOT NULL DEFAULT 0 CHECK (repeat_mode IN (0, 1, 2));",
+    },
+    Migration {
+        version: 6,
+        name: "006_track_favorites",
+        // The per-track favorite flag (design-handoff issue 03): a user
+        // fact stored directly on the track row, so removing or clearing
+        // the Library deletes the flag with the row — favorites can never
+        // dangle. The scan/tag upserts list columns explicitly and leave
+        // this one untouched, so rescans preserve it like play history.
+        sql: "ALTER TABLE tracks
+          ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0 CHECK (favorite IN (0, 1));",
+    },
+    Migration {
+        version: 7,
+        name: "007_browser_layout",
+        // The library browser column's render mode (design-handoff issue
+        // 06): the top bar's list/grid toggle persists here so the choice
+        // survives restarts. 0 = list, 1 = grid.
+        sql: "ALTER TABLE app_settings
+          ADD COLUMN browser_layout INTEGER NOT NULL DEFAULT 0 CHECK (browser_layout IN (0, 1));",
+    },
+    Migration {
+        version: 8,
+        name: "008_library_scan_prefs",
+        // The Library Scan preferences (design-handoff issue 12): hidden-file
+        // skipping, the enabled audio formats (a comma-joined extension list
+        // — extensions never contain commas — seeded to every format the
+        // scanner has always indexed), embedded-artwork reading, and the
+        // missing-artwork strategy. Defaults mirror the scanner's historical
+        // behavior so existing stores keep scanning exactly as before.
+        sql: "ALTER TABLE app_settings
+          ADD COLUMN skip_hidden_files INTEGER NOT NULL DEFAULT 1 CHECK (skip_hidden_files IN (0, 1));
+        ALTER TABLE app_settings
+          ADD COLUMN scan_formats TEXT NOT NULL DEFAULT 'mp3,m4a,aac,opus,ogg,flac,wav';
+        ALTER TABLE app_settings
+          ADD COLUMN read_embedded_artwork INTEGER NOT NULL DEFAULT 1 CHECK (read_embedded_artwork IN (0, 1));
+        ALTER TABLE app_settings
+          ADD COLUMN missing_artwork_strategy TEXT NOT NULL DEFAULT 'generated_colour'
+            CHECK (missing_artwork_strategy IN ('generated_colour'));",
     },
 ];
 
@@ -901,6 +954,36 @@ impl LibraryMutationStore for SqliteStore {
         recorded
     }
 
+    /// One immediate durable transaction per favorite toggle: the
+    /// single-row update commits alone, so a crash right after a toggle
+    /// cannot lose it. The `favorite != ?1` guard makes a redundant set a
+    /// no-op — nothing is written and no projection is invalidated.
+    fn set_track_favorite(&mut self, id: &TrackId, favorite: bool) -> Result<bool, StoreError> {
+        let set = self
+            .with_connection(|conn| {
+                conn.execute_batch("BEGIN IMMEDIATE;")?;
+                let updated = conn.execute(
+                    "UPDATE tracks SET favorite = ?1
+                     WHERE path = ?2 AND favorite != ?1",
+                    rusqlite::params![favorite, id.0],
+                );
+                match updated {
+                    Ok(_) => conn
+                        .execute_batch("COMMIT;")
+                        .map(|()| updated.unwrap_or(0) > 0),
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        Err(e)
+                    }
+                }
+            })
+            .map_err(|e| {
+                StoreError::InvalidOperation(format!("failed to set the favorite flag: {e}"))
+            });
+        self.bump_library_generation_on_commit(matches!(set, Ok(true)));
+        set
+    }
+
     /// One immediate durable transaction for a tag edit: the metadata upsert
     /// (history columns excluded) plus the album year/genre re-derivation and
     /// orphan cleanup commit together or not at all.
@@ -983,6 +1066,37 @@ impl LibraryMutationStore for SqliteStore {
             .map_err(|e| StoreError::InvalidOperation(format!("failed to clear the library: {e}")));
         self.bump_library_generation_on_commit(cleared.is_ok());
         cleared
+    }
+
+    /// Overwrite the last-scan summary in `store_metadata` as ONE immediate
+    /// durable transaction, then bump + notify the session Library
+    /// generation beside the commit. The value packs
+    /// `{finished nanos}:{files}:{errors}` in one string so the summary is
+    /// as atomic as the timestamp ever was (design-handoff issue 12).
+    fn record_full_scan_completed(&mut self, summary: FullScanSummary) -> Result<(), StoreError> {
+        let nanos = nanos_from_system_time(summary.at);
+        let value = format!("{}:{}:{}", nanos, summary.files, summary.errors);
+        let committed = self
+            .with_connection(|conn| {
+                conn.execute_batch("BEGIN IMMEDIATE;")?;
+                let outcome = conn.execute(
+                    "INSERT INTO store_metadata (key, value) VALUES ('last_full_scan', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    [value],
+                );
+                match outcome {
+                    Ok(_) => conn.execute_batch("COMMIT;"),
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        Err(e)
+                    }
+                }
+            })
+            .map_err(|e| {
+                StoreError::InvalidOperation(format!("failed to record the last scan: {e}"))
+            });
+        self.bump_library_generation_on_commit(committed.is_ok());
+        committed
     }
 }
 
@@ -1184,12 +1298,12 @@ const TRACK_COLUMNS: &str = "path, title, artist, album, album_artist,
             track_number, disc_number, genre, year, composer, comment,
             replaygain_track_gain, replaygain_track_peak,
             duration_nanos, sample_rate, channels,
-            play_count, last_played_nanos, date_added_nanos, search_text";
+            play_count, last_played_nanos, date_added_nanos, search_text, favorite";
 
 /// How many columns [`TRACK_COLUMNS`] expands to; result rows that append
 /// extra columns after them (e.g. the playlist-entries LEFT JOIN) index
 /// past this.
-const TRACK_COLUMN_COUNT: usize = 20;
+const TRACK_COLUMN_COUNT: usize = 21;
 
 /// Escape SQL-LIKE wildcards and the escape character itself so a path
 /// component matches literally under `LIKE ... ESCAPE '#'`: `%` and `_`
@@ -1282,6 +1396,7 @@ fn track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         play_count: narrow_u32(Some(row.get::<_, i64>(16)?)).unwrap_or(0),
         last_played: row.get::<_, Option<i64>>(17)?.map(system_time_from_nanos),
         date_added: row.get::<_, Option<i64>>(18)?.map(system_time_from_nanos),
+        favorite: row.get(20)?,
         search_text: row.get(19)?,
     })
 }
@@ -1492,6 +1607,187 @@ impl LibraryQueryStore for SqliteStore {
         .map_err(|e| StoreError::InvalidOperation(format!("failed to list album tracks: {e}")))
     }
 
+    /// The Library-count totals in one query: scalar subselects over
+    /// tracks, artists, and albums, with the genre count matching
+    /// [`Self::genre_counts`] semantics (distinct non-empty per-track
+    /// genre tags).
+    fn library_counts(&self) -> Result<LibraryCounts, StoreError> {
+        self.with_connection(|conn| {
+            conn.query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM tracks),
+                    (SELECT COUNT(*) FROM artists),
+                    (SELECT COUNT(*) FROM albums),
+                    (SELECT COUNT(DISTINCT genre) FROM tracks
+                     WHERE genre IS NOT NULL AND genre != '')",
+                [],
+                |row| {
+                    Ok(LibraryCounts {
+                        tracks: usize::try_from(row.get::<_, i64>(0)?)
+                            .expect("a track count fits in usize"),
+                        artists: usize::try_from(row.get::<_, i64>(1)?)
+                            .expect("an artist count fits in usize"),
+                        albums: usize::try_from(row.get::<_, i64>(2)?)
+                            .expect("an album count fits in usize"),
+                        genres: usize::try_from(row.get::<_, i64>(3)?)
+                            .expect("a genre count fits in usize"),
+                    })
+                },
+            )
+        })
+        .map_err(|e| StoreError::InvalidOperation(format!("failed to count the library: {e}")))
+    }
+
+    /// Every genre name-ascending with its per-track count, aggregated from
+    /// the tracks' own genre metadata. Missing (`NULL`) and empty genre
+    /// tags aggregate into nothing; `SQLite`'s default BINARY collation makes
+    /// the grouping and ordering byte-wise, matching the Rust-side sorts.
+    fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
+        self.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT genre, COUNT(*) FROM tracks
+                 WHERE genre IS NOT NULL AND genre != ''
+                 GROUP BY genre ORDER BY genre ASC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(GenreCount {
+                    genre: row.get(0)?,
+                    tracks: usize::try_from(row.get::<_, i64>(1)?)
+                        .expect("a track count fits in usize"),
+                })
+            })?;
+            rows.collect()
+        })
+        .map_err(|e| StoreError::InvalidOperation(format!("failed to aggregate genres: {e}")))
+    }
+
+    /// Artists name-ascending having at least one track with `genre`, each
+    /// with the album keys of albums holding at least one matching track.
+    /// Two ordered reads over genre-matching track rows; grouping happens in
+    /// Rust so the per-artist album order survives, mirroring
+    /// [`Self::all_artists`]. The JOIN against albums supplies the canonical
+    /// ordering columns; DISTINCT deduplicates multi-track albums.
+    fn artists_in_genre(&self, genre: &str) -> Result<Vec<Artist>, StoreError> {
+        self.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT t.album_artist_key, a.title
+                 FROM tracks t
+                 JOIN albums a ON a.album_artist = t.album_artist_key
+                              AND a.title = t.album_title_key
+                 WHERE t.genre = ?1
+                 ORDER BY t.album_artist_key ASC, COALESCE(a.year, 0) DESC, a.title ASC",
+            )?;
+            let rows = stmt.query_map([genre], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut keys_by_artist: HashMap<String, Vec<String>> = HashMap::new();
+            for row in rows {
+                let (artist, title) = row?;
+                keys_by_artist
+                    .entry(artist.clone())
+                    .or_default()
+                    .push(format!("{artist} - {title}"));
+            }
+
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT album_artist_key FROM tracks
+                 WHERE genre = ?1 ORDER BY album_artist_key ASC",
+            )?;
+            let names = stmt
+                .query_map([genre], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(names
+                .into_iter()
+                .map(|name| Artist {
+                    albums: keys_by_artist.remove(&name).unwrap_or_default(),
+                    name,
+                })
+                .collect())
+        })
+        .map_err(|e| StoreError::InvalidOperation(format!("failed to list genre artists: {e}")))
+    }
+
+    /// One artist's albums holding at least one track with `genre`, in
+    /// canonical browsing order, each carrying only its matching track ids
+    /// in album-track order. Mirrors [`Self::artist_albums`] with the genre
+    /// filter applied to the membership read.
+    fn artist_albums_in_genre(&self, artist: &str, genre: &str) -> Result<Vec<Album>, StoreError> {
+        self.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT title, year, genre FROM albums
+                 WHERE album_artist = ?1 AND EXISTS (
+                     SELECT 1 FROM tracks
+                     WHERE album_artist_key = ?1 AND album_title_key = albums.title
+                       AND genre = ?2
+                 )
+                 ORDER BY COALESCE(year, 0) DESC, title ASC",
+            )?;
+            let mut albums: Vec<Album> = stmt
+                .query_map(rusqlite::params![artist, genre], |row| {
+                    Ok(Album {
+                        artist: artist.to_string(),
+                        title: row.get(0)?,
+                        year: narrow_u32(row.get(1)?),
+                        genre: row.get(2)?,
+                        tracks: Vec::new(),
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            // Matching membership arrives globally ordered by number-then-
+            // path; appending per album preserves that order inside each
+            // album.
+            let mut stmt = conn.prepare(
+                "SELECT album_title_key, path FROM tracks
+                 WHERE album_artist_key = ?1 AND genre = ?2
+                 ORDER BY COALESCE(track_number, 0) ASC, path ASC",
+            )?;
+            let members = stmt.query_map(rusqlite::params![artist, genre], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut membership: HashMap<String, Vec<TrackId>> = HashMap::new();
+            for member in members {
+                let (title, path) = member?;
+                membership.entry(title).or_default().push(TrackId(path));
+            }
+            for album in &mut albums {
+                if let Some(ids) = membership.get(&album.title) {
+                    album.tracks.clone_from(ids);
+                }
+            }
+            Ok(albums)
+        })
+        .map_err(|e| {
+            StoreError::InvalidOperation(format!("failed to list artist albums in genre: {e}"))
+        })
+    }
+
+    /// One album's tracks with `genre`: track number ascending with missing
+    /// numbers first, path tiebreak — the canonical album-track order under
+    /// the genre filter.
+    fn album_tracks_in_genre(
+        &self,
+        album_artist: &str,
+        album_title: &str,
+        genre: &str,
+    ) -> Result<Vec<Track>, StoreError> {
+        self.with_connection(|conn| {
+            let mut stmt = conn.prepare_cached(&format!(
+                "SELECT {TRACK_COLUMNS} FROM tracks
+                 WHERE album_artist_key = ?1 AND album_title_key = ?2 AND genre = ?3
+                 ORDER BY COALESCE(track_number, 0) ASC, path ASC"
+            ))?;
+            let rows = stmt.query_map(
+                rusqlite::params![album_artist, album_title, genre],
+                track_from_row,
+            )?;
+            rows.collect()
+        })
+        .map_err(|e| {
+            StoreError::InvalidOperation(format!("failed to list album tracks in genre: {e}"))
+        })
+    }
+
     /// Escaped prefix existence check over stored track paths.
     fn folder_has_audio(&self, folder: &std::path::Path) -> Result<bool, StoreError> {
         let params = folder_prefix_params(&folder.to_string_lossy());
@@ -1532,6 +1828,65 @@ impl LibraryQueryStore for SqliteStore {
             Ok(exists > 0)
         })
         .map_err(|e| StoreError::InvalidOperation(format!("folder search failed: {e}")))
+    }
+
+    /// How many tracks live under `folder` (component-wise path prefix,
+    /// exactly like [`Self::track_ids_in_folder_tree`]'s membership) — the
+    /// per-music-folder count the Settings Library pane shows. One scalar
+    /// `COUNT` over the escaped prefix match; a sibling sharing a
+    /// byte-prefix (`a` vs `ab`) never matches.
+    fn folder_track_count(&self, folder: &std::path::Path) -> Result<usize, StoreError> {
+        self.with_connection(|conn| {
+            let params = folder_prefix_params(&folder.to_string_lossy());
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM tracks WHERE {FOLDER_PREFIX_SQL}"),
+                rusqlite::params![params[0], params[1], params[2]],
+                |row| {
+                    Ok(usize::try_from(row.get::<_, i64>(0)?)
+                        .expect("a folder track count fits in usize"))
+                },
+            )
+        })
+        .map_err(|e| StoreError::InvalidOperation(format!("failed to count folder tracks: {e}")))
+    }
+
+    /// The last completed full library scan's summary from the store's
+    /// metadata table. `None` when no scan has ever completed. Values
+    /// written by earlier builds carry only the finished nanos — they parse
+    /// as zero counts (nothing was recorded about them).
+    fn last_full_scan(&self) -> Result<Option<FullScanSummary>, StoreError> {
+        self.with_connection(|conn| {
+            conn.query_row(
+                "SELECT value FROM store_metadata WHERE key = 'last_full_scan'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map(|stamp| {
+                stamp.map(|text| {
+                    let mut parts = text.split(':');
+                    let nanos: i64 = parts
+                        .next()
+                        .unwrap_or_default()
+                        .parse()
+                        .expect("a stored scan stamp starts with an integer");
+                    let mut count = |fallback: usize| {
+                        parts
+                            .next()
+                            .and_then(|part| part.parse::<usize>().ok())
+                            .unwrap_or(fallback)
+                    };
+                    FullScanSummary {
+                        at: system_time_from_nanos(nanos),
+                        files: count(0),
+                        errors: count(0),
+                    }
+                })
+            })
+        })
+        .map_err(|e| {
+            StoreError::InvalidOperation(format!("failed to read the last-scan summary: {e}"))
+        })
     }
 
     /// Every path under `folder`, then re-sorted in Rust with the exact
@@ -1617,6 +1972,19 @@ impl LibraryQueryStore for SqliteStore {
     ) -> Result<Vec<Track>, StoreError> {
         let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
         match kind {
+            // Exactly the favorited tracks, in the canonical flat ordering
+            // (path-ascending, ADR 0003) — a stable order that never
+            // depends on insertion or play history.
+            SmartPlaylistKind::Favorites => self.with_connection(|conn| {
+                let mut stmt = conn.prepare_cached(&format!(
+                    "SELECT {TRACK_COLUMNS} FROM tracks
+                     WHERE favorite = 1
+                     ORDER BY path ASC
+                     LIMIT ?1"
+                ))?;
+                let rows = stmt.query_map([limit_i64], track_from_row)?;
+                rows.collect()
+            }),
             SmartPlaylistKind::MostPlayed => {
                 let mut played: Vec<Track> = self.with_connection(|conn| {
                     let mut stmt = conn.prepare_cached(&format!(
@@ -1645,6 +2013,18 @@ impl LibraryQueryStore for SqliteStore {
                     "SELECT {TRACK_COLUMNS} FROM tracks
                      WHERE date_added_nanos IS NOT NULL
                      ORDER BY date_added_nanos DESC, path ASC
+                     LIMIT ?1"
+                ))?;
+                let rows = stmt.query_map([limit_i64], track_from_row)?;
+                rows.collect()
+            }),
+            // Recently Played: newest finished-play first, never-played rows
+            // excluded (NULL last_played never qualifies); path tiebreak.
+            SmartPlaylistKind::RecentlyPlayed => self.with_connection(|conn| {
+                let mut stmt = conn.prepare_cached(&format!(
+                    "SELECT {TRACK_COLUMNS} FROM tracks
+                     WHERE last_played_nanos IS NOT NULL
+                     ORDER BY last_played_nanos DESC, path ASC
                      LIMIT ?1"
                 ))?;
                 let rows = stmt.query_map([limit_i64], track_from_row)?;
@@ -1691,6 +2071,53 @@ impl LibraryQueryStore for SqliteStore {
             }
         }
         .map_err(|e| StoreError::InvalidOperation(format!("smart playlist query failed: {e}")))
+    }
+
+    /// Every smart playlist's unbounded total, in [`SmartPlaylistKind::ALL`]
+    /// order. Each count runs the matching [`Self::smart_playlist`]
+    /// membership filter as a scalar `COUNT` (no `LIMIT`); `Lost Gems`
+    /// compares against the current clock like the list itself.
+    fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
+        self.with_connection(|conn| {
+            let scalar = |sql: &str| -> rusqlite::Result<usize> {
+                conn.query_row(sql, [], |row| {
+                    Ok(usize::try_from(row.get::<_, i64>(0)?)
+                        .expect("a smart list count fits in usize"))
+                })
+            };
+            let favorites = scalar("SELECT COUNT(*) FROM tracks WHERE favorite = 1")?;
+            let recently_added =
+                scalar("SELECT COUNT(*) FROM tracks WHERE date_added_nanos IS NOT NULL")?;
+            let most_played = scalar("SELECT COUNT(*) FROM tracks WHERE play_count > 0")?;
+            let recently_played =
+                scalar("SELECT COUNT(*) FROM tracks WHERE last_played_nanos IS NOT NULL")?;
+            let never_played = scalar("SELECT COUNT(*) FROM tracks WHERE play_count = 0")?;
+
+            let now_nanos = nanos_from_system_time(SystemTime::now());
+            let threshold_nanos = i64::try_from(LOST_GEMS_THRESHOLD.as_nanos()).unwrap_or(i64::MAX);
+            let cutoff = now_nanos.saturating_sub(threshold_nanos);
+            let lost_gems = conn.query_row(
+                "SELECT COUNT(*) FROM tracks
+                 WHERE last_played_nanos IS NULL
+                    OR last_played_nanos < ?1
+                    OR last_played_nanos > ?2",
+                rusqlite::params![cutoff, now_nanos],
+                |row| {
+                    Ok(usize::try_from(row.get::<_, i64>(0)?)
+                        .expect("a smart list count fits in usize"))
+                },
+            )?;
+
+            Ok(vec![
+                (SmartPlaylistKind::Favorites, favorites),
+                (SmartPlaylistKind::RecentlyAdded, recently_added),
+                (SmartPlaylistKind::MostPlayed, most_played),
+                (SmartPlaylistKind::RecentlyPlayed, recently_played),
+                (SmartPlaylistKind::NeverPlayed, never_played),
+                (SmartPlaylistKind::LostGems, lost_gems),
+            ])
+        })
+        .map_err(|e| StoreError::InvalidOperation(format!("smart list counts failed: {e}")))
     }
 }
 
@@ -1770,10 +2197,14 @@ impl SettingsStore for SqliteStore {
             .with_connection(|conn| {
                 conn.query_row(
                     "SELECT volume, advanced_mode, high_contrast, replaygain_enabled,
-                            shuffle, repeat_mode
+                            shuffle, repeat_mode, browser_layout,
+                            skip_hidden_files, scan_formats, read_embedded_artwork,
+                            missing_artwork_strategy
                      FROM app_settings WHERE id = 1",
                     [],
                     |row| {
+                        let scan_formats: String = row.get(8)?;
+                        let missing_artwork: String = row.get(10)?;
                         Ok(ScalarSettings {
                             volume: row.get(0)?,
                             advanced_mode: row.get::<_, i64>(1)? != 0,
@@ -1781,6 +2212,24 @@ impl SettingsStore for SqliteStore {
                             replaygain_enabled: row.get::<_, i64>(3)? != 0,
                             shuffle: row.get::<_, i64>(4)? != 0,
                             repeat_mode: row.get(5)?,
+                            browser_layout: row.get(6)?,
+                            skip_hidden_files: row.get::<_, i64>(7)? != 0,
+                            scan_formats: scan_formats
+                                .split(',')
+                                .filter(|extension| !extension.is_empty())
+                                .map(str::to_string)
+                                .collect(),
+                            read_embedded_artwork: row.get::<_, i64>(9)? != 0,
+                            missing_artwork_strategy: match missing_artwork.as_str() {
+                                "generated_colour" => MissingArtworkStrategy::GeneratedColour,
+                                other => {
+                                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                                        10,
+                                        rusqlite::types::Type::Text,
+                                        format!("unknown missing-artwork strategy: {other}").into(),
+                                    ));
+                                }
+                            },
                         })
                     },
                 )
@@ -1827,7 +2276,9 @@ impl SettingsStore for SqliteStore {
             let result = conn.execute(
                 "UPDATE app_settings
                  SET volume = ?1, advanced_mode = ?2, high_contrast = ?3,
-                     replaygain_enabled = ?4, shuffle = ?5, repeat_mode = ?6
+                     replaygain_enabled = ?4, shuffle = ?5, repeat_mode = ?6,
+                     browser_layout = ?7, skip_hidden_files = ?8, scan_formats = ?9,
+                     read_embedded_artwork = ?10, missing_artwork_strategy = ?11
                  WHERE id = 1",
                 rusqlite::params![
                     scalars.volume,
@@ -1836,6 +2287,13 @@ impl SettingsStore for SqliteStore {
                     i64::from(scalars.replaygain_enabled),
                     i64::from(scalars.shuffle),
                     scalars.repeat_mode,
+                    scalars.browser_layout,
+                    i64::from(scalars.skip_hidden_files),
+                    scalars.scan_formats.join(","),
+                    i64::from(scalars.read_embedded_artwork),
+                    match scalars.missing_artwork_strategy {
+                        MissingArtworkStrategy::GeneratedColour => "generated_colour",
+                    },
                 ],
             );
             match result {

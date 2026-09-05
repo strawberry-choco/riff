@@ -1,6 +1,10 @@
+mod browser_pane;
+mod selection_pane;
+
 use crate::ui::chrome::TitleBarAction;
 use crate::ui::now_playing::{NowPlayingAction, UpNextEntry};
 use crate::ui::playerbar::PlayerBarAction;
+use crate::ui::settings::SettingsSection;
 use crate::ui::theme;
 use eframe::egui;
 use riff_backend::app::MutexExt;
@@ -9,7 +13,7 @@ pub use riff_backend::app::cover_service::{COVER_CACHE_CAP, Covers, lru_insert};
 use riff_backend::app::facade::BackendFacade;
 use riff_backend::app::scan_service::{ScanOutcome, Scans};
 use riff_backend::app::state::{
-    BrowseMode, LibrarySession, LibraryStatus, PlaybackSession, UiFlags, ViewMode,
+    BrowseMode, LibrarySection, LibrarySession, LibraryStatus, PlaybackSession, UiFlags, ViewMode,
 };
 use riff_backend::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
 use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
@@ -17,8 +21,7 @@ use riff_backend::app::traits::TagEdit;
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
 use riff_backend::domain::{
-    Album, Artist, PlaybackState, Playlist, PlaylistId, RepeatMode, SmartPlaylistKind, Track,
-    TrackId,
+    PlaybackState, Playlist, PlaylistId, RepeatMode, SmartPlaylistKind, Track, TrackId,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -155,6 +158,8 @@ pub struct RiffApp {
     /// a fresh `Vec`.
     titlebar_actions: Vec<TitleBarAction>,
     playerbar_actions: Vec<PlayerBarAction>,
+    /// Caller-retained action buffer for the content top bar (issue 06).
+    topbar_actions: Vec<crate::ui::topbar::TopBarAction>,
     now_playing_actions: Vec<NowPlayingAction>,
     /// Transient "New Playlist" name prompt (`Some` = open, holds the draft).
     playlist_create_name: Option<String>,
@@ -164,6 +169,9 @@ pub struct RiffApp {
     /// Grouped with the other transient prompts on `RiffApp`.
     pub(crate) clear_library_confirm: bool,
     search_focus: bool,
+    /// Ctrl+K request flag (issue 06): one-shot focus request for the global
+    /// search field in the content top bar, consumed on the frame it lands.
+    global_search_focus: bool,
     first_frame: bool,
     pub(crate) watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
     /// The Application Store's settings section. The UI reads settings from
@@ -190,6 +198,9 @@ pub struct RiffApp {
     pub(crate) theme: ThemeState,
     /// Vendored-glyph texture cache for the shell's icon controls (Issue 06).
     pub(crate) icons: crate::ui::icons::IconCache,
+    /// The section the Settings modal's left nav currently shows (Issue 11).
+    /// Opens on Library, the pane the Library settings rewire builds on.
+    pub(crate) settings_section: SettingsSection,
     /// Linux-only folder-picker input state (no native file dialog there).
     /// Grouped so the rest of the struct keeps its cross-platform shape.
     #[cfg(target_os = "linux")]
@@ -257,11 +268,13 @@ impl RiffApp {
             stage_readouts: crate::ui::playerbar::SeekReadouts::new(),
             titlebar_actions: Vec::new(),
             playerbar_actions: Vec::new(),
+            topbar_actions: Vec::new(),
             now_playing_actions: Vec::new(),
             playlist_create_name: None,
             playlist_rename: None,
             clear_library_confirm: false,
             search_focus: false,
+            global_search_focus: false,
             first_frame: true,
             watcher_manager,
             settings_store,
@@ -274,6 +287,7 @@ impl RiffApp {
                 last_applied: None,
             },
             icons: crate::ui::icons::IconCache::new(),
+            settings_section: SettingsSection::Library,
             #[cfg(target_os = "linux")]
             settings_text_input: String::new(),
             #[cfg(target_os = "linux")]
@@ -306,6 +320,15 @@ impl RiffApp {
 
         let palette = theme::resolve(dark, high_contrast);
         theme::install(ctx, &palette);
+        // A palette-family flip invalidates the generated cover blocks:
+        // their colours were derived for the old family's tokens, so they
+        // re-derive under the new one on their next lookup (issue 14).
+        if self.theme.active.dark != palette.dark {
+            crate::ui::cover_placeholder::evict_generated(
+                &mut self.cover_textures,
+                &mut self.cover_lru_keys,
+            );
+        }
         self.theme.active = palette;
         self.theme.last_applied = Some((dark, high_contrast));
     }
@@ -358,6 +381,16 @@ impl RiffApp {
         if let Some(ref mut mgr) = *self.watcher_manager.lock_or_recover() {
             mgr.poll();
         }
+    }
+
+    /// Drop every generated cover block from the shared texture cache. For
+    /// sibling modules (`ui::settings`): the artwork-policy toggle uses it
+    /// so tracks resolved as artless under the old policy re-resolve.
+    pub(crate) fn evict_generated_covers(&mut self) {
+        crate::ui::cover_placeholder::evict_generated(
+            &mut self.cover_textures,
+            &mut self.cover_lru_keys,
+        );
     }
 
     /// Drain polled Tag Edit outcomes from the service. On [`Saved`] the
@@ -502,16 +535,20 @@ impl RiffApp {
         }
     }
 
-    /// Get a cover texture, touching the LRU to mark it as recently used.
-    fn get_cover_texture(&mut self, key: &str) -> Option<egui::TextureHandle> {
-        if let Some(tex) = self.cover_textures.get(key) {
-            // Move to end (most recently used) and return a clone.
-            self.cover_lru_keys.retain(|k| k != key);
-            self.cover_lru_keys.push(key.to_string());
-            Some(tex.clone())
-        } else {
-            None
-        }
+    /// Resolve a cover texture through the shared cache, touching the LRU
+    /// to mark it as recently used. A full miss (no real cover, no
+    /// generated block) resolves the identity's generated colour block into
+    /// the shared cache (issue 14) — real art, when it arrives through the
+    /// poll path, still wins.
+    fn resolve_cover_texture(&mut self, ctx: &egui::Context, key: &str) -> egui::TextureHandle {
+        let dark = self.theme.active.dark;
+        crate::ui::cover_placeholder::lookup_cover_texture(
+            &mut self.cover_textures,
+            &mut self.cover_lru_keys,
+            ctx,
+            dark,
+            key,
+        )
     }
 
     /// Attach the shared track context menu to `response`. See
@@ -599,6 +636,7 @@ impl RiffApp {
                 indent_level,
                 icon: None,
                 label,
+                count: None,
                 selected: is_selected,
                 now_playing: is_current,
                 playing: is_current && playing,
@@ -741,6 +779,7 @@ impl eframe::App for RiffApp {
             ui.ctx(),
             &playback,
             &mut self.search_focus,
+            &mut self.global_search_focus,
             self.transport.as_ref(),
         );
 
@@ -799,17 +838,37 @@ impl eframe::App for RiffApp {
             .resizable(false)
             .frame(egui::Frame::new().inner_margin(egui::Margin::same(12)))
             .show(ui, |ui| {
-                self.render_library_sidebar(ui, &mut library, &playback);
+                self.render_library_sidebar(ui, &mut library);
             });
+
+        // Content top bar (handoff issue 06): the orange wordmark, the
+        // global "Search or jump to…" field, and the list/grid view toggles —
+        // a second content strip above the library stage (open decision 4
+        // keeps the frameless chrome above it).
+        if library.view_mode == ViewMode::Library {
+            self.render_top_bar(ui, &mut library, &playback);
+        }
 
         // Bottom 88px strip: transport + progress + volume.
         self.render_control_bar(ui, &mut library, &mut playback);
+
+        // Browser column (handoff issue 08): the first pane of the
+        // three-pane explorer, one listing per sidebar section, right of
+        // the nav sidebar between the top bar and the player bar. Library
+        // content only — the Settings and Now Playing stages replace it.
+        self.render_browser_column_panel(ui, &mut library, &playback);
+
+        // Selection panel (handoff issue 10): the third pane of the
+        // explorer, a persistent right-hand readout of the selected album.
+        self.render_selection_panel_panel(ui, &mut library);
 
         // --- MAIN STAGE: exactly one View visible at a time ---
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(self.theme.active.background))
             .show(ui, |ui| match library.view_mode {
-                ViewMode::Library => self.render_track_details_panel(ui, &mut library),
+                ViewMode::Library => {
+                    self.render_detail_column_panel(ui, &mut library, &mut playback);
+                }
                 ViewMode::NowPlaying => self.show_now_playing_view(ui, &mut library, &playback),
                 ViewMode::Settings => {
                     self.show_settings_view(ui, &mut library, &mut playback);
@@ -866,6 +925,8 @@ fn apply_titlebar_action(
                 playback.replaygain_enabled,
                 playback.queue.shuffle,
                 playback.queue.repeat,
+                library.browser_layout,
+                &library.scan_prefs,
             );
         }
         Action::ToggleNowPlaying => {
@@ -881,6 +942,443 @@ fn apply_titlebar_action(
         }
         Action::Minimize => ctx.send_viewport_cmd(WindowControl::Minimize.viewport_command()),
         Action::Close => ctx.send_viewport_cmd(WindowControl::Close.viewport_command()),
+    }
+}
+
+/// Apply one [`crate::ui::browser::BrowserAction`] (handoff issue 08) to the
+/// library session: the sort toggle and genre chips are session fields; a
+/// row selection resolves per section into the [`BrowserSelection`] the
+/// detail column (issue 09) consumes. Track rows select through
+/// `library.selected_track` (the existing `interactive_track_row` flow), so
+/// the All Tracks variant never sets a browser selection.
+pub fn apply_browser_action(
+    action: crate::ui::browser::BrowserAction,
+    library: &mut LibrarySession,
+) {
+    use riff_backend::app::state::BrowserSelection;
+    match action {
+        crate::ui::browser::BrowserAction::ToggleSort => {
+            library.browser_sort_desc = !library.browser_sort_desc;
+        }
+        crate::ui::browser::BrowserAction::SetGenreFilter(filter) => {
+            library.genre_filter = filter;
+        }
+        crate::ui::browser::BrowserAction::Select(key) => {
+            library.browser_selection = match library.library_section {
+                LibrarySection::Artists => Some(BrowserSelection::Artist(key)),
+                LibrarySection::Genres => Some(BrowserSelection::Genre(key)),
+                LibrarySection::Albums => {
+                    key.split_once('\u{1f}')
+                        .map(|(artist, title)| BrowserSelection::Album {
+                            artist: artist.to_owned(),
+                            title: title.to_owned(),
+                        })
+                }
+                LibrarySection::AllTracks => None,
+            };
+            record_album_selection(library);
+        }
+    }
+}
+
+/// Record the panel's album (handoff issue 10) whenever the session's
+/// browser selection IS an album: called after every selection change, so
+/// the last album identity stays current while artist/genre selections and
+/// section navigation leave it — and the panel — alone.
+fn record_album_selection(library: &mut LibrarySession) {
+    use riff_backend::app::state::BrowserSelection;
+    if let Some(BrowserSelection::Album { artist, title }) = &library.browser_selection {
+        library.selected_album = Some(riff_backend::app::state::AlbumSelection {
+            artist: artist.clone(),
+            title: title.clone(),
+        });
+    }
+}
+
+/// Apply one [`crate::ui::detail::DetailAction`] (handoff issue 09) to the
+/// sessions and the store. `album_tracks` is the current album's track ids
+/// in store order, resolved by the caller from the Session Views facade —
+/// the play batch the header's two actions start. Playback follows the
+/// folder-enqueue precedent: one `play_many` batch, never per-track sends.
+pub fn apply_detail_action(
+    action: crate::ui::detail::DetailAction,
+    library: &mut LibrarySession,
+    playback: &mut PlaybackSession,
+    transport: &dyn Transport,
+    library_mutations: &mut dyn LibraryMutationStore,
+    album_tracks: &[TrackId],
+) {
+    use crate::ui::detail::DetailAction as Action;
+    match action {
+        Action::Crumb(_) | Action::SelectRow(_) => apply_detail_navigation(action, library),
+        Action::PlayAll | Action::Shuffle => {
+            // An empty album starts nothing — and never re-enables shuffle.
+            if album_tracks.is_empty() {
+                return;
+            }
+            if action == Action::Shuffle {
+                // Shuffle state lives in the session queue (same as the
+                // player bar's toggle); the batch itself is the ordinary
+                // play_many.
+                playback.queue.set_shuffle(true);
+            }
+            play_album_batch(album_tracks, transport);
+        }
+        Action::SelectTrack(key) => {
+            library.selected_track = Some(TrackId(key));
+        }
+        Action::PlayTrack(key) => {
+            library.selected_track = Some(TrackId(key.clone()));
+            transport.play(TrackId(key));
+        }
+        Action::SetFavorite { key, favorite } => {
+            if let Err(e) = library_mutations.set_track_favorite(&TrackId(key.clone()), favorite) {
+                tracing::warn!("Failed to commit the favorite flag for {key}: {e}");
+            }
+        }
+    }
+}
+
+/// Apply one [`crate::ui::selection::SelectionAction`] (handoff issue 10).
+/// `album_tracks` is the selected album's track ids in store order, resolved
+/// by the caller from the Session Views facade — the batch the panel's Play
+/// album starts, exactly the detail header's Play all gesture (one
+/// `play_many` batch, never per-track sends). An empty album starts nothing.
+pub fn apply_selection_action(
+    action: crate::ui::selection::SelectionAction,
+    transport: &dyn Transport,
+    album_tracks: &[TrackId],
+) {
+    match action {
+        crate::ui::selection::SelectionAction::PlayAlbum => {
+            play_album_batch(album_tracks, transport);
+        }
+    }
+}
+
+/// Start an album batch: its first track plays, the rest queue behind it —
+/// exactly [`play_folder`]'s gesture. An empty album starts nothing (and
+/// never re-enables shuffle).
+fn play_album_batch(album_tracks: &[TrackId], transport: &dyn Transport) {
+    let Some(first) = album_tracks.first() else {
+        return;
+    };
+    transport.play_many(first.clone(), album_tracks[1..].to_vec());
+}
+
+/// One frame of detail-column content, resolved from the library session
+/// through the Session Views facade: owned data so the render call site can
+/// borrow it all at once. Everything re-reads the store per generation, so
+/// scans and tag edits can never leave stale rows.
+#[derive(Default)]
+pub struct DetailContent {
+    pub breadcrumb: Vec<crate::ui::detail::Crumb>,
+    pub header: Option<crate::ui::detail::AlbumHeader>,
+    pub tracks: Vec<crate::ui::detail::TrackRow>,
+    pub rows: Vec<crate::ui::browser::BrowserItem>,
+}
+
+/// Resolve what the detail column (handoff issue 09) renders for the
+/// current [`BrowserSelection`]: the breadcrumb trail, the album header +
+/// track table on the album level, the artist's albums (or a genre's
+/// artists) on the level above.
+pub fn resolve_detail_content(views: &mut SessionViews, library: &LibrarySession) -> DetailContent {
+    use riff_backend::app::state::BrowserSelection;
+
+    let root = match library.library_section {
+        LibrarySection::Genres => "Genres",
+        LibrarySection::Albums => "Albums",
+        _ => "Artists",
+    };
+    let mut content = DetailContent {
+        breadcrumb: vec![crate::ui::detail::Crumb {
+            label: root.to_string(),
+        }],
+        ..DetailContent::default()
+    };
+    let Some(selection) = &library.browser_selection else {
+        return content;
+    };
+    match selection {
+        BrowserSelection::Artist(name) => {
+            content.breadcrumb.push(crate::ui::detail::Crumb {
+                label: name.clone(),
+            });
+            content.rows = artist_album_rows(views, name);
+        }
+        BrowserSelection::Genre(genre) => {
+            content.breadcrumb.push(crate::ui::detail::Crumb {
+                label: genre.clone(),
+            });
+            content.rows = views
+                .artists_in_genre(genre)
+                .iter()
+                .map(|artist| crate::ui::browser::BrowserItem {
+                    key: artist.name.clone(),
+                    label: artist.name.clone(),
+                    detail: None,
+                    thumbnail: None,
+                    selected: false,
+                    now_playing: false,
+                })
+                .collect();
+        }
+        BrowserSelection::Album { artist, title } => {
+            content.breadcrumb.push(crate::ui::detail::Crumb {
+                label: artist.clone(),
+            });
+            content.breadcrumb.push(crate::ui::detail::Crumb {
+                label: title.clone(),
+            });
+            // The album's year comes from its entry in the artist's album
+            // table (the store derives it from the first-added track).
+            let year = views
+                .artist_albums(artist)
+                .iter()
+                .find(|album| &album.title == title)
+                .and_then(|album| album.year);
+            content.header = Some(crate::ui::detail::AlbumHeader {
+                title: title.clone(),
+                subtitle: Some(
+                    year.map_or_else(|| artist.clone(), |y| format!("{artist} \u{b7} {y}")),
+                ),
+            });
+            let current = views.playback_current().map(|t| t.id.clone());
+            content.tracks = views
+                .album_tracks(artist, title)
+                .iter()
+                .map(|track| crate::ui::detail::TrackRow {
+                    key: track.id.0.clone(),
+                    number: track.metadata.track_number,
+                    title: track.metadata.display_title(&track.file_path),
+                    plays: track.play_count,
+                    duration: track.duration,
+                    favorite: track.favorite,
+                    selected: library.selected_track.as_ref() == Some(&track.id),
+                    now_playing: current.as_ref() == Some(&track.id),
+                })
+                .collect();
+        }
+    }
+    content
+}
+
+/// One frame of the selection panel (handoff issue 10), resolved from the
+/// library session through the Session Views facade. Owned data so the
+/// render call site can borrow it all at once. `title: None` is the empty
+/// state — nothing selected, or the album the session remembers is no
+/// longer in the store (so the panel can never show stale art).
+#[derive(Default)]
+pub struct SelectionContent {
+    pub title: Option<String>,
+    pub subtitle: Option<String>,
+    /// The album's first track — the cover the panel requests.
+    pub art_track: Option<TrackId>,
+    /// The album's track ids in store order — the batch Play album starts.
+    pub track_ids: Vec<TrackId>,
+    pub details: Vec<crate::ui::selection::SelectionDetail>,
+}
+
+/// Resolve what the selection panel (handoff issue 10) renders for the
+/// session's last album selection: title, artist · year line, art source,
+/// and the details grid (artist, released, genre, track count · total
+/// time, plays, last played, path) — all read through the Session Views
+/// seam, so scans and tag edits can never leave stale rows.
+pub fn resolve_selection_panel(
+    views: &mut SessionViews,
+    library: &LibrarySession,
+) -> SelectionContent {
+    use riff_backend::app::state::AlbumSelection;
+
+    let Some(AlbumSelection { artist, title }) = &library.selected_album else {
+        return SelectionContent::default();
+    };
+    let tracks = views.album_tracks(artist, title);
+    if tracks.is_empty() {
+        // The album is gone from the store (a rescan dropped it) — the
+        // empty state, never a stale readout.
+        return SelectionContent::default();
+    }
+    // The album's year and genre come from its entry in the artist's album
+    // table (the same source the detail column's header uses).
+    let albums = views.artist_albums(artist);
+    let album = albums.iter().find(|album| &album.title == title);
+    let details = vec![
+        crate::ui::selection::SelectionDetail {
+            label: "Artist".to_string(),
+            value: artist.clone(),
+        },
+        crate::ui::selection::SelectionDetail {
+            label: "Released".to_string(),
+            value: album
+                .and_then(|a| a.year)
+                .map_or_else(|| "\u{2014}".to_string(), |year| year.to_string()),
+        },
+        crate::ui::selection::SelectionDetail {
+            label: "Genre".to_string(),
+            value: album
+                .and_then(|a| a.genre.clone())
+                .unwrap_or_else(|| "\u{2014}".to_string()),
+        },
+        crate::ui::selection::SelectionDetail {
+            label: "Tracks".to_string(),
+            value: format!(
+                "{}{}",
+                tracks.len(),
+                total_duration(&tracks)
+                    .map(|total| format!(
+                        " \u{b7} {}",
+                        crate::ui::playerbar::format_duration(total)
+                    ))
+                    .unwrap_or_default()
+            ),
+        },
+        crate::ui::selection::SelectionDetail {
+            label: "Plays".to_string(),
+            value: tracks
+                .iter()
+                .map(|track| track.play_count)
+                .sum::<u32>()
+                .to_string(),
+        },
+        crate::ui::selection::SelectionDetail {
+            label: "Last played".to_string(),
+            value: last_played_label(&tracks),
+        },
+        crate::ui::selection::SelectionDetail {
+            label: "Path".to_string(),
+            value: tracks[0]
+                .file_path
+                .parent()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        },
+    ];
+    SelectionContent {
+        title: Some(title.clone()),
+        subtitle: Some(
+            album
+                .and_then(|a| a.year)
+                .map_or_else(|| artist.clone(), |year| format!("{artist} \u{b7} {year}")),
+        ),
+        art_track: tracks.first().map(|track| track.id.clone()),
+        track_ids: tracks.iter().map(|track| track.id.clone()).collect(),
+        details,
+    }
+}
+
+/// The album's known durations, summed; `None` when no track carries a
+/// duration (the count then reads alone, without a `·` total).
+fn total_duration(tracks: &[riff_backend::domain::Track]) -> Option<std::time::Duration> {
+    tracks
+        .iter()
+        .filter_map(|track| track.duration)
+        .reduce(|a, b| a + b)
+}
+
+/// The most recent play time across the album's tracks, as a coarse
+/// relative readout (`5m ago` — the sidebar footer's buckets); `Never`
+/// before the first play.
+fn last_played_label(tracks: &[riff_backend::domain::Track]) -> String {
+    let latest = tracks.iter().filter_map(|track| track.last_played).max();
+    latest.map_or_else(
+        || "Never".to_string(),
+        |at| {
+            let elapsed = at.elapsed().unwrap_or(std::time::Duration::ZERO);
+            crate::ui::sidebar::format_last_scan_ago(elapsed)
+        },
+    )
+}
+
+/// An artist's albums as detail-column rows, keyed by the store's
+/// `(album artist, title)` composite — the same identity the browser
+/// column's Albums variant reports.
+fn artist_album_rows(
+    views: &mut SessionViews,
+    artist: &str,
+) -> Vec<crate::ui::browser::BrowserItem> {
+    views
+        .artist_albums(artist)
+        .iter()
+        .map(|album| crate::ui::browser::BrowserItem {
+            key: format!("{}\u{1f}{}", album.artist, album.title),
+            label: album.title.clone(),
+            detail: album.year.map(|y| y.to_string()),
+            thumbnail: None,
+            selected: false,
+            now_playing: false,
+        })
+        .collect()
+}
+
+/// The detail column's navigation half: breadcrumb climbs and the
+/// artist/genre-level row selections, all [`LibrarySession`] state.
+fn apply_detail_navigation(action: crate::ui::detail::DetailAction, library: &mut LibrarySession) {
+    use riff_backend::app::state::BrowserSelection;
+    match action {
+        crate::ui::detail::DetailAction::Crumb(index) => {
+            // Climb the selection path back to `index`: level 0 is the
+            // section root (no selection); level 1 the first entity on the
+            // trail (the artist on an album trail). A segment at or below
+            // the current level changes nothing.
+            let climbed = match (&library.browser_selection, index) {
+                (_, 0) => None,
+                (Some(BrowserSelection::Album { artist, .. }), 1) => {
+                    Some(BrowserSelection::Artist(artist.clone()))
+                }
+                _ => library.browser_selection.clone(),
+            };
+            library.browser_selection = climbed;
+        }
+        crate::ui::detail::DetailAction::SelectRow(key) => {
+            // The rows' meaning follows the current level: on an artist the
+            // rows are albums (keyed by the store's `(album artist, title)`
+            // composite), on a genre they are artists. The identity
+            // convention is the browser column's (`apply_browser_action`).
+            let next = match &library.browser_selection {
+                Some(BrowserSelection::Artist(_)) => {
+                    key.split_once('\u{1f}')
+                        .map(|(artist, title)| BrowserSelection::Album {
+                            artist: artist.to_owned(),
+                            title: title.to_owned(),
+                        })
+                }
+                Some(BrowserSelection::Genre(_)) => Some(BrowserSelection::Artist(key)),
+                _ => None,
+            };
+            if let Some(selection) = next {
+                library.browser_selection = Some(selection);
+                record_album_selection(library);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Apply one [`crate::ui::topbar::TopBarAction`] (handoff issue 06) through
+/// the SAME store flows the other preferences use: the layout lands on the
+/// library session — the browser column (issue 08) reads it — and commits as
+/// one durable scalar transaction so the choice survives restarts.
+pub fn apply_top_bar_action(
+    action: crate::ui::topbar::TopBarAction,
+    library: &mut LibrarySession,
+    playback: &PlaybackSession,
+    store: &mut dyn SettingsStore,
+) {
+    match action {
+        crate::ui::topbar::TopBarAction::SetLayout(layout) => {
+            library.browser_layout = layout;
+            persist_scalars(
+                store,
+                playback.current_volume,
+                library.ui_flags,
+                playback.replaygain_enabled,
+                playback.queue.shuffle,
+                playback.queue.repeat,
+                layout,
+                &library.scan_prefs,
+            );
+        }
     }
 }
 
@@ -908,6 +1406,10 @@ pub fn apply_now_playing_action(
 /// transaction; failures are logged, the in-memory change stands. The
 /// scalar values are read from the playback and library sessions by the
 /// caller, so this helper no longer needs a session reference.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each parameter is one persisted scalar row field"
+)]
 fn persist_scalars(
     store: &mut dyn SettingsStore,
     volume: f32,
@@ -915,6 +1417,8 @@ fn persist_scalars(
     replaygain_enabled: bool,
     shuffle: bool,
     repeat: RepeatMode,
+    browser_layout: riff_backend::app::state::BrowserLayout,
+    scan_prefs: &riff_backend::app::state::ScanPrefs,
 ) {
     let repeat_mode = match repeat {
         RepeatMode::None => 0,
@@ -928,6 +1432,11 @@ fn persist_scalars(
         replaygain_enabled,
         shuffle,
         repeat_mode,
+        browser_layout: browser_layout.as_store_code(),
+        skip_hidden_files: scan_prefs.skip_hidden_files,
+        scan_formats: scan_prefs.scan_formats.clone(),
+        read_embedded_artwork: scan_prefs.read_embedded_artwork,
+        missing_artwork_strategy: scan_prefs.missing_artwork_strategy,
     };
     if let Err(e) = store.save_scalars(&scalars) {
         tracing::warn!("Failed to save settings: {e}");
@@ -947,6 +1456,38 @@ pub struct PlaylistPromptSlots<'a> {
     pub rename: &'a mut Option<(PlaylistId, String)>,
     /// The inline "New Playlist" prompt draft.
     pub create_name: &'a mut Option<String>,
+}
+
+/// The SMART LISTS sidebar section (design-handoff issue 07): the four core
+/// lists — in the design's order — are always visible, and Never Played /
+/// Lost Gems relocate behind Advanced mode (relocated, not deleted).
+#[must_use]
+pub fn smart_list_kinds(advanced: bool) -> Vec<SmartPlaylistKind> {
+    const CORE: [SmartPlaylistKind; 4] = [
+        SmartPlaylistKind::RecentlyAdded,
+        SmartPlaylistKind::RecentlyPlayed,
+        SmartPlaylistKind::MostPlayed,
+        SmartPlaylistKind::Favorites,
+    ];
+    if !advanced {
+        return CORE.to_vec();
+    }
+    let mut kinds = CORE.to_vec();
+    kinds.push(SmartPlaylistKind::NeverPlayed);
+    kinds.push(SmartPlaylistKind::LostGems);
+    kinds
+}
+
+/// Whether a smart list may currently be open (handoff issue 07): the
+/// Advanced-only lists (Never Played, Lost Gems) close once Advanced mode
+/// flips off; the core four always stay openable.
+#[must_use]
+pub fn smart_list_openable(kind: SmartPlaylistKind, advanced: bool) -> bool {
+    advanced
+        || !matches!(
+            kind,
+            SmartPlaylistKind::NeverPlayed | SmartPlaylistKind::LostGems
+        )
 }
 
 /// Apply one restyled playlist-row action (Issue 07) through the SAME Store
@@ -1069,6 +1610,8 @@ pub fn apply_player_bar_action(
                 playback.replaygain_enabled,
                 playback.queue.shuffle,
                 playback.queue.repeat,
+                library.browser_layout,
+                &library.scan_prefs,
             );
             // While muted the slider still edits current_volume, but the
             // engine keeps receiving 0 until unmuted.
@@ -1090,6 +1633,8 @@ pub fn apply_player_bar_action(
                 playback.replaygain_enabled,
                 playback.queue.shuffle,
                 playback.queue.repeat,
+                library.browser_layout,
+                &library.scan_prefs,
             );
         }
         Action::ToggleRepeat => {
@@ -1101,8 +1646,24 @@ pub fn apply_player_bar_action(
                 playback.replaygain_enabled,
                 playback.queue.shuffle,
                 playback.queue.repeat,
+                library.browser_layout,
+                &library.scan_prefs,
             );
         }
+        Action::ToggleQueue => {
+            // The queue panel is session state, not persisted (issue 13).
+            library.queue_open = !library.queue_open;
+        }
+        Action::ToggleExpanded => {
+            // The enlarged player view IS the Now Playing mode (issue 13):
+            // same routing as the titlebar's Now Playing toggle, and purely
+            // view state — playback keeps running untouched.
+            library.view_mode = match library.view_mode {
+                ViewMode::Library | ViewMode::Settings => ViewMode::NowPlaying,
+                ViewMode::NowPlaying => ViewMode::Library,
+            };
+        }
+        Action::PlayNext(track_id) => transport.play_next(track_id),
     }
 }
 
@@ -1167,18 +1728,34 @@ pub fn load_persisted_state(
 
         library_session.ui_flags.advanced_mode = settings.scalars.advanced_mode;
         library_session.ui_flags.high_contrast = settings.scalars.high_contrast;
+        library_session.browser_layout = riff_backend::app::state::BrowserLayout::from_store_code(
+            settings.scalars.browser_layout,
+        );
+        library_session.scan_prefs = riff_backend::app::state::ScanPrefs {
+            skip_hidden_files: settings.scalars.skip_hidden_files,
+            scan_formats: settings.scalars.scan_formats,
+            read_embedded_artwork: settings.scalars.read_embedded_artwork,
+            missing_artwork_strategy: settings.scalars.missing_artwork_strategy,
+        };
     }
 }
 
-/// Global keyboard shortcuts: Ctrl+F focuses search, Space toggles playback.
-fn handle_keyboard_shortcuts(
+/// Global keyboard shortcuts: Ctrl+K focuses the global search (issue 06),
+/// Ctrl+F the sidebar search, and Space toggles playback. Public so the
+/// shortcut contract is testable headlessly (precedent:
+/// [`load_persisted_state`]).
+pub fn handle_keyboard_shortcuts(
     ctx: &egui::Context,
     playback: &PlaybackSession,
-    search_focus: &mut bool,
+    sidebar_search_focus: &mut bool,
+    global_search_focus: &mut bool,
     transport: &dyn Transport,
 ) {
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::K)) {
+        *global_search_focus = true;
+    }
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::F)) {
-        *search_focus = true;
+        *sidebar_search_focus = true;
     }
     if !ctx.egui_wants_keyboard_input()
         && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
@@ -1254,6 +1831,45 @@ impl RiffApp {
         }
     }
 
+    /// Content top bar (handoff issue 06): the orange wordmark, the global
+    /// "Search or jump to…" field, and the list/grid view toggles, drawn by
+    /// the [`crate::ui::topbar`] widgets inside a 48px top panel. The search
+    /// field edits the session's `search_query` directly, so typing filters
+    /// the whole library; toggles land on the persisted browser layout via
+    /// [`apply_top_bar_action`], and a pending Ctrl+K request focuses the
+    /// field on the frame it lands.
+    fn render_top_bar(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        playback: &PlaybackSession,
+    ) {
+        egui::Panel::top("top_bar")
+            .exact_size(theme::TOPBAR_H)
+            .show(ui, |ui| {
+                let content = crate::ui::topbar::TopBarContent {
+                    layout: library.browser_layout,
+                };
+                self.topbar_actions.clear();
+                let search_response = crate::ui::topbar::show_top_bar(
+                    ui,
+                    &mut self.icons,
+                    &self.theme.active,
+                    &mut library.search_query,
+                    content,
+                    &mut self.topbar_actions,
+                );
+                // Ctrl+K landed: focus the global search field this frame.
+                if self.global_search_focus {
+                    search_response.request_focus();
+                    self.global_search_focus = false;
+                }
+            });
+        for action in self.topbar_actions.drain(..) {
+            apply_top_bar_action(action, library, playback, self.settings_store.as_mut());
+        }
+    }
+
     /// Bottom shell strip (Issues 06 + 08): transport, seek row, and volume
     /// at the exact 88px playerbar token height, drawn by the restyled
     /// playerbar widgets. Every reported [`crate::ui::playerbar::
@@ -1276,7 +1892,7 @@ impl RiffApp {
             let id = track.id.clone();
             let file_path = track.file_path.clone();
             self.request_cover(&id, &file_path);
-            cover = self.get_cover_texture(&id.0);
+            cover = Some(self.resolve_cover_texture(ui.ctx(), &id.0));
         }
 
         // The `{index}/{len}` queue-position label, formatted fresh each
@@ -1300,6 +1916,8 @@ impl RiffApp {
             shuffle: playback.queue.shuffle,
             repeat: playback.queue.repeat,
             queue_position: &queue_position,
+            queue_open: library.queue_open,
+            expanded: library.view_mode == ViewMode::NowPlaying,
             advanced: library.ui_flags.advanced_mode,
         };
 
@@ -1315,6 +1933,26 @@ impl RiffApp {
                     &mut self.playerbar_actions,
                 );
             });
+
+        // Queue panel (handoff issue 13): while the bar's queue button has
+        // the panel open, the existing Up Next read model is revealed in a
+        // floating sheet above the bar's right edge; its rows report
+        // `PlayNext` through the same action drain as the bar itself.
+        if library.queue_open {
+            self.views
+                .sync_playback(&playback.queue, crate::ui::playerbar::QUEUE_PANEL_LIMIT);
+            let up_next = crate::ui::now_playing::up_next_entries(
+                self.views.playback_up_next(),
+                crate::ui::playerbar::QUEUE_PANEL_LIMIT,
+            );
+            crate::ui::playerbar::show_queue_panel(
+                ui,
+                &mut self.icons,
+                &self.theme.active,
+                &up_next,
+                &mut self.playerbar_actions,
+            );
+        }
         for action in self.playerbar_actions.drain(..) {
             apply_player_bar_action(
                 action,
@@ -1329,20 +1967,17 @@ impl RiffApp {
 
 // --- Helper methods factored out to avoid borrow conflicts ---
 impl RiffApp {
-    /// Sidebar content (Issues 06 + 07): the restyled search box, the
-    /// segmented Library/Folders control, and the browser dispatch. Draws
-    /// inside the shell's fixed-width sidebar panel, which is shared chrome
-    /// present on every view; only the main stage switches. Nav routes
-    /// through [`crate::ui::chrome::NavDestination`] so exactly one View is
-    /// visible after any click.
-    fn render_library_sidebar(
-        &mut self,
-        ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-        playback: &PlaybackSession,
-    ) {
-        use crate::ui::chrome::NavDestination;
-        use crate::ui::sidebar::{self, SidebarNav};
+    /// Sidebar content (design-handoff issue 07): the flat, always-visible
+    /// sectioned nav — LIBRARY, SMART LISTS, PLAYLISTS — every row carrying a
+    /// live count from the counts read model, with the Add-folder /
+    /// "Last scan X ago" footer pinned to the panel's bottom. Draws inside
+    /// the shell's fixed-width sidebar panel, which is shared chrome present
+    /// on every view; only the main stage switches. Every nav click lands on
+    /// the library view (clearing any active search) so exactly one browser
+    /// variant is visible after it — the variant itself renders in the
+    /// browser column pane (issue 08), not here.
+    fn render_library_sidebar(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
+        use crate::ui::sidebar;
 
         let palette = self.theme.active;
 
@@ -1357,161 +1992,278 @@ impl RiffApp {
         }
         ui.add_space(10.0);
 
-        // Segmented Library/Folders control: each destination lands on the
-        // library view with its browse mode, so clicking one from Settings or
-        // Now Playing returns to it.
-        let active = NavDestination::active(library.view_mode, library.browse_mode);
-        let segment = match active {
-            Some(NavDestination::Library) => Some(SidebarNav::Library),
-            Some(NavDestination::Folders) => Some(SidebarNav::Folders),
-            _ => None,
-        };
-        if let Some(dest) = sidebar::segmented_nav(ui, &palette, segment) {
-            match dest {
-                SidebarNav::Library => {
-                    NavDestination::Library.apply(&mut library.view_mode, &mut library.browse_mode);
-                }
-                SidebarNav::Folders => {
-                    NavDestination::Folders.apply(&mut library.view_mode, &mut library.browse_mode);
-                    self.smart_playlist_view = None;
-                    self.playlist_view = None;
-                }
-            }
-        }
-        ui.add_space(12.0);
+        // One counts read per frame: every nav row's live count comes from
+        // the counts read model (handoff issue 05), cached per store
+        // generation so scans and playlist edits update it by the next frame.
+        let counts = self.views.sidebar_counts(library.library_paths.len());
 
-        let query = library.search_query.clone();
+        // A row highlights only while its browser variant is actually on
+        // screen (the Library view, no list opened over it).
+        let no_playlist = self.smart_playlist_view.is_none() && self.playlist_view.is_none();
+        let library_section_live = library.view_mode == ViewMode::Library
+            && library.browse_mode == BrowseMode::Library
+            && no_playlist;
+        let folder_section_live =
+            library.view_mode == ViewMode::Library && library.browse_mode == BrowseMode::Folders;
 
-        match library.browse_mode {
-            BrowseMode::Library => self.render_library_browser(ui, library, playback, &query),
-            BrowseMode::Folders => self.render_folder_tree(ui, library, playback, &query),
-        }
+        // --- LIBRARY ---------------------------------------------------------
+        self.render_library_rows(
+            ui,
+            library,
+            &counts,
+            library_section_live,
+            folder_section_live,
+        );
+        ui.add_space(8.0);
+
+        // --- SMART LISTS -------------------------------------------------------
+        // Four core lists are always visible (no Advanced gate); Never Played
+        // and Lost Gems relocate behind Advanced mode (relocated, not
+        // deleted — handoff issue 07 / open decision 2).
+        self.render_smart_list_rows(ui, library, &counts);
+
+        // --- PLAYLISTS ---------------------------------------------------------
+        // User playlists (Task 4.2): named, editable lists persisted in the
+        // Application Store, with their existing create/rename/delete/reorder
+        // flows. Always visible.
+        self.render_playlists_section(ui, library);
+
+        // --- FOOTER (pinned to the panel's bottom) ------------------------------
+        egui::Panel::bottom("sidebar_footer")
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                self.render_sidebar_footer(ui, library);
+            });
     }
 
-    /// Left-panel content in Library browse mode: the All Tracks / Artists
-    /// rows, smart playlists, user playlists, and the results dispatch — all
-    /// on the restyled 40px tree rows (Issue 07).
-    fn render_library_browser(
+    /// The LIBRARY section's five rows (design-handoff issue 07): All Tracks,
+    /// Artists, Albums, Genres, and Folders, each with its live count.
+    /// Clicking one lands on the library view in that section (Folders
+    /// switches the browse mode instead) and closes any opened list.
+    fn render_library_rows(
         &mut self,
         ui: &mut egui::Ui,
         library: &mut LibrarySession,
-        playback: &PlaybackSession,
-        query: &str,
+        counts: &riff_backend::app::views::SidebarCounts,
+        library_section_live: bool,
+        folder_section_live: bool,
     ) {
         use crate::ui::sidebar::{self, TreeRow};
+
         let palette = self.theme.active;
-
-        // Existing sub-toggle: All Tracks / Artists, now as tree rows.
-        // Selecting either one closes any open smart playlist.
-        let no_playlist = self.smart_playlist_view.is_none() && self.playlist_view.is_none();
-        let all_tracks = sidebar::tree_row(
-            ui,
-            &mut self.icons,
-            &palette,
-            TreeRow {
-                indent_level: 0,
-                icon: Some(crate::ui::icons::Icon::ListMusic),
-                label: "All Tracks",
-                selected: !library.ui_flags.show_artists_view && no_playlist,
-                now_playing: false,
-                playing: false,
-                disclosure: None,
-            },
-        );
-        if all_tracks.clicked() {
-            library.ui_flags.show_artists_view = false;
-            self.smart_playlist_view = None;
-            self.playlist_view = None;
-        }
-        let artists = sidebar::tree_row(
-            ui,
-            &mut self.icons,
-            &palette,
-            TreeRow {
-                indent_level: 0,
-                icon: Some(crate::ui::icons::Icon::Library),
-                label: "Artists",
-                selected: library.ui_flags.show_artists_view && no_playlist,
-                now_playing: false,
-                playing: false,
-                disclosure: None,
-            },
-        );
-        if artists.clicked() {
-            library.ui_flags.show_artists_view = true;
-            self.smart_playlist_view = None;
-            self.playlist_view = None;
-        }
-        ui.add_space(8.0);
-
-        // Smart Playlists: four read-only, auto-generated lists
-        // derived from local play history. They are virtual, so
-        // they never appear while searching. Advanced-only
-        // (REQ-UI-006): hidden entirely in the minimal UI.
-        if library.ui_flags.advanced_mode && query.is_empty() {
-            sidebar::section_header(ui, &palette, "Smart Playlists")
-                .on_hover_text("Auto-generated, read-only lists built from your play history.");
-            for kind in SmartPlaylistKind::ALL {
-                let selected = self.smart_playlist_view == Some(kind);
-                let row = sidebar::tree_row(
-                    ui,
-                    &mut self.icons,
-                    &palette,
-                    TreeRow {
-                        indent_level: 0,
-                        icon: Some(crate::ui::icons::Icon::Sparkles),
-                        label: kind.display_name(),
-                        selected,
-                        now_playing: false,
-                        playing: false,
-                        disclosure: None,
-                    },
-                );
-                if row.clicked() {
-                    self.smart_playlist_view = Some(kind);
-                    self.playlist_view = None;
-                }
+        sidebar::section_header(ui, &palette, "Library");
+        let library_rows: [(LibrarySection, &str, crate::ui::icons::Icon, usize); 4] = [
+            (
+                LibrarySection::AllTracks,
+                "All Tracks",
+                crate::ui::icons::Icon::ListMusic,
+                counts.tracks,
+            ),
+            (
+                LibrarySection::Artists,
+                "Artists",
+                crate::ui::icons::Icon::Library,
+                counts.artists,
+            ),
+            (
+                LibrarySection::Albums,
+                "Albums",
+                crate::ui::icons::Icon::Disc,
+                counts.albums,
+            ),
+            (
+                LibrarySection::Genres,
+                "Genres",
+                crate::ui::icons::Icon::Music,
+                counts.genres,
+            ),
+        ];
+        for (section, label, icon, count) in library_rows {
+            let row = sidebar::tree_row(
+                ui,
+                &mut self.icons,
+                &palette,
+                TreeRow {
+                    indent_level: 0,
+                    icon: Some(icon),
+                    label,
+                    count: Some(count),
+                    selected: library_section_live && library.library_section == section,
+                    now_playing: false,
+                    playing: false,
+                    disclosure: None,
+                },
+            );
+            if row.clicked() {
+                library.view_mode = ViewMode::Library;
+                library.browse_mode = BrowseMode::Library;
+                library.library_section = section;
+                library.search_query.clear();
+                self.smart_playlist_view = None;
+                self.playlist_view = None;
             }
-            ui.add_space(8.0);
         }
-
-        // User playlists (Task 4.2): named, editable lists persisted in the
-        // Application Store. A core feature — always visible (NOT
-        // gated behind advanced mode). Hidden while searching, like
-        // smart playlists.
-        if query.is_empty() {
-            self.render_playlists_section(ui);
+        // Folders is the one LIBRARY row that switches browse mode instead of
+        // section; its count is the registered library roots.
+        let folders_row = sidebar::tree_row(
+            ui,
+            &mut self.icons,
+            &palette,
+            TreeRow {
+                indent_level: 0,
+                icon: Some(crate::ui::icons::Icon::Folder),
+                label: "Folders",
+                count: Some(counts.folder_roots),
+                selected: folder_section_live,
+                now_playing: false,
+                playing: false,
+                disclosure: None,
+            },
+        );
+        if folders_row.clicked() {
+            library.view_mode = ViewMode::Library;
+            library.browse_mode = BrowseMode::Folders;
+            library.search_query.clear();
+            self.smart_playlist_view = None;
+            self.playlist_view = None;
         }
+    }
 
-        // Search gating reads the store's match count (the same query the
-        // flat view's projection totals use) — never the in-memory mirror.
-        let has_results = query.is_empty() || self.views.search_has_matches(query);
-        // A playlist only renders when not searching; search shows
-        // matching tracks only. Turning advanced mode off closes
-        // any open smart playlist.
-        let open_playlist = self
-            .smart_playlist_view
-            .filter(|_| query.is_empty() && library.ui_flags.advanced_mode);
-        let open_user_playlist = self.playlist_view.clone().filter(|_| query.is_empty());
+    /// The SMART LISTS section's rows (design-handoff issue 07): the four
+    /// core lists always, Never Played / Lost Gems behind Advanced mode.
+    /// Clicking one opens it over the library view.
+    fn render_smart_list_rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        counts: &riff_backend::app::views::SidebarCounts,
+    ) {
+        use crate::ui::sidebar::{self, TreeRow};
 
-        if !has_results && !query.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.label(format!("No tracks found matching '{query}'"));
-            });
-        } else if let Some(pid) = open_user_playlist {
-            self.render_playlist_view(ui, library, playback, &pid);
-        } else if let Some(kind) = open_playlist {
-            self.render_smart_playlist_view(ui, library, playback, kind);
-        } else if library.ui_flags.show_artists_view {
-            self.render_artist_view(ui, library, playback, query);
-        } else {
-            self.render_flat_view(ui, library, playback, query);
+        let palette = self.theme.active;
+        sidebar::section_header(ui, &palette, "Smart Lists")
+            .on_hover_text("Auto-generated, read-only lists built from your play history.");
+        let smart_count = |kind: SmartPlaylistKind| {
+            counts
+                .smart_lists
+                .iter()
+                .find(|(k, _)| *k == kind)
+                .map_or(0, |(_, n)| *n)
+        };
+        for kind in smart_list_kinds(library.ui_flags.advanced_mode) {
+            let row = sidebar::tree_row(
+                ui,
+                &mut self.icons,
+                &palette,
+                TreeRow {
+                    indent_level: 0,
+                    icon: Some(crate::ui::icons::Icon::Sparkles),
+                    label: kind.display_name(),
+                    count: Some(smart_count(kind)),
+                    selected: self.smart_playlist_view == Some(kind),
+                    now_playing: false,
+                    playing: false,
+                    disclosure: None,
+                },
+            );
+            if row.clicked() {
+                library.view_mode = ViewMode::Library;
+                library.browse_mode = BrowseMode::Library;
+                library.search_query.clear();
+                self.smart_playlist_view = Some(kind);
+                self.playlist_view = None;
+            }
+        }
+    }
+
+    /// The sidebar footer's action side: the stamp text comes from the
+    /// last-scan read model (issue 05) formatted by
+    /// [`sidebar::format_last_scan_ago`]; Add folder routes through the
+    /// EXISTING add-library-path flow.
+    fn render_sidebar_footer(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
+        use crate::ui::sidebar;
+
+        let stamp = self.views.last_scan().map(|scan| {
+            let elapsed = scan.elapsed().unwrap_or_default();
+            format!("Last scan {}", sidebar::format_last_scan_ago(elapsed))
+        });
+        if sidebar::sidebar_footer(ui, &mut self.icons, &self.theme.active, stamp.as_deref()) {
+            self.add_folder_from_sidebar(library);
+        }
+    }
+
+    /// Add a library root from the sidebar footer: the native folder picker
+    /// everywhere except Linux, where the text-input row renders beneath the
+    /// Settings stage — so the footer lands there before opening it.
+    fn add_folder_from_sidebar(&mut self, library: &mut LibrarySession) {
+        #[cfg(target_os = "linux")]
+        {
+            crate::ui::chrome::NavDestination::Settings
+                .apply(&mut library.view_mode, &mut library.browse_mode);
+            self.settings_show_input = true;
+            self.settings_path_error = None;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.add_library_via_platform_picker(library);
         }
     }
 
     /// Library-stage content (Issues 06 + 09): selected track metadata +
     /// cover, or the mockup's empty-state hero — the glowing disc circle with
     /// its copy — whenever there are no track details to show.
+    /// The detail column (handoff issue 09): the middle pane of the
+    /// three-pane explorer, rendered in the main stage between the browser
+    /// column and the future selection panel (issue 10). Whatever the
+    /// browser column's selection resolves to — an artist's albums, a
+    /// genre's artists, or the album header + track table. With no browser
+    /// selection (the flat All Tracks listing) the pre-existing selected-
+    /// track stage stays up.
+    fn render_detail_column_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        playback: &mut PlaybackSession,
+    ) {
+        if library.browser_selection.is_none() {
+            self.render_track_details_panel(ui, library);
+            return;
+        }
+        let content = resolve_detail_content(&mut self.views, library);
+        // The play batch the album header's actions start: the album's
+        // tracks in store order.
+        let album_tracks: Vec<TrackId> = content
+            .tracks
+            .iter()
+            .map(|row| TrackId(row.key.clone()))
+            .collect();
+        let mut actions = Vec::new();
+        crate::ui::detail::show_detail_column(
+            ui,
+            &mut self.icons,
+            &self.theme.active,
+            crate::ui::detail::DetailColumn {
+                breadcrumb: &content.breadcrumb,
+                header: content.header.as_ref(),
+                tracks: &content.tracks,
+                rows: &content.rows,
+                empty_title: "Nothing here yet",
+                empty_hint: "This selection has nothing to show.",
+            },
+            &mut actions,
+        );
+        for action in actions {
+            apply_detail_action(
+                action,
+                library,
+                playback,
+                self.transport.as_ref(),
+                self.library_mutations.as_mut(),
+                &album_tracks,
+            );
+        }
+    }
+
     fn render_track_details_panel(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
         let palette = self.theme.active;
         let Some(track_id) = library.selected_track.clone() else {
@@ -1538,217 +2290,10 @@ impl RiffApp {
                 ui.label(format!("File: {}", track.file_path.display()));
             });
             ui.with_layout(egui::Layout::top_down(egui::Align::RIGHT), |ui| {
-                let texture = self.get_cover_texture(&track.id.0);
+                let texture = Some(self.resolve_cover_texture(ui.ctx(), &track.id.0));
                 cover_art_ui(ui, &palette, texture, COVER_THUMB_SIZE);
             });
         });
-    }
-
-    fn render_artist_view(
-        &mut self,
-        ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-        playback: &PlaybackSession,
-        query: &str,
-    ) {
-        // Browsing reads through the Session Views facade over store queries
-        // (ADR 0002/0003): artists A–Z straight from the Application Store,
-        // each level cached until the next committed mutation bumps the
-        // generation. No in-memory mirror involved.
-        //
-        // Single pass over the borrowed cache: the projection hands back an
-        // Arc-shared list, so filtering collects lightweight references
-        // instead of cloning Artists, and the lowercased query is hoisted
-        // out of the per-item work.
-        let artists = self.views.artists();
-        let visible: Vec<&Artist> = if query.is_empty() {
-            artists.iter().collect()
-        } else {
-            let q = query.to_lowercase();
-            artists
-                .iter()
-                .filter(|a| a.name.to_lowercase().contains(&q))
-                .collect()
-        };
-        let current_track = playback.queue.current_track().cloned();
-
-        // Identity of the playing track's album, used to auto-open exactly
-        // the collapsed headers containing it — the same outcome as the
-        // former scan of every artist's albums, without loading closed
-        // artists' data.
-        let current_album: Option<(String, String)> = current_track
-            .as_ref()
-            .and_then(|tid| self.views.resolve_track(tid))
-            .map(|t| {
-                (
-                    // `display_*` return borrowed `Cow`s now (allocation
-                    // plan 4.6); the tuple outlives the track, so own the
-                    // strings.
-                    t.metadata.display_album_artist().into_owned(),
-                    t.metadata.display_album().into_owned(),
-                )
-            });
-
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for &artist in &visible {
-                let artist_has_current = current_album
-                    .as_ref()
-                    .is_some_and(|(album_artist, _)| album_artist == &artist.name);
-                self.render_artist_node(
-                    ui,
-                    library,
-                    playback,
-                    artist,
-                    current_album.as_ref(),
-                    current_track.as_ref(),
-                    artist_has_current,
-                    query,
-                );
-            }
-        });
-    }
-
-    /// One artist node of the Artists tree (Issue 07): a restyled 40px
-    /// collapsible row whose albums nest on the second indent level. The
-    /// collapse state persists per artist in egui memory, exactly like the
-    /// former `CollapsingHeader`.
-    #[allow(clippy::too_many_arguments)]
-    fn render_artist_node(
-        &mut self,
-        ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-        playback: &PlaybackSession,
-        artist: &Artist,
-        current_album: Option<&(String, String)>,
-        current_track: Option<&TrackId>,
-        artist_has_current: bool,
-        query: &str,
-    ) {
-        use crate::ui::icons::Icon;
-        use crate::ui::sidebar::{self, TreeRow};
-        use egui::collapsing_header::CollapsingState;
-
-        let palette = self.theme.active;
-        let id = egui::Id::new(("riff_sidebar_artist", &artist.name));
-        let mut collapsing =
-            CollapsingState::load_with_default_open(ui.ctx(), id, artist_has_current);
-
-        let response = sidebar::tree_row(
-            ui,
-            &mut self.icons,
-            &palette,
-            TreeRow {
-                indent_level: 0,
-                icon: Some(Icon::Music),
-                label: &artist.name,
-                selected: false,
-                now_playing: false,
-                playing: false,
-                disclosure: Some(collapsing.is_open()),
-            },
-        );
-        if response.clicked() {
-            collapsing.toggle(ui);
-        }
-        collapsing.store(ui.ctx());
-
-        if let Some(body) = collapsing.show_body_unindented(ui, |ui| {
-            let albums = self.views.artist_albums(&artist.name);
-
-            for album in albums.iter() {
-                let album_has_current = current_album.is_some_and(|(album_artist, album_title)| {
-                    album_artist == &album.artist && album_title == &album.title
-                });
-                self.render_album_node(
-                    ui,
-                    library,
-                    playback,
-                    album,
-                    current_track,
-                    album_has_current,
-                    query,
-                );
-            }
-        }) {
-            let _ = body;
-        }
-    }
-
-    /// One album node under an artist (Issue 07): a restyled 40px collapsible
-    /// row on the second indent level; its tracks sit on the third.
-    #[allow(clippy::too_many_arguments)]
-    fn render_album_node(
-        &mut self,
-        ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-        playback: &PlaybackSession,
-        album: &Album,
-        current_track: Option<&TrackId>,
-        album_has_current: bool,
-        _query: &str,
-    ) {
-        use crate::ui::icons::Icon;
-        use crate::ui::sidebar::{self, TreeRow};
-        use egui::collapsing_header::CollapsingState;
-
-        let palette = self.theme.active;
-        let id = egui::Id::new(("riff_sidebar_album", &album.artist, &album.title));
-        let mut collapsing =
-            CollapsingState::load_with_default_open(ui.ctx(), id, album_has_current);
-
-        let year_str = album.year.map_or(String::new(), |y| format!(" ({y})"));
-        let label = format!("{}{year_str}", album.title);
-
-        let response = sidebar::tree_row(
-            ui,
-            &mut self.icons,
-            &palette,
-            TreeRow {
-                indent_level: 1,
-                icon: Some(Icon::Disc),
-                label: &label,
-                selected: false,
-                now_playing: false,
-                playing: false,
-                disclosure: Some(collapsing.is_open()),
-            },
-        );
-        if response.clicked() {
-            collapsing.toggle(ui);
-        }
-        collapsing.store(ui.ctx());
-
-        collapsing.show_body_unindented(ui, |ui| {
-            let tracks = self.views.album_tracks(&album.artist, &album.title);
-            self.render_album_track_rows(ui, library, playback, &tracks, current_track);
-        });
-    }
-
-    /// Track rows for one album in the Artists view, rendered straight from
-    /// the store query results in their canonical order (track number then
-    /// filename, missing numbers first). Restyled 40px rows on the third
-    /// indent level (Issue 07).
-    fn render_album_track_rows(
-        &mut self,
-        ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-        playback: &PlaybackSession,
-        tracks: &[Track],
-        current_track: Option<&TrackId>,
-    ) {
-        for track in tracks {
-            let label = label_numbered(track);
-            self.interactive_track_row(
-                ui,
-                library,
-                playback,
-                track,
-                current_track,
-                None,
-                &label,
-                2,
-            );
-        }
     }
 
     fn render_flat_view(
@@ -1779,6 +2324,25 @@ impl RiffApp {
 
         // Anchor read: sizes the row range with the authoritative total.
         let first_page = self.views.track_list(query, 0);
+
+        if first_page.total == 0 {
+            crate::ui::browser::empty_state(
+                ui,
+                &self.theme.active,
+                "No tracks yet",
+                "Add a folder from the sidebar to start scanning your library.",
+            );
+            return;
+        }
+
+        // Grid mode (handoff issue 08): the same paged tracks as cover
+        // tiles. The list mode below keeps the interactive rows —
+        // double-click play, context menus, per-column readouts — until the
+        // detail column provides its own actions.
+        if library.browser_layout == riff_backend::app::state::BrowserLayout::Grid {
+            self.render_flat_grid(ui, library, query, current_track.as_ref());
+            return;
+        }
 
         egui::ScrollArea::vertical().show_rows(
             ui,
@@ -1821,8 +2385,12 @@ impl RiffApp {
     ) {
         // Bounded playlists cap at 50 entries; open-ended ones list all.
         let limit = match kind {
-            SmartPlaylistKind::RecentlyAdded | SmartPlaylistKind::MostPlayed => 50,
-            SmartPlaylistKind::NeverPlayed | SmartPlaylistKind::LostGems => usize::MAX,
+            SmartPlaylistKind::RecentlyAdded
+            | SmartPlaylistKind::MostPlayed
+            | SmartPlaylistKind::RecentlyPlayed => 50,
+            SmartPlaylistKind::Favorites
+            | SmartPlaylistKind::NeverPlayed
+            | SmartPlaylistKind::LostGems => usize::MAX,
         };
         let tracks = self.views.smart_list(kind, limit);
         let current_track = playback.queue.current_track().cloned();
@@ -1873,7 +2441,7 @@ impl RiffApp {
     /// create and rename prompts. Every mutation commits through the
     /// [`PlaylistStore`] port as one immediate durable transaction; reads
     /// come from the seam's playlist projection.
-    fn render_playlists_section(&mut self, ui: &mut egui::Ui) {
+    fn render_playlists_section(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
         use crate::ui::icons::Icon;
         use crate::ui::sidebar;
 
@@ -1939,6 +2507,14 @@ impl RiffApp {
                         create_name: &mut self.playlist_create_name,
                     },
                 );
+                // The section is shared chrome on every view: opening a
+                // playlist lands on the library view so its listing is on
+                // screen, and clears any search filter over the results.
+                if action == crate::ui::sidebar::PlaylistRowAction::Open {
+                    library.view_mode = ViewMode::Library;
+                    library.browse_mode = BrowseMode::Library;
+                    library.search_query.clear();
+                }
             }
 
             self.render_playlist_rename_prompt(ui, &playlists[index].id);
@@ -2180,6 +2756,7 @@ impl RiffApp {
                 indent_level: 0,
                 icon: None,
                 label: &label,
+                count: None,
                 selected: is_selected,
                 now_playing: is_current,
                 playing: is_current && playing,
@@ -2254,7 +2831,7 @@ impl RiffApp {
         let cover_key = self.now_playing_cover_key.take();
         let cover = cover_key
             .as_ref()
-            .and_then(|key| self.get_cover_texture(key));
+            .map(|key| self.resolve_cover_texture(ui.ctx(), key));
         self.now_playing_cover_key = cover_key;
         // Text block + Up Next rows formatted straight from the playback
         // projection's resolved tracks each frame; staleness is the
@@ -2309,10 +2886,12 @@ impl RiffApp {
         query: &str,
     ) {
         if library.library_paths.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(40.0);
-                ui.label("No library paths configured.");
-            });
+            crate::ui::browser::empty_state(
+                ui,
+                &self.theme.active,
+                "No folders yet",
+                "Add a folder from the sidebar to start scanning your library.",
+            );
             return;
         }
 
@@ -2393,6 +2972,7 @@ impl RiffApp {
                     Icon::Folder
                 }),
                 label: &label,
+                count: None,
                 selected: is_selected,
                 now_playing: false,
                 playing: false,

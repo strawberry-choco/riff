@@ -5,7 +5,9 @@ use riff_backend::app::MutexExt;
 use riff_backend::app::state::{
     LibrarySession, LibraryStatus, PlaybackSession, ViewMode, WatchState,
 };
-use riff_backend::app::store::SettingsStore;
+use riff_backend::app::store::{
+    AUDIO_EXTENSIONS, FullScanSummary, MissingArtworkStrategy, SettingsStore,
+};
 use std::path::{Path, PathBuf};
 
 /// Expand a leading `~/` (or a bare `~`) in `input` against the `HOME`
@@ -156,13 +158,56 @@ impl Readiness {
     }
 }
 
+// --- Sectioned modal (design-handoff issue 11) ---------------------------------
+
+/// One Settings section selectable from the modal's left nav. `ALL` is the
+/// mockup's nav order and drives focus order, so keep it authoritative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SettingsSection {
+    General,
+    Library,
+    Playback,
+    Appearance,
+    Shortcuts,
+    TagEditing,
+    Advanced,
+    About,
+}
+
+impl SettingsSection {
+    /// Every section in left-nav (and focus) order.
+    pub const ALL: [SettingsSection; 8] = [
+        Self::General,
+        Self::Library,
+        Self::Playback,
+        Self::Appearance,
+        Self::Shortcuts,
+        Self::TagEditing,
+        Self::Advanced,
+        Self::About,
+    ];
+
+    /// The nav label, verbatim from the mockup.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Library => "Library",
+            Self::Playback => "Playback",
+            Self::Appearance => "Appearance",
+            Self::Shortcuts => "Shortcuts",
+            Self::TagEditing => "Tag editing",
+            Self::Advanced => "Advanced",
+            Self::About => "About",
+        }
+    }
+}
+
 // --- Mockup copy -----------------------------------------------------------------
 
 /// Section heading, verbatim from the mockup (uppercased for display; egui
 /// has no letter-spacing, so the muted ink carries the hierarchy).
 pub const SECTION_LIBRARIES: &str = "MUSIC LIBRARIES";
-/// Section heading, verbatim from the mockup.
-pub const SECTION_PREFERENCES: &str = "PREFERENCES";
 /// Section heading, verbatim from the mockup.
 pub const SECTION_ADVANCED_INFO: &str = "ADVANCED & PLATFORM INFO";
 
@@ -189,6 +234,43 @@ pub const PREF_REPLAYGAIN: (&str, &str) = (
     "ReplayGain",
     "Normalize loudness across tracks when available.",
 );
+
+/// Library pane section headings (design-handoff issue 12), uppercased for
+/// display like [`SECTION_LIBRARIES`].
+pub const SECTION_FORMATS: &str = "INDEXED FORMATS";
+/// Library pane section heading.
+pub const SECTION_SCAN_STATUS: &str = "LAST FULL SCAN";
+/// Library pane section heading.
+pub const SECTION_ARTWORK: &str = "ARTWORK";
+
+/// Library pane preference copy: `(title, description)`.
+pub const PREF_WATCH_CHANGES: (&str, &str) = (
+    "Watch for changes",
+    "Update the Library automatically when files change on disk.",
+);
+/// Library pane preference copy.
+pub const PREF_SKIP_HIDDEN: (&str, &str) = (
+    "Skip hidden files",
+    "Leave dot-prefixed files and folders out of scans.",
+);
+/// Library pane preference copy.
+pub const PREF_READ_EMBEDDED: (&str, &str) = (
+    "Read embedded artwork",
+    "Use artwork stored in track tags before folder images.",
+);
+/// Library pane preference copy. The mockup's only strategy renders as the
+/// current choice; a second strategy would turn this row into a selector.
+pub const PREF_MISSING_ART: (&str, &str) = (
+    "Missing artwork",
+    "Generated colour — a deterministic colour stand-in per item.",
+);
+
+/// The Library pane footer's note.
+pub const FOOTER_NOTE: &str = "Changes apply immediately";
+/// The Library pane footer's restore action.
+pub const RESET_DEFAULTS_LABEL: &str = "Reset to defaults";
+/// The Library pane footer's closing action.
+pub const DONE_LABEL: &str = "Done";
 
 /// The destructive ghost button's fill: transparent until hovered, then the
 /// error token at the mockup's 10% (`hover:bg-destructive/10`). The idle
@@ -234,6 +316,10 @@ impl LibraryRow {
 /// Everything the Settings stage needs to render one frame. A plain value
 /// struct: the caller reads it out of the session, the widgets never touch
 /// state.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each persisted preference is an independent toggle"
+)]
 #[derive(Default)]
 pub struct SettingsContent {
     /// One row per configured library root, in display order.
@@ -244,6 +330,20 @@ pub struct SettingsContent {
     pub high_contrast: bool,
     /// `ReplayGain` preference (drives the third toggle).
     pub replaygain_enabled: bool,
+    /// The pane-level "Watch for changes" toggle: `true` when at least one
+    /// root is being watched. Turning it off stops every watcher; turning
+    /// it on starts one per root.
+    pub watch_any: bool,
+    /// The Library Scan preferences (design-handoff issue 12).
+    pub skip_hidden_files: bool,
+    /// The enabled audio extensions — the format chips' on/off state.
+    pub scan_formats: Vec<String>,
+    /// Whether embedded artwork is read before filesystem fallbacks.
+    pub read_embedded_artwork: bool,
+    /// What renders for Tracks and Albums with no artwork.
+    pub missing_artwork_strategy: MissingArtworkStrategy,
+    /// The last completed full scan's summary, `None` when never scanned.
+    pub last_scan: Option<FullScanSummary>,
 }
 
 /// What the user did to the Settings stage this frame. The app applies these
@@ -253,6 +353,8 @@ pub struct SettingsContent {
 pub enum SettingsAction {
     /// Leave the Settings View for the Library.
     Back,
+    /// Show the given section in the modal's right pane.
+    SelectSection(SettingsSection),
     /// Open the platform folder picker to register a new root.
     AddLibrary,
     /// Scan every configured root.
@@ -271,27 +373,26 @@ pub enum SettingsAction {
     SetHighContrast(bool),
     /// Set the `ReplayGain` preference.
     SetReplayGain(bool),
+    /// Start or stop watching every configured root (the pane's
+    /// "Watch for changes" toggle).
+    SetWatchAll(bool),
+    /// Set the "Skip hidden files" scan preference.
+    SetSkipHidden(bool),
+    /// Enable or disable one audio format's indexing (the format chips).
+    SetFormat(String, bool),
+    /// Set the "Read embedded artwork" preference.
+    SetReadEmbeddedArtwork(bool),
+    /// Restore the Library pane's preferences to their defaults.
+    ResetLibraryDefaults,
 }
 
 // --- Mockup dimensions ---------------------------------------------------------
-
-/// Stage column width (`max-w-2xl`): 672px.
-const COLUMN_MAX_W: f32 = 672.0;
-
-/// Stage inset around the column (`px-8 py-8`): 32px.
-const STAGE_PAD: f32 = 32.0;
-
-/// Gap under the Back bar before the first section (`mb-8`): 32px.
-const TOP_BAR_GAP: f32 = 32.0;
 
 /// Gap between a section header and its card (`mb-4`): 16px.
 const HEADER_GAP: f32 = 16.0;
 
 /// Gap between sections (`mb-8` on each `<section>`): 32px.
 const SECTION_GAP: f32 = 32.0;
-
-/// Height of the Back bar (its button is `px-3 py-2` at `text-sm`).
-const BACK_BAR_H: f32 = 36.0;
 
 /// Height of one library row (`px-4 py-3` over ~24px of content).
 const LIBRARY_ROW_H: f32 = 48.0;
@@ -322,67 +423,6 @@ const WATCH_BOX: f32 = 14.0;
 
 /// Full-texture UV rect for [`egui::Painter::image`] (sidebar precedent).
 const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-
-// --- Entry point -------------------------------------------------------------------
-
-/// Draw the restyled Settings stage (Issue 11) and report every interaction.
-/// Must run inside the shell's central stage panel; layout flows vertically
-/// through allocated rects so it scrolls naturally and renders headlessly.
-pub fn show_settings_stage(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    content: &SettingsContent,
-) -> Vec<SettingsAction> {
-    let mut actions = Vec::new();
-
-    egui::ScrollArea::vertical()
-        .id_salt("settings_stage")
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            let avail_w = ui.available_width();
-            let col_w = (avail_w - 2.0 * STAGE_PAD).clamp(120.0, COLUMN_MAX_W);
-            // The centered column's ABSOLUTE left edge: its offset within the
-            // stage plus the stage's own origin (the cursor's left), because
-            // the scope rect below is in screen coordinates. A vertical
-            // ScrollArea never scrolls horizontally, so the cursor's left is
-            // the stage's left edge on every frame.
-            let x0 = ui.cursor().left() + ((avail_w - col_w) * 0.5).max(0.0);
-
-            ui.add_space(STAGE_PAD);
-            let col_top = ui.cursor().top();
-            let col_bottom = col_top + ui.available_height();
-            ui.scope_builder(
-                egui::UiBuilder::new().max_rect(egui::Rect::from_min_max(
-                    egui::pos2(x0, col_top),
-                    egui::pos2(x0 + col_w, col_bottom),
-                )),
-                |ui| {
-                    back_bar(ui, cache, palette, &mut actions);
-                    ui.add_space(TOP_BAR_GAP);
-
-                    section_header(ui, palette, SECTION_LIBRARIES);
-                    ui.add_space(HEADER_GAP);
-                    libraries_card(ui, cache, palette, content, &mut actions);
-                    ui.add_space(HEADER_GAP);
-                    clear_row(ui, palette, &mut actions);
-                    ui.add_space(SECTION_GAP);
-
-                    section_header(ui, palette, SECTION_PREFERENCES);
-                    ui.add_space(HEADER_GAP);
-                    preferences_card(ui, palette, content, &mut actions);
-                    ui.add_space(SECTION_GAP);
-
-                    section_header(ui, palette, SECTION_ADVANCED_INFO);
-                    ui.add_space(HEADER_GAP);
-                    info_lines(ui, palette);
-                },
-            );
-            ui.add_space(STAGE_PAD);
-        });
-
-    actions
-}
 
 // --- Pure helpers ------------------------------------------------------------------
 
@@ -427,83 +467,6 @@ fn section_header(ui: &mut egui::Ui, palette: &Palette, text: &str) {
         text,
         styled_font(ui, egui::TextStyle::Heading, theme::TEXT_SM),
         palette.ink_3,
-    );
-}
-
-/// The top bar: a bordered surface Back button (arrow glyph + label) and the
-/// xl semibold "Settings" heading.
-fn back_bar(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    actions: &mut Vec<SettingsAction>,
-) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), BACK_BAR_H),
-        egui::Sense::hover(),
-    );
-    let painter = ui.painter_at(rect);
-
-    // Measure the label so the button hugs its content like px-3 does.
-    let body_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM);
-    let galley = painter.layout_no_wrap("Back".to_owned(), body_font, palette.ink);
-    let btn_w = 12.0 + 16.0 + 8.0 + galley.size().x + 12.0;
-    let btn_rect = egui::Rect::from_min_size(rect.min, egui::vec2(btn_w, BACK_BAR_H));
-
-    let response = ui.interact(
-        btn_rect,
-        egui::Id::new("settings_back"),
-        egui::Sense::click(),
-    );
-    painter.rect_filled(
-        btn_rect,
-        theme::RADIUS_MD,
-        if response.hovered() {
-            palette.surface_2
-        } else {
-            palette.surface
-        },
-    );
-    painter.rect_stroke(
-        btn_rect,
-        theme::RADIUS_MD,
-        egui::Stroke::new(1.0_f32, palette.border),
-        egui::StrokeKind::Inside,
-    );
-    let tint = if response.hovered() {
-        palette.ink
-    } else {
-        palette.ink_2
-    };
-    let tex_id = cache.texture(ui.ctx(), Icon::ArrowLeft, 16.0, tint);
-    let icon_rect = egui::Rect::from_center_size(
-        egui::pos2(btn_rect.left() + 20.0, btn_rect.center().y),
-        egui::vec2(16.0, 16.0),
-    );
-    painter.image(tex_id, icon_rect, UV_FULL, tint);
-    painter.galley(
-        egui::pos2(
-            icon_rect.right() + 8.0,
-            btn_rect.center().y - galley.size().y / 2.0,
-        ),
-        galley,
-        palette.ink,
-    );
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Back to Library")
-    });
-    if response.clicked() {
-        actions.push(SettingsAction::Back);
-    }
-
-    // Heading beside the button (gap-4).
-    let heading_font = styled_font(ui, egui::TextStyle::Heading, theme::TEXT_XL);
-    painter.text(
-        egui::pos2(btn_rect.right() + 16.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        "Settings",
-        heading_font,
-        palette.ink,
     );
 }
 
@@ -695,6 +658,22 @@ fn library_row_path(
         egui::pos2(path_x, cy - path_galley.size().y / 2.0),
         path_galley.clone(),
         path_color,
+    );
+
+    // The live per-folder track count (design-handoff issues 05 and 12):
+    // muted, beside the path, so each row answers "how much lives here".
+    let count_galley = painter.layout_no_wrap(
+        format!("{} tracks", row.indexed_tracks),
+        styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS),
+        palette.ink_3,
+    );
+    painter.galley(
+        egui::pos2(
+            path_x + path_galley.size().x + 12.0,
+            cy - count_galley.size().y / 2.0,
+        ),
+        count_galley,
+        palette.ink_3,
     );
     if is_unavailable {
         // Strikethrough for the missing root, as the previous row rendered it.
@@ -1016,13 +995,296 @@ fn clear_row(ui: &mut egui::Ui, palette: &Palette, actions: &mut Vec<SettingsAct
     }
 }
 
-/// The three boolean preferences the stage drives through the reusable
-/// toggle switch.
+/// Height of one format chip (the small secondary-button geometry).
+const CHIP_H: f32 = 27.0;
+
+/// Horizontal padding inside a format chip around its label.
+const CHIP_LABEL_PAD: f32 = 12.0;
+
+/// Gap between adjacent format chips.
+const CHIP_GAP: f32 = 8.0;
+
+/// Height of the last-full-scan card.
+const SCAN_CARD_H: f32 = 76.0;
+
+/// Height of the pane footer's action row.
+const FOOTER_H: f32 = 48.0;
+
+/// The format chips card: one toggle chip per [`AUDIO_EXTENSIONS`] entry;
+/// enabled formats are indexed on the next scan (design-handoff issue 12).
+fn formats_card(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    content: &SettingsContent,
+    actions: &mut Vec<SettingsAction>,
+) {
+    egui::Frame::new()
+        .fill(palette.surface)
+        .stroke(egui::Stroke::new(1.0_f32, palette.border))
+        .corner_radius(theme::RADIUS_LG)
+        .inner_margin(egui::Margin::same(12))
+        .show(ui, |ui| {
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), CHIP_H),
+                egui::Sense::hover(),
+            );
+            let painter = ui.painter_at(rect);
+            let mut x = rect.left();
+            for extension in AUDIO_EXTENSIONS {
+                let enabled = content.scan_formats.iter().any(|f| f == extension);
+                let label = extension.to_uppercase();
+                let font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS);
+                let label_w = painter
+                    .layout_no_wrap(label.clone(), font, palette.ink)
+                    .size()
+                    .x;
+                let chip_w = CHIP_LABEL_PAD * 2.0 + label_w;
+                let chip_rect = egui::Rect::from_min_size(
+                    egui::pos2(x, rect.top()),
+                    egui::vec2(chip_w, CHIP_H),
+                );
+                let a11y = format!("Index {extension} files");
+                if filled_button(
+                    ui,
+                    cache,
+                    palette,
+                    chip_rect,
+                    egui::Id::new(("settings_format_chip", *extension)),
+                    &label,
+                    &a11y,
+                    None,
+                    enabled,
+                    true,
+                    true,
+                ) {
+                    actions.push(SettingsAction::SetFormat(
+                        (*extension).to_string(),
+                        !enabled,
+                    ));
+                }
+                x += chip_w + CHIP_GAP;
+            }
+        });
+}
+
+/// The last-full-scan card: when the scan finished and what it saw, with a
+/// Rescan now action (design-handoff issue 12).
+fn scan_status_card(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    content: &SettingsContent,
+    actions: &mut Vec<SettingsAction>,
+) {
+    egui::Frame::new()
+        .fill(palette.surface)
+        .stroke(egui::Stroke::new(1.0_f32, palette.border))
+        .corner_radius(theme::RADIUS_LG)
+        .show(ui, |ui| {
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), SCAN_CARD_H),
+                egui::Sense::hover(),
+            );
+            let painter = ui.painter_at(rect);
+            let cy = rect.center().y;
+
+            let (stamp_line, counts_line) = match content.last_scan {
+                Some(summary) => {
+                    let elapsed = summary.at.elapsed().unwrap_or_default();
+                    (
+                        format!(
+                            "Last full scan {}",
+                            crate::ui::sidebar::format_last_scan_ago(elapsed)
+                        ),
+                        format!(
+                            "{} files indexed \u{b7} {} errors",
+                            summary.files, summary.errors
+                        ),
+                    )
+                }
+                None => (
+                    String::from("No full scan recorded yet"),
+                    String::from("Run a scan to index your music folders."),
+                ),
+            };
+
+            painter.text(
+                egui::pos2(rect.left() + 16.0, cy - 10.0),
+                egui::Align2::LEFT_CENTER,
+                stamp_line,
+                styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM),
+                palette.ink,
+            );
+            painter.text(
+                egui::pos2(rect.left() + 16.0, cy + 10.0),
+                egui::Align2::LEFT_CENTER,
+                counts_line,
+                styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS),
+                palette.ink_3,
+            );
+
+            let btn_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS);
+            let btn_label_w = painter
+                .layout_no_wrap("Rescan now".to_owned(), btn_font, palette.ink)
+                .size()
+                .x;
+            let btn_rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    rect.right() - 16.0 - (24.0 + btn_label_w),
+                    cy - SMALL_BTN_H / 2.0,
+                ),
+                egui::vec2(24.0 + btn_label_w, SMALL_BTN_H),
+            );
+            if filled_button(
+                ui,
+                cache,
+                palette,
+                btn_rect,
+                egui::Id::new("settings_rescan_now"),
+                "Rescan now",
+                "Rescan now",
+                Some(Icon::RefreshCw),
+                false,
+                true,
+                true,
+            ) {
+                actions.push(SettingsAction::ScanAll);
+            }
+        });
+}
+
+/// The Missing artwork strategy row: title + description on the left, the
+/// current strategy as a static brand chip on the right. One strategy ships
+/// today; a second would turn this into a selector.
+fn strategy_row(ui: &mut egui::Ui, palette: &Palette) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), PREF_ROW_H),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.text(
+        egui::pos2(rect.left() + 16.0, rect.top() + 11.0),
+        egui::Align2::LEFT_TOP,
+        PREF_MISSING_ART.0,
+        styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM),
+        palette.ink,
+    );
+    painter.text(
+        egui::pos2(rect.left() + 16.0, rect.bottom() - 11.0),
+        egui::Align2::LEFT_BOTTOM,
+        PREF_MISSING_ART.1,
+        styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS),
+        palette.ink_3,
+    );
+
+    let label = "Generated colour";
+    let font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS);
+    let label_w = painter
+        .layout_no_wrap(label.to_owned(), font, palette.on_brand)
+        .size()
+        .x;
+    let chip_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - 16.0 - label_w / 2.0 - 12.0, rect.center().y),
+        egui::vec2(label_w + 24.0, SMALL_BTN_H),
+    );
+    painter.rect_filled(chip_rect, theme::RADIUS_MD, palette.brand_primary);
+    painter.text(
+        chip_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS),
+        palette.on_brand,
+    );
+}
+
+/// The Library pane footer: the immediate-apply note on the left, the
+/// Reset-to-defaults (secondary) and Done (primary) actions on the right.
+fn library_footer(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    actions: &mut Vec<SettingsAction>,
+) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), FOOTER_H),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    let cy = rect.center().y;
+
+    painter.text(
+        egui::pos2(rect.left() + 4.0, cy),
+        egui::Align2::LEFT_CENTER,
+        FOOTER_NOTE,
+        styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM),
+        palette.ink_3,
+    );
+
+    // Done (primary) hugs the right edge; Reset sits to its left.
+    let done_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM);
+    let done_w = painter
+        .layout_no_wrap(DONE_LABEL.to_owned(), done_font, palette.on_brand)
+        .size()
+        .x
+        + 32.0;
+    let done_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - done_w - 4.0, cy - ACTION_BTN_H / 2.0),
+        egui::vec2(done_w, ACTION_BTN_H),
+    );
+    if filled_button(
+        ui,
+        cache,
+        palette,
+        done_rect,
+        egui::Id::new("settings_done"),
+        DONE_LABEL,
+        DONE_LABEL,
+        None,
+        true,
+        false,
+        true,
+    ) {
+        actions.push(SettingsAction::Back);
+    }
+
+    let reset_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM);
+    let reset_w = painter
+        .layout_no_wrap(RESET_DEFAULTS_LABEL.to_owned(), reset_font, palette.ink)
+        .size()
+        .x
+        + 32.0;
+    let reset_rect = egui::Rect::from_min_size(
+        egui::pos2(done_rect.left() - 12.0 - reset_w, cy - ACTION_BTN_H / 2.0),
+        egui::vec2(reset_w, ACTION_BTN_H),
+    );
+    if filled_button(
+        ui,
+        cache,
+        palette,
+        reset_rect,
+        egui::Id::new("settings_reset_defaults"),
+        RESET_DEFAULTS_LABEL,
+        RESET_DEFAULTS_LABEL,
+        None,
+        false,
+        false,
+        true,
+    ) {
+        actions.push(SettingsAction::ResetLibraryDefaults);
+    }
+}
+
+/// The boolean preferences the stage drives through the reusable toggle
+/// switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Preference {
     Advanced,
     HighContrast,
     ReplayGain,
+    WatchChanges,
+    SkipHidden,
+    ReadEmbedded,
 }
 
 impl Preference {
@@ -1032,6 +1294,9 @@ impl Preference {
             Self::Advanced => PREF_ADVANCED,
             Self::HighContrast => PREF_HIGH_CONTRAST,
             Self::ReplayGain => PREF_REPLAYGAIN,
+            Self::WatchChanges => PREF_WATCH_CHANGES,
+            Self::SkipHidden => PREF_SKIP_HIDDEN,
+            Self::ReadEmbedded => PREF_READ_EMBEDDED,
         }
     }
 
@@ -1041,6 +1306,9 @@ impl Preference {
             Self::Advanced => SettingsAction::SetAdvanced(value),
             Self::HighContrast => SettingsAction::SetHighContrast(value),
             Self::ReplayGain => SettingsAction::SetReplayGain(value),
+            Self::WatchChanges => SettingsAction::SetWatchAll(value),
+            Self::SkipHidden => SettingsAction::SetSkipHidden(value),
+            Self::ReadEmbedded => SettingsAction::SetReadEmbeddedArtwork(value),
         }
     }
 
@@ -1050,6 +1318,9 @@ impl Preference {
             Self::Advanced => "pref_advanced",
             Self::HighContrast => "pref_high_contrast",
             Self::ReplayGain => "pref_replaygain",
+            Self::WatchChanges => "pref_watch_changes",
+            Self::SkipHidden => "pref_skip_hidden",
+            Self::ReadEmbedded => "pref_read_embedded",
         }
     }
 
@@ -1059,17 +1330,22 @@ impl Preference {
             Self::Advanced => content.advanced_mode,
             Self::HighContrast => content.high_contrast,
             Self::ReplayGain => content.replaygain_enabled,
+            Self::WatchChanges => content.watch_any,
+            Self::SkipHidden => content.skip_hidden_files,
+            Self::ReadEmbedded => content.read_embedded_artwork,
         }
     }
 }
 
-/// The Preferences card: three rows, each driven by the reusable
-/// [`super::toggle_switch::toggle_switch`].
+/// A card of preference rows, each driven by the reusable
+/// [`super::toggle_switch::toggle_switch`]. `prefs` selects which rows the
+/// caller's section shows (one card can hold any subset).
 fn preferences_card(
     ui: &mut egui::Ui,
     palette: &Palette,
     content: &SettingsContent,
     actions: &mut Vec<SettingsAction>,
+    prefs: &[Preference],
 ) {
     egui::Frame::new()
         .fill(palette.surface)
@@ -1077,16 +1353,11 @@ fn preferences_card(
         .corner_radius(theme::RADIUS_LG)
         .inner_margin(egui::Margin::same(4))
         .show(ui, |ui| {
-            let prefs = [
-                Preference::Advanced,
-                Preference::HighContrast,
-                Preference::ReplayGain,
-            ];
-            for (i, pref) in prefs.into_iter().enumerate() {
+            for (i, pref) in prefs.iter().enumerate() {
                 if i > 0 {
                     row_separator(ui, palette, 16.0);
                 }
-                preference_row(ui, palette, pref, pref.checked(content), actions);
+                preference_row(ui, palette, *pref, pref.checked(content), actions);
             }
         });
 }
@@ -1188,6 +1459,329 @@ fn info_lines(ui: &mut egui::Ui, palette: &Palette) {
     }
 }
 
+// --- Sectioned modal (issue 11) --------------------------------------------------
+
+/// Modal card width cap (`max-w-3xl`-ish).
+const MODAL_MAX_W: f32 = 760.0;
+
+/// Modal card height cap.
+const MODAL_MAX_H: f32 = 600.0;
+
+/// Backdrop margin around the card (`p-8`).
+const MODAL_PAD: f32 = 32.0;
+
+/// Header height (title row + close control).
+const MODAL_HEADER_H: f32 = 56.0;
+
+/// Left-nav column width.
+const NAV_W: f32 = 180.0;
+
+/// One left-nav row's height (`py-2` at text-sm).
+const NAV_ITEM_H: f32 = 32.0;
+
+/// Draw the sectioned Settings modal (Issue 11): a centered card with a
+/// header, a left nav listing [`SettingsSection::ALL`], and the current
+/// section's pane. Must run inside the shell's central stage panel; reports
+/// every interaction as [`SettingsAction`]s so the app adapter applies them
+/// through its state/command/store paths.
+pub fn show_settings_modal(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    content: &SettingsContent,
+    current: SettingsSection,
+) -> Vec<SettingsAction> {
+    let mut actions = Vec::new();
+
+    // Center the card in the stage (a vertical layout never scrolls
+    // horizontally, so the cursor's left is the stage's left edge).
+    let avail = ui.available_size();
+    let card_w = (avail.x - 2.0 * MODAL_PAD).clamp(320.0, MODAL_MAX_W);
+    let card_h = (avail.y - 2.0 * MODAL_PAD).clamp(240.0, MODAL_MAX_H);
+    let x0 = ui.cursor().left() + ((avail.x - card_w) * 0.5).max(0.0);
+    let y0 = ui.cursor().top() + ((avail.y - card_h) * 0.5).max(0.0);
+    let card = egui::Rect::from_min_size(egui::pos2(x0, y0), egui::vec2(card_w, card_h));
+
+    let painter = ui.painter_at(card);
+    painter.rect_filled(card, theme::RADIUS_LG, palette.surface);
+    painter.rect_stroke(
+        card,
+        theme::RADIUS_LG,
+        egui::Stroke::new(1.0_f32, palette.border),
+        egui::StrokeKind::Inside,
+    );
+
+    ui.scope_builder(egui::UiBuilder::new().max_rect(card), |ui| {
+        modal_header(ui, cache, palette, &mut actions);
+        let body_top = ui.cursor().top();
+        let body_h = card.bottom() - body_top;
+
+        // Left nav strip (below the header — anchored to the card's top it
+        // would paint its first item over the title).
+        let nav =
+            egui::Rect::from_min_size(egui::pos2(card.left(), body_top), egui::vec2(NAV_W, body_h));
+        let nav_inner = egui::Rect::from_min_max(
+            egui::pos2(nav.left(), nav.top() + 8.0),
+            egui::pos2(nav.right(), nav.bottom()),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(nav_inner), |ui| {
+            for section in SettingsSection::ALL {
+                nav_item(ui, palette, section, section == current, &mut actions);
+            }
+        });
+        // Hairline between nav and pane.
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(nav.right(), body_top),
+                egui::pos2(nav.right() + 1.0, card.bottom()),
+            ),
+            0.0,
+            palette.border,
+        );
+
+        // Current section's pane (dispatch added with the pane slices).
+        let pane = egui::Rect::from_min_max(egui::pos2(nav.right() + 1.0, body_top), card.max);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| {
+            section_pane(ui, cache, palette, content, current, &mut actions);
+        });
+    });
+
+    actions
+}
+
+/// The modal's header: the "Settings" xl heading with a bordered close
+/// (arrow-left) control whose activation reports [`SettingsAction::Back`].
+fn modal_header(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    actions: &mut Vec<SettingsAction>,
+) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), MODAL_HEADER_H),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+
+    let heading_font = styled_font(ui, egui::TextStyle::Heading, theme::TEXT_XL);
+    let galley = painter.layout_no_wrap("Settings".to_owned(), heading_font, palette.ink);
+    painter.galley(
+        egui::pos2(rect.left() + 16.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        palette.ink,
+    );
+
+    // Close control at the header's right edge, hugging its content.
+    let body_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM);
+    let label_galley = painter.layout_no_wrap("Back".to_owned(), body_font, palette.ink_2);
+    let btn_w = 16.0 + 8.0 + label_galley.size().x + 12.0;
+    let btn_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - btn_w - 12.0, rect.center().y - 16.0),
+        egui::vec2(btn_w, 32.0),
+    );
+    let response = ui.interact(
+        btn_rect,
+        egui::Id::new("settings_back"),
+        egui::Sense::click(),
+    );
+    painter.rect_filled(
+        btn_rect,
+        theme::RADIUS_MD,
+        if response.hovered() {
+            palette.surface_2
+        } else {
+            palette.surface
+        },
+    );
+    painter.rect_stroke(
+        btn_rect,
+        theme::RADIUS_MD,
+        egui::Stroke::new(1.0_f32, palette.border),
+        egui::StrokeKind::Inside,
+    );
+    let tint = if response.hovered() {
+        palette.ink
+    } else {
+        palette.ink_2
+    };
+    let tex_id = cache.texture(ui.ctx(), Icon::ArrowLeft, 16.0, tint);
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(btn_rect.left() + 12.0 + 8.0, btn_rect.center().y),
+        egui::vec2(16.0, 16.0),
+    );
+    painter.image(tex_id, icon_rect, UV_FULL, tint);
+    painter.galley(
+        egui::pos2(
+            icon_rect.right() + 8.0,
+            btn_rect.center().y - label_galley.size().y / 2.0,
+        ),
+        label_galley,
+        tint,
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Back to Library")
+    });
+    if response.clicked() {
+        actions.push(SettingsAction::Back);
+    }
+}
+
+/// One left-nav row. The active section is visually indicated: a surface fill
+/// plus a brand accent bar and full ink, against muted ink for the rest.
+fn nav_item(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    section: SettingsSection,
+    selected: bool,
+    actions: &mut Vec<SettingsAction>,
+) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), NAV_ITEM_H),
+        egui::Sense::hover(),
+    );
+    let response = ui.interact(
+        rect,
+        egui::Id::new(("settings_nav", section.label())),
+        egui::Sense::click(),
+    );
+    let painter = ui.painter_at(rect);
+    if selected {
+        painter.rect_filled(
+            rect.shrink2(egui::vec2(8.0, 0.0)),
+            theme::RADIUS_MD,
+            palette.surface_2,
+        );
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left() + 8.0, rect.top() + 6.0),
+                egui::pos2(rect.left() + 11.0, rect.bottom() - 6.0),
+            ),
+            theme::RADIUS_FULL,
+            palette.brand_primary,
+        );
+    } else if response.hovered() {
+        painter.rect_filled(
+            rect.shrink2(egui::vec2(8.0, 0.0)),
+            theme::RADIUS_MD,
+            palette.row_hover,
+        );
+    }
+    painter.text(
+        egui::pos2(rect.left() + 20.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        section.label(),
+        styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM),
+        if selected { palette.ink } else { palette.ink_2 },
+    );
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, section.label()));
+    if response.clicked() {
+        actions.push(SettingsAction::SelectSection(section));
+    }
+}
+
+/// Pane inset around its content.
+const PANE_PAD: i8 = 24;
+
+/// The right pane's content for the current section. Sections with existing
+/// content show it; the rest show a clear placeholder (full implementations
+/// are later tickets).
+fn section_pane(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    content: &SettingsContent,
+    current: SettingsSection,
+    actions: &mut Vec<SettingsAction>,
+) {
+    egui::ScrollArea::vertical()
+        .id_salt("settings_pane")
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            egui::Frame::new()
+                .inner_margin(egui::Margin::same(PANE_PAD))
+                .show(ui, |ui| match current {
+                    SettingsSection::Library => {
+                        section_header(ui, palette, SECTION_LIBRARIES);
+                        ui.add_space(HEADER_GAP);
+                        libraries_card(ui, cache, palette, content, actions);
+                        ui.add_space(HEADER_GAP);
+                        clear_row(ui, palette, actions);
+
+                        ui.add_space(SECTION_GAP);
+                        preferences_card(
+                            ui,
+                            palette,
+                            content,
+                            actions,
+                            &[Preference::WatchChanges, Preference::SkipHidden],
+                        );
+
+                        ui.add_space(SECTION_GAP);
+                        section_header(ui, palette, SECTION_FORMATS);
+                        ui.add_space(HEADER_GAP);
+                        formats_card(ui, cache, palette, content, actions);
+
+                        ui.add_space(SECTION_GAP);
+                        section_header(ui, palette, SECTION_SCAN_STATUS);
+                        ui.add_space(HEADER_GAP);
+                        scan_status_card(ui, cache, palette, content, actions);
+
+                        ui.add_space(SECTION_GAP);
+                        section_header(ui, palette, SECTION_ARTWORK);
+                        ui.add_space(HEADER_GAP);
+                        egui::Frame::new()
+                            .fill(palette.surface)
+                            .stroke(egui::Stroke::new(1.0_f32, palette.border))
+                            .corner_radius(theme::RADIUS_LG)
+                            .inner_margin(egui::Margin::same(4))
+                            .show(ui, |ui| {
+                                preference_row(
+                                    ui,
+                                    palette,
+                                    Preference::ReadEmbedded,
+                                    content.read_embedded_artwork,
+                                    actions,
+                                );
+                                row_separator(ui, palette, 16.0);
+                                strategy_row(ui, palette);
+                            });
+
+                        ui.add_space(SECTION_GAP);
+                        library_footer(ui, cache, palette, actions);
+                    }
+                    SettingsSection::Advanced => {
+                        preferences_card(ui, palette, content, actions, &[Preference::Advanced]);
+                        ui.add_space(SECTION_GAP);
+                        section_header(ui, palette, SECTION_ADVANCED_INFO);
+                        ui.add_space(HEADER_GAP);
+                        info_lines(ui, palette);
+                    }
+                    SettingsSection::Playback => {
+                        preferences_card(ui, palette, content, actions, &[Preference::ReplayGain]);
+                    }
+                    SettingsSection::Appearance => {
+                        preferences_card(
+                            ui,
+                            palette,
+                            content,
+                            actions,
+                            &[Preference::HighContrast],
+                        );
+                    }
+                    _ => {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} settings are not implemented yet.",
+                                current.label()
+                            ))
+                            .color(palette.ink_3),
+                        );
+                    }
+                });
+        });
+}
+
 // --- Linux-only folder picker -------------------------------------------------------
 
 /// Text-based folder picker with directory autocomplete (no native dialog on
@@ -1247,11 +1841,11 @@ fn pick_folder_ui(
 // --- App adapter --------------------------------------------------------------------
 
 impl super::app::RiffApp {
-    /// Render the Settings stage inside the shell's central panel and apply
-    /// everything the user did this frame. The stage itself is a pure
-    /// renderer ([`show_settings_stage`]); this adapter owns the effects:
-    /// watcher start/stop, store mutations, scan requests through the
-    /// Library Scan Service, and the platform folder-picker split.
+    /// Render the sectioned Settings modal inside the shell's central panel
+    /// and apply everything the user did this frame. The modal itself is a
+    /// pure renderer ([`show_settings_modal`]); this adapter owns the
+    /// effects: watcher start/stop, store mutations, scan requests through
+    /// the Library Scan Service, and the platform folder-picker split.
     pub fn show_settings_view(
         &mut self,
         ui: &mut egui::Ui,
@@ -1282,10 +1876,25 @@ impl super::app::RiffApp {
             advanced_mode: library.ui_flags.advanced_mode,
             high_contrast: library.ui_flags.high_contrast,
             replaygain_enabled: playback.replaygain_enabled,
+            watch_any: library
+                .library_paths
+                .iter()
+                .any(|path| library.watch_states.get(path) == Some(&WatchState::Enabled)),
+            skip_hidden_files: library.scan_prefs.skip_hidden_files,
+            scan_formats: library.scan_prefs.scan_formats.clone(),
+            read_embedded_artwork: library.scan_prefs.read_embedded_artwork,
+            missing_artwork_strategy: library.scan_prefs.missing_artwork_strategy,
+            last_scan: self.views.last_full_scan_summary(),
         };
 
         let palette = self.theme.active;
-        for action in show_settings_stage(ui, &mut self.icons, &palette, &content) {
+        for action in show_settings_modal(
+            ui,
+            &mut self.icons,
+            &palette,
+            &content,
+            self.settings_section,
+        ) {
             self.apply_settings_action(action, library, playback);
         }
 
@@ -1316,6 +1925,7 @@ impl super::app::RiffApp {
     ) {
         match action {
             SettingsAction::Back => library.view_mode = ViewMode::Library,
+            SettingsAction::SelectSection(section) => self.settings_section = section,
             SettingsAction::AddLibrary => self.add_library_via_platform_picker(library),
             // Scan intent goes through the Library Scan Service seam (ADR
             // 0006): dedup against in-flight scans and the whole walk/commit
@@ -1343,13 +1953,59 @@ impl super::app::RiffApp {
                 playback.replaygain_enabled = value;
                 self.persist_scalars(playback, library);
             }
+            SettingsAction::SetWatchAll(watching) => {
+                let paths = library.library_paths.clone();
+                for path in paths {
+                    self.set_watch_state(&path, watching, library);
+                }
+            }
+            SettingsAction::SetSkipHidden(value) => {
+                library.scan_prefs.skip_hidden_files = value;
+                self.persist_scalars(playback, library);
+            }
+            SettingsAction::SetFormat(extension, enabled) => {
+                let prefs = &mut library.scan_prefs;
+                if enabled && !prefs.scan_formats.iter().any(|f| f == &extension) {
+                    prefs.scan_formats.push(extension);
+                    // Restore the canonical AUDIO_EXTENSIONS order so the
+                    // chips and the persisted list render stably.
+                    prefs.scan_formats.sort_by_key(|format| {
+                        AUDIO_EXTENSIONS
+                            .iter()
+                            .position(|candidate| candidate == format)
+                            .unwrap_or(usize::MAX)
+                    });
+                } else if !enabled {
+                    prefs.scan_formats.retain(|format| format != &extension);
+                }
+                self.persist_scalars(playback, library);
+            }
+            SettingsAction::SetReadEmbeddedArtwork(value) => {
+                library.scan_prefs.read_embedded_artwork = value;
+                self.persist_scalars(playback, library);
+                // Drop the generated cover blocks (issue 14): the tracks
+                // behind them were resolved as artless under the old
+                // policy, and only a fresh request lets real art surface.
+                self.evict_generated_covers();
+            }
+            SettingsAction::ResetLibraryDefaults => {
+                library.scan_prefs = riff_backend::app::state::ScanPrefs::default();
+                let paths = library.library_paths.clone();
+                // Re-enable watching for every root so the restored pane
+                // matches its default of watching configured folders.
+                for path in paths {
+                    self.set_watch_state(&path, true, library);
+                }
+                self.persist_scalars(playback, library);
+            }
         }
     }
 
     /// Register a new library root through the platform picker: the native
     /// folder dialog everywhere except Linux, which opens the text-input row
-    /// rendered beneath the stage.
-    fn add_library_via_platform_picker(&mut self, library: &mut LibrarySession) {
+    /// rendered beneath the stage. Also called from the sidebar footer
+    /// (design-handoff issue 07).
+    pub(crate) fn add_library_via_platform_picker(&mut self, library: &mut LibrarySession) {
         #[cfg(not(target_os = "linux"))]
         {
             if let Some(path) = rfd::FileDialog::new()
@@ -1471,6 +2127,11 @@ impl super::app::RiffApp {
             replaygain_enabled: playback.replaygain_enabled,
             shuffle: playback.queue.shuffle,
             repeat_mode,
+            browser_layout: library.browser_layout.as_store_code(),
+            skip_hidden_files: library.scan_prefs.skip_hidden_files,
+            scan_formats: library.scan_prefs.scan_formats.clone(),
+            read_embedded_artwork: library.scan_prefs.read_embedded_artwork,
+            missing_artwork_strategy: library.scan_prefs.missing_artwork_strategy,
         };
         if let Err(e) = self.settings_store.save_scalars(&scalars) {
             tracing::warn!("Failed to save settings: {e}");

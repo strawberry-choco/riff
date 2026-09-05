@@ -168,7 +168,6 @@ pub struct RiffApp {
     /// Transient Clear Library confirmation (`true` = awaiting confirm).
     /// Grouped with the other transient prompts on `RiffApp`.
     pub(crate) clear_library_confirm: bool,
-    search_focus: bool,
     /// Ctrl+K request flag (issue 06): one-shot focus request for the global
     /// search field in the content top bar, consumed on the frame it lands.
     global_search_focus: bool,
@@ -273,7 +272,6 @@ impl RiffApp {
             playlist_create_name: None,
             playlist_rename: None,
             clear_library_confirm: false,
-            search_focus: false,
             global_search_focus: false,
             first_frame: true,
             watcher_manager,
@@ -778,7 +776,6 @@ impl eframe::App for RiffApp {
         handle_keyboard_shortcuts(
             ui.ctx(),
             &playback,
-            &mut self.search_focus,
             &mut self.global_search_focus,
             self.transport.as_ref(),
         );
@@ -1741,21 +1738,16 @@ pub fn load_persisted_state(
 }
 
 /// Global keyboard shortcuts: Ctrl+K focuses the global search (issue 06),
-/// Ctrl+F the sidebar search, and Space toggles playback. Public so the
-/// shortcut contract is testable headlessly (precedent:
-/// [`load_persisted_state`]).
+/// and Space toggles playback. Public so the shortcut contract is testable
+/// headlessly (precedent: [`load_persisted_state`]).
 pub fn handle_keyboard_shortcuts(
     ctx: &egui::Context,
     playback: &PlaybackSession,
-    sidebar_search_focus: &mut bool,
     global_search_focus: &mut bool,
     transport: &dyn Transport,
 ) {
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::K)) {
         *global_search_focus = true;
-    }
-    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::F)) {
-        *sidebar_search_focus = true;
     }
     if !ctx.egui_wants_keyboard_input()
         && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
@@ -1977,21 +1969,6 @@ impl RiffApp {
     /// variant is visible after it — the variant itself renders in the
     /// browser column pane (issue 08), not here.
     fn render_library_sidebar(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
-        use crate::ui::sidebar;
-
-        let palette = self.theme.active;
-
-        // Search box with focus-ring border (mockup). The response drives the
-        // same Ctrl+F request-focus shortcut as before; the clear affordance
-        // lives inside the widget.
-        let search_response =
-            sidebar::search_box(ui, &mut self.icons, &palette, &mut library.search_query);
-        if self.search_focus {
-            search_response.request_focus();
-            self.search_focus = false;
-        }
-        ui.add_space(10.0);
-
         // One counts read per frame: every nav row's live count comes from
         // the counts read model (handoff issue 05), cached per store
         // generation so scans and playlist edits update it by the next frame.

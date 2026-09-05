@@ -1,7 +1,7 @@
 //! The restyled sidebar widgets (Issue 07, restructured per design-handoff
 //! issue 07).
 //!
-//! The design sidebar is: a search box with a focus-ring border, flat
+//! The design sidebar is: a focus-ring border, flat
 //! sectioned nav (LIBRARY / SMART LISTS / PLAYLISTS) on 40px tree rows with
 //! hover states and right-aligned live counts, an animated equalizer-bars
 //! indicator on the now-playing row, playlist rows whose edit/delete
@@ -101,9 +101,9 @@ fn paint_equalizer(
     }
 }
 
-// --- Search box -----------------------------------------------------------------
+// --- Search ring -------------------------------------------------------------------
 
-/// The search box border: the hairline border token when idle, the palette's
+/// The search field border: the hairline border token when idle, the palette's
 /// focus ring (thicker) once the field has keyboard focus — the mockup's
 /// "focus-ring border".
 #[must_use]
@@ -120,8 +120,8 @@ const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui:
 
 /// A ghost icon button: an invisible click target with a tinted glyph. With
 /// `hover_reveal` the glyph appears only while hovered (the mockup's
-/// playlist-row affordances); otherwise it is always painted (the search
-/// clear button). The hit area and accessibility label are registered every
+/// playlist-row affordances); otherwise it is always painted (the top bar's
+/// search clear button). The hit area and accessibility label are registered every
 /// frame regardless, so assistive tech and the kittest harness can reach it
 /// whether or not it is currently painted. The label also shows as a tooltip
 /// on hover — icon-only buttons explain themselves (Issue 12).
@@ -150,80 +150,6 @@ pub fn ghost_icon_button(
     }
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     response.on_hover_text(label).clicked()
-}
-
-/// The restyled search box: a rounded input well with the search glyph at the
-/// left edge, a frameless text field, and a clear affordance while the query
-/// is non-empty. The border follows [`search_ring_stroke`] — hairline when
-/// idle, focus ring when the field has focus.
-///
-/// Returns the text field's response so the caller can keep driving
-/// request-focus shortcuts (Ctrl+F) exactly as before.
-pub fn search_box(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    query: &mut String,
-) -> egui::Response {
-    let id = ui.id().with("sidebar_search");
-    // Read focus BEFORE painting so the ring lands on the same frame the
-    // field gains focus (egui re-renders immediately after focus changes).
-    let focused = ui.memory(|m| m.has_focus(id));
-
-    let size = egui::vec2(ui.available_width(), SEARCH_H);
-    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let painter = ui.painter_at(rect);
-
-    painter.rect_filled(rect, theme::RADIUS_MD, palette.surface_2);
-    painter.rect_stroke(
-        rect,
-        theme::RADIUS_MD,
-        search_ring_stroke(palette, focused),
-        egui::StrokeKind::Inside,
-    );
-
-    let inner = rect.shrink2(egui::vec2(10.0_f32, 4.0_f32));
-    let inner_ui = ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(inner)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        |ui| {
-            ui.spacing_mut().item_spacing.x = ICON_GAP;
-
-            let tex_id = cache.texture(ui.ctx(), Icon::Search, 16.0, palette.ink_3);
-            let sized = egui::load::SizedTexture::new(tex_id, egui::vec2(16.0, 16.0));
-            ui.add(egui::Image::from_texture(sized));
-
-            let response = ui.add(
-                egui::TextEdit::singleline(query)
-                    .id(id)
-                    .frame(egui::Frame::NONE)
-                    .desired_width(ui.available_width() - 20.0),
-            );
-
-            if !query.is_empty() {
-                let clear_rect = egui::Rect::from_center_size(
-                    egui::pos2(inner.right() - 10.0, rect.center().y),
-                    egui::vec2(20.0, SEARCH_H - 8.0),
-                );
-                if ghost_icon_button(
-                    ui,
-                    cache,
-                    palette,
-                    clear_rect,
-                    id.with("clear"),
-                    Icon::Close,
-                    "Clear search",
-                    false,
-                ) {
-                    query.clear();
-                }
-            }
-
-            response
-        },
-    );
-    inner_ui.inner
 }
 
 // --- Tree rows --------------------------------------------------------------------

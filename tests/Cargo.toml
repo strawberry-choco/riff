@@ -33,6 +33,7 @@ riff-backend = { path = "../crates/riff-backend" }
 riff-infra = { path = "../crates/riff-infra" }
 riff-library = { path = "../crates/riff-library" }
 riff-playback = { path = "../crates/riff-playback" }
+riff-persistence = { path = "../crates/riff-persistence" }
 riff-gui     = { path = "../crates/riff-gui" }
 
 # Golden-image tests render real egui frames headlessly (kittest + wgpu).

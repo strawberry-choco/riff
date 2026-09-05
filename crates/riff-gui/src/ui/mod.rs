@@ -1,14 +1,19 @@
 pub mod app;
+pub mod browser;
 pub mod chrome;
+pub mod cover_placeholder;
+pub mod detail;
 pub mod fonts;
 pub mod icons;
 pub mod library;
 pub mod now_playing;
 pub mod playerbar;
+pub mod selection;
 pub mod settings;
 pub mod sidebar;
 pub mod theme;
 pub mod toggle_switch;
+pub mod topbar;
 pub mod tray;
 pub mod window_visibility;
 

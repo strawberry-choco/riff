@@ -22,8 +22,21 @@ impl CoverResolver {
         }
     }
 
-    pub fn resolve(&self, track_path: &Path) -> Result<Option<CoverImage>, LibraryError> {
-        let source = self.metadata_reader.read_cover_source(track_path)?;
+    /// Resolve cover art for `track_path`. `read_embedded_artwork == false`
+    /// (the Settings Library pane's "Read embedded artwork" toggle,
+    /// design-handoff issue 12) skips the tag read entirely and goes
+    /// straight to the filesystem fallback — the tags are never opened for
+    /// art.
+    pub fn resolve(
+        &self,
+        track_path: &Path,
+        read_embedded_artwork: bool,
+    ) -> Result<Option<CoverImage>, LibraryError> {
+        let source = if read_embedded_artwork {
+            self.metadata_reader.read_cover_source(track_path)?
+        } else {
+            CoverSource::None
+        };
 
         match source {
             CoverSource::Embedded(_) | CoverSource::Filesystem(_) => {

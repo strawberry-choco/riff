@@ -32,6 +32,12 @@ pub struct Track {
     /// and never refreshed — it drives the "Recently Added" smart playlist.
     /// Deliberately NOT the filesystem mtime, which changes on tag edits.
     pub date_added: Option<SystemTime>,
+    /// Whether the listener marked this Track as a favorite. Persisted in
+    /// the Application Store's tracks table; set and cleared through the
+    /// store's favorite setter. A user fact, not scan data: rescans and tag
+    /// edits preserve it, and removing the Track from the Library removes
+    /// the flag with the row — favorites never dangle.
+    pub favorite: bool,
     /// The track's precomputed lowercase search blob — the same value the
     /// Application Store derives into its `search_text` column at write
     /// time (`title artist album album_artist`, lowercased). Surfaced on
@@ -41,22 +47,27 @@ pub struct Track {
     pub search_text: String,
 }
 
-/// The four auto-generated, read-only smart playlists (REQ-ML-009). Each is
-/// computed on demand from local library metadata and play history — purely
-/// offline, no network access, and never persisted as its own entity.
+/// The six auto-generated, read-only smart playlists (REQ-ML-009). Each is
+/// computed on demand from local library metadata, the favorite flags, and
+/// play history — purely offline, no network access, and never persisted as
+/// its own entity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SmartPlaylistKind {
+    Favorites,
     RecentlyAdded,
     MostPlayed,
+    RecentlyPlayed,
     NeverPlayed,
     LostGems,
 }
 
 impl SmartPlaylistKind {
     /// Every smart playlist in stable display order, for the UI to enumerate.
-    pub const ALL: [SmartPlaylistKind; 4] = [
+    pub const ALL: [SmartPlaylistKind; 6] = [
+        SmartPlaylistKind::Favorites,
         SmartPlaylistKind::RecentlyAdded,
         SmartPlaylistKind::MostPlayed,
+        SmartPlaylistKind::RecentlyPlayed,
         SmartPlaylistKind::NeverPlayed,
         SmartPlaylistKind::LostGems,
     ];
@@ -64,8 +75,10 @@ impl SmartPlaylistKind {
     /// Human-readable name shown in the library explorer.
     pub fn display_name(self) -> &'static str {
         match self {
+            SmartPlaylistKind::Favorites => "Favorites",
             SmartPlaylistKind::RecentlyAdded => "Recently Added",
             SmartPlaylistKind::MostPlayed => "Most Played",
+            SmartPlaylistKind::RecentlyPlayed => "Recently Played",
             SmartPlaylistKind::NeverPlayed => "Never Played",
             SmartPlaylistKind::LostGems => "Lost Gems",
         }
@@ -167,6 +180,16 @@ pub struct Album {
 pub struct Artist {
     pub name: String,
     pub albums: Vec<String>,
+}
+
+/// One aggregated genre row of the genre read model: the genre name as
+/// tagged on tracks, plus how many stored tracks carry it. Tracks without a
+/// genre (missing or empty) aggregate into nothing — there is no row for
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenreCount {
+    pub genre: String,
+    pub tracks: usize,
 }
 
 /// Cover art source for a track. Embedded art shares its bytes behind an

@@ -83,6 +83,7 @@ mod tests {
             play_count: 0,
             last_played: None,
             date_added: None,
+            favorite: false,
             search_text: String::new(),
         };
 
@@ -633,11 +634,16 @@ mod tests {
 
     #[test]
     fn test_smart_playlist_kind_display_names() {
+        assert_eq!(SmartPlaylistKind::Favorites.display_name(), "Favorites");
         assert_eq!(
             SmartPlaylistKind::RecentlyAdded.display_name(),
             "Recently Added"
         );
         assert_eq!(SmartPlaylistKind::MostPlayed.display_name(), "Most Played");
+        assert_eq!(
+            SmartPlaylistKind::RecentlyPlayed.display_name(),
+            "Recently Played"
+        );
         assert_eq!(
             SmartPlaylistKind::NeverPlayed.display_name(),
             "Never Played"
@@ -648,9 +654,11 @@ mod tests {
     #[test]
     fn test_smart_playlist_kind_all_enumerates_every_kind_exactly_once() {
         let all = SmartPlaylistKind::ALL;
-        assert_eq!(all.len(), 4);
+        assert_eq!(all.len(), 6);
+        assert!(all.contains(&SmartPlaylistKind::Favorites));
         assert!(all.contains(&SmartPlaylistKind::RecentlyAdded));
         assert!(all.contains(&SmartPlaylistKind::MostPlayed));
+        assert!(all.contains(&SmartPlaylistKind::RecentlyPlayed));
         assert!(all.contains(&SmartPlaylistKind::NeverPlayed));
         assert!(all.contains(&SmartPlaylistKind::LostGems));
     }

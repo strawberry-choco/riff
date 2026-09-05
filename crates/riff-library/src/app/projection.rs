@@ -10,12 +10,12 @@
 
 use crate::app::playlist_manager;
 use crate::app::store::PlaylistEntry;
-use crate::app::store::{StoreError, StoreGeneration};
+use crate::app::store::{FullScanSummary, LibraryCounts, StoreError, StoreGeneration};
 use crate::domain::{
-    Album, Artist, Playlist, PlaylistId, RepeatMode, SmartPlaylistKind, Track, TrackId,
+    Album, Artist, GenreCount, Playlist, PlaylistId, RepeatMode, SmartPlaylistKind, Track, TrackId,
 };
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Minimal playback queue for projection use (avoids riff-playback dependency).
@@ -120,7 +120,15 @@ where
     /// freshly initialized value when absent — the commit step for lazily
     /// filled multi-level bundles. Callers assign the loaded fields through
     /// the returned slot only after a successful fetch.
+    ///
+    /// A moved epoch (or changed key) starts an EMPTY bundle: re-stamping
+    /// the old one would present every sibling field it still holds as
+    /// fresh at the new generation, so a committed mutation could never
+    /// reach the views that read through a sibling field.
     fn slot(&mut self, epoch: u64, key: &K) -> &mut V {
+        if self.epoch != epoch || self.key.as_ref() != Some(key) {
+            self.value = None;
+        }
         self.epoch = epoch;
         self.key = Some(key.clone());
         self.value.get_or_insert_with(V::default)
@@ -415,6 +423,10 @@ impl BrowsingProjection {
             return Ok(cached);
         }
         let fresh: Arc<[Track]> = loader(album_artist, album_title)?.into();
+        eprintln!(
+            "probe album_tracks fresh_favs={:?}",
+            fresh.iter().map(|t| t.favorite).collect::<Vec<_>>()
+        );
         let levels = self.cache.slot(epoch, &());
         levels.tracks.insert(key, Arc::clone(&fresh));
         Ok(fresh)
@@ -603,6 +615,173 @@ impl FolderProjection {
         self.cache
             .slot(epoch, &())
             .children
+            .insert(key, Arc::clone(&fresh));
+        Ok(fresh)
+    }
+}
+
+/// The lazily-filled levels of the genre read model.
+#[derive(Default, Clone)]
+struct GenreLevels {
+    counts: Option<Arc<[GenreCount]>>,
+    artists: HashMap<String, Arc<[Artist]>>,
+    albums: HashMap<(String, String), Arc<[Album]>>,
+    tracks: HashMap<(String, String, String), Arc<[Track]>>,
+}
+
+/// Session Projection for the genre read model (ADR 0002): the genre
+/// aggregation for the sidebar plus the genre-filtered browsing levels.
+///
+/// Caches each level fetched from the store only when missing at the
+/// current generation; a generation bump (a committed store mutation) drops
+/// every level at once so a frame never mixes rows from two generations.
+/// Loader errors propagate and leave the cache untouched — the next call
+/// retries.
+pub struct GenreProjection {
+    /// Generation-keyed slot over the whole level bundle: a moved epoch
+    /// drops every level together, within a generation levels fill lazily.
+    cache: GenerationCache<(), GenreLevels>,
+}
+
+impl Default for GenreProjection {
+    fn default() -> Self {
+        Self::new(StoreGeneration::new())
+    }
+}
+
+/// Loader signature for one artist's genre-filtered albums (factored out
+/// for readability).
+type GenreAlbumsLoader<'a> = &'a mut dyn FnMut(&str, &str) -> Result<Vec<Album>, StoreError>;
+
+/// Loader signature for one album's genre-filtered tracks (factored out for
+/// readability).
+type GenreAlbumTracksLoader<'a> =
+    &'a mut dyn FnMut(&str, &str, &str) -> Result<Vec<Track>, StoreError>;
+
+impl GenreProjection {
+    #[must_use]
+    pub fn new(generation: StoreGeneration) -> Self {
+        Self {
+            cache: GenerationCache::new(generation),
+        }
+    }
+
+    /// Every genre with its per-track count, cached per generation. Fresh
+    /// frames hand out an `Arc` clone of the cached list — no per-frame
+    /// copy.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn counts(
+        &mut self,
+        loader: &mut dyn FnMut() -> Result<Vec<GenreCount>, StoreError>,
+    ) -> Result<Arc<[GenreCount]>, StoreError> {
+        let epoch = self.cache.observe();
+        let cached = if self.cache.loaded_at(epoch) {
+            self.cache.peek().and_then(|levels| levels.counts.clone())
+        } else {
+            None
+        };
+        if let Some(cached) = cached {
+            return Ok(cached);
+        }
+        let fresh: Arc<[GenreCount]> = loader()?.into();
+        self.cache.slot(epoch, &()).counts = Some(Arc::clone(&fresh));
+        Ok(fresh)
+    }
+
+    /// Artists having at least one track with `genre`, cached per
+    /// generation. Fresh frames hand out an `Arc` clone of the cached list.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn artists_in_genre(
+        &mut self,
+        genre: &str,
+        loader: &mut dyn FnMut(&str) -> Result<Vec<Artist>, StoreError>,
+    ) -> Result<Arc<[Artist]>, StoreError> {
+        let epoch = self.cache.observe();
+        let cached = if self.cache.loaded_at(epoch) {
+            self.cache
+                .peek()
+                .and_then(|levels| levels.artists.get(genre).cloned())
+        } else {
+            None
+        };
+        if let Some(cached) = cached {
+            return Ok(cached);
+        }
+        let fresh: Arc<[Artist]> = loader(genre)?.into();
+        self.cache
+            .slot(epoch, &())
+            .artists
+            .insert(genre.to_string(), Arc::clone(&fresh));
+        Ok(fresh)
+    }
+
+    /// One artist's albums holding a track with `genre`, cached per
+    /// generation. Fresh frames hand out an `Arc` clone of the cached list.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn artist_albums_in_genre(
+        &mut self,
+        artist: &str,
+        genre: &str,
+        loader: GenreAlbumsLoader<'_>,
+    ) -> Result<Arc<[Album]>, StoreError> {
+        let key = (artist.to_string(), genre.to_string());
+        let epoch = self.cache.observe();
+        let cached = if self.cache.loaded_at(epoch) {
+            self.cache
+                .peek()
+                .and_then(|levels| levels.albums.get(&key).cloned())
+        } else {
+            None
+        };
+        if let Some(cached) = cached {
+            return Ok(cached);
+        }
+        let fresh: Arc<[Album]> = loader(artist, genre)?.into();
+        self.cache
+            .slot(epoch, &())
+            .albums
+            .insert(key, Arc::clone(&fresh));
+        Ok(fresh)
+    }
+
+    /// One album's tracks with `genre`, cached per generation. Fresh frames
+    /// hand out an `Arc` clone of the cached list.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn album_tracks_in_genre(
+        &mut self,
+        album_artist: &str,
+        album_title: &str,
+        genre: &str,
+        loader: GenreAlbumTracksLoader<'_>,
+    ) -> Result<Arc<[Track]>, StoreError> {
+        let key = (
+            album_artist.to_string(),
+            album_title.to_string(),
+            genre.to_string(),
+        );
+        let epoch = self.cache.observe();
+        let cached = if self.cache.loaded_at(epoch) {
+            self.cache
+                .peek()
+                .and_then(|levels| levels.tracks.get(&key).cloned())
+        } else {
+            None
+        };
+        if let Some(cached) = cached {
+            return Ok(cached);
+        }
+        let fresh: Arc<[Track]> = loader(album_artist, album_title, genre)?.into();
+        self.cache
+            .slot(epoch, &())
+            .tracks
             .insert(key, Arc::clone(&fresh));
         Ok(fresh)
     }
@@ -993,5 +1172,152 @@ impl PlaylistProjection {
             rows: rows.into(),
             valid_ids: valid_ids.into(),
         }
+    }
+}
+
+/// Cached bundle for the counts read model: the library-side totals and the
+/// per-smart-list sizes, each `Some` once loaded this generation.
+#[derive(Default, Clone)]
+struct CountsBundle {
+    library: Option<Arc<LibraryCounts>>,
+    smart_lists: Option<Arc<[(SmartPlaylistKind, usize)]>>,
+    /// Per-folder track counts loaded this generation, keyed by folder.
+    folder_counts: HashMap<PathBuf, usize>,
+    /// The last-scan stamp loaded this generation: `NotLoaded` = not loaded
+    /// yet, `Loaded` carrying the stamp (`None` means "never scanned").
+    scan: ScanCache,
+}
+
+/// The scan-stamp slot's loaded state: distinguishes "no stamp read yet
+/// this generation" from "read, and the store has never scanned".
+#[derive(Default, Clone)]
+enum ScanCache {
+    #[default]
+    NotLoaded,
+    Loaded(Option<FullScanSummary>),
+}
+
+/// Session Projection for the counts read models (ADR 0002): the
+/// sidebar-count totals and the per-smart-list sizes, cached per generation
+/// so fresh frames cost nothing.
+pub struct CountsProjection {
+    cache: GenerationCache<(), CountsBundle>,
+}
+
+impl Default for CountsProjection {
+    fn default() -> Self {
+        Self::new(StoreGeneration::new())
+    }
+}
+
+impl CountsProjection {
+    #[must_use]
+    pub fn new(generation: StoreGeneration) -> Self {
+        Self {
+            cache: GenerationCache::new(generation),
+        }
+    }
+
+    /// The library-side totals (tracks, artists, albums, genres), cached per
+    /// generation. Fresh frames hand out an `Arc` clone of the cached
+    /// totals — one store query per generation, not per frame.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn library_counts(
+        &mut self,
+        loader: &mut dyn FnMut() -> Result<LibraryCounts, StoreError>,
+    ) -> Result<Arc<LibraryCounts>, StoreError> {
+        let epoch = self.cache.observe();
+        if let Some(cached) = self
+            .cache
+            .loaded_at(epoch)
+            .then(|| self.cache.peek().and_then(|bundle| bundle.library.clone()))
+            .flatten()
+        {
+            return Ok(cached);
+        }
+        let fresh: Arc<LibraryCounts> = Arc::new(loader()?);
+        self.cache.slot(epoch, &()).library = Some(Arc::clone(&fresh));
+        Ok(fresh)
+    }
+
+    /// Every smart playlist's unbounded total, in `ALL` order, cached per
+    /// generation.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn smart_list_counts(
+        &mut self,
+        loader: &mut dyn FnMut() -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError>,
+    ) -> Result<Arc<[(SmartPlaylistKind, usize)]>, StoreError> {
+        let epoch = self.cache.observe();
+        if let Some(cached) = self
+            .cache
+            .loaded_at(epoch)
+            .then(|| {
+                self.cache
+                    .peek()
+                    .and_then(|bundle| bundle.smart_lists.clone())
+            })
+            .flatten()
+        {
+            return Ok(cached);
+        }
+        let fresh: Arc<[(SmartPlaylistKind, usize)]> = loader()?.into();
+        self.cache.slot(epoch, &()).smart_lists = Some(Arc::clone(&fresh));
+        Ok(fresh)
+    }
+
+    /// How many tracks live under `folder`, cached per (generation, folder)
+    /// so each folder's Settings-pane count costs one query per generation.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn folder_count(
+        &mut self,
+        folder: &Path,
+        loader: &mut dyn FnMut(&Path) -> Result<usize, StoreError>,
+    ) -> Result<usize, StoreError> {
+        let epoch = self.cache.observe();
+        if self.cache.loaded_at(epoch)
+            && let Some(count) = self
+                .cache
+                .peek()
+                .and_then(|bundle| bundle.folder_counts.get(folder))
+        {
+            return Ok(*count);
+        }
+        let fresh = loader(folder)?;
+        self.cache
+            .slot(epoch, &())
+            .folder_counts
+            .insert(folder.to_path_buf(), fresh);
+        Ok(fresh)
+    }
+
+    /// The last completed full scan's summary (timestamp + file/error
+    /// counts, design-handoff issue 12), cached per generation — including
+    /// a cached absence ("never scanned"), so a cold store does not requery
+    /// per frame.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn last_scan(
+        &mut self,
+        loader: &mut dyn FnMut() -> Result<Option<FullScanSummary>, StoreError>,
+    ) -> Result<Option<FullScanSummary>, StoreError> {
+        let epoch = self.cache.observe();
+        if self.cache.loaded_at(epoch)
+            && let ScanCache::Loaded(scan) = self
+                .cache
+                .peek()
+                .map_or(ScanCache::NotLoaded, |bundle| bundle.scan.clone())
+        {
+            return Ok(scan);
+        }
+        let fresh = loader()?;
+        self.cache.slot(epoch, &()).scan = ScanCache::Loaded(fresh);
+        Ok(fresh)
     }
 }

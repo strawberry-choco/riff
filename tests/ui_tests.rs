@@ -66,6 +66,19 @@ mod tests {
         (Box::new(store), views)
     }
 
+    /// Open a real store-backed library-mutations port at a fresh temp
+    /// location, exactly as the UI receives it: a boxed
+    /// `LibraryMutationStore`.
+    pub(super) fn boxed_library_store(dir: &tempfile::TempDir) -> Box<dyn LibraryMutationStore> {
+        let db_path = dir.path().join("riff.sqlite3");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        Box::new(
+            riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .expect("opening a fresh store must work"),
+        )
+    }
+
     /// A `SessionViews` seam over the store already living at `dir`, for
     /// reading playlists the way the UI does.
     fn seam_views(dir: &tempfile::TempDir) -> riff_backend::app::views::SessionViews {
@@ -291,6 +304,148 @@ mod tests {
                 .unwrap()
                 .scalars
                 .high_contrast
+        );
+    }
+
+    #[test]
+    fn test_browser_layout_roundtrips_and_defaults_to_list() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Fresh store: the browser column renders as a list (handoff issue 06).
+        assert_eq!(
+            boxed_store(&dir)
+                .load_settings()
+                .unwrap()
+                .scalars
+                .browser_layout,
+            riff_backend::app::state::BrowserLayout::List.as_store_code()
+        );
+
+        // Switching to grid survives a restart...
+        {
+            let mut store = boxed_store(&dir);
+            store
+                .save_scalars(&riff_backend::app::state::ScalarSettings {
+                    browser_layout: riff_backend::app::state::BrowserLayout::Grid.as_store_code(),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            boxed_store(&dir)
+                .load_settings()
+                .unwrap()
+                .scalars
+                .browser_layout,
+            riff_backend::app::state::BrowserLayout::Grid.as_store_code()
+        );
+
+        // ...and switching back to list does too.
+        {
+            let mut store = boxed_store(&dir);
+            store
+                .save_scalars(&riff_backend::app::state::ScalarSettings {
+                    browser_layout: riff_backend::app::state::BrowserLayout::List.as_store_code(),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            boxed_store(&dir)
+                .load_settings()
+                .unwrap()
+                .scalars
+                .browser_layout,
+            riff_backend::app::state::BrowserLayout::List.as_store_code()
+        );
+    }
+
+    #[test]
+    fn test_browser_layout_hydrates_into_the_library_session_on_restore() {
+        use riff_backend::app::state::BrowserLayout;
+
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut store = boxed_store(&dir);
+            store
+                .save_scalars(&riff_backend::app::state::ScalarSettings {
+                    browser_layout: BrowserLayout::Grid.as_store_code(),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        let (playback, library) = create_test_sessions();
+        riff_gui::ui::app::load_persisted_state(
+            &playback,
+            &library,
+            boxed_store(&dir).as_ref(),
+            &crate::mocks::MockTransport::new(),
+        );
+
+        assert_eq!(
+            library.lock_or_recover().browser_layout,
+            BrowserLayout::Grid,
+            "first-frame restore must hydrate the browser layout into the session"
+        );
+    }
+
+    #[test]
+    fn test_library_scan_prefs_hydrate_into_the_library_session_on_restore() {
+        use riff_backend::app::state::ScanPrefs;
+
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut store = boxed_store(&dir);
+            let scalars = riff_backend::app::state::ScalarSettings {
+                skip_hidden_files: false,
+                scan_formats: vec!["flac".to_string(), "mp3".to_string()],
+                read_embedded_artwork: false,
+                ..Default::default()
+            };
+            store.save_scalars(&scalars).unwrap();
+        }
+
+        let (playback, library) = create_test_sessions();
+        riff_gui::ui::app::load_persisted_state(
+            &playback,
+            &library,
+            boxed_store(&dir).as_ref(),
+            &crate::mocks::MockTransport::new(),
+        );
+
+        assert_eq!(
+            library.lock_or_recover().scan_prefs,
+            ScanPrefs {
+                skip_hidden_files: false,
+                scan_formats: vec!["flac".to_string(), "mp3".to_string()],
+                read_embedded_artwork: false,
+                ..ScanPrefs::default()
+            },
+            "first-frame restore must hydrate the Library Scan preferences into the session"
+        );
+    }
+
+    #[test]
+    fn test_library_scan_prefs_default_to_the_historical_scanner_behavior() {
+        use riff_backend::app::state::ScanPrefs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (playback, library) = create_test_sessions();
+        riff_gui::ui::app::load_persisted_state(
+            &playback,
+            &library,
+            boxed_store(&dir).as_ref(),
+            &crate::mocks::MockTransport::new(),
+        );
+
+        let prefs = library.lock_or_recover().scan_prefs.clone();
+        assert!(prefs.skip_hidden_files);
+        assert!(prefs.read_embedded_artwork);
+        assert_eq!(prefs.scan_formats, ScanPrefs::default().scan_formats);
+        assert_eq!(
+            prefs.missing_artwork_strategy,
+            riff_backend::app::store::MissingArtworkStrategy::GeneratedColour
         );
     }
 
@@ -729,16 +884,20 @@ mod tests {
 
     #[test]
     fn test_dark_surface_and_ink_tokens_match_the_mockup() {
-        // Surfaces: --riff-bg / --riff-surface / --riff-surface-2 / --riff-surface-3.
-        assert_eq!(theme::SURFACE_BG, egui::Color32::from_rgb(0x0c, 0x0c, 0x10));
-        assert_eq!(theme::SURFACE, egui::Color32::from_rgb(0x13, 0x13, 0x1a));
-        assert_eq!(theme::SURFACE_2, egui::Color32::from_rgb(0x1b, 0x1b, 0x24));
-        assert_eq!(theme::SURFACE_3, egui::Color32::from_rgb(0x23, 0x23, 0x2e));
+        // Surfaces: --riff-bg / --riff-surface / --riff-surface-2 /
+        // --riff-surface-3. Values are the design handoff's extracted hex
+        // literals (docs/plans/design-handoff-gap-analysis.md, read back from
+        // the source SVGs: #17171B is the sidebar/top-bar/player-bar panel
+        // fill).
+        assert_eq!(theme::SURFACE_BG, egui::Color32::from_rgb(0x10, 0x10, 0x13));
+        assert_eq!(theme::SURFACE, egui::Color32::from_rgb(0x17, 0x17, 0x1b));
+        assert_eq!(theme::SURFACE_2, egui::Color32::from_rgb(0x1e, 0x1e, 0x23));
+        assert_eq!(theme::SURFACE_3, egui::Color32::from_rgb(0x26, 0x26, 0x2d));
 
         // Ink ladder: --riff-ink / --riff-ink-2 / --riff-ink-3.
-        assert_eq!(theme::INK, egui::Color32::from_rgb(0xf4, 0xf4, 0xf5));
-        assert_eq!(theme::INK_2, egui::Color32::from_rgb(0xa1, 0xa1, 0xaa));
-        assert_eq!(theme::INK_3, egui::Color32::from_rgb(0x71, 0x71, 0x7a));
+        assert_eq!(theme::INK, egui::Color32::from_rgb(0xed, 0xed, 0xf0));
+        assert_eq!(theme::INK_2, egui::Color32::from_rgb(0x9a, 0x9a, 0xa6));
+        assert_eq!(theme::INK_3, egui::Color32::from_rgb(0x6b, 0x6b, 0x77));
     }
 
     #[test]
@@ -763,7 +922,7 @@ mod tests {
         assert_eq!(theme::BRAND_200, egui::Color32::from_rgb(0xff, 0xe0, 0x99));
         assert_eq!(theme::BRAND_300, egui::Color32::from_rgb(0xff, 0xcc, 0x66));
         assert_eq!(theme::BRAND_400, egui::Color32::from_rgb(0xff, 0xb8, 0x33));
-        assert_eq!(theme::BRAND_500, egui::Color32::from_rgb(0xf5, 0xa6, 0x23));
+        assert_eq!(theme::BRAND_500, egui::Color32::from_rgb(0xf0, 0x82, 0x1e));
         assert_eq!(theme::BRAND_600, egui::Color32::from_rgb(0xd9, 0x8a, 0x0d));
         assert_eq!(theme::BRAND_700, egui::Color32::from_rgb(0xa6, 0x67, 0x09));
     }
@@ -799,6 +958,9 @@ mod tests {
         assert!((theme::TITLEBAR_H - 56.0).abs() < f32::EPSILON);
         assert!((theme::SIDEBAR_W - 280.0).abs() < f32::EPSILON);
         assert!((theme::PLAYERBAR_H - 88.0).abs() < f32::EPSILON);
+        // The selection panel's 300px right column (design: the 300×750
+        // panel between the detail column and the window edge).
+        assert!((theme::SELECT_PANEL_W - 300.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -819,11 +981,32 @@ mod tests {
         // is the deep ink text painted on top of amber fills.
         assert_eq!(p.brand_primary, theme::BRAND_500);
         assert_eq!(p.focus_ring, theme::BRAND_500);
-        assert_eq!(p.on_brand, egui::Color32::from_rgb(0x0c, 0x0c, 0x10));
+        assert_eq!(p.on_brand, egui::Color32::from_rgb(0x10, 0x10, 0x13));
         assert_eq!(p.success, theme::STATE_SUCCESS);
         assert_eq!(p.warning, theme::STATE_WARNING);
         assert_eq!(p.error, theme::STATE_ERROR);
         assert_eq!(p.info, theme::STATE_INFO);
+    }
+
+    #[test]
+    fn test_row_hover_uses_the_design_amber_wash() {
+        // The design's row hover is a literal amber wash (#2a1c0e), extracted
+        // from the highlighted sidebar/track rows in the source SVGs — a
+        // brand-derived tint, not a surface-ramp step.
+        assert_eq!(theme::ROW_HOVER, egui::Color32::from_rgb(0x2a, 0x1c, 0x0e));
+
+        // Dark palette binds the wash verbatim.
+        let dark = theme::Palette::dark();
+        assert_eq!(dark.row_hover, theme::ROW_HOVER);
+
+        // The light family derives its wash by rule (ADR 0004): the unchanged
+        // brand amber at the ~9% coverage the dark wash reads over its
+        // surface, so the hover stays a warm amber tint on both palettes.
+        let light = theme::Palette::light();
+        assert_eq!(
+            light.row_hover,
+            egui::Color32::from_rgba_unmultiplied(0xf0, 0x82, 0x1e, 24)
+        );
     }
 
     #[test]
@@ -841,9 +1024,9 @@ mod tests {
 
         assert!(!light.dark);
 
-        // Surfaces invert: worked example first (#0c0c10 → #f3f3ef), then the
+        // Surfaces invert: worked example first (#101013 → #efefec), then the
         // rule for the remaining ramp.
-        assert_eq!(light.background, egui::Color32::from_rgb(0xf3, 0xf3, 0xef));
+        assert_eq!(light.background, egui::Color32::from_rgb(0xef, 0xef, 0xec));
         assert_eq!(light.surface, mirror(dark.surface));
         assert_eq!(light.surface_2, mirror(dark.surface_2));
         assert_eq!(light.surface_3, mirror(dark.surface_3));
@@ -862,7 +1045,7 @@ mod tests {
 
         // Ink flips while preserving the faintness hierarchy: on dark the
         // primary ink is brightest; on light it is darkest.
-        assert_eq!(light.ink, egui::Color32::from_rgb(0x0b, 0x0b, 0x0a));
+        assert_eq!(light.ink, egui::Color32::from_rgb(0x12, 0x12, 0x0f));
         assert_eq!(light.ink_2, mirror(dark.ink_2));
         assert_eq!(light.ink_3, mirror(dark.ink_3));
         assert!(lum(dark.ink) > lum(dark.ink_2) && lum(dark.ink_2) > lum(dark.ink_3));
@@ -882,6 +1065,224 @@ mod tests {
         assert_eq!(light.info, dark.info);
         // Dark text stays correct on the unchanged amber fill.
         assert_eq!(light.on_brand, dark.on_brand);
+    }
+
+    // --- Generated-colour cover placeholder (design-handoff issue 14) ----------
+    //
+    // Tracks and albums without artwork render a solid colour block derived
+    // from their own identity instead of the glyph placeholder. The
+    // derivation is a pure function of the identity string and the palette
+    // family: same item → same colour every time, and the colour sits in a
+    // band that reads as part of the design palette on that family — never a
+    // white flash on dark, never a black hole on light.
+
+    /// Sample identities: realistic file paths and album keys, plus edge
+    /// shapes (empty, short, long) the hasher must distribute.
+    const PLACEHOLDER_SEEDS: [&str; 12] = [
+        "f:\\music\\a.mp3",
+        "f:\\music\\b.mp3",
+        "f:\\music\\artist\x1falbum",
+        "/home/user/Music/track 3.flac",
+        "",
+        "x",
+        "f:\\music\\very long path\\with several folders\\track.mp3",
+        "artist name\x1falbum title",
+        " compilation\\greatest hits",
+        "f:\\music\\c.mp3",
+        "f:\\music\\d.mp3",
+        "f:\\music\\e.mp3",
+    ];
+
+    #[test]
+    fn test_generated_colour_is_deterministic_per_identity_and_family() {
+        use riff_gui::ui::cover_placeholder::generated_colour;
+
+        // Same item → same colour every time: repeated calls agree exactly.
+        for seed in PLACEHOLDER_SEEDS {
+            assert_eq!(
+                generated_colour(seed, true),
+                generated_colour(seed, true),
+                "dark derivation for {seed:?} must be stable"
+            );
+            assert_eq!(
+                generated_colour(seed, false),
+                generated_colour(seed, false),
+                "light derivation for {seed:?} must be stable"
+            );
+        }
+    }
+
+    #[test]
+    fn test_generated_colour_spreads_across_identities() {
+        use riff_gui::ui::cover_placeholder::generated_colour;
+
+        // Distinct items mostly get distinct colours — the block is a
+        // per-identity signature, not one fixed tint for everything.
+        let dark: std::collections::HashSet<_> = PLACEHOLDER_SEEDS
+            .iter()
+            .map(|s| generated_colour(s, true))
+            .collect();
+        assert!(
+            dark.len() >= 9,
+            "12 identities must spread into at least 9 distinct dark colours, got {}",
+            dark.len()
+        );
+    }
+
+    #[test]
+    fn test_generated_colour_stays_inside_the_palette_compatible_band() {
+        use riff_gui::ui::cover_placeholder::generated_colour;
+
+        for seed in PLACEHOLDER_SEEDS {
+            let dark = generated_colour(seed, true);
+            let light = generated_colour(seed, false);
+
+            // Dark family: no white flash — every channel stays well below
+            // mid-grey — yet the block is visible against the near-black
+            // background, so it cannot collapse into it either.
+            for channel in [dark.r(), dark.g(), dark.b()] {
+                assert!(
+                    (24..=128).contains(&channel),
+                    "dark colour {dark:?} for {seed:?} leaves the visible dark band"
+                );
+            }
+            assert_ne!(dark, riff_gui::ui::theme::Palette::dark().background);
+
+            // Light family: mirror band — no black hole, no near-white
+            // washout against the light background.
+            for channel in [light.r(), light.g(), light.b()] {
+                assert!(
+                    (140..=236).contains(&channel),
+                    "light colour {light:?} for {seed:?} leaves the visible light band"
+                );
+            }
+            assert_ne!(light, riff_gui::ui::theme::Palette::light().background);
+        }
+    }
+
+    #[test]
+    fn test_generated_colour_follows_the_palette_family() {
+        use riff_gui::ui::cover_placeholder::generated_colour;
+
+        // The two families derive different blocks for the same identity —
+        // the derivation answers to the active palette, not one fixed tint.
+        for seed in PLACEHOLDER_SEEDS {
+            assert_ne!(
+                generated_colour(seed, true),
+                generated_colour(seed, false),
+                "dark and light derivations for {seed:?} must differ"
+            );
+        }
+    }
+
+    // --- Generated blocks flow through the shared texture cache (issue 14) -----
+    //
+    // A texture miss resolves the identity's generated block into the SAME
+    // map + LRU the real covers use (keyed by a reserved prefix, so the
+    // request flow keeps treating the track as artless), real art always
+    // wins over the block, and eviction paths touch only generated keys.
+
+    fn placeholder_ctx() -> egui::Context {
+        egui::Context::default()
+    }
+
+    fn real_texture(ctx: &egui::Context, name: &str) -> egui::TextureHandle {
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [2, 2],
+            &[
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+            ],
+        );
+        ctx.load_texture(name, image, egui::TextureOptions::default())
+    }
+
+    #[test]
+    fn test_lookup_generates_and_caches_a_block_on_a_full_miss() {
+        use riff_gui::ui::cover_placeholder::{
+            generated_colour, generated_image, generated_key, lookup_cover_texture,
+        };
+
+        let ctx = placeholder_ctx();
+        let mut textures = std::collections::HashMap::new();
+        let mut lru_keys = Vec::new();
+        let identity = "f:\\music\\artless.mp3";
+
+        let block = lookup_cover_texture(&mut textures, &mut lru_keys, &ctx, true, identity);
+
+        // The block lands in the shared cache under the reserved key...
+        let key = generated_key(identity);
+        assert!(textures.contains_key(&key), "the block is cached for reuse");
+        assert!(
+            lru_keys.iter().any(|k| k == &key),
+            "the block rides the shared LRU"
+        );
+
+        // ...is a 1x1 stretch-to-fit square of exactly the derived colour
+        // (pixel truth checked at the pure seam, where pixels are readable)...
+        assert_eq!(block.size(), [1, 1]);
+        let colour = generated_colour(identity, true);
+        let image = generated_image(identity, true);
+        assert_eq!(
+            image.pixels[0],
+            egui::Color32::from_rgba_unmultiplied(colour.r(), colour.g(), colour.b(), 255),
+            "the 1x1 block is the derived colour, stretched by every render site"
+        );
+
+        // ...and repeat lookups reuse it instead of regenerating.
+        let again = lookup_cover_texture(&mut textures, &mut lru_keys, &ctx, true, identity);
+        assert!(block == again, "the cached block is served, not rebuilt");
+    }
+
+    #[test]
+    fn test_real_art_wins_over_the_generated_block() {
+        use riff_gui::ui::cover_placeholder::lookup_cover_texture;
+
+        let ctx = placeholder_ctx();
+        let mut textures = std::collections::HashMap::new();
+        let mut lru_keys = Vec::new();
+        let identity = "f:\\music\\artful.mp3";
+
+        // The block is cached first (the artless window)...
+        let _ = lookup_cover_texture(&mut textures, &mut lru_keys, &ctx, true, identity);
+
+        // ...then real art arrives through the poll path under the plain key.
+        let art = real_texture(&ctx, identity);
+        textures.insert(identity.to_string(), art.clone());
+        lru_keys.push(identity.to_string());
+
+        let resolved = lookup_cover_texture(&mut textures, &mut lru_keys, &ctx, true, identity);
+        assert!(resolved == art, "real art wins over the generated block");
+    }
+
+    #[test]
+    fn test_evict_generated_removes_only_generated_entries() {
+        use riff_gui::ui::cover_placeholder::{
+            evict_generated, generated_key, lookup_cover_texture,
+        };
+
+        let ctx = placeholder_ctx();
+        let mut textures = std::collections::HashMap::new();
+        let mut lru_keys = Vec::new();
+
+        let _ = lookup_cover_texture(&mut textures, &mut lru_keys, &ctx, true, "a.mp3");
+        let _ = lookup_cover_texture(&mut textures, &mut lru_keys, &ctx, false, "b.mp3");
+        let art = real_texture(&ctx, "c.mp3");
+        textures.insert("c.mp3".to_string(), art);
+        lru_keys.push("c.mp3".to_string());
+
+        evict_generated(&mut textures, &mut lru_keys);
+
+        assert!(!textures.contains_key(&generated_key("a.mp3")));
+        assert!(!textures.contains_key(&generated_key("b.mp3")));
+        assert!(
+            !lru_keys.iter().any(|k| k.starts_with("gen\u{1f}")),
+            "the LRU list drops every generated key"
+        );
+        assert!(
+            textures.contains_key("c.mp3"),
+            "real covers survive the eviction"
+        );
+        assert!(lru_keys.contains(&"c.mp3".to_string()));
     }
 
     #[test]
@@ -992,6 +1393,27 @@ mod tests {
         assert_eq!(style.visuals.panel_fill, light.surface);
         assert_eq!(style.visuals.override_text_color, Some(light.ink));
         assert!(!style.visuals.dark_mode);
+    }
+
+    #[test]
+    fn test_focus_ring_stroke_appears_only_while_focused_and_thickens_in_high_contrast() {
+        // Handoff issue 16: custom-painted rows show a visible keyboard-focus
+        // ring from the palette's focus-ring token — nothing extra when idle
+        // — and High Contrast thickens it (REQ-UI-007), like the search well.
+        let dark = theme::Palette::dark();
+        assert!(
+            theme::focus_ring_stroke(&dark, false).is_none(),
+            "an unfocused row paints no ring"
+        );
+        let ring = theme::focus_ring_stroke(&dark, true).expect("a focused row paints the ring");
+        assert_eq!(ring.color, dark.focus_ring, "the ring is the ring token");
+
+        let hc = dark.high_contrast();
+        let hc_ring = theme::focus_ring_stroke(&hc, true).expect("high contrast keeps the ring");
+        assert!(
+            hc_ring.width > ring.width,
+            "high contrast thickens the ring"
+        );
     }
 
     // --- Typography: vendored Inter + text styles (Issue 02) --------------------
@@ -1558,19 +1980,30 @@ mod tests {
         assert!(harness.state().contains(&TitleBarAction::ToggleAdvanced));
     }
 
-    // --- Sidebar restyle (Issue 07) --------------------------------------------
+    // --- Sidebar (design-handoff issue 07) --------------------------------------
     //
-    // The sidebar matches the mockup: a search box with a focus-ring border,
-    // a segmented Library/Folders control, 40px tree rows on the three-level
-    // indent scale with hover states, an animated equalizer-bars indicator on
-    // the now-playing row, styled smart playlists ×4, and playlist rows whose
+    // The sidebar matches the design: a search box with a focus-ring border,
+    // the flat sectioned nav (LIBRARY / SMART LISTS / PLAYLISTS) on 40px tree
+    // rows with hover states and right-aligned live counts, an animated
+    // equalizer-bars indicator on the now-playing row, playlist rows whose
     // hover-revealed edit/delete drive the EXISTING rename/delete Store flows
-    // (ADR 0002 projection refresh). Restyle only — behavior untouched.
+    // (ADR 0002 projection refresh), and the Add-folder / last-scan footer.
     //
     // The widgets live behind headless seams in `riff_gui::ui::sidebar`; the
     // pixels are pinned by the `sidebar_dark` golden image.
 
     use riff_gui::ui::sidebar;
+
+    #[test]
+    fn test_library_section_defaults_to_all_tracks() {
+        // The sidebar's LIBRARY rows select the browser variant through the
+        // session; a fresh session starts on All Tracks (design-handoff
+        // issue 07, consumed by the browser column in issue 08).
+        assert_eq!(
+            riff_backend::app::state::LibrarySection::default(),
+            riff_backend::app::state::LibrarySection::AllTracks,
+        );
+    }
 
     #[test]
     fn test_sidebar_tree_rows_use_the_mockup_40px_height_and_indent_scale() {
@@ -1627,44 +2060,6 @@ mod tests {
     }
 
     #[test]
-    fn test_segmented_control_reports_the_clicked_destination() {
-        use egui_kittest::kittest::Queryable;
-
-        let palette = theme::Palette::dark();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(theme::SIDEBAR_W - 24.0, 40.0))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, clicks: &mut Vec<sidebar::SidebarNav>| {
-                    // ACCUMULATE across frames: a click fires its action on
-                    // exactly one frame; harness.run() settles afterwards.
-                    if let Some(dest) =
-                        sidebar::segmented_nav(ui, &palette, Some(sidebar::SidebarNav::Library))
-                    {
-                        clicks.push(dest);
-                    }
-                },
-                Vec::new(),
-            );
-        harness.run();
-
-        harness.get_by_label("Folders").click();
-        harness.run();
-        assert_eq!(
-            harness.state(),
-            &vec![sidebar::SidebarNav::Folders],
-            "clicking the Folders segment reports the Folders destination"
-        );
-
-        harness.get_by_label("Library").click();
-        harness.run();
-        assert!(
-            harness.state().contains(&sidebar::SidebarNav::Library),
-            "clicking the Library segment reports the Library destination"
-        );
-    }
-
-    #[test]
     fn test_tree_row_reports_clicks_for_selection() {
         use egui_kittest::kittest::Queryable;
 
@@ -1683,6 +2078,7 @@ mod tests {
                             indent_level: 1,
                             icon: Some(icons::Icon::Music),
                             label: "All Tracks",
+                            count: None,
                             selected: false,
                             now_playing: false,
                             playing: false,
@@ -1703,6 +2099,216 @@ mod tests {
             harness.state(),
             &vec!["clicked"],
             "a row click must be observable so selection keeps working"
+        );
+    }
+
+    #[test]
+    fn test_tree_row_live_count_shows_in_the_row_label() {
+        use egui_kittest::kittest::Queryable;
+
+        let palette = theme::Palette::dark();
+        let mut cache = icons::IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(theme::SIDEBAR_W - 24.0, 80.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, _events: &mut Vec<()>| {
+                    // The LIBRARY nav rows pass the live count from the counts
+                    // read model; the row paints it and exposes it in the
+                    // accessibility label so it is queryable.
+                    sidebar::tree_row(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        sidebar::TreeRow {
+                            indent_level: 0,
+                            icon: Some(icons::Icon::ListMusic),
+                            label: "All Tracks",
+                            count: Some(12),
+                            selected: false,
+                            now_playing: false,
+                            playing: false,
+                            disclosure: None,
+                        },
+                    );
+                    sidebar::tree_row(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        sidebar::TreeRow {
+                            indent_level: 0,
+                            icon: Some(icons::Icon::Music),
+                            label: "Artists",
+                            count: None,
+                            selected: false,
+                            now_playing: false,
+                            playing: false,
+                            disclosure: None,
+                        },
+                    );
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        assert!(
+            harness.query_by_label("All Tracks (12)").is_some(),
+            "a counted row exposes its live count in the accessibility label"
+        );
+        assert!(
+            harness.query_by_label("Artists").is_some(),
+            "a countless row keeps its bare label"
+        );
+    }
+
+    // --- Smart lists: always visible, two Advanced-only (handoff issue 07) -----
+    //
+    // The sidebar's SMART LISTS section shows Recently Added, Recently Played,
+    // Most Played, and Favorites without Advanced mode; Never Played and Lost
+    // Gems relocate behind Advanced (relocated, not deleted). The open rule
+    // matches the visibility rule: an Advanced-only list can only open while
+    // Advanced mode is on (e.g. it was left open when the toggle flipped off).
+
+    #[test]
+    fn test_smart_list_kinds_show_the_core_four_without_advanced_mode() {
+        use crate::domain::SmartPlaylistKind;
+        use riff_gui::ui::app::smart_list_kinds;
+
+        let kinds = smart_list_kinds(false);
+        assert_eq!(
+            kinds,
+            vec![
+                SmartPlaylistKind::RecentlyAdded,
+                SmartPlaylistKind::RecentlyPlayed,
+                SmartPlaylistKind::MostPlayed,
+                SmartPlaylistKind::Favorites,
+            ],
+            "the four core smart lists render in the design's order \
+             without Advanced mode"
+        );
+    }
+
+    #[test]
+    fn test_smart_list_kinds_relocate_never_played_and_lost_gems_behind_advanced() {
+        use crate::domain::SmartPlaylistKind;
+        use riff_gui::ui::app::smart_list_kinds;
+
+        let kinds = smart_list_kinds(true);
+        assert!(kinds.contains(&SmartPlaylistKind::NeverPlayed));
+        assert!(kinds.contains(&SmartPlaylistKind::LostGems));
+        assert_eq!(kinds.len(), 6, "Advanced mode shows every smart list");
+    }
+
+    #[test]
+    fn test_smart_list_openability_follows_the_visibility_rule() {
+        use crate::domain::SmartPlaylistKind;
+        use riff_gui::ui::app::smart_list_openable;
+
+        for kind in [
+            SmartPlaylistKind::RecentlyAdded,
+            SmartPlaylistKind::RecentlyPlayed,
+            SmartPlaylistKind::MostPlayed,
+            SmartPlaylistKind::Favorites,
+        ] {
+            assert!(
+                smart_list_openable(kind, false),
+                "core list {kind:?} opens without Advanced mode"
+            );
+        }
+        assert!(
+            !smart_list_openable(SmartPlaylistKind::NeverPlayed, false),
+            "Never Played stays closed while Advanced mode is off"
+        );
+        assert!(
+            !smart_list_openable(SmartPlaylistKind::LostGems, false),
+            "Lost Gems stays closed while Advanced mode is off"
+        );
+        for kind in SmartPlaylistKind::ALL {
+            assert!(
+                smart_list_openable(kind, true),
+                "every list opens once Advanced mode is on"
+            );
+        }
+    }
+
+    // --- Sidebar footer: "Last scan X ago" (handoff issue 07) -------------------
+
+    #[test]
+    fn test_last_scan_age_formats_the_coarse_human_buckets() {
+        use std::time::Duration;
+
+        let fmt = riff_gui::ui::sidebar::format_last_scan_ago;
+        assert_eq!(fmt(Duration::from_secs(0)), "just now");
+        assert_eq!(fmt(Duration::from_secs(59)), "just now");
+        assert_eq!(fmt(Duration::from_secs(60)), "1m ago");
+        assert_eq!(fmt(Duration::from_secs(5 * 60 + 59)), "5m ago");
+        assert_eq!(fmt(Duration::from_secs(3 * 3600)), "3h ago");
+        assert_eq!(fmt(Duration::from_secs(23 * 3600 + 59 * 60)), "23h ago");
+        assert_eq!(fmt(Duration::from_secs(2 * 86_400)), "2d ago");
+        assert_eq!(fmt(Duration::from_secs(40 * 86_400)), "40d ago");
+    }
+
+    #[test]
+    fn test_sidebar_footer_reports_add_folder_and_shows_the_scan_stamp() {
+        use egui_kittest::kittest::Queryable;
+
+        let palette = theme::Palette::dark();
+        let mut cache = icons::IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(theme::SIDEBAR_W - 24.0, 80.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, clicks: &mut Vec<&'static str>| {
+                    if riff_gui::ui::sidebar::sidebar_footer(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        Some("Last scan 5m ago"),
+                    ) {
+                        clicks.push("add_folder");
+                    }
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        harness.get_by_label("Add folder").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec!["add_folder"],
+            "the footer's Add folder action must be clickable"
+        );
+        assert!(
+            harness.query_by_label("Last scan 5m ago").is_some(),
+            "the footer shows the last-scan stamp"
+        );
+    }
+
+    #[test]
+    fn test_sidebar_footer_renders_without_a_scan_stamp() {
+        use egui_kittest::kittest::Queryable;
+
+        let palette = theme::Palette::dark();
+        let mut cache = icons::IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(theme::SIDEBAR_W - 24.0, 80.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, _clicks: &mut Vec<&'static str>| {
+                    riff_gui::ui::sidebar::sidebar_footer(ui, &mut cache, &palette, None);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        assert!(
+            harness.query_by_label_contains("Last scan").is_none(),
+            "no stamp renders before any scan has completed"
+        );
+        assert!(
+            harness.query_by_label("Add folder").is_some(),
+            "Add folder stays available without a scan stamp"
         );
     }
 
@@ -2008,6 +2614,8 @@ mod tests {
             shuffle: true,
             repeat: RepeatMode::None,
             queue_position: "3/12",
+            queue_open: false,
+            expanded: false,
             advanced: false,
         }
     }
@@ -2205,6 +2813,272 @@ mod tests {
         harness.get_by_label("Mute").click();
         harness.run();
         assert!(harness.state().contains(&PlayerBarAction::ToggleMute));
+    }
+
+    #[test]
+    fn test_queue_open_and_expand_buttons_report_toggle_actions() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::playerbar::PlayerBarAction;
+
+        // Closed/rested bar: the queue button opens the queue panel and the
+        // expand button enlarges the player view (handoff issue 13).
+        let closed = playing_content();
+        let palette = theme::Palette::dark();
+        let mut cache = IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<PlayerBarAction>| {
+                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &closed,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        harness.get_by_label("Open queue").click();
+        harness.run();
+        assert!(
+            harness.state().contains(&PlayerBarAction::ToggleQueue),
+            "the queue-open button must report ToggleQueue, got {:?}",
+            harness.state()
+        );
+
+        harness.get_by_label("Expand player").click();
+        harness.run();
+        assert!(
+            harness.state().contains(&PlayerBarAction::ToggleExpanded),
+            "the expand button must report ToggleExpanded, got {:?}",
+            harness.state()
+        );
+
+        // Open/expanded bar: the same controls flip their labels with their
+        // state (mute-button precedent) and keep reporting the toggles.
+        let open = playerbar::PlayerBarContent {
+            queue_open: true,
+            expanded: true,
+            ..playing_content()
+        };
+        let mut cache = IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<PlayerBarAction>| {
+                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &open,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        harness.get_by_label("Close queue").click();
+        harness.run();
+        assert!(harness.state().contains(&PlayerBarAction::ToggleQueue));
+
+        harness.get_by_label("Exit expanded player").click();
+        harness.run();
+        assert!(harness.state().contains(&PlayerBarAction::ToggleExpanded));
+    }
+
+    #[test]
+    fn test_keyboard_focus_reaches_the_queue_and_expand_buttons() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::playerbar::PlayerBarAction;
+
+        let content = playing_content();
+        let palette = theme::Palette::dark();
+        let mut cache = IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<PlayerBarAction>| {
+                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // Both new controls are individually focusable and Enter activates
+        // them — same report as a click (settings-nav precedent).
+        harness.get_by_label("Open queue").focus();
+        harness.run();
+        assert!(harness.get_by_label("Open queue").is_focused());
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert!(
+            harness.state().contains(&PlayerBarAction::ToggleQueue),
+            "Enter on the focused queue button must toggle the queue, got {:?}",
+            harness.state()
+        );
+
+        harness.get_by_label("Expand player").focus();
+        harness.run();
+        assert!(harness.get_by_label("Expand player").is_focused());
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert!(
+            harness.state().contains(&PlayerBarAction::ToggleExpanded),
+            "Enter on the focused expand button must toggle the expanded view, got {:?}",
+            harness.state()
+        );
+    }
+
+    /// Run `step` against a harness drawing the playerbar (queue open) plus
+    /// the queue panel over it — the shell layout while the panel is
+    /// revealed.
+    fn with_queue_panel(
+        palette: &theme::Palette,
+        content: &playerbar::PlayerBarContent<'static>,
+        entries: &[riff_gui::ui::now_playing::UpNextEntry],
+        step: impl FnOnce(&mut egui_kittest::Harness<'_, Vec<riff_gui::ui::playerbar::PlayerBarAction>>),
+    ) {
+        let mut cache = icons::IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, 400.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<PlayerBarAction>| {
+                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        palette,
+                        content,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    riff_gui::ui::playerbar::show_queue_panel(
+                        ui, &mut cache, palette, entries, &mut buf,
+                    );
+                    actions.append(&mut buf);
+                },
+                Vec::new(),
+            );
+        step(&mut harness);
+    }
+
+    #[test]
+    fn test_queue_panel_rows_queue_their_track_to_play_next() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::now_playing::UpNextEntry;
+        use riff_gui::ui::playerbar::PlayerBarAction;
+
+        let palette = theme::Palette::dark();
+        let open = playerbar::PlayerBarContent {
+            queue_open: true,
+            ..playing_content()
+        };
+        let entries = vec![
+            UpNextEntry {
+                id: TrackId("one.flac".to_string()),
+                label: "A - One".to_string(),
+            },
+            UpNextEntry {
+                id: TrackId("two.flac".to_string()),
+                label: "B - Two".to_string(),
+            },
+        ];
+        with_queue_panel(&palette, &open, &entries, |harness| {
+            harness.run();
+
+            harness.get_by_label("A - One").click();
+            harness.run();
+            assert!(
+                harness
+                    .state()
+                    .contains(&PlayerBarAction::PlayNext(TrackId("one.flac".to_string()))),
+                "clicking an Up Next row must queue that track, got {:?}",
+                harness.state()
+            );
+
+            harness.get_by_label("B - Two").click();
+            harness.run();
+            assert!(
+                harness
+                    .state()
+                    .contains(&PlayerBarAction::PlayNext(TrackId("two.flac".to_string()))),
+                "every row queues its own track, got {:?}",
+                harness.state()
+            );
+        });
+    }
+
+    #[test]
+    fn test_transport_stays_live_while_the_queue_panel_is_open() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::playerbar::PlayerBarAction;
+
+        let palette = theme::Palette::dark();
+        let open = playerbar::PlayerBarContent {
+            queue_open: true,
+            ..playing_content()
+        };
+        with_queue_panel(&palette, &open, &[], |harness| {
+            harness.run();
+
+            // The panel never blocks the bar: the transport underneath still
+            // reports its actions (playing, seeking, and queue navigation keep
+            // working from the revealed queue).
+            harness.get_by_label("Pause").click();
+            harness.run();
+            assert!(
+                harness.state().contains(&PlayerBarAction::Pause),
+                "the transport stays reachable while the queue panel is open, got {:?}",
+                harness.state()
+            );
+        });
+    }
+
+    #[test]
+    fn test_queue_panel_shows_its_empty_state() {
+        use egui_kittest::kittest::Queryable;
+
+        let palette = theme::Palette::dark();
+        let open = playerbar::PlayerBarContent {
+            queue_open: true,
+            ..playing_content()
+        };
+        with_queue_panel(&palette, &open, &[], |harness| {
+            harness.run();
+            assert!(
+                harness.query_by_label("Queue is empty").is_some(),
+                "an empty queue reads as an empty state, not blank space"
+            );
+        });
     }
 
     #[test]
@@ -2522,6 +3396,89 @@ mod tests {
             playback.queue.repeat,
             RepeatMode::All,
             "repeat cycles off → all"
+        );
+    }
+
+    #[test]
+    fn test_queue_toggle_flips_the_session_flag_without_touching_playback() {
+        let (playback, library, transport, store) = applied(PlayerBarAction::ToggleQueue);
+        assert!(library.queue_open, "the queue panel opens");
+        assert!(
+            transport.recorded().is_empty(),
+            "opening the queue issues no engine intent"
+        );
+        assert!(
+            store.calls.is_empty(),
+            "the queue panel is session state, not persisted"
+        );
+        assert_eq!(
+            playback.playback_state,
+            PlaybackState::Stopped,
+            "playback is untouched"
+        );
+
+        let (mut playback, mut library, transport, mut store) = applied(PlayerBarAction::Pause);
+        library.queue_open = true;
+        apply_player_bar_action(
+            PlayerBarAction::ToggleQueue,
+            &mut library,
+            &mut playback,
+            &transport,
+            &mut store,
+        );
+        assert!(!library.queue_open, "the queue panel closes again");
+    }
+
+    #[test]
+    fn test_expand_toggle_routes_through_the_now_playing_mode() {
+        // From the Library view: expanding lands on the enlarged player view.
+        let (playback, library, transport, _) = applied(PlayerBarAction::ToggleExpanded);
+        assert_eq!(
+            library.view_mode,
+            riff_backend::app::state::ViewMode::NowPlaying
+        );
+        assert!(
+            transport.recorded().is_empty(),
+            "expanding issues no engine intent"
+        );
+        assert_eq!(
+            playback.playback_state,
+            PlaybackState::Stopped,
+            "playback state is preserved untouched"
+        );
+
+        // While expanded: the same button returns to the Library view.
+        let (mut playback, mut library, transport, mut store) = applied(PlayerBarAction::Pause);
+        library.view_mode = riff_backend::app::state::ViewMode::NowPlaying;
+        apply_player_bar_action(
+            PlayerBarAction::ToggleExpanded,
+            &mut library,
+            &mut playback,
+            &transport,
+            &mut store,
+        );
+        assert_eq!(
+            library.view_mode,
+            riff_backend::app::state::ViewMode::Library,
+            "leaving the enlarged view lands on the Library view"
+        );
+    }
+
+    #[test]
+    fn test_queue_panel_row_reports_play_next_for_its_track() {
+        let (mut playback, mut library, _, mut store) = applied(PlayerBarAction::Pause);
+        let transport = crate::mocks::MockTransport::new();
+        apply_player_bar_action(
+            PlayerBarAction::PlayNext(TrackId("next.flac".to_string())),
+            &mut library,
+            &mut playback,
+            &transport,
+            &mut store,
+        );
+        assert_eq!(
+            transport.recorded(),
+            vec![TransportIntent::PlayNext(TrackId("next.flac".to_string()))],
+            "a queue-panel row queues its track to play next"
         );
     }
 
@@ -2977,7 +3934,6 @@ mod tests {
     #[test]
     fn test_settings_section_headers_match_the_mockup() {
         assert_eq!(settings::SECTION_LIBRARIES, "MUSIC LIBRARIES");
-        assert_eq!(settings::SECTION_PREFERENCES, "PREFERENCES");
         assert_eq!(settings::SECTION_ADVANCED_INFO, "ADVANCED & PLATFORM INFO");
     }
 
@@ -3083,24 +4039,295 @@ mod tests {
         );
     }
 
-    /// Render the restyled stage headlessly with one representative library
-    /// row, collecting reported actions like the Now Playing harness does.
-    fn settings_harness(
+    // --- Sectioned Settings modal + left nav (Issue 11) ------------------------
+    //
+    // Settings becomes a sectioned modal with a left nav (General, Library,
+    // Playback, Appearance, Shortcuts, Tag editing, Advanced, About) instead
+    // of one long scrolling stage. The seams: the pure `SettingsSection` type,
+    // and the headless renderer reporting `SettingsAction`s — the same shape
+    // the former stage used.
+
+    #[test]
+    fn test_settings_sections_list_the_eight_nav_entries_in_mockup_order() {
+        use riff_gui::ui::settings::SettingsSection;
+
+        let labels: Vec<&str> = SettingsSection::ALL.iter().map(|s| s.label()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "General",
+                "Library",
+                "Playback",
+                "Appearance",
+                "Shortcuts",
+                "Tag editing",
+                "Advanced",
+                "About",
+            ],
+            "the left nav lists exactly the mockup's eight sections in order"
+        );
+    }
+
+    /// Render the sectioned modal headlessly at `current`, with one
+    /// representative library row, collecting reported actions.
+    fn settings_modal_harness(
         content: &SettingsContent,
+        current: riff_gui::ui::settings::SettingsSection,
     ) -> egui_kittest::Harness<'_, Vec<SettingsAction>> {
+        use riff_gui::ui::settings::show_settings_modal;
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
         egui_kittest::Harness::builder()
-            .with_size(egui::vec2(672.0, 720.0))
+            .with_size(egui::vec2(800.0, 720.0))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 move |ui, actions: &mut Vec<SettingsAction>| {
-                    actions.extend(settings::show_settings_stage(
-                        ui, &mut cache, &palette, content,
+                    actions.extend(show_settings_modal(
+                        ui, &mut cache, &palette, content, current,
                     ));
                 },
                 Vec::new(),
             )
+    }
+
+    #[test]
+    fn test_library_pane_toggles_report_immediate_commit_actions() {
+        // The pane defaults: hidden files skipped, embedded art read, one
+        // root watched. Clicking each toggle must report the commit action
+        // that turns it OFF (values live in the session, not the widget).
+        let content = SettingsContent {
+            watch_any: true,
+            skip_hidden_files: true,
+            read_embedded_artwork: true,
+            ..sample_content()
+        };
+
+        // The Library pane scrolls, so each row is scrolled into view
+        // before its click (see [`click_into_view`]).
+        let harness = click_into_view("Watch for changes", &content);
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SetWatchAll(false)),
+            "the Watch for changes toggle reports the watcher-wide commit"
+        );
+
+        let harness = click_into_view("Skip hidden files", &content);
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SetSkipHidden(false)),
+            "the Skip hidden files toggle reports the scan-preference commit"
+        );
+
+        let harness = click_into_view("Read embedded artwork", &content);
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SetReadEmbeddedArtwork(false)),
+            "the Read embedded artwork toggle reports the artwork-policy commit"
+        );
+    }
+
+    #[test]
+    fn test_format_chip_click_reports_the_format_toggle() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::SettingsSection;
+
+        // FLAC enabled: clicking its chip must report disabling it.
+        let content = SettingsContent {
+            scan_formats: riff_backend::app::store::AUDIO_EXTENSIONS
+                .iter()
+                .map(|extension| (*extension).to_string())
+                .collect(),
+            ..sample_content()
+        };
+        let mut harness = settings_modal_harness(&content, SettingsSection::Library);
+        harness.run();
+        harness.get_by_label("Index flac files").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SetFormat("flac".to_string(), false)),
+            "an enabled format chip reports disabling that format's indexing"
+        );
+    }
+
+    #[test]
+    fn test_rescan_now_and_footer_actions_report_their_intents() {
+        let content = SettingsContent { ..sample_content() };
+
+        let harness = click_into_view("Rescan now", &content);
+        assert!(
+            harness.state().contains(&SettingsAction::ScanAll),
+            "Rescan now requests a full rescan"
+        );
+
+        let harness = click_into_view("Reset to defaults", &content);
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::ResetLibraryDefaults),
+            "Reset to defaults reports the pane restore action"
+        );
+
+        // Done closes Settings — the same intent as the header's back arrow.
+        let harness = click_into_view("Done", &content);
+        assert!(
+            harness.state().contains(&SettingsAction::Back),
+            "Done closes the Settings modal"
+        );
+    }
+
+    /// The Library pane scrolls, so a target must be scrolled into view
+    /// before its click (kittest clicks at on-screen coordinates). Runs the
+    /// modal, scrolls to `label`, clicks it, and returns the harness for
+    /// action assertions.
+    fn click_into_view<'h>(
+        label: &'static str,
+        content: &'h SettingsContent,
+    ) -> egui_kittest::Harness<'h, Vec<SettingsAction>> {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::SettingsSection;
+
+        let mut harness = settings_modal_harness(content, SettingsSection::Library);
+        harness.run();
+        harness.get_by_label(label).scroll_to_me();
+        harness.run();
+        harness.get_by_label(label).click();
+        harness.run();
+        harness
+    }
+
+    #[test]
+    fn test_settings_nav_clicks_report_the_selected_section() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::SettingsSection;
+
+        let content = sample_content();
+        let mut harness = settings_modal_harness(&content, SettingsSection::Library);
+        harness.run();
+
+        harness.get_by_label("About").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SelectSection(SettingsSection::About)),
+            "clicking a nav item reports the section to show"
+        );
+
+        harness.get_by_label("Playback").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SelectSection(SettingsSection::Playback)),
+            "every nav item is clickable"
+        );
+    }
+
+    #[test]
+    fn test_settings_pane_switches_content_with_the_current_section() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::SettingsSection;
+
+        let content = sample_content();
+
+        // Library: the working library controls are on stage, and no other
+        // section's content bleeds into the pane.
+        let mut harness = settings_modal_harness(&content, SettingsSection::Library);
+        harness.run();
+        assert!(
+            harness.query_by_label("Add Library").is_some(),
+            "the Library pane keeps the library actions"
+        );
+        assert!(
+            harness.query_by_label("Advanced mode").is_none(),
+            "the Advanced preference lives in its own section, not Library"
+        );
+
+        // Advanced: the section's existing content (Advanced mode preference
+        // and platform info) replaces the library controls entirely.
+        let mut harness = settings_modal_harness(&content, SettingsSection::Advanced);
+        harness.run();
+        assert!(
+            harness.query_by_label("Advanced mode").is_some(),
+            "the Advanced pane shows the Advanced mode preference"
+        );
+        assert!(
+            harness.query_by_label("Add Library").is_none(),
+            "the Library card must not render in the Advanced pane"
+        );
+
+        // Sections without existing content show a clear placeholder.
+        for section in [
+            SettingsSection::General,
+            SettingsSection::Shortcuts,
+            SettingsSection::About,
+        ] {
+            let mut harness = settings_modal_harness(&content, section);
+            harness.run();
+            let expected = format!("{} settings are not implemented yet.", section.label());
+            assert!(
+                harness.query_by_label(&expected).is_some(),
+                "the {} pane shows its placeholder",
+                section.label()
+            );
+            assert!(
+                harness.query_by_label("Add Library").is_none(),
+                "no library controls in the {} pane",
+                section.label()
+            );
+        }
+    }
+
+    #[test]
+    fn test_settings_nav_is_reachable_and_activatable_from_the_keyboard() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::SettingsSection;
+
+        let content = sample_content();
+        let mut harness = settings_modal_harness(&content, SettingsSection::Library);
+        harness.run();
+
+        // Tab walks the focus order: the header's Back control first, then
+        // the nav items in ALL order (General first here).
+        harness.key_press(egui::Key::Tab);
+        harness.run();
+        assert!(
+            harness.get_by_label("Back to Library").is_focused(),
+            "the first Tab lands on the header's Back control"
+        );
+        harness.key_press(egui::Key::Tab);
+        harness.run();
+        assert!(
+            harness.get_by_label("General").is_focused(),
+            "the nav follows the header in focus order"
+        );
+
+        // Enter activates the focused nav item — same report as a click.
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SelectSection(SettingsSection::General)),
+            "Enter on a focused nav item selects that section"
+        );
+
+        // Deep in the nav too: focus the last item directly and activate it.
+        harness.get_by_label("About").focus();
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SelectSection(SettingsSection::About)),
+            "the last nav item is keyboard-activatable"
+        );
     }
 
     fn sample_content() -> SettingsContent {
@@ -3114,19 +4341,21 @@ mod tests {
             advanced_mode: true,
             high_contrast: false,
             replaygain_enabled: false,
+            ..SettingsContent::default()
         }
     }
 
     #[test]
     fn test_toggle_switch_click_reports_the_preference_action() {
         use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::SettingsSection;
 
         let content = sample_content();
-        let mut harness = settings_harness(&content);
-        harness.run();
 
-        // Advanced mode starts ON (mockup shows it checked); clicking the
-        // switch must report turning it OFF.
+        // Advanced mode starts ON (mockup shows it checked) and lives in the
+        // Advanced pane; clicking the switch must report turning it OFF.
+        let mut harness = settings_modal_harness(&content, SettingsSection::Advanced);
+        harness.run();
         harness.get_by_label("Advanced mode").click();
         harness.run();
         assert!(
@@ -3136,7 +4365,9 @@ mod tests {
             "the reusable ToggleSwitch drives the Advanced mode preference"
         );
 
-        // ReplayGain starts OFF; its switch reports turning it ON.
+        // ReplayGain starts OFF in the Playback pane...
+        let mut harness = settings_modal_harness(&content, SettingsSection::Playback);
+        harness.run();
         harness.get_by_label("ReplayGain").click();
         harness.run();
         assert!(
@@ -3145,21 +4376,34 @@ mod tests {
                 .contains(&SettingsAction::SetReplayGain(true)),
             "the same widget drives the ReplayGain preference"
         );
+
+        // ...and High contrast starts OFF in the Appearance pane.
+        let mut harness = settings_modal_harness(&content, SettingsSection::Appearance);
+        harness.run();
+        harness.get_by_label("High contrast").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SetHighContrast(true)),
+            "the same widget drives the High contrast preference"
+        );
     }
 
     #[test]
     fn test_back_button_and_library_actions_report_actions() {
         use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::SettingsSection;
 
         let content = sample_content();
-        let mut harness = settings_harness(&content);
+        let mut harness = settings_modal_harness(&content, SettingsSection::Library);
         harness.run();
 
         harness.get_by_label("Back to Library").click();
         harness.run();
         assert!(
             harness.state().contains(&SettingsAction::Back),
-            "the top bar's back button leaves the Settings View"
+            "the header's close control leaves the Settings View"
         );
 
         harness.get_by_label("Scan C:\\Users\\stink\\Music").click();
@@ -3321,6 +4565,7 @@ mod tests {
                     indent_level: 0,
                     icon: None,
                     label: &label,
+                    count: None,
                     selected: false,
                     now_playing: false,
                     playing: false,
@@ -3471,6 +4716,7 @@ mod tests {
                                 indent_level: 0,
                                 icon: None,
                                 label,
+                                count: None,
                                 selected: false,
                                 now_playing: false,
                                 playing: false,
@@ -3524,6 +4770,7 @@ mod tests {
                             indent_level: 0,
                             icon: None,
                             label: "Beta",
+                            count: None,
                             selected: false,
                             now_playing: false,
                             playing: false,
@@ -4150,5 +5397,2514 @@ mod playback_notice_ui_tests {
         apply_backend_events(Vec::new(), &mut status);
 
         assert_eq!(status.as_deref(), Some("existing"));
+    }
+}
+
+#[cfg(test)]
+mod top_bar_ui_tests {
+    use super::*;
+
+    // --- Content top bar (design-handoff issue 06) ------------------------------
+    //
+    // The library's content top bar carries the orange riff wordmark, the
+    // global "Search or jump to…" field, and the list/grid view toggles. The
+    // headless seams are the toggle action contract and the search field's
+    // query-buffer editing; the pixels are covered by the top_bar golden.
+
+    use riff_backend::app::state::BrowserLayout;
+    use riff_gui::ui::topbar::{TopBarAction, TopBarContent, show_top_bar};
+
+    #[test]
+    fn test_top_bar_reports_view_toggle_actions() {
+        // Harness label queries resolve through kittest's accessibility tree.
+        use egui_kittest::kittest::Queryable;
+
+        let content = TopBarContent {
+            layout: BrowserLayout::List,
+        };
+        let palette = riff_gui::ui::theme::Palette::dark();
+        let mut cache = riff_gui::ui::icons::IconCache::new();
+        let mut query = String::new();
+        let mut widget_actions = Vec::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, riff_gui::ui::theme::TOPBAR_H))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions| {
+                    // ACCUMULATE across frames: a click fires its action on
+                    // exactly one frame, and harness.run() settles over
+                    // further no-op frames afterwards.
+                    widget_actions.clear();
+                    show_top_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &mut query,
+                        content,
+                        &mut widget_actions,
+                    );
+                    actions.append(&mut widget_actions);
+                },
+                Vec::new(),
+            );
+        // The wordmark renders in the vendored Inter Bold family, so install
+        // the app's font definitions (golden-harness precedent).
+        harness
+            .ctx
+            .set_fonts(riff_gui::ui::fonts::font_definitions());
+        harness.run();
+
+        // The inactive toggle activates its layout; the app applies the
+        // action to the persisted session state.
+        harness.get_by_label("Grid view").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&TopBarAction::SetLayout(BrowserLayout::Grid))
+        );
+
+        harness.get_by_label("List view").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&TopBarAction::SetLayout(BrowserLayout::List))
+        );
+    }
+
+    #[test]
+    fn test_top_bar_search_field_edits_the_query_buffer() {
+        use egui_kittest::kittest::Queryable;
+
+        let content = TopBarContent {
+            layout: BrowserLayout::List,
+        };
+        let palette = riff_gui::ui::theme::Palette::dark();
+        let mut cache = riff_gui::ui::icons::IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, riff_gui::ui::theme::TOPBAR_H))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, query| {
+                    show_top_bar(ui, &mut cache, &palette, query, content, &mut Vec::new());
+                },
+                String::new(),
+            );
+        harness
+            .ctx
+            .set_fonts(riff_gui::ui::fonts::font_definitions());
+        harness.run();
+
+        // Typing into the field writes straight into the caller's query
+        // buffer — the same `library.search_query` the library filters on.
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .focus();
+        harness.run();
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("boards of canada");
+        harness.run();
+
+        assert_eq!(harness.state(), "boards of canada");
+    }
+
+    #[test]
+    fn test_ctrl_k_focuses_global_search_and_ctrl_f_the_sidebar() {
+        use riff_backend::app::state::PlaybackSession;
+        use riff_gui::ui::app::handle_keyboard_shortcuts;
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(400.0, 100.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, state| {
+                    // Accumulate the per-frame focus flags: a consumed key
+                    // sets its flag on exactly one frame, and harness.run()
+                    // settles over further no-op frames afterwards.
+                    let mut sidebar_focus = false;
+                    let mut global_focus = false;
+                    handle_keyboard_shortcuts(
+                        ui.ctx(),
+                        &PlaybackSession::default(),
+                        &mut sidebar_focus,
+                        &mut global_focus,
+                        &crate::mocks::MockTransport::new(),
+                    );
+                    *state = (state.0 || sidebar_focus, state.1 || global_focus);
+                },
+                (false, false),
+            );
+        harness.run();
+
+        // Ctrl+K targets the GLOBAL search field, never the sidebar one.
+        harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::K);
+        harness.run();
+        assert_eq!(*harness.state(), (false, true));
+
+        // Ctrl+F keeps focusing the sidebar search (preserved behavior).
+        harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::F);
+        harness.run();
+        assert_eq!(*harness.state(), (true, true));
+    }
+
+    #[test]
+    fn test_top_bar_search_dismisses_on_escape() {
+        use egui_kittest::kittest::Queryable;
+
+        let content = TopBarContent {
+            layout: BrowserLayout::List,
+        };
+        let palette = riff_gui::ui::theme::Palette::dark();
+        let mut cache = riff_gui::ui::icons::IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, riff_gui::ui::theme::TOPBAR_H))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, query| {
+                    show_top_bar(ui, &mut cache, &palette, query, content, &mut Vec::new());
+                },
+                String::new(),
+            );
+        harness
+            .ctx
+            .set_fonts(riff_gui::ui::fonts::font_definitions());
+        harness.run();
+
+        // Type a query so there is something to dismiss.
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .focus();
+        harness.run();
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("boards of canada");
+        harness.run();
+
+        // Escape dismisses: the query clears and the field gives up focus,
+        // all from the keyboard.
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+
+        assert_eq!(harness.state(), "", "Escape must clear the query");
+        assert!(
+            !harness
+                .get_by_role(egui::accesskit::Role::TextInput)
+                .is_focused(),
+            "Escape must give up the field's keyboard focus"
+        );
+    }
+
+    /// A real store-backed settings port at a fresh temp location, exactly
+    /// as the UI receives it (same shape as the `tests` module's helper).
+    fn boxed_store(dir: &tempfile::TempDir) -> Box<dyn riff_backend::app::store::SettingsStore> {
+        let db_path = dir.path().join("riff.sqlite3");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        Box::new(
+            riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .expect("opening a fresh store must work"),
+        )
+    }
+
+    #[test]
+    fn test_top_bar_toggle_action_updates_the_session_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = boxed_store(&dir);
+
+        let mut library = riff_backend::app::state::LibrarySession::default();
+        let playback = riff_backend::app::state::PlaybackSession::default();
+
+        riff_gui::ui::app::apply_top_bar_action(
+            TopBarAction::SetLayout(BrowserLayout::Grid),
+            &mut library,
+            &playback,
+            store.as_mut(),
+        );
+
+        // The session reflects the choice immediately (the browser column
+        // reads it), and it persists as one durable scalar transaction.
+        assert_eq!(library.browser_layout, BrowserLayout::Grid);
+        assert_eq!(
+            store.load_settings().unwrap().scalars.browser_layout,
+            BrowserLayout::Grid.as_store_code()
+        );
+    }
+}
+
+// --- Browser column (design-handoff issue 08) -----------------------------------
+//
+// The first pane of the three-pane explorer: a generic list column that
+// renders every section's rows — artists with cover thumbnails, plus All
+// Tracks / Albums / Genres / Folders / smart-list / playlist rows — with an
+// A–Z sort control and genre filter chips on the artist variant, honoring
+// the top bar's list/grid toggle. The headless seam is the `browser` widget
+// module (the same pure-widget discipline as `sidebar`/`topbar`): widgets
+// paint from data and report `BrowserAction`s; app state stays in `app.rs`.
+#[cfg(test)]
+mod browser_column_ui_tests {
+    use super::*;
+    use crate::ui_tests::tests::boxed_library_store;
+    use riff_backend::app::state::BrowserLayout;
+    use riff_gui::ui::browser::{BrowserAction, BrowserColumn, BrowserItem};
+    use riff_gui::ui::icons::IconCache;
+    use riff_gui::ui::theme::Palette;
+
+    /// Three fixed rows, the smallest column that proves rendering and
+    /// selection reporting.
+    fn fixture_items() -> Vec<BrowserItem> {
+        vec![
+            BrowserItem {
+                key: "alpha".to_string(),
+                label: "Alpha".to_string(),
+                detail: None,
+                thumbnail: None,
+                selected: false,
+                now_playing: false,
+            },
+            BrowserItem {
+                key: "beta".to_string(),
+                label: "Beta".to_string(),
+                detail: None,
+                thumbnail: None,
+                selected: false,
+                now_playing: false,
+            },
+            BrowserItem {
+                key: "gamma".to_string(),
+                label: "Gamma".to_string(),
+                detail: None,
+                thumbnail: None,
+                selected: false,
+                now_playing: false,
+            },
+        ]
+    }
+
+    /// A provider closure over a fixture slice, bound to a mutable local so
+    /// it coerces to `&mut dyn FnMut` (the production providers page through
+    /// mutable Session Views caches).
+    fn provider(items: &[BrowserItem]) -> impl FnMut(usize) -> Option<BrowserItem> + '_ {
+        move |i| items.get(i).cloned()
+    }
+
+    #[test]
+    fn test_browser_column_renders_its_rows_and_reports_row_selection() {
+        use egui_kittest::kittest::Queryable;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let items = fixture_items();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<BrowserAction>| {
+                    // ACCUMULATE across frames: a click fires its action on
+                    // exactly one frame; harness.run() settles afterwards.
+                    let mut fixture_item = provider(&items);
+                    let column = BrowserColumn {
+                        layout: BrowserLayout::List,
+                        sort_desc: false,
+                        show_sort: true,
+                        genres: &[],
+                        genre_filter: None,
+                        total: items.len(),
+                        item: &mut fixture_item,
+                        empty_title: "",
+                        empty_hint: "",
+                    };
+                    riff_gui::ui::browser::show_browser_column(
+                        ui, &mut cache, &palette, column, actions,
+                    );
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        for label in ["Alpha", "Beta", "Gamma"] {
+            assert!(
+                harness.query_by_label(label).is_some(),
+                "row '{label}' must render in the browser column"
+            );
+        }
+
+        harness.get_by_label("Beta").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&BrowserAction::Select("beta".to_string())),
+            "clicking a row reports its selection by key: {:?}",
+            harness.state()
+        );
+    }
+
+    #[test]
+    fn test_browser_rows_expose_their_detail_line_in_the_accessible_label() {
+        use egui_kittest::kittest::Queryable;
+
+        // Handoff issue 16: counts and other secondary lines on browser rows
+        // are painted muted text under the label — invisible to a
+        // screen reader unless the row's accessibility label folds them in,
+        // the same "Name (count)" shape the sidebar rows speak.
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let items = vec![
+            BrowserItem {
+                key: "jazz".to_string(),
+                label: "Jazz".to_string(),
+                detail: Some("12 tracks".to_string()),
+                thumbnail: None,
+                selected: false,
+                now_playing: false,
+            },
+            BrowserItem {
+                key: "alpha".to_string(),
+                label: "Alpha".to_string(),
+                detail: None,
+                thumbnail: None,
+                selected: false,
+                now_playing: false,
+            },
+        ];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 200.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<BrowserAction>| {
+                    let mut fixture_item = provider(&items);
+                    let column = BrowserColumn {
+                        layout: BrowserLayout::List,
+                        sort_desc: false,
+                        show_sort: false,
+                        genres: &[],
+                        genre_filter: None,
+                        total: items.len(),
+                        item: &mut fixture_item,
+                        empty_title: "",
+                        empty_hint: "",
+                    };
+                    riff_gui::ui::browser::show_browser_column(
+                        ui, &mut cache, &palette, column, actions,
+                    );
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        assert!(
+            harness.query_by_label("Jazz (12 tracks)").is_some(),
+            "a counted row exposes its count in the accessibility label, \
+             not just as painted text"
+        );
+        assert!(
+            harness.query_by_label("Alpha").is_some(),
+            "a row with no detail line keeps its bare label"
+        );
+    }
+
+    #[test]
+    fn test_browser_tiles_expose_their_detail_line_in_the_accessible_label() {
+        use egui_kittest::kittest::Queryable;
+
+        // Grid tiles paint their label alone; the detail line (e.g. the
+        // track count) still reaches the accessibility tree.
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let items = vec![BrowserItem {
+            key: "jazz".to_string(),
+            label: "Jazz".to_string(),
+            detail: Some("12 tracks".to_string()),
+            thumbnail: None,
+            selected: false,
+            now_playing: false,
+        }];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 240.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<BrowserAction>| {
+                    let mut fixture_item = provider(&items);
+                    let column = BrowserColumn {
+                        layout: BrowserLayout::Grid,
+                        sort_desc: false,
+                        show_sort: false,
+                        genres: &[],
+                        genre_filter: None,
+                        total: items.len(),
+                        item: &mut fixture_item,
+                        empty_title: "",
+                        empty_hint: "",
+                    };
+                    riff_gui::ui::browser::show_browser_column(
+                        ui, &mut cache, &palette, column, actions,
+                    );
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        assert!(
+            harness.query_by_label("Jazz (12 tracks)").is_some(),
+            "a tile's accessibility label folds in its detail line"
+        );
+    }
+
+    #[test]
+    fn test_browser_column_renders_a_friendly_empty_state() {
+        use egui_kittest::kittest::Queryable;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let items = fixture_items();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<BrowserAction>| {
+                    let mut fixture_item = provider(&items);
+                    let column = BrowserColumn {
+                        layout: BrowserLayout::List,
+                        sort_desc: false,
+                        show_sort: true,
+                        genres: &[],
+                        genre_filter: None,
+                        total: 0,
+                        item: &mut fixture_item,
+                        empty_title: "No tracks yet",
+                        empty_hint: "Add a folder to start scanning your library.",
+                    };
+                    riff_gui::ui::browser::show_browser_column(
+                        ui, &mut cache, &palette, column, actions,
+                    );
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        assert!(
+            harness.query_by_label("No tracks yet").is_some(),
+            "an empty section shows its friendly title, not a raw error"
+        );
+        assert!(
+            harness
+                .query_by_label("Add a folder to start scanning your library.")
+                .is_some(),
+            "the empty state carries the hint that moves the listener forward"
+        );
+    }
+
+    #[test]
+    fn test_browser_column_sort_control_reports_toggle_and_reflects_direction() {
+        use egui_kittest::kittest::Queryable;
+
+        let run_column = |sort_desc: bool| {
+            let palette = Palette::dark();
+            let mut cache = IconCache::new();
+            let items = fixture_items();
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(320.0, 300.0))
+                .with_pixels_per_point(1.0)
+                .build_ui_state(
+                    move |ui, actions: &mut Vec<BrowserAction>| {
+                        let mut fixture_item = provider(&items);
+                        let column = BrowserColumn {
+                            layout: BrowserLayout::List,
+                            sort_desc,
+                            show_sort: true,
+                            genres: &[],
+                            genre_filter: None,
+                            total: items.len(),
+                            item: &mut fixture_item,
+                            empty_title: "",
+                            empty_hint: "",
+                        };
+                        riff_gui::ui::browser::show_browser_column(
+                            ui, &mut cache, &palette, column, actions,
+                        );
+                    },
+                    Vec::new(),
+                );
+            harness.run();
+            harness
+        };
+
+        // A–Z (ascending): the control offers the Z–A flip; clicking it
+        // reports ToggleSort for the session to apply.
+        let mut harness = run_column(false);
+        assert!(
+            harness.query_by_label("Sort Z to A").is_some(),
+            "ascending state offers the Z–A flip"
+        );
+        harness.get_by_label("Sort Z to A").click();
+        harness.run();
+        assert!(
+            harness.state().contains(&BrowserAction::ToggleSort),
+            "clicking the sort control reports ToggleSort"
+        );
+
+        // Z–A (descending): the control offers flipping back to A–Z.
+        let harness = run_column(true);
+        assert!(
+            harness.query_by_label("Sort A to Z").is_some(),
+            "descending state offers the A–Z flip"
+        );
+    }
+
+    #[test]
+    fn test_browser_column_hides_the_sort_control_for_unsortable_variants() {
+        use egui_kittest::kittest::Queryable;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let items = fixture_items();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<BrowserAction>| {
+                    let mut fixture_item = provider(&items);
+                    let column = BrowserColumn {
+                        layout: BrowserLayout::List,
+                        sort_desc: false,
+                        show_sort: false,
+                        genres: &[],
+                        genre_filter: None,
+                        total: items.len(),
+                        item: &mut fixture_item,
+                        empty_title: "",
+                        empty_hint: "",
+                    };
+                    riff_gui::ui::browser::show_browser_column(
+                        ui, &mut cache, &palette, column, actions,
+                    );
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        assert!(
+            harness.query_by_label("Sort Z to A").is_none(),
+            "variants the sort cannot order (paged track listings, folders) \
+             render no sort control"
+        );
+    }
+
+    #[test]
+    fn test_browser_column_genre_chips_filter_and_clear() {
+        use egui_kittest::kittest::Queryable;
+
+        use riff_backend::domain::GenreCount;
+
+        // Leaked so the harness closure can hold the slice for its 'static
+        // bound without the outer helper closure consuming it.
+        let genres: &'static [GenreCount] = Box::leak(
+            vec![
+                GenreCount {
+                    genre: "Electronic".to_string(),
+                    tracks: 12,
+                },
+                GenreCount {
+                    genre: "Rock".to_string(),
+                    tracks: 4,
+                },
+            ]
+            .into_boxed_slice(),
+        );
+        let run_column = |genre_filter: Option<&'static str>| {
+            let palette = Palette::dark();
+            let mut cache = IconCache::new();
+            let items = fixture_items();
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(320.0, 300.0))
+                .with_pixels_per_point(1.0)
+                .build_ui_state(
+                    move |ui, actions: &mut Vec<BrowserAction>| {
+                        let mut fixture_item = provider(&items);
+                        let column = BrowserColumn {
+                            layout: BrowserLayout::List,
+                            sort_desc: false,
+                            show_sort: true,
+                            genres,
+                            genre_filter,
+                            total: items.len(),
+                            item: &mut fixture_item,
+                            empty_title: "",
+                            empty_hint: "",
+                        };
+                        riff_gui::ui::browser::show_browser_column(
+                            ui, &mut cache, &palette, column, actions,
+                        );
+                    },
+                    Vec::new(),
+                );
+            harness.run();
+            harness
+        };
+
+        // The chip row: an All chip plus one chip per genre, alongside the
+        // sort control.
+        let mut harness = run_column(None);
+        for label in ["All genres", "Genre: Electronic", "Genre: Rock"] {
+            assert!(
+                harness.query_by_label(label).is_some(),
+                "chip '{label}' must render above the artist list"
+            );
+        }
+
+        // Clicking a genre chip narrows the list to that genre.
+        harness.get_by_label("Genre: Electronic").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&BrowserAction::SetGenreFilter(Some(
+                    "Electronic".to_string()
+                ))),
+            "clicking a genre chip reports the chosen genre"
+        );
+
+        // Clicking All clears the filter.
+        let mut harness = run_column(Some("Electronic"));
+        harness.get_by_label("All genres").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&BrowserAction::SetGenreFilter(None)),
+            "clicking All clears the genre filter"
+        );
+    }
+
+    #[test]
+    fn test_chips_and_sort_are_operable_from_the_keyboard() {
+        use egui_kittest::kittest::Queryable;
+        use riff_backend::domain::GenreCount;
+
+        // Handoff issue 16: the A–Z sort control and the genre filter chips
+        // must be keyboard-reachable and Enter-activatable, not mouse-only —
+        // a keyboard listener can reorder and narrow the listing.
+        let genres: &'static [GenreCount] = Box::leak(
+            vec![
+                GenreCount {
+                    genre: "Electronic".to_string(),
+                    tracks: 12,
+                },
+                GenreCount {
+                    genre: "Rock".to_string(),
+                    tracks: 4,
+                },
+            ]
+            .into_boxed_slice(),
+        );
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let items = fixture_items();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, actions: &mut Vec<BrowserAction>| {
+                    let mut fixture_item = provider(&items);
+                    let column = BrowserColumn {
+                        layout: BrowserLayout::List,
+                        sort_desc: false,
+                        show_sort: true,
+                        genres,
+                        genre_filter: None,
+                        total: items.len(),
+                        item: &mut fixture_item,
+                        empty_title: "",
+                        empty_hint: "",
+                    };
+                    riff_gui::ui::browser::show_browser_column(
+                        ui, &mut cache, &palette, column, actions,
+                    );
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // The sort control is individually focusable, and Enter on it
+        // reports the same ToggleSort a click does.
+        harness.get_by_label("Sort Z to A").focus();
+        harness.run();
+        assert!(
+            harness.get_by_label("Sort Z to A").is_focused(),
+            "the A–Z sort control is keyboard-reachable"
+        );
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert!(
+            harness.state().contains(&BrowserAction::ToggleSort),
+            "Enter on the focused sort control must report ToggleSort, got {:?}",
+            harness.state()
+        );
+
+        // A genre chip is individually focusable, and Enter on it reports
+        // the same SetGenreFilter a click does.
+        harness.run();
+        harness.get_by_label("Genre: Electronic").focus();
+        harness.run();
+        assert!(
+            harness.get_by_label("Genre: Electronic").is_focused(),
+            "a genre chip is keyboard-reachable"
+        );
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&BrowserAction::SetGenreFilter(Some(
+                    "Electronic".to_string()
+                ))),
+            "Enter on the focused chip must report the genre filter, got {:?}",
+            harness.state()
+        );
+    }
+
+    #[test]
+    fn test_browser_column_grid_renders_the_same_items_and_reports_selection() {
+        use egui_kittest::kittest::Queryable;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let items = fixture_items();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, actions: &mut Vec<BrowserAction>| {
+                    let mut fixture_item = provider(&items);
+                    let column = BrowserColumn {
+                        layout: BrowserLayout::Grid,
+                        sort_desc: false,
+                        show_sort: true,
+                        genres: &[],
+                        genre_filter: None,
+                        total: items.len(),
+                        item: &mut fixture_item,
+                        empty_title: "",
+                        empty_hint: "",
+                    };
+                    riff_gui::ui::browser::show_browser_column(
+                        ui, &mut cache, &palette, column, actions,
+                    );
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // No data loss on toggle: every item the list showed renders as a
+        // tile too.
+        for label in ["Alpha", "Beta", "Gamma"] {
+            assert!(
+                harness.query_by_label(label).is_some(),
+                "tile '{label}' must render in grid mode"
+            );
+        }
+
+        // Grid SHAPE: tiles flow two per row — Alpha and Beta share a row,
+        // where the list layout gave each its own.
+        let alpha_y = harness.query_by_label("Alpha").unwrap().rect().top();
+        let beta_y = harness.query_by_label("Beta").unwrap().rect().top();
+        let gamma_y = harness.query_by_label("Gamma").unwrap().rect().top();
+        assert_eq!(alpha_y, beta_y, "grid tiles flow side by side, two per row");
+        assert!(
+            gamma_y > alpha_y,
+            "the third tile wraps to the next grid row"
+        );
+
+        harness.get_by_label("Beta").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&BrowserAction::Select("beta".to_string())),
+            "clicking a tile reports its selection by key"
+        );
+    }
+
+    // --- Session glue (app applies widget actions) ------------------------------
+
+    use riff_backend::app::state::BrowserSelection;
+    use riff_backend::app::state::LibrarySection;
+    use riff_backend::app::state::LibrarySession;
+    use riff_gui::ui::app::apply_browser_action;
+
+    /// The unit separator joins an album's `(album artist, title)` composite
+    /// identity into one row key — the same identity the store keys albums
+    /// by.
+    fn album_key(artist: &str, title: &str) -> String {
+        format!("{artist}\u{1f}{title}")
+    }
+
+    #[test]
+    fn test_browser_actions_update_the_library_session() {
+        let mut library = LibrarySession::default();
+
+        // Sort starts A–Z; the widget's toggle flips it.
+        apply_browser_action(BrowserAction::ToggleSort, &mut library);
+        assert!(library.browser_sort_desc, "ToggleSort flips to Z–A");
+        apply_browser_action(BrowserAction::ToggleSort, &mut library);
+        assert!(!library.browser_sort_desc, "another toggle returns to A–Z");
+
+        // Genre chips set and clear the artist filter.
+        apply_browser_action(
+            BrowserAction::SetGenreFilter(Some("Electronic".to_string())),
+            &mut library,
+        );
+        assert_eq!(library.genre_filter.as_deref(), Some("Electronic"));
+        apply_browser_action(BrowserAction::SetGenreFilter(None), &mut library);
+        assert_eq!(library.genre_filter, None);
+    }
+
+    #[test]
+    fn test_browser_selection_resolves_per_section() {
+        // Artists: the row key IS the artist name.
+        let mut library = LibrarySession {
+            library_section: LibrarySection::Artists,
+            ..LibrarySession::default()
+        };
+        apply_browser_action(
+            BrowserAction::Select("Aphex Twin".to_string()),
+            &mut library,
+        );
+        assert_eq!(
+            library.browser_selection,
+            Some(BrowserSelection::Artist("Aphex Twin".to_string())),
+            "selecting an artist row stores the artist identity for the detail column"
+        );
+
+        // Albums: the key is the store's (album artist, title) composite.
+        library = LibrarySession {
+            library_section: LibrarySection::Albums,
+            ..LibrarySession::default()
+        };
+        apply_browser_action(
+            BrowserAction::Select(album_key("Boards of Canada", "Geogaddi")),
+            &mut library,
+        );
+        assert_eq!(
+            library.browser_selection,
+            Some(BrowserSelection::Album {
+                artist: "Boards of Canada".to_string(),
+                title: "Geogaddi".to_string(),
+            }),
+        );
+
+        // Genres: the row key IS the genre name.
+        library = LibrarySession {
+            library_section: LibrarySection::Genres,
+            ..LibrarySession::default()
+        };
+        apply_browser_action(
+            BrowserAction::Select("Electronic".to_string()),
+            &mut library,
+        );
+        assert_eq!(
+            library.browser_selection,
+            Some(BrowserSelection::Genre("Electronic".to_string())),
+        );
+    }
+
+    // --- Detail column (handoff issue 09) ---------------------------------------
+    //
+    // The middle pane of the three-pane explorer. Tested at the same two
+    // seams as the browser column (issue 08): the pure widget seam
+    // (`ui::detail::show_detail_column`, headless kittest harness) and the
+    // session-glue seam (`apply_detail_action`, real store/transport mocks).
+
+    #[test]
+    fn test_detail_column_renders_breadcrumb_and_climbs_one_level() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::detail::{Crumb, DetailAction, DetailColumn, show_detail_column};
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let crumbs = vec![
+            Crumb {
+                label: "Artists".to_string(),
+            },
+            Crumb {
+                label: "Boards of Canada".to_string(),
+            },
+        ];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(420.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<DetailAction>| {
+                    let column = DetailColumn {
+                        breadcrumb: &crumbs,
+                        ..DetailColumn::empty("No albums yet", "Nothing here.")
+                    };
+                    show_detail_column(ui, &mut cache, &palette, column, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // The trail reads `Artists / Boards of Canada` — every segment of the
+        // path the listener took is visible.
+        assert!(
+            harness.query_by_label("Artists").is_some(),
+            "the breadcrumb's root segment renders"
+        );
+        assert!(
+            harness.query_by_label("Boards of Canada").is_some(),
+            "the breadcrumb's leaf segment renders"
+        );
+
+        // Clicking the root climbs back one level: the widget reports WHICH
+        // segment was clicked, `apply_detail_action` does the climbing.
+        harness.get_by_label("Artists").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![DetailAction::Crumb(0)],
+            "clicking a breadcrumb segment reports its level"
+        );
+    }
+
+    #[test]
+    fn test_album_header_offers_play_all_and_shuffle() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::detail::{
+            AlbumHeader, Crumb, DetailAction, DetailColumn, show_detail_column,
+        };
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let crumbs = vec![
+            Crumb {
+                label: "Artists".to_string(),
+            },
+            Crumb {
+                label: "Boards of Canada".to_string(),
+            },
+            Crumb {
+                label: "Geogaddi".to_string(),
+            },
+        ];
+        let header = AlbumHeader {
+            title: "Geogaddi".to_string(),
+            subtitle: Some("Boards of Canada \u{b7} 2002".to_string()),
+        };
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(420.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<DetailAction>| {
+                    let column = DetailColumn {
+                        breadcrumb: &crumbs,
+                        header: Some(&header),
+                        ..DetailColumn::empty("", "")
+                    };
+                    show_detail_column(ui, &mut cache, &palette, column, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // The album header names the album and its artist · year line. The
+        // title also appears in the breadcrumb's leaf, so both renderings
+        // must be there.
+        assert!(
+            harness.query_all_by_label("Geogaddi").count() >= 2,
+            "the album title renders in the breadcrumb and the header"
+        );
+        assert!(
+            harness.query_by_label("Boards of Canada · 2002").is_some(),
+            "the album header renders the artist · year subtitle"
+        );
+
+        // Play all starts the album from the top; Shuffle starts it shuffled.
+        harness.get_by_label("Play all").click();
+        harness.run();
+        harness.get_by_label("Shuffle").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![DetailAction::PlayAll, DetailAction::Shuffle],
+            "the header's two playback actions report themselves"
+        );
+    }
+
+    #[test]
+    fn test_detail_play_all_and_shuffle_play_the_albums_tracks() {
+        use riff_gui::ui::app::apply_detail_action;
+        use riff_gui::ui::detail::DetailAction;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = boxed_library_store(&dir);
+        let tracks = [
+            TrackId("a.mp3".to_string()),
+            TrackId("b.mp3".to_string()),
+            TrackId("c.mp3".to_string()),
+        ];
+        let mut library = LibrarySession::default();
+        let mut playback = PlaybackSession::default();
+        let transport = crate::mocks::MockTransport::new();
+
+        apply_detail_action(
+            DetailAction::PlayAll,
+            &mut library,
+            &mut playback,
+            &transport,
+            store.as_mut(),
+            &tracks,
+        );
+        assert_eq!(
+            transport.recorded(),
+            vec![crate::mocks::TransportIntent::PlayMany(
+                TrackId("a.mp3".to_string()),
+                vec![TrackId("b.mp3".to_string()), TrackId("c.mp3".to_string())]
+            )],
+            "Play all starts the album's first track with the rest queued behind it"
+        );
+        assert!(
+            !playback.queue.shuffle,
+            "Play all never flips the queue's shuffle state"
+        );
+
+        let transport = crate::mocks::MockTransport::new();
+        apply_detail_action(
+            DetailAction::Shuffle,
+            &mut library,
+            &mut playback,
+            &transport,
+            store.as_mut(),
+            &tracks,
+        );
+        assert_eq!(
+            transport.recorded(),
+            vec![crate::mocks::TransportIntent::PlayMany(
+                TrackId("a.mp3".to_string()),
+                vec![TrackId("b.mp3".to_string()), TrackId("c.mp3".to_string())]
+            )],
+            "Shuffle plays the same album batch — the queue's traversal shuffles"
+        );
+        assert!(
+            playback.queue.shuffle,
+            "Shuffle turns the queue's shuffle traversal on"
+        );
+
+        // An empty album has nothing to start: no intents, no flag changes.
+        let transport = crate::mocks::MockTransport::new();
+        playback.queue.set_shuffle(false);
+        apply_detail_action(
+            DetailAction::PlayAll,
+            &mut library,
+            &mut playback,
+            &transport,
+            store.as_mut(),
+            &[],
+        );
+        apply_detail_action(
+            DetailAction::Shuffle,
+            &mut library,
+            &mut playback,
+            &transport,
+            store.as_mut(),
+            &[],
+        );
+        assert!(
+            transport.recorded().is_empty(),
+            "an empty album starts nothing"
+        );
+        assert!(
+            !playback.queue.shuffle,
+            "an empty album never re-enables shuffle"
+        );
+    }
+
+    #[test]
+    fn test_track_table_renders_columns_and_reports_row_gestures() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::detail::{
+            Crumb, DetailAction, DetailColumn, TrackRow, show_detail_column,
+        };
+        use std::time::Duration;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let crumbs = vec![Crumb {
+            label: "Geogaddi".to_string(),
+        }];
+        let tracks = vec![
+            TrackRow {
+                key: "t1".to_string(),
+                number: Some(5),
+                title: "Magic Window".to_string(),
+                plays: 3,
+                duration: Some(Duration::from_secs(205)),
+                favorite: false,
+                selected: false,
+                now_playing: false,
+            },
+            TrackRow {
+                key: "t2".to_string(),
+                number: None,
+                title: "Over the Horizon".to_string(),
+                plays: 0,
+                duration: None,
+                favorite: false,
+                selected: false,
+                now_playing: false,
+            },
+        ];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(560.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<DetailAction>| {
+                    let column = DetailColumn {
+                        breadcrumb: &crumbs,
+                        tracks: &tracks,
+                        ..DetailColumn::empty("", "")
+                    };
+                    show_detail_column(ui, &mut cache, &palette, column, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // The table's four columns head the listing.
+        for header in ["#", "Title", "Plays", "Time"] {
+            assert!(
+                harness.query_by_label(header).is_some(),
+                "the track table's '{header}' column header renders"
+            );
+        }
+
+        // Row values: the tagged track number, the play count, and the
+        // mm:ss readout; the unnumbered track falls back to its listing
+        // position and the unknown duration to the dash.
+        assert!(
+            harness.query_by_label("Magic Window").is_some()
+                && harness.query_by_label("Over the Horizon").is_some(),
+            "every track's title renders as its row's label"
+        );
+        assert!(
+            harness.query_by_label("5").is_some(),
+            "the tagged track number renders in the # column"
+        );
+        assert!(
+            harness.query_by_label("2").is_some(),
+            "an unnumbered track falls back to its 1-based position"
+        );
+        assert!(
+            harness.query_by_label("3").is_some(),
+            "the play count renders in the Plays column"
+        );
+        assert!(
+            harness.query_by_label("03:25").is_some(),
+            "the duration renders mm:ss in the Time column"
+        );
+        assert!(
+            harness.query_by_label("\u{2014}").is_some(),
+            "an unknown duration renders the dash"
+        );
+
+        // Single click selects the row; double click starts it playing.
+        harness.get_by_label("Magic Window").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&DetailAction::SelectTrack("t1".to_string())),
+            "clicking a row selects its track"
+        );
+        // Kittest has no double-click primitive and its default 0.25s step
+        // dt spreads one click's press/release across ~0.75s — past egui's
+        // 0.3s double-click window. A 60fps step rate keeps two successive
+        // clicks inside it.
+        let row = harness.get_by_label("Magic Window");
+        row.click();
+        row.click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&DetailAction::PlayTrack("t1".to_string())),
+            "double-clicking a row starts the track"
+        );
+    }
+
+    #[test]
+    fn test_track_table_favorite_control_reports_the_toggle() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::detail::{DetailAction, DetailColumn, TrackRow, show_detail_column};
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let tracks = vec![
+            TrackRow {
+                key: "plain".to_string(),
+                number: Some(1),
+                title: "Not A Favorite".to_string(),
+                plays: 0,
+                duration: None,
+                favorite: false,
+                selected: false,
+                now_playing: false,
+            },
+            TrackRow {
+                key: "loved".to_string(),
+                number: Some(2),
+                title: "Loved Song".to_string(),
+                plays: 7,
+                duration: None,
+                favorite: true,
+                selected: false,
+                now_playing: false,
+            },
+        ];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(560.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<DetailAction>| {
+                    let column = DetailColumn {
+                        tracks: &tracks,
+                        ..DetailColumn::empty("", "")
+                    };
+                    show_detail_column(ui, &mut cache, &palette, column, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // Every row carries its own favorite control, labelled by what the
+        // click will do.
+        assert!(
+            harness.query_by_label("Add to Favorites").is_some(),
+            "an unfavorite track offers to be added"
+        );
+        assert!(
+            harness.query_by_label("Remove from Favorites").is_some(),
+            "a favorite track offers to be removed"
+        );
+
+        // Clicking reports the flag's NEW value per row — the caller commits
+        // exactly that.
+        harness.get_by_label("Add to Favorites").click();
+        harness.get_by_label("Remove from Favorites").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![
+                DetailAction::SetFavorite {
+                    key: "plain".to_string(),
+                    favorite: true
+                },
+                DetailAction::SetFavorite {
+                    key: "loved".to_string(),
+                    favorite: false
+                },
+            ],
+            "each row's control reports its own track's new flag value"
+        );
+    }
+
+    #[test]
+    fn test_detail_favorite_toggle_commits_durably_and_favorites_list_reflects_it() {
+        use riff_backend::app::state::LibrarySession;
+        use riff_backend::app::store::{LibraryMutationStore, LibraryQueryStore};
+        use riff_backend::domain::SmartPlaylistKind;
+        use riff_gui::ui::app::apply_detail_action;
+        use riff_gui::ui::detail::DetailAction;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("opening a fresh store must work");
+
+        // One stored track, unfavorite. The views seam pairs with the store
+        // exactly the way the composition root wires it.
+        let track = crate::test_utils::create_test_track("a.mp3", "a.mp3");
+        store
+            .apply_scan_batch(std::slice::from_ref(&track))
+            .unwrap();
+        let mut views = riff_backend::app::views::SessionViews::new(
+            Box::new(store.clone()),
+            Box::new(store.clone()),
+            store.library_generation(),
+            store.playlist_generation(),
+        );
+        let mut library_mutations: Box<dyn LibraryMutationStore> = Box::new(store.clone());
+        let mut library = LibrarySession::default();
+        let mut playback = PlaybackSession::default();
+        let transport = crate::mocks::MockTransport::new();
+
+        // The row's control reports the flag's NEW value; applying it
+        // commits through the store's favorite setter.
+        apply_detail_action(
+            DetailAction::SetFavorite {
+                key: track.id.0.clone(),
+                favorite: true,
+            },
+            &mut library,
+            &mut playback,
+            &transport,
+            library_mutations.as_mut(),
+            &[],
+        );
+
+        // The Favorites smart list reflects the change with zero caller
+        // action — the committed mutation bumped the library generation
+        // itself.
+        let favorites = views.smart_list(SmartPlaylistKind::Favorites, 100);
+        assert_eq!(
+            favorites.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
+            vec![track.id.clone()],
+            "the Favorites smart list picks up the toggle"
+        );
+
+        // Durability: the flag survives closing and reopening the store.
+        drop(library_mutations);
+        drop(views);
+        drop(store);
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let reopened = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("reopening the store must work");
+        let restored = reopened
+            .get_track(&track.id)
+            .expect("the query works")
+            .expect("the track is still known");
+        assert!(
+            restored.favorite,
+            "the favorite flag persisted through a restart"
+        );
+    }
+
+    #[test]
+    fn test_artist_detail_lists_albums_that_drill_deeper() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::browser::BrowserItem;
+        use riff_gui::ui::detail::{Crumb, DetailAction, DetailColumn, show_detail_column};
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let crumbs = vec![
+            Crumb {
+                label: "Artists".to_string(),
+            },
+            Crumb {
+                label: "Boards of Canada".to_string(),
+            },
+        ];
+        let albums = vec![BrowserItem {
+            key: album_key("Boards of Canada", "Geogaddi"),
+            label: "Geogaddi".to_string(),
+            detail: Some("2002".to_string()),
+            thumbnail: None,
+            selected: false,
+            now_playing: false,
+        }];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(420.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<DetailAction>| {
+                    let column = DetailColumn {
+                        breadcrumb: &crumbs,
+                        rows: &albums,
+                        ..DetailColumn::empty("No albums yet", "Nothing here.")
+                    };
+                    show_detail_column(ui, &mut cache, &palette, column, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // The artist level lists the artist's albums (the browser column's
+        // row shape, drilled one level down). The row's detail line ("2002")
+        // folds into the accessibility label (issue 16).
+        assert!(
+            harness.query_by_label("Geogaddi (2002)").is_some(),
+            "the artist's album rows render in the detail column"
+        );
+        harness.get_by_label("Geogaddi (2002)").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![DetailAction::SelectRow(album_key(
+                "Boards of Canada",
+                "Geogaddi"
+            ))],
+            "clicking an album row reports its key; the app resolves the level"
+        );
+    }
+
+    #[test]
+    fn test_detail_breadcrumb_climb_resolves_the_selection_path() {
+        use riff_backend::app::state::BrowserSelection;
+        use riff_gui::ui::app::apply_detail_action;
+        use riff_gui::ui::detail::DetailAction;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = boxed_library_store(&dir);
+        let mut library = LibrarySession::default();
+        let mut playback = PlaybackSession::default();
+        let transport = crate::mocks::MockTransport::new();
+
+        // Album trail: Artists / Boards of Canada / Geogaddi.
+        library.browser_selection = Some(BrowserSelection::Album {
+            artist: "Boards of Canada".to_string(),
+            title: "Geogaddi".to_string(),
+        });
+
+        // Climbing one level lands on the artist; the browser column
+        // highlights the artist row again.
+        apply_detail_action(
+            DetailAction::Crumb(1),
+            &mut library,
+            &mut playback,
+            &transport,
+            store.as_mut(),
+            &[],
+        );
+        assert_eq!(
+            library.browser_selection,
+            Some(BrowserSelection::Artist("Boards of Canada".to_string())),
+            "one climb up the album trail selects the artist"
+        );
+
+        // Climbing to the root clears the selection: the browser column
+        // listing takes over again.
+        apply_detail_action(
+            DetailAction::Crumb(0),
+            &mut library,
+            &mut playback,
+            &transport,
+            store.as_mut(),
+            &[],
+        );
+        assert_eq!(
+            library.browser_selection, None,
+            "climbing to the root clears the selection"
+        );
+
+        // A segment at the current level changes nothing.
+        library.browser_selection = Some(BrowserSelection::Artist("Autechre".to_string()));
+        apply_detail_action(
+            DetailAction::Crumb(1),
+            &mut library,
+            &mut playback,
+            &transport,
+            store.as_mut(),
+            &[],
+        );
+        assert_eq!(
+            library.browser_selection,
+            Some(BrowserSelection::Artist("Autechre".to_string())),
+            "the current level's own segment is inert"
+        );
+
+        // Selecting an album row on the artist level drills back down: the
+        // row key resolves through the current selection's level.
+        apply_detail_action(
+            DetailAction::SelectRow(album_key("Autechre", "Tri Repetae")),
+            &mut library,
+            &mut playback,
+            &transport,
+            store.as_mut(),
+            &[],
+        );
+        assert_eq!(
+            library.browser_selection,
+            Some(BrowserSelection::Album {
+                artist: "Autechre".to_string(),
+                title: "Tri Repetae".to_string(),
+            }),
+        );
+
+        // On a genre trail the rows are artists: the same SelectRow gesture
+        // resolves by the level it is issued from.
+        library.browser_selection = Some(BrowserSelection::Genre("Electronic".to_string()));
+        apply_detail_action(
+            DetailAction::SelectRow("Autechre".to_string()),
+            &mut library,
+            &mut playback,
+            &transport,
+            store.as_mut(),
+            &[],
+        );
+        assert_eq!(
+            library.browser_selection,
+            Some(BrowserSelection::Artist("Autechre".to_string())),
+            "an artist row on the genre level selects that artist"
+        );
+    }
+
+    /// Harness state for the detail column's data-path test: the production
+    /// seam/store pairing, the library session driving it, the icon cache
+    /// the widget needs, and the actions the last frame reported.
+    struct DetailRenderState {
+        views: riff_backend::app::views::SessionViews,
+        library: riff_backend::app::state::LibrarySession,
+        cache: IconCache,
+        actions: Vec<riff_gui::ui::detail::DetailAction>,
+    }
+
+    /// The production detail-column data path, replicated frame-for-frame:
+    /// `resolve_detail_content` maps the library session through the
+    /// Session Views facade, and `show_detail_column` paints it.
+    fn render_detail_state_ui(ui: &mut egui::Ui, s: &mut DetailRenderState) {
+        let palette = Palette::dark();
+        let content = riff_gui::ui::app::resolve_detail_content(&mut s.views, &s.library);
+        let column = riff_gui::ui::detail::DetailColumn {
+            breadcrumb: &content.breadcrumb,
+            header: content.header.as_ref(),
+            tracks: &content.tracks,
+            rows: &content.rows,
+            ..riff_gui::ui::detail::DetailColumn::empty("Nothing selected", "Pick a row.")
+        };
+        s.actions.clear();
+        riff_gui::ui::detail::show_detail_column(
+            ui,
+            &mut s.cache,
+            &palette,
+            column,
+            &mut s.actions,
+        );
+    }
+
+    /// Seed the store behind `views` with Boards of Canada's "Geogaddi"
+    /// (two tagged tracks: one played three times, one favorited) and
+    /// return the two `Track`s.
+    fn seed_geogaddi(
+        store: &mut riff_infra::store::SqliteStore,
+    ) -> (riff_backend::domain::Track, riff_backend::domain::Track) {
+        use riff_backend::app::store::LibraryMutationStore as _;
+        use riff_backend::domain::TrackMetadata;
+
+        let mut t1 = crate::test_utils::create_test_track(
+            "music/Boards of Canada/Geogaddi/01.flac",
+            "music/Boards of Canada/Geogaddi/01.flac",
+        );
+        t1.metadata = TrackMetadata {
+            title: Some("Magic Window".to_string()),
+            artist: Some("Boards of Canada".to_string()),
+            album: Some("Geogaddi".to_string()),
+            album_artist: Some("Boards of Canada".to_string()),
+            track_number: Some(1),
+            year: Some(2002),
+            genre: Some("Electronic".to_string()),
+            ..TrackMetadata::default()
+        };
+        t1.duration = Some(std::time::Duration::from_secs(205));
+        let mut t2 = crate::test_utils::create_test_track(
+            "music/Boards of Canada/Geogaddi/02.flac",
+            "music/Boards of Canada/Geogaddi/02.flac",
+        );
+        t2.metadata = TrackMetadata {
+            title: Some("Dawn Chorus".to_string()),
+            artist: Some("Boards of Canada".to_string()),
+            album: Some("Geogaddi".to_string()),
+            album_artist: Some("Boards of Canada".to_string()),
+            track_number: Some(2),
+            year: Some(2002),
+            genre: Some("Electronic".to_string()),
+            ..TrackMetadata::default()
+        };
+        t2.favorite = true;
+        store.apply_scan_batch(&[t1.clone(), t2.clone()]).unwrap();
+        // The favorite flag is a user fact: scan batches never write it,
+        // so the fixture's favorite lands through the store's setter.
+        store.set_track_favorite(&t2.id, true).unwrap();
+        // Play history is an engine-owned fact: the scan batch always
+        // writes play_count 0, so the plays land through the store's
+        // play recorder — three finished plays of "Magic Window".
+        for _ in 0..3 {
+            store
+                .record_track_played(&t1.id, std::time::SystemTime::UNIX_EPOCH)
+                .unwrap();
+        }
+        (t1, t2)
+    }
+
+    #[test]
+    fn test_detail_column_resolves_the_librarys_data_and_stays_fresh() {
+        use egui_kittest::kittest::Queryable;
+        use riff_backend::app::state::{BrowserSelection, LibrarySection};
+        use riff_backend::app::store::LibraryMutationStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("opening a fresh store must work");
+        let (t1, _t2) = seed_geogaddi(&mut store);
+        let views = riff_backend::app::views::SessionViews::new(
+            Box::new(store.clone()),
+            Box::new(store.clone()),
+            store.library_generation(),
+            store.playlist_generation(),
+        );
+
+        let state = DetailRenderState {
+            views,
+            library: riff_backend::app::state::LibrarySession {
+                library_section: LibrarySection::Artists,
+                browser_selection: Some(BrowserSelection::Artist("Boards of Canada".to_string())),
+                ..riff_backend::app::state::LibrarySession::default()
+            },
+            cache: IconCache::new(),
+            actions: Vec::new(),
+        };
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(640.0, 480.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(render_detail_state_ui, state);
+        harness.run();
+
+        // Artist level: the artist's album rows render.
+        assert!(
+            harness.query_by_label("Boards of Canada").is_some(),
+            "the artist level renders the artist's album rows"
+        );
+
+        // Drill into the album: the header and track table resolve from
+        // the store.
+        harness.state_mut().library.browser_selection = Some(BrowserSelection::Album {
+            artist: "Boards of Canada".to_string(),
+            title: "Geogaddi".to_string(),
+        });
+        harness.run();
+        assert!(
+            harness
+                .query_by_label("Boards of Canada \u{b7} 2002")
+                .is_some(),
+            "the album header renders the artist \u{b7} year subtitle"
+        );
+        assert!(
+            harness.query_by_label("Magic Window").is_some()
+                && harness.query_by_label("Dawn Chorus").is_some(),
+            "the track table resolves the album's tracks"
+        );
+        assert!(
+            harness.query_by_label("3").is_some(),
+            "play counts come from the store's play history"
+        );
+        assert!(
+            harness.query_by_label("03:25").is_some(),
+            "durations render mm:ss"
+        );
+        assert!(
+            harness.query_by_label("Remove from Favorites").is_some()
+                && harness.query_by_label("Add to Favorites").is_some(),
+            "each row's favorite control reflects its stored flag"
+        );
+
+        // Staleness: a favorite committed through the store (exactly what
+        // a tag edit or scan batch does to library data) shows up on the
+        // next frame with zero caller action — the committed mutation
+        // bumped the library generation itself.
+        let bumped = store
+            .set_track_favorite(&t1.id, true)
+            .expect("the favorite commit works");
+        assert!(bumped, "the flag actually moved");
+        harness.run();
+        assert!(
+            harness.query_all_by_label("Remove from Favorites").count() == 2,
+            "the fresh flag renders without any explicit invalidation"
+        );
+
+        // Genre level: the genre's artist rows resolve from the genre read
+        // model.
+        harness.state_mut().library.browser_selection =
+            Some(BrowserSelection::Genre("Electronic".to_string()));
+        harness.run();
+        assert!(
+            harness.query_by_label("Boards of Canada").is_some(),
+            "the genre level lists the artists carrying that genre"
+        );
+    }
+
+    // --- Selection panel (handoff issue 10) -------------------------------------
+    //
+    // The third pane of the explorer: a persistent right-hand readout of the
+    // selected album's art and details with a Play album action. Tested at
+    // the same seams as the browser column (issue 08) and detail column
+    // (issue 09): the pure widget seam (`ui::selection::show_selection_panel`,
+    // headless kittest harness) and the session-glue seam in `ui::app`.
+
+    #[test]
+    fn test_selection_panel_renders_album_details_and_reports_play_album() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::selection::{
+            SelectionAction, SelectionDetail, SelectionPanel, show_selection_panel,
+        };
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let details = vec![
+            SelectionDetail {
+                label: "Artist".to_string(),
+                value: "Boards of Canada".to_string(),
+            },
+            SelectionDetail {
+                label: "Released".to_string(),
+                value: "2013".to_string(),
+            },
+            SelectionDetail {
+                label: "Tracks".to_string(),
+                value: "8 \u{b7} 27:16".to_string(),
+            },
+        ];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 640.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<SelectionAction>| {
+                    let panel = SelectionPanel {
+                        art: None,
+                        title: Some("Tomorrow's Harvest"),
+                        subtitle: Some("Boards of Canada \u{b7} 2013"),
+                        details: &details,
+                    };
+                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // The panel names itself and the selection's kind, then reads out
+        // the album: title, artist · year line, and the details grid.
+        assert!(
+            harness.query_by_label("SELECTION").is_some(),
+            "the panel's header renders"
+        );
+        assert!(
+            harness.query_by_label("Album").is_some(),
+            "the header's kind chip renders"
+        );
+        assert!(
+            harness.query_by_label("Tomorrow's Harvest").is_some(),
+            "the album title renders"
+        );
+        assert!(
+            harness.query_by_label("Boards of Canada · 2013").is_some(),
+            "the artist · year subtitle renders"
+        );
+        assert!(
+            harness.query_by_label("DETAILS").is_some(),
+            "the details section header renders"
+        );
+        for (label, value) in [
+            ("Artist", "Boards of Canada"),
+            ("Released", "2013"),
+            ("Tracks", "8 · 27:16"),
+        ] {
+            assert!(
+                harness.query_by_label(label).is_some() && harness.query_by_label(value).is_some(),
+                "the details row '{label}: {value}' renders"
+            );
+        }
+
+        // The Play album action reports itself — `ui::app` starts the batch.
+        harness.get_by_label("Play album").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![SelectionAction::PlayAlbum],
+            "the Play album button reports its action"
+        );
+    }
+
+    #[test]
+    fn test_selection_panel_renders_a_clear_empty_state() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::selection::{SelectionAction, SelectionPanel, show_selection_panel};
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 640.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<SelectionAction>| {
+                    let panel = SelectionPanel {
+                        art: None,
+                        title: None,
+                        subtitle: None,
+                        details: &[],
+                    };
+                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // Before any album is selected the panel says so in plain words —
+        // and offers nothing to click.
+        assert!(
+            harness.query_by_label("Nothing selected").is_some(),
+            "the empty state names itself"
+        );
+        assert!(
+            harness.query_by_label("Play album").is_none(),
+            "the empty state offers no play action"
+        );
+        assert!(
+            harness.state().is_empty(),
+            "the empty state reports nothing"
+        );
+    }
+
+    #[test]
+    fn test_album_selection_tracks_the_last_selected_album() {
+        use riff_backend::app::state::{AlbumSelection, BrowserSelection, LibrarySection};
+        use riff_gui::ui::app::{apply_browser_action, apply_detail_action};
+        use riff_gui::ui::detail::DetailAction;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = boxed_library_store(&dir);
+        let transport = crate::mocks::MockTransport::new();
+        let mut library = LibrarySession {
+            library_section: LibrarySection::Albums,
+            ..LibrarySession::default()
+        };
+
+        // Selecting an album row in the browser column records it as the
+        // panel's album — the identity the selection panel resolves.
+        apply_browser_action(
+            BrowserAction::Select(album_key("Boards of Canada", "Geogaddi")),
+            &mut library,
+        );
+        assert_eq!(
+            library.selected_album,
+            Some(AlbumSelection {
+                artist: "Boards of Canada".to_string(),
+                title: "Geogaddi".to_string(),
+            }),
+            "selecting an album row records the panel's album"
+        );
+
+        // Selecting a non-album entity leaves the panel's album alone: the
+        // panel keeps showing the last album while the listener browses.
+        library.library_section = LibrarySection::Artists;
+        apply_browser_action(
+            BrowserAction::Select("Aphex Twin".to_string()),
+            &mut library,
+        );
+        assert_eq!(
+            library.browser_selection,
+            Some(BrowserSelection::Artist("Aphex Twin".to_string())),
+            "the artist selection lands on the browser selection"
+        );
+        assert!(
+            library.selected_album.is_some(),
+            "selecting an artist does not blank the panel's album"
+        );
+
+        // Drilling from the artist into an album in the detail column is
+        // selecting that album too — the panel follows the drill.
+        apply_detail_action(
+            DetailAction::SelectRow(album_key("Aphex Twin", "Selected Ambient Works")),
+            &mut library,
+            &mut PlaybackSession::default(),
+            &transport,
+            store.as_mut(),
+            &[],
+        );
+        assert_eq!(
+            library.selected_album,
+            Some(AlbumSelection {
+                artist: "Aphex Twin".to_string(),
+                title: "Selected Ambient Works".to_string(),
+            }),
+            "drilling into an album updates the panel's album"
+        );
+
+        // Switching sidebar sections never blanks the panel: navigation is
+        // not a selection change.
+        library.library_section = LibrarySection::AllTracks;
+        apply_browser_action(BrowserAction::Select("whatever".to_string()), &mut library);
+        assert!(
+            library.selected_album.is_some(),
+            "browsing All Tracks does not blank the panel's album"
+        );
+    }
+
+    #[test]
+    fn test_selection_play_album_starts_the_albums_tracks() {
+        use riff_gui::ui::app::apply_selection_action;
+        use riff_gui::ui::selection::SelectionAction;
+
+        let tracks = [
+            TrackId("a.mp3".to_string()),
+            TrackId("b.mp3".to_string()),
+            TrackId("c.mp3".to_string()),
+        ];
+        let transport = crate::mocks::MockTransport::new();
+
+        apply_selection_action(SelectionAction::PlayAlbum, &transport, &tracks);
+        assert_eq!(
+            transport.recorded(),
+            vec![crate::mocks::TransportIntent::PlayMany(
+                TrackId("a.mp3".to_string()),
+                vec![TrackId("b.mp3".to_string()), TrackId("c.mp3".to_string())]
+            )],
+            "Play album starts the album's first track with the rest queued behind it"
+        );
+
+        // An album with no resolvable tracks starts nothing.
+        let transport = crate::mocks::MockTransport::new();
+        apply_selection_action(SelectionAction::PlayAlbum, &transport, &[]);
+        assert!(
+            transport.recorded().is_empty(),
+            "an album with no tracks starts nothing"
+        );
+    }
+
+    #[test]
+    fn test_selection_panel_resolves_the_selected_albums_details() {
+        use riff_backend::app::state::{AlbumSelection, LibrarySection};
+        use riff_gui::ui::app::resolve_selection_panel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("opening a fresh store must work");
+        let (t1, _t2) = seed_geogaddi(&mut store);
+        let mut views = riff_backend::app::views::SessionViews::new(
+            Box::new(store.clone()),
+            Box::new(store.clone()),
+            store.library_generation(),
+            store.playlist_generation(),
+        );
+
+        let library = riff_backend::app::state::LibrarySession {
+            library_section: LibrarySection::Albums,
+            selected_album: Some(AlbumSelection {
+                artist: "Boards of Canada".to_string(),
+                title: "Geogaddi".to_string(),
+            }),
+            ..riff_backend::app::state::LibrarySession::default()
+        };
+
+        let content = resolve_selection_panel(&mut views, &library);
+        assert_eq!(
+            content.title.as_deref(),
+            Some("Geogaddi"),
+            "the panel resolves the album's title"
+        );
+        assert_eq!(
+            content.subtitle.as_deref(),
+            Some("Boards of Canada \u{b7} 2002"),
+            "the panel resolves the artist · year subtitle"
+        );
+        assert_eq!(
+            content.art_track,
+            Some(t1.id.clone()),
+            "the panel resolves the album's first track for its art"
+        );
+
+        // The details grid reads the store: artist, year, genre, the track
+        // count with the known durations' total (03:25 = the one timed
+        // track), and the play history's sum.
+        let detail = |label: &str| {
+            content
+                .details
+                .iter()
+                .find(|d| d.label == label)
+                .map(|d| d.value.clone())
+        };
+        assert_eq!(detail("Artist").as_deref(), Some("Boards of Canada"));
+        assert_eq!(detail("Released").as_deref(), Some("2002"));
+        assert_eq!(detail("Genre").as_deref(), Some("Electronic"));
+        assert_eq!(
+            detail("Tracks").as_deref(),
+            Some("2 \u{b7} 03:25"),
+            "the track count carries the known durations' total"
+        );
+        assert_eq!(detail("Plays").as_deref(), Some("3"));
+        assert!(
+            detail("Last played").is_some() && detail("Path").is_some(),
+            "the last-played and path rows render"
+        );
+        assert!(
+            detail("Path").is_some_and(|p| p.ends_with("Geogaddi")),
+            "the path row names the album's folder"
+        );
+
+        // A panel album the store can no longer resolve (files removed, or
+        // nothing selected yet) renders the empty state — never stale art
+        // or wrong details.
+        let empty = riff_backend::app::state::LibrarySession::default();
+        assert!(
+            resolve_selection_panel(&mut views, &empty).title.is_none(),
+            "no selection renders the empty state"
+        );
+        let gone = riff_backend::app::state::LibrarySession {
+            selected_album: Some(AlbumSelection {
+                artist: "Boards of Canada".to_string(),
+                title: "A Few Old Tapes".to_string(),
+            }),
+            ..riff_backend::app::state::LibrarySession::default()
+        };
+        assert!(
+            resolve_selection_panel(&mut views, &gone).title.is_none(),
+            "an unresolvable album renders the empty state"
+        );
+    }
+
+    // --- Flat-slot mapping (the Albums variant derives its listing from
+    // the per-artist album tables) ----------------------------------------------
+
+    use riff_gui::ui::browser::flat_slot;
+
+    /// Two artists: the first with 2 albums, the second with 1. Prefix sums
+    /// `[0, 2, 3]`, total 3.
+    #[test]
+    fn test_flat_slot_maps_ascending_indexes_front_to_back() {
+        let counts = [0usize, 2, 3];
+        assert_eq!(flat_slot(&counts, 0, false), Some((0, 0)));
+        assert_eq!(flat_slot(&counts, 1, false), Some((0, 1)));
+        assert_eq!(flat_slot(&counts, 2, false), Some((1, 0)));
+        assert_eq!(flat_slot(&counts, 3, false), None, "past the end is None");
+    }
+
+    #[test]
+    fn test_flat_slot_maps_descending_indexes_back_to_front() {
+        // Z–A flips both the bucket order AND each bucket's contents, so
+        // the last bucket's last item comes first.
+        let counts = [0usize, 2, 3];
+        assert_eq!(flat_slot(&counts, 0, true), Some((1, 0)));
+        assert_eq!(flat_slot(&counts, 1, true), Some((0, 1)));
+        assert_eq!(flat_slot(&counts, 2, true), Some((0, 0)));
+        assert_eq!(flat_slot(&counts, 3, true), None);
+    }
+
+    // --- Keyboard operability (design-handoff issue 16) ---------------------
+    //
+    // Every interactive control in the three panes is reachable and operable
+    // from the keyboard. `.focus()` sends the same accesskit Focus request a
+    // screen reader sends — it lands only on widgets egui considers
+    // focusable — and Enter/Space on the focused widget is egui's keyboard
+    // primary click. The Tab walk across the panes is pinned separately by
+    // the pane-order tests below.
+
+    #[test]
+    fn test_browser_controls_activate_by_keyboard() {
+        use egui_kittest::kittest::Queryable;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let items = fixture_items();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<BrowserAction>| {
+                    let mut fixture_item = provider(&items);
+                    let column = BrowserColumn {
+                        layout: BrowserLayout::List,
+                        sort_desc: false,
+                        show_sort: true,
+                        genres: &[],
+                        genre_filter: None,
+                        total: items.len(),
+                        item: &mut fixture_item,
+                        empty_title: "",
+                        empty_hint: "",
+                    };
+                    riff_gui::ui::browser::show_browser_column(
+                        ui, &mut cache, &palette, column, actions,
+                    );
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // The A–Z sort control: focus it like a screen reader would, press
+        // Enter, and the toggle action fires.
+        harness.get_by_label("Sort Z to A").focus();
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert!(
+            harness.state().contains(&BrowserAction::ToggleSort),
+            "Enter on the focused sort control flips the sort: {:?}",
+            harness.state()
+        );
+
+        // A row: Space activates it too — egui treats both as the primary
+        // click for the focused widget.
+        harness.get_by_label("Beta").focus();
+        harness.run();
+        harness.key_press(egui::Key::Space);
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&BrowserAction::Select("beta".to_string())),
+            "Space on the focused row selects it: {:?}",
+            harness.state()
+        );
+    }
+
+    #[test]
+    fn test_track_table_rows_activate_by_keyboard() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::detail::{DetailAction, DetailColumn, TrackRow, show_detail_column};
+        use std::time::Duration;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let tracks = vec![TrackRow {
+            key: "t1".to_string(),
+            number: Some(5),
+            title: "Magic Window".to_string(),
+            plays: 3,
+            duration: Some(Duration::from_secs(205)),
+            favorite: false,
+            selected: false,
+            now_playing: false,
+        }];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(560.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<DetailAction>| {
+                    let column = DetailColumn {
+                        tracks: &tracks,
+                        ..DetailColumn::empty("", "")
+                    };
+                    show_detail_column(ui, &mut cache, &palette, column, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // The row's title cell selects the track.
+        harness.get_by_label("Magic Window").focus();
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&DetailAction::SelectTrack("t1".to_string())),
+            "Enter on the focused track row selects it: {:?}",
+            harness.state()
+        );
+
+        // The row's favorite control toggles the flag to its NEW value.
+        harness.get_by_label("Add to Favorites").focus();
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert!(
+            harness.state().contains(&DetailAction::SetFavorite {
+                key: "t1".to_string(),
+                favorite: true,
+            }),
+            "Enter on the focused favorite control toggles the flag: {:?}",
+            harness.state()
+        );
+    }
+
+    #[test]
+    fn test_play_album_activates_by_keyboard() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::selection::{SelectionAction, SelectionPanel, show_selection_panel};
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 640.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<SelectionAction>| {
+                    let panel = SelectionPanel {
+                        art: None,
+                        title: Some("Tomorrow's Harvest"),
+                        subtitle: Some("Boards of Canada \u{b7} 2013"),
+                        details: &[],
+                    };
+                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        harness.get_by_label("Play album").focus();
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![SelectionAction::PlayAlbum],
+            "Enter on the focused Play album button starts the album"
+        );
+    }
+
+    // --- Pane order & focus walk (design-handoff issue 16) ------------------
+    //
+    // egui walks focus in widget-creation order, so the composite fixture
+    // below mirrors the app's creation order (top bar → browser column →
+    // selection panel → detail column; the selection panel is a right panel
+    // and the CentralPanel must render last). Tab lands on the top bar
+    // search first, then walks every control of all three panes in a stable
+    // order; Shift+Tab walks the reverse chain all the way home, and past
+    // the last widget Tab wraps back to the search — no pane ever holds
+    // focus hostage.
+
+    /// One composite frame: the real top bar, browser column, selection
+    /// panel, and detail column seams, in the app's creation order.
+    fn walk_fixture() -> egui_kittest::Harness<'static, Vec<String>> {
+        use riff_gui::ui::browser::BrowserColumn;
+        use riff_gui::ui::detail::{AlbumHeader, Crumb, DetailColumn, TrackRow};
+        use riff_gui::ui::selection::SelectionPanel;
+        use riff_gui::ui::theme::TOPBAR_H;
+        use riff_gui::ui::topbar::{TopBarContent, show_top_bar};
+        use std::time::Duration;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let items = fixture_items();
+        let mut query = "abc".to_string();
+
+        let crumbs = vec![
+            Crumb {
+                label: "Artists".to_string(),
+            },
+            Crumb {
+                label: "Boards of Canada".to_string(),
+            },
+        ];
+        let header = AlbumHeader {
+            title: "Geogaddi".to_string(),
+            subtitle: None,
+        };
+        let tracks = vec![TrackRow {
+            key: "t1".to_string(),
+            number: Some(1),
+            title: "Magic Window".to_string(),
+            plays: 3,
+            duration: Some(Duration::from_secs(205)),
+            favorite: false,
+            selected: false,
+            now_playing: false,
+        }];
+
+        egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1400.0, 600.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, _state: &mut Vec<String>| {
+                    // The content top bar (the real `show_top_bar` seam).
+                    let mut topbar_actions = Vec::new();
+                    ui.allocate_ui(egui::vec2(1400.0, TOPBAR_H), |ui| {
+                        show_top_bar(
+                            ui,
+                            &mut cache,
+                            &palette,
+                            &mut query,
+                            TopBarContent {
+                                layout: BrowserLayout::List,
+                            },
+                            &mut topbar_actions,
+                        );
+                    });
+
+                    // The three panes side by side, in the app's panel show
+                    // order: browser column (left), selection panel (right),
+                    // detail column (the CentralPanel's content).
+                    ui.horizontal(|ui| {
+                        let mut browser_actions = Vec::new();
+                        ui.allocate_ui(egui::vec2(320.0, 480.0), |ui| {
+                            let mut fixture_item = provider(&items);
+                            let column = BrowserColumn {
+                                layout: BrowserLayout::List,
+                                sort_desc: false,
+                                show_sort: false,
+                                genres: &[],
+                                genre_filter: None,
+                                total: items.len(),
+                                item: &mut fixture_item,
+                                empty_title: "",
+                                empty_hint: "",
+                            };
+                            riff_gui::ui::browser::show_browser_column(
+                                ui,
+                                &mut cache,
+                                &palette,
+                                column,
+                                &mut browser_actions,
+                            );
+                        });
+
+                        let mut selection_actions = Vec::new();
+                        ui.allocate_ui(egui::vec2(300.0, 480.0), |ui| {
+                            let panel = SelectionPanel {
+                                art: None,
+                                title: Some("Tomorrow's Harvest"),
+                                subtitle: None,
+                                details: &[],
+                            };
+                            riff_gui::ui::selection::show_selection_panel(
+                                ui,
+                                &mut cache,
+                                &palette,
+                                panel,
+                                &mut selection_actions,
+                            );
+                        });
+
+                        let mut detail_actions = Vec::new();
+                        ui.allocate_ui(egui::vec2(600.0, 480.0), |ui| {
+                            let column = DetailColumn {
+                                breadcrumb: &crumbs,
+                                header: Some(&header),
+                                tracks: &tracks,
+                                ..DetailColumn::empty("", "")
+                            };
+                            riff_gui::ui::detail::show_detail_column(
+                                ui,
+                                &mut cache,
+                                &palette,
+                                column,
+                                &mut detail_actions,
+                            );
+                        });
+                    });
+                },
+                Vec::new(),
+            )
+    }
+
+    #[test]
+    fn test_tab_walks_the_top_bar_search_then_all_three_panes() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut harness = walk_fixture();
+        harness.run();
+
+        // The first Tab lands on the top bar search — the anchor the
+        // no-trap clause comes home to.
+        harness.key_press(egui::Key::Tab);
+        harness.run();
+        assert!(
+            harness
+                .get_by_role(egui::accesskit::Role::TextInput)
+                .is_focused(),
+            "the first Tab reaches the top bar search field"
+        );
+
+        // From there Tab walks every control of the three panes in the
+        // app's creation order: the browser rows, then the selection
+        // panel's chip and Play album, then the detail column's crumbs,
+        // header actions, and track row.
+        for label in [
+            "Clear search",
+            "List view",
+            "Grid view",
+            "Alpha",
+            "Beta",
+            "Gamma",
+            "Album",
+            "Play album",
+            "Artists",
+            "Shuffle",
+            "Play all",
+            "Add to Favorites",
+            "Magic Window",
+        ] {
+            harness.key_press(egui::Key::Tab);
+            harness.run();
+            assert!(
+                harness.get_by_label(label).is_focused(),
+                "Tab must move focus to '{label}' next"
+            );
+        }
+    }
+
+    #[test]
+    fn test_shift_tab_walks_home_and_tab_wraps_with_no_focus_trap() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut harness = walk_fixture();
+        harness.run();
+
+        // Walk to the last widget of the detail column: the top bar search,
+        // its clear affordance, the two view toggles, the three browser rows,
+        // the selection panel's chip and Play album, then the detail column's
+        // crumb, header actions, favorite, and the track row.
+        for _ in 0..14 {
+            harness.key_press(egui::Key::Tab);
+            harness.run();
+        }
+        assert!(
+            harness.get_by_label("Magic Window").is_focused(),
+            "the walk reaches the detail column's last control"
+        );
+
+        // Shift+Tab reverses the chain one widget at a time — backwards
+        // through the detail column, the selection panel, the browser
+        // rows, and the top bar toggles — and lands on the search.
+        for label in [
+            "Add to Favorites",
+            "Play all",
+            "Shuffle",
+            "Artists",
+            "Play album",
+            "Album",
+            "Gamma",
+            "Beta",
+            "Alpha",
+            "Grid view",
+            "List view",
+            "Clear search",
+        ] {
+            harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+            harness.run();
+            assert!(
+                harness.get_by_label(label).is_focused(),
+                "Shift+Tab must move focus back to '{label}'"
+            );
+        }
+        harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+        harness.run();
+        assert!(
+            harness
+                .get_by_role(egui::accesskit::Role::TextInput)
+                .is_focused(),
+            "Shift+Tab from the first control returns to the top bar search"
+        );
+
+        // Forward past the last widget, Tab wraps back to the search —
+        // the keyboard is never trapped inside a pane. From the search,
+        // 13 Tabs reach the track row again; one more wraps to the search.
+        for _ in 0..13 {
+            harness.key_press(egui::Key::Tab);
+            harness.run();
+        }
+        assert!(
+            harness.get_by_label("Magic Window").is_focused(),
+            "the forward walk reaches the end again"
+        );
+        harness.key_press(egui::Key::Tab);
+        harness.run();
+        assert!(
+            harness
+                .get_by_role(egui::accesskit::Role::TextInput)
+                .is_focused(),
+            "Tab past the last control wraps back to the top bar search"
+        );
     }
 }

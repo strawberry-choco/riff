@@ -1,10 +1,11 @@
-//! The restyled sidebar widgets (Issue 07).
+//! The restyled sidebar widgets (Issue 07, restructured per design-handoff
+//! issue 07).
 //!
-//! The mockup sidebar is: a search box with a focus-ring border, a segmented
-//! Library/Folders control, 40px tree rows on the three-level indent scale
-//! (12/44/80px) with hover states, an animated equalizer-bars indicator on
-//! the now-playing row, styled smart playlists ×4, and playlist rows whose
-//! edit/delete affordances reveal on hover.
+//! The design sidebar is: a search box with a focus-ring border, flat
+//! sectioned nav (LIBRARY / SMART LISTS / PLAYLISTS) on 40px tree rows with
+//! hover states and right-aligned live counts, an animated equalizer-bars
+//! indicator on the now-playing row, playlist rows whose edit/delete
+//! affordances reveal on hover, and an Add-folder / last-scan footer.
 //!
 //! Everything here is a pure widget seam: widgets paint from [`Palette`]
 //! tokens (ADR 0004), report actions instead of mutating app state, and
@@ -25,9 +26,6 @@ pub const ROW_H: f32 = 40.0;
 
 /// Search-box height (`h-8`).
 pub const SEARCH_H: f32 = 32.0;
-
-/// Segmented-control height.
-pub const SEGMENTED_H: f32 = 36.0;
 
 /// First-level indent: content starts 12px into the row.
 pub const INDENT_BASE: f32 = 12.0;
@@ -228,103 +226,13 @@ pub fn search_box(
     inner_ui.inner
 }
 
-// --- Segmented Library/Folders control -------------------------------------------
-
-/// One side of the segmented control. Mirrors the two library browse
-/// destinations; Settings/Now Playing simply highlight neither segment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SidebarNav {
-    /// The library explorer browse mode.
-    Library,
-    /// The folder-tree browse mode.
-    Folders,
-}
-
-/// The segmented Library/Folders control: a pill-shaped well holding two
-/// segments; the active one is raised on surface-3 with primary ink, the
-/// inactive one stays muted until hovered. Returns the segment clicked this
-/// frame, if any — routing stays with the caller.
-#[expect(clippy::cast_precision_loss)]
-pub fn segmented_nav(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    active: Option<SidebarNav>,
-) -> Option<SidebarNav> {
-    const PAD: f32 = 4.0;
-    let mut chosen = None;
-
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, SEGMENTED_H), egui::Sense::hover());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, theme::RADIUS_FULL, palette.surface_2);
-
-    let seg_w = (width - PAD * 2.0) / 2.0;
-    // Resolve the Button text style through the CURRENT style instead of
-    // naming the Inter Medium family directly: the golden harness renders one
-    // eager frame before fonts are installed, and an unbound family panics.
-    let font = ui
-        .style()
-        .text_styles
-        .get(&egui::TextStyle::Button)
-        .cloned()
-        .unwrap_or_else(|| egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional));
-
-    for (i, (nav, label)) in [
-        (SidebarNav::Library, "Library"),
-        (SidebarNav::Folders, "Folders"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let seg_rect = egui::Rect::from_min_size(
-            rect.min + egui::vec2(PAD + seg_w * i as f32, PAD),
-            egui::vec2(seg_w, SEGMENTED_H - PAD * 2.0),
-        );
-        let response = ui.interact(
-            seg_rect,
-            ui.id().with(("segmented_nav", nav)),
-            egui::Sense::click(),
-        );
-        let is_active = active == Some(nav);
-
-        if is_active {
-            painter.rect_filled(seg_rect, theme::RADIUS_FULL, palette.surface_3);
-        } else if response.hovered() {
-            painter.rect_filled(
-                seg_rect,
-                theme::RADIUS_FULL,
-                palette.surface_3.gamma_multiply(0.5),
-            );
-        }
-
-        let ink = if is_active {
-            palette.ink
-        } else {
-            palette.ink_2
-        };
-        painter.text(
-            seg_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            label,
-            font.clone(),
-            ink,
-        );
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-        if response.clicked() {
-            chosen = Some(nav);
-        }
-    }
-
-    chosen
-}
-
 // --- Tree rows --------------------------------------------------------------------
 
 /// One 40px sidebar tree row: indent level, optional leading glyph, label,
 /// selection state, and now-playing state. Rows paint their own hover fill
-/// ([`Palette::surface_2`]), selected fill ([`Palette::surface_3`]), and — on
-/// the now-playing row — the animated equalizer-bars indicator in the brand
-/// tint.
+/// ([`Palette::row_hover`], the design's amber wash), selected fill
+/// ([`Palette::surface_3`]), and — on the now-playing row — the animated
+/// equalizer-bars indicator in the brand tint.
 pub struct TreeRow<'a> {
     /// Nesting depth; 0 is a top-level row (see [`indent_px`]).
     pub indent_level: usize,
@@ -332,6 +240,10 @@ pub struct TreeRow<'a> {
     pub icon: Option<Icon>,
     /// Row text.
     pub label: &'a str,
+    /// Live count shown right-aligned in muted ink (the design's count on
+    /// every sidebar row, from the counts read model). `None` paints no
+    /// count; the accessibility label gains a `(count)` suffix when present.
+    pub count: Option<usize>,
     /// Whether this row is the current selection.
     pub selected: bool,
     /// Whether this row IS the track currently loaded in the player; paints
@@ -364,7 +276,10 @@ pub fn tree_row(
     if row.selected {
         painter.rect_filled(rect, theme::RADIUS_MD, palette.surface_3);
     } else if response.hovered() {
-        painter.rect_filled(rect, theme::RADIUS_MD, palette.surface_2);
+        painter.rect_filled(rect, theme::RADIUS_MD, palette.row_hover);
+    }
+    if let Some(ring) = theme::focus_ring_stroke(palette, ui.memory(|m| m.has_focus(response.id))) {
+        painter.rect_stroke(rect, theme::RADIUS_MD, ring, egui::StrokeKind::Inside);
     }
 
     let mut x = rect.left() + indent_px(row.indent_level);
@@ -430,8 +345,25 @@ pub fn tree_row(
         ink,
     );
 
+    if let Some(count) = row.count {
+        painter.text(
+            egui::pos2(rect.right() - INDENT_BASE, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            count.to_string(),
+            egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional),
+            palette.ink_3,
+        );
+    }
+
+    // The accessibility label folds the live count in so assistive tech and
+    // the kittest harness read the same "Name (count)" shape the playlist
+    // rows paint.
+    let labeled = match row.count {
+        Some(count) => format!("{} ({count})", row.label),
+        None => row.label.to_owned(),
+    };
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::SelectableLabel, row.selected, row.label)
+        egui::WidgetInfo::labeled(egui::WidgetType::SelectableLabel, row.selected, &labeled)
     });
     response
 }
@@ -473,7 +405,10 @@ pub fn playlist_row(
     if selected {
         painter.rect_filled(rect, theme::RADIUS_MD, palette.surface_3);
     } else if response.hovered() {
-        painter.rect_filled(rect, theme::RADIUS_MD, palette.surface_2);
+        painter.rect_filled(rect, theme::RADIUS_MD, palette.row_hover);
+    }
+    if let Some(ring) = theme::focus_ring_stroke(palette, ui.memory(|m| m.has_focus(response.id))) {
+        painter.rect_stroke(rect, theme::RADIUS_MD, ring, egui::StrokeKind::Inside);
     }
 
     let font = egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional);
@@ -532,7 +467,75 @@ pub fn playlist_row(
     action
 }
 
+// --- Footer ----------------------------------------------------------------------------
+
+/// The sidebar footer (design-handoff issue 07): an "Add folder" row that
+/// routes through the existing add-library-path flow, and the muted
+/// "Last scan X ago" stamp. `last_scan` carries the caller-preformatted
+/// stamp text (see [`format_last_scan_ago`]); `None` renders no stamp —
+/// before any scan has completed the footer just shows the action. Returns
+/// whether Add folder was clicked this frame; the add flow stays with the
+/// caller.
+pub fn sidebar_footer(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    last_scan: Option<&str>,
+) -> bool {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter_at(rect).line_segment(
+        [rect.left_center(), rect.right_center()],
+        egui::Stroke::new(1.0, palette.border),
+    );
+
+    let clicked = tree_row(
+        ui,
+        cache,
+        palette,
+        TreeRow {
+            indent_level: 0,
+            icon: Some(Icon::Folder),
+            label: "Add folder",
+            count: None,
+            selected: false,
+            now_playing: false,
+            playing: false,
+            disclosure: None,
+        },
+    )
+    .clicked();
+
+    if let Some(stamp) = last_scan {
+        ui.label(
+            egui::RichText::new(stamp)
+                .text_style(egui::TextStyle::Small)
+                .color(palette.ink_3),
+        );
+    }
+    clicked
+}
+
 // --- Section headers -----------------------------------------------------------------
+
+/// The footer's "Last scan" age, bucketed coarsely for a status readout:
+/// `just now` under a minute, then whole minutes, hours, and days.
+#[must_use]
+pub fn format_last_scan_ago(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        return "just now".to_owned();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m ago");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    format!("{}d ago", hours / 24)
+}
 
 /// A muted section header ("Smart Playlists", "Playlists") in the design's
 /// xs size. Letter-spacing is unavailable in egui; the muted ink carries the

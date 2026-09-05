@@ -7,4 +7,6 @@ pub use queue::PlaybackQueue;
 pub use riff_playback::domain::{
     PlaybackCommand, PlaybackPosition, PlaybackState, PlaybackUpdate, RepeatMode,
 };
-pub use track::{Album, Artist, CoverSource, SmartPlaylistKind, Track, TrackId, TrackMetadata};
+pub use track::{
+    Album, Artist, CoverSource, GenreCount, SmartPlaylistKind, Track, TrackId, TrackMetadata,
+};

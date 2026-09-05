@@ -235,6 +235,7 @@ mod tests {
             play_count: 0,
             last_played: None,
             date_added: None,
+            favorite: false,
             search_text: String::new(),
         }
     }

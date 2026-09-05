@@ -817,6 +817,8 @@ impl BackendFacade {
             replaygain_enabled: self.replaygain_enabled,
             shuffle: self.shuffle,
             repeat_mode,
+            browser_layout: 0,
+            ..ScalarSettings::default()
         };
         if let Err(e) = store.save_scalars(&scalars) {
             self.events

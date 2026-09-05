@@ -20,9 +20,9 @@ use riff_infra::filesystem::{AudioFileScanner, FilesystemWatcher};
 use riff_infra::media::{ImageCoverLoader, LoftyMetadataReader, LoftyMetadataWriter};
 use riff_infra::store::SqliteStore;
 use riff_persistence::errors::StoreError;
-use riff_persistence::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
+use riff_persistence::store::{LibraryMutationStore, PlaylistStore, ScanOptions, SettingsStore};
 
-use riff_library::app::cover_service::CoverService;
+use riff_library::app::cover_service::{CoverPolicy, CoverService};
 use riff_library::app::scan_service::ScanService;
 
 use riff_playback::app::playback_coordinator::PlaybackCoordinator;
@@ -151,12 +151,27 @@ impl AppRuntime {
         // so the app layer never names infra types.
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let scanner = AudioFileScanner::new(cancel_flag.clone());
+        // A settings clone bound into the walk so each scan reads the
+        // Library Scan options fresh — the Settings pane's toggles and
+        // format chips take effect on the next scan without a restart
+        // (design-handoff issue 12). A read failure falls back to the
+        // historical defaults rather than failing the scan.
+        let scan_settings = settings_store.clone();
         let (scans, scan_worker) = ScanService::new(
             Box::new(LoftyMetadataReader::new()),
             Box::new(library_query_store.clone()),
             Box::new(library_mutation_store.clone()),
             cancel_flag,
-            move |path| scanner.scan(path),
+            move |path| {
+                let options = scan_settings.load_settings().map_or_else(
+                    |e| {
+                        tracing::warn!("Failed to read the scan options from the store: {e}");
+                        ScanOptions::default()
+                    },
+                    |settings| ScanOptions::from(&settings.scalars),
+                );
+                scanner.scan(path, &options)
+            },
         );
         let _scan_thread = thread::spawn(move || scan_worker.run());
 
@@ -275,6 +290,11 @@ fn spawn_background_services(
     library_queries: SqliteStore,
     library_mutations: SqliteStore,
 ) -> (TagEditService, CoverService) {
+    // The cover worker reads the artwork policy fresh per resolution so
+    // the Settings pane's "Read embedded artwork" toggle applies
+    // immediately (design-handoff issue 12); a read failure falls back to
+    // the historical read-embedded default.
+    let cover_settings = library_queries.clone();
     let (tag_edits, tag_worker) = TagEditService::new(
         Box::new(LoftyMetadataWriter::new()),
         Box::new(library_queries),
@@ -282,9 +302,19 @@ fn spawn_background_services(
     );
     let _handle = thread::spawn(move || tag_worker.run());
 
+    let cover_policy: CoverPolicy = Box::new(move || {
+        cover_settings.load_settings().map_or_else(
+            |e| {
+                tracing::warn!("Failed to read the artwork policy from the store: {e}");
+                true
+            },
+            |settings| settings.scalars.read_embedded_artwork,
+        )
+    });
     let (covers, cover_worker) = CoverService::new(
         Box::new(LoftyMetadataReader::new()),
         Box::new(ImageCoverLoader::new()),
+        cover_policy,
     );
     let _handle = thread::spawn(move || cover_worker.run());
 

@@ -4185,6 +4185,7 @@ dependencies = [
  "riff-gui",
  "riff-infra",
  "riff-library",
+ "riff-persistence",
  "riff-playback",
  "tempfile",
 ]

@@ -19,8 +19,9 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use super::icons::{Icon, IconCache};
+use super::sidebar;
 use super::theme::{self, Palette};
-use riff_backend::domain::{PlaybackState, RepeatMode};
+use riff_backend::domain::{PlaybackState, RepeatMode, TrackId};
 
 // --- Mockup dimensions ---------------------------------------------------------
 
@@ -151,6 +152,10 @@ fn fraction_at(rect: egui::Rect, pos: egui::Pos2) -> f32 {
 /// Everything the playerbar needs to render one frame. A plain value struct:
 /// the caller reads it out of the session, the widgets never touch state.
 #[derive(Clone)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each field is an independent playback or display state, as in UiFlags"
+)]
 pub struct PlayerBarContent<'a> {
     /// Real cover texture from the app's LRU cache; `None` paints the
     /// gradient placeholder.
@@ -171,6 +176,12 @@ pub struct PlayerBarContent<'a> {
     pub repeat: RepeatMode,
     /// Preformatted queue position, e.g. `"3/12"`.
     pub queue_position: &'a str,
+    /// Whether the queue panel (handoff issue 13) is open; the queue button
+    /// carries the active tint and flipped label while it is.
+    pub queue_open: bool,
+    /// Whether the enlarged player view (Now Playing) is up; the expand
+    /// button carries the active tint and flipped glyph while it is.
+    pub expanded: bool,
     /// Progressive disclosure (REQ-UI-006): reveals the Stop affordance.
     pub advanced: bool,
 }
@@ -202,6 +213,12 @@ pub enum PlayerBarAction {
     ToggleShuffle,
     /// Cycle the repeat mode (off → all → one).
     ToggleRepeat,
+    /// Open or close the queue panel (handoff issue 13).
+    ToggleQueue,
+    /// Enter or leave the enlarged player view (handoff issue 13).
+    ToggleExpanded,
+    /// Queue a track from the queue panel to play next (REQ-UI-005).
+    PlayNext(TrackId),
 }
 
 // --- Entry point -------------------------------------------------------------------
@@ -256,10 +273,63 @@ pub fn show_player_bar(
     transport_row(ui, cache, palette, content, center, actions);
 }
 
+/// The queue-open ghost button (handoff issue 13): the list-music glyph,
+/// flipping its label and engaging the active tint while the panel is open.
+fn queue_open_button(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    rect: egui::Rect,
+    content: &PlayerBarContent<'_>,
+) -> bool {
+    let label = if content.queue_open {
+        "Close queue"
+    } else {
+        "Open queue"
+    };
+    ghost_circle_button(
+        ui,
+        cache,
+        palette,
+        rect,
+        egui::Id::new("playerbar_queue_open"),
+        Icon::ListMusic,
+        label,
+        content.queue_open,
+    )
+}
+
+/// The fullscreen/expand ghost button (handoff issue 13): the corner-bracket
+/// glyph flips to the collapse variant while the enlarged player view is up.
+fn expand_button(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    rect: egui::Rect,
+    content: &PlayerBarContent<'_>,
+) -> bool {
+    let (icon, label) = if content.expanded {
+        (Icon::Collapse, "Exit expanded player")
+    } else {
+        (Icon::Expand, "Expand player")
+    };
+    ghost_circle_button(
+        ui,
+        cache,
+        palette,
+        rect,
+        egui::Id::new("playerbar_expand"),
+        icon,
+        label,
+        content.expanded,
+    )
+}
+
 /// The right-hand cluster, laid right-to-left from the strip's right edge:
-/// volume slider, mute toggle, repeat and shuffle toggles, and the queue
-/// position label. Returns the label's left edge so the caller can bound the
-/// center column.
+/// the expand/fullscreen button at the corner, the volume slider, the mute
+/// toggle, the queue-open button, the repeat and shuffle toggles, and the
+/// queue position label. Returns the label's left edge so the caller can
+/// bound the center column.
 fn show_right_cluster(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -271,6 +341,18 @@ fn show_right_cluster(
     let cy = inner.center().y;
     let painter = ui.painter_at(inner);
     let mut x = inner.right();
+
+    // Expand/fullscreen at the strip's right corner (handoff issue 13):
+    // enters or leaves the enlarged player view; the glyph flips between
+    // the corner brackets while the enlarged view is up.
+    let expand_rect = egui::Rect::from_center_size(
+        egui::pos2(x - GHOST_BTN / 2.0, cy),
+        egui::vec2(GHOST_BTN, GHOST_BTN),
+    );
+    if expand_button(ui, cache, palette, expand_rect, content) {
+        actions.push(PlayerBarAction::ToggleExpanded);
+    }
+    x -= GHOST_BTN + 16.0;
 
     // Volume slider: 4px track + round thumb, click/drag to set.
     let vol_track = egui::Rect::from_min_size(
@@ -315,6 +397,17 @@ fn show_right_cluster(
         actions.push(PlayerBarAction::ToggleMute);
     }
     x -= GHOST_BTN + 14.0;
+
+    // Queue-open button (handoff issue 13): reveals the Up Next / queue
+    // panel; the label flips and the tint engages while it is open.
+    let queue_rect = egui::Rect::from_center_size(
+        egui::pos2(x - GHOST_BTN / 2.0, cy),
+        egui::vec2(GHOST_BTN, GHOST_BTN),
+    );
+    if queue_open_button(ui, cache, palette, queue_rect, content) {
+        actions.push(PlayerBarAction::ToggleQueue);
+    }
+    x -= GHOST_BTN + 6.0;
 
     // Repeat toggle: cycles off → all → one; active tint while engaged.
     let repeat_rect = egui::Rect::from_center_size(
@@ -546,6 +639,145 @@ fn transport_row(
     {
         actions.push(PlayerBarAction::Stop);
     }
+}
+
+// --- Queue panel -------------------------------------------------------------------
+
+/// Queue panel width (a compact side sheet, not a second stage).
+const QUEUE_PANEL_W: f32 = 320.0;
+
+/// Tallest the queue panel's row list grows before it scrolls.
+const QUEUE_PANEL_MAX_LIST_H: f32 = 320.0;
+
+/// How many Up Next rows the queue panel's projection resolves (design-handoff
+/// issue 13). A sheet, not the whole queue — the scroll list is bounded like
+/// the Now Playing stage's window, just deeper.
+pub const QUEUE_PANEL_LIMIT: usize = 50;
+
+/// Height of the panel's "Up Next" header line.
+const QUEUE_PANEL_HEADER_H: f32 = 28.0;
+
+/// Reveal the queue panel (handoff issue 13): a floating sheet anchored
+/// above the player bar's right edge, listing the existing Up Next read
+/// model in queue order. Clicking a row reports
+/// [`PlayerBarAction::PlayNext`] for its track — the same queue-to-play-next
+/// intent the Now Playing stage's Up Next rows report. Call while
+/// `queue_open` is set; the panel owns no state of its own.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "row counts stay far below f32's integer precision"
+)]
+pub fn show_queue_panel(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    entries: &[super::now_playing::UpNextEntry],
+    actions: &mut Vec<PlayerBarAction>,
+) {
+    let list_h = (entries.len() as f32 * sidebar::ROW_H).min(QUEUE_PANEL_MAX_LIST_H);
+
+    egui::Area::new(egui::Id::new("playerbar_queue_panel"))
+        .order(egui::Order::Foreground)
+        .anchor(
+            egui::Align2::RIGHT_BOTTOM,
+            egui::vec2(-16.0, -(theme::PLAYERBAR_H + 8.0)),
+        )
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(palette.surface)
+                .stroke(egui::Stroke::new(1.0, palette.border))
+                .corner_radius(theme::RADIUS_MD)
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    ui.set_width(QUEUE_PANEL_W - 16.0);
+                    ui.set_height(QUEUE_PANEL_HEADER_H + list_h);
+
+                    ui.painter().text(
+                        egui::pos2(
+                            ui.max_rect().left() + 4.0,
+                            ui.max_rect().top() + QUEUE_PANEL_HEADER_H / 2.0,
+                        ),
+                        egui::Align2::LEFT_CENTER,
+                        "Up Next",
+                        egui::FontId::new(theme::TEXT_XS, egui::FontFamily::Proportional),
+                        palette.ink_3,
+                    );
+
+                    if entries.is_empty() {
+                        let empty_center = egui::pos2(
+                            ui.max_rect().center().x,
+                            ui.max_rect().top() + QUEUE_PANEL_HEADER_H + sidebar::ROW_H / 2.0,
+                        );
+                        ui.painter().text(
+                            empty_center,
+                            egui::Align2::CENTER_CENTER,
+                            "Queue is empty",
+                            egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional),
+                            palette.ink_3,
+                        );
+                        // Register the empty state as a labeled widget so
+                        // assistive tech (and the harness) can read it.
+                        ui.interact(
+                            egui::Rect::from_center_size(
+                                empty_center,
+                                egui::vec2(QUEUE_PANEL_W - 16.0, sidebar::ROW_H),
+                            ),
+                            egui::Id::new("playerbar_queue_panel_empty"),
+                            egui::Sense::hover(),
+                        )
+                        .widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Label,
+                                true,
+                                "Queue is empty",
+                            )
+                        });
+                        return;
+                    }
+
+                    ui.scope_builder(
+                        egui::UiBuilder::new().max_rect(egui::Rect::from_min_max(
+                            egui::pos2(
+                                ui.max_rect().left(),
+                                ui.max_rect().top() + QUEUE_PANEL_HEADER_H,
+                            ),
+                            egui::pos2(ui.max_rect().right(), ui.max_rect().bottom()),
+                        )),
+                        |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt("playerbar_queue_panel_rows")
+                                .auto_shrink(false)
+                                .show_rows(ui, sidebar::ROW_H, entries.len(), |ui, range| {
+                                    for i in range {
+                                        let Some(entry) = entries.get(i) else {
+                                            continue;
+                                        };
+                                        let response = sidebar::tree_row(
+                                            ui,
+                                            cache,
+                                            palette,
+                                            sidebar::TreeRow {
+                                                indent_level: 0,
+                                                icon: None,
+                                                label: &entry.label,
+                                                count: None,
+                                                selected: false,
+                                                now_playing: false,
+                                                playing: false,
+                                                disclosure: None,
+                                            },
+                                        );
+                                        if response.clicked() {
+                                            actions
+                                                .push(PlayerBarAction::PlayNext(entry.id.clone()));
+                                        }
+                                        response.on_hover_text("Queue this track to play next");
+                                    }
+                                });
+                        },
+                    );
+                });
+        });
 }
 
 // --- Painters & controls ---------------------------------------------------------

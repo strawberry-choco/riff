@@ -247,6 +247,94 @@ fn test_audio_file_scanner_new() {
     // Scanner creation test
 }
 
+// --- AudioFileScanner: Library Scan options (design-handoff issue 12) -------
+//
+// The scanner's historical behavior (hidden files skipped, every supported
+// format indexed) becomes the persisted [`ScalarSettings`] pair the Settings
+// Library pane drives; the scan options reach the walk as an explicit
+// [`ScanOptions`] value.
+
+/// Seed one scan tree: two indexable files at the root, one hidden file, a
+/// hidden directory holding an indexable file, a non-audio file, and an
+/// indexable file in a nested directory.
+fn seed_scan_tree() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("album.mp3"), "x").unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "x").unwrap();
+    std::fs::write(dir.path().join(".hidden.mp3"), "x").unwrap();
+    std::fs::create_dir(dir.path().join(".hidden")).unwrap();
+    std::fs::write(dir.path().join(".hidden").join("buried.flac"), "x").unwrap();
+    std::fs::create_dir(dir.path().join("nested")).unwrap();
+    std::fs::write(dir.path().join("nested").join("song.wav"), "x").unwrap();
+    dir
+}
+
+fn scanned_names(options: &ScanOptions) -> Vec<PathBuf> {
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let dir = seed_scan_tree();
+    let mut found = AudioFileScanner::new(cancel_flag).scan(dir.path(), options);
+    found.sort();
+    found
+        .iter()
+        // Relative to the scratch root so the assertions name files, not
+        // tempdir paths.
+        .map(|path| path.strip_prefix(dir.path()).unwrap().to_path_buf())
+        .collect()
+}
+
+#[test]
+fn test_scanner_skips_hidden_entries_by_default_and_includes_them_when_asked() {
+    // The historical default: hidden files and directories stay out.
+    assert_eq!(
+        scanned_names(&ScanOptions::default()),
+        vec![
+            PathBuf::from("album.mp3"),
+            PathBuf::from("nested").join("song.wav")
+        ],
+        "the default options must skip every dot-entry"
+    );
+
+    // Disabling skip-hidden walks the dot-entries too.
+    let include_hidden = ScanOptions {
+        skip_hidden_files: false,
+        ..ScanOptions::default()
+    };
+    assert_eq!(
+        scanned_names(&include_hidden),
+        vec![
+            PathBuf::from(".hidden").join("buried.flac"),
+            PathBuf::from(".hidden.mp3"),
+            PathBuf::from("album.mp3"),
+            PathBuf::from("nested").join("song.wav"),
+        ],
+        "with skip-hidden off, hidden files and directories are walked"
+    );
+}
+
+#[test]
+fn test_scanner_indexes_only_the_enabled_formats() {
+    let mp3_only = ScanOptions {
+        formats: vec![String::from("mp3")],
+        ..ScanOptions::default()
+    };
+    assert_eq!(
+        scanned_names(&mp3_only),
+        vec![PathBuf::from("album.mp3")],
+        "disabled formats are left unindexed"
+    );
+
+    // Extension matching stays case-insensitive and dot-free, as before.
+    let uppercase = ScanOptions {
+        formats: vec![String::from("WAV")],
+        ..ScanOptions::default()
+    };
+    assert_eq!(
+        scanned_names(&uppercase),
+        vec![PathBuf::from("nested").join("song.wav")],
+        "enabled formats match case-insensitively"
+    );
+}
+
 // --- Filesystem watcher: debounced batch shaping (pure) -------------------
 
 /// Build one synthetic debounced event carrying a single path.

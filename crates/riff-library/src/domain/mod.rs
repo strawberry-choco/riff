@@ -9,7 +9,7 @@ pub use riff_persistence::store::{
     ScalarSettings, Settings, StoreChanged, StoreGeneration, WatchState,
 };
 pub use riff_persistence::track::{
-    Album, Artist, CoverSource, SmartPlaylistKind, Track, TrackId, TrackMetadata,
+    Album, Artist, CoverSource, GenreCount, SmartPlaylistKind, Track, TrackId, TrackMetadata,
 };
 
 /// Repeat mode for the queue.

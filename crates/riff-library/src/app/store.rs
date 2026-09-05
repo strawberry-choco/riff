@@ -2,6 +2,7 @@
 
 pub use riff_persistence::errors::StoreError;
 pub use riff_persistence::store::{
-    LOST_GEMS_THRESHOLD, LibraryMutationStore, LibraryQueryStore, PlaylistEntry, PlaylistStore,
-    ScalarSettings, Settings, StoreChanged, StoreGeneration, WatchState,
+    FullScanSummary, LOST_GEMS_THRESHOLD, LibraryCounts, LibraryMutationStore, LibraryQueryStore,
+    PlaylistEntry, PlaylistStore, ScalarSettings, Settings, StoreChanged, StoreGeneration,
+    WatchState,
 };

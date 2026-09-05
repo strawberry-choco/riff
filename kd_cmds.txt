@@ -1,3 +1,0 @@
-.bugcheck
-!analyze -v
-q

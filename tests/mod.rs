@@ -62,6 +62,7 @@ pub use riff_infra::audio::{CpalAudioOutput, SymphoniaDecoder};
 pub use riff_infra::filesystem::{AudioFileScanner, FilesystemWatcher};
 pub use riff_infra::media::metadata_reader::parse_replaygain_gain;
 pub use riff_infra::media::{ImageCoverLoader, LoftyMetadataReader, LoftyMetadataWriter};
+pub use riff_persistence::store::ScanOptions;
 
 // Standard-library names referenced unqualified in some suites.
 pub use std::sync::atomic::AtomicBool;
@@ -92,6 +93,7 @@ pub mod test_utils {
             play_count: 0,
             last_played: None,
             date_added: None,
+            favorite: false,
             search_text: String::new(),
         }
     }
@@ -119,6 +121,7 @@ pub mod test_utils {
             play_count: 0,
             last_played: None,
             date_added: None,
+            favorite: false,
             search_text: String::new(),
         }
     }
@@ -141,8 +144,8 @@ pub mod mocks {
     };
     use riff_backend::app::transport::clamp_seek;
     use riff_backend::domain::{
-        Album, Artist, CoverSource, Playlist, PlaylistId, RepeatMode, SmartPlaylistKind, Track,
-        TrackId, TrackMetadata,
+        Album, Artist, CoverSource, GenreCount, Playlist, PlaylistId, RepeatMode,
+        SmartPlaylistKind, Track, TrackId, TrackMetadata,
     };
     /// The library slice's copy of the error enum, used by the library
     /// slice's [`MetadataWriter`] port that the real lofty writer serves.
@@ -588,7 +591,7 @@ pub mod mocks {
             if self.fail {
                 return Err(StoreError::InvalidOperation("mock settings failure".into()));
             }
-            self.state.scalars = *scalars;
+            self.state.scalars = scalars.clone();
             self.calls.push(SettingsCall::Scalars);
             Ok(())
         }
@@ -631,6 +634,7 @@ pub mod mocks {
         pub fail_tag_refresh: bool,
         refreshed: Mutex<Vec<Track>>,
         played: Mutex<Vec<(TrackId, std::time::SystemTime)>>,
+        favorites: Mutex<Vec<(TrackId, bool)>>,
     }
 
     impl Default for MockLibraryMutationStore {
@@ -647,6 +651,7 @@ pub mod mocks {
                 fail_tag_refresh: false,
                 refreshed: Mutex::new(Vec::new()),
                 played: Mutex::new(Vec::new()),
+                favorites: Mutex::new(Vec::new()),
             }
         }
 
@@ -659,6 +664,7 @@ pub mod mocks {
                 fail_tag_refresh: true,
                 refreshed: Mutex::new(Vec::new()),
                 played: Mutex::new(Vec::new()),
+                favorites: Mutex::new(Vec::new()),
             }
         }
 
@@ -675,6 +681,13 @@ pub mod mocks {
         pub fn played(&self) -> Vec<(TrackId, std::time::SystemTime)> {
             self.played.lock().unwrap().clone()
         }
+
+        /// Snapshot of every `(id, favorite)` passed to
+        /// `set_track_favorite`, in call order.
+        #[must_use]
+        pub fn favorites(&self) -> Vec<(TrackId, bool)> {
+            self.favorites.lock().unwrap().clone()
+        }
     }
 
     impl LibraryMutationStore for MockLibraryMutationStore {
@@ -688,6 +701,11 @@ pub mod mocks {
             played_at: std::time::SystemTime,
         ) -> Result<bool, StoreError> {
             self.played.lock().unwrap().push((id.clone(), played_at));
+            Ok(true)
+        }
+
+        fn set_track_favorite(&mut self, id: &TrackId, favorite: bool) -> Result<bool, StoreError> {
+            self.favorites.lock().unwrap().push((id.clone(), favorite));
             Ok(true)
         }
 
@@ -707,6 +725,13 @@ pub mod mocks {
 
         fn clear_library(&mut self) -> Result<usize, StoreError> {
             Ok(0)
+        }
+
+        fn record_full_scan_completed(
+            &mut self,
+            _summary: riff_backend::app::store::FullScanSummary,
+        ) -> Result<(), StoreError> {
+            Ok(())
         }
     }
 
@@ -930,6 +955,14 @@ pub mod mocks {
         TracksInFolder(PathBuf),
         SubdirsWithAudio(PathBuf),
         SmartPlaylist(SmartPlaylistKind, usize),
+        LibraryCounts,
+        SmartListCounts,
+        FolderTrackCount(PathBuf),
+        LastFullScan,
+        GenreCounts,
+        ArtistsInGenre(String),
+        ArtistAlbumsInGenre(String, String),
+        AlbumTracksInGenre(String, String, String),
     }
 
     /// Which [`LibraryQueryStore`] query fails while listed in
@@ -972,6 +1005,22 @@ pub mod mocks {
         pub album_tracks: Vec<Track>,
         /// Tracks served by `smart_playlist`.
         pub smart: Vec<Track>,
+        /// Answer served by `library_counts`.
+        pub library_counts: riff_backend::app::store::LibraryCounts,
+        /// Answer served by `smart_list_counts`.
+        pub smart_list_counts: Vec<(SmartPlaylistKind, usize)>,
+        /// Answers served by `folder_track_count`, keyed by folder.
+        pub folder_track_counts: std::collections::HashMap<PathBuf, usize>,
+        /// Answer served by `last_full_scan`.
+        pub last_full_scan: Option<std::time::SystemTime>,
+        /// Rows served by `genre_counts`.
+        pub genre_counts: Vec<GenreCount>,
+        /// Artists served by `artists_in_genre` for any genre.
+        pub genre_artists: Vec<Artist>,
+        /// Albums served by `artist_albums_in_genre` for any artist/genre.
+        pub genre_albums: Vec<Album>,
+        /// Tracks served by `album_tracks_in_genre` for any album/genre.
+        pub genre_album_tracks: Vec<Track>,
         /// Answer served by `folder_has_audio`.
         pub folder_has_audio: bool,
         /// Answer served by `folder_has_search_match`.
@@ -1006,6 +1055,14 @@ pub mod mocks {
                 albums: Vec::new(),
                 album_tracks: Vec::new(),
                 smart: Vec::new(),
+                library_counts: riff_backend::app::store::LibraryCounts::default(),
+                smart_list_counts: Vec::new(),
+                folder_track_counts: std::collections::HashMap::new(),
+                last_full_scan: None,
+                genre_counts: Vec::new(),
+                genre_artists: Vec::new(),
+                genre_albums: Vec::new(),
+                genre_album_tracks: Vec::new(),
                 folder_has_audio: true,
                 folder_search_match: true,
                 folder_tree_ids: Vec::new(),
@@ -1097,6 +1154,11 @@ pub mod mocks {
             Ok(self.flat.len())
         }
 
+        fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
+            self.record(LibraryQueryCall::LibraryCounts);
+            Ok(self.library_counts)
+        }
+
         fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
             self.record(LibraryQueryCall::AllTrackIds);
             Ok(self.flat.iter().map(|t| t.id.clone()).collect())
@@ -1177,6 +1239,24 @@ pub mod mocks {
             Ok(self.folder_direct_tracks.clone())
         }
 
+        fn folder_track_count(&self, folder: &Path) -> Result<usize, StoreError> {
+            self.record(LibraryQueryCall::FolderTrackCount(folder.to_path_buf()));
+            Ok(self.folder_track_counts.get(folder).copied().unwrap_or(0))
+        }
+
+        fn last_full_scan(
+            &self,
+        ) -> Result<Option<riff_backend::app::store::FullScanSummary>, StoreError> {
+            self.record(LibraryQueryCall::LastFullScan);
+            Ok(self
+                .last_full_scan
+                .map(|at| riff_backend::app::store::FullScanSummary {
+                    at,
+                    files: 0,
+                    errors: 0,
+                }))
+        }
+
         fn subdirs_with_audio(&self, folder: &Path) -> Result<Vec<PathBuf>, StoreError> {
             self.record(LibraryQueryCall::SubdirsWithAudio(folder.to_path_buf()));
             Ok(self.folder_children.clone())
@@ -1194,6 +1274,47 @@ pub mod mocks {
                 ));
             }
             Ok(self.smart.clone())
+        }
+
+        fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
+            self.record(LibraryQueryCall::SmartListCounts);
+            Ok(self.smart_list_counts.clone())
+        }
+
+        fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
+            self.record(LibraryQueryCall::GenreCounts);
+            Ok(self.genre_counts.clone())
+        }
+
+        fn artists_in_genre(&self, genre: &str) -> Result<Vec<Artist>, StoreError> {
+            self.record(LibraryQueryCall::ArtistsInGenre(genre.to_string()));
+            Ok(self.genre_artists.clone())
+        }
+
+        fn artist_albums_in_genre(
+            &self,
+            artist: &str,
+            genre: &str,
+        ) -> Result<Vec<Album>, StoreError> {
+            self.record(LibraryQueryCall::ArtistAlbumsInGenre(
+                artist.to_string(),
+                genre.to_string(),
+            ));
+            Ok(self.genre_albums.clone())
+        }
+
+        fn album_tracks_in_genre(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+            genre: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.record(LibraryQueryCall::AlbumTracksInGenre(
+                album_artist.to_string(),
+                album_title.to_string(),
+                genre.to_string(),
+            ));
+            Ok(self.genre_album_tracks.clone())
         }
     }
 }

@@ -25,6 +25,7 @@
 //! tag parsing overhead of untagged files, batched commits) but not the
 //! heavier tag payloads of real-world MP3/FLAC libraries.
 
+use riff_persistence::store::ScanOptions;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
@@ -92,7 +93,7 @@ fn wire_pipeline(
         Box::new(queries),
         Box::new(mutations),
         cancel_flag,
-        move |path| scanner.scan(path),
+        move |path| scanner.scan(path, &ScanOptions::default()),
     );
     std::thread::spawn(move || worker.run());
     scans
@@ -174,7 +175,7 @@ fn main() {
     //    could save from the end-to-end time.
     let scanner = riff_infra::filesystem::AudioFileScanner::new(cancel_flag);
     let walk_start = Instant::now();
-    let walked = scanner.scan(&root);
+    let walked = scanner.scan(&root, &ScanOptions::default());
     println!(
         "walk only (sequential walkdir, cache-warm): {:>10.3?}  ({} files)",
         walk_start.elapsed(),

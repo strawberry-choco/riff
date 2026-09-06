@@ -16,7 +16,7 @@
 //! Pure-Rust: uses only the port traits. Concrete decoder/output
 //! implementations live in `riff-infra`.
 
-use crate::app::state::PlaybackSession;
+use crate::app::state::{replaygain_factor, PlaybackSession};
 use crate::domain::{PlaybackCommand, PlaybackPosition, PlaybackState, PlaybackUpdate, RepeatMode};
 use crate::infra::ports::{AudioDecoder, AudioFormatInfo, AudioOutput, DecoderFactory};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
@@ -98,10 +98,10 @@ impl AudioEngine {
         let mut pre_decode_state = PreDecodeState::default();
         let pre_buffer_cap =
             |rate, ch| crate::app::gapless::pre_buffer_cap(rate, ch, PRE_BUFFER_SECONDS);
-
-        // ReplayGain state
-        let mut replaygain_gain: Option<f32> = None;
-        let mut replaygain_peak: Option<f32> = None;
+        // ReplayGain: resolved once at track load via `replaygain_factor`
+        // and pushed to the audio output's port method, which multiplies
+        // every sample in the callback. The write loop no longer scales
+        // samples; the factor lives in the output's atomic.
 
         // Audio output callback - closure that pulls decoded samples
         let mut decode_buffer = vec![0.0f32; DECODE_CHUNK_SAMPLES];
@@ -205,24 +205,21 @@ impl AudioEngine {
                             current_format = Some(format.clone());
                         }
 
-                        // Apply ReplayGain if enabled
+                        // Resolve ReplayGain for this track and push the
+                        // linear factor to the audio output. The port method
+                        // multiplies every sample in the callback, so the
+                        // write loop below no longer scales samples.
                         {
                             let session = self
                                 .session
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            if session.replaygain_enabled {
-                                if let Some(gain) = track.metadata.replaygain_track_gain {
-                                    replaygain_gain = Some(gain);
-                                    replaygain_peak = track.metadata.replaygain_track_peak;
-                                } else {
-                                    replaygain_gain = None;
-                                    replaygain_peak = None;
-                                }
-                            } else {
-                                replaygain_gain = None;
-                                replaygain_peak = None;
-                            }
+                            let factor = replaygain_factor(
+                                session.replaygain_enabled,
+                                track.metadata.replaygain_track_gain,
+                                track.metadata.replaygain_track_peak,
+                            );
+                            self.output.set_replaygain(factor);
                         }
 
                         current_track_id = Some(id.clone());
@@ -425,22 +422,6 @@ impl AudioEngine {
             if output_started && let Some(decoder) = primary_decoder.as_mut() {
                 match decoder.next_frames(&mut decode_buffer) {
                     Some(samples) if samples > 0 => {
-                        // Apply ReplayGain if enabled
-                        if let Some(gain_db) = replaygain_gain {
-                            let mut factor = 10f32.powf(gain_db / 20.0);
-                            if let Some(peak) = replaygain_peak
-                                && peak > 0.0
-                            {
-                                let max_factor = 1.0 / peak;
-                                if factor > max_factor {
-                                    factor = max_factor;
-                                }
-                            }
-                            for s in &mut decode_buffer[..samples] {
-                                *s *= factor;
-                            }
-                        }
-
                         // Write to audio output (blocking if buffer full)
                         if output_started {
                             self.output.write(&decode_buffer[..samples]);

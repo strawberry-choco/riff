@@ -2,28 +2,6 @@ use crate::domain::TrackId;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Compute the linear playback-gain multiplier for `ReplayGain` (Task 4.3).
-///
-/// Disabled, or no gain tag → `1.0` (no adjustment). Otherwise the dB value is
-/// converted to a linear factor (`10^(dB/20)`). When a peak is known and
-/// positive, the factor is capped at `1.0 / peak` so `factor * peak <= 1.0`
-/// and amplified samples cannot clip. Pure f32 math — no external crates.
-pub fn replaygain_factor(enabled: bool, gain_db: Option<f32>, peak: Option<f32>) -> f32 {
-    if !enabled {
-        return 1.0;
-    }
-    let Some(g) = gain_db else {
-        return 1.0;
-    };
-    let mut linear = 10f32.powf(g / 20.0);
-    if let Some(p) = peak
-        && p > 0.0
-    {
-        linear = linear.min(1.0 / p);
-    }
-    linear
-}
-
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum LibraryStatus {
     #[default]
@@ -161,7 +139,7 @@ impl Default for ScanPrefs {
 /// Re-exported from `riff_playback::app::state` — the canonical playback
 /// session the Transport, coordinator, and engine all take. The backend keeps
 /// the library-side session types (`LibrarySession`, `ViewMode`, `UiFlags`).
-pub use riff_playback::app::state::PlaybackSession;
+pub use riff_playback::app::state::{replaygain_factor, PlaybackSession};
 
 /// The Library Session: everything that is not playback — selection, views,
 /// search, library roots and their statuses, scan status, browse mode, UI

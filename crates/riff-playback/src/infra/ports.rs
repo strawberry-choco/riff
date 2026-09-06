@@ -63,6 +63,11 @@ pub trait AudioOutput: Send {
     /// Set the output volume (0.0–1.0).
     fn set_volume(&mut self, volume: f32);
 
+    /// Set the `ReplayGain` linear factor applied alongside volume in the
+    /// sample-scaling step. Default no-op so mocks need not implement it;
+    /// `1.0` means no adjustment.
+    fn set_replaygain(&mut self, _factor: f32) {}
+
     /// Get the current output latency (frames).
     fn latency(&self) -> u32;
 }

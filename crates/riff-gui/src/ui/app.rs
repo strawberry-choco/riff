@@ -13,7 +13,8 @@ pub use riff_backend::app::cover_service::{COVER_CACHE_CAP, Covers, lru_insert};
 use riff_backend::app::facade::BackendFacade;
 use riff_backend::app::scan_service::{ScanOutcome, Scans};
 use riff_backend::app::state::{
-    BrowseMode, LibrarySection, LibrarySession, LibraryStatus, PlaybackSession, UiFlags, ViewMode,
+    BrowseMode, BrowserSelection, LibrarySection, LibrarySession, LibraryStatus, PlaybackSession,
+    UiFlags, ViewMode,
 };
 use riff_backend::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
 use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
@@ -938,6 +939,10 @@ fn apply_titlebar_action(
             NavDestination::Settings.apply(&mut library.view_mode, &mut library.browse_mode);
         }
         Action::Minimize => ctx.send_viewport_cmd(WindowControl::Minimize.viewport_command()),
+        Action::ToggleMaximize => {
+            let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+        }
         Action::Close => ctx.send_viewport_cmd(WindowControl::Close.viewport_command()),
     }
 }
@@ -1101,7 +1106,7 @@ pub fn resolve_detail_content(views: &mut SessionViews, library: &LibrarySession
             content.breadcrumb.push(crate::ui::detail::Crumb {
                 label: name.clone(),
             });
-            content.rows = artist_album_rows(views, name);
+            content.rows = artist_album_rows(views, name, library.browser_selection.as_ref());
         }
         BrowserSelection::Genre(genre) => {
             content.breadcrumb.push(crate::ui::detail::Crumb {
@@ -1115,7 +1120,8 @@ pub fn resolve_detail_content(views: &mut SessionViews, library: &LibrarySession
                     label: artist.name.clone(),
                     detail: None,
                     thumbnail: None,
-                    selected: false,
+                    selected: library.browser_selection.as_ref()
+                        == Some(&BrowserSelection::Artist(artist.name.clone())),
                     now_playing: false,
                 })
                 .collect();
@@ -1289,21 +1295,34 @@ fn last_played_label(tracks: &[riff_backend::domain::Track]) -> String {
 
 /// An artist's albums as detail-column rows, keyed by the store's
 /// `(album artist, title)` composite — the same identity the browser
-/// column's Albums variant reports.
+/// column's Albums variant reports. `selection` highlights the album
+/// that has been drilled into, matching the Albums section's behaviour.
 fn artist_album_rows(
     views: &mut SessionViews,
     artist: &str,
+    selection: Option<&BrowserSelection>,
 ) -> Vec<crate::ui::browser::BrowserItem> {
+    use riff_backend::app::state::BrowserSelection;
     views
         .artist_albums(artist)
         .iter()
-        .map(|album| crate::ui::browser::BrowserItem {
-            key: format!("{}\u{1f}{}", album.artist, album.title),
-            label: album.title.clone(),
-            detail: album.year.map(|y| y.to_string()),
-            thumbnail: None,
-            selected: false,
-            now_playing: false,
+        .map(|album| {
+            let album_key = format!("{}\u{1f}{}", album.artist, album.title);
+            let is_selected = selection.is_some_and(|s| match s {
+                BrowserSelection::Album {
+                    artist: a,
+                    title: t,
+                } => a.as_str() == album.artist.as_str() && t.as_str() == album.title.as_str(),
+                _ => false,
+            });
+            crate::ui::browser::BrowserItem {
+                key: album_key,
+                label: album.title.clone(),
+                detail: album.year.map(|y| y.to_string()),
+                thumbnail: None,
+                selected: is_selected,
+                now_playing: false,
+            }
         })
         .collect()
 }

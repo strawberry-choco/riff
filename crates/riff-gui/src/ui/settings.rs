@@ -267,8 +267,6 @@ pub const PREF_MISSING_ART: (&str, &str) = (
 
 /// The Library pane footer's note.
 pub const FOOTER_NOTE: &str = "Changes apply immediately";
-/// The Library pane footer's restore action.
-pub const RESET_DEFAULTS_LABEL: &str = "Reset to defaults";
 /// The Library pane footer's closing action.
 pub const DONE_LABEL: &str = "Done";
 
@@ -382,8 +380,58 @@ pub enum SettingsAction {
     SetFormat(String, bool),
     /// Set the "Read embedded artwork" preference.
     SetReadEmbeddedArtwork(bool),
-    /// Restore the Library pane's preferences to their defaults.
-    ResetLibraryDefaults,
+    /// Set the missing-artwork strategy. No UI control ships today (the
+    /// enum has one variant); the action exists for forward compatibility —
+    /// the next variant added here needs both a `Set…` arm in
+    /// `apply_settings_action` and a matching UI control.
+    SetMissingArtworkStrategy(MissingArtworkStrategy),
+}
+
+/// Build the one-row `ScalarSettings` from the current sessions, the same
+/// fields `RiffApp::persist_scalars` reads. Extracted so the missing-artwork
+/// handler (and any future per-preference handler) can persist without going
+/// through the full `apply_settings_action` seam.
+pub(crate) fn build_scalar_settings(
+    playback: &PlaybackSession,
+    library: &LibrarySession,
+) -> riff_backend::app::state::ScalarSettings {
+    let repeat_mode = match playback.queue.repeat {
+        riff_backend::domain::RepeatMode::None => 0,
+        riff_backend::domain::RepeatMode::All => 1,
+        riff_backend::domain::RepeatMode::One => 2,
+    };
+    riff_backend::app::state::ScalarSettings {
+        volume: Some(playback.current_volume),
+        advanced_mode: library.ui_flags.advanced_mode,
+        high_contrast: library.ui_flags.high_contrast,
+        replaygain_enabled: playback.replaygain_enabled,
+        shuffle: playback.queue.shuffle,
+        repeat_mode,
+        browser_layout: library.browser_layout.as_store_code(),
+        skip_hidden_files: library.scan_prefs.skip_hidden_files,
+        scan_formats: library.scan_prefs.scan_formats.clone(),
+        read_embedded_artwork: library.scan_prefs.read_embedded_artwork,
+        missing_artwork_strategy: library.scan_prefs.missing_artwork_strategy,
+    }
+}
+
+/// Apply [`SettingsAction::SetMissingArtworkStrategy`]: write the new
+/// strategy to the Library Session, then commit the full scalar set in one
+/// small durable transaction. `pub(crate)` so integration tests in `tests/`
+/// can drive the handler without constructing a `RiffApp` (the rest of
+/// `apply_settings_action`'s arms need the full app — only the scalar
+/// preferences are testable headlessly).
+pub fn apply_set_missing_artwork_strategy(
+    strategy: MissingArtworkStrategy,
+    library: &mut LibrarySession,
+    playback: &PlaybackSession,
+    store: &mut dyn SettingsStore,
+) {
+    library.scan_prefs.missing_artwork_strategy = strategy;
+    let scalars = build_scalar_settings(playback, library);
+    if let Err(e) = store.save_scalars(&scalars) {
+        tracing::warn!("Failed to save settings: {e}");
+    }
 }
 
 // --- Mockup dimensions ---------------------------------------------------------
@@ -475,23 +523,21 @@ fn section_header(ui: &mut egui::Ui, palette: &Palette, text: &str) {
 /// the painted text; `a11y` feeds the accessibility tree (per-path controls
 /// suffix their root so labels stay unique).
 #[allow(clippy::too_many_arguments)]
-fn filled_button(
-    ui: &mut egui::Ui,
+#[allow(clippy::fn_params_excessive_bools)] // 2×2 independent axes: brand vs surface × label size
+fn paint_filled_button(
+    ui: &egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
     rect: egui::Rect,
-    id: egui::Id,
     label: &str,
-    a11y: &str,
     icon: Option<Icon>,
     primary: bool,
     small_text: bool,
     enabled: bool,
-) -> bool {
-    let response = ui.interact(rect, id, egui::Sense::click());
+    hovered: bool,
+) {
     let painter = ui.painter_at(rect);
-
-    let (fill, ink, ring) = match (enabled, primary, response.hovered()) {
+    let (fill, ink, ring) = match (enabled, primary, hovered) {
         (false, _, _) => (palette.surface, palette.ink_3, false),
         (true, true, _) => (palette.brand_primary, palette.on_brand, false),
         (true, false, false) => (palette.surface_2, palette.ink, false),
@@ -530,7 +576,38 @@ fn filled_button(
         galley,
         ink,
     );
+}
 
+/// Interact at `rect` and paint a filled button. `a11y` feeds the
+/// accessibility tree (per-path controls suffix their root so labels stay
+/// unique). Returns whether the button was clicked AND enabled.
+#[allow(clippy::too_many_arguments)]
+fn filled_button(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    rect: egui::Rect,
+    id: egui::Id,
+    label: &str,
+    a11y: &str,
+    icon: Option<Icon>,
+    primary: bool,
+    small_text: bool,
+    enabled: bool,
+) -> bool {
+    let response = ui.interact(rect, id, egui::Sense::click());
+    paint_filled_button(
+        ui,
+        cache,
+        palette,
+        rect,
+        label,
+        icon,
+        primary,
+        small_text,
+        enabled,
+        response.hovered(),
+    );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, a11y));
     enabled && response.clicked()
 }
@@ -612,7 +689,7 @@ fn library_row(
     library_row_path(ui, cache, palette, rect, row, &display);
     // Returns where the Scan button starts so the readiness pair can sit
     // gap-4 to its left.
-    let scan_left = library_row_controls(
+    let layout = library_row_controls(
         ui,
         cache,
         palette,
@@ -624,7 +701,7 @@ fn library_row(
         &scan_label,
         actions,
     );
-    library_row_readiness(ui, palette, rect, row, scan_left);
+    library_row_readiness(ui, palette, rect, row, layout.scan_left);
 }
 
 /// The row's left cluster: folder glyph plus the (possibly struck-through)
@@ -687,9 +764,26 @@ fn library_row_path(
     }
 }
 
-/// The row's right cluster (gap-4): trash | watch | scan. Returns the Scan
-/// button's left edge. All per-path labels arrive precomputed by
-/// [`library_row`]; the trash hover text is only built while hovered.
+/// The geometry `library_row_controls` hands back to `library_row` so the
+/// readiness pair can sit gap-4 to the left of the Scan button and the
+/// path column can stop short of the right cluster.
+#[allow(
+    dead_code,
+    reason = "row_right is reserved for the path column's right limit"
+)]
+struct RowLayout {
+    /// Screen X of the Scan button's left edge — the readiness dot anchors
+    /// to it.
+    scan_left: f32,
+    /// Screen X of the right cluster's right edge (the trash button's
+    /// right padding). Reserved for the path column's right limit.
+    row_right: f32,
+}
+
+/// The row's right cluster (gap-4): trash | watch | scan. Returns the
+/// geometry `library_row_readiness` needs to anchor the readiness dot.
+/// All per-path labels arrive precomputed by [`library_row`]; the trash
+/// hover text is only built while hovered.
 #[allow(clippy::too_many_arguments)]
 fn library_row_controls(
     ui: &mut egui::Ui,
@@ -702,109 +796,124 @@ fn library_row_controls(
     watch_label: &str,
     scan_label: &str,
     actions: &mut Vec<SettingsAction>,
-) -> f32 {
-    let painter = ui.painter_at(rect);
-    let cy = rect.center().y;
+) -> RowLayout {
     let is_unavailable = matches!(row.status, LibraryStatus::Unavailable);
     let is_scanning = matches!(row.status, LibraryStatus::Scanning { .. });
+    let row_right = rect.right();
+    let mut scan_left = row_right;
 
-    // Trash ghost icon button, destructive on hover. The tooltip string is
-    // only formatted while the pointer is actually over the control.
-    let right = rect.right() - 16.0;
-    let trash_rect = egui::Rect::from_min_size(
-        egui::pos2(right - TRASH_BTN, cy - TRASH_BTN / 2.0),
-        egui::vec2(TRASH_BTN, TRASH_BTN),
-    );
-    let mut trash_response = ui.interact(
-        trash_rect,
-        egui::Id::new(("settings_trash", path_str)),
-        egui::Sense::click(),
-    );
-    if trash_response.hovered() {
-        trash_response = trash_response.on_hover_text(remove_label.to_owned());
-    }
-    let trash_tint = if trash_response.hovered() {
-        palette.error
-    } else {
-        palette.ink_3
-    };
-    let trash_tex_id = cache.texture(ui.ctx(), Icon::Trash, 16.0, trash_tint);
-    painter.image(trash_tex_id, trash_rect.shrink(6.0), UV_FULL, trash_tint);
-    trash_response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Remove library")
+    // Layout-based positioning (plan #3): the right cluster is one
+    // right-to-left strip. Insertion order is the visual order from the
+    // right edge: 16px padding, trash, 16px gap, watch, 16px gap, scan.
+    // Each control grabs its own slot via `allocate_exact_size`; the slot's
+    // response drives paint + interact. Item spacing is zeroed inside the
+    // closure so the explicit `add_space(16.0)` gaps reproduce the
+    // original hand-computed 16px exactly.
+    ui.push_id(path_str, |ui| {
+        // `new_child` does NOT consume parent space (see egui ui.rs:204);
+        // `allocate_ui_with_layout` would re-allocate the row and push
+        // everything below it down by `LIBRARY_ROW_H`. The row's rect is
+        // already reserved by `library_row`'s `allocate_exact_size`.
+        let mut strip_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        strip_ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+        // 16px right padding (the original `rect.right() - 16.0`).
+        strip_ui.add_space(16.0);
+
+        // --- Trash (rightmost) ---
+        let (trash_rect, mut trash_response) =
+            strip_ui.allocate_exact_size(egui::vec2(TRASH_BTN, TRASH_BTN), egui::Sense::click());
+        if trash_response.hovered() {
+            trash_response = trash_response.on_hover_text(remove_label.to_owned());
+        }
+        let trash_tint = if trash_response.hovered() {
+            palette.error
+        } else {
+            palette.ink_3
+        };
+        let trash_tex_id = cache.texture(strip_ui.ctx(), Icon::Trash, 16.0, trash_tint);
+        strip_ui
+            .painter()
+            .image(trash_tex_id, trash_rect.shrink(6.0), UV_FULL, trash_tint);
+        trash_response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Remove library")
+        });
+        if trash_response.clicked() {
+            actions.push(SettingsAction::Remove(row.path.clone()));
+        }
+        strip_ui.add_space(16.0);
+
+        // --- Watch (label + checkbox) ---
+        // Slot height spans the full row so the hit area matches the
+        // original `expand2(0, (LIBRARY_ROW_H - WATCH_BOX) / 2)`.
+        let watch_label_w = 38.0;
+        let watch_w = watch_label_w + 6.0 + WATCH_BOX;
+        let (watch_rect, watch_response) =
+            strip_ui.allocate_exact_size(egui::vec2(watch_w, LIBRARY_ROW_H), egui::Sense::click());
+        let watch_warning = matches!(row.watch, WatchState::Warning(_));
+        let can_watch = !watch_warning && !is_unavailable;
+        let watching = row.watch == WatchState::Enabled;
+        let box_rect = egui::Rect::from_center_size(
+            egui::pos2(watch_rect.right() - WATCH_BOX / 2.0, watch_rect.center().y),
+            egui::vec2(WATCH_BOX, WATCH_BOX),
+        );
+        strip_ui.painter().text(
+            egui::pos2(watch_rect.left(), watch_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            "Watch",
+            styled_font(&strip_ui, egui::TextStyle::Small, theme::TEXT_XS),
+            palette.ink_3,
+        );
+        paint_watch_box(strip_ui.painter(), palette, box_rect, watching && can_watch);
+        watch_response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, can_watch, watching, watch_label)
+        });
+        if can_watch && watch_response.clicked() {
+            actions.push(SettingsAction::SetWatch(row.path.clone(), !watching));
+        }
+        if let WatchState::Warning(ref reason) = row.watch {
+            watch_response.on_hover_text(reason.clone());
+        }
+        strip_ui.add_space(16.0);
+
+        // --- Scan (leftmost in the strip) ---
+        let scan_font = styled_font(&strip_ui, egui::TextStyle::Button, theme::TEXT_XS);
+        let scan_label_w = strip_ui
+            .painter()
+            .layout_no_wrap("Scan".to_owned(), scan_font, palette.ink)
+            .size()
+            .x;
+        let scan_w = 24.0 + scan_label_w;
+        let (scan_rect, scan_response) =
+            strip_ui.allocate_exact_size(egui::vec2(scan_w, SMALL_BTN_H), egui::Sense::click());
+        scan_left = scan_rect.left();
+        let scan_enabled = !is_scanning && !is_unavailable;
+        paint_filled_button(
+            &strip_ui,
+            cache,
+            palette,
+            scan_rect,
+            "Scan",
+            None,
+            false,
+            true,
+            scan_enabled,
+            scan_response.hovered(),
+        );
+        scan_response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, scan_enabled, scan_label)
+        });
+        if scan_enabled && scan_response.clicked() {
+            actions.push(SettingsAction::Scan(row.path.clone()));
+        }
     });
-    if trash_response.clicked() {
-        actions.push(SettingsAction::Remove(row.path.clone()));
+    RowLayout {
+        scan_left,
+        row_right,
     }
-
-    // Watch checkbox: muted xs label + a small painted checkbox. Disabled
-    // while the watcher is warning or the root is gone, exactly as before.
-    let watch_label_w = 38.0;
-    let watch_w = watch_label_w + 6.0 + WATCH_BOX;
-    let watch_rect = egui::Rect::from_min_size(
-        egui::pos2(trash_rect.left() - 16.0 - watch_w, cy - WATCH_BOX / 2.0),
-        egui::vec2(watch_w, WATCH_BOX),
-    );
-    let watch_warning = matches!(row.watch, WatchState::Warning(_));
-    let can_watch = !watch_warning && !is_unavailable;
-    let watching = row.watch == WatchState::Enabled;
-    let watch_response = ui.interact(
-        watch_rect.expand2(egui::vec2(0.0, (LIBRARY_ROW_H - WATCH_BOX) / 2.0)),
-        egui::Id::new(("settings_watch", path_str)),
-        egui::Sense::click(),
-    );
-    let box_rect = egui::Rect::from_min_size(
-        egui::pos2(watch_rect.right() - WATCH_BOX, watch_rect.top()),
-        egui::vec2(WATCH_BOX, WATCH_BOX),
-    );
-    painter.text(
-        egui::pos2(watch_rect.left(), watch_rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        "Watch",
-        styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS),
-        palette.ink_3,
-    );
-    paint_watch_box(&painter, palette, box_rect, watching && can_watch);
-    watch_response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, can_watch, watching, watch_label)
-    });
-    if can_watch && watch_response.clicked() {
-        actions.push(SettingsAction::SetWatch(row.path.clone(), !watching));
-    }
-    if let WatchState::Warning(ref reason) = row.watch {
-        watch_response.on_hover_text(reason.clone());
-    }
-
-    // Scan secondary button.
-    let scan_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS);
-    let scan_label_w = painter
-        .layout_no_wrap("Scan".to_owned(), scan_font, palette.ink)
-        .size()
-        .x;
-    let scan_rect = egui::Rect::from_min_size(
-        egui::pos2(
-            watch_rect.left() - 16.0 - (24.0 + scan_label_w),
-            cy - SMALL_BTN_H / 2.0,
-        ),
-        egui::vec2(24.0 + scan_label_w, SMALL_BTN_H),
-    );
-    let scan_enabled = !is_scanning && !is_unavailable;
-    if filled_button(
-        ui,
-        cache,
-        palette,
-        scan_rect,
-        egui::Id::new(("settings_scan", path_str)),
-        "Scan",
-        scan_label,
-        None,
-        false,
-        true,
-        scan_enabled,
-    ) {
-        actions.push(SettingsAction::Scan(row.path.clone()));
-    }
-    scan_rect.left()
 }
 
 /// The small painted Watch checkbox: brand fill + two-stroke checkmark when
@@ -1246,32 +1355,6 @@ fn library_footer(
         true,
     ) {
         actions.push(SettingsAction::Back);
-    }
-
-    let reset_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM);
-    let reset_w = painter
-        .layout_no_wrap(RESET_DEFAULTS_LABEL.to_owned(), reset_font, palette.ink)
-        .size()
-        .x
-        + 32.0;
-    let reset_rect = egui::Rect::from_min_size(
-        egui::pos2(done_rect.left() - 12.0 - reset_w, cy - ACTION_BTN_H / 2.0),
-        egui::vec2(reset_w, ACTION_BTN_H),
-    );
-    if filled_button(
-        ui,
-        cache,
-        palette,
-        reset_rect,
-        egui::Id::new("settings_reset_defaults"),
-        RESET_DEFAULTS_LABEL,
-        RESET_DEFAULTS_LABEL,
-        None,
-        false,
-        false,
-        true,
-    ) {
-        actions.push(SettingsAction::ResetLibraryDefaults);
     }
 }
 
@@ -1988,15 +2071,13 @@ impl super::app::RiffApp {
                 // policy, and only a fresh request lets real art surface.
                 self.evict_generated_covers();
             }
-            SettingsAction::ResetLibraryDefaults => {
-                library.scan_prefs = riff_backend::app::state::ScanPrefs::default();
-                let paths = library.library_paths.clone();
-                // Re-enable watching for every root so the restored pane
-                // matches its default of watching configured folders.
-                for path in paths {
-                    self.set_watch_state(&path, true, library);
-                }
-                self.persist_scalars(playback, library);
+            SettingsAction::SetMissingArtworkStrategy(s) => {
+                apply_set_missing_artwork_strategy(
+                    s,
+                    library,
+                    playback,
+                    self.settings_store.as_mut(),
+                );
             }
         }
     }
@@ -2115,24 +2196,7 @@ impl super::app::RiffApp {
     /// Commit the current scalar preferences as one small durable
     /// transaction.
     fn persist_scalars(&mut self, playback: &PlaybackSession, library: &LibrarySession) {
-        let repeat_mode = match playback.queue.repeat {
-            riff_backend::domain::RepeatMode::None => 0,
-            riff_backend::domain::RepeatMode::All => 1,
-            riff_backend::domain::RepeatMode::One => 2,
-        };
-        let scalars = riff_backend::app::state::ScalarSettings {
-            volume: Some(playback.current_volume),
-            advanced_mode: library.ui_flags.advanced_mode,
-            high_contrast: library.ui_flags.high_contrast,
-            replaygain_enabled: playback.replaygain_enabled,
-            shuffle: playback.queue.shuffle,
-            repeat_mode,
-            browser_layout: library.browser_layout.as_store_code(),
-            skip_hidden_files: library.scan_prefs.skip_hidden_files,
-            scan_formats: library.scan_prefs.scan_formats.clone(),
-            read_embedded_artwork: library.scan_prefs.read_embedded_artwork,
-            missing_artwork_strategy: library.scan_prefs.missing_artwork_strategy,
-        };
+        let scalars = build_scalar_settings(playback, library);
         if let Err(e) = self.settings_store.save_scalars(&scalars) {
             tracing::warn!("Failed to save settings: {e}");
         }

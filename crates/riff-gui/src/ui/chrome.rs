@@ -182,6 +182,8 @@ pub enum TitleBarAction {
     GoSettings,
     /// Collapse the window to the taskbar.
     Minimize,
+    /// Toggle maximize/restore (routes through the vetoable close-to-tray path).
+    ToggleMaximize,
     /// Close the window (routes through the vetoable close-to-tray path).
     Close,
 }
@@ -246,17 +248,22 @@ pub fn show_titlebar(
         );
     }
 
-    // Window controls at the top-right corner: two caption-style hit strips
-    // flush to the edge (Windows convention — minimize left of close, zero
-    // gap between them). Drawn after the drag region so they win clicks over
-    // their slice of the strip.
+    // Window controls at the top-right corner: three caption-style hit strips
+    // flush to the edge (Windows convention — minimize | maximize | close,
+    // zero gap between them). Drawn after the drag region so they win clicks
+    // over their slice of the strip.
     let btn_top = rect.center().y - CAPTION_BTN_H / 2.0;
+    let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
     let close_rect = egui::Rect::from_min_size(
         egui::pos2(rect.right() - CAPTION_BTN_W, btn_top),
         egui::vec2(CAPTION_BTN_W, CAPTION_BTN_H),
     );
-    let minimize_rect = egui::Rect::from_min_size(
+    let maximize_rect = egui::Rect::from_min_size(
         egui::pos2(close_rect.left() - CAPTION_BTN_W, btn_top),
+        egui::vec2(CAPTION_BTN_W, CAPTION_BTN_H),
+    );
+    let minimize_rect = egui::Rect::from_min_size(
+        egui::pos2(maximize_rect.left() - CAPTION_BTN_W, btn_top),
         egui::vec2(CAPTION_BTN_W, CAPTION_BTN_H),
     );
     if window_control_button(
@@ -270,6 +277,23 @@ pub fn show_titlebar(
         false,
     ) {
         actions.push(TitleBarAction::Minimize);
+    }
+    let (max_icon, max_label) = if maximized {
+        (Icon::Collapse, "Restore")
+    } else {
+        (Icon::Expand, "Maximize")
+    };
+    if window_control_button(
+        ui,
+        cache,
+        palette,
+        maximize_rect,
+        egui::Id::new("riff_titlebar_maximize"),
+        max_icon,
+        max_label,
+        false,
+    ) {
+        actions.push(TitleBarAction::ToggleMaximize);
     }
     if window_control_button(
         ui,

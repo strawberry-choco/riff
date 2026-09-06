@@ -93,10 +93,10 @@ impl RiffApp {
     }
 
     /// The Artists variant (handoff issue 08): every artist as a row with a
-    /// small cover thumbnail (open decision 3: the first album's cover),
-    /// with the A–Z sort control and the genre filter chips above the list.
-    /// Selecting a row stores the identity the detail column (issue 09)
-    /// resolves; the album hierarchy it drills into lands there.
+    /// small cover thumbnail (open decision 3: the first album's cover) and
+    /// the A–Z sort control above the list. Selecting a row stores the
+    /// identity the detail column (issue 09) resolves; the album hierarchy
+    /// it drills into lands there.
     fn render_artists_browser(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
         use riff_backend::app::state::BrowserSelection;
 
@@ -104,16 +104,20 @@ impl RiffApp {
         let genre = library.genre_filter.clone();
         let sort_desc = library.browser_sort_desc;
 
-        let genres = self.views.genres();
         let artists: Arc<[Artist]> = match &genre {
             Some(g) => self.views.artists_in_genre(g),
             None => self.views.artists(),
         };
         // artists() is name-ascending; the sort control flips the render
-        // order only, the store keeps the canonical ordering.
-        let mut names: Vec<String> = artists.iter().map(|a| a.name.clone()).collect();
+        // order only, the store keeps the canonical ordering. The album
+        // count rides along so the row's detail line can match the Albums
+        // browser's `Artist · Year` and Genres' `N tracks` shape.
+        let mut rows: Vec<(&str, usize)> = artists
+            .iter()
+            .map(|a| (a.name.as_str(), a.albums.len()))
+            .collect();
         if sort_desc {
-            names.reverse();
+            rows.reverse();
         }
         let selected = match &library.browser_selection {
             Some(BrowserSelection::Artist(name)) => Some(name.clone()),
@@ -127,13 +131,18 @@ impl RiffApp {
         let lru_keys = &mut self.cover_lru_keys;
         let ctx = ui.ctx().clone();
         let mut item = |i: usize| -> Option<browser::BrowserItem> {
-            let name = names.get(i)?;
+            let (name, album_count) = *rows.get(i)?;
             // The row's small cover thumbnail: the first album's cover
             // (open decision 3), requested through the first album's first
             // track — the Cover Service resolves by track path, the texture
             // comes from the UI LRU. A full miss resolves the generated
             // colour block (issue 14) through the same cache. Repeat reads
-            // hit the projection cache.
+            // hit the projection cache. The detail line shows the album
+            // count, matching the shape Albums and Genres rows already use.
+            let detail = match album_count {
+                1 => "1 album".to_string(),
+                n => format!("{n} albums"),
+            };
             let albums = views.artist_albums(name);
             let thumbnail = albums
                 .first()
@@ -154,11 +163,11 @@ impl RiffApp {
                     )
                 });
             Some(browser::BrowserItem {
-                key: name.clone(),
-                label: name.clone(),
-                detail: None,
+                key: name.to_owned(),
+                label: name.to_owned(),
+                detail: Some(detail),
                 thumbnail,
-                selected: selected.as_deref() == Some(name.as_str()),
+                selected: selected.as_deref() == Some(name),
                 now_playing: false,
             })
         };
@@ -177,9 +186,9 @@ impl RiffApp {
             layout: library.browser_layout,
             sort_desc,
             show_sort: true,
-            genres: &genres,
+            genres: &[],
             genre_filter: genre.as_deref(),
-            total: names.len(),
+            total: rows.len(),
             item: &mut item,
             empty_title,
             empty_hint,

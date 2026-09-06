@@ -1962,6 +1962,10 @@ mod tests {
         harness.run();
         assert!(harness.state().contains(&TitleBarAction::Minimize));
 
+        harness.get_by_label("Maximize").click();
+        harness.run();
+        assert!(harness.state().contains(&TitleBarAction::ToggleMaximize));
+
         // The former top-bar controls live in the merged titlebar now.
         harness.get_by_label("Settings").click();
         harness.run();

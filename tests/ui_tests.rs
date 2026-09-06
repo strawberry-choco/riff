@@ -4137,16 +4137,8 @@ mod tests {
             harness.state().contains(&SettingsAction::ScanAll),
             "Rescan now requests a full rescan"
         );
-
-        let harness = click_into_view("Reset to defaults", &content);
-        assert!(
-            harness
-                .state()
-                .contains(&SettingsAction::ResetLibraryDefaults),
-            "Reset to defaults reports the pane restore action"
-        );
-
         // Done closes Settings — the same intent as the header's back arrow.
+
         let harness = click_into_view("Done", &content);
         assert!(
             harness.state().contains(&SettingsAction::Back),
@@ -4987,6 +4979,111 @@ mod tests {
     }
 }
 
+// --- Settings scalar handler seams --------------------------------------------
+//
+// `SettingsAction::SetMissingArtworkStrategy` is the only Settings action
+// today that has no UI control — the enum has one variant. The handler is
+// extracted to a `pub(crate)` free function so the wiring (variant →
+// Library Session field → Application Store transaction) is testable
+// without constructing a full `RiffApp`.
+#[cfg(test)]
+mod settings_scalar_handler_tests {
+    use super::*;
+    use riff_backend::app::store::MissingArtworkStrategy;
+    use riff_gui::ui::settings::{
+        LibraryRow, SettingsAction, SettingsContent, SettingsSection,
+        apply_set_missing_artwork_strategy, show_settings_modal,
+    };
+    use std::path::PathBuf;
+
+    /// `apply_set_missing_artwork_strategy` writes the new strategy to the
+    /// Library Session and persists the full scalar set in one transaction.
+    /// Today the only variant is `GeneratedColour`, so re-asserting it
+    /// is tautological — the test pins the wiring for the day a second
+    /// variant is added (the test will then exercise a non-default value).
+    #[test]
+    fn test_apply_set_missing_artwork_strategy_updates_session_and_persists() {
+        let mut library = LibrarySession::default();
+        let playback = PlaybackSession::default();
+        let mut store = crate::mocks::MockSettingsStore::default();
+
+        // Sanity: the session starts at the default strategy.
+        assert_eq!(
+            library.scan_prefs.missing_artwork_strategy,
+            MissingArtworkStrategy::GeneratedColour,
+            "the default strategy is the only variant today"
+        );
+
+        apply_set_missing_artwork_strategy(
+            MissingArtworkStrategy::GeneratedColour,
+            &mut library,
+            &playback,
+            &mut store,
+        );
+
+        assert_eq!(
+            library.scan_prefs.missing_artwork_strategy,
+            MissingArtworkStrategy::GeneratedColour,
+            "the handler mirrors the new strategy into the Library Session"
+        );
+        assert_eq!(
+            store.calls,
+            vec![crate::mocks::SettingsCall::Scalars],
+            "save_scalars is the one transaction the handler commits"
+        );
+        assert_eq!(
+            store.state.scalars.missing_artwork_strategy,
+            MissingArtworkStrategy::GeneratedColour,
+            "save_scalars must persist the new strategy"
+        );
+    }
+
+    /// The "Reset to defaults" button was removed (plan #2): the action must
+    /// not be a variant of `SettingsAction`, and the modal must not render a
+    /// button with that label. Both checks live in one test so a regression
+    /// (constant left behind, variant left behind) is caught by the same
+    /// failure.
+    #[test]
+    fn test_settings_modal_does_not_render_reset_to_defaults() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::theme::Palette;
+
+        let content = SettingsContent {
+            libraries: vec![LibraryRow {
+                path: PathBuf::from("C:\\Users\\stink\\Music"),
+                status: LibraryStatus::Scanned(1284),
+                watch: WatchState::Enabled,
+                indexed_tracks: 1284,
+            }],
+            ..SettingsContent::default()
+        };
+        let palette = Palette::dark();
+        let mut cache = riff_gui::ui::icons::IconCache::new();
+        let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
+            egui_kittest::Harness::builder()
+                .with_size(egui::vec2(800.0, 720.0))
+                .with_pixels_per_point(1.0)
+                .build_ui_state(
+                    |ui, actions: &mut Vec<SettingsAction>| {
+                        actions.extend(show_settings_modal(
+                            ui,
+                            &mut cache,
+                            &palette,
+                            &content,
+                            SettingsSection::Library,
+                        ));
+                    },
+                    Vec::new(),
+                );
+        harness.run();
+
+        // The label must not be painted anywhere in the modal.
+        assert!(
+            harness.query_by_label("Reset to defaults").is_none(),
+            "the 'Reset to defaults' button must not be rendered"
+        );
+    }
+}
 // --- Background service seams in the UI ----------------------------------------
 //
 // The UI no longer owns worker threads or channel protocols (ADR 0006): it

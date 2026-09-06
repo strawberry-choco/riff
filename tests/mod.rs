@@ -1317,6 +1317,54 @@ pub mod mocks {
             Ok(self.genre_album_tracks.clone())
         }
     }
+
+    /// No-op [`Scans`] for UI tests that exercise `RiffApp` but never trigger
+    /// a scan. `request`/`cancel` are fire-and-forget; `poll` and
+    /// `is_scanning` always return empty/false.
+    #[derive(Default)]
+    pub struct MockScans;
+
+    /// No-op [`TagEdits`] for UI tests that exercise `RiffApp` but never submit
+    /// a tag edit. `submit` discards; `poll` always returns `None`.
+    #[derive(Default)]
+    pub struct MockTagEdits;
+
+    /// No-op [`Covers`] for UI tests that exercise `RiffApp` but never request
+    /// a cover. `request` discards; `poll` always returns an empty Vec.
+    #[derive(Default)]
+    pub struct MockCovers;
+}
+
+// --- Minimal trait impls for the no-op UI test mocks -----------------------
+
+impl riff_library::app::scan_service::Scans for crate::mocks::MockScans {
+    fn request(&self, _path: std::path::PathBuf) {}
+    fn cancel(&self) {}
+    fn poll(&self) -> Vec<riff_library::app::scan_service::ScanOutcome> {
+        Vec::new()
+    }
+    fn is_scanning(&self, _path: &std::path::Path) -> bool {
+        false
+    }
+}
+
+impl riff_backend::app::tag_edit_service::TagEdits for crate::mocks::MockTagEdits {
+    fn submit(&self, _request: riff_backend::app::tag_edit_service::TagEditRequest) {}
+    fn poll(&self) -> Option<riff_backend::app::tag_edit_service::TagEditOutcome> {
+        None
+    }
+}
+
+impl riff_library::app::cover_service::Covers for crate::mocks::MockCovers {
+    fn request(&self, _track_id: riff_backend::domain::TrackId, _path: std::path::PathBuf) {}
+    fn poll(
+        &self,
+    ) -> Vec<(
+        riff_backend::domain::TrackId,
+        Option<riff_library::app::traits::CoverImage>,
+    )> {
+        Vec::new()
+    }
 }
 
 // Integration test helper functions

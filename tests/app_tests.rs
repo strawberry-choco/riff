@@ -635,7 +635,7 @@ mod tests {
     // [`MockLibraryQueryStore`] stands in for the store port and a real
     // `StoreGeneration` handle plays the mutation adapter's bumps.
 
-    use crate::mocks::{LibraryQueryCall, MockLibraryQueryStore};
+    use crate::mocks::{FailingQuery, LibraryQueryCall, MockLibraryQueryStore};
     use riff_backend::app::store::{LibraryQueryStore, PlaylistStore, StoreGeneration};
     use riff_backend::app::views::SessionViews;
 
@@ -1847,6 +1847,514 @@ mod tests {
         assert_eq!(reorder_tracks(&tracks, 2, 0), None, "from out of range");
         assert_eq!(reorder_tracks(&tracks, 0, 2), None, "to out of range");
         assert_eq!(reorder_tracks(&[], 0, 0), None, "empty list has no rows");
+    }
+
+    // --- Per-projection staleness contracts ----------------------------------
+    //
+    // Every Session Projection's staleness contract, proven through the
+    // `SessionViews` facade (ADR 0002): a fresh view returns the mock's
+    // deterministic rows, an unchanged generation serves the same rows
+    // without refetching, a committed mutation (a `StoreGeneration` bump)
+    // makes the next call refetch, and a failed load surfaces the facade's
+    // default while the projection keeps its previous rows readable for the
+    // retry. One section per projection; the mock stands in for the store
+    // port and the test holds the generation handle the mutation adapter
+    // would bump.
+
+    #[test]
+    fn staleness_tracks_fresh_serves_then_caches_then_refetches_after_a_bump() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            flat: flat_library(120),
+            ..Default::default()
+        });
+
+        // Fresh: the visible window and the authoritative total load once.
+        let page = views.track_list("", 0);
+        assert_eq!(page.total, 120);
+        assert_eq!(page.rows[0].id.0, "0");
+        assert_eq!(mock.window_calls(), vec![(0, 50)]);
+
+        // Unchanged generation: the same window is served from cache.
+        let _ = views.track_list("", 0);
+        assert_eq!(
+            mock.window_calls(),
+            vec![(0, 50)],
+            "fresh frame refetches nothing"
+        );
+
+        // A committed mutation bumps the generation: the next call refetches
+        // the window and recounts, so the view shows committed state.
+        {
+            let mut mock = mock.lock();
+            for n in 120..125 {
+                mock.flat.push(projection_track(n));
+            }
+        }
+        generation.bump();
+        let page = views.track_list("", 0);
+        assert_eq!(page.total, 125, "the invalidated frame recounts");
+        assert_eq!(
+            mock.window_calls(),
+            vec![(0, 50), (0, 50)],
+            "the window refetches"
+        );
+    }
+
+    #[test]
+    fn staleness_tracks_failed_load_keeps_the_stale_window_readable_for_the_retry() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            flat: flat_library(120),
+            ..Default::default()
+        });
+        let _ = views.track_list("", 0);
+
+        // A committed mutation whose window load fails: the refresh errors
+        // (the facade warns and moves on) but the stale-but-present window
+        // stays readable — the UI keeps rendering last good rows.
+        mock.lock().failing.push(FailingQuery::TracksWindow);
+        generation.bump();
+        let page = views.track_list("", 0);
+        assert_eq!(page.rows.len(), 50, "stale rows survive the failed refresh");
+        assert_eq!(page.rows[0].id.0, "0");
+
+        // The retry heals: the next call refetches and the view is fresh.
+        mock.lock().failing.clear();
+        let page = views.track_list("", 0);
+        assert_eq!(page.total, 120);
+        assert_eq!(page.rows[0].id.0, "0");
+        assert_eq!(mock.window_calls().len(), 3, "load, failed load, retry");
+    }
+
+    #[test]
+    fn staleness_browsing_fresh_serves_then_caches_then_refetches_after_a_bump() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            artists: vec![Artist {
+                name: "Alpha".to_string(),
+                albums: vec!["Alpha - One".to_string()],
+            }],
+            ..Default::default()
+        });
+
+        // Fresh: the artist list loads once; a repeat frame is served from
+        // cache.
+        assert_eq!(views.artists()[0].name, "Alpha");
+        assert_eq!(views.artists()[0].name, "Alpha");
+        assert_eq!(mock.count_of(&LibraryQueryCall::AllArtists), 1);
+
+        // A committed mutation bumps the generation: the list refetches and
+        // shows the committed rows.
+        mock.lock().artists.push(Artist {
+            name: "Beta".to_string(),
+            albums: Vec::new(),
+        });
+        generation.bump();
+        assert_eq!(views.artists().len(), 2);
+        assert_eq!(mock.count_of(&LibraryQueryCall::AllArtists), 2);
+    }
+
+    #[test]
+    fn staleness_browsing_failed_load_defaults_then_the_retry_recovers() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            artists: vec![Artist {
+                name: "Alpha".to_string(),
+                albums: vec!["Alpha - One".to_string()],
+            }],
+            ..Default::default()
+        });
+        assert_eq!(views.artists().len(), 1);
+
+        // A committed mutation whose artist load fails: the facade answers
+        // its default (an empty list) — the projection keeps its rows
+        // internally, the UI never sees the error.
+        mock.lock().failing.push(FailingQuery::AllArtists);
+        generation.bump();
+        assert!(
+            views.artists().is_empty(),
+            "a failed load renders the default, never a Result"
+        );
+
+        // The retry heals: the next call refetches the artist list.
+        mock.lock().failing.clear();
+        assert_eq!(views.artists().len(), 1);
+        assert_eq!(mock.count_of(&LibraryQueryCall::AllArtists), 3);
+    }
+
+    #[test]
+    fn staleness_folders_fresh_serves_then_caches_then_refetches_after_a_bump() {
+        let folder = Path::new("f:\\lib");
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            folder_tree_ids: vec![TrackId("f:\\lib\\a\\1.mp3".to_string())],
+            ..Default::default()
+        });
+
+        // Fresh then cached: the subtree listing loads once per generation.
+        assert_eq!(views.folder_subtree_ids(folder).len(), 1);
+        assert_eq!(views.folder_subtree_ids(folder).len(), 1);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::TrackIdsInFolderTree(
+                folder.to_path_buf()
+            )),
+            1
+        );
+
+        // A committed mutation bumps the generation: the listing refetches.
+        mock.lock()
+            .folder_tree_ids
+            .push(TrackId("f:\\lib\\b\\2.mp3".to_string()));
+        generation.bump();
+        assert_eq!(views.folder_subtree_ids(folder).len(), 2);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::TrackIdsInFolderTree(
+                folder.to_path_buf()
+            )),
+            2
+        );
+    }
+
+    #[test]
+    fn staleness_folders_failed_load_defaults_then_the_retry_recovers() {
+        let folder = Path::new("f:\\lib");
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            folder_tree_ids: vec![TrackId("f:\\lib\\a\\1.mp3".to_string())],
+            ..Default::default()
+        });
+        assert_eq!(views.folder_subtree_ids(folder).len(), 1);
+
+        // A committed mutation whose listing fails: the facade's default (an
+        // empty list) renders.
+        mock.lock().failing.push(FailingQuery::TrackIdsInFolderTree);
+        generation.bump();
+        assert!(views.folder_subtree_ids(folder).is_empty());
+
+        // The retry heals.
+        mock.lock().failing.clear();
+        assert_eq!(views.folder_subtree_ids(folder).len(), 1);
+    }
+
+    #[test]
+    fn staleness_smart_playlists_fresh_serves_then_caches_then_refetches_after_a_bump() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            smart: vec![crate::test_utils::create_test_track(
+                "f:\\sm\\1.mp3",
+                "f:\\sm\\1.mp3",
+            )],
+            ..Default::default()
+        });
+
+        // Fresh then cached: one computation per (generation, limit).
+        assert_eq!(views.smart_list(SmartPlaylistKind::MostPlayed, 50).len(), 1);
+        assert_eq!(views.smart_list(SmartPlaylistKind::MostPlayed, 50).len(), 1);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::SmartPlaylist(
+                SmartPlaylistKind::MostPlayed,
+                50
+            )),
+            1
+        );
+
+        // A committed mutation bumps the generation: the list recomputes and
+        // shows the committed rows.
+        mock.lock().smart.push(crate::test_utils::create_test_track(
+            "f:\\sm\\2.mp3",
+            "f:\\sm\\2.mp3",
+        ));
+        generation.bump();
+        assert_eq!(views.smart_list(SmartPlaylistKind::MostPlayed, 50).len(), 2);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::SmartPlaylist(
+                SmartPlaylistKind::MostPlayed,
+                50
+            )),
+            2
+        );
+    }
+
+    #[test]
+    fn staleness_smart_playlists_failed_load_defaults_then_the_retry_recovers() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            smart: vec![crate::test_utils::create_test_track(
+                "f:\\sm\\1.mp3",
+                "f:\\sm\\1.mp3",
+            )],
+            ..Default::default()
+        });
+        assert_eq!(views.smart_list(SmartPlaylistKind::MostPlayed, 50).len(), 1);
+
+        // A committed mutation whose computation fails: the facade's default
+        // (an empty list) renders.
+        mock.lock().failing.push(FailingQuery::SmartPlaylist);
+        generation.bump();
+        assert!(
+            views
+                .smart_list(SmartPlaylistKind::MostPlayed, 50)
+                .is_empty()
+        );
+
+        // The retry heals.
+        mock.lock().failing.clear();
+        assert_eq!(views.smart_list(SmartPlaylistKind::MostPlayed, 50).len(), 1);
+    }
+
+    #[test]
+    fn staleness_genres_fresh_serves_then_caches_then_refetches_after_a_bump() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            genre_counts: vec![GenreCount {
+                genre: "Jazz".to_string(),
+                tracks: 1,
+            }],
+            ..Default::default()
+        });
+
+        // Fresh then cached: one aggregation per generation.
+        assert_eq!(views.genres()[0].genre, "Jazz");
+        assert_eq!(views.genres().len(), 1);
+        assert_eq!(mock.count_of(&LibraryQueryCall::GenreCounts), 1);
+
+        // A committed mutation bumps the generation: the aggregation refetches.
+        mock.lock().genre_counts.push(GenreCount {
+            genre: "Soul".to_string(),
+            tracks: 4,
+        });
+        generation.bump();
+        assert_eq!(views.genres().len(), 2);
+        assert_eq!(mock.count_of(&LibraryQueryCall::GenreCounts), 2);
+    }
+
+    #[test]
+    fn staleness_genres_failed_load_defaults_then_the_retry_recovers() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            genre_counts: vec![GenreCount {
+                genre: "Jazz".to_string(),
+                tracks: 1,
+            }],
+            ..Default::default()
+        });
+        assert_eq!(views.genres().len(), 1);
+
+        // A committed mutation whose aggregation fails: the facade's default
+        // (an empty list) renders.
+        mock.lock().failing.push(FailingQuery::GenreCounts);
+        generation.bump();
+        assert!(views.genres().is_empty());
+
+        // The retry heals.
+        mock.lock().failing.clear();
+        assert_eq!(views.genres().len(), 1);
+    }
+
+    #[test]
+    fn staleness_counts_fresh_serves_then_caches_then_refetches_after_a_bump() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            library_counts: riff_backend::app::store::LibraryCounts {
+                tracks: 42,
+                artists: 7,
+                albums: 12,
+                genres: 5,
+            },
+            smart_list_counts: vec![(SmartPlaylistKind::Favorites, 3)],
+            ..Default::default()
+        });
+
+        // Fresh then cached: one totals query per generation.
+        assert_eq!(views.sidebar_counts(0).tracks, 42);
+        assert_eq!(views.sidebar_counts(0).tracks, 42);
+        assert_eq!(mock.count_of(&LibraryQueryCall::LibraryCounts), 1);
+        assert_eq!(mock.count_of(&LibraryQueryCall::SmartListCounts), 1);
+
+        // A committed mutation bumps the generation: the totals refetch.
+        mock.lock().library_counts.tracks = 50;
+        generation.bump();
+        assert_eq!(views.sidebar_counts(0).tracks, 50);
+        assert_eq!(mock.count_of(&LibraryQueryCall::LibraryCounts), 2);
+    }
+
+    #[test]
+    fn staleness_counts_failed_load_defaults_then_the_retry_recovers() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            library_counts: riff_backend::app::store::LibraryCounts {
+                tracks: 42,
+                ..Default::default()
+            },
+            smart_list_counts: vec![(SmartPlaylistKind::Favorites, 3)],
+            ..Default::default()
+        });
+        assert_eq!(views.sidebar_counts(0).tracks, 42);
+
+        // A committed mutation whose totals query fails: the affected count
+        // answers its default (0) while the rest of the sidebar still renders.
+        mock.lock().failing.push(FailingQuery::LibraryCounts);
+        generation.bump();
+        let counts = views.sidebar_counts(0);
+        assert_eq!(counts.tracks, 0, "the failed totals query defaults to zero");
+        assert_eq!(
+            counts.smart_lists.len(),
+            1,
+            "the sibling count still renders"
+        );
+
+        // The retry heals.
+        mock.lock().failing.clear();
+        assert_eq!(views.sidebar_counts(0).tracks, 42);
+    }
+
+    /// A [`PlaylistStore`] fake whose `load_playlists` can be switched to
+    /// fail behind a shared flag — the playlists staleness section flips it
+    /// after wiring to script a failed load against a warmed facade.
+    struct FlakyPlaylists {
+        state: Arc<Mutex<FlakyPlaylistState>>,
+    }
+
+    struct FlakyPlaylistState {
+        fail_loads: bool,
+        playlists: Vec<Playlist>,
+        load_calls: usize,
+    }
+
+    impl PlaylistStore for FlakyPlaylists {
+        fn load_playlists(&self) -> Result<Vec<Playlist>, StoreError> {
+            let mut state = self.state.lock().unwrap();
+            state.load_calls += 1;
+            if state.fail_loads {
+                return Err(StoreError::InvalidOperation("playlists boom".to_string()));
+            }
+            Ok(state.playlists.clone())
+        }
+
+        fn load_playlist_entries(
+            &self,
+            _id: &PlaylistId,
+        ) -> Result<Vec<riff_backend::app::store::PlaylistEntry>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn create_playlist(
+            &mut self,
+            _name: &str,
+            _initial_tracks: &[TrackId],
+        ) -> Result<PlaylistId, StoreError> {
+            Ok(PlaylistId("mock".to_string()))
+        }
+
+        fn rename_playlist(
+            &mut self,
+            _id: &PlaylistId,
+            _new_name: &str,
+        ) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        fn delete_playlist(&mut self, _id: &PlaylistId) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        fn add_playlist_entry(
+            &mut self,
+            _id: &PlaylistId,
+            _track: &TrackId,
+        ) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        fn remove_playlist_entries(
+            &mut self,
+            _id: &PlaylistId,
+            _track: &TrackId,
+        ) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        fn reorder_playlist_entries(
+            &mut self,
+            _id: &PlaylistId,
+            _ordered: &[TrackId],
+        ) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+    }
+
+    #[test]
+    fn staleness_playlists_fresh_serves_then_caches_then_refetches_after_a_bump() {
+        let state = Arc::new(Mutex::new(FlakyPlaylistState {
+            fail_loads: false,
+            playlists: vec![Playlist::new(
+                PlaylistId("mix".to_string()),
+                "Mix".to_string(),
+            )],
+            load_calls: 0,
+        }));
+        let generation = StoreGeneration::new();
+        let playlist_generation = StoreGeneration::new();
+        let mut views = SessionViews::new(
+            Box::new(SharedMock(Arc::new(Mutex::new(
+                MockLibraryQueryStore::default(),
+            )))),
+            Box::new(FlakyPlaylists {
+                state: Arc::clone(&state),
+            }),
+            generation,
+            playlist_generation.clone(),
+        );
+
+        // Fresh then cached: one listing per playlist generation.
+        assert_eq!(views.playlists()[0].name, "Mix");
+        assert_eq!(views.playlists()[0].name, "Mix");
+        assert_eq!(state.lock().unwrap().load_calls, 1);
+
+        // A committed playlist mutation bumps the playlist generation: the
+        // listing refetches and shows the committed rows.
+        state.lock().unwrap().playlists.push(Playlist::new(
+            PlaylistId("gym".to_string()),
+            "Gym".to_string(),
+        ));
+        playlist_generation.bump();
+        assert_eq!(views.playlists().len(), 2);
+        assert_eq!(state.lock().unwrap().load_calls, 2);
+    }
+
+    #[test]
+    fn staleness_playlists_failed_load_keeps_the_stale_list_readable_for_the_retry() {
+        let state = Arc::new(Mutex::new(FlakyPlaylistState {
+            fail_loads: false,
+            playlists: vec![Playlist::new(
+                PlaylistId("mix".to_string()),
+                "Mix".to_string(),
+            )],
+            load_calls: 0,
+        }));
+        let generation = StoreGeneration::new();
+        let playlist_generation = StoreGeneration::new();
+        let mut views = SessionViews::new(
+            Box::new(SharedMock(Arc::new(Mutex::new(
+                MockLibraryQueryStore::default(),
+            )))),
+            Box::new(FlakyPlaylists {
+                state: Arc::clone(&state),
+            }),
+            generation,
+            playlist_generation.clone(),
+        );
+        assert_eq!(views.playlists().len(), 1);
+
+        // A committed playlist mutation whose listing fails: the facade keeps
+        // the last good list — stale-but-present beats blanking the sidebar.
+        state.lock().unwrap().fail_loads = true;
+        playlist_generation.bump();
+        let playlists = views.playlists();
+        assert_eq!(playlists.len(), 1, "the stale-but-present list renders");
+        assert_eq!(playlists[0].name, "Mix");
+
+        // The retry heals: the next call refetches the committed rows.
+        {
+            let mut flaky = state.lock().unwrap();
+            flaky.fail_loads = false;
+            flaky.playlists.push(Playlist::new(
+                PlaylistId("gym".to_string()),
+                "Gym".to_string(),
+            ));
+        }
+        let playlists = views.playlists();
+        assert_eq!(playlists.len(), 2);
+        assert_eq!(state.lock().unwrap().load_calls, 3);
     }
 }
 
@@ -4911,7 +5419,7 @@ mod playback_coordinator_tests {
 /// leaves the stale-but-present value readable for the retry.
 mod generation_cache_tests {
     use riff_backend::app::store::StoreGeneration;
-    use riff_backend::app::views::GenerationCache;
+    use riff_persistence::store::GenerationCache;
 
     #[test]
     fn test_fresh_load_stamps_the_observed_epoch() {

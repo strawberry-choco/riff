@@ -322,6 +322,113 @@ impl StoreGeneration {
     }
 }
 
+/// Generic generation-keyed cache slot — the ONE implementation of "drop
+/// when the epoch moved" behind every Session Projection (ADR 0002).
+///
+/// Holds at most one `(epoch, key, value)` entry stamped with the session
+/// [`StoreGeneration`] epoch it was loaded at. Per operation a caller
+/// observes the counter exactly once ([`Self::observe`]), serves the cached
+/// value while [`Self::holds`] holds, and commits a fresh load through
+/// [`Self::store`] or [`Self::slot`] only AFTER its loader succeeded — a
+/// failed load leaves the previous entry untouched, so stale-but-present
+/// data survives to the next retry.
+///
+/// Seam machinery: projections own private instances and no code outside a
+/// projection's implementation may observe an epoch value. The canonical
+/// type lives here beside the counter it keys on, so the library, playback,
+/// and facade read seams share one audited staleness contract.
+pub struct GenerationCache<K, V> {
+    /// The session counter this cache is keyed on.
+    counter: StoreGeneration,
+    /// The single cached entry, if any.
+    loaded: Option<LoadedEntry<K, V>>,
+}
+
+/// One epoch-stamped cache entry.
+struct LoadedEntry<K, V> {
+    epoch: u64,
+    key: K,
+    value: V,
+}
+
+impl<K, V> GenerationCache<K, V> {
+    /// Key a cache on `counter`; starts empty.
+    pub fn new(counter: StoreGeneration) -> Self {
+        Self {
+            counter,
+            loaded: None,
+        }
+    }
+
+    /// The epoch currently being observed. Read ONCE per operation and
+    /// reuse it for both the freshness check and the commit stamp, so a
+    /// store commit racing mid-frame cannot split one logical read across
+    /// two generations.
+    pub fn observe(&self) -> u64 {
+        self.counter.current()
+    }
+
+    /// Whether an entry is present and stamped with `epoch`.
+    pub fn loaded_at(&self, epoch: u64) -> bool {
+        self.loaded
+            .as_ref()
+            .is_some_and(|entry| entry.epoch == epoch)
+    }
+
+    /// Whether an entry is present, stamped with `epoch`, and keyed `key`.
+    pub fn holds(&self, epoch: u64, key: &K) -> bool
+    where
+        K: PartialEq,
+    {
+        self.loaded
+            .as_ref()
+            .is_some_and(|entry| entry.epoch == epoch && entry.key == *key)
+    }
+
+    /// The cached value regardless of epoch — the stale-but-present error
+    /// fallback reads through here. Callers that need freshness guard the
+    /// read themselves: `if cache.loaded_at(cache.observe()) { cache.peek() }`.
+    pub fn peek(&self) -> Option<&V> {
+        self.loaded.as_ref().map(|entry| &entry.value)
+    }
+
+    /// Steal the cached value regardless of epoch (the fetch-then-swap
+    /// merge path reuses prior-generation rows only when they still hold).
+    pub fn take_value(&mut self) -> Option<V> {
+        self.loaded.take().map(|entry| entry.value)
+    }
+
+    /// Drop the cached entry whatever it is stamped with.
+    pub fn invalidate(&mut self) {
+        self.loaded = None;
+    }
+
+    /// Commit `value` as loaded at `epoch` for `key`. The stamp happens
+    /// here and nowhere else, so a failed load never advances it.
+    pub fn store(&mut self, epoch: u64, key: K, value: V) {
+        self.loaded = Some(LoadedEntry { epoch, key, value });
+    }
+
+    /// The mutable entry slot stamped `epoch` for `key`: drops any entry
+    /// from a different epoch or key and hands out a freshly initialized
+    /// default one. The commit step for lazily-filled multi-level bundles —
+    /// call only after a successful load.
+    pub fn slot(&mut self, epoch: u64, key: &K) -> &mut V
+    where
+        V: Default,
+        K: Clone + PartialEq,
+    {
+        if !self.holds(epoch, key) {
+            self.loaded = Some(LoadedEntry {
+                epoch,
+                key: key.clone(),
+                value: V::default(),
+            });
+        }
+        &mut self.loaded.as_mut().expect("entry just ensured").value
+    }
+}
+
 /// Port for writing the Library collection section of the Application Store.
 ///
 /// Implemented by infrastructure over a real `SQLite` connection. Every call

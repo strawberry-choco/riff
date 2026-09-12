@@ -165,7 +165,7 @@ mod tests {
         let legacy_bytes_before = std::fs::read(&legacy_path).unwrap();
 
         let (playback, library) = create_test_sessions();
-        riff_gui::ui::app::load_persisted_state(
+        riff_backend::app::preferences::Preferences::hydrate(
             &playback,
             &library,
             boxed_store(&dir).as_ref(),
@@ -376,7 +376,7 @@ mod tests {
         }
 
         let (playback, library) = create_test_sessions();
-        riff_gui::ui::app::load_persisted_state(
+        riff_backend::app::preferences::Preferences::hydrate(
             &playback,
             &library,
             boxed_store(&dir).as_ref(),
@@ -407,7 +407,7 @@ mod tests {
         }
 
         let (playback, library) = create_test_sessions();
-        riff_gui::ui::app::load_persisted_state(
+        riff_backend::app::preferences::Preferences::hydrate(
             &playback,
             &library,
             boxed_store(&dir).as_ref(),
@@ -432,7 +432,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let (playback, library) = create_test_sessions();
-        riff_gui::ui::app::load_persisted_state(
+        riff_backend::app::preferences::Preferences::hydrate(
             &playback,
             &library,
             boxed_store(&dir).as_ref(),
@@ -848,7 +848,7 @@ mod tests {
         }
 
         let (playback, library) = create_test_sessions();
-        riff_gui::ui::app::load_persisted_state(
+        riff_backend::app::preferences::Preferences::hydrate(
             &playback,
             &library,
             boxed_store(&dir).as_ref(),
@@ -3190,24 +3190,18 @@ mod tests {
 
     use crate::mocks::TransportIntent;
     /// Apply one action against fresh `PlaybackSession` + `LibrarySession` +
-    /// recording transport + mock store, returning all four for inspection.
-    /// The two session values are the type the [`apply_player_bar_action`]
-    /// function takes after the two-session split.
+    /// recording transport, returning all three for inspection. The two
+    /// session values are the type the [`apply_player_bar_action`] function
+    /// takes after the two-session split.
     #[allow(clippy::type_complexity)]
     fn applied(
         action: PlayerBarAction,
-    ) -> (
-        PlaybackSession,
-        LibrarySession,
-        crate::mocks::MockTransport,
-        crate::mocks::MockSettingsStore,
-    ) {
+    ) -> (PlaybackSession, LibrarySession, crate::mocks::MockTransport) {
         let mut playback = PlaybackSession::default();
         let mut library = LibrarySession::default();
         let transport = crate::mocks::MockTransport::new();
-        let mut store = crate::mocks::MockSettingsStore::default();
-        apply_player_bar_action(action, &mut library, &mut playback, &transport, &mut store);
-        (playback, library, transport, store)
+        apply_player_bar_action(action, &mut library, &mut playback, &transport);
+        (playback, library, transport)
     }
 
     #[test]
@@ -3220,7 +3214,7 @@ mod tests {
             (PlayerBarAction::Next, TransportIntent::Next),
             (PlayerBarAction::Stop, TransportIntent::Stop),
         ] {
-            let (_, _, transport, _) = applied(action);
+            let (_, _, transport) = applied(action);
             assert_eq!(
                 transport.recorded(),
                 vec![expected.clone()],
@@ -3231,8 +3225,7 @@ mod tests {
 
     #[test]
     fn test_play_selected_plays_the_selected_track() {
-        let (mut playback, mut library, transport, mut store) =
-            applied(PlayerBarAction::PlaySelected); // no selection yet
+        let (mut playback, mut library, transport) = applied(PlayerBarAction::PlaySelected); // no selection yet
         assert!(
             transport.recorded().is_empty(),
             "no selection means no play intent"
@@ -3244,7 +3237,6 @@ mod tests {
             &mut library,
             &mut playback,
             &transport,
-            &mut store,
         );
         assert_eq!(
             transport.recorded(),
@@ -3253,7 +3245,7 @@ mod tests {
     }
     #[test]
     fn test_seek_action_is_clamped_against_the_live_total() {
-        let (mut playback, _, _, mut store) = applied(PlayerBarAction::Pause);
+        let (mut playback, _, _) = applied(PlayerBarAction::Pause);
         playback.current_position.total = Some(std::time::Duration::from_secs(245));
 
         let transport = crate::mocks::MockTransport::new();
@@ -3262,7 +3254,6 @@ mod tests {
             &mut LibrarySession::default(),
             &mut playback,
             &transport,
-            &mut store,
         );
         assert_eq!(
             transport.recorded(),
@@ -3272,8 +3263,8 @@ mod tests {
     }
 
     #[test]
-    fn test_volume_action_updates_state_persists_and_sends_effective_volume() {
-        let (playback, _, transport, store) = applied(PlayerBarAction::SetVolume(0.7));
+    fn test_volume_action_updates_the_session_and_sends_effective_volume() {
+        let (playback, _, transport) = applied(PlayerBarAction::SetVolume(0.7));
 
         assert!(
             (playback.current_volume - 0.7).abs() < 1e-6,
@@ -3284,15 +3275,13 @@ mod tests {
             vec![TransportIntent::ApplyVolume(0.7)],
             "the engine hears the new volume"
         );
-        assert!(
-            store.calls.contains(&crate::mocks::SettingsCall::Scalars),
-            "volume changes persist through the settings store"
-        );
+        // Durability is the frame-end `Preferences` diff commit's job
+        // (covered by the app_tests preferences suite), not the handler's.
     }
 
     #[test]
     fn test_mute_toggle_sends_zero_and_keeps_slider_value() {
-        let (mut playback, _, _, mut store) = applied(PlayerBarAction::SetVolume(0.7));
+        let (mut playback, _, _) = applied(PlayerBarAction::SetVolume(0.7));
         let transport = crate::mocks::MockTransport::new();
         let mut library = LibrarySession::default();
 
@@ -3302,7 +3291,6 @@ mod tests {
             &mut library,
             &mut playback,
             &transport,
-            &mut store,
         );
         assert!(playback.muted);
         assert_eq!(
@@ -3322,7 +3310,6 @@ mod tests {
             &mut library,
             &mut playback,
             &transport,
-            &mut store,
         );
         assert!((playback.current_volume - 0.9).abs() < 1e-6);
         assert_eq!(
@@ -3336,7 +3323,6 @@ mod tests {
             &mut library,
             &mut playback,
             &transport,
-            &mut store,
         );
         assert!(!playback.muted);
         assert_eq!(
@@ -3348,7 +3334,7 @@ mod tests {
 
     #[test]
     fn test_shuffle_and_repeat_toggles_flip_queue_state() {
-        let (mut playback, _, _, mut store) = applied(PlayerBarAction::Pause);
+        let (mut playback, _, _) = applied(PlayerBarAction::Pause);
         let transport = crate::mocks::MockTransport::new();
         let mut library = LibrarySession::default();
 
@@ -3358,7 +3344,6 @@ mod tests {
             &mut library,
             &mut playback,
             &transport,
-            &mut store,
         );
         assert_ne!(playback.queue.shuffle, was, "shuffle flips");
 
@@ -3368,7 +3353,6 @@ mod tests {
             &mut library,
             &mut playback,
             &transport,
-            &mut store,
         );
         assert_eq!(
             playback.queue.repeat,
@@ -3379,15 +3363,11 @@ mod tests {
 
     #[test]
     fn test_queue_toggle_flips_the_session_flag_without_touching_playback() {
-        let (playback, library, transport, store) = applied(PlayerBarAction::ToggleQueue);
+        let (playback, library, transport) = applied(PlayerBarAction::ToggleQueue);
         assert!(library.queue_open, "the queue panel opens");
         assert!(
             transport.recorded().is_empty(),
             "opening the queue issues no engine intent"
-        );
-        assert!(
-            store.calls.is_empty(),
-            "the queue panel is session state, not persisted"
         );
         assert_eq!(
             playback.playback_state,
@@ -3395,14 +3375,13 @@ mod tests {
             "playback is untouched"
         );
 
-        let (mut playback, mut library, transport, mut store) = applied(PlayerBarAction::Pause);
+        let (mut playback, mut library, transport) = applied(PlayerBarAction::Pause);
         library.queue_open = true;
         apply_player_bar_action(
             PlayerBarAction::ToggleQueue,
             &mut library,
             &mut playback,
             &transport,
-            &mut store,
         );
         assert!(!library.queue_open, "the queue panel closes again");
     }
@@ -3410,7 +3389,7 @@ mod tests {
     #[test]
     fn test_expand_toggle_routes_through_the_now_playing_mode() {
         // From the Library view: expanding lands on the enlarged player view.
-        let (playback, library, transport, _) = applied(PlayerBarAction::ToggleExpanded);
+        let (playback, library, transport) = applied(PlayerBarAction::ToggleExpanded);
         assert_eq!(
             library.view_mode,
             riff_backend::app::state::ViewMode::NowPlaying
@@ -3426,14 +3405,13 @@ mod tests {
         );
 
         // While expanded: the same button returns to the Library view.
-        let (mut playback, mut library, transport, mut store) = applied(PlayerBarAction::Pause);
+        let (mut playback, mut library, transport) = applied(PlayerBarAction::Pause);
         library.view_mode = riff_backend::app::state::ViewMode::NowPlaying;
         apply_player_bar_action(
             PlayerBarAction::ToggleExpanded,
             &mut library,
             &mut playback,
             &transport,
-            &mut store,
         );
         assert_eq!(
             library.view_mode,
@@ -3444,14 +3422,13 @@ mod tests {
 
     #[test]
     fn test_queue_panel_row_reports_play_next_for_its_track() {
-        let (mut playback, mut library, _, mut store) = applied(PlayerBarAction::Pause);
+        let (mut playback, mut library, _) = applied(PlayerBarAction::Pause);
         let transport = crate::mocks::MockTransport::new();
         apply_player_bar_action(
             PlayerBarAction::PlayNext(TrackId("next.flac".to_string())),
             &mut library,
             &mut playback,
             &transport,
-            &mut store,
         );
         assert_eq!(
             transport.recorded(),
@@ -5001,15 +4978,13 @@ mod settings_scalar_handler_tests {
     use std::path::PathBuf;
 
     /// `apply_set_missing_artwork_strategy` writes the new strategy to the
-    /// Library Session and persists the full scalar set in one transaction.
-    /// Today the only variant is `GeneratedColour`, so re-asserting it
-    /// is tautological — the test pins the wiring for the day a second
+    /// Library Session; the frame-end `Preferences` diff commit makes it
+    /// durable. Today the only variant is `GeneratedColour`, so re-asserting
+    /// it is tautological — the test pins the wiring for the day a second
     /// variant is added (the test will then exercise a non-default value).
     #[test]
-    fn test_apply_set_missing_artwork_strategy_updates_session_and_persists() {
+    fn test_apply_set_missing_artwork_strategy_updates_the_session() {
         let mut library = LibrarySession::default();
-        let playback = PlaybackSession::default();
-        let mut store = crate::mocks::MockSettingsStore::default();
 
         // Sanity: the session starts at the default strategy.
         assert_eq!(
@@ -5018,27 +4993,12 @@ mod settings_scalar_handler_tests {
             "the default strategy is the only variant today"
         );
 
-        apply_set_missing_artwork_strategy(
-            MissingArtworkStrategy::GeneratedColour,
-            &mut library,
-            &playback,
-            &mut store,
-        );
+        apply_set_missing_artwork_strategy(MissingArtworkStrategy::GeneratedColour, &mut library);
 
         assert_eq!(
             library.scan_prefs.missing_artwork_strategy,
             MissingArtworkStrategy::GeneratedColour,
             "the handler mirrors the new strategy into the Library Session"
-        );
-        assert_eq!(
-            store.calls,
-            vec![crate::mocks::SettingsCall::Scalars],
-            "save_scalars is the one transaction the handler commits"
-        );
-        assert_eq!(
-            store.state.scalars.missing_artwork_strategy,
-            MissingArtworkStrategy::GeneratedColour,
-            "save_scalars must persist the new strategy"
         );
     }
 
@@ -5477,8 +5437,6 @@ mod playback_notice_ui_tests {
 
 #[cfg(test)]
 mod top_bar_ui_tests {
-    use super::*;
-
     // --- Content top bar (design-handoff issue 06) ------------------------------
     //
     // The library's content top bar carries the orange riff wordmark, the
@@ -5671,40 +5629,19 @@ mod top_bar_ui_tests {
         );
     }
 
-    /// A real store-backed settings port at a fresh temp location, exactly
-    /// as the UI receives it (same shape as the `tests` module's helper).
-    fn boxed_store(dir: &tempfile::TempDir) -> Box<dyn riff_backend::app::store::SettingsStore> {
-        let db_path = dir.path().join("riff.sqlite3");
-        let (changes_tx, _changes_rx) =
-            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
-        Box::new(
-            riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
-                .expect("opening a fresh store must work"),
-        )
-    }
-
     #[test]
-    fn test_top_bar_toggle_action_updates_the_session_and_persists() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = boxed_store(&dir);
-
+    fn test_top_bar_toggle_action_updates_the_session() {
         let mut library = riff_backend::app::state::LibrarySession::default();
-        let playback = riff_backend::app::state::PlaybackSession::default();
 
         riff_gui::ui::app::apply_top_bar_action(
             TopBarAction::SetLayout(BrowserLayout::Grid),
             &mut library,
-            &playback,
-            store.as_mut(),
         );
 
         // The session reflects the choice immediately (the browser column
-        // reads it), and it persists as one durable scalar transaction.
+        // reads it); the frame-end `Preferences` diff commit makes the
+        // choice survive restarts.
         assert_eq!(library.browser_layout, BrowserLayout::Grid);
-        assert_eq!(
-            store.load_settings().unwrap().scalars.browser_layout,
-            BrowserLayout::Grid.as_store_code()
-        );
     }
 }
 

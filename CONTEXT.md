@@ -72,6 +72,10 @@ _Avoid_: auto-fill, auto-populate
 Persisted user preferences that are not music-collection data, such as Library Paths, volume, Watch States, and display toggles.
 _Avoid_: config, options
 
+**Preferences**:
+The module that owns the Settings round-trip — hydrating Settings into the sessions on launch, committing session changes back to the Application Store; a preference change is durable by construction, never by call-site discipline.
+_Avoid_: settings sync, persist helper
+
 **Watch State**:
 The persisted watcher choice for a Library Path: Disabled, Enabled, or Warning carrying a diagnostic message.
 _Avoid_: watcher status

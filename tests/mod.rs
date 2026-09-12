@@ -913,20 +913,23 @@ pub mod mocks {
             )));
         }
 
-        fn set_volume(&self, session: &PlaybackSession, vol: f32) {
-            self.record(TransportIntent::ApplyVolume(vol));
-            let _ = session;
-        }
-
-        fn toggle_mute(&self, session: &PlaybackSession) {
+        fn set_volume(&self, session: &mut PlaybackSession, vol: f32) {
+            session.current_volume = vol.clamp(0.0, 1.0);
             self.record(TransportIntent::ApplyVolume(session.effective_volume()));
         }
 
-        fn toggle_shuffle(&self, session: &PlaybackSession) {
+        fn toggle_mute(&self, session: &mut PlaybackSession) {
+            session.muted = !session.muted;
+            self.record(TransportIntent::ApplyVolume(session.effective_volume()));
+        }
+
+        fn toggle_shuffle(&self, session: &mut PlaybackSession) {
+            session.queue.set_shuffle(!session.queue.shuffle);
             self.record(TransportIntent::ToggleShuffle(session.queue.shuffle));
         }
 
-        fn toggle_repeat(&self, session: &PlaybackSession) {
+        fn toggle_repeat(&self, session: &mut PlaybackSession) {
+            session.queue.toggle_repeat();
             self.record(TransportIntent::ToggleRepeat(session.queue.repeat));
         }
 

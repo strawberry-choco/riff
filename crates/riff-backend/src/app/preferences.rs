@@ -68,9 +68,11 @@ impl Preferences {
             // Restore the player-bar toggles so shuffle/repeat survive restarts.
             session.queue.shuffle = settings.scalars.shuffle;
             session.queue.repeat = repeat_mode_from_store_code(settings.scalars.repeat_mode);
-            // Route through effective_volume so a muted app (once mute
-            // state is restored) never emits sound at startup.
-            transport.set_volume(&session, session.effective_volume());
+            // Route through the transport so a SetVolume command always goes
+            // out on the first frame and the engine starts at the restored
+            // effective (mute-aware) volume.
+            let restored = settings.scalars.volume.unwrap_or(session.current_volume);
+            transport.set_volume(&mut session, restored);
         }
         {
             let mut session = library.lock_or_recover();

@@ -26,7 +26,7 @@ use riff_library::app::cover_service::{CoverPolicy, CoverService};
 use riff_library::app::scan_service::ScanService;
 
 use riff_playback::app::playback_coordinator::PlaybackCoordinator;
-use riff_playback::app::transport::{ChannelTransport, FacadeTransport, Transport};
+use riff_playback::app::transport::{ChannelTransport, Transport};
 use riff_playback::infra::audio_engine::AudioEngine;
 use riff_playback::infra::ports::DecoderFactory;
 
@@ -54,7 +54,7 @@ pub struct AppRuntime {
     /// event inbox before being forwarded to the audio engine.
     pub ui_transport: Box<dyn Transport>,
     /// The tray's command transport — same event inbox, same command channel.
-    pub tray_transport: FacadeTransport,
+    pub tray_transport: ChannelTransport,
     /// The Library Scan front-end handle (boxed into the UI; cloned by the
     /// watcher manager, which is already wired inside `spawn`).
     pub scans: ScanService,
@@ -94,14 +94,14 @@ impl AppRuntime {
             changes_rx,
         ) = open_application_store(store_path)?;
 
-        // The single shared event inbox: every `FacadeTransport` — the UI's
-        // and the tray's — records dispatched commands onto the same
-        // `Arc<Mutex<BackendEvents>>`, so dispatches land on one observable
-        // surface. The store's `StoreChanged` stream is the inbox's second
-        // input. Playback errors surface as typed notices (issue 01 seam
-        // fix): the coordinator sends pre-formatted messages over this
-        // channel and BackendEvents stamps them with playback source + error
-        // severity.
+        // The single shared event inbox: both transports — the UI's and the
+        // tray's — are recording `ChannelTransport`s over the same command
+        // channel and the same recorder closure, so dispatched commands land
+        // on one observable surface. The store's `StoreChanged` stream is the
+        // inbox's second input. Playback errors surface as typed notices
+        // (issue 01 seam fix): the coordinator sends pre-formatted messages
+        // over this channel and `BackendEvents` stamps them with playback
+        // source + error severity.
         let backend_events = Arc::new(Mutex::new(BackendEvents::default()));
         let (notice_tx, notice_rx) = unbounded::<String>();
         {
@@ -182,22 +182,22 @@ impl AppRuntime {
         let (tag_edits, covers) =
             spawn_background_services(library_query_store.clone(), library_mutation_store.clone());
 
-        // The UI's `Box<dyn Transport>` is a `FacadeTransport` wrapping the
-        // shared event inbox, so every UI intent is recorded synchronously
-        // onto it before it is forwarded. The tray's transport shares both
-        // the inbox and the command channel.
+        // The UI's `Box<dyn Transport>` and the tray's transport are
+        // `ChannelTransport`s wired with the same shared recorder, so every
+        // UI and tray intent is recorded synchronously onto the shared
+        // event inbox before it is forwarded to the engine's command
+        // channel.
         let recorder = {
             let backend_events = backend_events.clone();
-            move |cmd: riff_playback::domain::PlaybackCommand| {
-                backend_events.lock_or_recover().record_command(cmd);
+            move |cmd: &riff_playback::domain::PlaybackCommand| {
+                backend_events.lock_or_recover().record_command(cmd.clone());
             }
         };
-        let ui_transport: Box<dyn Transport> = Box::new(FacadeTransport::new(
-            ChannelTransport::new(ui_cmd_tx),
+        let ui_transport: Box<dyn Transport> = Box::new(ChannelTransport::new_recording(
+            ui_cmd_tx,
             Box::new(recorder.clone()),
         ));
-        let tray_transport =
-            FacadeTransport::new(ChannelTransport::new(tray_cmd_tx), Box::new(recorder));
+        let tray_transport = ChannelTransport::new_recording(tray_cmd_tx, Box::new(recorder));
 
         let quit_flag = Arc::new(AtomicBool::new(false));
 

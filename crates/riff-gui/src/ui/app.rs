@@ -1529,11 +1529,13 @@ pub fn commit_playlist_reorder(
 
 /// Apply one restyled player-bar action (Issue 08) through the SAME engine
 /// intents and state paths the pre-restyle controls used. Transport actions
-/// pass straight through to the Transport port; volume routes through the
-/// port's `set_volume` with [`PlaybackSession::effective_volume`] so a muted
-/// app never emits sound; seek targets re-clamp against the live track
-/// duration inside the adapter. Preference changes are session writes only —
-/// the frame-end `Preferences` commit persists them.
+/// pass straight through to the Transport port; the port's mutators complete
+/// the intent on the session themselves — `set_volume` clamps and stores the
+/// slider value, `toggle_mute` flips the flag, `toggle_shuffle`/
+/// `toggle_repeat` flip the queue state — and send the engine exactly what
+/// it needs, so a muted app never emits sound. Seek targets re-clamp against
+/// the live track duration inside the adapter. Preference changes are
+/// session writes only — the frame-end `Preferences` commit persists them.
 pub fn apply_player_bar_action(
     action: crate::ui::playerbar::PlayerBarAction,
     library: &mut LibrarySession,
@@ -1555,24 +1557,17 @@ pub fn apply_player_bar_action(
         Action::Stop => transport.stop(),
         Action::Seek(target) => transport.seek(playback, target.as_secs_f32()),
         Action::SetVolume(volume) => {
-            playback.current_volume = volume;
             // While muted the slider still edits current_volume, but the
             // engine keeps receiving 0 until unmuted.
-            transport.set_volume(playback, playback.effective_volume());
+            transport.set_volume(playback, volume);
         }
         Action::ToggleMute => {
             // Muting never moves the volume slider — it only zeroes the
             // effective volume sent to the engine; unmuting restores it.
-            playback.muted = !playback.muted;
-            transport.set_volume(playback, playback.effective_volume());
+            transport.toggle_mute(playback);
         }
-        Action::ToggleShuffle => {
-            let was = playback.queue.shuffle;
-            playback.queue.set_shuffle(!was);
-        }
-        Action::ToggleRepeat => {
-            playback.queue.toggle_repeat();
-        }
+        Action::ToggleShuffle => transport.toggle_shuffle(playback),
+        Action::ToggleRepeat => transport.toggle_repeat(playback),
         Action::ToggleQueue => {
             // The queue panel is session state, not persisted (issue 13).
             library.queue_open = !library.queue_open;

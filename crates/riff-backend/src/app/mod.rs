@@ -41,7 +41,7 @@ pub use riff_playback::app::{
     playback_coordinator::PlaybackCoordinator,
     projection::PlaybackProjection,
     state::PlaybackSession,
-    transport::{ChannelTransport, FacadeTransport, Transport, clamp_seek},
+    transport::{ChannelTransport, Transport, clamp_seek},
 };
 
 use std::sync::{Mutex, MutexGuard};

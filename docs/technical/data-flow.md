@@ -8,8 +8,8 @@ This is the central flow. It begins with a click in the UI and ends with samples
 
 ```
 User clicks "Play" in the UI (riff-gui/src/ui/)
-  -> The UI's Box<dyn Transport> dispatches the intent: the FacadeTransport
-     records the command onto the shared facade's event inbox, then the
+  -> The UI's Box<dyn Transport> dispatches the intent: the recording
+     ChannelTransport reports the command onto the shared event inbox, then the
      ChannelTransport sends PlaybackCommand::Play(track_id) on the command channel
   -> Audio engine thread (AudioEngine::run in riff-playback/src/infra/audio_engine.rs)
      receives the command

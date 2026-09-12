@@ -139,7 +139,7 @@ impl Default for ScanPrefs {
 /// Re-exported from `riff_playback::app::state` — the canonical playback
 /// session the Transport, coordinator, and engine all take. The backend keeps
 /// the library-side session types (`LibrarySession`, `ViewMode`, `UiFlags`).
-pub use riff_playback::app::state::{replaygain_factor, PlaybackSession};
+pub use riff_playback::app::state::{PlaybackSession, replaygain_factor};
 
 /// The Library Session: everything that is not playback — selection, views,
 /// search, library roots and their statuses, scan status, browse mode, UI

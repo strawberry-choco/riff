@@ -16,7 +16,7 @@
 //! Pure-Rust: uses only the port traits. Concrete decoder/output
 //! implementations live in `riff-infra`.
 
-use crate::app::state::{replaygain_factor, PlaybackSession};
+use crate::app::state::{PlaybackSession, replaygain_factor};
 use crate::domain::{PlaybackCommand, PlaybackPosition, PlaybackState, PlaybackUpdate, RepeatMode};
 use crate::infra::ports::{AudioDecoder, AudioFormatInfo, AudioOutput, DecoderFactory};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};

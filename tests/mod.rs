@@ -973,6 +973,9 @@ pub mod mocks {
         TracksWindow,
         AllArtists,
         SmartPlaylist,
+        TrackIdsInFolderTree,
+        GenreCounts,
+        LibraryCounts,
     }
 
     /// Canned [`LibraryQueryStore`] fake standing in for the Application
@@ -1156,6 +1159,9 @@ pub mod mocks {
 
         fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
             self.record(LibraryQueryCall::LibraryCounts);
+            if self.failing.contains(&FailingQuery::LibraryCounts) {
+                return Err(StoreError::InvalidOperation("counts boom".to_string()));
+            }
             Ok(self.library_counts)
         }
 
@@ -1231,6 +1237,9 @@ pub mod mocks {
 
         fn track_ids_in_folder_tree(&self, folder: &Path) -> Result<Vec<TrackId>, StoreError> {
             self.record(LibraryQueryCall::TrackIdsInFolderTree(folder.to_path_buf()));
+            if self.failing.contains(&FailingQuery::TrackIdsInFolderTree) {
+                return Err(StoreError::InvalidOperation("folder tree boom".to_string()));
+            }
             Ok(self.folder_tree_ids.clone())
         }
 
@@ -1283,6 +1292,11 @@ pub mod mocks {
 
         fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
             self.record(LibraryQueryCall::GenreCounts);
+            if self.failing.contains(&FailingQuery::GenreCounts) {
+                return Err(StoreError::InvalidOperation(
+                    "genre counts boom".to_string(),
+                ));
+            }
             Ok(self.genre_counts.clone())
         }
 

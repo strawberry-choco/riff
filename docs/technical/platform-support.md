@@ -35,7 +35,7 @@ On macOS and Windows, adding a library path opens the native OS folder dialog th
 
 ### The tray menu
 
-Where the tray is present (macOS and Windows), it is built with `tray-icon` and `muda` and offers quick playback controls — play/pause, next, previous, show/hide window, and quit. Tray menu events are dispatched on a dedicated thread (`riff-gui/src/ui/tray.rs`) that translates them into `PlaybackCommand`s on the shared command channel (through the tray's `FacadeTransport`), so the tray drives exactly the same playback path as the main window. A shared `AtomicBool` quit flag coordinates shutdown between the tray and the egui event loop.
+Where the tray is present (macOS and Windows), it is built with `tray-icon` and `muda` and offers quick playback controls — play/pause, next, previous, show/hide window, and quit. Tray menu events are dispatched on a dedicated thread (`riff-gui/src/ui/tray.rs`) that translates them into `PlaybackCommand`s on the shared command channel (through the tray's recording `ChannelTransport`), so the tray drives exactly the same playback path as the main window. A shared `AtomicBool` quit flag coordinates shutdown between the tray and the egui event loop.
 
 ## Why Linux Has No Tray
 

@@ -18,7 +18,7 @@ Every worker thread is spawned by the Composition Root — `AppRuntime::spawn` i
 | Filesystem-event forwarder | Receives raw change paths from the `notify` watcher and forwards them to the `WatcherManager`, which debounces and triggers rescans through the `ScanService`. | `composition.rs` (`spawn_fs_watcher`) |
 | Tag-edit worker | Processes `TagEdit` requests: writes file tags via lofty (source of truth) and commits the store facts as one durable change, reporting a single combined outcome. | `composition.rs` (`TagEditService::new` + worker run) |
 | Cover worker | Receives cover requests, resolves embedded/filesystem art, decodes it to RGBA through the bounded LRU in the `CoverService`, and returns results to the UI. | `composition.rs` (`CoverService::new` + worker run) |
-| Tray event thread (non-Linux) | Dispatches system tray menu events (play/pause, next, previous, show/hide, quit) through the tray's `FacadeTransport`. | `riff-gui/src/ui/tray.rs` |
+| Tray event thread (non-Linux) | Dispatches system tray menu events (play/pause, next, previous, show/hide, quit) through the tray's recording `ChannelTransport`. | `riff-gui/src/ui/tray.rs` |
 
 The audio engine thread is the heart of playback. It is a single long-lived loop that blocks on `cmd_rx.recv()` waiting for a `PlaybackCommand`. When it receives `Play(track_id)` it resolves the Track through the store query port, opens a decoder through the injected `DecoderFactory` (which mints a fresh symphonia `CodecRegistry` per decoder, so the Opus adapter decodes correctly), starts the cpal stream, and enters an inner decode loop that runs until the track ends or a command interrupts it.
 
@@ -36,7 +36,7 @@ let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
 let (update_tx, update_rx) = unbounded::<PlaybackUpdate>();
 ```
 
-One shared `SqliteStore` connection serves every store port view; both session generations (library and playlist) bump inside the store's mutation impls, and the `StoreChanged` stream feeds the event inbox. The UI's `Box<dyn Transport>` and the tray's transport are both `FacadeTransport`s wrapping the same facade, so every dispatched command is recorded onto one observable event inbox before being forwarded to the engine's command channel. The scan service, watcher manager, tag-edit service, and cover service are constructed over the real adapters here, and their workers' thread handles are owned by the runtime. The frontend then receives everything it renders with as one `AppRuntime` value.
+One shared `SqliteStore` connection serves every store port view; both session generations (library and playlist) bump inside the store's mutation impls, and the `StoreChanged` stream feeds the event inbox. The UI's `Box<dyn Transport>` and the tray's transport are both `ChannelTransport`s wired with the same shared recorder closure, so every dispatched command is reported onto one observable event inbox before being forwarded to the engine's command channel. The scan service, watcher manager, tag-edit service, and cover service are constructed over the real adapters here, and their workers' thread handles are owned by the runtime. The frontend then receives everything it renders with as one `AppRuntime` value.
 
 ## The Playback Coordinator in Detail
 

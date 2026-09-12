@@ -6,13 +6,17 @@
 //! Playback continuation stays with the `PlaybackCoordinator`, which keeps its
 //! own raw channel (out of scope here).
 //!
-//! # Why the state-coupled methods take `&PlaybackSession`
+//! # Why the mutator methods take `&mut PlaybackSession`
 //!
-//! Seek clamping, effective volume, and mute flipping read live playback
-//! session state. The transport touches only the playback session, so every
-//! UI call site hands it that session — never the library session — and no
-//! code path ever holds both session locks at once. The math still lives
-//! entirely inside the implementation, exactly as the port intends.
+//! The port promises only what the adapter delivers. `seek` and `play_pause`
+//! merely read the session (`&`); the mutators complete the user intent in
+//! place — `set_volume` clamps and stores the slider value, `toggle_mute`
+//! flips the flag, `toggle_shuffle`/`toggle_repeat` flip the queue state —
+//! and send whatever the Audio Engine actually needs (a `SetVolume` carrying
+//! the effective volume; nothing at all for shuffle/repeat, which the engine
+//! reads off the shared session). Every UI call site hands the playback
+//! session it already holds — never the library session — so no code path
+//! ever holds both session locks at once.
 
 use crate::app::state::PlaybackSession;
 use crate::domain::PlaybackCommand;
@@ -38,11 +42,15 @@ pub trait Transport: Send {
     /// Seek to `secs` within the current track (clamped to `[0, total]`).
     fn seek(&self, session: &PlaybackSession, secs: f32);
 
-    /// Set the volume to `vol` (0.0–1.0).
-    fn set_volume(&self, session: &PlaybackSession, vol: f32);
+    /// Set the volume to `vol` (0.0–1.0): clamp it, store it on the
+    /// session, and send the engine a `SetVolume` carrying the effective
+    /// (mute-aware) level.
+    fn set_volume(&self, session: &mut PlaybackSession, vol: f32);
 
-    /// Toggle mute.
-    fn toggle_mute(&self, session: &PlaybackSession);
+    /// Toggle mute: flip the session flag and send the engine a `SetVolume`
+    /// carrying the effective level, so muting zeroes and unmuting restores
+    /// what the engine hears while the slider keeps its value.
+    fn toggle_mute(&self, session: &mut PlaybackSession);
 
     /// Skip to the next track.
     fn next(&self);
@@ -55,14 +63,18 @@ pub trait Transport: Send {
     /// Add `track` to the end of the queue.
     fn add_to_queue(&self, track: TrackId);
 
-    /// Play `first`, append `rest` behind it (folder/album enqueue pattern).
+    /// Play `first`, append `rest` behind it as one batch (folder/album
+    /// enqueue pattern): one `Play` plus a single `AddMany`, so the queue
+    /// mutates once under one lock with one shuffle regeneration.
     fn play_many(&self, first: TrackId, rest: Vec<TrackId>);
 
-    /// Toggle shuffle mode.
-    fn toggle_shuffle(&self, session: &PlaybackSession);
+    /// Toggle shuffle mode on the session queue. No command is sent — the
+    /// engine reads the shared session.
+    fn toggle_shuffle(&self, session: &mut PlaybackSession);
 
-    /// Toggle repeat mode.
-    fn toggle_repeat(&self, session: &PlaybackSession);
+    /// Toggle repeat mode on the session queue (None → All → One → None).
+    /// No command is sent — the engine reads the shared session.
+    fn toggle_repeat(&self, session: &mut PlaybackSession);
 
     /// Toggle play/pause.
     fn play_pause(&self, session: &PlaybackSession);
@@ -72,17 +84,48 @@ pub trait Transport: Send {
 /// sends over the UI's command channel. All methods are infallible — a send
 /// only fails when the engine channel is closed, which is logged and then
 /// dropped (the former `let _ = send(..)` semantics).
+///
+/// The optional recorder (see [`ChannelTransport::new_recording`]) is the
+/// adapter's observability hook: when wired at the composition root, every
+/// dispatched command is reported to the backend's event inbox before it is
+/// forwarded, so mouse, keyboard, and tray paths all land on one observable
+/// surface.
+/// The adapter's observability hook: reports every dispatched command
+/// synchronously before it is forwarded (see
+/// [`ChannelTransport::new_recording`]).
+pub type DispatchRecorder = dyn Fn(&PlaybackCommand) + Send + Sync;
+
 pub struct ChannelTransport {
     cmd_tx: Sender<PlaybackCommand>,
+    recorder: Option<Box<DispatchRecorder>>,
 }
 
 impl ChannelTransport {
-    /// Create a new transport wrapping the given command channel.
+    /// Create a new transport wrapping the given command channel. Nothing
+    /// is recorded; observability is opt-in via [`Self::new_recording`].
     pub fn new(cmd_tx: Sender<PlaybackCommand>) -> Self {
-        Self { cmd_tx }
+        Self {
+            cmd_tx,
+            recorder: None,
+        }
+    }
+
+    /// Create a recording transport: every dispatched command is reported
+    /// through `recorder` synchronously before the command is forwarded.
+    /// The composition root passes a closure that pushes the command onto
+    /// the shared backend event inbox, keeping this crate decoupled from
+    /// the backend's concrete event type.
+    pub fn new_recording(cmd_tx: Sender<PlaybackCommand>, recorder: Box<DispatchRecorder>) -> Self {
+        Self {
+            cmd_tx,
+            recorder: Some(recorder),
+        }
     }
 
     fn send(&self, cmd: PlaybackCommand) {
+        if let Some(recorder) = &self.recorder {
+            recorder(&cmd);
+        }
         let _ = self.cmd_tx.send(cmd);
     }
 }
@@ -109,17 +152,14 @@ impl Transport for ChannelTransport {
         self.send(PlaybackCommand::Seek(clamped));
     }
 
-    fn set_volume(&self, _session: &PlaybackSession, vol: f32) {
-        let clamped = vol.clamp(0.0, 1.0);
-        self.send(PlaybackCommand::SetVolume(clamped));
+    fn set_volume(&self, session: &mut PlaybackSession, vol: f32) {
+        session.current_volume = vol.clamp(0.0, 1.0);
+        self.send(PlaybackCommand::SetVolume(session.effective_volume()));
     }
 
-    fn toggle_mute(&self, session: &PlaybackSession) {
-        // Volume command is a no-op for mute; the engine reads effective_volume
-        self.send(PlaybackCommand::SetVolume(session.current_volume));
-        // The session mutation happens via the coordinator's update loop,
-        // not here. The UI flips the local mute flag and the engine picks
-        // it up on the next PositionChanged.
+    fn toggle_mute(&self, session: &mut PlaybackSession) {
+        session.muted = !session.muted;
+        self.send(PlaybackCommand::SetVolume(session.effective_volume()));
     }
 
     fn next(&self) {
@@ -140,138 +180,20 @@ impl Transport for ChannelTransport {
 
     fn play_many(&self, first: TrackId, rest: Vec<TrackId>) {
         self.send(PlaybackCommand::Play(first));
-        for track in rest {
-            self.send(PlaybackCommand::AddToQueue(track));
-        }
+        self.send(PlaybackCommand::AddMany(rest));
     }
 
-    fn toggle_shuffle(&self, _session: &PlaybackSession) {
-        self.send(PlaybackCommand::PlayPause); // placeholder — actual impl in FacadeTransport
+    fn toggle_shuffle(&self, session: &mut PlaybackSession) {
+        let was = session.queue.shuffle;
+        session.queue.set_shuffle(!was);
     }
 
-    fn toggle_repeat(&self, _session: &PlaybackSession) {
-        self.send(PlaybackCommand::PlayPause); // placeholder — actual impl in FacadeTransport
+    fn toggle_repeat(&self, session: &mut PlaybackSession) {
+        session.queue.toggle_repeat();
     }
 
     fn play_pause(&self, _session: &PlaybackSession) {
         self.send(PlaybackCommand::PlayPause);
-    }
-}
-
-/// A [`Transport`] decorator that records every dispatched command *before*
-/// forwarding it to the inner transport.
-///
-/// Because every dispatch path (mouse click on the playerbar, keyboard Space
-/// shortcut, tray menu click, Now Playing button) flows through this wrapper
-/// when wired at the composition root, the recorder becomes the single
-/// observable side-effect surface for the frontend — no raw
-/// [`PlaybackCommand`] construction is needed outside the facade.
-///
-/// The recorder is an injected callback so this crate stays decoupled from
-/// the backend facade's concrete type; the composition root passes a closure
-/// that pushes the command onto the shared facade's event inbox.
-pub struct FacadeTransport {
-    inner: ChannelTransport,
-    record: Box<dyn Fn(PlaybackCommand) + Send + Sync>,
-}
-
-impl FacadeTransport {
-    /// Wrap `inner`, reporting every dispatched command through `record`
-    /// synchronously before the command is forwarded.
-    pub fn new(
-        inner: ChannelTransport,
-        record: Box<dyn Fn(PlaybackCommand) + Send + Sync>,
-    ) -> Self {
-        Self { inner, record }
-    }
-
-    /// Access the raw [`ChannelTransport`] handle. Exists so composition-root
-    /// code that still takes `Box<dyn Transport>` continues to compile
-    /// unchanged while a later issue removes the direct reference.
-    pub fn inner(&self) -> &ChannelTransport {
-        &self.inner
-    }
-}
-
-impl Transport for FacadeTransport {
-    fn play(&self, track: TrackId) {
-        (self.record)(PlaybackCommand::Play(track.clone()));
-        self.inner.play(track);
-    }
-
-    fn pause(&self) {
-        (self.record)(PlaybackCommand::Pause);
-        self.inner.pause();
-    }
-
-    fn resume(&self) {
-        (self.record)(PlaybackCommand::Resume);
-        self.inner.resume();
-    }
-
-    fn stop(&self) {
-        (self.record)(PlaybackCommand::Stop);
-        self.inner.stop();
-    }
-
-    fn seek(&self, session: &PlaybackSession, secs: f32) {
-        (self.record)(PlaybackCommand::Seek(clamp_seek(
-            secs,
-            session.current_position.total,
-        )));
-        self.inner.seek(session, secs);
-    }
-
-    fn set_volume(&self, session: &PlaybackSession, vol: f32) {
-        (self.record)(PlaybackCommand::SetVolume(vol.clamp(0.0, 1.0)));
-        self.inner.set_volume(session, vol);
-    }
-
-    fn toggle_mute(&self, session: &PlaybackSession) {
-        (self.record)(PlaybackCommand::SetVolume(session.current_volume));
-        self.inner.toggle_mute(session);
-    }
-
-    fn next(&self) {
-        (self.record)(PlaybackCommand::Next);
-        self.inner.next();
-    }
-
-    fn previous(&self) {
-        (self.record)(PlaybackCommand::Previous);
-        self.inner.previous();
-    }
-
-    fn play_next(&self, track: TrackId) {
-        (self.record)(PlaybackCommand::PlayNext(track.clone()));
-        self.inner.play_next(track);
-    }
-
-    fn add_to_queue(&self, track: TrackId) {
-        (self.record)(PlaybackCommand::AddToQueue(track.clone()));
-        self.inner.add_to_queue(track);
-    }
-
-    fn play_many(&self, first: TrackId, rest: Vec<TrackId>) {
-        (self.record)(PlaybackCommand::Play(first.clone()));
-        self.inner.play_many(first, rest);
-    }
-
-    fn toggle_shuffle(&self, session: &PlaybackSession) {
-        // Shuffle state lives in the session queue and is mutated by the UI
-        // layer directly; no engine command exists to record.
-        let _ = session;
-    }
-
-    fn toggle_repeat(&self, session: &PlaybackSession) {
-        // Repeat state lives in the session queue and is mutated by the UI
-        // layer directly; no engine command exists to record.
-        let _ = session;
-    }
-
-    fn play_pause(&self, session: &PlaybackSession) {
-        (self.record)(PlaybackCommand::PlayPause);
-        self.inner.play_pause(session);
     }
 }
 
@@ -331,5 +253,164 @@ mod tests {
             clamp_seek(f32::NAN, Some(std::time::Duration::from_mins(1))),
             std::time::Duration::ZERO
         );
+    }
+
+    // --- Adapter behavior over a real command channel -----------------------
+
+    use riff_persistence::track::TrackId;
+
+    fn id(s: &str) -> TrackId {
+        TrackId(s.to_string())
+    }
+
+    /// A transport wired to an inspectable command receiver.
+    fn transport() -> (
+        ChannelTransport,
+        crossbeam_channel::Receiver<PlaybackCommand>,
+    ) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        (ChannelTransport::new(tx), rx)
+    }
+
+    #[test]
+    fn set_volume_sets_the_field_clamps_and_sends_the_effective_volume() {
+        let (t, rx) = transport();
+        let mut session = crate::app::state::PlaybackSession {
+            muted: true,
+            ..crate::app::state::PlaybackSession::default()
+        };
+
+        t.set_volume(&mut session, 2.0);
+        assert!(
+            (session.current_volume - 1.0).abs() < f32::EPSILON,
+            "the volume clamps to 1.0"
+        );
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(PlaybackCommand::SetVolume(0.0)),
+            "a muted app sends the muted (zero) effective volume"
+        );
+
+        session.muted = false;
+        t.set_volume(&mut session, 0.7);
+        assert!((session.current_volume - 0.7).abs() < f32::EPSILON);
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(PlaybackCommand::SetVolume(0.7)),
+            "the engine hears the new effective volume"
+        );
+    }
+
+    #[test]
+    fn toggle_mute_flips_the_flag_and_sends_the_effective_volume() {
+        let (t, rx) = transport();
+        let mut session = crate::app::state::PlaybackSession {
+            current_volume: 0.7,
+            ..crate::app::state::PlaybackSession::default()
+        };
+
+        t.toggle_mute(&mut session);
+        assert!(session.muted);
+        assert!(
+            (session.current_volume - 0.7).abs() < f32::EPSILON,
+            "muting keeps the slider value"
+        );
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(PlaybackCommand::SetVolume(0.0)),
+            "muting zeroes what the engine hears"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "one toggle sends exactly one command"
+        );
+
+        t.toggle_mute(&mut session);
+        assert!(!session.muted);
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(PlaybackCommand::SetVolume(0.7)),
+            "unmuting restores the slider's volume"
+        );
+    }
+
+    #[test]
+    fn toggle_shuffle_flips_the_session_and_sends_nothing() {
+        let (t, rx) = transport();
+        let mut session = crate::app::state::PlaybackSession::default();
+
+        t.toggle_shuffle(&mut session);
+        assert!(session.queue.shuffle, "shuffle flips on");
+        assert!(
+            rx.try_recv().is_err(),
+            "the engine reads the shared session — no command exists to send"
+        );
+
+        t.toggle_shuffle(&mut session);
+        assert!(!session.queue.shuffle, "shuffle flips back off");
+    }
+
+    #[test]
+    fn toggle_repeat_flips_the_session_and_sends_nothing() {
+        let (t, rx) = transport();
+        let mut session = crate::app::state::PlaybackSession::default();
+
+        t.toggle_repeat(&mut session);
+        assert_eq!(session.queue.repeat, crate::domain::RepeatMode::All);
+        assert!(
+            rx.try_recv().is_err(),
+            "the engine reads the shared session — no command exists to send"
+        );
+
+        t.toggle_repeat(&mut session);
+        assert_eq!(session.queue.repeat, crate::domain::RepeatMode::One);
+    }
+
+    #[test]
+    fn play_many_sends_exactly_play_then_add_many() {
+        let (t, rx) = transport();
+
+        t.play_many(id("a"), vec![id("b"), id("c")]);
+
+        assert_eq!(rx.try_recv().ok(), Some(PlaybackCommand::Play(id("a"))));
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(PlaybackCommand::AddMany(vec![id("b"), id("c")])),
+            "the batch mutates the queue once under one lock"
+        );
+        assert!(rx.try_recv().is_err(), "no per-track AddToQueue fan-out");
+    }
+
+    #[test]
+    fn new_recording_reports_every_dispatched_command() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_for_recorder = std::sync::Arc::clone(&sink);
+        let recorder = Box::new(move |cmd: &PlaybackCommand| {
+            sink_for_recorder.lock().unwrap().push(format!("{cmd:?}"));
+        });
+        let t = ChannelTransport::new_recording(tx, recorder);
+        let mut session = crate::app::state::PlaybackSession::default();
+
+        t.play(id("a"));
+        t.set_volume(&mut session, 0.5);
+
+        let seen = sink.lock().unwrap();
+        assert_eq!(seen.len(), 2, "every dispatch is recorded");
+        assert!(
+            seen[0].starts_with("Play("),
+            "the play command is recorded first"
+        );
+        assert!(seen[1].starts_with("SetVolume("), "then the volume command");
+        assert_eq!(rx.try_recv().ok(), Some(PlaybackCommand::Play(id("a"))));
+    }
+
+    #[test]
+    fn plain_new_records_nothing() {
+        let (t, _rx) = transport();
+        let mut session = crate::app::state::PlaybackSession::default();
+        // Compiles and runs without a recorder; observability is opt-in.
+        t.play_pause(&session);
+        t.set_volume(&mut session, 0.5);
     }
 }

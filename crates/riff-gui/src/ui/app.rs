@@ -11,10 +11,11 @@ use riff_backend::app::MutexExt;
 use riff_backend::app::Transport;
 pub use riff_backend::app::cover_service::{COVER_CACHE_CAP, Covers, lru_insert};
 use riff_backend::app::events::BackendEvents;
+use riff_backend::app::preferences::Preferences;
 use riff_backend::app::scan_service::{ScanOutcome, Scans};
 use riff_backend::app::state::{
     BrowseMode, BrowserSelection, LibrarySection, LibrarySession, LibraryStatus, PlaybackSession,
-    UiFlags, ViewMode,
+    ViewMode,
 };
 use riff_backend::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
 use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
@@ -22,7 +23,7 @@ use riff_backend::app::traits::TagEdit;
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
 use riff_backend::domain::{
-    PlaybackState, Playlist, PlaylistId, RepeatMode, SmartPlaylistKind, Track, TrackId,
+    PlaybackState, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -174,10 +175,14 @@ pub struct RiffApp {
     global_search_focus: bool,
     first_frame: bool,
     pub(crate) watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
-    /// The Application Store's settings section. The UI reads settings from
-    /// it on the first frame and writes every preference change straight
-    /// back, so preferences survive restarts through the store.
+    /// The Application Store's settings section. `Preferences` reads it on
+    /// the first frame and diff-commits the sessions back at frame end, so
+    /// preferences survive restarts through the store.
     pub(crate) settings_store: Box<dyn SettingsStore>,
+    /// The Settings round-trip owner: hydrates the stored Settings into the
+    /// sessions on launch and diff-commits session changes back at frame
+    /// end, so a preference change is durable by construction.
+    prefs: Preferences,
     /// The Application Store's playlists section. Every playlist mutation
     /// commits through it as one immediate durable transaction; its adapter
     /// owns the session playlist generation whose bumps invalidate the
@@ -277,6 +282,7 @@ impl RiffApp {
             first_frame: true,
             watcher_manager,
             settings_store,
+            prefs: Preferences::default(),
             playlist_store,
             library_mutations,
             views,
@@ -739,7 +745,7 @@ impl eframe::App for RiffApp {
         let library_arc = self.library.clone();
 
         if self.first_frame {
-            load_persisted_state(
+            self.prefs = Preferences::hydrate(
                 &playback_arc,
                 &library_arc,
                 self.settings_store.as_ref(),
@@ -816,14 +822,7 @@ impl eframe::App for RiffApp {
                     &mut self.titlebar_actions,
                 );
                 for action in self.titlebar_actions.drain(..) {
-                    apply_titlebar_action(
-                        action,
-                        ui.ctx(),
-                        &mut library,
-                        &playback,
-                        &mut self.theme,
-                        self.settings_store.as_mut(),
-                    );
+                    apply_titlebar_action(action, ui.ctx(), &mut library, &mut self.theme);
                 }
             });
 
@@ -844,7 +843,7 @@ impl eframe::App for RiffApp {
         // a second content strip above the library stage (open decision 4
         // keeps the frameless chrome above it).
         if library.view_mode == ViewMode::Library {
-            self.render_top_bar(ui, &mut library, &playback);
+            self.render_top_bar(ui, &mut library);
         }
 
         // Bottom 88px strip: transport + progress + volume.
@@ -876,13 +875,18 @@ impl eframe::App for RiffApp {
         // --- EDIT TAGS MODAL ---
         self.show_tag_edit_modal(ui.ctx());
 
-        // --- WRITE BACK: the library guard is no longer live, so the two
-        // session locks never overlap. The snapshot carries every playback
-        // field, but only the UI-owned ones were ever written by the frame —
-        // volume, mute, replay-gain, shuffle, repeat. The engine and
-        // coordinator own `playback_state`, `current_position`, and the
-        // queue's traversal state, so a whole-session replace here would
-        // clobber their work between frames.
+        // --- WRITE BACK: the library guard is still live here, so the
+        // frame-end Preferences commit sees the frame's playback snapshot
+        // (volume, mute, replay-gain, shuffle, repeat) together with the
+        // library session's preference fields, and lands any drift in the
+        // store — durability by construction, no per-handler call sites.
+        // Then the guard is dropped and only the UI-owned playback fields
+        // are written back: the engine and coordinator own `playback_state`,
+        // `current_position`, and the queue's traversal state, so a
+        // whole-session replace here would clobber their work between
+        // frames.
+        self.prefs
+            .commit_if_changed(&playback, &library, self.settings_store.as_mut());
         drop(library);
         {
             let mut live = self.playback.lock_or_recover();
@@ -902,30 +906,19 @@ impl eframe::App for RiffApp {
 /// Apply one [`crate::ui::chrome::TitleBarAction`] to app state and viewport
 /// commands (Issue 06). Window controls route through the same vetoable
 /// viewport commands as their issue-04 counterparts, so close-to-tray
-/// (REQ-SI-001) keeps working from the custom chrome.
+/// (REQ-SI-001) keeps working from the custom chrome. Preference changes are
+/// session writes only — the frame-end `Preferences` commit persists them.
 fn apply_titlebar_action(
     action: crate::ui::chrome::TitleBarAction,
     ctx: &egui::Context,
     library: &mut LibrarySession,
-    playback: &PlaybackSession,
     theme: &mut ThemeState,
-    store: &mut dyn SettingsStore,
 ) {
     use crate::ui::chrome::{NavDestination, TitleBarAction as Action, WindowControl};
     match action {
         Action::ToggleTheme => theme.dark = !theme.dark,
         Action::ToggleAdvanced => {
             library.ui_flags.advanced_mode = !library.ui_flags.advanced_mode;
-            persist_scalars(
-                store,
-                playback.current_volume,
-                library.ui_flags,
-                playback.replaygain_enabled,
-                playback.queue.shuffle,
-                playback.queue.repeat,
-                library.browser_layout,
-                &library.scan_prefs,
-            );
         }
         Action::ToggleNowPlaying => {
             // Now Playing replaces the active view; leaving it returns to the
@@ -1371,29 +1364,14 @@ fn apply_detail_navigation(action: crate::ui::detail::DetailAction, library: &mu
     }
 }
 
-/// Apply one [`crate::ui::topbar::TopBarAction`] (handoff issue 06) through
-/// the SAME store flows the other preferences use: the layout lands on the
-/// library session — the browser column (issue 08) reads it — and commits as
-/// one durable scalar transaction so the choice survives restarts.
-pub fn apply_top_bar_action(
-    action: crate::ui::topbar::TopBarAction,
-    library: &mut LibrarySession,
-    playback: &PlaybackSession,
-    store: &mut dyn SettingsStore,
-) {
+/// Apply one [`crate::ui::topbar::TopBarAction`] (handoff issue 06): the
+/// layout lands on the library session — the browser column (issue 08) reads
+/// it, and the frame-end `Preferences` commit makes the choice survive
+/// restarts.
+pub fn apply_top_bar_action(action: crate::ui::topbar::TopBarAction, library: &mut LibrarySession) {
     match action {
         crate::ui::topbar::TopBarAction::SetLayout(layout) => {
             library.browser_layout = layout;
-            persist_scalars(
-                store,
-                playback.current_volume,
-                library.ui_flags,
-                playback.replaygain_enabled,
-                playback.queue.shuffle,
-                playback.queue.repeat,
-                layout,
-                &library.scan_prefs,
-            );
         }
     }
 }
@@ -1415,47 +1393,6 @@ pub fn apply_now_playing_action(
         Action::Close => library.view_mode = ViewMode::Library,
         Action::PlayNext(track_id) => transport.play_next(track_id),
         Action::Seek(duration) => transport.seek(playback, duration.as_secs_f32()),
-    }
-}
-
-/// Commit the current scalar preferences as one small durable store
-/// transaction; failures are logged, the in-memory change stands. The
-/// scalar values are read from the playback and library sessions by the
-/// caller, so this helper no longer needs a session reference.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "each parameter is one persisted scalar row field"
-)]
-fn persist_scalars(
-    store: &mut dyn SettingsStore,
-    volume: f32,
-    ui_flags: UiFlags,
-    replaygain_enabled: bool,
-    shuffle: bool,
-    repeat: RepeatMode,
-    browser_layout: riff_backend::app::state::BrowserLayout,
-    scan_prefs: &riff_backend::app::state::ScanPrefs,
-) {
-    let repeat_mode = match repeat {
-        RepeatMode::None => 0,
-        RepeatMode::All => 1,
-        RepeatMode::One => 2,
-    };
-    let scalars = riff_backend::app::state::ScalarSettings {
-        volume: Some(volume),
-        advanced_mode: ui_flags.advanced_mode,
-        high_contrast: ui_flags.high_contrast,
-        replaygain_enabled,
-        shuffle,
-        repeat_mode,
-        browser_layout: browser_layout.as_store_code(),
-        skip_hidden_files: scan_prefs.skip_hidden_files,
-        scan_formats: scan_prefs.scan_formats.clone(),
-        read_embedded_artwork: scan_prefs.read_embedded_artwork,
-        missing_artwork_strategy: scan_prefs.missing_artwork_strategy,
-    };
-    if let Err(e) = store.save_scalars(&scalars) {
-        tracing::warn!("Failed to save settings: {e}");
     }
 }
 
@@ -1595,13 +1532,13 @@ pub fn commit_playlist_reorder(
 /// pass straight through to the Transport port; volume routes through the
 /// port's `set_volume` with [`PlaybackSession::effective_volume`] so a muted
 /// app never emits sound; seek targets re-clamp against the live track
-/// duration inside the adapter.
+/// duration inside the adapter. Preference changes are session writes only —
+/// the frame-end `Preferences` commit persists them.
 pub fn apply_player_bar_action(
     action: crate::ui::playerbar::PlayerBarAction,
     library: &mut LibrarySession,
     playback: &mut PlaybackSession,
     transport: &dyn Transport,
-    store: &mut dyn SettingsStore,
 ) {
     use crate::ui::playerbar::PlayerBarAction as Action;
     match action {
@@ -1619,16 +1556,6 @@ pub fn apply_player_bar_action(
         Action::Seek(target) => transport.seek(playback, target.as_secs_f32()),
         Action::SetVolume(volume) => {
             playback.current_volume = volume;
-            persist_scalars(
-                store,
-                playback.current_volume,
-                library.ui_flags,
-                playback.replaygain_enabled,
-                playback.queue.shuffle,
-                playback.queue.repeat,
-                library.browser_layout,
-                &library.scan_prefs,
-            );
             // While muted the slider still edits current_volume, but the
             // engine keeps receiving 0 until unmuted.
             transport.set_volume(playback, playback.effective_volume());
@@ -1642,29 +1569,9 @@ pub fn apply_player_bar_action(
         Action::ToggleShuffle => {
             let was = playback.queue.shuffle;
             playback.queue.set_shuffle(!was);
-            persist_scalars(
-                store,
-                playback.current_volume,
-                library.ui_flags,
-                playback.replaygain_enabled,
-                playback.queue.shuffle,
-                playback.queue.repeat,
-                library.browser_layout,
-                &library.scan_prefs,
-            );
         }
         Action::ToggleRepeat => {
             playback.queue.toggle_repeat();
-            persist_scalars(
-                store,
-                playback.current_volume,
-                library.ui_flags,
-                playback.replaygain_enabled,
-                playback.queue.shuffle,
-                playback.queue.repeat,
-                library.browser_layout,
-                &library.scan_prefs,
-            );
         }
         Action::ToggleQueue => {
             // The queue panel is session state, not persisted (issue 13).
@@ -1683,82 +1590,9 @@ pub fn apply_player_bar_action(
     }
 }
 
-/// First-frame restore. Every user preference hydrates from the typed
-/// settings tables via [`SettingsStore`]; the Library collection and the
-/// user playlists need no hydration step at all — every view reads them
-/// live through the [`SessionViews`] seam, which serves the Application
-/// Store directly on its first call. The legacy JSON cache is never read
-/// or written. Public so the restore contract is testable headlessly.
-pub fn load_persisted_state(
-    playback: &Arc<Mutex<PlaybackSession>>,
-    library: &Arc<Mutex<LibrarySession>>,
-    store: &dyn SettingsStore,
-    transport: &dyn Transport,
-) {
-    let settings = match store.load_settings() {
-        Ok(settings) => settings,
-        Err(e) => {
-            tracing::warn!("Failed to load settings from the store: {e}");
-            riff_backend::app::store::Settings::default()
-        }
-    };
-
-    // Two session locks in sequence (contract: never both at once).
-    // Playback first so the volume path lands with `replaygain_enabled`
-    // already set; library second for paths, statuses, watch states, and
-    // UI flags.
-    {
-        let mut playback_session = playback.lock_or_recover();
-        if let Some(vol) = settings.scalars.volume {
-            playback_session.current_volume = vol;
-        }
-        playback_session.replaygain_enabled = settings.scalars.replaygain_enabled;
-        // Restore the player-bar toggles so shuffle/repeat survive restarts.
-        playback_session.queue.shuffle = settings.scalars.shuffle;
-        playback_session.queue.repeat = match settings.scalars.repeat_mode {
-            1 => RepeatMode::All,
-            2 => RepeatMode::One,
-            _ => RepeatMode::None,
-        };
-        // Route through effective_volume so a muted app (once mute
-        // state is restored) never emits sound at startup.
-        transport.set_volume(&playback_session, playback_session.effective_volume());
-    }
-    {
-        let mut library_session = library.lock_or_recover();
-        if !settings.library_paths.is_empty() {
-            for path in &settings.library_paths {
-                let status = if path.exists() {
-                    LibraryStatus::Idle
-                } else {
-                    LibraryStatus::Unavailable
-                };
-                library_session
-                    .library_statuses
-                    .insert(path.clone(), status);
-            }
-            library_session.library_paths = settings.library_paths;
-        }
-
-        library_session.watch_states = settings.watch_states;
-
-        library_session.ui_flags.advanced_mode = settings.scalars.advanced_mode;
-        library_session.ui_flags.high_contrast = settings.scalars.high_contrast;
-        library_session.browser_layout = riff_backend::app::state::BrowserLayout::from_store_code(
-            settings.scalars.browser_layout,
-        );
-        library_session.scan_prefs = riff_backend::app::state::ScanPrefs {
-            skip_hidden_files: settings.scalars.skip_hidden_files,
-            scan_formats: settings.scalars.scan_formats,
-            read_embedded_artwork: settings.scalars.read_embedded_artwork,
-            missing_artwork_strategy: settings.scalars.missing_artwork_strategy,
-        };
-    }
-}
-
 /// Global keyboard shortcuts: Ctrl+K focuses the global search (issue 06),
 /// and Space toggles playback. Public so the shortcut contract is testable
-/// headlessly (precedent: [`load_persisted_state`]).
+/// headlessly (precedent: [`Preferences::hydrate`]).
 pub fn handle_keyboard_shortcuts(
     ctx: &egui::Context,
     playback: &PlaybackSession,
@@ -1849,12 +1683,7 @@ impl RiffApp {
     /// the whole library; toggles land on the persisted browser layout via
     /// [`apply_top_bar_action`], and a pending Ctrl+K request focuses the
     /// field on the frame it lands.
-    fn render_top_bar(
-        &mut self,
-        ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-        playback: &PlaybackSession,
-    ) {
+    fn render_top_bar(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
         egui::Panel::top("top_bar")
             .exact_size(theme::TOPBAR_H)
             .show(ui, |ui| {
@@ -1877,7 +1706,7 @@ impl RiffApp {
                 }
             });
         for action in self.topbar_actions.drain(..) {
-            apply_top_bar_action(action, library, playback, self.settings_store.as_mut());
+            apply_top_bar_action(action, library);
         }
     }
 
@@ -1965,13 +1794,7 @@ impl RiffApp {
             );
         }
         for action in self.playerbar_actions.drain(..) {
-            apply_player_bar_action(
-                action,
-                library,
-                playback,
-                self.transport.as_ref(),
-                self.settings_store.as_mut(),
-            );
+            apply_player_bar_action(action, library, playback, self.transport.as_ref());
         }
     }
 }

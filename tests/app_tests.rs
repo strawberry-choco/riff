@@ -587,9 +587,9 @@ mod tests {
     #[test]
     fn test_mock_settings_store_drives_hydration_and_persistence() {
         use riff_backend::app::store::SettingsStore;
-        // App-layer orchestration through the port: the same flow
-        // `load_persisted_state` + the save call sites use, driven by a mock so
-        // no real SQL is involved.
+        // App-layer orchestration through the port: the same flow the
+        // `Preferences` round-trip uses, driven by a mock so no real SQL is
+        // involved.
         let mut mock = crate::mocks::MockSettingsStore::default();
 
         // Hydration: the mock starts with defaults.
@@ -5523,5 +5523,153 @@ mod generation_cache_tests {
         cache.invalidate();
         assert_eq!(cache.peek(), None);
         assert!(!cache.loaded_at(epoch));
+    }
+}
+
+// --- Preferences: the Settings round-trip (hydrate + diff commit) -----------
+//
+// A preference change is durable by construction: `Preferences::hydrate`
+// loads the stored Settings into both sessions once at startup and seeds
+// the last-committed snapshot, and `commit_if_changed` at frame end saves
+// exactly when the sessions drifted from that snapshot. These tests pin the
+// diff semantics over the recording mock store.
+
+#[cfg(test)]
+mod preferences_tests {
+    use std::sync::{Arc, Mutex};
+
+    use riff_backend::app::MutexExt;
+    use riff_backend::app::preferences::Preferences;
+    use riff_backend::app::state::{LibrarySession, PlaybackSession};
+
+    use crate::mocks::{MockSettingsStore, MockTransport, SettingsCall};
+
+    /// Hydrate from `store`, returning the hydrated playback snapshot, the
+    /// live library session, and the preferences handle.
+    fn hydrate_from(
+        store: &MockSettingsStore,
+        playback: &Arc<Mutex<PlaybackSession>>,
+        library: &Arc<Mutex<LibrarySession>>,
+    ) -> Preferences {
+        Preferences::hydrate(playback, library, store, &MockTransport::new())
+    }
+
+    #[test]
+    fn hydrate_lands_the_stored_scalars_in_both_sessions() {
+        let mut store = MockSettingsStore::default();
+        store.state.scalars.volume = Some(0.4);
+        store.state.scalars.advanced_mode = true;
+        store.state.scalars.browser_layout =
+            riff_backend::app::state::BrowserLayout::Grid.as_store_code();
+
+        let playback = Arc::new(Mutex::new(PlaybackSession::default()));
+        let library = Arc::new(Mutex::new(LibrarySession::default()));
+        let _prefs = hydrate_from(&store, &playback, &library);
+
+        assert_eq!(playback.lock_or_recover().current_volume, 0.4);
+        assert!(library.lock_or_recover().ui_flags.advanced_mode);
+        assert_eq!(
+            library.lock_or_recover().browser_layout,
+            riff_backend::app::state::BrowserLayout::Grid
+        );
+    }
+
+    #[test]
+    fn the_first_commit_after_hydrate_is_a_no_op() {
+        let mut store = MockSettingsStore::default();
+        store.state.scalars.volume = Some(0.4);
+
+        let playback = Arc::new(Mutex::new(PlaybackSession::default()));
+        let library = Arc::new(Mutex::new(LibrarySession::default()));
+        let mut prefs = hydrate_from(&store, &playback, &library);
+
+        // Frame end with zero user changes: what the sessions hold is exactly
+        // what the store already holds, so nothing is saved.
+        let playback = playback.lock_or_recover().clone();
+        prefs.commit_if_changed(&playback, &library.lock_or_recover(), &mut store);
+        assert!(
+            store.calls.is_empty(),
+            "no change since hydrate must not commit, got {:?}",
+            store.calls
+        );
+    }
+
+    #[test]
+    fn one_changed_preference_commits_exactly_once() {
+        let store = MockSettingsStore::default();
+        let playback = Arc::new(Mutex::new(PlaybackSession::default()));
+        let library = Arc::new(Mutex::new(LibrarySession::default()));
+        let mut prefs = hydrate_from(&store, &playback, &library);
+
+        let mut snapshot = playback.lock_or_recover().clone();
+        snapshot.current_volume = 0.7;
+        let mut store = MockSettingsStore::default();
+        prefs.commit_if_changed(&snapshot, &library.lock_or_recover(), &mut store);
+
+        assert_eq!(store.calls, vec![SettingsCall::Scalars]);
+        assert_eq!(store.state.scalars.volume, Some(0.7));
+
+        // The same state again: the commit landed, so nothing more to save.
+        prefs.commit_if_changed(&snapshot, &library.lock_or_recover(), &mut store);
+        assert_eq!(store.calls, vec![SettingsCall::Scalars]);
+    }
+
+    #[test]
+    fn two_changes_in_one_frame_commit_once_with_the_final_values() {
+        let store = MockSettingsStore::default();
+        let playback = Arc::new(Mutex::new(PlaybackSession::default()));
+        let library = Arc::new(Mutex::new(LibrarySession::default()));
+        let mut prefs = hydrate_from(&store, &playback, &library);
+
+        // One "frame": the volume drags to 0.3 and the browser layout flips
+        // to grid before the frame-end commit runs.
+        let mut snapshot = playback.lock_or_recover().clone();
+        snapshot.current_volume = 0.3;
+        let mut library = library.lock_or_recover();
+        library.browser_layout = riff_backend::app::state::BrowserLayout::Grid;
+
+        let mut store = MockSettingsStore::default();
+        prefs.commit_if_changed(&snapshot, &library, &mut store);
+
+        assert_eq!(store.calls, vec![SettingsCall::Scalars]);
+        assert_eq!(store.state.scalars.volume, Some(0.3));
+        assert_eq!(
+            store.state.scalars.browser_layout,
+            riff_backend::app::state::BrowserLayout::Grid.as_store_code()
+        );
+    }
+
+    #[test]
+    fn a_failed_commit_keeps_the_change_pending_for_the_next_frame() {
+        let store = MockSettingsStore::default();
+        let playback = Arc::new(Mutex::new(PlaybackSession::default()));
+        let library = Arc::new(Mutex::new(LibrarySession::default()));
+        let mut prefs = hydrate_from(&store, &playback, &library);
+
+        let snapshot = playback.lock_or_recover().clone();
+        let mut snapshot = snapshot;
+        snapshot.current_volume = 0.9;
+
+        let mut store = MockSettingsStore {
+            fail: true,
+            ..MockSettingsStore::default()
+        };
+        prefs.commit_if_changed(&snapshot, &library.lock_or_recover(), &mut store);
+        assert!(
+            store.calls.is_empty(),
+            "a failed save records no successful commit"
+        );
+
+        // The store recovers: the still-pending change commits on a later
+        // frame without any new user action.
+        store.fail = false;
+        prefs.commit_if_changed(&snapshot, &library.lock_or_recover(), &mut store);
+        assert_eq!(store.calls, vec![SettingsCall::Scalars]);
+        assert_eq!(store.state.scalars.volume, Some(0.9));
+
+        // And the frame after that is a no-op again.
+        store.calls.clear();
+        prefs.commit_if_changed(&snapshot, &library.lock_or_recover(), &mut store);
+        assert!(store.calls.is_empty());
     }
 }

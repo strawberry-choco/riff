@@ -387,51 +387,17 @@ pub enum SettingsAction {
     SetMissingArtworkStrategy(MissingArtworkStrategy),
 }
 
-/// Build the one-row `ScalarSettings` from the current sessions, the same
-/// fields `RiffApp::persist_scalars` reads. Extracted so the missing-artwork
-/// handler (and any future per-preference handler) can persist without going
-/// through the full `apply_settings_action` seam.
-pub(crate) fn build_scalar_settings(
-    playback: &PlaybackSession,
-    library: &LibrarySession,
-) -> riff_backend::app::state::ScalarSettings {
-    let repeat_mode = match playback.queue.repeat {
-        riff_backend::domain::RepeatMode::None => 0,
-        riff_backend::domain::RepeatMode::All => 1,
-        riff_backend::domain::RepeatMode::One => 2,
-    };
-    riff_backend::app::state::ScalarSettings {
-        volume: Some(playback.current_volume),
-        advanced_mode: library.ui_flags.advanced_mode,
-        high_contrast: library.ui_flags.high_contrast,
-        replaygain_enabled: playback.replaygain_enabled,
-        shuffle: playback.queue.shuffle,
-        repeat_mode,
-        browser_layout: library.browser_layout.as_store_code(),
-        skip_hidden_files: library.scan_prefs.skip_hidden_files,
-        scan_formats: library.scan_prefs.scan_formats.clone(),
-        read_embedded_artwork: library.scan_prefs.read_embedded_artwork,
-        missing_artwork_strategy: library.scan_prefs.missing_artwork_strategy,
-    }
-}
-
 /// Apply [`SettingsAction::SetMissingArtworkStrategy`]: write the new
-/// strategy to the Library Session, then commit the full scalar set in one
-/// small durable transaction. `pub(crate)` so integration tests in `tests/`
-/// can drive the handler without constructing a `RiffApp` (the rest of
-/// `apply_settings_action`'s arms need the full app — only the scalar
-/// preferences are testable headlessly).
+/// strategy to the Library Session; the frame-end `Preferences` commit makes
+/// it durable. `pub` so integration tests in `tests/` can drive the handler
+/// without constructing a `RiffApp` (the rest of `apply_settings_action`'s
+/// arms need the full app — only the scalar preferences are testable
+/// headlessly).
 pub fn apply_set_missing_artwork_strategy(
     strategy: MissingArtworkStrategy,
     library: &mut LibrarySession,
-    playback: &PlaybackSession,
-    store: &mut dyn SettingsStore,
 ) {
     library.scan_prefs.missing_artwork_strategy = strategy;
-    let scalars = build_scalar_settings(playback, library);
-    if let Err(e) = store.save_scalars(&scalars) {
-        tracing::warn!("Failed to save settings: {e}");
-    }
 }
 
 // --- Mockup dimensions ---------------------------------------------------------
@@ -2026,15 +1992,12 @@ impl super::app::RiffApp {
             SettingsAction::ClearLibrary => self.clear_library_confirm = true,
             SettingsAction::SetAdvanced(value) => {
                 library.ui_flags.advanced_mode = value;
-                self.persist_scalars(playback, library);
             }
             SettingsAction::SetHighContrast(value) => {
                 library.ui_flags.high_contrast = value;
-                self.persist_scalars(playback, library);
             }
             SettingsAction::SetReplayGain(value) => {
                 playback.replaygain_enabled = value;
-                self.persist_scalars(playback, library);
             }
             SettingsAction::SetWatchAll(watching) => {
                 let paths = library.library_paths.clone();
@@ -2044,7 +2007,6 @@ impl super::app::RiffApp {
             }
             SettingsAction::SetSkipHidden(value) => {
                 library.scan_prefs.skip_hidden_files = value;
-                self.persist_scalars(playback, library);
             }
             SettingsAction::SetFormat(extension, enabled) => {
                 let prefs = &mut library.scan_prefs;
@@ -2061,23 +2023,16 @@ impl super::app::RiffApp {
                 } else if !enabled {
                     prefs.scan_formats.retain(|format| format != &extension);
                 }
-                self.persist_scalars(playback, library);
             }
             SettingsAction::SetReadEmbeddedArtwork(value) => {
                 library.scan_prefs.read_embedded_artwork = value;
-                self.persist_scalars(playback, library);
                 // Drop the generated cover blocks (issue 14): the tracks
                 // behind them were resolved as artless under the old
                 // policy, and only a fresh request lets real art surface.
                 self.evict_generated_covers();
             }
             SettingsAction::SetMissingArtworkStrategy(s) => {
-                apply_set_missing_artwork_strategy(
-                    s,
-                    library,
-                    playback,
-                    self.settings_store.as_mut(),
-                );
+                apply_set_missing_artwork_strategy(s, library);
             }
         }
     }
@@ -2191,14 +2146,5 @@ impl super::app::RiffApp {
                 self.clear_library_confirm = false;
             }
         });
-    }
-
-    /// Commit the current scalar preferences as one small durable
-    /// transaction.
-    fn persist_scalars(&mut self, playback: &PlaybackSession, library: &LibrarySession) {
-        let scalars = build_scalar_settings(playback, library);
-        if let Err(e) = self.settings_store.save_scalars(&scalars) {
-            tracing::warn!("Failed to save settings: {e}");
-        }
     }
 }

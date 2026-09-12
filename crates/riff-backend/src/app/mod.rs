@@ -1,5 +1,6 @@
 pub mod errors;
 pub mod events;
+pub mod preferences;
 pub mod state;
 pub mod store;
 pub mod tag_edit_service;

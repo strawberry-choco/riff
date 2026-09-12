@@ -29,14 +29,14 @@ The audio engine thread is the heart of playback. It is a single long-lived loop
 ```rust
 let (settings, playlists, library_mutations, library_queries, generation,
      playlist_generation, changes_rx) = open_application_store(store_path)?;
-let facade = Arc::new(Mutex::new(BackendFacade::default()));
+let backend_events = Arc::new(Mutex::new(BackendEvents::default()));
 let (playback, library) = (Arc::new(Mutex::new(PlaybackSession::default())),
                            Arc::new(Mutex::new(LibrarySession::default())));
 let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
 let (update_tx, update_rx) = unbounded::<PlaybackUpdate>();
 ```
 
-One shared `SqliteStore` connection serves every store port view; both session generations (library and playlist) bump inside the store's mutation impls, and the `StoreChanged` stream feeds the facade. The UI's `Box<dyn Transport>` and the tray's transport are both `FacadeTransport`s wrapping the same facade, so every dispatched command is recorded onto one observable event inbox before being forwarded to the engine's command channel. The scan service, watcher manager, tag-edit service, and cover service are constructed over the real adapters here, and their workers' thread handles are owned by the runtime. The frontend then receives everything it renders with as one `AppRuntime` value.
+One shared `SqliteStore` connection serves every store port view; both session generations (library and playlist) bump inside the store's mutation impls, and the `StoreChanged` stream feeds the event inbox. The UI's `Box<dyn Transport>` and the tray's transport are both `FacadeTransport`s wrapping the same facade, so every dispatched command is recorded onto one observable event inbox before being forwarded to the engine's command channel. The scan service, watcher manager, tag-edit service, and cover service are constructed over the real adapters here, and their workers' thread handles are owned by the runtime. The frontend then receives everything it renders with as one `AppRuntime` value.
 
 ## The Playback Coordinator in Detail
 
@@ -46,7 +46,7 @@ The coordinator is a thin loop: `while let Ok(update) = update_rx.recv()`, then 
 2. Drop the lock before doing anything else.
 3. If there is a next track, send `PlaybackCommand::Play(next_id)`; on repeat-one, replay the current track; otherwise re-lock and set the state to `Stopped`.
 
-Play history is committed through the `LibraryMutationStore` port before the advance, so a crash between the two steps records the track that actually played. Playback errors surface as typed notices: the coordinator sends a pre-formatted message over the notice channel, and the facade stamps it with playback source and error severity — no cross-slice state write ever happens.
+Play history is committed through the `LibraryMutationStore` port before the advance, so a crash between the two steps records the track that actually played. Playback errors surface as typed notices: the coordinator sends a pre-formatted message over the notice channel, and BackendEvents stamps it with playback source and error severity — no cross-slice state write ever happens.
 
 This drop-then-reacquire pattern is the canonical example of the "no nested locking / no long-held lock" rule: the lock is never held while sending on a channel, and each critical section is as short as possible.
 
@@ -59,8 +59,8 @@ All cross-thread messaging uses unbounded `crossbeam_channel` channels created i
 | UI / tray -> audio engine | `PlaybackCommand` | `Play(TrackId)`, `Pause`, `Resume`, `Stop`, `Seek(Duration)`, `SetVolume(f32)`, `Next`, `Previous`, `PlayNext(TrackId)`, `AddToQueue(TrackId)`, `PlayPause`, `ToggleVisibility` |
 | Audio engine -> playback coordinator | `PlaybackUpdate` | `StateChanged(PlaybackState)`, `PositionChanged(PlaybackPosition)`, `TrackChanged(TrackId)`, `TrackEnded`, `Error(String)` |
 | Coordinator -> engine | `PlaybackCommand` | The `Play(next_id)` issued on auto-advance |
-| Playback Coordinator -> facade | `String` notice | A pre-formatted playback failure, stamped by the facade with source and severity |
-| Store mutations -> facade | `StoreChanged` | Committed-mutation notifications that drive the facade's event surface |
+| Playback Coordinator -> event inbox | `String` notice | A pre-formatted playback failure, stamped by BackendEvents with source and severity |
+| Store mutations -> event inbox | `StoreChanged` | Committed-mutation notifications that drive the event surface |
 | UI / watcher -> scan service | Scan request | A path to scan, serviced by the serial scan worker (one request at a time, cancelable) |
 | Scan service -> UI | `ScanOutcome` stream | Progress cadence and a terminal outcome (completed total or failure) |
 | `notify` watcher -> fs-event forwarder | `Vec<PathBuf>` | The paths that changed, forwarded to `WatcherManager::on_fs_events` |
@@ -75,7 +75,7 @@ A small set of values is shared between threads behind `Arc<Mutex<_>>`:
 
 - **`Arc<Mutex<PlaybackSession>>`** — the playback half of the session state: queue, playback state, current position, volume, mute. Read by the engine, mutated by the Playback Coordinator, read by the tray and UI.
 - **`Arc<Mutex<LibrarySession>>`** — the library half: selection, views, search, library paths and statuses, scan status, watch states. Owned by the frontend's rendering loop and the library services.
-- **`Arc<Mutex<BackendFacade>>`** — the facade's event inbox; both transports record onto it and the UI drains it.
+- **`Arc<Mutex<BackendEvents>>`** — the event inbox; both transports record onto it and the UI drains it.
 - **`Arc<Mutex<Option<WatcherManager>>>`** — shared between the filesystem-event forwarder and the UI, which reconfigures watch states through it.
 
 The two session mutexes are independent: code must never hold one while acquiring the other. The audio ring buffer between the decode loop and the cpal callback is a lock-free SPSC ring (`ringbuf`) inside `CpalAudioOutput` (`riff-infra`) and is not part of the application surface.

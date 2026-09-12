@@ -14,7 +14,7 @@ The workspace members are five backend crates, the frontend, and the integration
 | `riff-library` | Collection capability | Scanning, Session Projections, playlist management, cover resolution and service, the ports it consumes, its error type. |
 | `riff-playback` | Playback capability | The Playback Queue, the audio engine, gapless logic, the playback coordinator, the Transport trait, the playback ports, the playback session, and the Up Next read model. |
 | `riff-infra` | Adapter crate | Every port implementation and every native/external dependency, so toolchain requirements exist in exactly one place. |
-| `riff-backend` | Application API | The Backend Facade, typed events and notices, the facade-adjacent application services, the library session state, and the Composition Root that owns the worker threads. |
+| `riff-backend` | Application API | The Backend Events inbox (typed events and notices), the app-layer application services, the library session state, and the Composition Root that owns the worker threads. |
 | `riff-gui` | Frontend | egui UI, tray icon, native dialogs, fonts, and the `riff` binary entry point — a thin composition over `riff-backend`. |
 | `tests` | Integration tests | The single workspace-root integration-test crate (cross-crate integration, UI, and golden-image suites). |
 
@@ -76,9 +76,9 @@ Concretely: the SQLite Application Store (`store/`: `SqliteStore`, migrations, c
 
 ### `riff-backend` — the application API
 
-**Membership criterion**: the facade surface, the facade-adjacent application services, and the one place that knows both ports and adapters.
+**Membership criterion**: the frontend-facing event surface, the app-layer application services, and the one place that knows both ports and adapters.
 
-It owns the Backend Facade (`facade.rs` — typed `BackendEvent`s, notices with source and severity, the command correlation record), the facade-adjacent application services that orchestrate across the facade (the Session Views read facade `views.rs`, the Tag Edit service `tag_edit_service.rs`, the Watcher Manager `watcher_manager.rs`), the library half of the session state (`state.rs`: `LibrarySession`, `ViewMode`, `BrowseMode`, `LibraryStatus`, `UiFlags` — the playback half lives in `riff-playback`), the Composition Root (`composition.rs`: `AppRuntime::spawn` opens the Application Store, constructs every real adapter, wires them into the slice-defined ports, and spawns the worker threads), and the re-export surface that keeps historical `riff_backend::…` import paths resolving for the frontend and the test suite. The crate carries no native dependencies of its own and no UI crate dependencies.
+It owns the Backend Events inbox (`events.rs` — the `BackendEvent` enum, notices with source and severity, and the two inputs that feed it: recorded transport commands and the store's `StoreChanged` stream), the app-layer application services (the Session Views read seam `views.rs`, the Tag Edit service `tag_edit_service.rs`, the Watcher Manager `watcher_manager.rs`), the library half of the session state (`state.rs`: `LibrarySession`, `ViewMode`, `BrowseMode`, `LibraryStatus`, `UiFlags` — the playback half lives in `riff-playback`), the Composition Root (`composition.rs`: `AppRuntime::spawn` opens the Application Store, constructs every real adapter, wires them into the slice-defined ports, and spawns the worker threads), and the re-export surface that keeps historical `riff_backend::…` import paths resolving for the frontend and the test suite. The crate carries no native dependencies of its own and no UI crate dependencies.
 
 ### `riff-gui` — the frontend
 
@@ -104,7 +104,7 @@ Inside each slice, the historical layering is preserved as module convention: `d
 - **Persistence contract to slices**: owned stored entities and DTOs (`Track`, `TrackId`, `Settings`, `PlaylistEntry`).
 - **Slices to infrastructure**: trait method calls passing owned data or immutable references (for example `MetadataReader::read_all(&self, path: &Path)`).
 - **Infrastructure to slices**: results returned through trait methods. Infrastructure never holds a reference to application state.
-- **Backend to frontend**: the `AppRuntime` handles — the two session mutexes, the facade, the transports, the service front ends, and the store port views — plus channel messages drained by the UI each frame.
+- **Backend to frontend**: the `AppRuntime` handles — the two session mutexes, the event inbox, the transports, the service front ends, and the store port views — plus channel messages drained by the UI each frame.
 
 ## Boundary Rules
 
@@ -113,8 +113,8 @@ Inside each slice, the historical layering is preserved as module convention: `d
 Three communication mechanisms are used, each for a different kind of interaction:
 
 - **Synchronous calls** for fast, deterministic operations: queue manipulation, library queries, state reads.
-- **Channels** (`crossbeam_channel::unbounded`) for all cross-thread communication: UI/tray to audio engine, engine to playback coordinator, scan service to worker, watcher events to the manager, tag-edit and cover request/response pairs, store change notifications to the facade.
-- **Shared state** for read-heavy concurrent access: `Arc<Mutex<PlaybackSession>>` and `Arc<Mutex<LibrarySession>>` (the split of the former single `AppState`, each behind its own mutex), plus `Arc<Mutex<BackendFacade>>`. The audio ring buffer between the decode loop and the cpal callback lives inside `riff-infra`'s output adapter and is not part of the application surface.
+- **Channels** (`crossbeam_channel::unbounded`) for all cross-thread communication: UI/tray to audio engine, engine to playback coordinator, scan service to worker, watcher events to the manager, tag-edit and cover request/response pairs, store change notifications to the event inbox.
+- **Shared state** for read-heavy concurrent access: `Arc<Mutex<PlaybackSession>>` and `Arc<Mutex<LibrarySession>>` (the split of the former single `AppState`, each behind its own mutex), plus `Arc<Mutex<BackendEvents>>`. The audio ring buffer between the decode loop and the cpal callback lives inside `riff-infra`'s output adapter and is not part of the application surface.
 
 ### Manual dependency injection
 
@@ -133,7 +133,7 @@ All thread-to-thread communication uses `crossbeam_channel`. See [./threading-mo
 
 - Errors are typed per owner: `StoreError` in `riff-persistence`, `LibraryError` in `riff-library`, `PlaybackError` in `riff-playback` — each defined with `thiserror`, string-based so adapters can map into whichever port's error they answer.
 - Infrastructure maps external crate errors into the owning port's error at the adapter boundary, so crate-specific error types never leak above `riff-infra`.
-- Playback failures surface to the session as typed notices through the facade's notice channel (source + severity), not as a cross-slice state write.
+- Playback failures surface to the session as typed notices through the event inbox's notice channel (source + severity), not as a cross-slice state write.
 - The UI displays user-friendly messages and never panics on a recoverable error.
 - Mutex access uses the `MutexExt::lock_or_recover` helper (defined in `riff-backend`), which recovers a poisoned lock instead of panicking, so a panic on one thread does not cascade into every other thread that shares a session mutex.
 
@@ -160,13 +160,13 @@ Use this checklist when adding or reviewing a component:
 - **Callback spaghetti**: an audio callback calls UI methods directly. Use channels for all thread-to-thread communication; never call UI code from a non-UI thread.
 - **Stringly typed errors**: errors passed as bare `String` across a port. Use the owning crate's typed error enum so callers can match on variants.
 
-Note that the two-session split (`PlaybackSession` / `LibrarySession` behind their own mutexes) is a deliberate design, not an accident: each session is owned and mutated by the capability that cares about it, and the only cross-slice interaction (a playback failure setting a scan-status message) is a typed notice through the facade. Keep all session access short and never hold one session's lock while acquiring the other's.
+Note that the two-session split (`PlaybackSession` / `LibrarySession` behind their own mutexes) is a deliberate design, not an accident: each session is owned and mutated by the capability that cares about it, and the only cross-slice interaction (a playback failure setting a scan-status message) is a typed notice through the event inbox. Keep all session access short and never hold one session's lock while acquiring the other's.
 
 ## Ambiguity Signals
 
 These are decisions with more than one defensible answer. Surface them explicitly rather than choosing silently:
 
-- **Where the facade-adjacent services belong.** The Session Views facade, Tag Edit service, and Watcher Manager live in `riff-backend` because they orchestrate the facade surface the frontend renders; the use cases and ports beneath them live in `riff-library`. If a service ever needs to serve a non-frontend consumer, moving it into its slice is the considered step.
+- **Where the app-layer services belong.** The Session Views seam, Tag Edit service, and Watcher Manager live in `riff-backend` because they orchestrate the event surface the frontend renders; the use cases and ports beneath them live in `riff-library`. If a service ever needs to serve a non-frontend consumer, moving it into its slice is the considered step.
 - **Where cover caching belongs.** The in-memory cover texture LRU lives in `riff-gui` because it stores egui-specific `TextureHandle`s. If caching policy (how long to keep covers) ever becomes a business rule, it may warrant a home in a slice.
 - **Shared state versus message passing for playback position.** Position flows as a `PlaybackUpdate::PositionChanged` channel message rather than a shared atomic. The channel approach is more explicit and easier to trace; an atomic would be marginally faster.
 - **Recovery from corrupted files.** Whether the decoder should skip a bad frame and continue or stop playback is a product decision with valid arguments on both sides.
@@ -176,7 +176,7 @@ These are decisions with more than one defensible answer. Surface them explicitl
 
 - **Per-owner error types**: `riff_persistence::errors::StoreError` (store/invalid-operation failures), `riff_library::app::errors::LibraryError` (metadata read/write, cover load, scan, I/O, track lookup), and `riff_playback::app::errors::PlaybackError` (decode, audio output) — all `thiserror`-derived and `Clone`, variants carrying a `String` message.
 - **Infrastructure mapping**: each adapter in `riff-infra` converts its crate's error type into the appropriate owning port's error at the boundary, typically with `map_err`, so external error types never cross above the adapter crate.
-- **Typed notices for playback failures**: the Playback Coordinator sends pre-formatted failure messages over the notice channel; the facade stamps them with playback source and error severity. No slice ever writes into another slice's session state.
+- **Typed notices for playback failures**: the Playback Coordinator sends pre-formatted failure messages over the notice channel; BackendEvents stamps them with playback source and error severity. No slice ever writes into another slice's session state.
 - **UI display**: the frontend matches on results and shows brief, user-facing messages. Technical detail goes to the log, not the screen.
 - **Logging**: the `tracing` crate provides structured logging, initialized in `riff-gui/src/main.rs` via `tracing_subscriber::fmt::init()` with env-filter support. Use ERROR for failures, WARN for recoverable issues (for example, a failed store write or a failed cover decode), INFO for notable state changes, and DEBUG for detailed tracing.
 - **Lock poisoning**: `MutexExt::lock_or_recover` recovers from a poisoned mutex instead of panicking, so an isolated thread panic does not take down the whole application.

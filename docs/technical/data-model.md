@@ -195,7 +195,7 @@ pub struct LibrarySession {
 | `search_query` | The current search bar text. |
 | `library_paths` | Registered library root folders. Persisted in the Application Store's typed settings tables. |
 | `library_statuses` | Per-path scan status. |
-| `scan_status` | A human-readable status/error line for the most recent scan or playback error (playback errors arrive as typed notices through the facade). |
+| `scan_status` | A human-readable status/error line for the most recent scan or playback error (playback errors arrive as typed notices through the event inbox). |
 | `browse_mode` | Whether the sidebar shows the metadata hierarchy (`Library`) or the folder tree (`Folders`). |
 | `selected_folder` | The selected folder in Folders browse mode. |
 | `ui_flags` | Library-browser and display flags: `show_artists_view`, `advanced_mode`, `high_contrast`, `compact_density`, and per-column toggles (track numbers, artwork, duration, play count, date added). |
@@ -221,7 +221,7 @@ The Application Store is riff's single authoritative persistent state — Librar
 - `LibraryMutationStore` — scan batches, play-history recording, targeted tag refresh, removal by root, and Clear Library. Every committed mutation bumps the session generations (library and playlist) inside the store, so Session Projections refetch.
 - `LibraryQueryStore` — all library reads: single-track lookup, bounded flat/search windows, canonical `all_track_ids()` ordering (path ascending) for Queue Fill, artist/album browsing, folder queries, smart playlists (parameterized by the relocated `LOST_GEMS_THRESHOLD`), and search counts.
 
-Views never query SQLite directly: per-frame reads go through the Session Projections — the library-side projections in `riff-library/src/app/projection.rs` (bounded windows for the flat list and search, browsing/folder/smart-playlist caches) and the playback-side projection in `riff-playback/src/app/projection.rs` (current Track, Up Next window, details-panel selection). All projections invalidate on generation bumps; the frontend reaches them through the Session Views facade in `riff-backend`.
+Views never query SQLite directly: per-frame reads go through the Session Projections — the library-side projections in `riff-library/src/app/projection.rs` (bounded windows for the flat list and search, browsing/folder/smart-playlist caches) and the playback-side projection in `riff-playback/src/app/projection.rs` (current Track, Up Next window, details-panel selection). All projections invalidate on generation bumps; the frontend reaches them through the Session Views seam in `riff-backend`.
 
 ## Port Traits (`riff-playback`, `riff-library`, `riff-persistence`)
 

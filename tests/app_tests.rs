@@ -628,7 +628,7 @@ mod tests {
         assert!(mock.save_watch_states(&HashMap::new()).is_err());
     }
 
-    // --- Session Views facade: bounded views with generation invalidation ---
+    // --- Session Views seam: bounded views with generation invalidation ---
     //
     // The UI's single read seam over the Application Store (ADR 0002). Every
     // scenario drives `SessionViews` through its public interface: a shared
@@ -650,7 +650,7 @@ mod tests {
     }
 
     /// [`LibraryQueryStore`] view over one shared [`MockLibraryQueryStore`]
-    /// behind a mutex: the facade takes ownership of the port, so the test
+    /// behind a mutex: the seam takes ownership of the port, so the test
     /// keeps the other handle for assertions and post-wire configuration
     /// changes (failure flags, mutated canned data).
     #[derive(Clone)]
@@ -792,7 +792,7 @@ mod tests {
 
     /// Test-side handle to the shared mock: locks on every access so
     /// assertions read recordings and configuration tweaks mutate the canned
-    /// data behind the facade's back.
+    /// data behind the seam's back.
     struct MockHandle(Arc<Mutex<MockLibraryQueryStore>>);
 
     impl MockHandle {
@@ -821,7 +821,7 @@ mod tests {
         }
     }
 
-    /// Wire a facade to `mock`; returns the facade, the shared mock handle
+    /// Wire a seam to `mock`; returns the seam, the shared mock handle
     /// for assertions and configuration, and the generation handle that
     /// stands in for the mutation adapter's bumps.
     fn wire(mock: MockLibraryQueryStore) -> (SessionViews, MockHandle, StoreGeneration) {
@@ -925,7 +925,7 @@ mod tests {
         // A committed mutation adds ten tracks and bumps the generation.
         // The invalidated frame must recount instead of trusting the stale
         // count, so the returned total agrees with the refreshed rows (the
-        // torn-count guarantee the facade owns).
+        // torn-count guarantee the seam owns).
         {
             let mut mock = mock.lock();
             for n in 120..130 {
@@ -1275,7 +1275,7 @@ mod tests {
     // generation; folder roots arrive from the caller (the UI holds them).
 
     /// Shared [`PlaylistStore`] fake over a mutex-guarded playlist list, so
-    /// a test can mutate the Playlists section behind the facade's back and
+    /// a test can mutate the Playlists section behind the seam's back and
     /// invalidate via the playlist generation.
     struct SharedPlaylists(Arc<Mutex<Vec<Playlist>>>);
 
@@ -1336,9 +1336,9 @@ mod tests {
         }
     }
 
-    /// Wire a `SessionViews` facade over the given Library mock and an
+    /// Wire a `SessionViews` seam over the given Library mock and an
     /// explicit Playlists section (a shared, mutex-guarded playlist list so
-    /// a test can mutate it behind the facade's back), returning both
+    /// a test can mutate it behind the seam's back), returning both
     /// session generations so a test can bump either independently.
     fn wire_with_playlists(
         mock: MockLibraryQueryStore,
@@ -1852,10 +1852,10 @@ mod tests {
     // --- Per-projection staleness contracts ----------------------------------
     //
     // Every Session Projection's staleness contract, proven through the
-    // `SessionViews` facade (ADR 0002): a fresh view returns the mock's
+    // `SessionViews` seam (ADR 0002): a fresh view returns the mock's
     // deterministic rows, an unchanged generation serves the same rows
     // without refetching, a committed mutation (a `StoreGeneration` bump)
-    // makes the next call refetch, and a failed load surfaces the facade's
+    // makes the next call refetch, and a failed load surfaces the seam's
     // default while the projection keeps its previous rows readable for the
     // retry. One section per projection; the mock stands in for the store
     // port and the test holds the generation handle the mutation adapter
@@ -1909,7 +1909,7 @@ mod tests {
         let _ = views.track_list("", 0);
 
         // A committed mutation whose window load fails: the refresh errors
-        // (the facade warns and moves on) but the stale-but-present window
+        // (the seam warns and moves on) but the stale-but-present window
         // stays readable — the UI keeps rendering last good rows.
         mock.lock().failing.push(FailingQuery::TracksWindow);
         generation.bump();
@@ -1963,7 +1963,7 @@ mod tests {
         });
         assert_eq!(views.artists().len(), 1);
 
-        // A committed mutation whose artist load fails: the facade answers
+        // A committed mutation whose artist load fails: the seam answers
         // its default (an empty list) — the projection keeps its rows
         // internally, the UI never sees the error.
         mock.lock().failing.push(FailingQuery::AllArtists);
@@ -2020,7 +2020,7 @@ mod tests {
         });
         assert_eq!(views.folder_subtree_ids(folder).len(), 1);
 
-        // A committed mutation whose listing fails: the facade's default (an
+        // A committed mutation whose listing fails: the seam's default (an
         // empty list) renders.
         mock.lock().failing.push(FailingQuery::TrackIdsInFolderTree);
         generation.bump();
@@ -2080,7 +2080,7 @@ mod tests {
         });
         assert_eq!(views.smart_list(SmartPlaylistKind::MostPlayed, 50).len(), 1);
 
-        // A committed mutation whose computation fails: the facade's default
+        // A committed mutation whose computation fails: the seam's default
         // (an empty list) renders.
         mock.lock().failing.push(FailingQuery::SmartPlaylist);
         generation.bump();
@@ -2131,7 +2131,7 @@ mod tests {
         });
         assert_eq!(views.genres().len(), 1);
 
-        // A committed mutation whose aggregation fails: the facade's default
+        // A committed mutation whose aggregation fails: the seam's default
         // (an empty list) renders.
         mock.lock().failing.push(FailingQuery::GenreCounts);
         generation.bump();
@@ -2199,7 +2199,7 @@ mod tests {
 
     /// A [`PlaylistStore`] fake whose `load_playlists` can be switched to
     /// fail behind a shared flag — the playlists staleness section flips it
-    /// after wiring to script a failed load against a warmed facade.
+    /// after wiring to script a failed load against a warmed seam.
     struct FlakyPlaylists {
         state: Arc<Mutex<FlakyPlaylistState>>,
     }
@@ -2335,7 +2335,7 @@ mod tests {
         );
         assert_eq!(views.playlists().len(), 1);
 
-        // A committed playlist mutation whose listing fails: the facade keeps
+        // A committed playlist mutation whose listing fails: the seam keeps
         // the last good list — stale-but-present beats blanking the sidebar.
         state.lock().unwrap().fail_loads = true;
         playlist_generation.bump();
@@ -5034,7 +5034,7 @@ mod playlist_projection_tests {
             }
         }
 
-        /// How often the facade read playlist entries through the store.
+        /// How often the seam read playlist entries through the store.
         fn entry_loads(&self) -> usize {
             self.entry_loads.load(Ordering::SeqCst)
         }
@@ -5248,7 +5248,7 @@ mod playback_coordinator_tests {
     /// playback and library sessions (held in two separate `Arc<Mutex<>>`s so
     /// the test never holds both locks at once), the command receiver (what
     /// the engine would receive), the playback-error notice receiver (what
-    /// the facade would receive), and the mutation recordings.
+    /// the seam would receive), and the mutation recordings.
     struct Harness {
         state: Arc<Mutex<PlaybackSession>>,
         library: Arc<Mutex<LibrarySession>>,
@@ -5390,7 +5390,7 @@ mod playback_coordinator_tests {
                 "playback errors must not write the library session's scan-status slot"
             );
         }
-        // Instead the error surfaces as a notice over the facade's channel,
+        // Instead the error surfaces as a notice over the event inbox's channel,
         // preserving the exact user-facing string format.
         assert_eq!(
             h.notice_rx.try_recv().as_deref(),

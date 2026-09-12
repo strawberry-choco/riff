@@ -31,7 +31,7 @@ use riff_playback::infra::audio_engine::AudioEngine;
 use riff_playback::infra::ports::DecoderFactory;
 
 use crate::app::MutexExt;
-use crate::app::facade::BackendFacade;
+use crate::app::events::BackendEvents;
 use crate::app::state::{LibrarySession, PlaybackSession};
 use crate::app::tag_edit_service::TagEditService;
 use crate::app::views::SessionViews;
@@ -47,13 +47,13 @@ pub struct AppRuntime {
     pub playback: Arc<Mutex<PlaybackSession>>,
     /// The shared library session (library use cases and UI state).
     pub library: Arc<Mutex<LibrarySession>>,
-    /// The single shared backend facade: both transports record dispatched
-    /// commands onto its event inbox, and the frontend drains its events.
-    pub facade: Arc<Mutex<BackendFacade>>,
+    /// The backend's event inbox: both transports record dispatched
+    /// commands onto it, and the frontend drains it each frame.
+    pub backend_events: Arc<Mutex<BackendEvents>>,
     /// The UI's command transport: every dispatch is recorded onto the
-    /// facade's event inbox before being forwarded to the audio engine.
+    /// event inbox before being forwarded to the audio engine.
     pub ui_transport: Box<dyn Transport>,
-    /// The tray's command transport — same facade, same command channel.
+    /// The tray's command transport — same event inbox, same command channel.
     pub tray_transport: FacadeTransport,
     /// The Library Scan front-end handle (boxed into the UI; cloned by the
     /// watcher manager, which is already wired inside `spawn`).
@@ -83,7 +83,7 @@ impl AppRuntime {
     pub fn spawn(store_path: &Path) -> Result<Self, StoreError> {
         // The store: one shared connection behind an internal mutex serves
         // every store port; both session generations bump inside the store's
-        // mutation impls, and the change channel feeds the facade.
+        // mutation impls, and the change channel feeds the event inbox.
         let (
             settings_store,
             playlist_store,
@@ -94,18 +94,18 @@ impl AppRuntime {
             changes_rx,
         ) = open_application_store(store_path)?;
 
-        // The single shared `BackendFacade`: every `FacadeTransport` — the
-        // UI's and the tray's — wraps the same `Arc<Mutex<BackendFacade>>`,
-        // so dispatched commands are recorded onto one observable event
-        // inbox. The store's `StoreChanged` stream is the facade's second
+        // The single shared event inbox: every `FacadeTransport` — the UI's
+        // and the tray's — records dispatched commands onto the same
+        // `Arc<Mutex<BackendEvents>>`, so dispatches land on one observable
+        // surface. The store's `StoreChanged` stream is the inbox's second
         // input. Playback errors surface as typed notices (issue 01 seam
         // fix): the coordinator sends pre-formatted messages over this
-        // channel and the facade stamps them with playback source + error
+        // channel and BackendEvents stamps them with playback source + error
         // severity.
-        let facade = Arc::new(Mutex::new(BackendFacade::default()));
+        let backend_events = Arc::new(Mutex::new(BackendEvents::default()));
         let (notice_tx, notice_rx) = unbounded::<String>();
         {
-            let mut f = facade.lock_or_recover();
+            let mut f = backend_events.lock_or_recover();
             f.subscribe_to_backend_changes(changes_rx);
             f.subscribe_playback_notices(notice_rx);
         }
@@ -183,13 +183,13 @@ impl AppRuntime {
             spawn_background_services(library_query_store.clone(), library_mutation_store.clone());
 
         // The UI's `Box<dyn Transport>` is a `FacadeTransport` wrapping the
-        // shared facade, so every UI intent is recorded synchronously onto
-        // the facade's event inbox before it is forwarded. The tray's
-        // transport shares both the facade and the command channel.
+        // shared event inbox, so every UI intent is recorded synchronously
+        // onto it before it is forwarded. The tray's transport shares both
+        // the inbox and the command channel.
         let recorder = {
-            let facade = facade.clone();
+            let backend_events = backend_events.clone();
             move |cmd: riff_playback::domain::PlaybackCommand| {
-                facade.lock_or_recover().record_command(cmd);
+                backend_events.lock_or_recover().record_command(cmd);
             }
         };
         let ui_transport: Box<dyn Transport> = Box::new(FacadeTransport::new(
@@ -204,7 +204,7 @@ impl AppRuntime {
         Ok(Self {
             playback,
             library,
-            facade,
+            backend_events,
             ui_transport,
             tray_transport,
             scans,

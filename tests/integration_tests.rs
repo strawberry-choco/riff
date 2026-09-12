@@ -475,7 +475,7 @@ mod tests {
 mod composition_root_tests {
     use crate::app::MutexExt;
     use crate::domain::TrackId;
-    use riff_backend::app::facade::{BackendEvent, NoticeSeverity, NoticeSource};
+    use riff_backend::app::events::{BackendEvent, NoticeSeverity, NoticeSource};
     use riff_backend::app::scan_service::{ScanOutcome, Scans};
     use riff_backend::composition::AppRuntime;
     use std::path::Path;
@@ -595,15 +595,15 @@ mod composition_root_tests {
 
         // The audio pipeline runs: a Play command for a missing track travels
         // the UI transport into the audio-engine thread, comes back as a
-        // playback error, and lands on the facade as a typed notice relayed
-        // by the coordinator thread.
+        // playback error, and lands on the event inbox as a typed notice
+        // relayed by the coordinator thread.
         rt.ui_transport
             .play(TrackId("missing-track.mp3".to_string()));
         let notice = poll_until(
             Duration::from_secs(10),
             "typed playback error notice",
             || {
-                rt.facade
+                rt.backend_events
                     .lock_or_recover()
                     .events()
                     .into_iter()
@@ -637,8 +637,8 @@ mod composition_root_tests {
         assert_eq!(total, 2, "every fixture file discovered");
 
         // The read seam observes the committed scan through the store's
-        // session generations, and the facade relays the library change the
-        // store announced on its change channel.
+        // session generations, and the event inbox relays the library change
+        // the store announced on its change channel.
         poll_until(
             Duration::from_secs(10),
             "committed tracks in SessionViews",
@@ -646,9 +646,9 @@ mod composition_root_tests {
         );
         poll_until(
             Duration::from_secs(10),
-            "LibraryChanged on the facade",
+            "LibraryChanged on the event inbox",
             || {
-                rt.facade
+                rt.backend_events
                     .lock_or_recover()
                     .events()
                     .into_iter()

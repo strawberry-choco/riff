@@ -386,7 +386,7 @@ impl RiffApp {
         let mut page: Option<riff_backend::app::views::TrackListPage> = Some(first_page);
         let mut item = |i: usize| -> Option<browser::BrowserItem> {
             // Refetch only when the row leaves the page in hand; the
-            // facade serves repeat windows from cache.
+            // seam serves repeat windows from cache.
             if page.as_ref().is_none_or(|p| p.start + p.rows.len() <= i) {
                 page = Some(views.track_list(query, i));
             }

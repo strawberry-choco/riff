@@ -1,4 +1,4 @@
-//! The Session Views facade: the UI's single read seam over the Application
+//! The Session Views seam: the UI's single read seam over the Application
 //! Store (ADR 0002).
 //!
 //! [`SessionViews`] owns the five bounded Session Projections, the Library
@@ -69,7 +69,7 @@ pub struct SidebarCounts {
     pub playlists: Vec<(PlaylistId, usize)>,
 }
 
-/// Flat facade over the Session Projections and the Library query port
+/// The flat read seam over the Session Projections and the Library query port
 /// (ADR 0002). One instance per UI session; constructed by composition root
 /// injection in `main.rs`.
 pub struct SessionViews {
@@ -89,7 +89,7 @@ pub struct SessionViews {
 }
 
 impl SessionViews {
-    /// Wire the facade to the Library query port and the Playlists query
+    /// Wire the seam to the Library query port and the Playlists query
     /// port plus both session counters — the Library generation and the
     /// dedicated playlist generation the store bumps after each committed
     /// mutation. The handles are consumed here: every projection observes

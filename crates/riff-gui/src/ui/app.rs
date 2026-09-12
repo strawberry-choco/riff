@@ -10,7 +10,7 @@ use eframe::egui;
 use riff_backend::app::MutexExt;
 use riff_backend::app::Transport;
 pub use riff_backend::app::cover_service::{COVER_CACHE_CAP, Covers, lru_insert};
-use riff_backend::app::facade::BackendFacade;
+use riff_backend::app::events::BackendEvents;
 use riff_backend::app::scan_service::{ScanOutcome, Scans};
 use riff_backend::app::state::{
     BrowseMode, BrowserSelection, LibrarySection, LibrarySession, LibraryStatus, PlaybackSession,
@@ -188,7 +188,7 @@ pub struct RiffApp {
     /// metadata changes (e.g. tag edits) persist through it as one durable
     /// transaction per batch.
     pub(crate) library_mutations: Box<dyn LibraryMutationStore>,
-    /// The Session Views facade (ADR 0002): every store-backed read the UI
+    /// The Session Views seam (ADR 0002): every store-backed read the UI
     /// renders — flat list, search, browsing, folders, smart playlists, and
     /// the playback-side slots — goes through it. It owns the five bounded
     /// Session Projections, the Library query port, and the session-local
@@ -220,10 +220,10 @@ pub struct RiffApp {
     /// on every logic tick — no backend state, no audio engine involvement.
     #[cfg(not(target_os = "linux"))]
     visibility_listener: crate::ui::window_visibility::VisibilityListener,
-    /// The Backend Facade: the single seam between the frontend and the
-    /// the per-command observable side-effect surface both the Transport
-    /// wrapper and the tray thread write to.
-    facade: Arc<Mutex<BackendFacade>>,
+    /// The Backend Events inbox: the observable surface both the Transport
+    /// wrapper and the tray thread record dispatched commands onto, and the
+    /// inbox the UI drains at the start of every frame.
+    backend_events: Arc<Mutex<BackendEvents>>,
     quit_flag: Arc<AtomicBool>,
 }
 
@@ -245,7 +245,7 @@ impl RiffApp {
         views: SessionViews,
         tag_edits: Box<dyn TagEdits>,
         covers: Box<dyn Covers>,
-        facade: Arc<Mutex<BackendFacade>>,
+        backend_events: Arc<Mutex<BackendEvents>>,
         #[cfg(not(target_os = "linux"))]
         visibility_listener: crate::ui::window_visibility::VisibilityListener,
     ) -> Self {
@@ -300,7 +300,7 @@ impl RiffApp {
             #[cfg(not(target_os = "linux"))]
             visibility_listener,
             quit_flag,
-            facade,
+            backend_events,
         }
     }
 
@@ -658,17 +658,17 @@ impl RiffApp {
         );
     }
 
-    /// Drain every pending [`BackendFacade::events`] for this frame.
+    /// Drain every pending [`BackendEvents::events`] for this frame.
     ///
     /// Called at the start of the frame so any dispatch recorded by the tray
-    /// thread or by a `FacadeTransport` between frames is observable before
-    /// the UI renders. The frontend renders from the real engine updates on
-    /// the playback session; this seam's events are the issue-02
-    /// observability surface that proves every dispatch path
-    /// (mouse/keyboard/tray) flows through one Transport wrapper.
-    pub fn drain_facade_events(&self) -> Vec<riff_backend::app::facade::BackendEvent> {
+    /// thread or by a transport between frames is observable before the UI
+    /// renders. The frontend renders from the real engine updates on the
+    /// playback session; this seam's events are the observability surface
+    /// that proves every dispatch path (mouse/keyboard/tray) flows through
+    /// one recorded Transport.
+    pub fn drain_backend_events(&self) -> Vec<riff_backend::app::events::BackendEvent> {
         use std::sync::PoisonError;
-        self.facade
+        self.backend_events
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .events()
@@ -764,10 +764,10 @@ impl eframe::App for RiffApp {
         // light/dark palette.
         self.apply_theme(ui.ctx(), library.ui_flags.high_contrast);
 
-        // Drain the facade event inbox and route playback-error typed
+        // Drain the backend event inbox and route playback-error typed
         // notices to the status line (issue 01 seam fix) — the coordinator
         // no longer writes the library session's status slot directly.
-        apply_backend_events(self.drain_facade_events(), &mut library.scan_status);
+        apply_backend_events(self.drain_backend_events(), &mut library.scan_status);
 
         self.poll_library_updates(&mut library);
         self.poll_tag_edit_outcomes(&mut library);
@@ -999,7 +999,7 @@ fn record_album_selection(library: &mut LibrarySession) {
 
 /// Apply one [`crate::ui::detail::DetailAction`] (handoff issue 09) to the
 /// sessions and the store. `album_tracks` is the current album's track ids
-/// in store order, resolved by the caller from the Session Views facade —
+/// in store order, resolved by the caller from the Session Views seam —
 /// the play batch the header's two actions start. Playback follows the
 /// folder-enqueue precedent: one `play_many` batch, never per-track sends.
 pub fn apply_detail_action(
@@ -1043,7 +1043,7 @@ pub fn apply_detail_action(
 
 /// Apply one [`crate::ui::selection::SelectionAction`] (handoff issue 10).
 /// `album_tracks` is the selected album's track ids in store order, resolved
-/// by the caller from the Session Views facade — the batch the panel's Play
+/// by the caller from the Session Views seam — the batch the panel's Play
 /// album starts, exactly the detail header's Play all gesture (one
 /// `play_many` batch, never per-track sends). An empty album starts nothing.
 pub fn apply_selection_action(
@@ -1069,7 +1069,7 @@ fn play_album_batch(album_tracks: &[TrackId], transport: &dyn Transport) {
 }
 
 /// One frame of detail-column content, resolved from the library session
-/// through the Session Views facade: owned data so the render call site can
+/// through the Session Views seam: owned data so the render call site can
 /// borrow it all at once. Everything re-reads the store per generation, so
 /// scans and tag edits can never leave stale rows.
 #[derive(Default)]
@@ -1167,7 +1167,7 @@ pub fn resolve_detail_content(views: &mut SessionViews, library: &LibrarySession
 }
 
 /// One frame of the selection panel (handoff issue 10), resolved from the
-/// library session through the Session Views facade. Owned data so the
+/// library session through the Session Views seam. Owned data so the
 /// render call site can borrow it all at once. `title: None` is the empty
 /// state — nothing selected, or the album the session remembers is no
 /// longer in the store (so the panel can never show stale art).
@@ -1785,7 +1785,7 @@ pub fn handle_keyboard_shortcuts(
 /// against the last push FIRST: steady-state frames send no viewport command
 /// and format nothing. The key exists to avoid repeating OS viewport
 /// commands, not for staleness; the current Track resolves through the
-/// Session Views facade over the store's `get_track` query — never the
+/// Session Views seam over the store's `get_track` query — never the
 /// in-memory mirror.
 /// Last identity pushed to the window title / tray tooltip. `Unset`
 /// distinguishes "nothing pushed yet" from "pushed while nothing plays" so
@@ -1894,7 +1894,7 @@ impl RiffApp {
     ) {
         // Cover for the current track, served from the LRU texture cache;
         // misses enqueue a background resolve exactly like the other views.
-        // The current Track comes from the Session Views facade over the
+        // The current Track comes from the Session Views seam over the
         // store's `get_track` query — never the in-memory mirror.
         let mut cover = None;
         self.views
@@ -2266,7 +2266,7 @@ impl RiffApp {
             crate::ui::library::empty_state_hero(ui, &mut self.icons, &palette);
             return;
         };
-        // The selected Track resolves through the Session Views facade over
+        // The selected Track resolves through the Session Views seam over
         // the store's `get_track` query (cached until the selection or the
         // generation moves) — never the in-memory mirror. An absent track —
         // unknown to the store, or unreadable right now — renders the empty
@@ -2311,9 +2311,9 @@ impl RiffApp {
         // `test_large_library_fixture_culls_rows_to_the_visible_window`.
         //
         // The flat list and search box are served through the bounded
-        // Session Projection behind the Session Views facade (ADR 0003):
+        // Session Projection behind the Session Views seam (ADR 0003):
         // only visible row windows fetch, invalidated by generation bumps
-        // after committed mutations. The facade owns the window math, the
+        // after committed mutations. The seam owns the window math, the
         // count reads, and the torn-count recount; this view only maps row
         // indices to pages.
         let current_track = playback.queue.current_track().cloned();
@@ -2348,7 +2348,7 @@ impl RiffApp {
                 let mut page: Option<riff_backend::app::views::TrackListPage> = None;
                 for i in row_range {
                     // Refetch only when the row leaves the page in hand; the
-                    // facade serves repeat windows from cache.
+                    // seam serves repeat windows from cache.
                     if page.as_ref().is_none_or(|p| p.start + p.rows.len() <= i) {
                         page = Some(self.views.track_list(query, i));
                     }
@@ -2369,7 +2369,7 @@ impl RiffApp {
     }
 
     /// Render the tracks of a read-only smart playlist. The list reads
-    /// through the Session Views facade over store queries (ADR 0002): every
+    /// through the Session Views seam over store queries (ADR 0002): every
     /// committed mutation bumps the generation, so the next frame
     /// regenerates from committed state — no manual refresh needed.
     fn render_smart_playlist_view(
@@ -2805,7 +2805,7 @@ impl RiffApp {
 
         // Current track + cover from the LRU texture cache; misses enqueue a
         // background resolve exactly like the other views. Both the current
-        // Track and the Up Next window come from the Session Views facade
+        // Track and the Up Next window come from the Session Views seam
         // over the store's `get_track` query — never the mirror. The cover
         // key is only re-cloned when the playing track moves, so fresh
         // frames allocate nothing here.
@@ -2891,7 +2891,7 @@ impl RiffApp {
             return;
         }
 
-        // Folder views read through the Session Views facade over store
+        // Folder views read through the Session Views seam over store
         // queries (ADR 0002/0003): escaped prefix matching over stored track
         // paths, cached until the next committed mutation bumps the
         // generation. No in-memory mirror involved.
@@ -3084,16 +3084,16 @@ pub fn apply_tag_edit_outcome(
     }
 }
 
-/// Apply drained facade events to session state (issue 01 seam fix).
+/// Apply drained backend events to session state (issue 01 seam fix).
 /// Playback errors arrive as typed notices with playback source — the
 /// coordinator no longer writes the library session's status slot directly —
 /// so the UI routes them to the titlebar status line here, preserving the
 /// exact visible string. Other event kinds carry no UI state change yet.
 pub fn apply_backend_events(
-    events: Vec<riff_backend::app::facade::BackendEvent>,
+    events: Vec<riff_backend::app::events::BackendEvent>,
     scan_status: &mut Option<String>,
 ) {
-    use riff_backend::app::facade::{BackendEvent, NoticeSource};
+    use riff_backend::app::events::{BackendEvent, NoticeSource};
     for event in events {
         if let BackendEvent::TypedNotice(payload) = event
             && payload.source == NoticeSource::Playback

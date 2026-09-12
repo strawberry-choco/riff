@@ -9,7 +9,7 @@
 
 use crate::app::errors::StoreError;
 use crate::domain::PlaybackQueue;
-use riff_persistence::store::StoreGeneration;
+use riff_persistence::store::{GenerationCache, StoreGeneration};
 use riff_persistence::track::{Track, TrackId};
 
 /// The playback slots plus the queue shape they were loaded for.
@@ -36,62 +36,6 @@ pub struct PlaybackProjection {
     selected: GenerationCache<TrackId, Option<Track>>,
 }
 
-/// Generation-keyed cache with freshness validation.
-///
-/// `K` is the cache key (for freshness checks), `V` is the cached value.
-/// The cache compares the observed generation at load time against the
-/// current generation on each access; if the generation moved, the cache
-/// is stale and `peek` returns `None`.
-struct GenerationCache<K, V> {
-    generation: StoreGeneration,
-    /// The generation epoch at which `value` was loaded — staleness is a
-    /// mismatch against a fresh observation of the counter.
-    epoch: u64,
-    key: Option<K>,
-    value: Option<V>,
-}
-
-impl<K, V> GenerationCache<K, V>
-where
-    K: Clone + PartialEq,
-    V: Clone,
-{
-    fn new(generation: StoreGeneration) -> Self {
-        Self {
-            epoch: generation.current(),
-            generation,
-            key: None,
-            value: None,
-        }
-    }
-
-    /// Get a reference to the cached value if it's still fresh.
-    fn peek(&self) -> Option<&V> {
-        if self.epoch == self.generation.current() {
-            self.value.as_ref()
-        } else {
-            None
-        }
-    }
-
-    /// Store a new value stamped with the observed generation.
-    fn store(&mut self, epoch: u64, key: K, value: V) {
-        self.epoch = epoch;
-        self.key = Some(key);
-        self.value = Some(value);
-    }
-
-    /// Observe the current generation for freshness checking.
-    fn observe(&self) -> u64 {
-        self.generation.current()
-    }
-
-    /// Check if the cache was loaded at the given epoch.
-    fn loaded_at(&self, epoch: u64) -> bool {
-        self.epoch == epoch
-    }
-}
-
 fn upcoming_matches(stamp: &[TrackId], queue: &PlaybackQueue, limit: usize) -> bool {
     let upcoming: Vec<_> = queue.upcoming(limit).into_iter().cloned().collect();
     stamp == upcoming
@@ -113,19 +57,32 @@ impl PlaybackProjection {
     }
 
     /// The resolved current Track, when one is playing and it still resolves.
+    /// `None` while the slots are stale (the generation moved since the last
+    /// successful [`Self::refresh`]) — the caller-side freshness guard of
+    /// the canonical `GenerationCache::peek`.
     #[must_use]
     pub fn current(&self) -> Option<&Track> {
-        self.slots.peek().and_then(|slots| slots.current.as_ref())
+        if self.slots.loaded_at(self.slots.observe()) {
+            self.slots.peek().and_then(|slots| slots.current.as_ref())
+        } else {
+            None
+        }
     }
 
     /// The resolved Up Next window in Playback Queue order. Ids whose files
     /// left the library are skipped (the former mirror-reader behavior), so
-    /// this can be shorter than the requested window.
+    /// this can be shorter than the requested window. Empty while the slots
+    /// are stale — the caller-side freshness guard of the canonical
+    /// `GenerationCache::peek`.
     #[must_use]
     pub fn up_next(&self) -> &[Track] {
-        self.slots
-            .peek()
-            .map_or(&[], |slots| slots.up_next.as_slice())
+        if self.slots.loaded_at(self.slots.observe()) {
+            self.slots
+                .peek()
+                .map_or(&[], |slots| slots.up_next.as_slice())
+        } else {
+            &[]
+        }
     }
 
     /// Bring the playback slots up to date with `queue`.
@@ -204,11 +161,14 @@ impl PlaybackProjection {
     ) -> Result<Option<Track>, StoreError> {
         let epoch = self.selected.observe();
 
-        if let Some(cached) = self.selected.peek()
-            && self.selected.loaded_at(epoch)
-            && self.selected.key.as_ref() == Some(id)
-        {
-            return Ok(cached.clone());
+        // Caller-guarded freshness check: the canonical cache's `peek` is
+        // epoch-agnostic, so `holds` decides whether the entry is a hit.
+        if self.selected.holds(epoch, id) {
+            return Ok(self
+                .selected
+                .peek()
+                .expect("holds implies an entry")
+                .clone());
         }
 
         let fetched = loader(id)?;

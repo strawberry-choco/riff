@@ -252,6 +252,36 @@ pub fn show_titlebar(
     // flush to the edge (Windows convention — minimize | maximize | close,
     // zero gap between them). Drawn after the drag region so they win clicks
     // over their slice of the strip.
+    let minimize_left = draw_caption_controls(ui, cache, palette, rect, actions);
+
+    // Nav controls (theme / Now Playing / Settings / Advanced toggles) at the
+    // right edge, Windows order, ending one gap left of the caption pair.
+    // Drawn after the drag region so they take priority over it.
+    let nav_rect = egui::Rect::from_min_max(
+        rect.min,
+        egui::pos2(minimize_left - CAPTION_GAP, rect.max.y),
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(nav_rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        |ui| {
+            show_titlebar_controls(ui, cache, palette, content, actions);
+        },
+    );
+}
+
+/// The minimize | maximize | close caption strips: three caption-style hit
+/// areas flush to the top-right corner (Windows convention, zero gap between
+/// them), observed actions appended to `actions`. Returns the minimize
+/// strip's left edge — the nav cluster ends one [`CAPTION_GAP`] left of it.
+fn draw_caption_controls(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    rect: egui::Rect,
+    actions: &mut Vec<TitleBarAction>,
+) -> f32 {
     let btn_top = rect.center().y - CAPTION_BTN_H / 2.0;
     let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
     let close_rect = egui::Rect::from_min_size(
@@ -307,22 +337,7 @@ pub fn show_titlebar(
     ) {
         actions.push(TitleBarAction::Close);
     }
-
-    // Nav controls (theme / Now Playing / Settings / Advanced toggles) at the
-    // right edge, Windows order, ending one gap left of the caption pair.
-    // Drawn after the drag region so they take priority over it.
-    let nav_rect = egui::Rect::from_min_max(
-        rect.min,
-        egui::pos2(minimize_rect.left() - CAPTION_GAP, rect.max.y),
-    );
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(nav_rect)
-            .layout(egui::Layout::right_to_left(egui::Align::Center)),
-        |ui| {
-            show_titlebar_controls(ui, cache, palette, content, actions);
-        },
-    );
+    minimize_rect.left()
 }
 
 /// One caption-style window-control strip: transparent until hovered (then a

@@ -130,7 +130,7 @@ pub enum PlaybackUpdate {
 }
 ```
 
-These are the messages that cross the playback channels. `PlaybackCommand` flows from the UI and tray (through their `FacadeTransport`s) to the audio engine; `PlaybackUpdate` flows back from the engine to the Playback Coordinator. Neither is serialized. See [./threading-model.md](./threading-model.md) for the channel directions.
+These are the messages that cross the playback channels. `PlaybackCommand` flows from the UI and tray (through their recording `ChannelTransport`s) to the audio engine; `PlaybackUpdate` flows back from the engine to the Playback Coordinator. Neither is serialized. See [./threading-model.md](./threading-model.md) for the channel directions.
 
 ### PlaybackQueue (`riff-playback`)
 

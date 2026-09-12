@@ -18,7 +18,7 @@ use tray_icon::Icon;
 use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::ui::window_visibility::{VisibilityMessage, VisibilityTx};
-use riff_backend::app::FacadeTransport;
+use riff_backend::app::ChannelTransport;
 use riff_backend::app::MutexExt;
 use riff_backend::app::state::PlaybackSession;
 use riff_backend::app::transport::Transport;
@@ -27,7 +27,7 @@ use riff_backend::app::transport::Transport;
 /// On Linux this is a no-op (tray-icon requires GTK which isn't always available).
 #[cfg(not(target_os = "linux"))]
 pub fn create_tray(
-    transport: FacadeTransport,
+    transport: ChannelTransport,
     playback: Arc<Mutex<PlaybackSession>>,
     quit_flag: Arc<AtomicBool>,
     visibility_tx: VisibilityTx,

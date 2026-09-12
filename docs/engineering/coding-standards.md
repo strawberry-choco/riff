@@ -14,7 +14,7 @@ The workspace is divided into five backend crates plus the frontend:
 | `riff-library` | Collection capability | Scanning, projections, playlists, covers; its own ports and error type. |
 | `riff-playback` | Playback capability | Queue, engine, gapless, coordinator, Transport; its own ports and error type. |
 | `riff-infra` | Adapters | Implements the slices' ports using external crates; owns every native dependency. |
-| `riff-backend` | Application API | Backend Facade, facade-adjacent services, `LibrarySession`, Composition Root. |
+| `riff-backend` | Application API | Backend Events inbox, app-layer services, `LibrarySession`, Composition Root. |
 | `riff-gui` | Frontend | egui widgets, tray icon, native file dialogs, the `riff` binary. |
 
 ### Dependency direction
@@ -89,7 +89,7 @@ Errors are typed per owner using the `thiserror` crate, and each owner's type is
 - `riff_library::app::errors::LibraryError` — the collection capability: metadata read/write, cover load, scan, and I/O failures.
 - `riff_playback::app::errors::PlaybackError` — the playback capability: decode and audio-output failures.
 
-The conversion flow runs outward: `riff-infra` maps external crate errors into the owning port's error at the adapter boundary, the slices and services match on those typed errors, and the UI surfaces a user-appropriate message. Playback failures reach the session as typed notices through the facade's notice channel (source + severity) rather than as a cross-slice state write. Errors are never returned as bare `String` values across a port, and the UI never panics on a recoverable error; it surfaces a message instead. Structured logging uses the `tracing` crate, with levels chosen by severity (ERROR for failures, WARN for recoverable issues, INFO for state changes, DEBUG for detailed tracing).
+The conversion flow runs outward: `riff-infra` maps external crate errors into the owning port's error at the adapter boundary, the slices and services match on those typed errors, and the UI surfaces a user-appropriate message. Playback failures reach the session as typed notices through the event inbox's notice channel (source + severity) rather than as a cross-slice state write. Errors are never returned as bare `String` values across a port, and the UI never panics on a recoverable error; it surfaces a message instead. Structured logging uses the `tracing` crate, with levels chosen by severity (ERROR for failures, WARN for recoverable issues, INFO for state changes, DEBUG for detailed tracing).
 
 ## Key Gotchas
 

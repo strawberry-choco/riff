@@ -336,7 +336,7 @@ impl StoreGeneration {
 /// Seam machinery: projections own private instances and no code outside a
 /// projection's implementation may observe an epoch value. The canonical
 /// type lives here beside the counter it keys on, so the library, playback,
-/// and facade read seams share one audited staleness contract.
+/// and app-layer read seams share one audited staleness contract.
 pub struct GenerationCache<K, V> {
     /// The session counter this cache is keyed on.
     counter: StoreGeneration,
@@ -685,7 +685,7 @@ pub trait LibraryQueryStore {
 
 /// Notification the `Application Store` emits (best-effort) over a
 /// crossbeam channel sender whenever a committed mutation bumps one of
-/// its two session generations (ADR 0002). The `BackendFacade` drains
+/// its two session generations (ADR 0002). `BackendEvents` drains
 /// this channel on the frontend frame path, coalesces rapid Library bumps,
 /// and surfaces them as `BackendEvents`.
 ///
@@ -697,7 +697,7 @@ pub trait LibraryQueryStore {
 pub enum StoreChanged {
     /// The session Library generation moved to `gen` on a committed
     /// Library mutation (scan batch, play recording, tag edit, remove,
-    /// clear). The facade coalesces these to roughly four per second.
+    /// clear). `BackendEvents` coalesces these to roughly four per second.
     Library(u64),
 
     /// The session playlist generation moved to `gen` on a committed

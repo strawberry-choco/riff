@@ -58,10 +58,10 @@ Dev-dependency: `tempfile` 3.8 — scratch directories for the real-SQLite and t
 | Crate | Version | Purpose | Notes |
 |-------|---------|---------|-------|
 | `riff-persistence` / `riff-library` / `riff-playback` / `riff-infra` | path | The full backend stack | `riff-infra` is named only by the Composition Root. |
-| `thiserror` | 2 | Facade error types | |
+| `thiserror` | 2 | Per-owner error types | |
 | `tracing` | 0.1 | Structured logging | |
-| `crossbeam-channel` | 0.5 | Channels | Facade event inbox and worker plumbing. |
-| `fastrand` | 2 | Shuffle | Queue helpers the facade surface exposes. |
+| `crossbeam-channel` | 0.5 | Channels | Backend event inbox and worker plumbing. |
+| `fastrand` | 2 | Shuffle | Queue helpers the playback surface exposes. |
 
 No native dependencies of its own, and no UI crate dependencies. Dev-dependency: `tempfile` 3.8 for the `scan_bench` example's synthetic library fixture.
 

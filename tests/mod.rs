@@ -736,7 +736,7 @@ pub mod mocks {
     }
 
     /// Empty [`PlaylistStore`] fake standing in for the Playlists section
-    /// of the Application Store in `SessionViews` facade tests that exercise
+    /// of the Application Store in `SessionViews` seam tests that exercise
     /// Library-side views: every read serves an empty result and every
     /// mutation reports "nothing changed". The playlist projection's own
     /// behavior is pinned against real `SQLite` scratch stores in the app
@@ -937,7 +937,7 @@ pub mod mocks {
 
     /// Which [`LibraryQueryStore`] query a [`MockLibraryQueryStore`]
     /// recorded. Arguments are kept so assertions can pin both call counts
-    /// and the exact query shapes the Session Views facade issues.
+    /// and the exact query shapes the Session Views seam issues.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum LibraryQueryCall {
         GetTrack(TrackId),
@@ -979,14 +979,14 @@ pub mod mocks {
     }
 
     /// Canned [`LibraryQueryStore`] fake standing in for the Application
-    /// Store's Library collection in `SessionViews` facade tests: every
+    /// Store's Library collection in `SessionViews` seam tests: every
     /// query serves its configured field, records one
     /// [`LibraryQueryCall`], and fails on demand while listed in
     /// `failing`.
     ///
     /// Configuration happens before wiring; recordings accumulate behind an
     /// internal mutex because the port takes `&self`. Tests that must hand
-    /// ownership to the facade keep a shared handle (see
+    /// ownership to the seam keep a shared handle (see
     /// `SharedMock` in the app tests) or lock through the `Arc`.
     pub struct MockLibraryQueryStore {
         // --- canned answers -------------------------------------------------

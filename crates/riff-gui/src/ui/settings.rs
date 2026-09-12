@@ -1936,7 +1936,7 @@ impl super::app::RiffApp {
         playback: &mut PlaybackSession,
     ) {
         // Per-root indexed-track counts come from the store through the
-        // Session Views facade (component-wise subtree ids, invalidated by
+        // Session Views seam (component-wise subtree ids, invalidated by
         // generation bumps) — never the former in-memory mirror.
         let content = SettingsContent {
             libraries: library

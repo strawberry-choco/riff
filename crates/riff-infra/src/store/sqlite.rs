@@ -277,7 +277,7 @@ pub struct SqliteStore {
     conn: std::sync::Arc<std::sync::Mutex<Connection>>,
     library_generation: StoreGeneration,
     playlist_generation: StoreGeneration,
-    /// Sender for `BackendFacade`-side change notifications. Writes are
+    /// Sender for `BackendEvents`-side change notifications. Writes are
     /// best-effort (`send()` — dropped receivers are fine) and happen
     /// exactly beside the corresponding generation bump.
     changes: Sender<StoreChanged>,
@@ -481,7 +481,7 @@ impl SqliteStore {
     }
 
     /// Handle for wiring this store into the event backbone. Returns a fresh
-    /// crossbeam [`Sender`] of [`StoreChanged`] so tests and the facade can
+    /// crossbeam [`Sender`] of [`StoreChanged`] so tests and the event inbox can
     /// consume the notifications this handle produces beside each generation bump.
     #[must_use]
     pub fn changes_sender(&self) -> Sender<StoreChanged> {

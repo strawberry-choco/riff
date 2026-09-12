@@ -38,7 +38,7 @@ impl RiffApp {
     }
 
     /// The selection panel pane (handoff issue 10): whatever album the
-    /// session last selected, resolved through the Session Views facade —
+    /// session last selected, resolved through the Session Views seam —
     /// art requested through the album's first track, the details grid, and
     /// the Play album action over the album's track batch.
     fn render_selection_pane(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {

@@ -21,7 +21,7 @@ Every contribution must respect the crate split and its dependency chain (see [A
 - **Use trait abstraction across the slice/infra boundary.** Each slice defines the port traits it consumes; `riff-infra` implements them. Adding a new external dependency means introducing or extending a port in the consuming slice and implementing it in `riff-infra` — never calling the crate from a slice directly.
 - **One composition root.** Only `riff-backend/src/composition.rs` constructs concrete adapters and wires them into ports. Do not add a DI framework, and do not construct infrastructure elsewhere.
 
-If you are unsure which crate a new piece of code belongs in, ask what it is: types crossing the persistence boundary go in `riff-persistence`, collection logic and its ports in `riff-library`, playback logic and its ports in `riff-playback`, anything touching an external crate in `riff-infra`, facade surface and wiring in `riff-backend`, and anything rendering pixels in `riff-gui`.
+If you are unsure which crate a new piece of code belongs in, ask what it is: types crossing the persistence boundary go in `riff-persistence`, collection logic and its ports in `riff-library`, playback logic and its ports in `riff-playback`, anything touching an external crate in `riff-infra`, event surface and wiring in `riff-backend`, and anything rendering pixels in `riff-gui`.
 
 ## Working on a Change
 

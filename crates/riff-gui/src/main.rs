@@ -62,7 +62,7 @@ fn main() {
         rt.session_views,
         rt.tag_edits,
         rt.covers,
-        rt.facade,
+        rt.backend_events,
         visibility_listener,
     );
 
@@ -80,7 +80,7 @@ fn main() {
         rt.session_views,
         rt.tag_edits,
         rt.covers,
-        rt.facade,
+        rt.backend_events,
         visibility_listener,
     );
 

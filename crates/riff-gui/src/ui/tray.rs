@@ -4,9 +4,9 @@
 //! construct backend playback commands for the "Show Window" / left-click
 //! path: those go over a frontend-only [`window_visibility::VisibilityTx`]
 //! channel that the UI thread drains on every logic tick. Playback intents
-//! (Play/Pause, Next, Previous, Stop) go through the facade transport's
+//! (Play/Pause, Next, Previous, Stop) go through the tray transport's
 //! [`Transport`] port exactly like the mouse and keyboard paths, so every
-//! tray dispatch is recorded onto the facade's event inbox too.
+//! tray dispatch is recorded onto the shared event inbox too.
 
 #[cfg(not(target_os = "linux"))]
 use muda::{Menu, MenuId, MenuItem, PredefinedMenuItem};

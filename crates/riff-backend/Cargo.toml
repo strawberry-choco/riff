@@ -1,7 +1,7 @@
-# riff-backend — the application API: Backend Facade, typed events and
-# notices, facade transport, and the Composition Root.
+# riff-backend — the application API: the Backend Events inbox, typed
+# events and notices, and the Composition Root.
 #
-# Owns the facade and its event surface, the Composition Root (the one place
+# Owns the event inbox, the Composition Root (the one place
 # that names both the slice-defined ports and the concrete `riff-infra`
 # adapters), and the worker threads those adapters run. This crate carries no
 # native dependencies of its own and NO UI crate dependencies

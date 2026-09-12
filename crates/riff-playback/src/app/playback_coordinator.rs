@@ -23,7 +23,7 @@ pub struct PlaybackCoordinator {
     update_rx: Receiver<PlaybackUpdate>,
     cmd_tx: Sender<PlaybackCommand>,
     mutations: Box<dyn LibraryMutationStore + Send>,
-    /// Playback errors surface as typed notices through the facade's notice
+    /// Playback errors surface as typed notices through the event inbox's notice
     /// channel instead of a cross-slice state write: the coordinator sends
     /// the pre-formatted user-facing message here and never touches the
     /// library session's status slot.

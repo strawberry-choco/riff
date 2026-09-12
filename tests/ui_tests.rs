@@ -5421,7 +5421,7 @@ mod background_service_ui_tests {
 /// [`apply_backend_events`], preserving the exact visible string.
 #[cfg(test)]
 mod playback_notice_ui_tests {
-    use riff_backend::app::facade::{BackendEvent, NoticePayload, NoticeSeverity, NoticeSource};
+    use riff_backend::app::events::{BackendEvent, NoticePayload, NoticeSeverity, NoticeSource};
     use riff_gui::ui::app::apply_backend_events;
 
     fn playback_notice(message: &str) -> BackendEvent {
@@ -7032,7 +7032,7 @@ mod browser_column_ui_tests {
 
     /// The production detail-column data path, replicated frame-for-frame:
     /// `resolve_detail_content` maps the library session through the
-    /// Session Views facade, and `show_detail_column` paints it.
+    /// Session Views seam, and `show_detail_column` paints it.
     fn render_detail_state_ui(ui: &mut egui::Ui, s: &mut DetailRenderState) {
         let palette = Palette::dark();
         let content = riff_gui::ui::app::resolve_detail_content(&mut s.views, &s.library);

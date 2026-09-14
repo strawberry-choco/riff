@@ -958,9 +958,13 @@ mod tests {
         assert!((theme::TITLEBAR_H - 56.0).abs() < f32::EPSILON);
         assert!((theme::SIDEBAR_W - 280.0).abs() < f32::EPSILON);
         assert!((theme::PLAYERBAR_H - 88.0).abs() < f32::EPSILON);
-        // The selection panel's 300px right column (design: the 300×750
-        // panel between the detail column and the window edge).
-        assert!((theme::SELECT_PANEL_W - 300.0).abs() < f32::EPSILON);
+        // The elastic column stage's sizing tokens: the 280px entity column
+        // preferred width, the 200px / 320px floors, and the 300px inspector
+        // (the former selection panel's width).
+        assert!((theme::COLUMN_WIDTH - 280.0).abs() < f32::EPSILON);
+        assert!((theme::COLUMN_MIN_W - 200.0).abs() < f32::EPSILON);
+        assert!((theme::LAST_COLUMN_MIN_W - 320.0).abs() < f32::EPSILON);
+        assert!((theme::INSPECTOR_WIDTH - 300.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -6285,8 +6289,8 @@ mod browser_column_ui_tests {
             &mut library,
         );
         assert_eq!(
-            library.browser_selection,
-            Some(BrowserSelection::Artist("Aphex Twin".to_string())),
+            library.current_selection(),
+            Some(&BrowserSelection::Artist("Aphex Twin".to_string())),
             "selecting an artist row stores the artist identity for the detail column"
         );
 
@@ -6300,8 +6304,8 @@ mod browser_column_ui_tests {
             &mut library,
         );
         assert_eq!(
-            library.browser_selection,
-            Some(BrowserSelection::Album {
+            library.current_selection(),
+            Some(&BrowserSelection::Album {
                 artist: "Boards of Canada".to_string(),
                 title: "Geogaddi".to_string(),
             }),
@@ -6317,8 +6321,8 @@ mod browser_column_ui_tests {
             &mut library,
         );
         assert_eq!(
-            library.browser_selection,
-            Some(BrowserSelection::Genre("Electronic".to_string())),
+            library.current_selection(),
+            Some(&BrowserSelection::Genre("Electronic".to_string())),
         );
     }
 
@@ -6857,9 +6861,9 @@ mod browser_column_ui_tests {
     }
 
     #[test]
-    fn test_detail_breadcrumb_climb_resolves_the_selection_path() {
+    fn test_detail_crumb_truncates_the_path() {
         use riff_backend::app::state::BrowserSelection;
-        use riff_gui::ui::app::apply_detail_action;
+        use riff_gui::ui::app::{apply_detail_action, apply_drill_action};
         use riff_gui::ui::detail::DetailAction;
 
         let dir = tempfile::tempdir().unwrap();
@@ -6869,13 +6873,31 @@ mod browser_column_ui_tests {
         let transport = crate::mocks::MockTransport::new();
 
         // Album trail: Artists / Boards of Canada / Geogaddi.
-        library.browser_selection = Some(BrowserSelection::Album {
-            artist: "Boards of Canada".to_string(),
-            title: "Geogaddi".to_string(),
-        });
+        library.library_section = LibrarySection::Artists;
+        apply_browser_action(
+            BrowserAction::Select("Boards of Canada".to_string()),
+            &mut library,
+        );
+        apply_drill_action(
+            LibrarySection::Artists,
+            1,
+            album_key("Boards of Canada", "Geogaddi"),
+            &mut library,
+        );
+        assert_eq!(
+            library.browser_path,
+            vec![
+                BrowserSelection::Artist("Boards of Canada".to_string()),
+                BrowserSelection::Album {
+                    artist: "Boards of Canada".to_string(),
+                    title: "Geogaddi".to_string(),
+                },
+            ],
+            "drilling selects the album at level 1 under the root artist"
+        );
 
-        // Climbing one level lands on the artist; the browser column
-        // highlights the artist row again.
+        // A crumb click at level 1 climbs back to the artist; the browser
+        // column highlights the artist row again.
         apply_detail_action(
             DetailAction::Crumb(1),
             &mut library,
@@ -6885,13 +6907,13 @@ mod browser_column_ui_tests {
             &[],
         );
         assert_eq!(
-            library.browser_selection,
-            Some(BrowserSelection::Artist("Boards of Canada".to_string())),
-            "one climb up the album trail selects the artist"
+            library.browser_path,
+            vec![BrowserSelection::Artist("Boards of Canada".to_string())],
+            "one climb up the album trail truncates the path to the artist"
         );
 
-        // Climbing to the root clears the selection: the browser column
-        // listing takes over again.
+        // A crumb click at the root (level 0) empties the path: the browser
+        // column listing takes over again.
         apply_detail_action(
             DetailAction::Crumb(0),
             &mut library,
@@ -6900,13 +6922,13 @@ mod browser_column_ui_tests {
             store.as_mut(),
             &[],
         );
-        assert_eq!(
-            library.browser_selection, None,
-            "climbing to the root clears the selection"
+        assert!(
+            library.browser_path.is_empty(),
+            "climbing to the root clears the drill-down path"
         );
 
-        // A segment at the current level changes nothing.
-        library.browser_selection = Some(BrowserSelection::Artist("Autechre".to_string()));
+        // A crumb level at or past the current depth changes nothing.
+        library.browser_path = vec![BrowserSelection::Artist("Autechre".to_string())];
         apply_detail_action(
             DetailAction::Crumb(1),
             &mut library,
@@ -6916,44 +6938,256 @@ mod browser_column_ui_tests {
             &[],
         );
         assert_eq!(
-            library.browser_selection,
-            Some(BrowserSelection::Artist("Autechre".to_string())),
-            "the current level's own segment is inert"
+            library.browser_path,
+            vec![BrowserSelection::Artist("Autechre".to_string())],
+            "a crumb level at or past the current depth is inert"
         );
+    }
 
-        // Selecting an album row on the artist level drills back down: the
-        // row key resolves through the current selection's level.
-        apply_detail_action(
-            DetailAction::SelectRow(album_key("Autechre", "Tri Repetae")),
+    #[test]
+    fn test_apply_drill_action_selects_at_the_level_and_truncates_deeper_entries() {
+        use riff_backend::app::state::BrowserSelection;
+        use riff_gui::ui::app::apply_drill_action;
+
+        // Artists, level 1: the row key is the (album artist, title)
+        // composite; the new entry lands under the root artist.
+        let mut library = LibrarySession {
+            library_section: LibrarySection::Artists,
+            browser_path: vec![BrowserSelection::Artist("Boards of Canada".to_string())],
+            ..LibrarySession::default()
+        };
+        apply_drill_action(
+            LibrarySection::Artists,
+            1,
+            album_key("Boards of Canada", "Geogaddi"),
             &mut library,
-            &mut playback,
-            &transport,
-            store.as_mut(),
-            &[],
         );
         assert_eq!(
-            library.browser_selection,
-            Some(BrowserSelection::Album {
-                artist: "Autechre".to_string(),
-                title: "Tri Repetae".to_string(),
-            }),
+            library.browser_path,
+            vec![
+                BrowserSelection::Artist("Boards of Canada".to_string()),
+                BrowserSelection::Album {
+                    artist: "Boards of Canada".to_string(),
+                    title: "Geogaddi".to_string(),
+                },
+            ],
+            "an album row on the artist level selects that album at level 1"
         );
 
-        // On a genre trail the rows are artists: the same SelectRow gesture
-        // resolves by the level it is issued from.
-        library.browser_selection = Some(BrowserSelection::Genre("Electronic".to_string()));
-        apply_detail_action(
-            DetailAction::SelectRow("Autechre".to_string()),
+        // Genres, level 1: the row key is the artist name.
+        let mut library = LibrarySession {
+            library_section: LibrarySection::Genres,
+            browser_path: vec![BrowserSelection::Genre("Electronic".to_string())],
+            ..LibrarySession::default()
+        };
+        apply_drill_action(
+            LibrarySection::Genres,
+            1,
+            "Autechre".to_string(),
             &mut library,
-            &mut playback,
-            &transport,
-            store.as_mut(),
-            &[],
         );
         assert_eq!(
-            library.browser_selection,
-            Some(BrowserSelection::Artist("Autechre".to_string())),
-            "an artist row on the genre level selects that artist"
+            library.browser_path,
+            vec![
+                BrowserSelection::Genre("Electronic".to_string()),
+                BrowserSelection::Artist("Autechre".to_string()),
+            ],
+            "an artist row on the genre level selects that artist at level 1"
+        );
+
+        // Genres, level 2: the row key is the album composite, and the
+        // deeper path (a stale album entry) truncates.
+        library.browser_path.push(BrowserSelection::Album {
+            artist: "Autechre".to_string(),
+            title: "Old".to_string(),
+        });
+        apply_drill_action(
+            LibrarySection::Genres,
+            2,
+            album_key("Autechre", "Tri Repetae"),
+            &mut library,
+        );
+        assert_eq!(
+            library.browser_path,
+            vec![
+                BrowserSelection::Genre("Electronic".to_string()),
+                BrowserSelection::Artist("Autechre".to_string()),
+                BrowserSelection::Album {
+                    artist: "Autechre".to_string(),
+                    title: "Tri Repetae".to_string(),
+                },
+            ],
+            "an album row at level 2 truncates any deeper entries"
+        );
+
+        // A level the section has no identity for applies nothing.
+        let mut library = LibrarySession::default();
+        apply_drill_action(LibrarySection::AllTracks, 1, "x".to_string(), &mut library);
+        assert!(library.browser_path.is_empty(), "All Tracks drills nowhere");
+    }
+
+    #[test]
+    fn test_column_plan_shapes_per_section_and_path() {
+        use riff_backend::app::state::BrowserSelection;
+        use riff_gui::ui::app::{ColumnKind, column_plan};
+
+        let artist = BrowserSelection::Artist("Boards of Canada".to_string());
+        let album = BrowserSelection::Album {
+            artist: "Boards of Canada".to_string(),
+            title: "Geogaddi".to_string(),
+        };
+        let genre = BrowserSelection::Genre("Electronic".to_string());
+
+        // Artists: root only, then the albums-of-artist column, then Tracks.
+        assert_eq!(
+            column_plan(LibrarySection::Artists, &[]),
+            vec![ColumnKind::Root],
+            "Artists with an empty path renders its root column only"
+        );
+        assert_eq!(
+            column_plan(LibrarySection::Artists, std::slice::from_ref(&artist)),
+            vec![ColumnKind::Root, ColumnKind::ArtistAlbums],
+        );
+        assert_eq!(
+            column_plan(LibrarySection::Artists, &[artist.clone(), album.clone()]),
+            vec![
+                ColumnKind::Root,
+                ColumnKind::ArtistAlbums,
+                ColumnKind::Tracks,
+            ],
+        );
+
+        // Albums: root only, then the Tracks column.
+        assert_eq!(
+            column_plan(LibrarySection::Albums, &[]),
+            vec![ColumnKind::Root],
+            "Albums with an empty path renders its root column only"
+        );
+        assert_eq!(
+            column_plan(LibrarySection::Albums, std::slice::from_ref(&album)),
+            vec![ColumnKind::Root, ColumnKind::Tracks],
+        );
+
+        // Genres: one column per drill level, capped at the four-column
+        // genre → artist → album → tracks shape.
+        assert_eq!(
+            column_plan(LibrarySection::Genres, &[]),
+            vec![ColumnKind::Root],
+        );
+        assert_eq!(
+            column_plan(LibrarySection::Genres, std::slice::from_ref(&genre)),
+            vec![ColumnKind::Root, ColumnKind::GenreArtists],
+        );
+        assert_eq!(
+            column_plan(LibrarySection::Genres, &[genre.clone(), artist.clone()]),
+            vec![
+                ColumnKind::Root,
+                ColumnKind::GenreArtists,
+                ColumnKind::GenreArtistAlbums,
+            ],
+        );
+        assert_eq!(
+            column_plan(
+                LibrarySection::Genres,
+                &[genre.clone(), artist.clone(), album.clone()],
+            ),
+            vec![
+                ColumnKind::Root,
+                ColumnKind::GenreArtists,
+                ColumnKind::GenreArtistAlbums,
+                ColumnKind::Tracks,
+            ],
+        );
+
+        // All Tracks is the single flat listing column.
+        assert_eq!(
+            column_plan(LibrarySection::AllTracks, &[]),
+            vec![ColumnKind::Flat],
+        );
+
+        // A path entry of the wrong kind for its level is ignored: it never
+        // spawns a column.
+        assert_eq!(
+            column_plan(
+                LibrarySection::Artists,
+                &[BrowserSelection::Album {
+                    artist: "Boards of Canada".to_string(),
+                    title: "Geogaddi".to_string(),
+                }]
+            ),
+            vec![ColumnKind::Root],
+            "an album entry on the Artists root is ignored"
+        );
+        assert_eq!(
+            column_plan(
+                LibrarySection::Genres,
+                &[BrowserSelection::Artist("Autechre".to_string())]
+            ),
+            vec![ColumnKind::Root],
+            "an artist entry on the Genres root is ignored"
+        );
+        assert_eq!(
+            column_plan(LibrarySection::Artists, &[artist.clone(), genre.clone()],),
+            vec![ColumnKind::Root, ColumnKind::ArtistAlbums],
+            "a wrong-kind level-1 entry still leaves the artist's albums column"
+        );
+    }
+
+    #[test]
+    fn test_column_widths_fit_the_available_width_without_scrolling() {
+        use riff_gui::ui::app::column_widths;
+
+        // Wide window: entity columns keep their preferred width, the last
+        // column absorbs the remainder.
+        assert_eq!(column_widths(1000.0, 2, false), vec![280.0, 720.0]);
+        // The inspector takes its width off the top first.
+        assert_eq!(
+            column_widths(1300.0, 3, true),
+            vec![280.0, 280.0, 440.0],
+            "the inspector's 300px is reserved before the last column absorbs"
+        );
+        // The last column never falls below its floor: once the window can
+        // pay for the floors, the non-last columns yield width toward the
+        // last column's floor first (280·3 leaves only 160 for the last).
+        let widths = column_widths(1000.0, 4, false);
+        assert_eq!(widths.iter().sum::<f32>(), 1000.0);
+        assert!(
+            widths[3] >= 320.0 && widths[0] >= 200.0,
+            "the last column's floor holds before the non-last columns shrink: {widths:?}"
+        );
+
+        // A single column fills the whole stage (floors do not apply).
+        assert_eq!(column_widths(500.0, 1, false), vec![500.0]);
+        assert_eq!(column_widths(500.0, 1, true), vec![200.0]);
+
+        // Narrow window: when the width cannot satisfy the floors, every
+        // column shrinks proportionally to its floor — never scrolls, and
+        // never drops a column below a usable sliver.
+        let widths = column_widths(1000.0, 4, true);
+        assert_eq!(
+            widths.iter().sum::<f32>(),
+            700.0,
+            "the four list columns plus the 300px inspector exactly fill the stage"
+        );
+        let expected_scale = 700.0 / (200.0 * 3.0 + 320.0);
+        assert!(
+            (widths[0] - 200.0 * expected_scale).abs() < f32::EPSILON
+                && (widths[3] - 320.0 * expected_scale).abs() < f32::EPSILON,
+            "columns shrink proportionally to their floors: {widths:?}"
+        );
+        assert!(
+            widths.iter().all(|w| *w > 0.0),
+            "every visible column stays usable: {widths:?}"
+        );
+
+        // Medium window: floors are satisfiable, and the non-last columns
+        // yield toward the last column's floor before the last column
+        // absorbs the remainder.
+        let widths = column_widths(800.0, 3, false);
+        assert_eq!(widths.iter().sum::<f32>(), 800.0);
+        assert!(
+            widths[2] >= 320.0 && widths[0] >= 200.0 && widths[1] >= 200.0,
+            "all floors hold once the window can pay for them: {widths:?}"
         );
     }
 
@@ -6967,9 +7201,11 @@ mod browser_column_ui_tests {
         actions: Vec<riff_gui::ui::detail::DetailAction>,
     }
 
-    /// The production detail-column data path, replicated frame-for-frame:
+    /// The production Tracks-column data path, replicated frame-for-frame:
     /// `resolve_detail_content` maps the library session through the
-    /// Session Views seam, and `show_detail_column` paints it.
+    /// Session Views seam, and `show_detail_column` paints it. Entity
+    /// listings are their own columns in the stage, so the widget receives
+    /// no rows.
     fn render_detail_state_ui(ui: &mut egui::Ui, s: &mut DetailRenderState) {
         let palette = Palette::dark();
         let content = riff_gui::ui::app::resolve_detail_content(&mut s.views, &s.library);
@@ -6977,7 +7213,7 @@ mod browser_column_ui_tests {
             breadcrumb: &content.breadcrumb,
             header: content.header.as_ref(),
             tracks: &content.tracks,
-            rows: &content.rows,
+            rows: &[],
             ..riff_gui::ui::detail::DetailColumn::empty("Nothing selected", "Pick a row.")
         };
         s.actions.clear();
@@ -7045,7 +7281,7 @@ mod browser_column_ui_tests {
     }
 
     #[test]
-    fn test_detail_column_resolves_the_librarys_data_and_stays_fresh() {
+    fn test_tracks_column_resolves_the_librarys_data_and_stays_fresh() {
         use egui_kittest::kittest::Queryable;
         use riff_backend::app::state::{BrowserSelection, LibrarySection};
         use riff_backend::app::store::LibraryMutationStore;
@@ -7068,7 +7304,13 @@ mod browser_column_ui_tests {
             views,
             library: riff_backend::app::state::LibrarySession {
                 library_section: LibrarySection::Artists,
-                browser_selection: Some(BrowserSelection::Artist("Boards of Canada".to_string())),
+                browser_path: vec![
+                    BrowserSelection::Artist("Boards of Canada".to_string()),
+                    BrowserSelection::Album {
+                        artist: "Boards of Canada".to_string(),
+                        title: "Geogaddi".to_string(),
+                    },
+                ],
                 ..riff_backend::app::state::LibrarySession::default()
             },
             cache: IconCache::new(),
@@ -7080,19 +7322,15 @@ mod browser_column_ui_tests {
             .build_ui_state(render_detail_state_ui, state);
         harness.run();
 
-        // Artist level: the artist's album rows render.
-        assert!(
-            harness.query_by_label("Boards of Canada").is_some(),
-            "the artist level renders the artist's album rows"
-        );
-
-        // Drill into the album: the header and track table resolve from
+        // Album level: the breadcrumb trail reads the section root and one
+        // crumb per path entry, and the header + track table resolve from
         // the store.
-        harness.state_mut().library.browser_selection = Some(BrowserSelection::Album {
-            artist: "Boards of Canada".to_string(),
-            title: "Geogaddi".to_string(),
-        });
-        harness.run();
+        assert!(
+            harness.query_by_label("Artists").is_some()
+                && harness.query_by_label("Boards of Canada").is_some()
+                && harness.query_all_by_label("Geogaddi").count() >= 2,
+            "the breadcrumb and the header both name the album (trail + title)"
+        );
         assert!(
             harness
                 .query_by_label("Boards of Canada \u{b7} 2002")
@@ -7118,10 +7356,33 @@ mod browser_column_ui_tests {
             "each row's favorite control reflects its stored flag"
         );
 
+        // Above the album level the Tracks column carries no header or
+        // track table — entity listings are their own columns now; only
+        // the breadcrumb trail renders.
+        harness.state_mut().library.browser_path =
+            vec![BrowserSelection::Artist("Boards of Canada".to_string())];
+        harness.run();
+        assert!(
+            harness.query_by_label("Magic Window").is_none(),
+            "the artist level renders no track table"
+        );
+        assert!(
+            harness.query_by_label("Boards of Canada").is_some(),
+            "the artist level still renders the breadcrumb trail"
+        );
+
         // Staleness: a favorite committed through the store (exactly what
         // a tag edit or scan batch does to library data) shows up on the
         // next frame with zero caller action — the committed mutation
         // bumped the library generation itself.
+        harness.state_mut().library.browser_path = vec![
+            BrowserSelection::Artist("Boards of Canada".to_string()),
+            BrowserSelection::Album {
+                artist: "Boards of Canada".to_string(),
+                title: "Geogaddi".to_string(),
+            },
+        ];
+        harness.run();
         let bumped = store
             .set_track_favorite(&t1.id, true)
             .expect("the favorite commit works");
@@ -7132,24 +7393,38 @@ mod browser_column_ui_tests {
             "the fresh flag renders without any explicit invalidation"
         );
 
-        // Genre level: the genre's artist rows resolve from the genre read
-        // model.
-        harness.state_mut().library.browser_selection =
-            Some(BrowserSelection::Genre("Electronic".to_string()));
+        // Genre drill: the same album's tracks resolve genre-scoped through
+        // the Genres section, with the genre's own breadcrumb root.
+        harness.state_mut().library.library_section = LibrarySection::Genres;
+        harness.state_mut().library.browser_path = vec![
+            BrowserSelection::Genre("Electronic".to_string()),
+            BrowserSelection::Artist("Boards of Canada".to_string()),
+            BrowserSelection::Album {
+                artist: "Boards of Canada".to_string(),
+                title: "Geogaddi".to_string(),
+            },
+        ];
         harness.run();
         assert!(
-            harness.query_by_label("Boards of Canada").is_some(),
-            "the genre level lists the artists carrying that genre"
+            harness.query_by_label("Genres").is_some()
+                && harness.query_by_label("Electronic").is_some(),
+            "the genre trail's breadcrumb names the genre section"
+        );
+        assert!(
+            harness.query_by_label("Magic Window").is_some()
+                && harness.query_by_label("Dawn Chorus").is_some(),
+            "the genre-scoped track table resolves the album's tracks"
         );
     }
 
-    // --- Selection panel (handoff issue 10) -------------------------------------
+    // --- Inspector (the collapsible selection panel, handoff issue 10) ----------
     //
-    // The third pane of the explorer: a persistent right-hand readout of the
-    // selected album's art and details with a Play album action. Tested at
-    // the same seams as the browser column (issue 08) and detail column
-    // (issue 09): the pure widget seam (`ui::selection::show_selection_panel`,
-    // headless kittest harness) and the session-glue seam in `ui::app`.
+    // The elastic stage's rightmost column: a readout of the live selection
+    // (album / artist / genre / track) with Play album and Add to Queue.
+    // Tested at the same seams as the browser column (issue 08) and detail
+    // column (issue 09): the pure widget seam
+    // (`ui::selection::show_selection_panel`, headless kittest harness) and
+    // the session-glue seam in `ui::app`.
 
     #[test]
     fn test_selection_panel_renders_album_details_and_reports_play_album() {
@@ -7184,6 +7459,7 @@ mod browser_column_ui_tests {
                         title: Some("Tomorrow's Harvest"),
                         subtitle: Some("Boards of Canada \u{b7} 2013"),
                         details: &details,
+                        queue: false,
                     };
                     show_selection_panel(ui, &mut cache, &palette, panel, actions);
                 },
@@ -7251,6 +7527,7 @@ mod browser_column_ui_tests {
                         title: None,
                         subtitle: None,
                         details: &[],
+                        queue: false,
                     };
                     show_selection_panel(ui, &mut cache, &palette, panel, actions);
                 },
@@ -7271,81 +7548,6 @@ mod browser_column_ui_tests {
         assert!(
             harness.state().is_empty(),
             "the empty state reports nothing"
-        );
-    }
-
-    #[test]
-    fn test_album_selection_tracks_the_last_selected_album() {
-        use riff_backend::app::state::{AlbumSelection, BrowserSelection, LibrarySection};
-        use riff_gui::ui::app::{apply_browser_action, apply_detail_action};
-        use riff_gui::ui::detail::DetailAction;
-
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = boxed_library_store(&dir);
-        let transport = crate::mocks::MockTransport::new();
-        let mut library = LibrarySession {
-            library_section: LibrarySection::Albums,
-            ..LibrarySession::default()
-        };
-
-        // Selecting an album row in the browser column records it as the
-        // panel's album — the identity the selection panel resolves.
-        apply_browser_action(
-            BrowserAction::Select(album_key("Boards of Canada", "Geogaddi")),
-            &mut library,
-        );
-        assert_eq!(
-            library.selected_album,
-            Some(AlbumSelection {
-                artist: "Boards of Canada".to_string(),
-                title: "Geogaddi".to_string(),
-            }),
-            "selecting an album row records the panel's album"
-        );
-
-        // Selecting a non-album entity leaves the panel's album alone: the
-        // panel keeps showing the last album while the listener browses.
-        library.library_section = LibrarySection::Artists;
-        apply_browser_action(
-            BrowserAction::Select("Aphex Twin".to_string()),
-            &mut library,
-        );
-        assert_eq!(
-            library.browser_selection,
-            Some(BrowserSelection::Artist("Aphex Twin".to_string())),
-            "the artist selection lands on the browser selection"
-        );
-        assert!(
-            library.selected_album.is_some(),
-            "selecting an artist does not blank the panel's album"
-        );
-
-        // Drilling from the artist into an album in the detail column is
-        // selecting that album too — the panel follows the drill.
-        apply_detail_action(
-            DetailAction::SelectRow(album_key("Aphex Twin", "Selected Ambient Works")),
-            &mut library,
-            &mut PlaybackSession::default(),
-            &transport,
-            store.as_mut(),
-            &[],
-        );
-        assert_eq!(
-            library.selected_album,
-            Some(AlbumSelection {
-                artist: "Aphex Twin".to_string(),
-                title: "Selected Ambient Works".to_string(),
-            }),
-            "drilling into an album updates the panel's album"
-        );
-
-        // Switching sidebar sections never blanks the panel: navigation is
-        // not a selection change.
-        library.library_section = LibrarySection::AllTracks;
-        apply_browser_action(BrowserAction::Select("whatever".to_string()), &mut library);
-        assert!(
-            library.selected_album.is_some(),
-            "browsing All Tracks does not blank the panel's album"
         );
     }
 
@@ -7381,9 +7583,78 @@ mod browser_column_ui_tests {
     }
 
     #[test]
-    fn test_selection_panel_resolves_the_selected_albums_details() {
-        use riff_backend::app::state::{AlbumSelection, LibrarySection};
-        use riff_gui::ui::app::resolve_selection_panel;
+    fn test_selection_queue_appends_the_selections_tracks() {
+        use riff_gui::ui::app::apply_selection_action;
+        use riff_gui::ui::selection::SelectionAction;
+
+        let tracks = [
+            TrackId("a.mp3".to_string()),
+            TrackId("b.mp3".to_string()),
+            TrackId("c.mp3".to_string()),
+        ];
+        let transport = crate::mocks::MockTransport::new();
+        apply_selection_action(SelectionAction::Queue, &transport, &tracks);
+        assert_eq!(
+            transport.recorded(),
+            vec![
+                crate::mocks::TransportIntent::AddToQueue(TrackId("a.mp3".to_string())),
+                crate::mocks::TransportIntent::AddToQueue(TrackId("b.mp3".to_string())),
+                crate::mocks::TransportIntent::AddToQueue(TrackId("c.mp3".to_string())),
+            ],
+            "Add to Queue appends every track of the selection, in order"
+        );
+
+        // An empty selection queues nothing.
+        let transport = crate::mocks::MockTransport::new();
+        apply_selection_action(SelectionAction::Queue, &transport, &[]);
+        assert!(transport.recorded().is_empty(), "nothing to queue");
+    }
+
+    #[test]
+    fn test_selection_panel_reports_add_to_queue() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::selection::{SelectionAction, SelectionPanel, show_selection_panel};
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 640.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<SelectionAction>| {
+                    let panel = SelectionPanel {
+                        art: None,
+                        title: Some("Tomorrow's Harvest"),
+                        subtitle: Some("Boards of Canada \u{b7} 2013"),
+                        details: &[],
+                        queue: true,
+                    };
+                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // The inspector's quick-action row offers both Play album and
+        // Add to Queue; each reports its own action.
+        assert!(
+            harness.query_by_label("Add to Queue").is_some(),
+            "the inspector renders the Add to Queue button"
+        );
+        harness.get_by_label("Add to Queue").click();
+        harness.get_by_label("Play album").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![SelectionAction::Queue, SelectionAction::PlayAlbum],
+            "each button in the quick-action row reports its action"
+        );
+    }
+
+    #[test]
+    fn test_inspector_resolves_the_selection_and_gates_visibility() {
+        use riff_backend::app::state::{BrowserSelection, LibrarySection};
+        use riff_gui::ui::app::{InspectorKind, resolve_inspector};
 
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("riff.sqlite3");
@@ -7399,30 +7670,38 @@ mod browser_column_ui_tests {
             store.playlist_generation(),
         );
 
+        // Album selection: the full readout — cover track, title, artist ·
+        // year line, and the details grid.
         let library = riff_backend::app::state::LibrarySession {
             library_section: LibrarySection::Albums,
-            selected_album: Some(AlbumSelection {
+            browser_path: vec![BrowserSelection::Album {
                 artist: "Boards of Canada".to_string(),
                 title: "Geogaddi".to_string(),
-            }),
+            }],
             ..riff_backend::app::state::LibrarySession::default()
         };
-
-        let content = resolve_selection_panel(&mut views, &library);
+        let content = resolve_inspector(&mut views, &library);
+        assert!(content.visible, "an album selection shows the inspector");
+        assert_eq!(content.kind, InspectorKind::Album);
         assert_eq!(
             content.title.as_deref(),
             Some("Geogaddi"),
-            "the panel resolves the album's title"
+            "the inspector resolves the album's title"
         );
         assert_eq!(
             content.subtitle.as_deref(),
             Some("Boards of Canada \u{b7} 2002"),
-            "the panel resolves the artist · year subtitle"
+            "the inspector resolves the artist · year subtitle"
         );
         assert_eq!(
             content.art_track,
             Some(t1.id.clone()),
-            "the panel resolves the album's first track for its art"
+            "the inspector resolves the album's first track for its art"
+        );
+        assert_eq!(
+            content.track_ids,
+            vec![t1.id.clone(), _t2.id.clone()],
+            "the inspector carries the album's track batch for Play/Queue"
         );
 
         // The details grid reads the store: artist, year, genre, the track
@@ -7453,24 +7732,73 @@ mod browser_column_ui_tests {
             "the path row names the album's folder"
         );
 
-        // A panel album the store can no longer resolve (files removed, or
-        // nothing selected yet) renders the empty state — never stale art
-        // or wrong details.
+        // Artist selection: name, album count, cover, and the artist's
+        // track batch.
+        let library = riff_backend::app::state::LibrarySession {
+            browser_path: vec![BrowserSelection::Artist("Boards of Canada".to_string())],
+            ..riff_backend::app::state::LibrarySession::default()
+        };
+        let content = resolve_inspector(&mut views, &library);
+        assert!(content.visible, "an artist selection shows the inspector");
+        assert_eq!(content.kind, InspectorKind::Artist);
+        assert_eq!(content.title.as_deref(), Some("Boards of Canada"));
+        assert_eq!(content.subtitle.as_deref(), Some("1 album"));
+        assert_eq!(
+            content.track_ids,
+            vec![t1.id.clone(), _t2.id.clone()],
+            "the artist batch flattens the artist's albums in order"
+        );
+
+        // Genre selection: name and track count.
+        let library = riff_backend::app::state::LibrarySession {
+            browser_path: vec![BrowserSelection::Genre("Electronic".to_string())],
+            ..riff_backend::app::state::LibrarySession::default()
+        };
+        let content = resolve_inspector(&mut views, &library);
+        assert!(content.visible, "a genre selection shows the inspector");
+        assert_eq!(content.kind, InspectorKind::Genre);
+        assert_eq!(content.title.as_deref(), Some("Electronic"));
+        assert_eq!(content.subtitle.as_deref(), Some("2 tracks"));
+        assert_eq!(
+            content.track_ids,
+            vec![t1.id.clone(), _t2.id.clone()],
+            "the genre batch flattens the genre-scoped tracks in order"
+        );
+
+        // Track selection (single-list stages): the compact readout.
+        let library = riff_backend::app::state::LibrarySession {
+            selected_track: Some(t1.id.clone()),
+            ..riff_backend::app::state::LibrarySession::default()
+        };
+        let content = resolve_inspector(&mut views, &library);
+        assert!(content.visible, "a selected track shows the inspector");
+        assert_eq!(content.kind, InspectorKind::Track);
+        assert_eq!(content.title.as_deref(), Some("Magic Window"));
+        assert_eq!(
+            content.track_ids,
+            vec![t1.id.clone()],
+            "the track batch is the single track"
+        );
+
+        // No selection at all: the inspector is fully hidden.
         let empty = riff_backend::app::state::LibrarySession::default();
         assert!(
-            resolve_selection_panel(&mut views, &empty).title.is_none(),
-            "no selection renders the empty state"
+            !resolve_inspector(&mut views, &empty).visible,
+            "no selection hides the inspector"
         );
+
+        // A selection the store no longer carries (an album dropped by a
+        // rescan) is hidden too: never stale art or wrong details.
         let gone = riff_backend::app::state::LibrarySession {
-            selected_album: Some(AlbumSelection {
+            browser_path: vec![BrowserSelection::Album {
                 artist: "Boards of Canada".to_string(),
                 title: "A Few Old Tapes".to_string(),
-            }),
+            }],
             ..riff_backend::app::state::LibrarySession::default()
         };
         assert!(
-            resolve_selection_panel(&mut views, &gone).title.is_none(),
-            "an unresolvable album renders the empty state"
+            !resolve_inspector(&mut views, &gone).visible,
+            "an unresolvable album hides the inspector"
         );
     }
 
@@ -7647,6 +7975,7 @@ mod browser_column_ui_tests {
                         title: Some("Tomorrow's Harvest"),
                         subtitle: Some("Boards of Canada \u{b7} 2013"),
                         details: &[],
+                        queue: false,
                     };
                     show_selection_panel(ui, &mut cache, &palette, panel, actions);
                 },
@@ -7768,6 +8097,7 @@ mod browser_column_ui_tests {
                                 title: Some("Tomorrow's Harvest"),
                                 subtitle: None,
                                 details: &[],
+                                queue: false,
                             };
                             riff_gui::ui::selection::show_selection_panel(
                                 ui,

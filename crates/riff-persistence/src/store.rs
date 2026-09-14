@@ -504,7 +504,7 @@ pub trait LibraryMutationStore {
 /// The sidebar-count totals for the Library collection, answered by ONE
 /// store query (design-handoff issue 05): total tracks, distinct artists,
 /// distinct `(album artist, title)` albums, and distinct non-empty per-track
-/// genres. A fresh store answers all zeros.
+/// genre entries. A fresh store answers all zeros.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LibraryCounts {
     /// Total number of stored Tracks.
@@ -513,7 +513,8 @@ pub struct LibraryCounts {
     pub artists: usize,
     /// Distinct `(album artist, title)` albums (the sidebar's Albums rows).
     pub albums: usize,
-    /// Distinct non-empty per-track genres (the sidebar's Genres rows).
+    /// Distinct non-empty per-track genre entries (the sidebar's Genres
+    /// rows); a semicolon-separated tag counts once per entry.
     pub genres: usize,
 }
 
@@ -540,7 +541,7 @@ pub trait LibraryQueryStore {
     /// query (design-handoff issue 05), so the sidebar-counts read model
     /// costs one store round trip per generation instead of four queries.
     /// Genre semantics match [`Self::genre_counts`]: distinct non-empty
-    /// per-track genres.
+    /// per-track genre entries.
     fn library_counts(&self) -> Result<LibraryCounts, StoreError>;
 
     /// Every smart playlist's unbounded total in [`SmartPlaylistKind::ALL`]
@@ -651,30 +652,36 @@ pub trait LibraryQueryStore {
         limit: usize,
     ) -> Result<Vec<Track>, StoreError>;
 
-    /// Every genre carrying at least one stored Track, name-ascending
+    /// Every genre entry carrying at least one stored Track, name-ascending
     /// (byte-wise), each with its per-track count aggregated from the
     /// tracks' own genre metadata — not the albums' derived genre column.
-    /// Tracks whose genre is missing or empty aggregate into nothing: there
-    /// is no row for them. The sidebar's total-genres count is this list's
-    /// length.
+    /// A stored genre string is split on `;` (each segment trimmed; empty
+    /// segments dropped), so `"Rock; Jazz"` yields one row for `Rock` and
+    /// one for `Jazz`, each counting the track once. Tracks whose genre is
+    /// missing or empty aggregate into nothing: there is no row for them.
+    /// The sidebar's total-genres count is this list's length.
     fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError>;
 
     /// Every artist having at least one Track with genre `genre`,
     /// name-ascending, each with only the album keys of albums holding at
-    /// least one matching track, in canonical browsing order. Matching is an
-    /// exact comparison against the stored per-track genre. Unknown genres
-    /// yield an empty `Vec`.
+    /// least one matching track, in canonical browsing order. A track
+    /// matches when `genre` equals one of its semicolon-separated (trimmed)
+    /// genre entries — exact, so `"Indie Rock"` never matches `"Rock"`.
+    /// Unknown genres yield an empty `Vec`.
     fn artists_in_genre(&self, genre: &str) -> Result<Vec<Artist>, StoreError>;
 
     /// One artist's albums holding at least one Track with genre `genre`,
     /// in canonical browsing order, each carrying only its matching track
-    /// ids in album-track order. Unknown artists or genres yield an empty
-    /// `Vec`.
+    /// ids in album-track order. Matching follows [`Self::artists_in_genre`]
+    /// (semicolon-separated entries). Unknown artists or genres yield an
+    /// empty `Vec`.
     fn artist_albums_in_genre(&self, artist: &str, genre: &str) -> Result<Vec<Album>, StoreError>;
 
     /// One album's Tracks with genre `genre`, in canonical album-track
     /// order: track number ascending with missing numbers first, then path
-    /// tiebreak. Unknown albums or genres yield an empty `Vec`.
+    /// tiebreak. Matching follows [`Self::artists_in_genre`]
+    /// (semicolon-separated entries). Unknown albums or genres yield an
+    /// empty `Vec`.
     fn album_tracks_in_genre(
         &self,
         album_artist: &str,

@@ -1106,6 +1106,21 @@ fn duration_to_nanos(duration: Duration) -> i64 {
     i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX)
 }
 
+/// The independent genre entries of a stored genre string: split on `;`,
+/// trim surrounding whitespace, and drop empty segments. A tag like
+/// `"Rock; Jazz"` contributes the two entries `Rock` and `Jazz`.
+fn genre_segments(genre: &str) -> impl Iterator<Item = &str> {
+    genre.split(';').map(str::trim).filter(|g| !g.is_empty())
+}
+
+/// Whether a stored (possibly multi-value) genre string carries `target`
+/// as one of its independent entries. Segment boundaries make this exact:
+/// `"Indie Rock"` never matches `"Rock"` even though it contains the
+/// substring.
+fn genre_contains(stored: &str, target: &str) -> bool {
+    genre_segments(stored).any(|g| g == target)
+}
+
 impl SqliteStore {
     /// Scan-batch body shared with the transaction wrapper above.
     fn apply_scan_batch_in_tx(conn: &Connection, tracks: &[Track]) -> rusqlite::Result<usize> {
@@ -1610,99 +1625,130 @@ impl LibraryQueryStore for SqliteStore {
     /// The Library-count totals in one query: scalar subselects over
     /// tracks, artists, and albums, with the genre count matching
     /// [`Self::genre_counts`] semantics (distinct non-empty per-track
-    /// genre tags).
+    /// genre entries — semicolon-separated tags count once per entry).
     fn library_counts(&self) -> Result<LibraryCounts, StoreError> {
         self.with_connection(|conn| {
-            conn.query_row(
+            let (tracks, artists, albums): (i64, i64, i64) = conn.query_row(
                 "SELECT
                     (SELECT COUNT(*) FROM tracks),
                     (SELECT COUNT(*) FROM artists),
-                    (SELECT COUNT(*) FROM albums),
-                    (SELECT COUNT(DISTINCT genre) FROM tracks
-                     WHERE genre IS NOT NULL AND genre != '')",
+                    (SELECT COUNT(*) FROM albums)",
                 [],
-                |row| {
-                    Ok(LibraryCounts {
-                        tracks: usize::try_from(row.get::<_, i64>(0)?)
-                            .expect("a track count fits in usize"),
-                        artists: usize::try_from(row.get::<_, i64>(1)?)
-                            .expect("an artist count fits in usize"),
-                        albums: usize::try_from(row.get::<_, i64>(2)?)
-                            .expect("an album count fits in usize"),
-                        genres: usize::try_from(row.get::<_, i64>(3)?)
-                            .expect("a genre count fits in usize"),
-                    })
-                },
-            )
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            // Genre totals cannot be a scalar subselect: the distinct count
+            // is over the split entries, so the raw tags aggregate in Rust.
+            let mut stmt =
+                conn.prepare("SELECT genre FROM tracks WHERE genre IS NOT NULL AND genre != ''")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let mut genres = std::collections::HashSet::new();
+            for row in rows {
+                for segment in genre_segments(&row?) {
+                    genres.insert(segment.to_string());
+                }
+            }
+            Ok(LibraryCounts {
+                tracks: usize::try_from(tracks).expect("a track count fits in usize"),
+                artists: usize::try_from(artists).expect("an artist count fits in usize"),
+                albums: usize::try_from(albums).expect("an album count fits in usize"),
+                genres: genres.len(),
+            })
         })
         .map_err(|e| StoreError::InvalidOperation(format!("failed to count the library: {e}")))
     }
 
-    /// Every genre name-ascending with its per-track count, aggregated from
-    /// the tracks' own genre metadata. Missing (`NULL`) and empty genre
-    /// tags aggregate into nothing; `SQLite`'s default BINARY collation makes
-    /// the grouping and ordering byte-wise, matching the Rust-side sorts.
+    /// Every genre entry name-ascending with its per-track count, aggregated
+    /// from the tracks' own genre metadata — semicolon-separated tags count
+    /// once per entry (a track tagged `"Rock; Jazz"` contributes one count
+    /// to `Rock` and one to `Jazz`). Missing (`NULL`) and empty genre tags
+    /// aggregate into nothing; entries sort byte-wise, matching the former
+    /// `SQLite` BINARY-collation grouping.
     fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
         self.with_connection(|conn| {
+            // `GROUP BY` over the raw column would keep `"Rock; Jazz"` as one
+            // row; the entries split in Rust instead.
             let mut stmt = conn.prepare(
-                "SELECT genre, COUNT(*) FROM tracks
-                 WHERE genre IS NOT NULL AND genre != ''
-                 GROUP BY genre ORDER BY genre ASC",
+                "SELECT genre FROM tracks
+                 WHERE genre IS NOT NULL AND genre != ''",
             )?;
-            let rows = stmt.query_map([], |row| {
-                Ok(GenreCount {
-                    genre: row.get(0)?,
-                    tracks: usize::try_from(row.get::<_, i64>(1)?)
-                        .expect("a track count fits in usize"),
-                })
-            })?;
-            rows.collect()
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            for row in rows {
+                for segment in genre_segments(&row?) {
+                    *counts.entry(segment.to_string()).or_insert(0) += 1;
+                }
+            }
+            let mut entries: Vec<GenreCount> = counts
+                .into_iter()
+                .map(|(genre, tracks)| GenreCount { genre, tracks })
+                .collect();
+            entries.sort_by(|a, b| a.genre.cmp(&b.genre));
+            Ok(entries)
         })
         .map_err(|e| StoreError::InvalidOperation(format!("failed to aggregate genres: {e}")))
     }
 
     /// Artists name-ascending having at least one track with `genre`, each
     /// with the album keys of albums holding at least one matching track.
-    /// Two ordered reads over genre-matching track rows; grouping happens in
-    /// Rust so the per-artist album order survives, mirroring
-    /// [`Self::all_artists`]. The JOIN against albums supplies the canonical
-    /// ordering columns; DISTINCT deduplicates multi-track albums.
+    /// Two ordered reads over the genre-bearing track rows; the per-track
+    /// membership split (`;`-separated entries) happens in Rust so the
+    /// per-artist album order survives, mirroring [`Self::all_artists`]. The
+    /// JOIN against albums supplies the canonical ordering columns;
+    /// consecutive-dedup collapses multi-track albums.
     fn artists_in_genre(&self, genre: &str) -> Result<Vec<Artist>, StoreError> {
         self.with_connection(|conn| {
+            // No `DISTINCT`: the genre match is per track, so the SQL keeps
+            // every row and the filtered stream dedups below. SQL ordering
+            // keeps one album's rows contiguous, so the dedup preserves the
+            // canonical artist/album order.
             let mut stmt = conn.prepare(
-                "SELECT DISTINCT t.album_artist_key, a.title
+                "SELECT t.album_artist_key, a.title, t.genre
                  FROM tracks t
                  JOIN albums a ON a.album_artist = t.album_artist_key
                               AND a.title = t.album_title_key
-                 WHERE t.genre = ?1
+                 WHERE t.genre IS NOT NULL AND t.genre != ''
                  ORDER BY t.album_artist_key ASC, COALESCE(a.year, 0) DESC, a.title ASC",
             )?;
-            let rows = stmt.query_map([genre], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })?;
             let mut keys_by_artist: HashMap<String, Vec<String>> = HashMap::new();
+            let mut last_key: Option<(String, String)> = None;
             for row in rows {
-                let (artist, title) = row?;
+                let (artist, title, stored_genre) = row?;
+                if !genre_contains(&stored_genre, genre) {
+                    continue;
+                }
+                let key = (artist.clone(), title);
+                if last_key.as_ref() == Some(&key) {
+                    continue;
+                }
+                last_key = Some(key.clone());
                 keys_by_artist
-                    .entry(artist.clone())
+                    .entry(artist)
                     .or_default()
-                    .push(format!("{artist} - {title}"));
+                    .push(format!("{} - {}", key.0, key.1));
             }
 
             let mut stmt = conn.prepare(
                 "SELECT DISTINCT album_artist_key FROM tracks
-                 WHERE genre = ?1 ORDER BY album_artist_key ASC",
+                 WHERE genre IS NOT NULL AND genre != ''
+                 ORDER BY album_artist_key ASC",
             )?;
             let names = stmt
-                .query_map([genre], |row| row.get::<_, String>(0))?
+                .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(names
-                .into_iter()
-                .map(|name| Artist {
-                    albums: keys_by_artist.remove(&name).unwrap_or_default(),
-                    name,
-                })
-                .collect())
+            let mut artists = Vec::new();
+            for name in names {
+                if let Some(albums) = keys_by_artist.remove(&name) {
+                    artists.push(Artist { name, albums });
+                }
+            }
+            Ok(artists)
         })
         .map_err(|e| StoreError::InvalidOperation(format!("failed to list genre artists: {e}")))
     }
@@ -1710,20 +1756,21 @@ impl LibraryQueryStore for SqliteStore {
     /// One artist's albums holding at least one track with `genre`, in
     /// canonical browsing order, each carrying only its matching track ids
     /// in album-track order. Mirrors [`Self::artist_albums`] with the genre
-    /// filter applied to the membership read.
+    /// filter applied to the membership read — membership is the split
+    /// (`;`-separated) per-track entries, matched in Rust; albums left with
+    /// no matching track are dropped.
     fn artist_albums_in_genre(&self, artist: &str, genre: &str) -> Result<Vec<Album>, StoreError> {
         self.with_connection(|conn| {
+            // No `EXISTS` subquery: the per-track genre membership is split
+            // in Rust below, so this lists the artist's albums unconditionally
+            // and the final filtering keeps only those with a matching track.
             let mut stmt = conn.prepare(
                 "SELECT title, year, genre FROM albums
-                 WHERE album_artist = ?1 AND EXISTS (
-                     SELECT 1 FROM tracks
-                     WHERE album_artist_key = ?1 AND album_title_key = albums.title
-                       AND genre = ?2
-                 )
+                 WHERE album_artist = ?1
                  ORDER BY COALESCE(year, 0) DESC, title ASC",
             )?;
             let mut albums: Vec<Album> = stmt
-                .query_map(rusqlite::params![artist, genre], |row| {
+                .query_map(rusqlite::params![artist], |row| {
                     Ok(Album {
                         artist: artist.to_string(),
                         title: row.get(0)?,
@@ -1738,22 +1785,27 @@ impl LibraryQueryStore for SqliteStore {
             // path; appending per album preserves that order inside each
             // album.
             let mut stmt = conn.prepare(
-                "SELECT album_title_key, path FROM tracks
-                 WHERE album_artist_key = ?1 AND genre = ?2
+                "SELECT album_title_key, path, genre FROM tracks
+                 WHERE album_artist_key = ?1 AND genre IS NOT NULL AND genre != ''
                  ORDER BY COALESCE(track_number, 0) ASC, path ASC",
             )?;
-            let members = stmt.query_map(rusqlite::params![artist, genre], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            let members = stmt.query_map(rusqlite::params![artist], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })?;
             let mut membership: HashMap<String, Vec<TrackId>> = HashMap::new();
             for member in members {
-                let (title, path) = member?;
-                membership.entry(title).or_default().push(TrackId(path));
-            }
-            for album in &mut albums {
-                if let Some(ids) = membership.get(&album.title) {
-                    album.tracks.clone_from(ids);
+                let (title, path, stored_genre) = member?;
+                if genre_contains(&stored_genre, genre) {
+                    membership.entry(title).or_default().push(TrackId(path));
                 }
+            }
+            albums.retain(|album| membership.contains_key(&album.title));
+            for album in &mut albums {
+                album.tracks.clone_from(&membership[&album.title]);
             }
             Ok(albums)
         })
@@ -1764,7 +1816,8 @@ impl LibraryQueryStore for SqliteStore {
 
     /// One album's tracks with `genre`: track number ascending with missing
     /// numbers first, path tiebreak — the canonical album-track order under
-    /// the genre filter.
+    /// the genre filter. The per-track membership split (`;`-separated
+    /// entries) happens in Rust on the genre-bearing rows.
     fn album_tracks_in_genre(
         &self,
         album_artist: &str,
@@ -1774,14 +1827,25 @@ impl LibraryQueryStore for SqliteStore {
         self.with_connection(|conn| {
             let mut stmt = conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS} FROM tracks
-                 WHERE album_artist_key = ?1 AND album_title_key = ?2 AND genre = ?3
+                 WHERE album_artist_key = ?1 AND album_title_key = ?2
+                   AND genre IS NOT NULL AND genre != ''
                  ORDER BY COALESCE(track_number, 0) ASC, path ASC"
             ))?;
             let rows = stmt.query_map(
-                rusqlite::params![album_artist, album_title, genre],
+                rusqlite::params![album_artist, album_title],
                 track_from_row,
             )?;
-            rows.collect()
+            let tracks = rows.collect::<Result<Vec<_>, _>>()?;
+            Ok(tracks
+                .into_iter()
+                .filter(|track| {
+                    track
+                        .metadata
+                        .genre
+                        .as_deref()
+                        .is_some_and(|stored| genre_contains(stored, genre))
+                })
+                .collect())
         })
         .map_err(|e| {
             StoreError::InvalidOperation(format!("failed to list album tracks in genre: {e}"))

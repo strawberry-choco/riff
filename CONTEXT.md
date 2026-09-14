@@ -112,3 +112,7 @@ _Avoid_: scanner thread, directory walker
 The user action of editing a Track's Metadata through the edit dialog; saving commits the file tags and the Store facts as one durable change, and a failure leaves the dialog open with the reason.
 _Avoid_: metadata editor, tag writer
 
+**App Runtime**:
+The composed application the Composition Root spawns: shared sessions, Application Store ports, service front ends, and worker threads wired in one place. It owns the worker threads' whole lifecycle — they start with it and shut down through it, never outliving it.
+_Avoid_: global state, handle bag
+

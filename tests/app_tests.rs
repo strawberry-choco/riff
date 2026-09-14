@@ -43,6 +43,149 @@ mod tests {
         assert!(!state.ui_flags.high_contrast);
     }
 
+    // --- Browser drill-down path (elastic column navigation) -------------------
+    //
+    // The ordered path of entity selections that replaces the single
+    // `browser_selection`: select-at truncates deeper entries, truncate/reset
+    // climb and clear, and `current_selection` reads the deepest entry.
+
+    #[test]
+    fn test_browser_path_select_at_appends_at_each_level() {
+        use riff_backend::app::state::BrowserSelection;
+
+        let mut state = LibrarySession::default();
+        assert!(
+            state.current_selection().is_none(),
+            "a fresh session has no selection"
+        );
+
+        // Genres → Artist → Album: each selection lands one level deeper.
+        state.select_at(0, BrowserSelection::Genre("Electronic".to_string()));
+        assert_eq!(
+            state.current_selection(),
+            Some(&BrowserSelection::Genre("Electronic".to_string()))
+        );
+        state.select_at(1, BrowserSelection::Artist("Autechre".to_string()));
+        assert_eq!(
+            state.current_selection(),
+            Some(&BrowserSelection::Artist("Autechre".to_string()))
+        );
+        state.select_at(
+            2,
+            BrowserSelection::Album {
+                artist: "Autechre".to_string(),
+                title: "Tri Repetae".to_string(),
+            },
+        );
+        assert_eq!(
+            state.browser_path,
+            vec![
+                BrowserSelection::Genre("Electronic".to_string()),
+                BrowserSelection::Artist("Autechre".to_string()),
+                BrowserSelection::Album {
+                    artist: "Autechre".to_string(),
+                    title: "Tri Repetae".to_string(),
+                },
+            ],
+            "a fully drilled path keeps every level, deepest last"
+        );
+    }
+
+    #[test]
+    fn test_browser_path_select_at_truncates_deeper_entries() {
+        use riff_backend::app::state::BrowserSelection;
+
+        let mut state = LibrarySession::default();
+        state.select_at(0, BrowserSelection::Genre("Electronic".to_string()));
+        state.select_at(1, BrowserSelection::Artist("Autechre".to_string()));
+        state.select_at(
+            2,
+            BrowserSelection::Album {
+                artist: "Autechre".to_string(),
+                title: "Tri Repetae".to_string(),
+            },
+        );
+
+        // Re-selecting an artist at level 1 drops the album: the path
+        // becomes [Genre, Artist(new)] until a new album is selected.
+        state.select_at(1, BrowserSelection::Artist("Boards of Canada".to_string()));
+        assert_eq!(
+            state.browser_path,
+            vec![
+                BrowserSelection::Genre("Electronic".to_string()),
+                BrowserSelection::Artist("Boards of Canada".to_string()),
+            ],
+            "re-selecting at a shallower level truncates the deeper entries"
+        );
+
+        // Level 0 replaces the whole path.
+        state.select_at(0, BrowserSelection::Genre("Ambient".to_string()));
+        assert_eq!(
+            state.browser_path,
+            vec![BrowserSelection::Genre("Ambient".to_string())],
+            "selecting at level 0 replaces the path"
+        );
+    }
+
+    #[test]
+    fn test_browser_path_truncate_path_keeps_the_prefix() {
+        use riff_backend::app::state::BrowserSelection;
+
+        let mut state = LibrarySession::default();
+        state.select_at(0, BrowserSelection::Genre("Electronic".to_string()));
+        state.select_at(1, BrowserSelection::Artist("Autechre".to_string()));
+        state.select_at(
+            2,
+            BrowserSelection::Album {
+                artist: "Autechre".to_string(),
+                title: "Tri Repetae".to_string(),
+            },
+        );
+
+        // A breadcrumb climb to level 1 keeps the genre, drops the rest.
+        state.truncate_path(1);
+        assert_eq!(
+            state.browser_path,
+            vec![BrowserSelection::Genre("Electronic".to_string())],
+            "truncating to level 1 keeps only the prefix"
+        );
+        assert_eq!(
+            state.current_selection(),
+            Some(&BrowserSelection::Genre("Electronic".to_string()))
+        );
+
+        // Truncating past the current length changes nothing; to 0 empties.
+        state.truncate_path(10);
+        assert_eq!(
+            state.browser_path,
+            vec![BrowserSelection::Genre("Electronic".to_string())],
+            "truncating past the length is a no-op"
+        );
+        state.truncate_path(0);
+        assert!(state.browser_path.is_empty());
+        assert!(state.current_selection().is_none());
+    }
+
+    #[test]
+    fn test_browser_path_reset_clears_the_path() {
+        use riff_backend::app::state::BrowserSelection;
+
+        let mut state = LibrarySession::default();
+        state.select_at(0, BrowserSelection::Genre("Electronic".to_string()));
+        state.select_at(1, BrowserSelection::Artist("Autechre".to_string()));
+
+        // A section or browse-mode switch starts navigation over.
+        state.reset_browser_path();
+        assert!(
+            state.browser_path.is_empty(),
+            "reset clears the drill-down path"
+        );
+        assert!(
+            state.current_selection().is_none(),
+            "reset leaves no current selection"
+        );
+    }
+
     #[test]
     fn test_app_state_muted_defaults_to_false() {
         // Mute (REQ-UI-003-08): the app starts unmuted.

@@ -2396,6 +2396,85 @@ fn test_genre_counts_aggregate_per_track_genres_and_skip_missing() {
     assert_eq!(counts.len(), 2, "total genre count for the sidebar");
 }
 
+/// A semicolon-separated genre tag splits into independent entries: the
+/// sidebar aggregates each entry, browsing by any entry finds the track, and
+/// a longer name containing the same letters (`"Indie Rock"`) never matches
+/// `"Rock"`.
+#[test]
+fn test_genre_semicolon_split_yields_independent_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    store
+        .apply_scan_batch(&[
+            // Multi-value tags: whitespace around `;` trims and empty
+            // segments drop, while the raw column round-trips untouched.
+            genre_track("f:\\g\\1.mp3", "One", "Alpha", "LP", Some("Rock; Jazz")),
+            genre_track("f:\\g\\2.mp3", "Two", "Alpha", "LP", Some("Rock;;Punk")),
+            genre_track("f:\\g\\3.mp3", "Three", "Beta", "EP", Some("Indie Rock")),
+            genre_track("f:\\g\\4.mp3", "Four", "Gamma", "Single", Some("Jazz")),
+        ])
+        .expect("batch applies");
+
+    let counts = store.genre_counts().expect("genre counts query");
+    assert_eq!(
+        counts
+            .iter()
+            .map(|g| (g.genre.as_str(), g.tracks))
+            .collect::<Vec<_>>(),
+        [("Indie Rock", 1), ("Jazz", 2), ("Punk", 1), ("Rock", 2)],
+        "each trimmed `;`-separated entry is its own genre row, counted once per track"
+    );
+
+    // Browsing by any single entry finds the multi-tag track.
+    let rock_artists = store.artists_in_genre("Rock").expect("genre artists query");
+    assert_eq!(
+        rock_artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+        ["Alpha"],
+        "the Rock;Jazz and Rock;;Punk tracks match Rock browsing; Indie Rock does not"
+    );
+    let jazz_artists = store.artists_in_genre("Jazz").expect("genre artists query");
+    assert_eq!(
+        jazz_artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+        ["Alpha", "Gamma"],
+        "the same Rock;Jazz track also matches Jazz browsing"
+    );
+
+    let albums = store
+        .artist_albums_in_genre("Alpha", "Jazz")
+        .expect("genre albums query");
+    assert_eq!(
+        albums.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
+        ["LP"],
+        "only albums holding a Jazz-entry track list under Jazz"
+    );
+    assert_eq!(
+        albums[0]
+            .tracks
+            .iter()
+            .map(|t| t.0.as_str())
+            .collect::<Vec<_>>(),
+        ["f:\\g\\1.mp3"],
+        "only the track carrying the Jazz entry is a member"
+    );
+
+    // A genre entry that merely contains the name does not match.
+    assert!(
+        store
+            .artist_albums_in_genre("Beta", "Rock")
+            .expect("no overmatch")
+            .is_empty(),
+        "`Indie Rock` is its own entry, not a match for `Rock`"
+    );
+
+    // The sidebar total counts entries, not raw tags.
+    let counts = store.library_counts().expect("library counts query");
+    assert_eq!(counts.genres, 4, "distinct split entries across the library");
+}
+
 #[test]
 fn test_artists_in_genre_returns_only_matching_artists_and_album_keys() {
     let dir = tempfile::tempdir().unwrap();

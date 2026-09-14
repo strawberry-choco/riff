@@ -52,20 +52,6 @@ pub enum BrowserSelection {
     Genre(String),
 }
 
-/// The album the selection panel (design-handoff issue 10) reads out: the
-/// last album identity selected anywhere in the browser — a browser column
-/// row or a detail-column drill. A non-album selection (artist, genre) and
-/// plain section navigation never clear it, so the panel shows a coherent
-/// readout instead of blanking or showing stale state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AlbumSelection {
-    /// The album's album-artist name (the store's `(album artist, title)`
-    /// identity).
-    pub artist: String,
-    /// The album's title.
-    pub title: String,
-}
-
 /// How the library browser column renders its entries (design-handoff issue
 /// 06): a flat list or a grid of cards. The top bar's list/grid toggle writes
 /// it; the browser column (issue 08) reads it. Persisted through
@@ -167,12 +153,12 @@ pub struct LibrarySession {
     /// The genre chip narrowing the browser column's artist/album listings
     /// (issue 08). Session state; `None` is no filter.
     pub genre_filter: Option<String>,
-    /// What the listener selected in the browser column (issue 08) — the
-    /// identity the detail column (issue 09) resolves.
-    pub browser_selection: Option<BrowserSelection>,
-    /// The last album selected anywhere in the browser (issue 10) — the
-    /// identity the selection panel resolves. See [`AlbumSelection`].
-    pub selected_album: Option<AlbumSelection>,
+    /// The ordered drill-down path of entity selections (issue 08), deepest
+    /// entry last: what the detail column (issue 09) resolves from the
+    /// current (deepest) selection. Selecting at a level truncates any
+    /// deeper entries; section or browse-mode navigation resets the path.
+    /// Volatile session state, never persisted.
+    pub browser_path: Vec<BrowserSelection>,
     /// Whether the player bar's queue panel (design-handoff issue 13) is
     /// open over the shell. Session state, not persisted — the design pins
     /// no default past closed.
@@ -239,8 +225,7 @@ impl Default for LibrarySession {
             browser_layout: BrowserLayout::default(),
             browser_sort_desc: false,
             genre_filter: None,
-            browser_selection: None,
-            selected_album: None,
+            browser_path: Vec::new(),
             queue_open: false,
             ui_flags: UiFlags::default(),
             scan_prefs: ScanPrefs::default(),
@@ -256,5 +241,32 @@ impl LibrarySession {
             .get(root)
             .cloned()
             .unwrap_or(WatchState::Disabled)
+    }
+
+    /// Select an entity at drill-down level `level`: truncates the path to
+    /// its first `level` entries (dropping any deeper ones) and appends
+    /// `selection`, so the path ends at `level + 1` entries with the new
+    /// selection deepest.
+    pub fn select_at(&mut self, level: usize, selection: BrowserSelection) {
+        self.browser_path.truncate(level);
+        self.browser_path.push(selection);
+    }
+
+    /// The deepest entity in the drill-down path — the selection the detail
+    /// column resolves — or `None` while the path is empty.
+    pub fn current_selection(&self) -> Option<&BrowserSelection> {
+        self.browser_path.last()
+    }
+
+    /// Keep only the first `level` entries of the drill-down path (a
+    /// breadcrumb climb); `level` past the current length changes nothing.
+    pub fn truncate_path(&mut self, level: usize) {
+        self.browser_path.truncate(level);
+    }
+
+    /// Clear the drill-down path entirely (a section or browse-mode switch
+    /// starts navigation over at the root listing).
+    pub fn reset_browser_path(&mut self) {
+        self.browser_path.clear();
     }
 }

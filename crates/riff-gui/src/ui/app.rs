@@ -849,22 +849,15 @@ impl eframe::App for RiffApp {
         // Bottom 88px strip: transport + progress + volume.
         self.render_control_bar(ui, &mut library, &mut playback);
 
-        // Browser column (handoff issue 08): the first pane of the
-        // three-pane explorer, one listing per sidebar section, right of
-        // the nav sidebar between the top bar and the player bar. Library
-        // content only — the Settings and Now Playing stages replace it.
-        self.render_browser_column_panel(ui, &mut library, &playback);
-
-        // Selection panel (handoff issue 10): the third pane of the
-        // explorer, a persistent right-hand readout of the selected album.
-        self.render_selection_panel_panel(ui, &mut library);
-
         // --- MAIN STAGE: exactly one View visible at a time ---
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(self.theme.active.background))
             .show(ui, |ui| match library.view_mode {
                 ViewMode::Library => {
-                    self.render_detail_column_panel(ui, &mut library, &mut playback);
+                    // The elastic column stage (elastic-column spec): the
+                    // section-driven column sequence plus the collapsible
+                    // inspector replace the fixed three-pane explorer.
+                    self.render_elastic_stage(ui, &mut library, &mut playback);
                 }
                 ViewMode::NowPlaying => self.show_now_playing_view(ui, &mut library, &playback),
                 ViewMode::Settings => {
@@ -943,9 +936,11 @@ fn apply_titlebar_action(
 /// Apply one [`crate::ui::browser::BrowserAction`] (handoff issue 08) to the
 /// library session: the sort toggle and genre chips are session fields; a
 /// row selection resolves per section into the [`BrowserSelection`] the
-/// detail column (issue 09) consumes. Track rows select through
+/// stage's root column consumes, landing at level 0 (`select_at(0, …)`) so
+/// drill-down restarts from the root. Track rows select through
 /// `library.selected_track` (the existing `interactive_track_row` flow), so
-/// the All Tracks variant never sets a browser selection.
+/// the All Tracks variant never sets a browser selection. The drill columns
+/// (level 1 / 2) go through [`apply_drill_action`].
 pub fn apply_browser_action(
     action: crate::ui::browser::BrowserAction,
     library: &mut LibrarySession,
@@ -959,7 +954,7 @@ pub fn apply_browser_action(
             library.genre_filter = filter;
         }
         crate::ui::browser::BrowserAction::Select(key) => {
-            library.browser_selection = match library.library_section {
+            let selection = match library.library_section {
                 LibrarySection::Artists => Some(BrowserSelection::Artist(key)),
                 LibrarySection::Genres => Some(BrowserSelection::Genre(key)),
                 LibrarySection::Albums => {
@@ -971,22 +966,10 @@ pub fn apply_browser_action(
                 }
                 LibrarySection::AllTracks => None,
             };
-            record_album_selection(library);
+            if let Some(selection) = selection {
+                library.select_at(0, selection);
+            }
         }
-    }
-}
-
-/// Record the panel's album (handoff issue 10) whenever the session's
-/// browser selection IS an album: called after every selection change, so
-/// the last album identity stays current while artist/genre selections and
-/// section navigation leave it — and the panel — alone.
-fn record_album_selection(library: &mut LibrarySession) {
-    use riff_backend::app::state::BrowserSelection;
-    if let Some(BrowserSelection::Album { artist, title }) = &library.browser_selection {
-        library.selected_album = Some(riff_backend::app::state::AlbumSelection {
-            artist: artist.clone(),
-            title: title.clone(),
-        });
     }
 }
 
@@ -1005,7 +988,14 @@ pub fn apply_detail_action(
 ) {
     use crate::ui::detail::DetailAction as Action;
     match action {
-        Action::Crumb(_) | Action::SelectRow(_) => apply_detail_navigation(action, library),
+        // A breadcrumb segment at level `i` climbs the drill-down path back
+        // to that level: level 0 empties the path (the section root).
+        Action::Crumb(index) => library.truncate_path(index),
+        // Entity rows no longer render inside the detail column — they are
+        // their own columns in the elastic stage — so this action cannot
+        // fire from the app. The widget seam keeps the variant for its
+        // own contract (tests render rows directly).
+        Action::SelectRow(_) => {}
         Action::PlayAll | Action::Shuffle => {
             // An empty album starts nothing — and never re-enables shuffle.
             if album_tracks.is_empty() {
@@ -1035,19 +1025,57 @@ pub fn apply_detail_action(
 }
 
 /// Apply one [`crate::ui::selection::SelectionAction`] (handoff issue 10).
-/// `album_tracks` is the selected album's track ids in store order, resolved
-/// by the caller from the Session Views seam — the batch the panel's Play
-/// album starts, exactly the detail header's Play all gesture (one
-/// `play_many` batch, never per-track sends). An empty album starts nothing.
+/// `track_ids` is the selection's track ids in store order, resolved by the
+/// caller from the Session Views seam — the batch the panel's Play starts
+/// (one `play_many` batch, never per-track sends) or the Queue action
+/// appends (the context menu's per-track queue precedent). An empty batch
+/// starts and queues nothing.
 pub fn apply_selection_action(
     action: crate::ui::selection::SelectionAction,
     transport: &dyn Transport,
-    album_tracks: &[TrackId],
+    track_ids: &[TrackId],
 ) {
     match action {
         crate::ui::selection::SelectionAction::PlayAlbum => {
-            play_album_batch(album_tracks, transport);
+            play_album_batch(track_ids, transport);
         }
+        crate::ui::selection::SelectionAction::Queue => {
+            for tid in track_ids {
+                transport.add_to_queue(tid.clone());
+            }
+        }
+    }
+}
+
+/// Apply a drill-down row selection from one of the elastic stage's entity
+/// columns at `level` (1 or 2 — deeper than the root's level 0): the row
+/// key follows the section's identity convention (`(album artist, title)`
+/// composites for album rows, bare names for artist rows), and
+/// [`LibrarySession::select_at`] truncates any deeper path entries. The
+/// root column's selections keep going through [`apply_browser_action`]
+/// (`select_at(0, …)`), so drill-down always restarts from the root.
+pub fn apply_drill_action(
+    section: LibrarySection,
+    level: usize,
+    key: String,
+    library: &mut LibrarySession,
+) {
+    let selection = match (section, level) {
+        // Album rows: an artist's albums (Artists, level 1) and an
+        // artist's albums within a genre (Genres, level 2).
+        (LibrarySection::Artists, 1) | (LibrarySection::Genres, 2) => {
+            key.split_once('\u{1f}')
+                .map(|(artist, title)| BrowserSelection::Album {
+                    artist: artist.to_owned(),
+                    title: title.to_owned(),
+                })
+        }
+        // Artist rows: the artists carrying a genre (Genres, level 1).
+        (LibrarySection::Genres, 1) => Some(BrowserSelection::Artist(key)),
+        _ => None,
+    };
+    if let Some(selection) = selection {
+        library.select_at(level, selection);
     }
 }
 
@@ -1061,22 +1089,161 @@ fn play_album_batch(album_tracks: &[TrackId], transport: &dyn Transport) {
     transport.play_many(first.clone(), album_tracks[1..].to_vec());
 }
 
-/// One frame of detail-column content, resolved from the library session
-/// through the Session Views seam: owned data so the render call site can
-/// borrow it all at once. Everything re-reads the store per generation, so
-/// scans and tag edits can never leave stale rows.
+/// One frame of the Tracks column's content, resolved from the library
+/// session through the Session Views seam: owned data so the render call
+/// site can borrow it all at once. Everything re-reads the store per
+/// generation, so scans and tag edits can never leave stale rows.
 #[derive(Default)]
 pub struct DetailContent {
     pub breadcrumb: Vec<crate::ui::detail::Crumb>,
     pub header: Option<crate::ui::detail::AlbumHeader>,
     pub tracks: Vec<crate::ui::detail::TrackRow>,
-    pub rows: Vec<crate::ui::browser::BrowserItem>,
 }
 
-/// Resolve what the detail column (handoff issue 09) renders for the
-/// current [`BrowserSelection`]: the breadcrumb trail, the album header +
-/// track table on the album level, the artist's albums (or a genre's
-/// artists) on the level above.
+/// The kinds of list column the elastic stage renders for
+/// [`BrowseMode::Library`] sections. Entity listings below the album level
+/// are their own columns now; the Tracks column is the existing
+/// `DetailColumn` shape (breadcrumb + album header + track table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnKind {
+    /// The section's root entity listing (Artists / Albums / Genres).
+    Root,
+    /// An artist's albums (Artists section, one level deep).
+    ArtistAlbums,
+    /// The artists carrying a genre (Genres section, one level deep).
+    GenreArtists,
+    /// An artist's albums within a genre (Genres section, two levels deep).
+    GenreArtistAlbums,
+    /// The All Tracks flat listing (list or grid per the top-bar toggle).
+    Flat,
+    /// A single-list stage's full-width listing: search results, an opened
+    /// playlist or smart list, or the folder tree.
+    Single,
+    /// The Tracks column: breadcrumb, album header, and track table.
+    Tracks,
+}
+
+/// The elastic stage's column plan for one [`LibrarySection`]: which list
+/// columns render for the current drill-down path, in left-to-right order.
+/// A column with no content is never included — the shape follows the
+/// section's facet depth and the path's depth:
+///
+/// | Section    | Columns (per drill-down depth)                    |
+/// | ---------- | ------------------------------------------------- |
+/// | All Tracks | `[Flat]` (fills the stage)                        |
+/// | Artists    | `[Root]` → `[Root, ArtistAlbums]` → `[+ Tracks]` |
+/// | Albums     | `[Root]` → `[Root, Tracks]`                       |
+/// | Genres     | `[Root]` → `[+ GenreArtists]` → `[+ GenreArtistAlbums]` → `[+ Tracks]` |
+///
+/// Path entries of the wrong kind for their level are ignored (section
+/// switches reset the path, but the plan stays defensive), so a stale or
+/// foreign entry never spawns a column.
+#[must_use]
+pub fn column_plan(section: LibrarySection, path: &[BrowserSelection]) -> Vec<ColumnKind> {
+    use riff_backend::app::state::BrowserSelection;
+    match section {
+        LibrarySection::AllTracks => vec![ColumnKind::Flat],
+        LibrarySection::Artists => {
+            let mut columns = vec![ColumnKind::Root];
+            if matches!(path.first(), Some(BrowserSelection::Artist(_))) {
+                columns.push(ColumnKind::ArtistAlbums);
+                if matches!(path.get(1), Some(BrowserSelection::Album { .. })) {
+                    columns.push(ColumnKind::Tracks);
+                }
+            }
+            columns
+        }
+        LibrarySection::Albums => {
+            let mut columns = vec![ColumnKind::Root];
+            if matches!(path.first(), Some(BrowserSelection::Album { .. })) {
+                columns.push(ColumnKind::Tracks);
+            }
+            columns
+        }
+        LibrarySection::Genres => {
+            let mut columns = vec![ColumnKind::Root];
+            if matches!(path.first(), Some(BrowserSelection::Genre(_))) {
+                columns.push(ColumnKind::GenreArtists);
+                if matches!(path.get(1), Some(BrowserSelection::Artist(_))) {
+                    columns.push(ColumnKind::GenreArtistAlbums);
+                    if matches!(path.get(2), Some(BrowserSelection::Album { .. })) {
+                        columns.push(ColumnKind::Tracks);
+                    }
+                }
+            }
+            columns
+        }
+    }
+}
+
+/// The elastic stage's column sizing policy (elastic-column spec): non-last
+/// list columns keep their preferred [`theme::COLUMN_WIDTH`], the last list
+/// column absorbs the remaining width, and the inspector (when visible)
+/// takes [`theme::INSPECTOR_WIDTH`] off the top. When the width left for
+/// the list columns cannot satisfy the minimum floors ([`theme::COLUMN_MIN_W`]
+/// per entity column, [`theme::LAST_COLUMN_MIN_W`] for the last), every
+/// column shrinks proportionally to its floor — the stage never introduces
+/// horizontal scrolling, accepting below-floor widths only in extreme narrow
+/// windows. Returns one width per list column (the inspector is separate).
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a column count is a small non-negative number"
+)]
+pub fn column_widths(available: f32, list_columns: usize, inspector: bool) -> Vec<f32> {
+    let inspector_w = if inspector {
+        theme::INSPECTOR_WIDTH
+    } else {
+        0.0
+    };
+    let available_lists = (available - inspector_w).max(0.0);
+    if list_columns == 0 {
+        return Vec::new();
+    }
+    // Preferred widths: non-last columns at COLUMN_WIDTH, the last column
+    // absorbing the remainder.
+    let mut widths = vec![theme::COLUMN_WIDTH; list_columns - 1];
+    widths.push(available_lists - theme::COLUMN_WIDTH * (list_columns - 1) as f32);
+    if list_columns == 1 {
+        // A single column fills the stage; floors do not apply.
+        return widths;
+    }
+    let floors = theme::COLUMN_MIN_W * (list_columns - 1) as f32 + theme::LAST_COLUMN_MIN_W;
+    if available_lists < floors {
+        // Narrow window: shrink every column proportionally to its floor.
+        let scale = available_lists / floors;
+        for (i, width) in widths.iter_mut().enumerate() {
+            let floor = if i + 1 == list_columns {
+                theme::LAST_COLUMN_MIN_W
+            } else {
+                theme::COLUMN_MIN_W
+            };
+            *width = floor * scale;
+        }
+    } else if let Some(last) = widths.last_mut()
+        && *last < theme::LAST_COLUMN_MIN_W
+    {
+        // The remainder is enough for the floors, but the last column's
+        // remainder would land below its floor: the non-last columns (which
+        // have headroom above their own floors) yield width toward the last
+        // column's floor first, then the last column absorbs the rest.
+        let non_last_total = theme::COLUMN_WIDTH * (list_columns - 1) as f32;
+        let headroom = non_last_total - theme::COLUMN_MIN_W * (list_columns - 1) as f32;
+        let give = (theme::LAST_COLUMN_MIN_W - *last).min(headroom);
+        *last += give;
+        let scale = (available_lists - *last) / non_last_total;
+        for width in widths.iter_mut().take(list_columns - 1) {
+            *width *= scale;
+        }
+    }
+    widths
+}
+
+/// Resolve what the Tracks column renders for the current drill-down path:
+/// the breadcrumb trail (section root, then one crumb per path entry), and
+/// on the album level the album header plus its track table — genre-scoped
+/// in the Genres section. Entity listings below the album level are their
+/// own columns in the stage, so this resolver carries no rows.
 pub fn resolve_detail_content(views: &mut SessionViews, library: &LibrarySession) -> DetailContent {
     use riff_backend::app::state::BrowserSelection;
 
@@ -1091,118 +1258,193 @@ pub fn resolve_detail_content(views: &mut SessionViews, library: &LibrarySession
         }],
         ..DetailContent::default()
     };
-    let Some(selection) = &library.browser_selection else {
+    for entry in &library.browser_path {
+        let label = match entry {
+            BrowserSelection::Artist(name) => name.clone(),
+            BrowserSelection::Genre(genre) => genre.clone(),
+            BrowserSelection::Album { title, .. } => title.clone(),
+        };
+        content.breadcrumb.push(crate::ui::detail::Crumb { label });
+    }
+    let Some(BrowserSelection::Album { artist, title }) = library.current_selection() else {
         return content;
     };
-    match selection {
-        BrowserSelection::Artist(name) => {
-            content.breadcrumb.push(crate::ui::detail::Crumb {
-                label: name.clone(),
-            });
-            content.rows = artist_album_rows(views, name, library.browser_selection.as_ref());
-        }
-        BrowserSelection::Genre(genre) => {
-            content.breadcrumb.push(crate::ui::detail::Crumb {
-                label: genre.clone(),
-            });
-            content.rows = views
-                .artists_in_genre(genre)
-                .iter()
-                .map(|artist| crate::ui::browser::BrowserItem {
-                    key: artist.name.clone(),
-                    label: artist.name.clone(),
-                    detail: None,
-                    thumbnail: None,
-                    selected: library.browser_selection.as_ref()
-                        == Some(&BrowserSelection::Artist(artist.name.clone())),
-                    now_playing: false,
-                })
-                .collect();
-        }
-        BrowserSelection::Album { artist, title } => {
-            content.breadcrumb.push(crate::ui::detail::Crumb {
-                label: artist.clone(),
-            });
-            content.breadcrumb.push(crate::ui::detail::Crumb {
-                label: title.clone(),
-            });
-            // The album's year comes from its entry in the artist's album
-            // table (the store derives it from the first-added track).
-            let year = views
-                .artist_albums(artist)
-                .iter()
-                .find(|album| &album.title == title)
-                .and_then(|album| album.year);
-            content.header = Some(crate::ui::detail::AlbumHeader {
-                title: title.clone(),
-                subtitle: Some(
-                    year.map_or_else(|| artist.clone(), |y| format!("{artist} \u{b7} {y}")),
-                ),
-            });
-            let current = views.playback_current().map(|t| t.id.clone());
-            content.tracks = views
-                .album_tracks(artist, title)
-                .iter()
-                .map(|track| crate::ui::detail::TrackRow {
-                    key: track.id.0.clone(),
-                    number: track.metadata.track_number,
-                    title: track.metadata.display_title(&track.file_path),
-                    plays: track.play_count,
-                    duration: track.duration,
-                    favorite: track.favorite,
-                    selected: library.selected_track.as_ref() == Some(&track.id),
-                    now_playing: current.as_ref() == Some(&track.id),
-                })
-                .collect();
-        }
-    }
+    // The album's year comes from its entry in the artist's album table
+    // (the store derives it from the first-added track).
+    let year = views
+        .artist_albums(artist)
+        .iter()
+        .find(|album| &album.title == title)
+        .and_then(|album| album.year);
+    content.header = Some(crate::ui::detail::AlbumHeader {
+        title: title.clone(),
+        subtitle: Some(year.map_or_else(|| artist.clone(), |y| format!("{artist} \u{b7} {y}"))),
+    });
+    let genre = match library.library_section {
+        LibrarySection::Genres => library.browser_path.first().and_then(|entry| match entry {
+            BrowserSelection::Genre(genre) => Some(genre.clone()),
+            _ => None,
+        }),
+        _ => None,
+    };
+    let tracks = match &genre {
+        Some(genre) => views.album_tracks_in_genre(artist, title, genre),
+        None => views.album_tracks(artist, title),
+    };
+    let current = views.playback_current().map(|t| t.id.clone());
+    content.tracks = tracks
+        .iter()
+        .map(|track| crate::ui::detail::TrackRow {
+            key: track.id.0.clone(),
+            number: track.metadata.track_number,
+            title: track.metadata.display_title(&track.file_path),
+            plays: track.play_count,
+            duration: track.duration,
+            favorite: track.favorite,
+            selected: library.selected_track.as_ref() == Some(&track.id),
+            now_playing: current.as_ref() == Some(&track.id),
+        })
+        .collect();
     content
 }
 
-/// One frame of the selection panel (handoff issue 10), resolved from the
-/// library session through the Session Views seam. Owned data so the
-/// render call site can borrow it all at once. `title: None` is the empty
-/// state — nothing selected, or the album the session remembers is no
-/// longer in the store (so the panel can never show stale art).
+/// What the inspector's readout shows: the deepest entity in the drill-down
+/// path (album > artist > genre), or the selected track on single-list
+/// stages. Drives the widget's kind chip and the batch Play/Queue resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InspectorKind {
+    /// An album at the deepest path entry — the full details grid.
+    #[default]
+    Album,
+    /// An artist at the deepest path entry — name, album count, cover.
+    Artist,
+    /// A genre at the deepest path entry — name and track count.
+    Genre,
+    /// A selected track on a single-list stage — the compact readout.
+    Track,
+}
+
+/// One frame of the inspector (the collapsible selection panel, handoff
+/// issue 10), resolved from the library session through the Session Views
+/// seam. Owned data so the render call site can borrow it all at once.
+/// `visible: false` is the hidden state — nothing selected, or the selection
+/// the session remembers is no longer in the store (so the inspector can
+/// never show stale art).
 #[derive(Default)]
-pub struct SelectionContent {
+pub struct InspectorContent {
+    /// Whether the inspector renders at all (a selection exists and the
+    /// store still carries it).
+    pub visible: bool,
+    /// What the readout shows — drives which details resolve.
+    pub kind: InspectorKind,
     pub title: Option<String>,
     pub subtitle: Option<String>,
-    /// The album's first track — the cover the panel requests.
+    /// The selection's cover art source (a track id); `None` renders the
+    /// neutral placeholder block.
     pub art_track: Option<TrackId>,
-    /// The album's track ids in store order — the batch Play album starts.
+    /// The selection's track ids in store order — the batch Play and
+    /// Add to Queue actions start.
     pub track_ids: Vec<TrackId>,
     pub details: Vec<crate::ui::selection::SelectionDetail>,
 }
 
-/// Resolve what the selection panel (handoff issue 10) renders for the
-/// session's last album selection: title, artist · year line, art source,
-/// and the details grid (artist, released, genre, track count · total
-/// time, plays, last played, path) — all read through the Session Views
-/// seam, so scans and tag edits can never leave stale rows.
-pub fn resolve_selection_panel(
-    views: &mut SessionViews,
-    library: &LibrarySession,
-) -> SelectionContent {
-    use riff_backend::app::state::AlbumSelection;
+/// Resolve what the inspector renders for the session: the deepest entity
+/// in the drill-down path (album > artist > genre), or the selected track
+/// when the path is empty (single-list stages). The album variant preserves
+/// today's selection-panel content (cover, title, artist · year line, and
+/// the details grid: artist, released, genre, track count · total time,
+/// plays, last played, path) — all read through the Session Views seam, so
+/// scans and tag edits can never leave stale rows. Any selection the store
+/// no longer carries resolves hidden, never a stale readout.
+pub fn resolve_inspector(views: &mut SessionViews, library: &LibrarySession) -> InspectorContent {
+    use riff_backend::app::state::BrowserSelection;
 
-    let Some(AlbumSelection { artist, title }) = &library.selected_album else {
-        return SelectionContent::default();
+    let Some(selection) = library.current_selection() else {
+        // Single-list stages (All Tracks, search, playlists, smart lists,
+        // folders): the selected track's compact readout.
+        let Some(track_id) = library.selected_track.clone() else {
+            return InspectorContent::default();
+        };
+        let Some(track) = views.selected_track(&track_id) else {
+            return InspectorContent::default();
+        };
+        return track_inspector(track);
     };
+    match selection {
+        BrowserSelection::Album { artist, title } => album_inspector(views, artist, title),
+        BrowserSelection::Artist(name) => artist_inspector(views, name),
+        BrowserSelection::Genre(genre) => genre_inspector(views, genre),
+    }
+}
+
+/// The compact track readout: title, artist, album, metadata, and the
+/// single-track batch the Play/Queue actions start.
+fn track_inspector(track: riff_backend::domain::Track) -> InspectorContent {
+    let details = vec![
+        crate::ui::selection::SelectionDetail {
+            label: "Artist".to_string(),
+            value: track.metadata.display_artist(),
+        },
+        crate::ui::selection::SelectionDetail {
+            label: "Album".to_string(),
+            value: track.metadata.display_album().to_string(),
+        },
+        crate::ui::selection::SelectionDetail {
+            label: "Genre".to_string(),
+            value: track
+                .metadata
+                .genre
+                .clone()
+                .unwrap_or_else(|| "\u{2014}".to_string()),
+        },
+        crate::ui::selection::SelectionDetail {
+            label: "Plays".to_string(),
+            value: track.play_count.to_string(),
+        },
+        crate::ui::selection::SelectionDetail {
+            label: "Last played".to_string(),
+            value: track.last_played.map_or_else(
+                || "Never".to_string(),
+                |at| {
+                    let elapsed = at.elapsed().unwrap_or(std::time::Duration::ZERO);
+                    crate::ui::sidebar::format_last_scan_ago(elapsed)
+                },
+            ),
+        },
+        crate::ui::selection::SelectionDetail {
+            label: "Path".to_string(),
+            value: track.file_path.to_string_lossy().to_string(),
+        },
+    ];
+    InspectorContent {
+        visible: true,
+        kind: InspectorKind::Track,
+        title: Some(track.metadata.display_title(&track.file_path)),
+        subtitle: Some(track.metadata.display_artist()),
+        art_track: Some(track.id.clone()),
+        track_ids: vec![track.id.clone()],
+        details,
+    }
+}
+
+/// The album readout: cover, title, artist · year line, and the details
+/// grid (artist, released, genre, track count · total time, plays, last
+/// played, path). Hidden when the store no longer carries the album.
+fn album_inspector(views: &mut SessionViews, artist: &str, title: &str) -> InspectorContent {
     let tracks = views.album_tracks(artist, title);
     if tracks.is_empty() {
         // The album is gone from the store (a rescan dropped it) — the
-        // empty state, never a stale readout.
-        return SelectionContent::default();
+        // hidden state, never a stale readout.
+        return InspectorContent::default();
     }
     // The album's year and genre come from its entry in the artist's album
     // table (the same source the detail column's header uses).
     let albums = views.artist_albums(artist);
-    let album = albums.iter().find(|album| &album.title == title);
+    let album = albums.iter().find(|album| album.title == title);
     let details = vec![
         crate::ui::selection::SelectionDetail {
             label: "Artist".to_string(),
-            value: artist.clone(),
+            value: artist.to_string(),
         },
         crate::ui::selection::SelectionDetail {
             label: "Released".to_string(),
@@ -1250,16 +1492,100 @@ pub fn resolve_selection_panel(
                 .unwrap_or_default(),
         },
     ];
-    SelectionContent {
-        title: Some(title.clone()),
-        subtitle: Some(
-            album
-                .and_then(|a| a.year)
-                .map_or_else(|| artist.clone(), |year| format!("{artist} \u{b7} {year}")),
-        ),
+    InspectorContent {
+        visible: true,
+        kind: InspectorKind::Album,
+        title: Some(title.to_string()),
+        subtitle: Some(album.and_then(|a| a.year).map_or_else(
+            || artist.to_string(),
+            |year| format!("{artist} \u{b7} {year}"),
+        )),
         art_track: tracks.first().map(|track| track.id.clone()),
         track_ids: tracks.iter().map(|track| track.id.clone()).collect(),
         details,
+    }
+}
+
+/// The artist readout: name, album count, cover (the first album's first
+/// track), and the artist's track batch. Hidden when the store no longer
+/// carries the artist.
+fn artist_inspector(views: &mut SessionViews, name: &str) -> InspectorContent {
+    let albums = views.artist_albums(name);
+    if albums.is_empty() {
+        return InspectorContent::default();
+    }
+    let total_tracks: usize = albums.iter().map(|album| album.tracks.len()).sum();
+    let details = vec![
+        crate::ui::selection::SelectionDetail {
+            label: "Albums".to_string(),
+            value: album_count_label(albums.len()),
+        },
+        crate::ui::selection::SelectionDetail {
+            label: "Tracks".to_string(),
+            value: total_tracks.to_string(),
+        },
+    ];
+    InspectorContent {
+        visible: true,
+        kind: InspectorKind::Artist,
+        title: Some(name.to_string()),
+        subtitle: Some(album_count_label(albums.len())),
+        // The artist's cover: the first album's first track.
+        art_track: albums
+            .first()
+            .and_then(|album| album.tracks.first().cloned()),
+        track_ids: albums
+            .iter()
+            .flat_map(|album| album.tracks.iter().cloned())
+            .collect(),
+        details,
+    }
+}
+
+/// The genre readout: name and track count, with the genre-scoped track
+/// batch. Hidden when the genre is gone from the read model.
+fn genre_inspector(views: &mut SessionViews, genre: &str) -> InspectorContent {
+    let count = views
+        .genres()
+        .iter()
+        .find(|row| row.genre == genre)
+        .map(|row| row.tracks);
+    let Some(tracks) = count else {
+        // The genre is gone from the read model — hidden, never a stale
+        // readout.
+        return InspectorContent::default();
+    };
+    let mut track_ids = Vec::new();
+    for artist in views.artists_in_genre(genre).iter() {
+        for album in views.artist_albums_in_genre(&artist.name, genre).iter() {
+            for track in views
+                .album_tracks_in_genre(&album.artist, &album.title, genre)
+                .iter()
+            {
+                track_ids.push(track.id.clone());
+            }
+        }
+    }
+    let details = vec![crate::ui::selection::SelectionDetail {
+        label: "Tracks".to_string(),
+        value: tracks.to_string(),
+    }];
+    InspectorContent {
+        visible: true,
+        kind: InspectorKind::Genre,
+        title: Some(genre.to_string()),
+        subtitle: Some(format!("{tracks} tracks")),
+        art_track: None,
+        track_ids,
+        details,
+    }
+}
+
+/// `"1 album"` / `"N albums"` — the artist readout's count line.
+fn album_count_label(count: usize) -> String {
+    match count {
+        1 => "1 album".to_string(),
+        n => format!("{n} albums"),
     }
 }
 
@@ -1284,84 +1610,6 @@ fn last_played_label(tracks: &[riff_backend::domain::Track]) -> String {
             crate::ui::sidebar::format_last_scan_ago(elapsed)
         },
     )
-}
-
-/// An artist's albums as detail-column rows, keyed by the store's
-/// `(album artist, title)` composite — the same identity the browser
-/// column's Albums variant reports. `selection` highlights the album
-/// that has been drilled into, matching the Albums section's behaviour.
-fn artist_album_rows(
-    views: &mut SessionViews,
-    artist: &str,
-    selection: Option<&BrowserSelection>,
-) -> Vec<crate::ui::browser::BrowserItem> {
-    use riff_backend::app::state::BrowserSelection;
-    views
-        .artist_albums(artist)
-        .iter()
-        .map(|album| {
-            let album_key = format!("{}\u{1f}{}", album.artist, album.title);
-            let is_selected = selection.is_some_and(|s| match s {
-                BrowserSelection::Album {
-                    artist: a,
-                    title: t,
-                } => a.as_str() == album.artist.as_str() && t.as_str() == album.title.as_str(),
-                _ => false,
-            });
-            crate::ui::browser::BrowserItem {
-                key: album_key,
-                label: album.title.clone(),
-                detail: album.year.map(|y| y.to_string()),
-                thumbnail: None,
-                selected: is_selected,
-                now_playing: false,
-            }
-        })
-        .collect()
-}
-
-/// The detail column's navigation half: breadcrumb climbs and the
-/// artist/genre-level row selections, all [`LibrarySession`] state.
-fn apply_detail_navigation(action: crate::ui::detail::DetailAction, library: &mut LibrarySession) {
-    use riff_backend::app::state::BrowserSelection;
-    match action {
-        crate::ui::detail::DetailAction::Crumb(index) => {
-            // Climb the selection path back to `index`: level 0 is the
-            // section root (no selection); level 1 the first entity on the
-            // trail (the artist on an album trail). A segment at or below
-            // the current level changes nothing.
-            let climbed = match (&library.browser_selection, index) {
-                (_, 0) => None,
-                (Some(BrowserSelection::Album { artist, .. }), 1) => {
-                    Some(BrowserSelection::Artist(artist.clone()))
-                }
-                _ => library.browser_selection.clone(),
-            };
-            library.browser_selection = climbed;
-        }
-        crate::ui::detail::DetailAction::SelectRow(key) => {
-            // The rows' meaning follows the current level: on an artist the
-            // rows are albums (keyed by the store's `(album artist, title)`
-            // composite), on a genre they are artists. The identity
-            // convention is the browser column's (`apply_browser_action`).
-            let next = match &library.browser_selection {
-                Some(BrowserSelection::Artist(_)) => {
-                    key.split_once('\u{1f}')
-                        .map(|(artist, title)| BrowserSelection::Album {
-                            artist: artist.to_owned(),
-                            title: title.to_owned(),
-                        })
-                }
-                Some(BrowserSelection::Genre(_)) => Some(BrowserSelection::Artist(key)),
-                _ => None,
-            };
-            if let Some(selection) = next {
-                library.browser_selection = Some(selection);
-                record_album_selection(library);
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Apply one [`crate::ui::topbar::TopBarAction`] (handoff issue 06): the
@@ -1912,6 +2160,9 @@ impl RiffApp {
                 library.view_mode = ViewMode::Library;
                 library.browse_mode = BrowseMode::Library;
                 library.library_section = section;
+                // Section (or browse-mode) navigation resets the drill-down
+                // path: the new section starts at its root listing.
+                library.reset_browser_path();
                 library.search_query.clear();
                 self.smart_playlist_view = None;
                 self.playlist_view = None;
@@ -1937,6 +2188,9 @@ impl RiffApp {
         if folders_row.clicked() {
             library.view_mode = ViewMode::Library;
             library.browse_mode = BrowseMode::Folders;
+            // A browse-mode switch resets the drill-down path along with the
+            // section change.
+            library.reset_browser_path();
             library.search_query.clear();
             self.smart_playlist_view = None;
             self.playlist_view = None;
@@ -1983,6 +2237,9 @@ impl RiffApp {
             if row.clicked() {
                 library.view_mode = ViewMode::Library;
                 library.browse_mode = BrowseMode::Library;
+                // Opening a smart list leaves the browser's drill-down path
+                // behind: the listing replaces the column stage.
+                library.reset_browser_path();
                 library.search_query.clear();
                 self.smart_playlist_view = Some(kind);
                 self.playlist_view = None;
@@ -2021,93 +2278,6 @@ impl RiffApp {
         {
             self.add_library_via_platform_picker(library);
         }
-    }
-
-    /// Library-stage content (Issues 06 + 09): selected track metadata +
-    /// cover, or the mockup's empty-state hero — the glowing disc circle with
-    /// its copy — whenever there are no track details to show.
-    /// The detail column (handoff issue 09): the middle pane of the
-    /// three-pane explorer, rendered in the main stage between the browser
-    /// column and the future selection panel (issue 10). Whatever the
-    /// browser column's selection resolves to — an artist's albums, a
-    /// genre's artists, or the album header + track table. With no browser
-    /// selection (the flat All Tracks listing) the pre-existing selected-
-    /// track stage stays up.
-    fn render_detail_column_panel(
-        &mut self,
-        ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-        playback: &mut PlaybackSession,
-    ) {
-        if library.browser_selection.is_none() {
-            self.render_track_details_panel(ui, library);
-            return;
-        }
-        let content = resolve_detail_content(&mut self.views, library);
-        // The play batch the album header's actions start: the album's
-        // tracks in store order.
-        let album_tracks: Vec<TrackId> = content
-            .tracks
-            .iter()
-            .map(|row| TrackId(row.key.clone()))
-            .collect();
-        let mut actions = Vec::new();
-        crate::ui::detail::show_detail_column(
-            ui,
-            &mut self.icons,
-            &self.theme.active,
-            crate::ui::detail::DetailColumn {
-                breadcrumb: &content.breadcrumb,
-                header: content.header.as_ref(),
-                tracks: &content.tracks,
-                rows: &content.rows,
-                empty_title: "Nothing here yet",
-                empty_hint: "This selection has nothing to show.",
-            },
-            &mut actions,
-        );
-        for action in actions {
-            apply_detail_action(
-                action,
-                library,
-                playback,
-                self.transport.as_ref(),
-                self.library_mutations.as_mut(),
-                &album_tracks,
-            );
-        }
-    }
-
-    fn render_track_details_panel(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
-        let palette = self.theme.active;
-        let Some(track_id) = library.selected_track.clone() else {
-            crate::ui::library::empty_state_hero(ui, &mut self.icons, &palette);
-            return;
-        };
-        // The selected Track resolves through the Session Views seam over
-        // the store's `get_track` query (cached until the selection or the
-        // generation moves) — never the in-memory mirror. An absent track —
-        // unknown to the store, or unreadable right now — renders the empty
-        // state.
-        let Some(track) = self.views.selected_track(&track_id) else {
-            crate::ui::library::empty_state_hero(ui, &mut self.icons, &palette);
-            return;
-        };
-        self.request_cover(&track.id, &track.file_path);
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.heading(track.metadata.display_title(&track.file_path));
-                ui.label(format!("Artist: {}", track.metadata.display_artist()));
-                ui.label(format!("Album: {}", track.metadata.display_album()));
-                render_track_meta_labels(ui, &track.metadata, false);
-                ui.separator();
-                ui.label(format!("File: {}", track.file_path.display()));
-            });
-            ui.with_layout(egui::Layout::top_down(egui::Align::RIGHT), |ui| {
-                let texture = Some(self.resolve_cover_texture(ui.ctx(), &track.id.0));
-                cover_art_ui(ui, &palette, texture, COVER_THUMB_SIZE);
-            });
-        });
     }
 
     fn render_flat_view(
@@ -2327,6 +2497,9 @@ impl RiffApp {
                 if action == crate::ui::sidebar::PlaylistRowAction::Open {
                     library.view_mode = ViewMode::Library;
                     library.browse_mode = BrowseMode::Library;
+                    // Opening a playlist leaves the browser's drill-down path
+                    // behind: the listing replaces the column stage.
+                    library.reset_browser_path();
                     library.search_query.clear();
                 }
             }
@@ -3029,36 +3202,6 @@ fn folder_tracks_filtered<'a>(tracks: &'a [Track], query: &str) -> Vec<&'a Track
     }
 }
 
-/// Shared metadata label rows (album artist, year, genre, track/disc number).
-fn render_track_meta_labels(
-    ui: &mut egui::Ui,
-    metadata: &riff_backend::domain::TrackMetadata,
-    show_disc: bool,
-) {
-    if let Some(ref aa) = metadata.album_artist
-        && *aa != metadata.display_artist()
-    {
-        ui.label(format!("Album Artist: {aa}"));
-    }
-    if let Some(y) = metadata.year {
-        ui.label(format!("Year: {y}"));
-    }
-    if let Some(g) = &metadata.genre {
-        ui.label(format!("Genre: {g}"));
-    }
-    if let Some(tn) = metadata.track_number {
-        if show_disc {
-            ui.label(format!(
-                "Track: {} / Disc: {}",
-                tn,
-                metadata.disc_number.unwrap_or(1)
-            ));
-        } else {
-            ui.label(format!("Track: {tn}"));
-        }
-    }
-}
-
 /// Arguments for the shared track context menu, grouped into one value to
 /// keep the call sites readable.
 struct TrackMenuArgs<'a> {
@@ -3175,39 +3318,6 @@ fn show_list_context_menu(
             ui.close();
         }
     });
-}
-
-/// Fixed square size (points) for the cover thumbnail in the library detail
-/// pane (REQ-UI-004). The Now Playing cover's size lives with the restyled
-/// stage widgets (`now_playing::COVER_SIZE`, Issue 10).
-const COVER_THUMB_SIZE: f32 = 200.0;
-
-/// Render cover art inside a fixed `size` x `size` square, or a placeholder
-/// (rounded box + note glyph) while no texture is loaded yet. The placeholder
-/// reads the active palette's tokens — an empty surface-2 well with a muted
-/// ink-3 glyph — so it themes correctly on both palettes (Issue 03). The
-/// `SizedTexture` destination rect forces the image into the allotted
-/// square, so oversized covers are clamped and can never overflow the layout.
-fn cover_art_ui(
-    ui: &mut egui::Ui,
-    palette: &theme::Palette,
-    texture: Option<egui::TextureHandle>,
-    size: f32,
-) {
-    if let Some(texture) = texture {
-        let sized = egui::load::SizedTexture::new(texture.id(), egui::vec2(size, size));
-        ui.add(egui::Image::from_texture(sized).corner_radius(4.0));
-    } else {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-        ui.painter().rect_filled(rect, 4.0, palette.surface_2);
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "\u{1F3B5}",
-            egui::FontId::proportional(size * 0.3),
-            palette.ink_3,
-        );
-    }
 }
 
 /// "Add to Playlist" submenu shared by the track context menus (Task 4.2).

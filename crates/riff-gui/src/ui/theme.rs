@@ -179,13 +179,22 @@ pub const TOPBAR_H: f32 = 48.0;
 /// `--riff-sidebar-w` — 280 px sidebar.
 pub const SIDEBAR_W: f32 = 280.0;
 
-/// Width of the browser column pane (design-handoff issue 08): the first
-/// pane of the three-pane explorer, right of the nav sidebar.
-pub const BROWSER_W: f32 = 320.0;
-/// Width of the selection panel (design-handoff issue 10): the third pane
-/// of the explorer — the design's 300×750 panel between the detail column
-/// and the window edge.
-pub const SELECT_PANEL_W: f32 = 300.0;
+/// Preferred width of an entity list column in the elastic column stage
+/// (the elastic-column spec): every non-last list column keeps this width
+/// while the window allows it.
+pub const COLUMN_WIDTH: f32 = 280.0;
+/// Minimum width an entity list column shrinks to before proportional
+/// shrinking takes over. The stage never scrolls horizontally; in narrow
+/// windows every column shrinks toward its floor instead.
+pub const COLUMN_MIN_W: f32 = 200.0;
+/// Minimum width of the stage's last (absorbing) column — the tracks column
+/// or a single full-width listing — before proportional shrinking takes
+/// over. Kept wider than [`COLUMN_MIN_W`] because the last column usually
+/// carries the track table.
+pub const LAST_COLUMN_MIN_W: f32 = 320.0;
+/// Width of the collapsible inspector (the former selection panel): the
+/// stage's rightmost column, shown only while a selection exists.
+pub const INSPECTOR_WIDTH: f32 = 300.0;
 /// `--riff-playerbar-h` — 88 px bottom player bar.
 pub const PLAYERBAR_H: f32 = 88.0;
 

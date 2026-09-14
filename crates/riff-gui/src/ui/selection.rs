@@ -1,9 +1,10 @@
-//! The selection panel (design-handoff issue 10): the third pane of the
-//! three-pane explorer. A persistent right-hand readout of the currently
-//! selected album — its art, title, artist · year line, and a details grid —
-//! with the orange **Play album** action. A selection readout, not a view:
-//! it follows the session's last album selection while the listener browses
-//! any section, and the Now Playing view stays untouched.
+//! The selection panel (design-handoff issue 10), since the elastic-column
+//! task the **inspector**: the stage's rightmost column, shown only while a
+//! selection exists. A readout of the selected entity or track — its art,
+//! title, subtitle, and a details grid — with the orange **Play album**
+//! action, plus **Add to Queue** in its inspector form. A selection readout,
+//! not a view: it follows the live selection, and the Now Playing view stays
+//! untouched.
 //!
 //! Pure widget seam, same discipline as [`crate::ui::browser`] and
 //! [`crate::ui::detail`]: the widget paints from [`Palette`] tokens and
@@ -22,6 +23,10 @@ pub enum SelectionAction {
     /// The panel's **Play album**: start the selected album's tracks from
     /// the top, in order.
     PlayAlbum,
+    /// The panel's **Add to Queue**: append the selection's track batch to
+    /// the end of the playback queue, following the context menu's per-track
+    /// queue precedent.
+    Queue,
 }
 
 /// One row of the details grid: the display values the app resolved from
@@ -44,6 +49,11 @@ pub struct SelectionPanel<'a> {
     pub subtitle: Option<&'a str>,
     /// The details grid rows, resolved by the caller.
     pub details: &'a [SelectionDetail],
+    /// Whether the quick-action row renders **Add to Queue** beside **Play
+    /// album** (the elastic-column inspector). `false` keeps the panel's
+    /// original single Play album action — the rendering the `selection_panel`
+    /// golden pins.
+    pub queue: bool,
 }
 
 /// The empty state's copy: what the panel says before any album has been
@@ -77,7 +87,11 @@ pub fn show_selection_panel(
             );
         }
         ui.add_space(12.0);
-        play_album_button(ui, cache, palette, actions);
+        if panel.queue {
+            action_row(ui, cache, palette, actions);
+        } else {
+            play_album_button(ui, cache, palette, actions);
+        }
         ui.add_space(12.0);
         details_grid(ui, palette, panel.details);
     } else {
@@ -141,10 +155,94 @@ fn play_album_button(
     actions: &mut Vec<SelectionAction>,
 ) {
     let width = ui.available_width();
-    let texture = cache.texture(ui.ctx(), super::icons::Icon::Play, 14.0, palette.on_brand);
+    action_button(
+        ui,
+        cache,
+        palette,
+        width,
+        QuickAction {
+            text: "Play album",
+            icon: super::icons::Icon::Play,
+            label: "Play the whole album",
+            action: SelectionAction::PlayAlbum,
+        },
+        actions,
+    );
+}
+
+/// The inspector's quick-action row: **Play album** and **Add to Queue**
+/// side by side, each half the panel width. The visible text doubles as the
+/// accessibility labels; the queue action follows the context menu's
+/// per-track queue precedent.
+fn action_row(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    actions: &mut Vec<SelectionAction>,
+) {
+    let width = ui.available_width();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let half = (width - 8.0) / 2.0;
+        action_button(
+            ui,
+            cache,
+            palette,
+            half,
+            QuickAction {
+                text: "Play album",
+                icon: super::icons::Icon::Play,
+                label: "Play the whole album",
+                action: SelectionAction::PlayAlbum,
+            },
+            actions,
+        );
+        action_button(
+            ui,
+            cache,
+            palette,
+            half,
+            QuickAction {
+                text: "Add to Queue",
+                icon: super::icons::Icon::ListMusic,
+                label: "Add this selection's tracks to the queue",
+                action: SelectionAction::Queue,
+            },
+            actions,
+        );
+    });
+}
+
+/// One quick-action button's spec: the visible text (doubling as the
+/// accessibility label), its icon, the hover label, and the action it
+/// reports.
+struct QuickAction {
+    text: &'static str,
+    icon: super::icons::Icon,
+    label: &'static str,
+    action: SelectionAction,
+}
+
+/// One primary action button at `width` wide: the brand fill with its
+/// foreground ink, reporting `spec.action` when clicked.
+fn action_button(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    width: f32,
+    spec: QuickAction,
+    actions: &mut Vec<SelectionAction>,
+) {
+    let QuickAction {
+        text,
+        icon,
+        label,
+        action,
+    } = spec;
+    let texture = cache.texture(ui.ctx(), icon, 14.0, palette.on_brand);
     let button = egui::Button::image_and_text(
         egui::Image::new((texture, egui::vec2(14.0, 14.0))),
-        egui::RichText::new("Play album")
+        egui::RichText::new(text)
             .text_style(egui::TextStyle::Body)
             .color(palette.on_brand),
     )
@@ -152,10 +250,10 @@ fn play_album_button(
     .corner_radius(super::theme::RADIUS_SM);
     if ui
         .add_sized([width, PLAY_H], button)
-        .on_hover_text("Play the whole album")
+        .on_hover_text(label)
         .clicked()
     {
-        actions.push(SelectionAction::PlayAlbum);
+        actions.push(action);
     }
 }
 

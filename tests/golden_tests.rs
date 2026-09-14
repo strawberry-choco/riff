@@ -860,22 +860,26 @@ mod tests {
             });
     }
 
-    // --- Three-pane explorer baselines (design-handoff issue 15) -------------------
+    // --- Explorer widget baselines (design-handoff issue 15) ---------------------
     //
-    // The missing column goldens: browser column, detail column, and the
-    // selection panel — the three panes of the restructured explorer. The
-    // list/grid toggle state and the top-bar search are pinned by
-    // `top_bar_dark`; the grid state gets its own baseline below.
+    // The explorer's widget seams: browser column, detail column, and the
+    // selection panel — the widgets the elastic stage (elastic-column spec)
+    // composes side by side at the widths its sizing policy hands them. The
+    // stage's own column compositions (sized by `column_widths`) are pinned
+    // by the `elastic_*_dark` goldens below. The list/grid toggle state and
+    // the top-bar search are pinned by `top_bar_dark`; the grid state gets
+    // its own baseline below.
 
-    /// The browser column (the explorer's first pane) at the width the
-    /// three-pane layout gives it: the A–Z sort control, the artist
-    /// variant's genre chip row (one filter engaged), and list rows with
-    /// placeholder thumbnail slots, secondary detail lines, one selected and
-    /// one now-playing row. Rendered idle so the snapshot is deterministic.
+    /// The browser column (the explorer's entity-list widget) at the elastic
+    /// stage's preferred column width ([`riff_gui::ui::theme::COLUMN_WIDTH`],
+    /// 280): the A–Z sort control, the artist variant's genre chip row (one
+    /// filter engaged), and list rows with placeholder thumbnail slots,
+    /// secondary detail lines, one selected and one now-playing row. Rendered
+    /// idle so the snapshot is deterministic.
     #[test]
     fn browser_column_dark_matches_golden_baseline() {
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(320.0, 420.0))
+            .with_size(egui::vec2(riff_gui::ui::theme::COLUMN_WIDTH, 420.0))
             .with_pixels_per_point(1.0)
             .build_ui(draw_browser_column);
         theme::install(&harness.ctx, &Palette::dark());
@@ -944,12 +948,14 @@ mod tests {
         browser::show_browser_column(ui, &mut cache, &palette, column, &mut Vec::new());
     }
 
-    /// The detail column (the explorer's middle pane) at album level: the
+    /// The detail column (the explorer's Tracks widget — the elastic stage's
+    /// last column, which absorbs the remaining width) at album level: the
     /// breadcrumb trail, the album header with its subtitle, and the
     /// `# / Title / Plays / Time` track table — one favorite, one selected,
-    /// one now-playing (idle, so nothing animates). The harness is wide
-    /// enough that the Time column clears the right edge — a clipped
-    /// golden would bake truncation into the baseline.
+    /// one now-playing (idle, so nothing animates). 480 is a representative
+    /// absorbing width for the last column; the harness is wide enough that
+    /// the Time column clears the right edge — a clipped golden would bake
+    /// truncation into the baseline.
     #[test]
     fn detail_column_dark_matches_golden_baseline() {
         let mut harness = egui_kittest::Harness::builder()
@@ -963,7 +969,7 @@ mod tests {
     }
 
     fn draw_detail_column(ui: &mut egui::Ui) {
-        use riff_gui::ui::detail::{self, Crumb, DetailColumn, TrackRow};
+        use riff_gui::ui::detail::{self, Crumb, DetailColumn};
         use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::theme::{Palette, SURFACE_BG};
 
@@ -989,7 +995,22 @@ mod tests {
             title: "Geogaddi".to_string(),
             subtitle: Some("Boards of Canada \u{b7} 2002".to_string()),
         };
-        let tracks = [
+        let tracks = geogaddi_tracks();
+        let column = DetailColumn {
+            breadcrumb: &crumbs,
+            header: Some(&header),
+            tracks: &tracks,
+            ..DetailColumn::empty("", "")
+        };
+        detail::show_detail_column(ui, &mut cache, &palette, column, &mut Vec::new());
+    }
+
+    /// The dummy Geogaddi track table shared by the detail-column golden and
+    /// the elastic drilled compositions: one favorite, one selected, one
+    /// now-playing (idle, so nothing animates).
+    fn geogaddi_tracks() -> Vec<riff_gui::ui::detail::TrackRow> {
+        use riff_gui::ui::detail::TrackRow;
+        vec![
             TrackRow {
                 key: "t1".to_string(),
                 number: Some(1),
@@ -1030,17 +1051,13 @@ mod tests {
                 selected: false,
                 now_playing: true,
             },
-        ];
-        let column = DetailColumn {
-            breadcrumb: &crumbs,
-            header: Some(&header),
-            tracks: &tracks,
-            ..DetailColumn::empty("", "")
-        };
-        detail::show_detail_column(ui, &mut cache, &palette, column, &mut Vec::new());
+        ]
     }
 
-    /// The selection panel (the explorer's third pane): the SELECTION
+    /// The selection panel (the inspector's content widget — the collapsible
+    /// panel the elastic stage shows as its rightmost column while a
+    /// selection exists) at the inspector's width
+    /// ([`riff_gui::ui::theme::INSPECTOR_WIDTH`], 300): the SELECTION
     /// header with its kind chip, the 268×200 placeholder art block, the
     /// album title over its artist · year line, the Play album action, and
     /// the details grid. Rendered without art so no texture load is
@@ -1049,7 +1066,7 @@ mod tests {
     #[test]
     fn selection_panel_dark_matches_golden_baseline() {
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(320.0, 640.0))
+            .with_size(egui::vec2(riff_gui::ui::theme::INSPECTOR_WIDTH, 640.0))
             .with_pixels_per_point(1.0)
             .build_ui(draw_selection_panel);
         theme::install(&harness.ctx, &Palette::dark());
@@ -1089,8 +1106,580 @@ mod tests {
             title: Some("Tomorrow's Harvest"),
             subtitle: Some("Boards of Canada \u{b7} 2013"),
             details: &details,
+            // The golden pins the panel's single Play album action — the
+            // rendering the original fixed pane used; the inspector's Play /
+            // Add to Queue row (`queue: true`) is pinned by the
+            // `elastic_all_tracks_inspector_dark` composition below.
+            queue: false,
         };
         selection::show_selection_panel(ui, &mut cache, &palette, panel, &mut Vec::new());
+    }
+
+    // --- Elastic column stage compositions (elastic-column spec) ------------------
+    //
+    // The elastic stage's column compositions: the widgets it composes side
+    // by side, sized by `column_widths` — the Artists and Genres drill-downs
+    // and the flat Tracks listing beside the collapsible inspector. Each
+    // draw function mirrors `render_elastic_stage` exactly: zero item
+    // spacing, a hairline separator between columns, every column in a
+    // `width`-constrained child ui, and the sizing policy fed the width the
+    // separators leave.
+
+    /// The stage's column sizing arithmetic, mirrored from
+    /// `render_elastic_stage`: `column_widths` over the width the hairline
+    /// separators between the columns leave (each consumes the style's
+    /// separator spacing in the horizontal layout).
+    fn stage_column_widths(ui: &egui::Ui, columns: usize, inspector: bool) -> Vec<f32> {
+        let gaps = columns.saturating_sub(1) + usize::from(inspector);
+        let separator_w = ui
+            .style()
+            .separator_style(
+                &egui::widget_style::Classes::default(),
+                egui::widget_style::WidgetState::default(),
+            )
+            .spacing;
+        riff_gui::ui::app::column_widths(
+            (ui.available_width() - separator_w * gaps as f32).max(0.0),
+            columns,
+            inspector,
+        )
+    }
+
+    /// The stage's horizontal composition, mirrored from
+    /// `render_elastic_stage`: a row of zero item spacing with a hairline
+    /// separator between columns, each column drawn inside a
+    /// `width`-constrained child ui. `column(index)` draws one list column;
+    /// when `inspector_width` is `Some`, a final separator and the inspector
+    /// column follow the list columns. The stage runs inside a `height`-tall
+    /// rect: the kittest root ui sizes itself to its content, which would
+    /// collapse the columns to stub heights — pin the composition at a real
+    /// window size instead, like the app's CentralPanel.
+    fn horizontal_stage(
+        ui: &mut egui::Ui,
+        widths: &[f32],
+        inspector_width: Option<f32>,
+        height: f32,
+        mut column: impl FnMut(&mut egui::Ui, usize),
+    ) {
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), height),
+            egui::Sense::hover(),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+            // Mirror `render_elastic_stage`'s column scoping exactly: every
+            // column child ui gets a distinct id salt, because sibling
+            // `allocate_ui_with_layout` children share one stable id and their
+            // persistent-id widgets (each column's ScrollArea) would collide.
+            let mut scope = |ui: &mut egui::Ui, width: f32, i: usize| {
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(width, ui.available_height()),
+                    egui::Sense::hover(),
+                );
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min))
+                        .id_salt(("column", i)),
+                    |ui| column(ui, i),
+                );
+            };
+            // `horizontal_top`, like the stage: plain `horizontal` sizes the
+            // row to `interact_size.y` and only grows with content, which
+            // would collapse the columns to stub heights.
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for (i, width) in widths.iter().copied().enumerate() {
+                    if i > 0 {
+                        ui.separator();
+                    }
+                    scope(ui, width, i);
+                }
+                if let Some(width) = inspector_width {
+                    ui.separator();
+                    scope(ui, width, widths.len());
+                }
+            });
+        });
+    }
+
+    /// The elastic stage's Artists drill-down composition: the three list
+    /// columns the stage sizes side by side — the Artists root (A–Z sort,
+    /// genre chips, artist rows) · the artist's Albums column (list rows,
+    /// no sort, no chips) · the Tracks column (breadcrumb
+    /// `Artists / Boards of Canada / Geogaddi`, album header, track table).
+    #[test]
+    fn elastic_artists_drilled_dark_matches_golden_baseline() {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1180.0, 420.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(draw_elastic_artists_drilled);
+        theme::install(&harness.ctx, &Palette::dark());
+        harness.ctx.set_fonts(inter_only_font_definitions());
+        harness.run();
+        harness.snapshot("elastic_artists_drilled_dark");
+    }
+
+    fn draw_elastic_artists_drilled(ui: &mut egui::Ui) {
+        use riff_backend::domain::GenreCount;
+        use riff_gui::ui::browser::{self, BrowserColumn, BrowserItem};
+        use riff_gui::ui::detail::{self, Crumb, DetailColumn};
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::theme::{Palette, SURFACE_BG};
+
+        // Full-canvas background (determinism rule).
+        let background = ui.ctx().layer_painter(egui::LayerId::background());
+        background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let widths = stage_column_widths(ui, 3, false);
+
+        horizontal_stage(ui, &widths, None, 420.0, |ui, column| {
+            // Column 1 — the Artists root: sort control, genre chips, rows
+            // keyed by artist name (the same dummy rows the browser-column
+            // golden uses).
+            if column == 0 {
+                let rows = [
+                    ("Boards of Canada", "12 albums", false, false),
+                    ("Daft Punk", "9 albums", true, false), // selected
+                    ("Miles Davis", "31 albums", false, false),
+                    ("Portishead", "5 albums", false, true), // now-playing, idle
+                ];
+                let items: Vec<BrowserItem> = rows
+                    .into_iter()
+                    .map(|(label, detail, selected, now_playing)| BrowserItem {
+                        key: label.to_string(),
+                        label: label.to_string(),
+                        detail: Some(detail.to_string()),
+                        thumbnail: None,
+                        selected,
+                        now_playing,
+                    })
+                    .collect();
+                let genres = [
+                    GenreCount {
+                        genre: "Electronic".to_string(),
+                        tracks: 42,
+                    },
+                    GenreCount {
+                        genre: "Jazz".to_string(),
+                        tracks: 31,
+                    },
+                    GenreCount {
+                        genre: "Rock".to_string(),
+                        tracks: 19,
+                    },
+                ];
+                let mut provider = |i: usize| items.get(i).cloned();
+                let column = BrowserColumn {
+                    layout: riff_backend::app::state::BrowserLayout::List,
+                    sort_desc: false,
+                    show_sort: true,
+                    genres: &genres,
+                    genre_filter: Some("Electronic"),
+                    total: items.len(),
+                    item: &mut provider,
+                    empty_title: "",
+                    empty_hint: "",
+                };
+                browser::show_browser_column(ui, &mut cache, &palette, column, &mut Vec::new());
+                return;
+            }
+            // Column 2 — the artist's Albums: list rows, no sort, no chips,
+            // `(album artist, title)` composite keys, one selected.
+            if column == 1 {
+                let albums = [
+                    (
+                        "Music Has the Right to Children",
+                        "Boards of Canada \u{b7} 1998",
+                        false,
+                    ),
+                    ("Geogaddi", "Boards of Canada \u{b7} 2002", true), // selected
+                    (
+                        "The Campfire Headphase",
+                        "Boards of Canada \u{b7} 2005",
+                        false,
+                    ),
+                    ("Tomorrow's Harvest", "Boards of Canada \u{b7} 2013", false),
+                ];
+                let items: Vec<BrowserItem> = albums
+                    .into_iter()
+                    .map(|(label, detail, selected)| BrowserItem {
+                        key: format!("Boards of Canada\u{1f}{label}"),
+                        label: label.to_string(),
+                        detail: Some(detail.to_string()),
+                        thumbnail: None,
+                        selected,
+                        now_playing: false,
+                    })
+                    .collect();
+                let mut provider = |i: usize| items.get(i).cloned();
+                let column = BrowserColumn {
+                    layout: riff_backend::app::state::BrowserLayout::List,
+                    sort_desc: false,
+                    show_sort: false,
+                    genres: &[],
+                    genre_filter: None,
+                    total: items.len(),
+                    item: &mut provider,
+                    empty_title: "",
+                    empty_hint: "",
+                };
+                browser::show_browser_column(ui, &mut cache, &palette, column, &mut Vec::new());
+                return;
+            }
+            // Column 3 — the Tracks column: breadcrumb, header, track table.
+            let crumbs = [
+                Crumb {
+                    label: "Artists".to_string(),
+                },
+                Crumb {
+                    label: "Boards of Canada".to_string(),
+                },
+                Crumb {
+                    label: "Geogaddi".to_string(),
+                },
+            ];
+            let header = detail::AlbumHeader {
+                title: "Geogaddi".to_string(),
+                subtitle: Some("Boards of Canada \u{b7} 2002".to_string()),
+            };
+            let tracks = geogaddi_tracks();
+            let column = DetailColumn {
+                breadcrumb: &crumbs,
+                header: Some(&header),
+                tracks: &tracks,
+                ..DetailColumn::empty("", "")
+            };
+            detail::show_detail_column(ui, &mut cache, &palette, column, &mut Vec::new());
+        });
+    }
+
+    /// The elastic stage's Genres drill-down composition: the four list
+    /// columns the stage sizes side by side — the Genres root · the
+    /// artists-in-genre column · the albums-in-genre column · the Tracks
+    /// column (breadcrumb `Genres / Electronic / Autechre / Tri Repetae`).
+    #[test]
+    fn elastic_genres_drilled_dark_matches_golden_baseline() {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1460.0, 420.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(draw_elastic_genres_drilled);
+        theme::install(&harness.ctx, &Palette::dark());
+        harness.ctx.set_fonts(inter_only_font_definitions());
+        harness.run();
+        harness.snapshot("elastic_genres_drilled_dark");
+    }
+
+    fn draw_elastic_genres_drilled(ui: &mut egui::Ui) {
+        use riff_gui::ui::browser::{self, BrowserColumn, BrowserItem};
+        use riff_gui::ui::detail::{self, Crumb, DetailColumn, TrackRow};
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::theme::{Palette, SURFACE_BG};
+
+        // Full-canvas background (determinism rule).
+        let background = ui.ctx().layer_painter(egui::LayerId::background());
+        background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let widths = stage_column_widths(ui, 4, false);
+
+        horizontal_stage(ui, &widths, None, 420.0, |ui, column| {
+            // Column 1 — the Genres root: A–Z sort and genre rows keyed by
+            // genre name.
+            if column == 0 {
+                let rows = [
+                    ("Electronic", "42 tracks", true), // selected
+                    ("Jazz", "31 tracks", false),
+                    ("Rock", "19 tracks", false),
+                ];
+                let items: Vec<BrowserItem> = rows
+                    .into_iter()
+                    .map(|(label, detail, selected)| BrowserItem {
+                        key: label.to_string(),
+                        label: label.to_string(),
+                        detail: Some(detail.to_string()),
+                        thumbnail: None,
+                        selected,
+                        now_playing: false,
+                    })
+                    .collect();
+                let mut provider = |i: usize| items.get(i).cloned();
+                let column = BrowserColumn {
+                    layout: riff_backend::app::state::BrowserLayout::List,
+                    sort_desc: false,
+                    show_sort: true,
+                    genres: &[],
+                    genre_filter: None,
+                    total: items.len(),
+                    item: &mut provider,
+                    empty_title: "",
+                    empty_hint: "",
+                };
+                browser::show_browser_column(ui, &mut cache, &palette, column, &mut Vec::new());
+                return;
+            }
+            // Column 2 — the artists in the genre: list rows, no sort, no
+            // chips, keyed by artist name, one selected.
+            if column == 1 {
+                let rows = [
+                    ("Autechre", "2 albums", true), // selected
+                    ("Aphex Twin", "5 albums", false),
+                    ("Boards of Canada", "3 albums", false),
+                ];
+                let items: Vec<BrowserItem> = rows
+                    .into_iter()
+                    .map(|(label, detail, selected)| BrowserItem {
+                        key: label.to_string(),
+                        label: label.to_string(),
+                        detail: Some(detail.to_string()),
+                        thumbnail: None,
+                        selected,
+                        now_playing: false,
+                    })
+                    .collect();
+                let mut provider = |i: usize| items.get(i).cloned();
+                let column = BrowserColumn {
+                    layout: riff_backend::app::state::BrowserLayout::List,
+                    sort_desc: false,
+                    show_sort: false,
+                    genres: &[],
+                    genre_filter: None,
+                    total: items.len(),
+                    item: &mut provider,
+                    empty_title: "",
+                    empty_hint: "",
+                };
+                browser::show_browser_column(ui, &mut cache, &palette, column, &mut Vec::new());
+                return;
+            }
+            // Column 3 — the albums in the genre: `(album artist, title)`
+            // composite keys, one selected.
+            if column == 2 {
+                let albums = [
+                    ("Tri Repetae", "Autechre \u{b7} 1995", true), // selected
+                    ("Amber", "Autechre \u{b7} 1994", false),
+                    ("Incunabula", "Autechre \u{b7} 1993", false),
+                ];
+                let items: Vec<BrowserItem> = albums
+                    .into_iter()
+                    .map(|(label, detail, selected)| BrowserItem {
+                        key: format!("Autechre\u{1f}{label}"),
+                        label: label.to_string(),
+                        detail: Some(detail.to_string()),
+                        thumbnail: None,
+                        selected,
+                        now_playing: false,
+                    })
+                    .collect();
+                let mut provider = |i: usize| items.get(i).cloned();
+                let column = BrowserColumn {
+                    layout: riff_backend::app::state::BrowserLayout::List,
+                    sort_desc: false,
+                    show_sort: false,
+                    genres: &[],
+                    genre_filter: None,
+                    total: items.len(),
+                    item: &mut provider,
+                    empty_title: "",
+                    empty_hint: "",
+                };
+                browser::show_browser_column(ui, &mut cache, &palette, column, &mut Vec::new());
+                return;
+            }
+            // Column 4 — the Tracks column: breadcrumb, header, track table.
+            let crumbs = [
+                Crumb {
+                    label: "Genres".to_string(),
+                },
+                Crumb {
+                    label: "Electronic".to_string(),
+                },
+                Crumb {
+                    label: "Autechre".to_string(),
+                },
+                Crumb {
+                    label: "Tri Repetae".to_string(),
+                },
+            ];
+            let header = detail::AlbumHeader {
+                title: "Tri Repetae".to_string(),
+                subtitle: Some("Autechre \u{b7} 1995".to_string()),
+            };
+            let tracks = [
+                TrackRow {
+                    key: "g1".to_string(),
+                    number: Some(1),
+                    title: "Drane".to_string(),
+                    plays: 14,
+                    duration: Some(std::time::Duration::from_secs(377)),
+                    favorite: false,
+                    selected: false,
+                    now_playing: false,
+                },
+                TrackRow {
+                    key: "g2".to_string(),
+                    number: Some(2),
+                    title: "Eutow".to_string(),
+                    plays: 27,
+                    duration: Some(std::time::Duration::from_secs(255)),
+                    favorite: true,
+                    selected: false,
+                    now_playing: false,
+                },
+                TrackRow {
+                    key: "g3".to_string(),
+                    number: Some(3),
+                    title: "C/Pach".to_string(),
+                    plays: 8,
+                    duration: Some(std::time::Duration::from_secs(237)),
+                    favorite: false,
+                    selected: true,
+                    now_playing: false,
+                },
+                TrackRow {
+                    key: "g4".to_string(),
+                    number: Some(4),
+                    title: "Gnit".to_string(),
+                    plays: 19,
+                    duration: Some(std::time::Duration::from_secs(353)),
+                    favorite: false,
+                    selected: false,
+                    now_playing: true,
+                },
+            ];
+            let column = DetailColumn {
+                breadcrumb: &crumbs,
+                header: Some(&header),
+                tracks: &tracks,
+                ..DetailColumn::empty("", "")
+            };
+            detail::show_detail_column(ui, &mut cache, &palette, column, &mut Vec::new());
+        });
+    }
+
+    /// The elastic stage's All Tracks composition: the flat Tracks listing
+    /// beside the collapsible inspector (the selection panel's Play / Add to
+    /// Queue variant) — one selected and one now-playing (idle) track row,
+    /// the inspector at [`riff_gui::ui::theme::INSPECTOR_WIDTH`].
+    #[test]
+    fn elastic_all_tracks_inspector_dark_matches_golden_baseline() {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 640.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(draw_elastic_all_tracks_inspector);
+        theme::install(&harness.ctx, &Palette::dark());
+        harness.ctx.set_fonts(inter_only_font_definitions());
+        harness.run();
+        harness.snapshot("elastic_all_tracks_inspector_dark");
+    }
+
+    fn draw_elastic_all_tracks_inspector(ui: &mut egui::Ui) {
+        use riff_gui::ui::browser::{self, BrowserColumn, BrowserItem};
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::selection::{self, SelectionDetail, SelectionPanel};
+        use riff_gui::ui::theme::{Palette, SURFACE_BG};
+
+        // Full-canvas background (determinism rule).
+        let background = ui.ctx().layer_painter(egui::LayerId::background());
+        background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let widths = stage_column_widths(ui, 1, true);
+
+        horizontal_stage(
+            ui,
+            &widths,
+            Some(riff_gui::ui::theme::INSPECTOR_WIDTH),
+            640.0,
+            |ui, column| {
+                // Column 1 — the flat Tracks listing: track rows keyed by
+                // `TrackId`, one selected and one now-playing (idle).
+                if column == 0 {
+                    let rows = [
+                        ("Daft Punk - One More Time", false, false),
+                        ("Radiohead - Weird Fishes", false, true), // now-playing, idle
+                        ("Miles Davis - So What", true, false),    // selected
+                        ("Portishead - Roads", false, false),
+                        ("Burial - Archangel", false, false),
+                        ("Nils Frahm - Says", false, false),
+                        ("Aphex Twin - Xtal", false, false),
+                        ("Brian Eno - An Ending", false, false),
+                        ("Massive Attack - Teardrop", false, false),
+                        ("Tycho - Awake", false, false),
+                        ("Jon Hopkins - Open Eye Signal", false, false),
+                        ("Four Tet - She Moves She", false, false),
+                    ];
+                    let keys = [
+                        "a.flac", "b.flac", "c.flac", "d.flac", "e.flac", "f.flac", "g.flac",
+                        "h.flac", "i.flac", "j.flac", "k.flac", "l.flac",
+                    ];
+                    let items: Vec<BrowserItem> = rows
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, (label, selected, now_playing))| BrowserItem {
+                            key: keys[i].to_string(),
+                            label: label.to_string(),
+                            detail: None,
+                            thumbnail: None,
+                            selected,
+                            now_playing,
+                        })
+                        .collect();
+                    let mut provider = |i: usize| items.get(i).cloned();
+                    let column = BrowserColumn {
+                        layout: riff_backend::app::state::BrowserLayout::List,
+                        sort_desc: false,
+                        show_sort: false,
+                        genres: &[],
+                        genre_filter: None,
+                        total: items.len(),
+                        item: &mut provider,
+                        empty_title: "",
+                        empty_hint: "",
+                    };
+                    browser::show_browser_column(ui, &mut cache, &palette, column, &mut Vec::new());
+                    return;
+                }
+                // Column 2 — the inspector: the selection panel's Play / Add
+                // to Queue variant inside the same 16px inset the app's
+                // `render_inspector` gives it, no art (no texture load).
+                let details = [
+                    SelectionDetail {
+                        label: "Artist".to_string(),
+                        value: "Boards of Canada".to_string(),
+                    },
+                    SelectionDetail {
+                        label: "Released".to_string(),
+                        value: "2013".to_string(),
+                    },
+                    SelectionDetail {
+                        label: "Tracks".to_string(),
+                        value: "8 \u{b7} 27:16".to_string(),
+                    },
+                ];
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::same(16))
+                    .show(ui, |ui| {
+                        let panel = SelectionPanel {
+                            art: None,
+                            title: Some("Tomorrow's Harvest"),
+                            subtitle: Some("Boards of Canada \u{b7} 2013"),
+                            details: &details,
+                            queue: true,
+                        };
+                        selection::show_selection_panel(
+                            ui,
+                            &mut cache,
+                            &palette,
+                            panel,
+                            &mut Vec::new(),
+                        );
+                    });
+            },
+        );
     }
 
     // --- Grid toggle state (design-handoff issue 15) -----------------------------
@@ -1098,6 +1687,235 @@ mod tests {
     // The top bar with the grid layout engaged: the grid toggle carries the
     // brand tint and the wordmark/search field stay put. Complements
     // `top_bar_dark`, which pins the list state.
+
+    // TEMP DEBUG: bisect the red-text corruption.
+    #[test]
+    fn debug_red_check() {
+        use riff_backend::domain::GenreCount;
+        use riff_gui::ui::browser::{self, BrowserColumn, BrowserItem};
+        use riff_gui::ui::icons::IconCache;
+
+        fn red_count(image: &image::RgbaImage) -> usize {
+            image
+                .pixels()
+                .filter(|p| p.0[0] > 200 && p.0[1] < 110 && p.0[2] < 110)
+                .count()
+        }
+
+        fn base_rows() -> Vec<BrowserItem> {
+            [
+                ("Boards of Canada", "12 albums", false, false),
+                ("Daft Punk", "9 albums", true, false),
+                ("Miles Davis", "31 albums", false, false),
+                ("Portishead", "5 albums", false, true),
+            ]
+            .into_iter()
+            .map(|(label, detail, selected, now_playing)| BrowserItem {
+                key: label.to_string(),
+                label: label.to_string(),
+                detail: Some(detail.to_string()),
+                thumbnail: None,
+                selected,
+                now_playing,
+            })
+            .collect()
+        }
+
+        fn genres() -> Vec<GenreCount> {
+            vec![
+                GenreCount {
+                    genre: "Electronic".to_string(),
+                    tracks: 42,
+                },
+                GenreCount {
+                    genre: "Jazz".to_string(),
+                    tracks: 31,
+                },
+            ]
+        }
+
+        fn run_variant<F: FnMut(&mut egui::Ui)>(size: egui::Vec2, mut draw: F) -> usize {
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(size)
+                .with_pixels_per_point(1.0)
+                .build_ui(move |ui| draw(ui));
+            theme::install(&harness.ctx, &Palette::dark());
+            harness.ctx.set_fonts(inter_only_font_definitions());
+            harness.run();
+            let frame = harness.render().unwrap();
+            red_count(&frame)
+        }
+
+        // A: root ui, full width, one browser column with chips.
+        let a = run_variant(egui::vec2(1180.0, 420.0), |ui| {
+            let background = ui.ctx().layer_painter(egui::LayerId::background());
+            background.rect_filled(ui.ctx().content_rect(), 0.0, theme::SURFACE_BG);
+            let palette = Palette::dark();
+            let mut cache = IconCache::new();
+            let items = base_rows();
+            let genres = genres();
+            let mut provider = |i: usize| items.get(i).cloned();
+            let column = BrowserColumn {
+                layout: riff_backend::app::state::BrowserLayout::List,
+                sort_desc: false,
+                show_sort: true,
+                genres: &genres,
+                genre_filter: Some("Electronic"),
+                total: items.len(),
+                item: &mut provider,
+                empty_title: "",
+                empty_hint: "",
+            };
+            browser::show_browser_column(ui, &mut cache, &palette, column, &mut Vec::new());
+        });
+        eprintln!("A (root ui, full width, 1 column): red={a}");
+
+        // B: same column inside a 280-wide child ui.
+        let b = run_variant(egui::vec2(1180.0, 420.0), |ui| {
+            let background = ui.ctx().layer_painter(egui::LayerId::background());
+            background.rect_filled(ui.ctx().content_rect(), 0.0, theme::SURFACE_BG);
+            let palette = Palette::dark();
+            let mut cache = IconCache::new();
+            ui.allocate_ui_with_layout(
+                egui::vec2(280.0, ui.available_height()),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    let items = base_rows();
+                    let genres = genres();
+                    let mut provider = |i: usize| items.get(i).cloned();
+                    let column = BrowserColumn {
+                        layout: riff_backend::app::state::BrowserLayout::List,
+                        sort_desc: false,
+                        show_sort: true,
+                        genres: &genres,
+                        genre_filter: Some("Electronic"),
+                        total: items.len(),
+                        item: &mut provider,
+                        empty_title: "",
+                        empty_hint: "",
+                    };
+                    browser::show_browser_column(ui, &mut cache, &palette, column, &mut Vec::new());
+                },
+            );
+        });
+        eprintln!("B (280 child ui, 1 column): red={b}");
+
+        // C: 280-wide root-ui harness (like browser_column_dark) as control.
+        let c = run_variant(egui::vec2(280.0, 420.0), |ui| {
+            let background = ui.ctx().layer_painter(egui::LayerId::background());
+            background.rect_filled(ui.ctx().content_rect(), 0.0, theme::SURFACE_BG);
+            let palette = Palette::dark();
+            let mut cache = IconCache::new();
+            let items = base_rows();
+            let genres = genres();
+            let mut provider = |i: usize| items.get(i).cloned();
+            let column = BrowserColumn {
+                layout: riff_backend::app::state::BrowserLayout::List,
+                sort_desc: false,
+                show_sort: true,
+                genres: &genres,
+                genre_filter: Some("Electronic"),
+                total: items.len(),
+                item: &mut provider,
+                empty_title: "",
+                empty_hint: "",
+            };
+            browser::show_browser_column(ui, &mut cache, &palette, column, &mut Vec::new());
+        });
+        eprintln!("C (280 root ui control): red={c}");
+
+        // D: two browser columns side by side (horizontal stage), no detail column.
+        let d = run_variant(egui::vec2(1180.0, 420.0), |ui| {
+            use riff_gui::ui::app::column_widths;
+            let background = ui.ctx().layer_painter(egui::LayerId::background());
+            background.rect_filled(ui.ctx().content_rect(), 0.0, theme::SURFACE_BG);
+            let palette = Palette::dark();
+            let mut cache = IconCache::new();
+            let gaps = 1;
+            let separator_w = ui
+                .style()
+                .separator_style(&Default::default(), Default::default())
+                .spacing;
+            let widths = column_widths(
+                (ui.available_width() - separator_w * gaps as f32).max(0.0),
+                2,
+                false,
+            );
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for (i, width) in widths.iter().copied().enumerate() {
+                    if i > 0 {
+                        ui.separator();
+                    }
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(width, ui.available_height()),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            let items = base_rows();
+                            let genres = genres();
+                            let mut provider = |i: usize| items.get(i).cloned();
+                            let column = BrowserColumn {
+                                layout: riff_backend::app::state::BrowserLayout::List,
+                                sort_desc: false,
+                                show_sort: i == 0,
+                                genres: if i == 0 { &genres } else { &[] },
+                                genre_filter: if i == 0 { Some("Electronic") } else { None },
+                                total: items.len(),
+                                item: &mut provider,
+                                empty_title: "",
+                                empty_hint: "",
+                            };
+                            browser::show_browser_column(
+                                ui,
+                                &mut cache,
+                                &palette,
+                                column,
+                                &mut Vec::new(),
+                            );
+                        },
+                    );
+                }
+            });
+        });
+        eprintln!("D (2 browser columns): red={d}");
+
+        // E: the full three-column artists composition.
+        let e = run_variant(egui::vec2(1180.0, 420.0), draw_elastic_artists_drilled);
+        eprintln!("E (full 3-col artists composition): red={e}");
+
+        // F: one browser column with 12 rows (text volume).
+        let f = run_variant(egui::vec2(1180.0, 420.0), |ui| {
+            let background = ui.ctx().layer_painter(egui::LayerId::background());
+            background.rect_filled(ui.ctx().content_rect(), 0.0, theme::SURFACE_BG);
+            let palette = Palette::dark();
+            let mut cache = IconCache::new();
+            let items: Vec<BrowserItem> = (0..12)
+                .map(|i| BrowserItem {
+                    key: format!("artist-{i}"),
+                    label: format!("Artist Number {i}"),
+                    detail: Some(format!("{i} albums")),
+                    thumbnail: None,
+                    selected: i == 1,
+                    now_playing: i == 2,
+                })
+                .collect();
+            let genres = genres();
+            let mut provider = |i: usize| items.get(i).cloned();
+            let column = BrowserColumn {
+                layout: riff_backend::app::state::BrowserLayout::List,
+                sort_desc: false,
+                show_sort: true,
+                genres: &genres,
+                genre_filter: Some("Electronic"),
+                total: items.len(),
+                item: &mut provider,
+                empty_title: "",
+                empty_hint: "",
+            };
+            browser::show_browser_column(ui, &mut cache, &palette, column, &mut Vec::new());
+        });
+        eprintln!("F (1 column, 12 rows): red={f}");
+    }
 
     #[test]
     fn top_bar_grid_dark_matches_golden_baseline() {

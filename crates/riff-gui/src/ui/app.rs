@@ -428,100 +428,20 @@ impl RiffApp {
 
     /// Render the "Edit Tags" modal while `self.tag_edit` is open. Writing
     /// only happens on an explicit Save click; Cancel (or the window close
-    /// button) discards the edits.
+    /// button) discards the edits. The composition itself is the pure widget
+    /// seam in [`crate::ui::prompts`], so the golden harness renders the same
+    /// pixels the app does.
     fn show_tag_edit_modal(&mut self, ctx: &egui::Context) {
-        // Read the active palette's error token before the modal state takes
-        // its mutable borrow (Issue 03: no hardcoded colors in view code).
-        let error_color = self.theme.active.error;
+        // Read the active palette before the modal state takes its mutable
+        // borrow (Issue 03: no hardcoded colors in view code).
+        let palette = self.theme.active;
         let Some(tag_edit) = self.tag_edit.as_mut() else {
             return;
         };
-
-        let mut open = true;
-        let mut save_clicked = false;
-        let mut cancel_clicked = false;
-        // Escape closes the modal (REQ-UI-007 keyboard navigation), matching
-        // the window close button and Cancel.
-        let escape_pressed = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-
-        egui::Window::new("Edit Tags")
-            .id(egui::Id::new("tag_edit_modal"))
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .open(&mut open)
-            .show(ctx, |ui| {
-                ui.label(egui::RichText::new(tag_edit.path.to_string_lossy()).weak());
-                ui.separator();
-                egui::Grid::new("tag_edit_grid")
-                    .num_columns(2)
-                    .spacing([8.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label("Title");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut tag_edit.title).desired_width(280.0),
-                        );
-                        ui.end_row();
-                        ui.label("Artist");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut tag_edit.artist).desired_width(280.0),
-                        );
-                        ui.end_row();
-                        ui.label("Album");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut tag_edit.album).desired_width(280.0),
-                        );
-                        ui.end_row();
-                        ui.label("Album Artist");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut tag_edit.album_artist)
-                                .desired_width(280.0),
-                        );
-                        ui.end_row();
-                        ui.label("Genre");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut tag_edit.genre).desired_width(280.0),
-                        );
-                        ui.end_row();
-                        ui.label("Year");
-                        ui.add(egui::TextEdit::singleline(&mut tag_edit.year).desired_width(80.0));
-                        ui.end_row();
-                        ui.label("Track Number");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut tag_edit.track_number)
-                                .desired_width(80.0),
-                        );
-                        ui.end_row();
-                    });
-
-                if let Some(ref error) = tag_edit.error {
-                    ui.colored_label(error_color, error);
-                }
-
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!tag_edit.saving, egui::Button::new("Save"))
-                        .clicked()
-                    {
-                        save_clicked = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        cancel_clicked = true;
-                    }
-                    if tag_edit.saving {
-                        ui.spinner();
-                    }
-                });
-            });
-
-        if !open || cancel_clicked || escape_pressed {
-            self.tag_edit = None;
-            return;
-        }
-
-        if save_clicked {
-            self.submit_tag_edit();
+        match crate::ui::prompts::tag_edit_modal(ctx, &palette, tag_edit) {
+            None => {}
+            Some(crate::ui::prompts::PromptOutcome::Cancel) => self.tag_edit = None,
+            Some(crate::ui::prompts::PromptOutcome::Confirm) => self.submit_tag_edit(),
         }
     }
 
@@ -2589,22 +2509,14 @@ impl RiffApp {
 
     /// The inline "New Playlist" name prompt while it is open.
     fn render_playlist_create_prompt(&mut self, ui: &mut egui::Ui) {
-        if self.playlist_create_name.is_none() {
+        let Some(draft) = self.playlist_create_name.as_mut() else {
             return;
-        }
-        let mut confirm = false;
-        let mut cancel = false;
-        ui.horizontal(|ui| {
-            if let Some(draft) = self.playlist_create_name.as_mut() {
-                ui.text_edit_singleline(draft);
-                if ui.button("Create").clicked() {
-                    confirm = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
-                }
-            }
-        });
+        };
+        // The pure widget seam (golden-image gap audit P1-7) reports the
+        // outcome; the store flow below is unchanged.
+        let outcome = crate::ui::prompts::playlist_create_prompt(ui, draft);
+        let confirm = outcome == Some(crate::ui::prompts::PromptOutcome::Confirm);
+        let cancel = outcome == Some(crate::ui::prompts::PromptOutcome::Cancel);
         if confirm {
             let name = self.playlist_create_name.take().unwrap_or_default();
             let name = name.trim().to_string();
@@ -2633,19 +2545,14 @@ impl RiffApp {
         if !renaming {
             return;
         }
-        let mut confirm = false;
-        let mut cancel = false;
-        ui.horizontal(|ui| {
-            if let Some((_, draft)) = self.playlist_rename.as_mut() {
-                ui.text_edit_singleline(draft);
-                if ui.button("Save").clicked() {
-                    confirm = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
-                }
-            }
-        });
+        let Some((_, draft)) = self.playlist_rename.as_mut() else {
+            return;
+        };
+        // The pure widget seam (golden-image gap audit P1-7), same shape as
+        // the create prompt.
+        let outcome = crate::ui::prompts::playlist_rename_prompt(ui, draft);
+        let confirm = outcome == Some(crate::ui::prompts::PromptOutcome::Confirm);
+        let cancel = outcome == Some(crate::ui::prompts::PromptOutcome::Cancel);
         if confirm {
             if let Some((rid, draft)) = self.playlist_rename.take() {
                 // Same Store flow as before the restyle: trim, rename as one

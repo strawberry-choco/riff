@@ -2083,13 +2083,12 @@ impl super::app::RiffApp {
     /// The inline confirmation for the destructive Clear Library action,
     /// rendered beneath the stage until confirmed or cancelled.
     fn render_clear_library_confirm(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
-        ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new("Remove every indexed track? Playlists and settings are kept.")
-                .color(ui.visuals().warn_fg_color),
-        );
-        ui.horizontal(|ui| {
-            if ui.button("Confirm").clicked() {
+        // The composition is the pure widget seam in [`crate::ui::prompts`]
+        // (golden-image gap audit P1-7): the same pixels the golden pins.
+        let palette = self.theme.active;
+        let outcome = crate::ui::prompts::clear_library_confirm(ui, &palette);
+        match outcome {
+            Some(crate::ui::prompts::PromptOutcome::Confirm) => {
                 self.clear_library_confirm = false;
                 match self.library_mutations.clear_library() {
                     Ok(removed) => {
@@ -2107,9 +2106,10 @@ impl super::app::RiffApp {
                     }
                 }
             }
-            if ui.button("Cancel").clicked() {
+            Some(crate::ui::prompts::PromptOutcome::Cancel) => {
                 self.clear_library_confirm = false;
             }
-        });
+            None => {}
+        }
     }
 }

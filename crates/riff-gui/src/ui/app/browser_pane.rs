@@ -94,9 +94,10 @@ impl RiffApp {
             Some(_) => vec![ColumnKind::Single],
         };
 
-        // The inspector follows the live selection (the deepest path entity,
-        // or the selected track on single-list stages) and collapses away
-        // completely when nothing is selected.
+        // The inspector follows the live selection: the selected track when
+        // a track row was single-clicked (in any track listing), otherwise
+        // the deepest path entity — and collapses away completely when
+        // nothing is selected.
         let inspector = resolve_inspector(&mut self.views, library);
 
         let available = ui.available_width();
@@ -248,7 +249,7 @@ impl RiffApp {
             let album = albums.get(i)?;
             // The album's cover, requested through its first track — the
             // same flow the root columns use; a full miss resolves the
-            // generated colour block (issue 14).
+            // music-icon placeholder tile.
             let thumbnail = album.tracks.first().map(|tid| {
                 request_cover_intent(
                     textures.contains_key(&tid.0),
@@ -257,11 +258,7 @@ impl RiffApp {
                     PathBuf::from(&tid.0),
                 );
                 crate::ui::cover_placeholder::lookup_cover_texture(
-                    textures,
-                    lru_keys,
-                    &ctx,
-                    palette.dark,
-                    &tid.0,
+                    textures, lru_keys, &ctx, &palette, &tid.0,
                 )
             });
             let detail = album.year.map_or_else(
@@ -342,11 +339,7 @@ impl RiffApp {
                         PathBuf::from(&tid.0),
                     );
                     crate::ui::cover_placeholder::lookup_cover_texture(
-                        textures,
-                        lru_keys,
-                        &ctx,
-                        palette.dark,
-                        &tid.0,
+                        textures, lru_keys, &ctx, &palette, &tid.0,
                     )
                 });
             let selected = matches!(
@@ -493,11 +486,7 @@ impl RiffApp {
                         PathBuf::from(&tid.0),
                     );
                     crate::ui::cover_placeholder::lookup_cover_texture(
-                        textures,
-                        lru_keys,
-                        &ctx,
-                        palette.dark,
-                        &tid.0,
+                        textures, lru_keys, &ctx, &palette, &tid.0,
                     )
                 });
             Some(browser::BrowserItem {
@@ -592,7 +581,7 @@ impl RiffApp {
             let album = albums.get(slot)?;
             // The album's cover, requested through its first track — the
             // same flow the artist rows and track listings use; a full miss
-            // resolves the generated colour block (issue 14).
+            // resolves the music-icon placeholder tile.
             let thumbnail = album
                 .tracks
                 .first()
@@ -604,11 +593,7 @@ impl RiffApp {
                         PathBuf::from(&tid.0),
                     );
                     crate::ui::cover_placeholder::lookup_cover_texture(
-                        textures,
-                        lru_keys,
-                        &ctx,
-                        palette.dark,
-                        &tid.0,
+                        textures, lru_keys, &ctx, &palette, &tid.0,
                     )
                     .into()
                 })
@@ -739,12 +724,12 @@ impl RiffApp {
                 track.id.clone(),
                 track.file_path.clone(),
             );
-            // A full miss resolves the generated colour block (issue 14).
+            // A full miss resolves the music-icon placeholder tile.
             let thumbnail = Some(crate::ui::cover_placeholder::lookup_cover_texture(
                 textures,
                 lru_keys,
                 &ctx,
-                palette.dark,
+                &palette,
                 &track.id.0,
             ));
             Some(browser::BrowserItem {

@@ -92,13 +92,13 @@ impl Preferences {
 
             session.ui_flags.advanced_mode = settings.scalars.advanced_mode;
             session.ui_flags.high_contrast = settings.scalars.high_contrast;
+            session.ui_flags.smart_lists_collapsed = settings.scalars.smart_lists_collapsed;
             session.browser_layout =
                 BrowserLayout::from_store_code(settings.scalars.browser_layout);
             session.scan_prefs = ScanPrefs {
                 skip_hidden_files: settings.scalars.skip_hidden_files,
                 scan_formats: settings.scalars.scan_formats.clone(),
                 read_embedded_artwork: settings.scalars.read_embedded_artwork,
-                missing_artwork_strategy: settings.scalars.missing_artwork_strategy,
             };
         }
 
@@ -141,6 +141,7 @@ fn scalar_settings(playback: &PlaybackSession, library: &LibrarySession) -> Scal
         volume: Some(playback.current_volume),
         advanced_mode: library.ui_flags.advanced_mode,
         high_contrast: library.ui_flags.high_contrast,
+        smart_lists_collapsed: library.ui_flags.smart_lists_collapsed,
         replaygain_enabled: playback.replaygain_enabled,
         shuffle: playback.queue.shuffle,
         repeat_mode: repeat_mode_to_store_code(playback.queue.repeat),
@@ -148,7 +149,6 @@ fn scalar_settings(playback: &PlaybackSession, library: &LibrarySession) -> Scal
         skip_hidden_files: library.scan_prefs.skip_hidden_files,
         scan_formats: library.scan_prefs.scan_formats.clone(),
         read_embedded_artwork: library.scan_prefs.read_embedded_artwork,
-        missing_artwork_strategy: library.scan_prefs.missing_artwork_strategy,
     }
 }
 

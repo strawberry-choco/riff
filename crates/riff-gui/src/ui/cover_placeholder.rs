@@ -1,79 +1,93 @@
-//! The generated-colour cover placeholder (design-handoff issue 14).
+//! The music-icon cover placeholder.
 //!
-//! Tracks and albums without embedded artwork render a solid colour block
-//! derived from their own identity instead of a fallback glyph, so covers
-//! read as part of the design's palette. The derivation is a pure function
-//! of the identity string and the palette family — same item, same colour,
-//! every time — and the hue is mapped onto a muted band per family so the
-//! block never clashes with the active tokens (no white flash on dark, no
-//! black hole on light).
+//! Tracks and albums whose artwork cannot be resolved — no embedded image,
+//! no filesystem cover — render a neutral tile: the surface well with a
+//! music glyph, the same "just a music icon" placeholder the now-playing
+//! cover paints behind its art. Every artless item shares ONE tile under a
+//! single cache key (the removed generated-colour block was the only
+//! per-identity input, so nothing varies by item anymore), and it derives
+//! from the active palette — `surface_2` for the well, `ink_3` for the
+//! glyph — so a palette-family flip re-renders it like any themed surface.
+//!
+//! The tile materializes as a real texture inside the UI's existing cover
+//! texture map + LRU (the same bounded cache real covers ride), so every
+//! render site keeps its `Option<TextureHandle>` seam and the tile renders
+//! through the same texture path as real art — including headless snapshots.
 
 use eframe::egui;
 
 use crate::ui::app::{COVER_CACHE_CAP, lru_insert};
+use crate::ui::icons;
+use crate::ui::theme::{self, Palette};
 
-// The colour derivation itself lives in `theme` — the sanctioned home of
-// colour construction (the no-hardcoded-colors scan exempts it) — and is
-// re-exported here so the placeholder seam stays one import away.
-pub use crate::ui::theme::generated_colour;
-
-// --- Cache-through generation -------------------------------------------------
-//
-// The block materializes as a real texture inside the UI's existing cover
-// texture map + LRU (the same bounded cache real covers ride), so every
-// render site keeps its `Option<TextureHandle>` seam and the block renders
-// through the same texture path as real art — including headless snapshots.
-
-/// Cache-key prefix marking a generated block. The reserved prefix keeps
-/// generated entries out of the real-cover lookups: the request flow (which
+/// Cache key under which the shared placeholder tile is stored. The `gen`
+/// prefix keeps it out of the real-cover lookups: the request flow (which
 /// checks the plain `TrackId` key) keeps treating the track as artless, so
-/// real art still resolves, lands under the plain key, and wins.
-pub const GENERATED_KEY_PREFIX: &str = "gen\u{1f}";
+/// real art still resolves, lands under the plain key, and wins over the
+/// tile.
+pub const PLACEHOLDER_KEY: &str = "gen\u{1f}music-icon";
 
-/// The cache key under which one identity's generated block is stored.
+/// Render resolution of the tile in pixels. Every render site stretches
+/// the square to its own cover size — 40px browser thumbnails up to the
+/// 240px now-playing cover — so the tile is rasterized generously and
+/// only ever downscaled to stay crisp.
+const TILE_PX: usize = 256;
+
+/// Build the placeholder image for `palette`: the `surface_2` well with
+/// the music glyph tinted `ink_3`, centered at half the tile.
 #[must_use]
-pub fn generated_key(identity: &str) -> String {
-    format!("{GENERATED_KEY_PREFIX}{identity}")
+pub fn placeholder_image(palette: &Palette) -> egui::ColorImage {
+    let well = palette.surface_2;
+    let mut rgba = Vec::with_capacity(TILE_PX * TILE_PX * 4);
+    for _ in 0..TILE_PX * TILE_PX {
+        rgba.extend_from_slice(&[well.r(), well.g(), well.b(), u8::MAX]);
+    }
+    let mut image = egui::ColorImage::from_rgba_unmultiplied([TILE_PX, TILE_PX], &rgba);
+
+    let Some(glyph) = icons::rasterize(icons::Icon::Music.svg(), TILE_PX / 2, palette.ink_3) else {
+        return image;
+    };
+    let inset = (TILE_PX - glyph.size[0]) / 2;
+    for (i, px) in glyph.pixels.iter().enumerate() {
+        if px.a() == 0 {
+            continue;
+        }
+        let x = i % glyph.size[0] + inset;
+        let y = i / glyph.size[0] + inset;
+        image.pixels[y * TILE_PX + x] = theme::blend_over(image.pixels[y * TILE_PX + x], *px);
+    }
+    image
 }
 
-/// The generated block as a 1×1 image: a solid colour needs no resolution —
-/// every render site stretches it over its allotted square.
-#[must_use]
-pub fn generated_image(seed: &str, dark: bool) -> egui::ColorImage {
-    let colour = generated_colour(seed, dark);
-    egui::ColorImage::from_rgba_unmultiplied([1, 1], &[colour.r(), colour.g(), colour.b(), u8::MAX])
-}
-
-/// Resolve one identity's cover texture through the shared cache: the real
-/// cover under the plain key when one is cached, otherwise the identity's
-/// generated block (created once on a full miss, then cached), evicting
-/// through the same LRU cap real covers obey. `dark` selects the palette
-/// family the block is derived for. The return is handed to the render
+/// Resolve one item's cover texture through the shared cache: the real
+/// cover under the plain key when one is cached, otherwise the shared
+/// placeholder tile (created once on a full miss, then cached), evicting
+/// through the same LRU cap real covers obey. `palette` supplies the
+/// tile's well and glyph colours. The return is handed to the render
 /// sites' `Option<TextureHandle>` seams, which keep their pre-texture
 /// fallbacks for the not-yet-rendered window.
 pub fn lookup_cover_texture<S: std::hash::BuildHasher>(
     textures: &mut std::collections::HashMap<String, egui::TextureHandle, S>,
     lru_keys: &mut Vec<String>,
     ctx: &egui::Context,
-    dark: bool,
+    palette: &Palette,
     identity: &str,
 ) -> egui::TextureHandle {
-    // Real art first — it always wins over the generated block.
+    // Real art first — it always wins over the placeholder tile.
     if let Some(texture) = touch(textures, lru_keys, identity) {
         return texture;
     }
-    let key = generated_key(identity);
-    if let Some(texture) = touch(textures, lru_keys, &key) {
+    if let Some(texture) = touch(textures, lru_keys, PLACEHOLDER_KEY) {
         return texture;
     }
 
     let texture = ctx.load_texture(
-        format!("generated cover {identity}"),
-        generated_image(identity, dark),
+        "riff cover placeholder",
+        placeholder_image(palette),
         egui::TextureOptions::default(),
     );
-    textures.insert(key.clone(), texture.clone());
-    for old in lru_insert(lru_keys, key, COVER_CACHE_CAP) {
+    textures.insert(PLACEHOLDER_KEY.to_string(), texture.clone());
+    for old in lru_insert(lru_keys, PLACEHOLDER_KEY.to_string(), COVER_CACHE_CAP) {
         textures.remove(&old);
     }
     texture
@@ -91,14 +105,13 @@ fn touch<S: std::hash::BuildHasher>(
     Some(texture.clone())
 }
 
-/// Drop every generated block from the shared cache, keeping real covers.
-/// Called when the blocks' derivation inputs move: a palette-family switch
-/// (re-derive under the new tokens) and the "Read embedded artwork" toggle
-/// (let affected tracks re-resolve so real art can surface).
+/// Drop the placeholder tile from the shared cache, keeping real covers.
+/// Called when the tile's derivation inputs move — a palette-family flip
+/// re-renders it under the active tokens.
 pub fn evict_generated<S: std::hash::BuildHasher>(
     textures: &mut std::collections::HashMap<String, egui::TextureHandle, S>,
     lru_keys: &mut Vec<String>,
 ) {
-    lru_keys.retain(|k| !k.starts_with(GENERATED_KEY_PREFIX));
-    textures.retain(|k, _| !k.starts_with(GENERATED_KEY_PREFIX));
+    lru_keys.retain(|k| k != PLACEHOLDER_KEY);
+    textures.remove(PLACEHOLDER_KEY);
 }

@@ -187,6 +187,26 @@ mod tests {
     }
 
     #[test]
+    fn test_select_at_clears_the_selected_track() {
+        use riff_backend::app::state::BrowserSelection;
+
+        // A track row was single-clicked; the detail panel shows its readout.
+        let mut state = LibrarySession {
+            selected_track: Some(TrackId("song.flac".to_string())),
+            ..LibrarySession::default()
+        };
+
+        // Selecting an entity row deselects the track: the two selections are
+        // mutually exclusive, so the detail panel follows whichever the user
+        // clicked last.
+        state.select_at(0, BrowserSelection::Genre("Electronic".to_string()));
+        assert!(
+            state.selected_track.is_none(),
+            "an entity selection clears the selected track"
+        );
+    }
+
+    #[test]
     fn test_app_state_muted_defaults_to_false() {
         // Mute (REQ-UI-003-08): the app starts unmuted.
         let state = PlaybackSession::default();

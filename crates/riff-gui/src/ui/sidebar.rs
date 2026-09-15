@@ -24,6 +24,11 @@ use super::theme::{self, Palette};
 /// Tree-row height (`h-10`): every sidebar row is exactly 40px tall.
 pub const ROW_H: f32 = 40.0;
 
+/// Track-row cover thumbnail on library track rows: a square cover-art tile
+/// sized `ROW_H - 8` (32×32), so width and height always match and the tile
+/// never exceeds the 40px row it sits in.
+pub const ROW_COVER: f32 = ROW_H - 8.0;
+
 /// Search-box height (`h-8`).
 pub const SEARCH_H: f32 = 32.0;
 
@@ -164,6 +169,11 @@ pub struct TreeRow<'a> {
     pub indent_level: usize,
     /// Optional leading Lucide glyph (e.g. sparkles for smart playlists).
     pub icon: Option<Icon>,
+    /// Optional leading cover-art thumbnail (library track rows). `None`
+    /// paints none; track rows pass the row's cover texture — real art when
+    /// cached, otherwise the shared music-icon placeholder tile — so every
+    /// track row reads with a uniform leading square.
+    pub cover: Option<egui::TextureId>,
     /// Row text.
     pub label: &'a str,
     /// Live count shown right-aligned in muted ink (the design's count on
@@ -220,6 +230,23 @@ pub fn tree_row(
             palette.ink_3,
         );
         x += 12.0 + 4.0;
+    }
+
+    if let Some(cover_id) = row.cover {
+        // A square cover-art tile on the row's leading edge, centered in
+        // the row and sized so it never exceeds the row height.
+        let cover_rect = egui::Rect::from_min_size(
+            egui::pos2(x + 4.0, rect.center().y - ROW_COVER / 2.0),
+            egui::vec2(ROW_COVER, ROW_COVER),
+        );
+        painter.image(cover_id, cover_rect, UV_FULL, theme::TEXTURE_TINT);
+        painter.rect_stroke(
+            cover_rect,
+            theme::RADIUS_SM,
+            egui::Stroke::new(1.0, palette.border),
+            egui::StrokeKind::Inside,
+        );
+        x += 4.0 + ROW_COVER + ICON_GAP;
     }
 
     if let Some(icon) = row.icon {
@@ -422,6 +449,7 @@ pub fn sidebar_footer(
         TreeRow {
             indent_level: 0,
             icon: Some(Icon::Folder),
+            cover: None,
             label: "Add folder",
             count: None,
             selected: false,

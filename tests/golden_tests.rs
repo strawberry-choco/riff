@@ -138,6 +138,7 @@ mod tests {
                     TreeRow {
                         indent_level: 0,
                         icon: None,
+                        cover: None,
                         label: "All Tracks",
                         count: None,
                         selected: false,
@@ -168,22 +169,22 @@ mod tests {
         );
     }
 
-    // --- Generated cover block renders headlessly (handoff issue 14) ---------------
+    // --- The placeholder tile renders headlessly --------------------------------
 
-    /// The generated colour block is a *user-loaded* texture (built through
+    /// The placeholder tile is a *user-loaded* texture (built through
     /// `ctx.load_texture` inside the frame), the exact category the pinned
     /// egui 0.35 must keep rendering in headless snapshots (the 0.36
     /// regression in the workspace notes). Behavior test, not a golden:
-    /// resolve the block for one identity through the shared-cache seam and
-    /// look for its derived colour among the playerbar's output pixels —
-    /// the color the user actually sees on the 56×56 cover square. Tolerance
-    /// ±2 per channel absorbs driver-level dithering on flat fills.
+    /// resolve the tile for one identity through the shared-cache seam, paint
+    /// it full-frame through the same `painter.image` path the playerbar and
+    /// now-playing cover use, and look for the tile's compose colours — the
+    /// `surface_2` well and the `ink_3` music glyph — among the output
+    /// pixels. Tolerance ±2 per channel absorbs driver-level dithering on
+    /// flat fills.
     #[test]
-    fn generated_cover_block_renders_in_a_headless_snapshot() {
-        use riff_gui::ui::cover_placeholder::{generated_colour, lookup_cover_texture};
-        use riff_gui::ui::icons::IconCache;
-        use riff_gui::ui::playerbar::{self, PlayerBarContent};
-        use riff_gui::ui::theme::{Palette, SURFACE_BG};
+    fn placeholder_tile_renders_in_a_headless_snapshot() {
+        use riff_gui::ui::cover_placeholder::lookup_cover_texture;
+        use riff_gui::ui::theme::{Palette, SURFACE_BG, TEXTURE_TINT};
 
         const IDENTITY: &str = "f:\\music\\artless golden.mp3";
 
@@ -199,52 +200,41 @@ mod tests {
         }
 
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
+            .with_size(egui::vec2(400.0, 400.0))
             .with_pixels_per_point(1.0)
             .build_ui(|ui| {
                 let background = ui.ctx().layer_painter(egui::LayerId::background());
                 background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
 
                 // A full miss on the shared cover cache resolves the
-                // identity's generated block, exactly as the app's views do.
+                // placeholder tile, exactly as the app's views do.
                 let mut textures = std::collections::HashMap::new();
                 let mut lru_keys = Vec::new();
-                let block =
-                    lookup_cover_texture(&mut textures, &mut lru_keys, ui.ctx(), true, IDENTITY);
-                let palette = Palette::dark();
-                let content = PlayerBarContent {
-                    cover: Some(block),
-                    playback: riff_backend::domain::PlaybackState::Playing,
-                    position: std::time::Duration::from_mins(2),
-                    total: Some(std::time::Duration::from_secs(245)),
-                    volume: 0.65,
-                    muted: false,
-                    shuffle: true,
-                    repeat: riff_backend::domain::RepeatMode::None,
-                    queue_position: "3/12",
-                    queue_open: false,
-                    expanded: false,
-                    advanced: false,
-                };
-                let mut cache = IconCache::new();
-                playerbar::show_player_bar(
-                    ui,
-                    &mut cache,
-                    &palette,
-                    &content,
-                    &mut riff_gui::ui::playerbar::SeekReadouts::default(),
-                    &mut Vec::new(),
+                let tile = lookup_cover_texture(
+                    &mut textures,
+                    &mut lru_keys,
+                    ui.ctx(),
+                    &Palette::dark(),
+                    IDENTITY,
                 );
+                let canvas = ui.available_rect_before_wrap();
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                ui.painter().image(tile.id(), canvas, uv, TEXTURE_TINT);
             });
         theme::install(&harness.ctx, &Palette::dark());
         harness.run();
 
         let frame = harness.render().unwrap();
-        let colour = generated_colour(IDENTITY, true);
+        let palette = Palette::dark();
         assert!(
-            count_pixels(&frame, colour) > 0,
-            "the generated block's derived colour {colour:?} must appear in the \
-             headless render — user-loaded textures must not be dropped"
+            count_pixels(&frame, palette.surface_2) > 0,
+            "the placeholder well's surface fill must appear in the headless \
+             render — user-loaded textures must not be dropped"
+        );
+        assert!(
+            count_pixels(&frame, palette.ink_3) > 0,
+            "the placeholder's music glyph (ink_3) must appear in the headless \
+             render — user-loaded textures must not be dropped"
         );
     }
 
@@ -378,6 +368,7 @@ mod tests {
                         TreeRow {
                             indent_level: 0,
                             icon,
+                            cover: None,
                             label,
                             count: Some(count),
                             selected,
@@ -406,6 +397,7 @@ mod tests {
                         TreeRow {
                             indent_level: 0,
                             icon: Some(Icon::Sparkles),
+                            cover: None,
                             label: name,
                             count: Some(count),
                             selected: i == 1,
@@ -436,6 +428,7 @@ mod tests {
                     TreeRow {
                         indent_level: 1,
                         icon: None,
+                        cover: None,
                         label: "01. Moonlight Sonata",
                         count: None,
                         selected: false,
@@ -451,6 +444,7 @@ mod tests {
                     TreeRow {
                         indent_level: 2,
                         icon: None,
+                        cover: None,
                         label: "02. Für Elise",
                         count: None,
                         selected: false,
@@ -657,6 +651,7 @@ mod tests {
                 TreeRow {
                     indent_level: 0,
                     icon: None,
+                    cover: None,
                     label,
                     count: None,
                     selected,
@@ -798,7 +793,6 @@ mod tests {
                 .map(|extension| (*extension).to_string())
                 .collect(),
             read_embedded_artwork: true,
-            missing_artwork_strategy: Default::default(),
             last_scan: Some(riff_backend::app::store::FullScanSummary {
                 // Rendered immediately, so the relative stamp reads "just
                 // now" deterministically.
@@ -1106,6 +1100,7 @@ mod tests {
             title: Some("Tomorrow's Harvest"),
             subtitle: Some("Boards of Canada \u{b7} 2013"),
             details: &details,
+            single: false,
             // The golden pins the panel's single Play album action — the
             // rendering the original fixed pane used; the inspector's Play /
             // Add to Queue row (`queue: true`) is pinned by the
@@ -1668,6 +1663,7 @@ mod tests {
                             title: Some("Tomorrow's Harvest"),
                             subtitle: Some("Boards of Canada \u{b7} 2013"),
                             details: &details,
+                            single: false,
                             queue: true,
                         };
                         selection::show_selection_panel(

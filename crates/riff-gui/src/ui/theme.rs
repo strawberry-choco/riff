@@ -345,79 +345,23 @@ impl Palette {
     }
 }
 
-// --- Generated placeholder colour (design-handoff issue 14) -------------------
-//
-// The derivation is colour math over the palette family, so it lives beside
-// the tokens it derives from; the cache mechanics that materialize it into a
-// texture live in `cover_placeholder`.
-
-/// Muted band for the dark family: saturation 28–42%, lightness 20–30%.
-/// Bright enough to read against the near-black surfaces, dark enough to
-/// never flash white.
-const DARK_SATURATION: (f32, f32) = (0.28, 0.42);
-const DARK_LIGHTNESS: (f32, f32) = (0.20, 0.30);
-
-/// Mirror band for the light family (ADR 0004 derives light by rule):
-/// pastel saturation 24–38%, lightness 76–86% — visible against the light
-/// surfaces without washout.
-const LIGHT_SATURATION: (f32, f32) = (0.24, 0.38);
-const LIGHT_LIGHTNESS: (f32, f32) = (0.76, 0.86);
-
-/// Derive the generated cover placeholder colour for one identity (`seed` —
-/// a track's [`TrackId`](riff_persistence::track::TrackId) string or an
-/// album key) on the `dark` or light palette family. Deterministic: the hash
-/// is a fixed-key `DefaultHasher`, so the colour is stable across runs, not
-/// just frames.
+/// Source-over blend of one straight-alpha colour over an opaque one,
+/// returning an opaque result. Colour math lives here beside the tokens it
+/// derives from (the no-hardcoded-colors scan exempts this module); view
+/// code composes palette colors through helpers like this instead of
+/// constructing them.
 #[must_use]
-pub fn generated_colour(seed: &str, dark: bool) -> Color32 {
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    seed.hash(&mut hasher);
-    let bits = hasher.finish();
-
-    // Independent bit fields drive hue, saturation, and lightness so the
-    // three vary without stepping on each other. The fields are all below
-    // 1024, so the u16 conversions cannot fail.
-    let hue = f32::from(u16::try_from((bits >> 8) % 360).unwrap_or(0));
-    let (saturation, lightness) = if dark {
-        (
-            band(DARK_SATURATION, bits >> 40),
-            band(DARK_LIGHTNESS, bits >> 52),
-        )
-    } else {
-        (
-            band(LIGHT_SATURATION, bits >> 40),
-            band(LIGHT_LIGHTNESS, bits >> 52),
-        )
-    };
-    hsl_to_rgb(hue, saturation, lightness)
-}
-
-/// Map one hash field into a `(lo, hi)` band.
-fn band((lo, hi): (f32, f32), bits: u64) -> f32 {
-    let fraction = f32::from(u16::try_from(bits % 1024).unwrap_or(0)) / 1024.0;
-    lo + fraction * (hi - lo)
-}
-
-/// Standard HSL → sRGB conversion (no external dependency: the token crate
-/// rule keeps colour math beside the tokens it serves).
 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn hsl_to_rgb(hue: f32, saturation: f32, lightness: f32) -> Color32 {
-    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
-    let hue_prime = hue / 60.0;
-    let x = chroma * (1.0 - (hue_prime % 2.0 - 1.0).abs());
-    let (r1, g1, b1) = match hue_prime as u32 {
-        0 => (chroma, x, 0.0),
-        1 => (x, chroma, 0.0),
-        2 => (0.0, chroma, x),
-        3 => (0.0, x, chroma),
-        4 => (x, 0.0, chroma),
-        _ => (chroma, 0.0, x),
-    };
-    let m = lightness - chroma / 2.0;
-    let channel = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
-    Color32::from_rgb(channel(r1), channel(g1), channel(b1))
+pub fn blend_over(bottom: egui::Color32, top: egui::Color32) -> egui::Color32 {
+    let alpha = f32::from(top.a()) / 255.0;
+    let channel =
+        |b: u8, t: u8| (f32::from(t) * alpha + f32::from(b) * (1.0 - alpha)).round() as u8;
+    egui::Color32::from_rgba_unmultiplied(
+        channel(bottom.r(), top.r()),
+        channel(bottom.g(), top.g()),
+        channel(bottom.b(), top.b()),
+        u8::MAX,
+    )
 }
 
 /// Convert a radius token (px) into an egui [`CornerRadius`], clamping the

@@ -62,18 +62,6 @@ impl From<&ScalarSettings> for ScanOptions {
     }
 }
 
-/// How artwork stands in for Tracks and Albums that have none — the
-/// Settings Library pane's "Missing artwork" choice (design-handoff issue
-/// 12). One strategy ships today; the enum leaves room for more.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum MissingArtworkStrategy {
-    /// A solid colour derived deterministically from the item's own
-    /// identity, so covers read as part of the palette rather than a
-    /// fallback glyph.
-    #[default]
-    GeneratedColour,
-}
-
 /// One completed full Library Scan's recorded summary (design-handoff
 /// issue 12): when it finished and what it saw, served back by
 /// [`LibraryQueryStore::last_full_scan`] for the Settings Library pane.
@@ -99,8 +87,8 @@ pub struct FullScanSummary {
 ///
 /// The Library scan preferences (design-handoff issue 12): `skip_hidden_files`
 /// leaves dot-entries out of the scan walk, `scan_formats` lists the enabled
-/// audio extensions (subsets of [`AUDIO_EXTENSIONS`]), and the artwork pair
-/// drives cover resolution.
+/// audio extensions (subsets of [`AUDIO_EXTENSIONS`]), and
+/// `read_embedded_artwork` drives cover resolution.
 #[allow(
     clippy::struct_excessive_bools,
     reason = "the struct mirrors the scalar settings row's typed columns"
@@ -110,6 +98,9 @@ pub struct ScalarSettings {
     pub volume: Option<f32>,
     pub advanced_mode: bool,
     pub high_contrast: bool,
+    /// `true` = the Smart Lists sidebar section is folded away (persisted
+    /// display preference, restored on launch).
+    pub smart_lists_collapsed: bool,
     pub replaygain_enabled: bool,
     pub shuffle: bool,
     pub repeat_mode: i64,
@@ -121,8 +112,6 @@ pub struct ScalarSettings {
     pub scan_formats: Vec<String>,
     /// Read artwork embedded in track tags before filesystem fallbacks.
     pub read_embedded_artwork: bool,
-    /// What renders for Tracks and Albums with no artwork.
-    pub missing_artwork_strategy: MissingArtworkStrategy,
 }
 
 impl Default for ScalarSettings {
@@ -133,6 +122,7 @@ impl Default for ScalarSettings {
             volume: None,
             advanced_mode: false,
             high_contrast: false,
+            smart_lists_collapsed: false,
             replaygain_enabled: false,
             shuffle: false,
             repeat_mode: 0,
@@ -143,7 +133,6 @@ impl Default for ScalarSettings {
                 .map(|extension| (*extension).to_string())
                 .collect(),
             read_embedded_artwork: true,
-            missing_artwork_strategy: MissingArtworkStrategy::default(),
         }
     }
 }

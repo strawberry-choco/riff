@@ -759,6 +759,7 @@ pub fn show_queue_panel(
                                             sidebar::TreeRow {
                                                 indent_level: 0,
                                                 icon: None,
+                                                cover: None,
                                                 label: &entry.label,
                                                 count: None,
                                                 selected: false,

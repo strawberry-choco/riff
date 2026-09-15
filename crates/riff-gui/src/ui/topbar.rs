@@ -1,8 +1,9 @@
 //! The library's content top bar (design-handoff issue 06).
 //!
 //! A second content strip — distinct from the frameless window chrome —
-//! above the library stage, carrying the orange riff wordmark, the global
-//! "Search or jump to…" field, and the list/grid view toggles. The search
+//! above the library stage, carrying the global "Search or jump to…" field
+//! and the list/grid view toggles; the brand wordmark (sound-wave mark +
+//! "riff") lives in the window titlebar at the very top-left. The search
 //! field edits the caller's query buffer directly (the same
 //! `library.search_query` the sidebar search binds to, so the whole library
 //! filters while typing); the toggles report [`TopBarAction`]s the caller
@@ -13,7 +14,6 @@
 //! contract and the search field's query-buffer editing. The pixels are
 //! covered by the `top_bar_dark` golden (`tests/golden_tests.rs`).
 
-use super::fonts;
 use super::icons::{Icon, IconCache, icon_button};
 use super::sidebar::{SEARCH_H, ghost_icon_button, search_ring_stroke};
 use super::theme::{self, Palette};
@@ -39,18 +39,15 @@ pub enum TopBarAction {
 /// Upper bound on the search field's width so it stays a field, not a
 /// second window; it shrinks with the window before the toggles move.
 const SEARCH_MAX_W: f32 = 520.0;
-/// Right inset of the toggle cluster and left inset of the wordmark.
+/// Right inset of the toggle cluster and left inset of the search field.
 const EDGE_INSET: f32 = 12.0;
-/// Gap between the wordmark and the search field.
-const WORDMARK_GAP: f32 = 16.0;
+/// Gap between the search field and the toggle cluster.
+const FIELD_GAP: f32 = 16.0;
 /// Reserved width for the two view-toggle icon buttons plus their gaps.
 const TOGGLES_W: f32 = 76.0;
-/// The static normalized bar heights of the wordmark's equalizer glyph — a
-/// fixed brand mark, not the playing indicator's animation.
-const WORDMARK_BARS: [f32; 4] = [0.55, 0.95, 0.7, 0.4];
 
-/// Draw the content top bar inside its panel: wordmark, global search field,
-/// and the list/grid view toggles. Runs inside a top panel of exactly
+/// Draw the content top bar inside its panel: the global search field and
+/// the list/grid view toggles. Runs inside a top panel of exactly
 /// [`crate::ui::theme::TOPBAR_H`] height.
 ///
 /// The search field edits `query` in place — pass the session's
@@ -67,16 +64,6 @@ pub fn show_top_bar(
 ) -> egui::Response {
     let rect = ui.max_rect();
 
-    // Wordmark: the orange equalizer glyph plus "riff" in Inter Bold, both in
-    // the reconciled brand accent (issue 01 tokens). The text is measured so
-    // the search field starts clear of it instead of covering it.
-    let mark_rect = egui::Rect::from_center_size(
-        egui::pos2(rect.left() + EDGE_INSET + 9.0, rect.center().y),
-        egui::vec2(18.0, 20.0),
-    );
-    paint_equalizer_mark(&ui.painter_at(mark_rect), mark_rect, palette.brand_primary);
-    let wordmark_right = paint_wordmark_text(ui, mark_rect, rect.center().y, palette);
-
     // View toggles at the right edge — their geometry is fixed, but the
     // widgets are created AFTER the search field so Tab order follows the
     // visual left-to-right order (handoff issue 16).
@@ -85,11 +72,11 @@ pub fn show_top_bar(
         egui::pos2(rect.right() - EDGE_INSET, rect.max.y),
     );
 
-    // Global search field: the "Search or jump to…" well between the
-    // wordmark and the toggles. Keyboard/screen-reader parity with the
+    // Global search field: the "Search or jump to…" well between the left
+    // inset and the toggles. Keyboard/screen-reader parity with the
     // sidebar search — focus ring border, clear affordance, real text field.
-    let search_left = wordmark_right + WORDMARK_GAP;
-    let search_right = toggles_rect.left() - WORDMARK_GAP;
+    let search_left = rect.left() + EDGE_INSET;
+    let search_right = toggles_rect.left() - FIELD_GAP;
     let search_w = (search_right - search_left).min(SEARCH_MAX_W);
     let search_rect = egui::Rect::from_min_size(
         egui::pos2(search_left, rect.center().y - SEARCH_H / 2.0),
@@ -109,28 +96,6 @@ pub fn show_top_bar(
     show_view_toggles(ui, cache, palette, content, toggles_rect, actions);
 
     response
-}
-
-/// The wordmark's "riff" text, painted at the equalizer glyph's right edge.
-/// Returns the text's right edge so the search field can start clear of it.
-fn paint_wordmark_text(
-    ui: &mut egui::Ui,
-    mark_rect: egui::Rect,
-    center_y: f32,
-    palette: &Palette,
-) -> f32 {
-    let wordmark = ui.painter().layout_no_wrap(
-        "riff".to_owned(),
-        wordmark_font(ui.ctx()),
-        palette.brand_primary,
-    );
-    let pos = egui::pos2(
-        mark_rect.right() + WORDMARK_GAP,
-        center_y - wordmark.size().y / 2.0,
-    );
-    ui.painter()
-        .galley(pos, wordmark.clone(), palette.brand_primary);
-    pos.x + wordmark.size().x
 }
 
 /// The list/grid toggle cluster at the right edge: the active layout carries
@@ -265,42 +230,5 @@ fn handle_search_dismiss(ui: &egui::Ui, id: egui::Id, focused: bool, query: &mut
     if had_focus && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         query.clear();
         ui.memory_mut(|m| m.surrender_focus(id));
-    }
-}
-
-/// The wordmark font: Inter Bold at 18 px. Resolved through the context's
-/// bound families so a bare harness frame (fonts not yet installed — the
-/// kittest constructor renders once before a test can configure them) falls
-/// back to the default proportional family instead of panicking; the app
-/// installs the vendored faces at startup, so the bold face always wins
-/// there.
-fn wordmark_font(ctx: &egui::Context) -> egui::FontId {
-    let family = fonts::family_bold();
-    let bound = ctx.fonts(|f| f.definitions().families.contains_key(&family));
-    if bound {
-        egui::FontId::new(18.0, family)
-    } else {
-        egui::FontId::proportional(18.0)
-    }
-}
-
-/// Paint the wordmark's static equalizer glyph: four rounded bars of fixed
-/// heights ([`WORDMARK_BARS`]) in one color.
-#[expect(clippy::cast_precision_loss)]
-fn paint_equalizer_mark(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
-    let n = WORDMARK_BARS.len() as f32;
-    let bar_w = rect.width() / (n * 1.6);
-    let gap = (rect.width() - bar_w * n) / (n - 1.0);
-    for (i, h) in WORDMARK_BARS.iter().enumerate() {
-        let x = rect.left() + i as f32 * (bar_w + gap);
-        let bar_h = rect.height() * h;
-        painter.rect_filled(
-            egui::Rect::from_min_size(
-                egui::pos2(x, rect.center().y - bar_h / 2.0),
-                egui::vec2(bar_w, bar_h),
-            ),
-            bar_w / 2.0,
-            color,
-        );
     }
 }

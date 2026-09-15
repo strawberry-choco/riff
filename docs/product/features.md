@@ -79,7 +79,7 @@ The egui-based graphical interface: the main window, a dual-view library explore
 | Main Application Window | egui window with cross-platform support, close-to-tray on macOS/Windows | implemented | P0 | — |
 | Library Explorer Panel | Dual library/folder views with toggle, folder playback, context menus, search | implemented | P0 | Library Search |
 | Column Browser Navigation | Section-driven elastic columns (Artists → Albums → Tracks; Genres → Artists → Albums → Tracks) with breadcrumb drill-down and a collapsible inspector offering Play / Add to Queue | implemented | P1 | Library Search, Library Persistence |
-| Content Top Bar | Orange wordmark, global "Search or jump to…" field (Ctrl+K to focus, Escape to dismiss), and a persisted list/grid browser-layout toggle | implemented | P1 | Library Search |
+| Content Top Bar | Global "Search or jump to…" field (Ctrl+K to focus, Escape to dismiss) and a persisted list/grid browser-layout toggle; the brand wordmark (sound-wave mark + "riff") lives in the window titlebar | implemented | P1 | Library Search |
 | Player Control Bar | Transport controls, progress bar, volume with mute, stop behind advanced mode | implemented | P0 | Playback Control |
 | Cover Art Display | Display resolved cover art in the UI | implemented | P1 | Cover Art Resolution |
 | Now Playing View | Full track info, large cover art, clickable up-next queue | implemented | P2 | Playback Queue, Cover Art Display |

@@ -488,6 +488,7 @@ fn up_next_section(
                         TreeRow {
                             indent_level: 0,
                             icon: None,
+                            cover: None,
                             label: &entry.label,
                             count: None,
                             selected: false,

@@ -325,9 +325,9 @@ impl RiffApp {
 
         let palette = theme::resolve(dark, high_contrast);
         theme::install(ctx, &palette);
-        // A palette-family flip invalidates the generated cover blocks:
-        // their colours were derived for the old family's tokens, so they
-        // re-derive under the new one on their next lookup (issue 14).
+        // A palette-family flip invalidates the placeholder tile: its well
+        // and glyph colours were derived for the old family's tokens, so it
+        // re-renders under the new one on its next lookup.
         if self.theme.active.dark != palette.dark {
             crate::ui::cover_placeholder::evict_generated(
                 &mut self.cover_textures,
@@ -388,7 +388,7 @@ impl RiffApp {
         }
     }
 
-    /// Drop every generated cover block from the shared texture cache. For
+    /// Drop the shared placeholder tile from the texture cache. For
     /// sibling modules (`ui::settings`): the artwork-policy toggle uses it
     /// so tracks resolved as artless under the old policy re-resolve.
     pub(crate) fn evict_generated_covers(&mut self) {
@@ -541,17 +541,17 @@ impl RiffApp {
     }
 
     /// Resolve a cover texture through the shared cache, touching the LRU
-    /// to mark it as recently used. A full miss (no real cover, no
-    /// generated block) resolves the identity's generated colour block into
-    /// the shared cache (issue 14) — real art, when it arrives through the
-    /// poll path, still wins.
+    /// to mark it as recently used. A full miss (no real cover, no cached
+    /// placeholder tile) resolves the shared music-icon placeholder tile
+    /// into the cache — real art, when it arrives through the poll path,
+    /// still wins.
     fn resolve_cover_texture(&mut self, ctx: &egui::Context, key: &str) -> egui::TextureHandle {
-        let dark = self.theme.active.dark;
+        let palette = self.theme.active;
         crate::ui::cover_placeholder::lookup_cover_texture(
             &mut self.cover_textures,
             &mut self.cover_lru_keys,
             ctx,
-            dark,
+            &palette,
             key,
         )
     }
@@ -633,6 +633,13 @@ impl RiffApp {
 
         self.request_cover(&track.id, &track.file_path);
 
+        // Every library track row carries a leading cover tile: the real
+        // cover when one is cached, otherwise the shared music-icon
+        // placeholder — artless tracks read as a uniform tile instead of an
+        // empty gap. The request above keeps filling the cache with real art
+        // as it lands (the placeholder lives under a separate key).
+        let cover = Some(self.resolve_cover_texture(ui.ctx(), &track.id.0).id());
+
         let response = sidebar::tree_row(
             ui,
             &mut self.icons,
@@ -640,6 +647,7 @@ impl RiffApp {
             TreeRow {
                 indent_level,
                 icon: None,
+                cover,
                 label,
                 count: None,
                 selected: is_selected,
@@ -1308,9 +1316,10 @@ pub fn resolve_detail_content(views: &mut SessionViews, library: &LibrarySession
     content
 }
 
-/// What the inspector's readout shows: the deepest entity in the drill-down
-/// path (album > artist > genre), or the selected track on single-list
-/// stages. Drives the widget's kind chip and the batch Play/Queue resolve.
+/// What the inspector's readout shows: the selected track — single-clicking
+/// a track row in any track listing sets it — or, when no track is selected,
+/// the deepest entity in the drill-down path (album > artist > genre). Drives
+/// the widget's kind chip and the batch Play/Queue resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InspectorKind {
     /// An album at the deepest path entry — the full details grid.
@@ -1320,7 +1329,7 @@ pub enum InspectorKind {
     Artist,
     /// A genre at the deepest path entry — name and track count.
     Genre,
-    /// A selected track on a single-list stage — the compact readout.
+    /// A selected track — the compact readout.
     Track,
 }
 
@@ -1348,27 +1357,32 @@ pub struct InspectorContent {
     pub details: Vec<crate::ui::selection::SelectionDetail>,
 }
 
-/// Resolve what the inspector renders for the session: the deepest entity
-/// in the drill-down path (album > artist > genre), or the selected track
-/// when the path is empty (single-list stages). The album variant preserves
-/// today's selection-panel content (cover, title, artist · year line, and
-/// the details grid: artist, released, genre, track count · total time,
-/// plays, last played, path) — all read through the Session Views seam, so
-/// scans and tag edits can never leave stale rows. Any selection the store
-/// no longer carries resolves hidden, never a stale readout.
+/// Resolve what the inspector renders for the session: the selected track —
+/// single-clicking a track row in any track listing sets it, so the detail
+/// panel follows the click into the track's readout — or, when no track is
+/// selected, the deepest entity in the drill-down path (album > artist >
+/// genre). Entity selections clear the selected track (see
+/// [`riff_backend::app::state::LibrarySession::select_at`]), so the two never
+/// compete. The album variant preserves today's selection-panel content
+/// (cover, title, artist · year line, and the details grid: artist, released,
+/// genre, track count · total time, plays, last played, path) — all read
+/// through the Session Views seam, so scans and tag edits can never leave
+/// stale rows. Any selection the store no longer carries resolves hidden,
+/// never a stale readout.
 pub fn resolve_inspector(views: &mut SessionViews, library: &LibrarySession) -> InspectorContent {
     use riff_backend::app::state::BrowserSelection;
 
-    let Some(selection) = library.current_selection() else {
-        // Single-list stages (All Tracks, search, playlists, smart lists,
-        // folders): the selected track's compact readout.
-        let Some(track_id) = library.selected_track.clone() else {
-            return InspectorContent::default();
-        };
-        let Some(track) = views.selected_track(&track_id) else {
-            return InspectorContent::default();
-        };
+    // The selected track wins: single-clicking a track in the flat list,
+    // search, playlists, folders, or the album's Tracks column shows that
+    // track's readout in the detail panel. A stale id (the store dropped the
+    // track) falls through to the path entity below.
+    if let Some(track_id) = library.selected_track.clone()
+        && let Some(track) = views.selected_track(&track_id)
+    {
         return track_inspector(track);
+    }
+    let Some(selection) = library.current_selection() else {
+        return InspectorContent::default();
     };
     match selection {
         BrowserSelection::Album { artist, title } => album_inspector(views, artist, title),
@@ -2148,6 +2162,7 @@ impl RiffApp {
                 TreeRow {
                     indent_level: 0,
                     icon: Some(icon),
+                    cover: None,
                     label,
                     count: Some(count),
                     selected: library_section_live && library.library_section == section,
@@ -2177,6 +2192,7 @@ impl RiffApp {
             TreeRow {
                 indent_level: 0,
                 icon: Some(crate::ui::icons::Icon::Folder),
+                cover: None,
                 label: "Folders",
                 count: Some(counts.folder_roots),
                 selected: folder_section_live,
@@ -2199,18 +2215,74 @@ impl RiffApp {
 
     /// The SMART LISTS section's rows (design-handoff issue 07): the four
     /// core lists always, Never Played / Lost Gems behind Advanced mode.
-    /// Clicking one opens it over the library view.
+    /// Clicking one opens it over the library view. The section header is
+    /// clickable: a chevron pinned to the header's right edge (the same
+    /// slot the Playlists "+" button uses) folds the section away, and the
+    /// collapsed state is a persisted UI flag
+    /// (`UiFlags::smart_lists_collapsed`) restored on launch through the
+    /// scalar settings round-trip.
     fn render_smart_list_rows(
         &mut self,
         ui: &mut egui::Ui,
         library: &mut LibrarySession,
         counts: &riff_backend::app::views::SidebarCounts,
     ) {
+        use crate::ui::icons::Icon;
         use crate::ui::sidebar::{self, TreeRow};
 
         let palette = self.theme.active;
-        sidebar::section_header(ui, &palette, "Smart Lists")
-            .on_hover_text("Auto-generated, read-only lists built from your play history.");
+        let collapsed = library.ui_flags.smart_lists_collapsed;
+
+        ui.horizontal(|ui| {
+            sidebar::section_header(ui, &palette, "Smart Lists")
+                .on_hover_text("Auto-generated, read-only lists built from your play history.");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let chevron_rect = egui::Rect::from_center_size(
+                    egui::pos2(ui.max_rect().right() - 12.0, ui.cursor().center().y),
+                    egui::vec2(24.0, 24.0),
+                );
+                let chevron = if collapsed {
+                    Icon::ChevronRight
+                } else {
+                    Icon::ChevronDown
+                };
+                let label = if collapsed {
+                    "Expand Smart Lists"
+                } else {
+                    "Collapse Smart Lists"
+                };
+                // The chevron keeps the smart-list rows' ink tint
+                // (`ink_2`, the same color the Sparkles glyphs paint) and
+                // does not flip on hover — it reads as part of the section,
+                // not as an ephemeral control.
+                let tint = palette.ink_2;
+                let response = ui.interact(
+                    chevron_rect,
+                    ui.id().with("smart_lists_collapse"),
+                    egui::Sense::click(),
+                );
+                let tex_id = self.icons.texture(ui.ctx(), chevron, 16.0, tint);
+                let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                ui.painter_at(chevron_rect)
+                    .image(tex_id, chevron_rect.shrink(4.0), uv_full, tint);
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label)
+                });
+                if response.clicked() {
+                    library.ui_flags.smart_lists_collapsed = !collapsed;
+                    // Folding the section away also closes any smart list it
+                    // opened: with the rows gone there is no other way back
+                    // to that view.
+                    self.smart_playlist_view = None;
+                }
+                response.on_hover_text(label);
+            });
+        });
+
+        if collapsed {
+            return;
+        }
+
         let smart_count = |kind: SmartPlaylistKind| {
             counts
                 .smart_lists
@@ -2226,6 +2298,7 @@ impl RiffApp {
                 TreeRow {
                     indent_level: 0,
                     icon: Some(crate::ui::icons::Icon::Sparkles),
+                    cover: None,
                     label: kind.display_name(),
                     count: Some(smart_count(kind)),
                     selected: self.smart_playlist_view == Some(kind),
@@ -2733,6 +2806,10 @@ impl RiffApp {
 
         self.request_cover(&track.id, &track.file_path);
 
+        // Same leading cover tile as the library rows: real art when cached,
+        // otherwise the shared music-icon placeholder for artless tracks.
+        let cover = Some(self.resolve_cover_texture(ui.ctx(), &track.id.0).id());
+
         let outcome = sidebar::reorderable_row(
             ui,
             &mut self.icons,
@@ -2742,6 +2819,7 @@ impl RiffApp {
             TreeRow {
                 indent_level: 0,
                 icon: None,
+                cover,
                 label: &label,
                 count: None,
                 selected: is_selected,
@@ -2958,6 +3036,7 @@ impl RiffApp {
                 } else {
                     Icon::Folder
                 }),
+                cover: None,
                 label: &label,
                 count: None,
                 selected: is_selected,

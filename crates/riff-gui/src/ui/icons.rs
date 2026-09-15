@@ -19,6 +19,10 @@ use super::theme;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Icon {
     ArrowLeft,
+    /// The Lucide chevron glyphs for collapsible section headers (the
+    /// Smart Lists collapse toggle): down when expanded, right when folded.
+    ChevronDown,
+    ChevronRight,
     Close,
     Disc,
     /// The Lucide corner-bracket expand glyph (fullscreen/expand button).
@@ -60,6 +64,8 @@ impl Icon {
     /// Every glyph the shell vendors; later tickets pick from this list.
     pub const ALL: &'static [Self] = &[
         Self::ArrowLeft,
+        Self::ChevronDown,
+        Self::ChevronRight,
         Self::Close,
         Self::Disc,
         Self::Expand,
@@ -99,6 +105,8 @@ impl Icon {
     pub fn asset_name(self) -> &'static str {
         match self {
             Self::ArrowLeft => "arrow-left",
+            Self::ChevronDown => "chevron-down",
+            Self::ChevronRight => "chevron-right",
             Self::Close => "x",
             Self::Disc => "disc-3",
             Self::Expand => "maximize",
@@ -139,6 +147,8 @@ impl Icon {
     pub fn svg(self) -> &'static str {
         match self {
             Self::ArrowLeft => include_str!("../../assets/icons/arrow-left.svg"),
+            Self::ChevronDown => include_str!("../../assets/icons/chevron-down.svg"),
+            Self::ChevronRight => include_str!("../../assets/icons/chevron-right.svg"),
             Self::Close => include_str!("../../assets/icons/x.svg"),
             Self::Disc => include_str!("../../assets/icons/disc-3.svg"),
             Self::Expand => include_str!("../../assets/icons/maximize.svg"),

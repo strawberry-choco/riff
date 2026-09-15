@@ -34,6 +34,12 @@ const CAPTION_BTN_W: f32 = 44.0;
 const CAPTION_BTN_H: f32 = 36.0;
 /// Gap between the nav-control cluster and the caption-button pair.
 const CAPTION_GAP: f32 = 12.0;
+/// Gap between the wordmark's equalizer glyph and its "riff" text (and
+/// between the wordmark and the scan status line).
+const WORDMARK_GAP: f32 = 16.0;
+/// The static normalized bar heights of the wordmark's equalizer glyph — a
+/// fixed brand mark that moved into the titlebar from the content top bar.
+const WORDMARK_BARS: [f32; 4] = [0.55, 0.95, 0.7, 0.4];
 
 /// Chrome-fitting minimum window size: sidebar + stage across, titlebar +
 /// playerbar + stage down. The window can never shrink below this, so the
@@ -215,14 +221,15 @@ pub fn show_titlebar(
         egui::Sense::click_and_drag(),
     );
 
-    // Wordmark at the left edge.
-    ui.painter().text(
-        rect.left_center() + egui::vec2(16.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        "riff",
-        egui::FontId::proportional(18.0),
-        palette.ink,
+    // Wordmark at the left edge: the sound-wave equalizer glyph plus "riff",
+    // both in the brand orange. The cluster sits at the very top-left of the
+    // window; the text is measured so the scan status starts clear of it.
+    let mark_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 16.0 + 9.0, rect.center().y),
+        egui::vec2(18.0, 20.0),
     );
+    paint_equalizer_mark(&ui.painter_at(mark_rect), mark_rect, palette.brand_primary);
+    let wordmark_right = paint_wordmark_text(ui, mark_rect, rect.center().y, palette);
 
     if let Some(action) = drag_region_action(
         drag_response.drag_started_by(egui::PointerButton::Primary),
@@ -240,7 +247,7 @@ pub fn show_titlebar(
     // Scan status sits next to the wordmark, muted.
     if let Some(status) = content.scan_status {
         ui.painter().text(
-            rect.left_center() + egui::vec2(72.0, 0.0),
+            egui::pos2(wordmark_right + WORDMARK_GAP, rect.center().y),
             egui::Align2::LEFT_CENTER,
             status,
             egui::FontId::proportional(theme::TEXT_SM),
@@ -459,4 +466,48 @@ fn show_titlebar_controls(
         actions.push(TitleBarAction::ToggleTheme);
     }
     ui.add_space(8.0);
+}
+
+/// The wordmark's "riff" title, painted at the equalizer glyph's right edge
+/// in the brand orange. Returns the text's right edge so the scan status can
+/// start clear of it.
+fn paint_wordmark_text(
+    ui: &mut egui::Ui,
+    mark_rect: egui::Rect,
+    center_y: f32,
+    palette: &Palette,
+) -> f32 {
+    let wordmark = ui.painter().layout_no_wrap(
+        "riff".to_owned(),
+        egui::FontId::proportional(18.0),
+        palette.brand_primary,
+    );
+    let pos = egui::pos2(
+        mark_rect.right() + WORDMARK_GAP,
+        center_y - wordmark.size().y / 2.0,
+    );
+    ui.painter()
+        .galley(pos, wordmark.clone(), palette.brand_primary);
+    pos.x + wordmark.size().x
+}
+
+/// Paint the wordmark's static equalizer glyph: four rounded bars of fixed
+/// heights ([`WORDMARK_BARS`]) in one color.
+#[expect(clippy::cast_precision_loss)]
+fn paint_equalizer_mark(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let n = WORDMARK_BARS.len() as f32;
+    let bar_w = rect.width() / (n * 1.6);
+    let gap = (rect.width() - bar_w * n) / (n - 1.0);
+    for (i, h) in WORDMARK_BARS.iter().enumerate() {
+        let x = rect.left() + i as f32 * (bar_w + gap);
+        let bar_h = rect.height() * h;
+        painter.rect_filled(
+            egui::Rect::from_min_size(
+                egui::pos2(x, rect.center().y - bar_h / 2.0),
+                egui::vec2(bar_w, bar_h),
+            ),
+            bar_w / 2.0,
+            color,
+        );
+    }
 }

@@ -443,10 +443,6 @@ mod tests {
         assert!(prefs.skip_hidden_files);
         assert!(prefs.read_embedded_artwork);
         assert_eq!(prefs.scan_formats, ScanPrefs::default().scan_formats);
-        assert_eq!(
-            prefs.missing_artwork_strategy,
-            riff_backend::app::store::MissingArtworkStrategy::GeneratedColour
-        );
     }
 
     #[test]
@@ -1071,120 +1067,63 @@ mod tests {
         assert_eq!(light.on_brand, dark.on_brand);
     }
 
-    // --- Generated-colour cover placeholder (design-handoff issue 14) ----------
+    // --- The music-icon placeholder tile (shared, themed) ----------------------
     //
-    // Tracks and albums without artwork render a solid colour block derived
-    // from their own identity instead of the glyph placeholder. The
-    // derivation is a pure function of the identity string and the palette
-    // family: same item → same colour every time, and the colour sits in a
-    // band that reads as part of the design palette on that family — never a
-    // white flash on dark, never a black hole on light.
-
-    /// Sample identities: realistic file paths and album keys, plus edge
-    /// shapes (empty, short, long) the hasher must distribute.
-    const PLACEHOLDER_SEEDS: [&str; 12] = [
-        "f:\\music\\a.mp3",
-        "f:\\music\\b.mp3",
-        "f:\\music\\artist\x1falbum",
-        "/home/user/Music/track 3.flac",
-        "",
-        "x",
-        "f:\\music\\very long path\\with several folders\\track.mp3",
-        "artist name\x1falbum title",
-        " compilation\\greatest hits",
-        "f:\\music\\c.mp3",
-        "f:\\music\\d.mp3",
-        "f:\\music\\e.mp3",
-    ];
+    // Tracks and albums without artwork render the shared placeholder tile —
+    // a surface well with a music glyph — instead of a per-item colour
+    // block. Nothing derives per identity anymore: every artless item
+    // resolves the SAME tile, which only answers to the active palette
+    // family (`surface_2` well, `ink_3` glyph).
 
     #[test]
-    fn test_generated_colour_is_deterministic_per_identity_and_family() {
-        use riff_gui::ui::cover_placeholder::generated_colour;
+    fn test_placeholder_tile_is_shared_across_identities() {
+        use riff_gui::ui::cover_placeholder::lookup_cover_texture;
+        use riff_gui::ui::theme::Palette;
 
-        // Same item → same colour every time: repeated calls agree exactly.
-        for seed in PLACEHOLDER_SEEDS {
-            assert_eq!(
-                generated_colour(seed, true),
-                generated_colour(seed, true),
-                "dark derivation for {seed:?} must be stable"
-            );
-            assert_eq!(
-                generated_colour(seed, false),
-                generated_colour(seed, false),
-                "light derivation for {seed:?} must be stable"
-            );
-        }
+        let ctx = placeholder_ctx();
+        let mut textures = std::collections::HashMap::new();
+        let mut lru_keys = Vec::new();
+
+        // The removed colour block was the only per-identity input, so two
+        // artless items resolve to one shared cached tile.
+        let a = lookup_cover_texture(
+            &mut textures,
+            &mut lru_keys,
+            &ctx,
+            &Palette::dark(),
+            "a.mp3",
+        );
+        let b = lookup_cover_texture(
+            &mut textures,
+            &mut lru_keys,
+            &ctx,
+            &Palette::dark(),
+            "b.mp3",
+        );
+        assert!(a == b, "one tile serves every artless item");
     }
 
     #[test]
-    fn test_generated_colour_spreads_across_identities() {
-        use riff_gui::ui::cover_placeholder::generated_colour;
+    fn test_placeholder_tile_follows_the_palette_family() {
+        use riff_gui::ui::cover_placeholder::placeholder_image;
+        use riff_gui::ui::theme::Palette;
 
-        // Distinct items mostly get distinct colours — the block is a
-        // per-identity signature, not one fixed tint for everything.
-        let dark: std::collections::HashSet<_> = PLACEHOLDER_SEEDS
-            .iter()
-            .map(|s| generated_colour(s, true))
-            .collect();
-        assert!(
-            dark.len() >= 9,
-            "12 identities must spread into at least 9 distinct dark colours, got {}",
-            dark.len()
+        // The derivation answers to the active palette: the well and glyph
+        // colours come from `surface_2` / `ink_3`, which differ across the
+        // families, so dark and light tiles must differ.
+        assert_ne!(
+            placeholder_image(&Palette::dark()).pixels,
+            placeholder_image(&Palette::light()).pixels,
+            "dark and light tiles must differ"
         );
     }
 
-    #[test]
-    fn test_generated_colour_stays_inside_the_palette_compatible_band() {
-        use riff_gui::ui::cover_placeholder::generated_colour;
-
-        for seed in PLACEHOLDER_SEEDS {
-            let dark = generated_colour(seed, true);
-            let light = generated_colour(seed, false);
-
-            // Dark family: no white flash — every channel stays well below
-            // mid-grey — yet the block is visible against the near-black
-            // background, so it cannot collapse into it either.
-            for channel in [dark.r(), dark.g(), dark.b()] {
-                assert!(
-                    (24..=128).contains(&channel),
-                    "dark colour {dark:?} for {seed:?} leaves the visible dark band"
-                );
-            }
-            assert_ne!(dark, riff_gui::ui::theme::Palette::dark().background);
-
-            // Light family: mirror band — no black hole, no near-white
-            // washout against the light background.
-            for channel in [light.r(), light.g(), light.b()] {
-                assert!(
-                    (140..=236).contains(&channel),
-                    "light colour {light:?} for {seed:?} leaves the visible light band"
-                );
-            }
-            assert_ne!(light, riff_gui::ui::theme::Palette::light().background);
-        }
-    }
-
-    #[test]
-    fn test_generated_colour_follows_the_palette_family() {
-        use riff_gui::ui::cover_placeholder::generated_colour;
-
-        // The two families derive different blocks for the same identity —
-        // the derivation answers to the active palette, not one fixed tint.
-        for seed in PLACEHOLDER_SEEDS {
-            assert_ne!(
-                generated_colour(seed, true),
-                generated_colour(seed, false),
-                "dark and light derivations for {seed:?} must differ"
-            );
-        }
-    }
-
-    // --- Generated blocks flow through the shared texture cache (issue 14) -----
+    // --- The placeholder tile flows through the shared texture cache ----------
     //
-    // A texture miss resolves the identity's generated block into the SAME
-    // map + LRU the real covers use (keyed by a reserved prefix, so the
-    // request flow keeps treating the track as artless), real art always
-    // wins over the block, and eviction paths touch only generated keys.
+    // A texture miss resolves the shared tile into the SAME map + LRU the
+    // real covers use (keyed by a reserved key, so the request flow keeps
+    // treating the track as artless), real art always wins over the tile,
+    // and eviction paths touch only the tile.
 
     fn placeholder_ctx() -> egui::Context {
         egui::Context::default()
@@ -1201,86 +1140,125 @@ mod tests {
     }
 
     #[test]
-    fn test_lookup_generates_and_caches_a_block_on_a_full_miss() {
+    fn test_lookup_caches_the_shared_placeholder_tile_on_a_full_miss() {
         use riff_gui::ui::cover_placeholder::{
-            generated_colour, generated_image, generated_key, lookup_cover_texture,
+            PLACEHOLDER_KEY, lookup_cover_texture, placeholder_image,
         };
+        use riff_gui::ui::theme::Palette;
 
         let ctx = placeholder_ctx();
         let mut textures = std::collections::HashMap::new();
         let mut lru_keys = Vec::new();
         let identity = "f:\\music\\artless.mp3";
 
-        let block = lookup_cover_texture(&mut textures, &mut lru_keys, &ctx, true, identity);
-
-        // The block lands in the shared cache under the reserved key...
-        let key = generated_key(identity);
-        assert!(textures.contains_key(&key), "the block is cached for reuse");
-        assert!(
-            lru_keys.iter().any(|k| k == &key),
-            "the block rides the shared LRU"
+        let tile = lookup_cover_texture(
+            &mut textures,
+            &mut lru_keys,
+            &ctx,
+            &Palette::dark(),
+            identity,
         );
 
-        // ...is a 1x1 stretch-to-fit square of exactly the derived colour
-        // (pixel truth checked at the pure seam, where pixels are readable)...
-        assert_eq!(block.size(), [1, 1]);
-        let colour = generated_colour(identity, true);
-        let image = generated_image(identity, true);
+        // The tile lands in the shared cache under the reserved key...
+        assert!(
+            textures.contains_key(PLACEHOLDER_KEY),
+            "the tile is cached for reuse"
+        );
+        assert!(
+            lru_keys.iter().any(|k| k == PLACEHOLDER_KEY),
+            "the tile rides the shared LRU"
+        );
+
+        // ...is the composed placeholder: the surface well with the music
+        // glyph tinted ink_3 (pixel truth checked at the pure seam, where
+        // pixels are readable)...
+        let image = placeholder_image(&Palette::dark());
+        let well = Palette::dark().surface_2;
         assert_eq!(
-            image.pixels[0],
-            egui::Color32::from_rgba_unmultiplied(colour.r(), colour.g(), colour.b(), 255),
-            "the 1x1 block is the derived colour, stretched by every render site"
+            image.pixels[0], well,
+            "the tile's first pixel is the well fill"
+        );
+        assert!(
+            image.pixels.iter().any(|p| *p != well),
+            "the tile carries the music glyph beyond the well fill"
         );
 
         // ...and repeat lookups reuse it instead of regenerating.
-        let again = lookup_cover_texture(&mut textures, &mut lru_keys, &ctx, true, identity);
-        assert!(block == again, "the cached block is served, not rebuilt");
+        let again = lookup_cover_texture(
+            &mut textures,
+            &mut lru_keys,
+            &ctx,
+            &Palette::dark(),
+            identity,
+        );
+        assert!(tile == again, "the cached tile is served, not rebuilt");
     }
 
     #[test]
-    fn test_real_art_wins_over_the_generated_block() {
+    fn test_real_art_wins_over_the_placeholder_tile() {
         use riff_gui::ui::cover_placeholder::lookup_cover_texture;
+        use riff_gui::ui::theme::Palette;
 
         let ctx = placeholder_ctx();
         let mut textures = std::collections::HashMap::new();
         let mut lru_keys = Vec::new();
         let identity = "f:\\music\\artful.mp3";
 
-        // The block is cached first (the artless window)...
-        let _ = lookup_cover_texture(&mut textures, &mut lru_keys, &ctx, true, identity);
+        // The tile is cached first (the artless window)...
+        let _ = lookup_cover_texture(
+            &mut textures,
+            &mut lru_keys,
+            &ctx,
+            &Palette::dark(),
+            identity,
+        );
 
         // ...then real art arrives through the poll path under the plain key.
         let art = real_texture(&ctx, identity);
         textures.insert(identity.to_string(), art.clone());
         lru_keys.push(identity.to_string());
 
-        let resolved = lookup_cover_texture(&mut textures, &mut lru_keys, &ctx, true, identity);
-        assert!(resolved == art, "real art wins over the generated block");
+        let resolved = lookup_cover_texture(
+            &mut textures,
+            &mut lru_keys,
+            &ctx,
+            &Palette::dark(),
+            identity,
+        );
+        assert!(resolved == art, "real art wins over the placeholder tile");
     }
 
     #[test]
-    fn test_evict_generated_removes_only_generated_entries() {
+    fn test_evict_generated_removes_only_the_placeholder_tile() {
         use riff_gui::ui::cover_placeholder::{
-            evict_generated, generated_key, lookup_cover_texture,
+            PLACEHOLDER_KEY, evict_generated, lookup_cover_texture,
         };
+        use riff_gui::ui::theme::Palette;
 
         let ctx = placeholder_ctx();
         let mut textures = std::collections::HashMap::new();
         let mut lru_keys = Vec::new();
 
-        let _ = lookup_cover_texture(&mut textures, &mut lru_keys, &ctx, true, "a.mp3");
-        let _ = lookup_cover_texture(&mut textures, &mut lru_keys, &ctx, false, "b.mp3");
+        let _ = lookup_cover_texture(
+            &mut textures,
+            &mut lru_keys,
+            &ctx,
+            &Palette::dark(),
+            "a.mp3",
+        );
         let art = real_texture(&ctx, "c.mp3");
         textures.insert("c.mp3".to_string(), art);
         lru_keys.push("c.mp3".to_string());
 
         evict_generated(&mut textures, &mut lru_keys);
 
-        assert!(!textures.contains_key(&generated_key("a.mp3")));
-        assert!(!textures.contains_key(&generated_key("b.mp3")));
         assert!(
-            !lru_keys.iter().any(|k| k.starts_with("gen\u{1f}")),
-            "the LRU list drops every generated key"
+            !textures.contains_key(PLACEHOLDER_KEY),
+            "the tile leaves the cache"
+        );
+        assert!(
+            !lru_keys.iter().any(|k| k == PLACEHOLDER_KEY),
+            "the LRU list drops the tile"
         );
         assert!(
             textures.contains_key("c.mp3"),
@@ -2085,6 +2063,7 @@ mod tests {
                         sidebar::TreeRow {
                             indent_level: 1,
                             icon: Some(icons::Icon::Music),
+                            cover: None,
                             label: "All Tracks",
                             count: None,
                             selected: false,
@@ -2131,6 +2110,7 @@ mod tests {
                         sidebar::TreeRow {
                             indent_level: 0,
                             icon: Some(icons::Icon::ListMusic),
+                            cover: None,
                             label: "All Tracks",
                             count: Some(12),
                             selected: false,
@@ -2146,6 +2126,7 @@ mod tests {
                         sidebar::TreeRow {
                             indent_level: 0,
                             icon: Some(icons::Icon::Music),
+                            cover: None,
                             label: "Artists",
                             count: None,
                             selected: false,
@@ -4000,30 +3981,20 @@ mod tests {
 
     // --- Sectioned Settings modal + left nav (Issue 11) ------------------------
     //
-    // Settings becomes a sectioned modal with a left nav (General, Library,
-    // Playback, Appearance, Shortcuts, Tag editing, Advanced, About) instead
-    // of one long scrolling stage. The seams: the pure `SettingsSection` type,
-    // and the headless renderer reporting `SettingsAction`s — the same shape
-    // the former stage used.
+    // Settings becomes a sectioned modal with a left nav (Library, Playback,
+    // Appearance, Advanced, About) instead of one long scrolling stage. The
+    // seams: the pure `SettingsSection` type, and the headless renderer
+    // reporting `SettingsAction`s — the same shape the former stage used.
 
     #[test]
-    fn test_settings_sections_list_the_eight_nav_entries_in_mockup_order() {
+    fn test_settings_sections_list_the_nav_entries_in_mockup_order() {
         use riff_gui::ui::settings::SettingsSection;
 
         let labels: Vec<&str> = SettingsSection::ALL.iter().map(|s| s.label()).collect();
         assert_eq!(
             labels,
-            vec![
-                "General",
-                "Library",
-                "Playback",
-                "Appearance",
-                "Shortcuts",
-                "Tag editing",
-                "Advanced",
-                "About",
-            ],
-            "the left nav lists exactly the mockup's eight sections in order"
+            vec!["Library", "Playback", "Appearance", "Advanced", "About",],
+            "the left nav lists exactly the implemented sections in order"
         );
     }
 
@@ -4212,12 +4183,8 @@ mod tests {
             "the Library card must not render in the Advanced pane"
         );
 
-        // Sections without existing content show a clear placeholder.
-        for section in [
-            SettingsSection::General,
-            SettingsSection::Shortcuts,
-            SettingsSection::About,
-        ] {
+        // About has no existing content and shows a clear placeholder.
+        for section in [SettingsSection::About] {
             let mut harness = settings_modal_harness(&content, section);
             harness.run();
             let expected = format!("{} settings are not implemented yet.", section.label());
@@ -4244,7 +4211,7 @@ mod tests {
         harness.run();
 
         // Tab walks the focus order: the header's Back control first, then
-        // the nav items in ALL order (General first here).
+        // the nav items in ALL order (Library first here).
         harness.key_press(egui::Key::Tab);
         harness.run();
         assert!(
@@ -4254,7 +4221,7 @@ mod tests {
         harness.key_press(egui::Key::Tab);
         harness.run();
         assert!(
-            harness.get_by_label("General").is_focused(),
+            harness.get_by_label("Library").is_focused(),
             "the nav follows the header in focus order"
         );
 
@@ -4264,7 +4231,7 @@ mod tests {
         assert!(
             harness
                 .state()
-                .contains(&SettingsAction::SelectSection(SettingsSection::General)),
+                .contains(&SettingsAction::SelectSection(SettingsSection::Library)),
             "Enter on a focused nav item selects that section"
         );
 
@@ -4515,6 +4482,7 @@ mod tests {
                 sidebar::TreeRow {
                     indent_level: 0,
                     icon: None,
+                    cover: None,
                     label: &label,
                     count: None,
                     selected: false,
@@ -4666,6 +4634,7 @@ mod tests {
                             sidebar::TreeRow {
                                 indent_level: 0,
                                 icon: None,
+                                cover: None,
                                 label,
                                 count: None,
                                 selected: false,
@@ -4720,6 +4689,7 @@ mod tests {
                         sidebar::TreeRow {
                             indent_level: 0,
                             icon: None,
+                            cover: None,
                             label: "Beta",
                             count: None,
                             selected: false,
@@ -4964,47 +4934,18 @@ mod tests {
     }
 }
 
-// --- Settings scalar handler seams --------------------------------------------
+// --- Settings modal contract --------------------------------------------------
 //
-// `SettingsAction::SetMissingArtworkStrategy` is the only Settings action
-// today that has no UI control — the enum has one variant. The handler is
-// extracted to a `pub(crate)` free function so the wiring (variant →
-// Library Session field → Application Store transaction) is testable
-// without constructing a full `RiffApp`.
+// Modal-level behavior pinned headlessly: nothing renders unless the product
+// ships it. The "Reset to defaults" button is a deliberate non-feature (plan
+// #2), asserted absent so a regression can't silently reintroduce it.
 #[cfg(test)]
 mod settings_scalar_handler_tests {
     use super::*;
-    use riff_backend::app::store::MissingArtworkStrategy;
     use riff_gui::ui::settings::{
-        LibraryRow, SettingsAction, SettingsContent, SettingsSection,
-        apply_set_missing_artwork_strategy, show_settings_modal,
+        LibraryRow, SettingsAction, SettingsContent, SettingsSection, show_settings_modal,
     };
     use std::path::PathBuf;
-
-    /// `apply_set_missing_artwork_strategy` writes the new strategy to the
-    /// Library Session; the frame-end `Preferences` diff commit makes it
-    /// durable. Today the only variant is `GeneratedColour`, so re-asserting
-    /// it is tautological — the test pins the wiring for the day a second
-    /// variant is added (the test will then exercise a non-default value).
-    #[test]
-    fn test_apply_set_missing_artwork_strategy_updates_the_session() {
-        let mut library = LibrarySession::default();
-
-        // Sanity: the session starts at the default strategy.
-        assert_eq!(
-            library.scan_prefs.missing_artwork_strategy,
-            MissingArtworkStrategy::GeneratedColour,
-            "the default strategy is the only variant today"
-        );
-
-        apply_set_missing_artwork_strategy(MissingArtworkStrategy::GeneratedColour, &mut library);
-
-        assert_eq!(
-            library.scan_prefs.missing_artwork_strategy,
-            MissingArtworkStrategy::GeneratedColour,
-            "the handler mirrors the new strategy into the Library Session"
-        );
-    }
 
     /// The "Reset to defaults" button was removed (plan #2): the action must
     /// not be a variant of `SettingsAction`, and the modal must not render a
@@ -7528,6 +7469,7 @@ mod browser_column_ui_tests {
                         title: Some("Tomorrow's Harvest"),
                         subtitle: Some("Boards of Canada \u{b7} 2013"),
                         details: &details,
+                        single: false,
                         queue: false,
                     };
                     show_selection_panel(ui, &mut cache, &palette, panel, actions);
@@ -7596,6 +7538,7 @@ mod browser_column_ui_tests {
                         title: None,
                         subtitle: None,
                         details: &[],
+                        single: false,
                         queue: false,
                     };
                     show_selection_panel(ui, &mut cache, &palette, panel, actions);
@@ -7696,6 +7639,7 @@ mod browser_column_ui_tests {
                         title: Some("Tomorrow's Harvest"),
                         subtitle: Some("Boards of Canada \u{b7} 2013"),
                         details: &[],
+                        single: false,
                         queue: true,
                     };
                     show_selection_panel(ui, &mut cache, &palette, panel, actions);
@@ -7717,6 +7661,71 @@ mod browser_column_ui_tests {
             harness.state(),
             &vec![SelectionAction::Queue, SelectionAction::PlayAlbum],
             "each button in the quick-action row reports its action"
+        );
+    }
+
+    #[test]
+    fn test_track_readout_play_plays_just_that_one_track() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::app::apply_selection_action;
+        use riff_gui::ui::selection::{SelectionAction, SelectionPanel, show_selection_panel};
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 640.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<SelectionAction>| {
+                    let panel = SelectionPanel {
+                        art: None,
+                        title: Some("Magic Window"),
+                        subtitle: Some("Boards of Canada"),
+                        details: &[],
+                        single: true,
+                        queue: true,
+                    };
+                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // A single-track readout's primary action reads Play (never Play
+        // album): the detail panel shows one track, so the button plays just
+        // that one.
+        assert!(
+            harness.query_by_label("Play").is_some(),
+            "the track readout's primary action is labeled Play"
+        );
+        assert!(
+            harness.query_by_label("Play album").is_none(),
+            "the track readout offers no Play album action"
+        );
+        harness.get_by_label("Play").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![SelectionAction::PlayAlbum],
+            "the track readout's Play reports the play action"
+        );
+
+        // The reported action starts exactly that one track — the batch the
+        // panel resolves for a track readout is the single track, so nothing
+        // queues behind it.
+        let transport = crate::mocks::MockTransport::new();
+        apply_selection_action(
+            SelectionAction::PlayAlbum,
+            &transport,
+            &[TrackId("t1.mp3".to_string())],
+        );
+        assert_eq!(
+            transport.recorded(),
+            vec![crate::mocks::TransportIntent::PlayMany(
+                TrackId("t1.mp3".to_string()),
+                vec![],
+            )],
+            "a track readout's Play starts only that track"
         );
     }
 
@@ -7847,6 +7856,34 @@ mod browser_column_ui_tests {
             content.track_ids,
             vec![t1.id.clone()],
             "the track batch is the single track"
+        );
+
+        // A track single-clicked in the album's Tracks column wins over the
+        // album in the drill-down path: the detail panel shows the track's
+        // readout, not the album's.
+        let library = riff_backend::app::state::LibrarySession {
+            library_section: LibrarySection::Albums,
+            browser_path: vec![BrowserSelection::Album {
+                artist: "Boards of Canada".to_string(),
+                title: "Geogaddi".to_string(),
+            }],
+            selected_track: Some(t1.id.clone()),
+            ..riff_backend::app::state::LibrarySession::default()
+        };
+        let content = resolve_inspector(&mut views, &library);
+        assert!(
+            content.visible,
+            "a track clicked in the Tracks column shows the inspector"
+        );
+        assert_eq!(
+            content.kind,
+            InspectorKind::Track,
+            "the clicked track's readout wins over the album's"
+        );
+        assert_eq!(
+            content.title.as_deref(),
+            Some("Magic Window"),
+            "the detail panel resolves the clicked track's title"
         );
 
         // No selection at all: the inspector is fully hidden.
@@ -8044,6 +8081,7 @@ mod browser_column_ui_tests {
                         title: Some("Tomorrow's Harvest"),
                         subtitle: Some("Boards of Canada \u{b7} 2013"),
                         details: &[],
+                        single: false,
                         queue: false,
                     };
                     show_selection_panel(ui, &mut cache, &palette, panel, actions);
@@ -8166,6 +8204,7 @@ mod browser_column_ui_tests {
                                 title: Some("Tomorrow's Harvest"),
                                 subtitle: None,
                                 details: &[],
+                                single: false,
                                 queue: false,
                             };
                             riff_gui::ui::selection::show_selection_panel(

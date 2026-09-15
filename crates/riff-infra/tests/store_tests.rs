@@ -31,10 +31,11 @@ fn test_store_fresh_start_creates_file_and_applies_initial_migration_once() {
         .expect("reading schema_migrations must work");
     // The shipped initial set: v1 (foundation) + v2 (typed settings tables)
     // + v3 (playlists) + v4 (library collection) + v5 (playback prefs)
-    // + v6 (track favorites) + v7 (browser layout) + v8 (library scan prefs).
+    // + v6 (track favorites) + v7 (browser layout) + v8 (library scan prefs)
+    // + v9 (smart lists collapsed) + v10 (drop the missing-artwork strategy).
     assert_eq!(
         applied.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     );
 }
 
@@ -96,10 +97,10 @@ fn test_store_double_apply_is_idempotent() {
             mapped.collect()
         })
         .expect("reading schema_migrations must work");
-    assert_eq!(rows.len(), 8, "no duplicate migration rows allowed");
+    assert_eq!(rows.len(), 10, "no duplicate migration rows allowed");
     assert_eq!(
         rows.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     );
 
     let applied_at: i64 = store
@@ -114,6 +115,73 @@ fn test_store_double_apply_is_idempotent() {
     assert_eq!(
         applied_at, 777,
         "idempotent re-apply must not touch existing rows"
+    );
+}
+
+/// Migration 010 removes the missing-artwork strategy column (the generated
+/// colour placeholder feature). Simulate a store that predates the migration
+/// — un-apply 010 and re-add the old column — then reopen through the full
+/// migration path: the column must drop and the surviving scalars must carry
+/// over untouched.
+#[test]
+fn test_store_migration_010_drops_the_missing_artwork_strategy_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+
+    // A fully migrated fresh store is the base: every scalar at defaults.
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    // Roll back to the 009-era state: forget migration 010 and restore the
+    // column exactly as migration 008 created it, plus some non-default
+    // scalars that 010's table rebuild must preserve.
+    store
+        .with_connection(|conn| {
+            conn.execute_batch(
+                "DELETE FROM schema_migrations WHERE version = 10;
+                 ALTER TABLE app_settings
+                   ADD COLUMN missing_artwork_strategy TEXT NOT NULL DEFAULT 'generated_colour'
+                     CHECK (missing_artwork_strategy IN ('generated_colour'));
+                 UPDATE app_settings
+                   SET volume = 0.42, shuffle = 1, smart_lists_collapsed = 1;",
+            )
+        })
+        .expect("rolling back to the 009-era schema must work");
+    drop(store);
+
+    // Reopening applies only the pending migration 010: the table is rebuilt
+    // without the column and the remaining scalars ride along.
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let upgraded = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let columns: Vec<String> = upgraded
+        .with_connection(|conn| {
+            let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('app_settings')")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect()
+        })
+        .expect("reading the settings table's columns must work");
+    assert!(
+        !columns
+            .iter()
+            .any(|column| column == "missing_artwork_strategy"),
+        "migration 010 must drop the missing-artwork column"
+    );
+
+    let scalars = upgraded
+        .load_settings()
+        .expect("loading settings from the upgraded store must work")
+        .scalars;
+    assert_eq!(
+        scalars.volume,
+        Some(0.42),
+        "the rebuild must preserve volume"
+    );
+    assert!(scalars.shuffle, "the rebuild must preserve shuffle");
+    assert!(
+        scalars.smart_lists_collapsed,
+        "the rebuild must preserve smart-lists collapsed"
     );
 }
 
@@ -152,7 +220,7 @@ fn test_store_checksum_tamper_is_fatal() {
         })
         .expect("reading schema_migrations must work");
     assert_eq!(
-        rows, 8,
+        rows, 10,
         "all shipped migration rows must exist, none re-applied"
     );
 }
@@ -372,6 +440,7 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
         assert!(!settings.scalars.advanced_mode);
         assert!(!settings.scalars.high_contrast);
         assert!(!settings.scalars.replaygain_enabled);
+        assert!(!settings.scalars.smart_lists_collapsed);
     }
 
     // Change every scalar and drop the connection (the "restart").
@@ -389,6 +458,7 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
                 shuffle: true,
                 repeat_mode: 2,
                 browser_layout: 1,
+                smart_lists_collapsed: true,
                 ..riff_persistence::store::ScalarSettings::default()
             })
             .expect("saving scalars must work");
@@ -409,6 +479,7 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
     assert!(settings.scalars.shuffle);
     assert_eq!(settings.scalars.repeat_mode, 2);
     assert_eq!(settings.scalars.browser_layout, 1);
+    assert!(settings.scalars.smart_lists_collapsed);
 }
 
 #[test]
@@ -478,7 +549,7 @@ fn test_store_library_paths_and_watch_states_roundtrip_across_reopen() {
 
 // --- Application Store: Library scan settings (design-handoff issue 12) ------
 
-use riff_persistence::store::{AUDIO_EXTENSIONS, FullScanSummary, MissingArtworkStrategy};
+use riff_persistence::store::{AUDIO_EXTENSIONS, FullScanSummary};
 
 #[test]
 fn test_store_library_scan_settings_roundtrip_across_reopen() {
@@ -486,8 +557,7 @@ fn test_store_library_scan_settings_roundtrip_across_reopen() {
     let db_path = dir.path().join("riff.sqlite3");
 
     // Fresh store: the scanner defaults — hidden files skipped, every
-    // supported format indexed, embedded artwork read, generated-colour
-    // placeholder for missing art.
+    // supported format indexed, embedded artwork read.
     {
         let (changes_tx, _changes_rx) =
             crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
@@ -498,10 +568,6 @@ fn test_store_library_scan_settings_roundtrip_across_reopen() {
         assert!(settings.scalars.skip_hidden_files);
         assert_eq!(settings.scalars.scan_formats.len(), AUDIO_EXTENSIONS.len());
         assert!(settings.scalars.read_embedded_artwork);
-        assert_eq!(
-            settings.scalars.missing_artwork_strategy,
-            MissingArtworkStrategy::GeneratedColour
-        );
     }
 
     // Change the library scan settings and drop the connection ("restart").
@@ -2432,13 +2498,19 @@ fn test_genre_semicolon_split_yields_independent_entries() {
     // Browsing by any single entry finds the multi-tag track.
     let rock_artists = store.artists_in_genre("Rock").expect("genre artists query");
     assert_eq!(
-        rock_artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+        rock_artists
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>(),
         ["Alpha"],
         "the Rock;Jazz and Rock;;Punk tracks match Rock browsing; Indie Rock does not"
     );
     let jazz_artists = store.artists_in_genre("Jazz").expect("genre artists query");
     assert_eq!(
-        jazz_artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+        jazz_artists
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>(),
         ["Alpha", "Gamma"],
         "the same Rock;Jazz track also matches Jazz browsing"
     );
@@ -2472,7 +2544,10 @@ fn test_genre_semicolon_split_yields_independent_entries() {
 
     // The sidebar total counts entries, not raw tags.
     let counts = store.library_counts().expect("library counts query");
-    assert_eq!(counts.genres, 4, "distinct split entries across the library");
+    assert_eq!(
+        counts.genres, 4,
+        "distinct split entries across the library"
+    );
 }
 
 #[test]

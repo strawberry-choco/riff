@@ -192,10 +192,25 @@ const VALUE_COL_W: f32 = 52.0;
 /// Column width of the track table's favorite control.
 const FAVORITE_COL_W: f32 = 24.0;
 
+/// Horizontal gap between the track table's five columns.
+const TABLE_SPACING_X: f32 = 12.0;
+
+/// The fixed columns' total width — favorite + number + the two value
+/// columns, plus the four gaps between the five columns — so the title
+/// column can wrap within whatever the table leaves over.
+const TRACK_TABLE_FIXED_W: f32 =
+    FAVORITE_COL_W + NUMBER_COL_W + 2.0 * VALUE_COL_W + 4.0 * TABLE_SPACING_X;
+
+/// Floor under the title column's wrap width: a pathologically narrow pane
+/// keeps a usable (still wrapping) title cell instead of collapsing it.
+const MIN_TITLE_WRAP: f32 = 60.0;
+
 /// The album's track table: `# / Title / Plays / Time`, one selectable row
 /// per track, each with its favorite control. Single click selects; double
 /// click starts the track — the same gestures every track listing in the
-/// app speaks.
+/// app speaks. The grid's `max_col_width` is the width the title column
+/// leaves over after the fixed columns, so over-long titles wrap to the
+/// next line instead of extending past the pane's edge and clipping.
 fn track_table(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -203,9 +218,11 @@ fn track_table(
     tracks: &[TrackRow],
     actions: &mut Vec<DetailAction>,
 ) {
+    let title_wrap = (ui.available_width() - TRACK_TABLE_FIXED_W).max(MIN_TITLE_WRAP);
     egui::Grid::new("detail_track_table")
         .num_columns(5)
-        .spacing([12.0, 2.0])
+        .spacing([TABLE_SPACING_X, 2.0])
+        .max_col_width(title_wrap)
         .show(ui, |ui| {
             let head = |text: &str| {
                 egui::RichText::new(text)

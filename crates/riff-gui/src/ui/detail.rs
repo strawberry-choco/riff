@@ -129,6 +129,9 @@ pub fn show_detail_column(
     column: DetailColumn<'_>,
     actions: &mut Vec<DetailAction>,
 ) {
+    // Resolved before the fields move out of `column` below.
+    let has_content =
+        column.header.is_some() || !column.tracks.is_empty() || !column.rows.is_empty();
     breadcrumb(ui, palette, column.breadcrumb, actions);
     if let Some(header) = column.header {
         album_header(ui, palette, header, actions);
@@ -141,6 +144,12 @@ pub fn show_detail_column(
         if response.clicked() {
             actions.push(DetailAction::SelectRow(row.key.clone()));
         }
+    }
+    // Nothing to render (no album selected yet, or a level with no entries):
+    // the column says so under its breadcrumb instead of going blank. Every
+    // app call site passes copy for this case.
+    if !has_content {
+        super::browser::empty_state(ui, palette, column.empty_title, column.empty_hint);
     }
 }
 

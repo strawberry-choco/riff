@@ -151,6 +151,11 @@ run. The harness enforces several rules; keep them when adding goldens:
   no failing test, no image diff, green on the next run. The cap costs a few
   seconds of suite time and removed the crash. If it ever recurs, lower the
   cap rather than chasing pixels.
+  **It has recurred** (measured 2026-09-16, three golden-only runs crashed 3/3
+  at the cap of 4 — and those runs spawn no runtime workers, so the crash is
+  the harness block and not application teardown). See
+  [./access-violation-flake.md](./access-violation-flake.md) for the run matrix
+  and the open questions; lowering the cap is the next thing to try.
 - **Baselines are machine-local.** wgpu picks different adapters/backends on
   different machines, and tiny driver-level differences can exceed the
   default per-pixel tolerance. Treat committed baselines as authored *on your

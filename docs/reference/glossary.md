@@ -8,6 +8,7 @@ This glossary defines the recurring terms used across riff's documentation and s
 |---|---|
 | **Album Artist** | The primary artist credited for an album, distinct from track-specific artists (for example, on compilations where each track has a different artist). |
 | **ALSA** | Advanced Linux Sound Architecture — the Linux kernel audio subsystem. `cpal` uses it as the audio backend on Linux, and ALSA development headers are commonly required to compile riff there. |
+| **App Runtime** | The composed application produced by one `AppRuntime::spawn` call in the Composition Root. `spawn` returns it as two halves: the `AppRuntime` the frontend renders with, and a `RuntimeLifecycle` that owns the six worker threads along with the stop flags and cancel flag that end them — so the process that spawns the workers is also the process that joins them. Shutdown is an explicit `RuntimeLifecycle::shutdown` call, never a destructor. |
 | **AppState** | Retired name for the former single shared application-state struct. The backend crate split (ADR 0009) replaced it with two session structs — `PlaybackSession` (in `riff-playback`) and `LibrarySession` (in `riff-backend`) — each shared across threads behind its own `Arc<Mutex<>>`. |
 | **Arc/Mutex** | Standard concurrency primitives for shared ownership (`Arc`) and interior mutability (`Mutex`). riff shares `PlaybackSession` and `LibrarySession` as `Arc<Mutex<_>>`, along with the backend event inbox; the audio buffer between the decode loop and the cpal callback is a lock-free `ringbuf` SPSC ring inside the output adapter. |
 | **Codec** | A software component that encodes or decodes audio data in a specific format (MP3, AAC, Opus, FLAC, etc.). |
@@ -43,7 +44,7 @@ The same terms grouped thematically, to help you find related concepts:
 - **Audio output backends:** cpal, WASAPI, ALSA, CoreAudio.
 - **UI framework:** egui, eframe, egui-elegance.
 - **Library and state:** Application Store, Session Projection, Library, Clear Library, Playback Queue, TrackId, AppState.
-- **Architecture roles:** Composition Root, Port / Trait.
+- **Architecture roles:** Composition Root, App Runtime, Port / Trait.
 - **Concurrency and messaging:** Arc/Mutex, crossbeam channel.
 - **System integration and files:** notify, rfd.
 - **Supporting libraries:** lofty, image (cover decoding), walkdir (scanning).

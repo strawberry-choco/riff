@@ -27,7 +27,7 @@ riff-gui (frontend, `riff` binary)
 - **`riff-library`** — the collection capability: scan-side Track construction, the Library Scan Service, Library Session Projections, playlist management, cover resolution and service, its port traits (`MetadataReader`, `MetadataWriter`, `CoverLoader`, `FilesystemWatch`), and `LibraryError`. Sibling of `riff-playback` — no edge between them.
 - **`riff-playback`** — the playback capability: the Playback Queue, playback command/update types, the audio engine (pure Rust over its ports), gapless math, the Playback Coordinator, the `Transport` trait + `ChannelTransport` (with its optional dispatch-recorder hook), its port traits (`AudioDecoder`, `DecoderFactory`, `AudioOutput`), `PlaybackError`, the `PlaybackSession`, and the Up Next read model.
 - **`riff-infra`** — every port implementation and every native/external dependency (`rusqlite` bundled, `cpal`, `symphonia`, `lofty`, `image`, `walkdir`, `notify`), with internal seams store / audio / media / filesystem. Membership rule: an item belongs here iff it implements a port defined in another crate or wraps a native/external dependency.
-- **`riff-backend`** — the application API: the Backend Events inbox (record + drain + two subscriptions + typed-notice stamping), the app-layer services (Session Views, Tag Edit service, Watcher Manager), the `LibrarySession`, the re-export surface that keeps historical `riff_backend::` paths resolving, and the Composition Root (`composition.rs` — the only place that names both ports and concrete adapters, and the owner of the worker threads).
+- **`riff-backend`** — the application API: the Backend Events inbox (record + drain + two subscriptions + typed-notice stamping), the app-layer services (Session Views, Tag Edit service, Watcher Manager), the `LibrarySession`, the re-export surface that keeps historical `riff_backend::` paths resolving, and the Composition Root (`composition.rs` — the only place that names both ports and concrete adapters, and the owner of the worker threads' whole lifecycle).
 - **`riff-gui`** — the frontend: egui UI, tray icon, native dialogs, fonts, and the `riff` binary, which is a thin composition over `riff_backend::composition::AppRuntime::spawn`.
 
 Domain types (`Track`, `TrackId`, `PlaybackQueue`, …) live in `riff-persistence` and `riff-playback` and import nothing from app, infra, or UI code. Each slice codes against its own port traits; `riff-infra` implements them; dependency arrows point adapters → slices.
@@ -36,7 +36,7 @@ Inside the slices, the layering is preserved as module convention: `domain/` (pu
 
 ## Threading Model
 
-Worker threads are spawned by the Composition Root (`crates/riff-backend/src/composition.rs`):
+Worker threads are spawned and joined by the Composition Root (`crates/riff-backend/src/composition.rs`): `AppRuntime::spawn` returns `(AppRuntime, RuntimeLifecycle)` — the handles the frontend renders with, and the worker threads plus the flags that end them. `RuntimeLifecycle::shutdown` is explicit and idempotent, and joins in dependency order (audio engine first, since its exit disconnects the coordinator).
 
 - **Main thread** — egui event loop (`riff-gui`). Must not block.
 - **Audio engine thread** — `AudioEngine::run` (`crates/riff-playback/src/infra/audio_engine.rs`). Reads `PlaybackCommand` from a channel, sends `PlaybackUpdate` back.
@@ -46,7 +46,7 @@ Worker threads are spawned by the Composition Root (`crates/riff-backend/src/com
 - **Tag-edit worker thread** — `TagEditWorker` writes tag edits via lofty and commits store facts as one durable change.
 - **Cover worker thread** — `CoverService` worker resolves and decodes cover art in the background.
 
-Cross-thread communication: `crossbeam_channel::unbounded()` for all message passing. Shared state: `Arc<Mutex<PlaybackSession>>` and `Arc<Mutex<LibrarySession>>` (one mutex per session — never nested), `Arc<Mutex<BackendEvents>>`, an `Arc<AtomicBool>` cancel flag for library scans, and a quit flag. The audio ring buffer between decode loop and cpal callback lives inside `riff-infra`'s output adapter.
+Cross-thread communication: `crossbeam_channel::unbounded()` for all message passing. Shared state: `Arc<Mutex<PlaybackSession>>` and `Arc<Mutex<LibrarySession>>` (one mutex per session — never nested), `Arc<Mutex<BackendEvents>>`, an `Arc<AtomicBool>` cancel flag for library scans, one `Arc<AtomicBool>` stop flag per request-channel worker (engine, scan, tag-edit, cover), and a quit flag. The audio ring buffer between decode loop and cpal callback lives inside `riff-infra`'s output adapter.
 
 ## Platform-Specific Code
 

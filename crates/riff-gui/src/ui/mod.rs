@@ -8,6 +8,7 @@ pub mod icons;
 pub mod library;
 pub mod now_playing;
 pub mod playerbar;
+pub mod prompts;
 pub mod selection;
 pub mod settings;
 pub mod sidebar;

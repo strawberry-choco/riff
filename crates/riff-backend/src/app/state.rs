@@ -89,7 +89,7 @@ pub use riff_playback::domain::{
 };
 
 /// Re-exported from `riff_persistence::store`.
-pub use riff_persistence::store::{MissingArtworkStrategy, ScalarSettings, WatchState};
+pub use riff_persistence::store::{ScalarSettings, WatchState};
 
 /// The Library Scan preferences the Settings Library pane drives
 /// (design-handoff issue 12), hydrated from the Application Store's scalar
@@ -104,8 +104,6 @@ pub struct ScanPrefs {
     pub scan_formats: Vec<String>,
     /// Read artwork embedded in track tags before filesystem fallbacks.
     pub read_embedded_artwork: bool,
-    /// What renders for Tracks and Albums with no artwork.
-    pub missing_artwork_strategy: MissingArtworkStrategy,
 }
 
 impl Default for ScanPrefs {
@@ -117,7 +115,6 @@ impl Default for ScanPrefs {
                 .map(|extension| (*extension).to_string())
                 .collect(),
             read_embedded_artwork: true,
-            missing_artwork_strategy: MissingArtworkStrategy::default(),
         }
     }
 }
@@ -189,6 +186,9 @@ pub struct UiFlags {
     /// high-contrast theme (extreme text, strong borders, bright focus
     /// outlines) as a variant over the regular light/dark palette.
     pub high_contrast: bool,
+    /// `true` = the Smart Lists sidebar section is folded to its header
+    /// (persisted display preference, restored on launch).
+    pub smart_lists_collapsed: bool,
     /// `true` = compact list density; `false` = comfortable density.
     pub compact_density: bool,
     /// `true` = show track numbers in the list.
@@ -246,10 +246,13 @@ impl LibrarySession {
     /// Select an entity at drill-down level `level`: truncates the path to
     /// its first `level` entries (dropping any deeper ones) and appends
     /// `selection`, so the path ends at `level + 1` entries with the new
-    /// selection deepest.
+    /// selection deepest. An entity selection also clears the selected track:
+    /// the two selections are mutually exclusive, so the detail panel follows
+    /// whichever the user clicked last — a track row or an entity row.
     pub fn select_at(&mut self, level: usize, selection: BrowserSelection) {
         self.browser_path.truncate(level);
         self.browser_path.push(selection);
+        self.selected_track = None;
     }
 
     /// The deepest entity in the drill-down path — the selection the detail

@@ -12,8 +12,8 @@ use riff_persistence::errors::StoreError;
 use riff_persistence::playlist::{Playlist, PlaylistId};
 use riff_persistence::store::{
     FullScanSummary, LOST_GEMS_THRESHOLD, LibraryCounts, LibraryMutationStore, LibraryQueryStore,
-    MissingArtworkStrategy, PlaylistEntry, PlaylistStore, ScalarSettings, Settings, SettingsStore,
-    StoreChanged, StoreGeneration, StoreMigrations, WatchState,
+    PlaylistEntry, PlaylistStore, ScalarSettings, Settings, SettingsStore, StoreChanged,
+    StoreGeneration, StoreMigrations, WatchState,
 };
 use riff_persistence::track::{
     Album, Artist, GenreCount, SmartPlaylistKind, Track, TrackId, TrackMetadata,
@@ -64,6 +64,14 @@ static MIGRATION_CHECKSUMS: &[(&str, &str)] = &[
     (
         "008_library_scan_prefs",
         "4f0d61c2b1a3e2f8c9d5e7a6b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5",
+    ),
+    (
+        "009_smart_lists_collapsed",
+        "c922ef2496e210e5a7c8aed8c43e0c027dfa55fe330801d6f5d88683984113ee",
+    ),
+    (
+        "010_drop_missing_artwork_strategy",
+        "276a52aa96ff1fa936a47b702bcfb923c971a9f6803fdd6b26ea270adbf7ca1a",
     ),
 ];
 
@@ -223,6 +231,50 @@ const MIGRATIONS: &[Migration] = &[
         ALTER TABLE app_settings
           ADD COLUMN missing_artwork_strategy TEXT NOT NULL DEFAULT 'generated_colour'
             CHECK (missing_artwork_strategy IN ('generated_colour'));",
+    },
+    Migration {
+        version: 9,
+        name: "009_smart_lists_collapsed",
+        // The Smart Lists sidebar section's collapse toggle (persistent UI
+        // preference): folded away means the section header shows only.
+        // Mirrors the other scalar boolean display prefs; default 0 keeps
+        // existing stores expanded.
+        sql: "ALTER TABLE app_settings
+          ADD COLUMN smart_lists_collapsed INTEGER NOT NULL DEFAULT 0 CHECK (smart_lists_collapsed IN (0, 1));",
+    },
+    Migration {
+        version: 10,
+        name: "010_drop_missing_artwork_strategy",
+        // The missing-artwork strategy setting is removed (the generated
+        // colour placeholder was dropped with the feature). SQLite refuses to
+        // DROP a column used by a CHECK constraint, so the settings row is
+        // rebuilt without the column; every other scalar carries over as-is.
+        sql: "CREATE TABLE app_settings_new (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          volume REAL,
+          advanced_mode INTEGER NOT NULL DEFAULT 0 CHECK (advanced_mode IN (0, 1)),
+          high_contrast INTEGER NOT NULL DEFAULT 0 CHECK (high_contrast IN (0, 1)),
+          replaygain_enabled INTEGER NOT NULL DEFAULT 0 CHECK (replaygain_enabled IN (0, 1)),
+          shuffle INTEGER NOT NULL DEFAULT 0 CHECK (shuffle IN (0, 1)),
+          repeat_mode INTEGER NOT NULL DEFAULT 0 CHECK (repeat_mode IN (0, 1, 2)),
+          browser_layout INTEGER NOT NULL DEFAULT 0 CHECK (browser_layout IN (0, 1)),
+          skip_hidden_files INTEGER NOT NULL DEFAULT 1 CHECK (skip_hidden_files IN (0, 1)),
+          scan_formats TEXT NOT NULL DEFAULT 'mp3,m4a,aac,opus,ogg,flac,wav',
+          read_embedded_artwork INTEGER NOT NULL DEFAULT 1 CHECK (read_embedded_artwork IN (0, 1)),
+          smart_lists_collapsed INTEGER NOT NULL DEFAULT 0 CHECK (smart_lists_collapsed IN (0, 1))
+        );
+        INSERT INTO app_settings_new (
+          id, volume, advanced_mode, high_contrast, replaygain_enabled,
+          shuffle, repeat_mode, browser_layout, skip_hidden_files, scan_formats,
+          read_embedded_artwork, smart_lists_collapsed
+        )
+        SELECT
+          id, volume, advanced_mode, high_contrast, replaygain_enabled,
+          shuffle, repeat_mode, browser_layout, skip_hidden_files, scan_formats,
+          read_embedded_artwork, smart_lists_collapsed
+        FROM app_settings;
+        DROP TABLE app_settings;
+        ALTER TABLE app_settings_new RENAME TO app_settings;",
     },
 ];
 
@@ -1831,10 +1883,8 @@ impl LibraryQueryStore for SqliteStore {
                    AND genre IS NOT NULL AND genre != ''
                  ORDER BY COALESCE(track_number, 0) ASC, path ASC"
             ))?;
-            let rows = stmt.query_map(
-                rusqlite::params![album_artist, album_title],
-                track_from_row,
-            )?;
+            let rows =
+                stmt.query_map(rusqlite::params![album_artist, album_title], track_from_row)?;
             let tracks = rows.collect::<Result<Vec<_>, _>>()?;
             Ok(tracks
                 .into_iter()
@@ -2263,12 +2313,11 @@ impl SettingsStore for SqliteStore {
                     "SELECT volume, advanced_mode, high_contrast, replaygain_enabled,
                             shuffle, repeat_mode, browser_layout,
                             skip_hidden_files, scan_formats, read_embedded_artwork,
-                            missing_artwork_strategy
+                            smart_lists_collapsed
                      FROM app_settings WHERE id = 1",
                     [],
                     |row| {
                         let scan_formats: String = row.get(8)?;
-                        let missing_artwork: String = row.get(10)?;
                         Ok(ScalarSettings {
                             volume: row.get(0)?,
                             advanced_mode: row.get::<_, i64>(1)? != 0,
@@ -2284,16 +2333,7 @@ impl SettingsStore for SqliteStore {
                                 .map(str::to_string)
                                 .collect(),
                             read_embedded_artwork: row.get::<_, i64>(9)? != 0,
-                            missing_artwork_strategy: match missing_artwork.as_str() {
-                                "generated_colour" => MissingArtworkStrategy::GeneratedColour,
-                                other => {
-                                    return Err(rusqlite::Error::FromSqlConversionFailure(
-                                        10,
-                                        rusqlite::types::Type::Text,
-                                        format!("unknown missing-artwork strategy: {other}").into(),
-                                    ));
-                                }
-                            },
+                            smart_lists_collapsed: row.get::<_, i64>(10)? != 0,
                         })
                     },
                 )
@@ -2342,7 +2382,7 @@ impl SettingsStore for SqliteStore {
                  SET volume = ?1, advanced_mode = ?2, high_contrast = ?3,
                      replaygain_enabled = ?4, shuffle = ?5, repeat_mode = ?6,
                      browser_layout = ?7, skip_hidden_files = ?8, scan_formats = ?9,
-                     read_embedded_artwork = ?10, missing_artwork_strategy = ?11
+                     read_embedded_artwork = ?10, smart_lists_collapsed = ?11
                  WHERE id = 1",
                 rusqlite::params![
                     scalars.volume,
@@ -2355,9 +2395,7 @@ impl SettingsStore for SqliteStore {
                     i64::from(scalars.skip_hidden_files),
                     scalars.scan_formats.join(","),
                     i64::from(scalars.read_embedded_artwork),
-                    match scalars.missing_artwork_strategy {
-                        MissingArtworkStrategy::GeneratedColour => "generated_colour",
-                    },
+                    i64::from(scalars.smart_lists_collapsed),
                 ],
             );
             match result {

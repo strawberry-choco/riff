@@ -5,9 +5,7 @@ use riff_backend::app::MutexExt;
 use riff_backend::app::state::{
     LibrarySession, LibraryStatus, PlaybackSession, ViewMode, WatchState,
 };
-use riff_backend::app::store::{
-    AUDIO_EXTENSIONS, FullScanSummary, MissingArtworkStrategy, SettingsStore,
-};
+use riff_backend::app::store::{AUDIO_EXTENSIONS, FullScanSummary, SettingsStore};
 use std::path::{Path, PathBuf};
 
 /// Expand a leading `~/` (or a bare `~`) in `input` against the `HOME`
@@ -164,25 +162,19 @@ impl Readiness {
 /// mockup's nav order and drives focus order, so keep it authoritative.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SettingsSection {
-    General,
     Library,
     Playback,
     Appearance,
-    Shortcuts,
-    TagEditing,
     Advanced,
     About,
 }
 
 impl SettingsSection {
     /// Every section in left-nav (and focus) order.
-    pub const ALL: [SettingsSection; 8] = [
-        Self::General,
+    pub const ALL: [SettingsSection; 5] = [
         Self::Library,
         Self::Playback,
         Self::Appearance,
-        Self::Shortcuts,
-        Self::TagEditing,
         Self::Advanced,
         Self::About,
     ];
@@ -191,12 +183,9 @@ impl SettingsSection {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::General => "General",
             Self::Library => "Library",
             Self::Playback => "Playback",
             Self::Appearance => "Appearance",
-            Self::Shortcuts => "Shortcuts",
-            Self::TagEditing => "Tag editing",
             Self::Advanced => "Advanced",
             Self::About => "About",
         }
@@ -338,8 +327,6 @@ pub struct SettingsContent {
     pub scan_formats: Vec<String>,
     /// Whether embedded artwork is read before filesystem fallbacks.
     pub read_embedded_artwork: bool,
-    /// What renders for Tracks and Albums with no artwork.
-    pub missing_artwork_strategy: MissingArtworkStrategy,
     /// The last completed full scan's summary, `None` when never scanned.
     pub last_scan: Option<FullScanSummary>,
 }
@@ -380,24 +367,6 @@ pub enum SettingsAction {
     SetFormat(String, bool),
     /// Set the "Read embedded artwork" preference.
     SetReadEmbeddedArtwork(bool),
-    /// Set the missing-artwork strategy. No UI control ships today (the
-    /// enum has one variant); the action exists for forward compatibility —
-    /// the next variant added here needs both a `Set…` arm in
-    /// `apply_settings_action` and a matching UI control.
-    SetMissingArtworkStrategy(MissingArtworkStrategy),
-}
-
-/// Apply [`SettingsAction::SetMissingArtworkStrategy`]: write the new
-/// strategy to the Library Session; the frame-end `Preferences` commit makes
-/// it durable. `pub` so integration tests in `tests/` can drive the handler
-/// without constructing a `RiffApp` (the rest of `apply_settings_action`'s
-/// arms need the full app — only the scalar preferences are testable
-/// headlessly).
-pub fn apply_set_missing_artwork_strategy(
-    strategy: MissingArtworkStrategy,
-    library: &mut LibrarySession,
-) {
-    library.scan_prefs.missing_artwork_strategy = strategy;
 }
 
 // --- Mockup dimensions ---------------------------------------------------------
@@ -1932,7 +1901,6 @@ impl super::app::RiffApp {
             skip_hidden_files: library.scan_prefs.skip_hidden_files,
             scan_formats: library.scan_prefs.scan_formats.clone(),
             read_embedded_artwork: library.scan_prefs.read_embedded_artwork,
-            missing_artwork_strategy: library.scan_prefs.missing_artwork_strategy,
             last_scan: self.views.last_full_scan_summary(),
         };
 
@@ -2026,13 +1994,10 @@ impl super::app::RiffApp {
             }
             SettingsAction::SetReadEmbeddedArtwork(value) => {
                 library.scan_prefs.read_embedded_artwork = value;
-                // Drop the generated cover blocks (issue 14): the tracks
-                // behind them were resolved as artless under the old
-                // policy, and only a fresh request lets real art surface.
+                // Drop the shared placeholder tile: the tracks behind it
+                // were resolved as artless under the old policy, and only a
+                // fresh request lets real art surface.
                 self.evict_generated_covers();
-            }
-            SettingsAction::SetMissingArtworkStrategy(s) => {
-                apply_set_missing_artwork_strategy(s, library);
             }
         }
     }

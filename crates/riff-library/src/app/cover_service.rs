@@ -3,15 +3,24 @@
 
 use crate::app::cover_resolver::CoverResolver;
 use crate::infra::ports::{CoverImage, CoverLoader, MetadataReader};
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use riff_persistence::track::TrackId;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 /// Max entries per cover cache (the UI's positive texture cache and this
 /// module's negative cache alike); the oldest entries are evicted LRU-style
 /// beyond this cap.
 pub const COVER_CACHE_CAP: usize = 50;
+
+/// How long [`CoverWorker::next_accepted`] waits for the next request before
+/// it looks at its stop flag. The worker is idle almost all the time, so the
+/// wait must expire: with a blocking `recv` the thread could never be asked
+/// to stop without dropping every [`CoverService`] front end first.
+const WORKER_POLL: Duration = Duration::from_millis(10);
 
 /// Insert `key` at the most-recently-used end of an LRU key list: an already
 /// present entry is moved to the end (no duplicates), and keys evicted beyond
@@ -51,6 +60,7 @@ impl CoverService {
         metadata_reader: Box<dyn MetadataReader>,
         cover_loader: Box<dyn CoverLoader>,
         policy: CoverPolicy,
+        stop: Arc<AtomicBool>,
     ) -> (Self, CoverWorker) {
         let (request_tx, request_rx) = unbounded();
         let (result_tx, result_rx) = unbounded();
@@ -67,6 +77,7 @@ impl CoverService {
                 backlog: VecDeque::new(),
                 pending: HashSet::new(),
                 negative: Vec::new(),
+                stop,
             },
         )
     }
@@ -96,9 +107,15 @@ pub struct CoverWorker {
     backlog: VecDeque<(TrackId, PathBuf)>,
     pending: HashSet<TrackId>,
     negative: Vec<TrackId>,
+    /// Cooperative stop request from the Composition Root; see
+    /// [`Self::next_accepted`].
+    stop: Arc<AtomicBool>,
 }
 
 impl CoverWorker {
+    /// Resolve covers until the request channel closes or the Composition
+    /// Root asks the worker to stop. Spawns nothing; run this on the
+    /// dedicated cover thread.
     pub fn run(mut self) {
         while let Some((track_id, path)) = self.next_accepted() {
             let read_embedded = (self.policy)();
@@ -118,12 +135,27 @@ impl CoverWorker {
         }
     }
 
+    /// The next request that survives dedup, or `None` when the worker has
+    /// been asked to stop or the request channel closed.
+    ///
+    /// The wait for a first request polls on [`WORKER_POLL`] rather than
+    /// blocking: an idle worker is the normal case, and the expiry is the
+    /// only moment it can notice a stop request. A tick that finds nothing
+    /// leaves the backlog, the pending set, and the negative cache exactly as
+    /// they were — the dedup semantics below are unchanged.
     fn next_accepted(&mut self) -> Option<(TrackId, PathBuf)> {
         loop {
-            if self.backlog.is_empty()
-                && let Ok(request) = self.request_rx.recv()
-            {
-                self.backlog.push_back(request);
+            if self.backlog.is_empty() {
+                match self.request_rx.recv_timeout(WORKER_POLL) {
+                    Ok(request) => self.backlog.push_back(request),
+                    Err(RecvTimeoutError::Timeout) => {
+                        if self.stop.load(Ordering::Relaxed) {
+                            return None;
+                        }
+                        continue;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => return None,
+                }
             }
             while let Ok(request) = self.request_rx.try_recv() {
                 self.backlog.push_back(request);

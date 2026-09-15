@@ -5822,6 +5822,75 @@ mod browser_column_ui_tests {
     }
 
     #[test]
+    fn test_overlong_row_label_wraps_and_grows_the_row() {
+        use egui_kittest::kittest::Queryable;
+
+        // A label too long for the column's text width wraps onto the next
+        // line and the row grows past the classic 48px slot instead of
+        // painting past the pane edge; a single-line row keeps the classic
+        // slot exactly.
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let items = vec![
+            BrowserItem {
+                key: "long".to_string(),
+                label: "A genre name far too long to fit the column's text width".to_string(),
+                detail: Some("12 tracks".to_string()),
+                thumbnail: None,
+                selected: false,
+                now_playing: false,
+            },
+            BrowserItem {
+                key: "short".to_string(),
+                label: "Jazz".to_string(),
+                detail: Some("5 tracks".to_string()),
+                thumbnail: None,
+                selected: false,
+                now_playing: false,
+            },
+        ];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(220.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<BrowserAction>| {
+                    let mut fixture_item = provider(&items);
+                    let column = BrowserColumn {
+                        layout: BrowserLayout::List,
+                        sort_desc: false,
+                        show_sort: false,
+                        genres: &[],
+                        genre_filter: None,
+                        total: items.len(),
+                        item: &mut fixture_item,
+                        empty_title: "",
+                        empty_hint: "",
+                    };
+                    riff_gui::ui::browser::show_browser_column(
+                        ui, &mut cache, &palette, column, actions,
+                    );
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        let long = harness
+            .query_by_label("A genre name far too long to fit the column's text width (12 tracks)")
+            .unwrap_or_else(|| panic!("the long row renders"));
+        assert!(
+            long.rect().height() > riff_gui::ui::browser::BROWSER_ROW_H,
+            "a wrapped label grows its row past the classic slot: {:?}",
+            long.rect()
+        );
+        let short = harness.get_by_label("Jazz (5 tracks)");
+        assert_eq!(
+            short.rect().height(),
+            riff_gui::ui::browser::BROWSER_ROW_H,
+            "a single-line row keeps the classic 48px slot"
+        );
+    }
+
+    #[test]
     fn test_browser_tiles_expose_their_detail_line_in_the_accessible_label() {
         use egui_kittest::kittest::Queryable;
 

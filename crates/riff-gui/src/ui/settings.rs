@@ -1787,7 +1787,7 @@ fn section_pane(
                             &[Preference::HighContrast],
                         );
                     }
-                    _ => {
+                    SettingsSection::About => {
                         ui.label(
                             egui::RichText::new(format!(
                                 "{} settings are not implemented yet.",

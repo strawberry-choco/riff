@@ -1,7 +1,9 @@
 //! The detail column (design-handoff issue 09): the middle pane of the
 //! three-pane explorer. A breadcrumb trail over the drilled path, the album
-//! header with **Play all** and **Shuffle**, and the album's track table
-//! (`# / Title / Plays / Time`) with a per-row favorite control.
+//! header with **Play all** and **Shuffle**, and the album's track list — one
+//! row per track with its favorite control, the same 40px
+//! [`super::sidebar::tree_row`] shape the All Tracks list speaks, with the
+//! `Plays · Time` cluster on the right.
 //!
 //! Pure widget seam, same discipline as [`crate::ui::browser`]: widgets
 //! paint from [`Palette`] tokens and report [`DetailAction`]s instead of
@@ -64,9 +66,6 @@ pub struct TrackRow {
     /// The track's [`riff_backend::domain::TrackId`] key — the selection,
     /// playback, and favorite identity for the row.
     pub key: String,
-    /// The tagged track number; `None` falls back to the row's 1-based
-    /// position in the table.
-    pub number: Option<u32>,
     pub title: String,
     /// Finished plays, straight from the store's play history.
     pub plays: u32,
@@ -78,6 +77,16 @@ pub struct TrackRow {
     pub now_playing: bool,
 }
 
+/// The row's right-aligned value cluster, `Plays · Time`.
+impl TrackRow {
+    fn meta(&self) -> super::sidebar::RowMeta {
+        super::sidebar::RowMeta {
+            plays: Some(self.plays),
+            time: self.duration,
+        }
+    }
+}
+
 /// One frame of the detail column: what to render and how.
 pub struct DetailColumn<'a> {
     /// The drilled path, root first, current level last.
@@ -85,8 +94,8 @@ pub struct DetailColumn<'a> {
     /// The album header block; `None` above the album level (artist and
     /// genre detail render entity rows instead).
     pub header: Option<&'a AlbumHeader>,
-    /// The album's track table (`# / Title / Plays / Time`); empty above
-    /// the album level.
+    /// The album's track list (the shared 40px track row, one per track);
+    /// empty above the album level.
     pub tracks: &'a [TrackRow],
     /// The entity rows below the album level: an artist's albums, or a
     /// genre's artists (the browser column's row shape, drilled down).
@@ -125,7 +134,7 @@ pub fn show_detail_column(
         album_header(ui, palette, header, actions);
     }
     if !column.tracks.is_empty() {
-        track_table(ui, cache, palette, column.tracks, actions);
+        track_list(ui, cache, palette, column.tracks, actions);
     }
     for row in column.rows {
         let response = super::browser::detail_entity_row(ui, cache, palette, row);
@@ -181,144 +190,61 @@ fn action_button(ui: &mut egui::Ui, palette: &Palette, text: &str, label: &str) 
     ui.add(button).on_hover_text(label).clicked()
 }
 
-/// Column width of the track table's `#` column: two to three digits of
-/// room without shoving the titles right.
-const NUMBER_COL_W: f32 = 28.0;
-
-/// Column width of the track table's `Plays` and `Time` columns so every
-/// row's values line up.
-const VALUE_COL_W: f32 = 52.0;
-
-/// Column width of the track table's favorite control.
+/// Column width of the track list's favorite control.
 const FAVORITE_COL_W: f32 = 24.0;
 
-/// Horizontal gap between the track table's five columns.
-const TABLE_SPACING_X: f32 = 12.0;
-
-/// The fixed columns' total width — favorite + number + the two value
-/// columns, plus the four gaps between the five columns — so the title
-/// column can wrap within whatever the table leaves over.
-const TRACK_TABLE_FIXED_W: f32 =
-    FAVORITE_COL_W + NUMBER_COL_W + 2.0 * VALUE_COL_W + 4.0 * TABLE_SPACING_X;
-
-/// Floor under the title column's wrap width: a pathologically narrow pane
-/// keeps a usable (still wrapping) title cell instead of collapsing it.
-const MIN_TITLE_WRAP: f32 = 60.0;
-
-/// The album's track table: `# / Title / Plays / Time`, one selectable row
-/// per track, each with its favorite control. Single click selects; double
-/// click starts the track — the same gestures every track listing in the
-/// app speaks. The grid's `max_col_width` is the width the title column
-/// leaves over after the fixed columns, so over-long titles wrap to the
-/// next line instead of extending past the pane's edge and clipping.
-fn track_table(
+/// The album's track list: one shared 40px track row per track — the same
+/// [`super::sidebar::tree_row`] shape the All Tracks list speaks — with the
+/// favorite control leading and the `Plays · Time` cluster on the right.
+/// Rows cull to the visible viewport; single click selects, double
+/// click starts the track, the same gestures every track listing in the app
+/// speaks.
+fn track_list(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
     tracks: &[TrackRow],
     actions: &mut Vec<DetailAction>,
 ) {
-    let title_wrap = (ui.available_width() - TRACK_TABLE_FIXED_W).max(MIN_TITLE_WRAP);
-    egui::Grid::new("detail_track_table")
-        .num_columns(5)
-        .spacing([TABLE_SPACING_X, 2.0])
-        .max_col_width(title_wrap)
-        .show(ui, |ui| {
-            let head = |text: &str| {
-                egui::RichText::new(text)
-                    .text_style(egui::TextStyle::Small)
-                    .color(palette.ink_3)
-            };
-            ui.add_sized([FAVORITE_COL_W, 18.0], egui::Label::new(""));
-            ui.add_sized([NUMBER_COL_W, 18.0], egui::Label::new(head("#")));
-            ui.add(egui::Label::new(head("Title")));
-            ui.add_sized([VALUE_COL_W, 18.0], egui::Label::new(head("Plays")));
-            ui.add_sized([VALUE_COL_W, 18.0], egui::Label::new(head("Time")));
-            ui.end_row();
-
-            for (i, track) in tracks.iter().enumerate() {
-                track_row(ui, cache, palette, i, track, actions);
-                ui.end_row();
+    let total = tracks.len();
+    egui::ScrollArea::vertical()
+        .id_salt("tracks_column_list")
+        .auto_shrink(false)
+        .show_rows(ui, super::sidebar::ROW_H, total, |ui, row_range| {
+            for i in row_range {
+                let Some(track) = tracks.get(i) else {
+                    continue;
+                };
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    favorite_control(ui, cache, palette, track, actions);
+                    let response = super::sidebar::tree_row(
+                        ui,
+                        cache,
+                        palette,
+                        super::sidebar::TreeRow {
+                            indent_level: 0,
+                            icon: None,
+                            cover: None,
+                            label: &track.title,
+                            count: None,
+                            meta: Some(track.meta()),
+                            selected: track.selected,
+                            now_playing: track.now_playing,
+                            playing: false,
+                            disclosure: None,
+                        },
+                    );
+                    if response.clicked() {
+                        actions.push(DetailAction::SelectTrack(track.key.clone()));
+                    }
+                    if response.double_clicked() {
+                        actions.push(DetailAction::SelectTrack(track.key.clone()));
+                        actions.push(DetailAction::PlayTrack(track.key.clone()));
+                    }
+                });
             }
         });
-}
-
-/// One row of the track table. The title cell is the row's click target
-/// and doubles as its accessibility label.
-fn track_row(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    index: usize,
-    track: &TrackRow,
-    actions: &mut Vec<DetailAction>,
-) {
-    favorite_control(ui, cache, palette, track, actions);
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "a listing position is a small non-negative count"
-    )]
-    let number = track.number.unwrap_or_else(|| index as u32 + 1).to_string();
-    ui.add_sized(
-        [NUMBER_COL_W, 20.0],
-        egui::Label::new(
-            egui::RichText::new(number)
-                .text_style(egui::TextStyle::Small)
-                .color(palette.ink_3),
-        ),
-    );
-
-    let title_color = if track.now_playing {
-        palette.brand_primary
-    } else {
-        palette.ink
-    };
-    let title = egui::Label::new(
-        egui::RichText::new(&track.title)
-            .text_style(egui::TextStyle::Body)
-            .color(title_color),
-    )
-    .sense(egui::Sense::click());
-    let response = ui.add(title);
-    // The title cell is a plain label — egui paints no focused state for it,
-    // so the keyboard-focus ring is painted here (handoff issue 16).
-    if let Some(ring) =
-        super::theme::focus_ring_stroke(palette, ui.memory(|m| m.has_focus(response.id)))
-    {
-        ui.painter().rect_stroke(
-            response.rect,
-            super::theme::RADIUS_SM,
-            ring,
-            egui::StrokeKind::Inside,
-        );
-    }
-    if response.clicked() {
-        actions.push(DetailAction::SelectTrack(track.key.clone()));
-    }
-    if response.double_clicked() {
-        actions.push(DetailAction::SelectTrack(track.key.clone()));
-        actions.push(DetailAction::PlayTrack(track.key.clone()));
-    }
-
-    ui.add_sized(
-        [VALUE_COL_W, 20.0],
-        egui::Label::new(
-            egui::RichText::new(track.plays.to_string())
-                .text_style(egui::TextStyle::Small)
-                .color(palette.ink_2),
-        ),
-    );
-    let time = track
-        .duration
-        .map_or_else(|| "\u{2014}".to_string(), super::playerbar::format_duration);
-    ui.add_sized(
-        [VALUE_COL_W, 20.0],
-        egui::Label::new(
-            egui::RichText::new(time)
-                .text_style(egui::TextStyle::Small)
-                .color(palette.ink_2),
-        ),
-    );
 }
 
 /// The row's favorite control (handoff issue 09): a heart in the brand tint

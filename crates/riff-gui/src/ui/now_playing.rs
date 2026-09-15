@@ -491,6 +491,7 @@ fn up_next_section(
                             cover: None,
                             label: &entry.label,
                             count: None,
+                            meta: None,
                             selected: false,
                             now_playing: false,
                             playing: false,

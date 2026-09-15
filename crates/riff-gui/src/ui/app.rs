@@ -650,6 +650,10 @@ impl RiffApp {
                 cover,
                 label,
                 count: None,
+                meta: Some(sidebar::RowMeta {
+                    plays: Some(track.play_count),
+                    time: track.duration,
+                }),
                 selected: is_selected,
                 now_playing: is_current,
                 playing: is_current && playing,
@@ -1249,7 +1253,7 @@ pub fn column_widths(available: f32, list_columns: usize, inspector: bool) -> Ve
 
 /// Resolve what the Tracks column renders for the current drill-down path:
 /// the breadcrumb trail (section root, then one crumb per path entry), and
-/// on the album level the album header plus its track table — genre-scoped
+/// on the album level the album header plus its track list — genre-scoped
 /// in the Genres section. Entity listings below the album level are their
 /// own columns in the stage, so this resolver carries no rows.
 pub fn resolve_detail_content(views: &mut SessionViews, library: &LibrarySession) -> DetailContent {
@@ -1304,7 +1308,6 @@ pub fn resolve_detail_content(views: &mut SessionViews, library: &LibrarySession
         .iter()
         .map(|track| crate::ui::detail::TrackRow {
             key: track.id.0.clone(),
-            number: track.metadata.track_number,
             title: track.metadata.display_title(&track.file_path),
             plays: track.play_count,
             duration: track.duration,
@@ -2165,6 +2168,7 @@ impl RiffApp {
                     cover: None,
                     label,
                     count: Some(count),
+                    meta: None,
                     selected: library_section_live && library.library_section == section,
                     now_playing: false,
                     playing: false,
@@ -2195,6 +2199,7 @@ impl RiffApp {
                 cover: None,
                 label: "Folders",
                 count: Some(counts.folder_roots),
+                meta: None,
                 selected: folder_section_live,
                 now_playing: false,
                 playing: false,
@@ -2301,6 +2306,7 @@ impl RiffApp {
                     cover: None,
                     label: kind.display_name(),
                     count: Some(smart_count(kind)),
+                    meta: None,
                     selected: self.smart_playlist_view == Some(kind),
                     now_playing: false,
                     playing: false,
@@ -2822,6 +2828,7 @@ impl RiffApp {
                 cover,
                 label: &label,
                 count: None,
+                meta: None,
                 selected: is_selected,
                 now_playing: is_current,
                 playing: is_current && playing,
@@ -3039,6 +3046,7 @@ impl RiffApp {
                 cover: None,
                 label: &label,
                 count: None,
+                meta: None,
                 selected: is_selected,
                 now_playing: false,
                 playing: false,

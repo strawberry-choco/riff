@@ -141,6 +141,7 @@ mod tests {
                         cover: None,
                         label: "All Tracks",
                         count: None,
+                        meta: None,
                         selected: false,
                         now_playing: false,
                         playing: false,
@@ -371,6 +372,7 @@ mod tests {
                             cover: None,
                             label,
                             count: Some(count),
+                            meta: None,
                             selected,
                             now_playing: false,
                             playing: false,
@@ -400,6 +402,7 @@ mod tests {
                             cover: None,
                             label: name,
                             count: Some(count),
+                            meta: None,
                             selected: i == 1,
                             now_playing: false,
                             playing: false,
@@ -431,6 +434,7 @@ mod tests {
                         cover: None,
                         label: "01. Moonlight Sonata",
                         count: None,
+                        meta: None,
                         selected: false,
                         now_playing: true,
                         playing: false,
@@ -447,6 +451,7 @@ mod tests {
                         cover: None,
                         label: "02. Für Elise",
                         count: None,
+                        meta: None,
                         selected: false,
                         now_playing: false,
                         playing: false,
@@ -634,16 +639,29 @@ mod tests {
         let mut cache = IconCache::new();
 
         // Same row shape `RiffApp::render_track_row` produces for the flat
-        // list: indent 0, no leading glyph, "Artist - Title" label.
+        // list: indent 0, no leading glyph, "Artist - Title" label, and the
+        // right-aligned `Plays · Time` cluster.
         let rows = [
-            ("Daft Punk - One More Time", false, false),
-            ("Radiohead - Weird Fishes", false, true), // now-playing, idle
-            ("Miles Davis - So What", true, false),    // selected
-            ("Portishead - Roads", false, false),
-            ("Burial - Archangel", false, false),
-            ("Nils Frahm - Says", false, false),
+            ("Daft Punk - One More Time", 54, 337, false, false),
+            (
+                "Radiohead - Weird Fishes",
+                31,
+                318,
+                false,
+                true, // now-playing, idle
+            ),
+            (
+                "Miles Davis - So What",
+                128,
+                562,
+                true, // selected
+                false,
+            ),
+            ("Portishead - Roads", 76, 303, false, false),
+            ("Burial - Archangel", 22, 240, false, false),
+            ("Nils Frahm - Says", 9, 412, false, false),
         ];
-        for (label, selected, now_playing) in rows {
+        for (label, plays, time, selected, now_playing) in rows {
             sidebar::tree_row(
                 ui,
                 &mut cache,
@@ -654,6 +672,10 @@ mod tests {
                     cover: None,
                     label,
                     count: None,
+                    meta: Some(sidebar::RowMeta {
+                        plays: Some(plays),
+                        time: Some(std::time::Duration::from_secs(time)),
+                    }),
                     selected,
                     now_playing,
                     playing: false,
@@ -1007,7 +1029,6 @@ mod tests {
         vec![
             TrackRow {
                 key: "t1".to_string(),
-                number: Some(1),
                 title: "Ready Let's Go".to_string(),
                 plays: 12,
                 duration: Some(std::time::Duration::from_secs(201)),
@@ -1017,7 +1038,6 @@ mod tests {
             },
             TrackRow {
                 key: "t2".to_string(),
-                number: Some(2),
                 title: "Music Is Math".to_string(),
                 plays: 34,
                 duration: Some(std::time::Duration::from_secs(322)),
@@ -1027,7 +1047,6 @@ mod tests {
             },
             TrackRow {
                 key: "t3".to_string(),
-                number: Some(3),
                 title: "Beware the Friendly Stranger".to_string(),
                 plays: 5,
                 duration: Some(std::time::Duration::from_secs(27)),
@@ -1037,7 +1056,6 @@ mod tests {
             },
             TrackRow {
                 key: "t4".to_string(),
-                number: Some(4),
                 title: "Gyroscope".to_string(),
                 plays: 21,
                 duration: Some(std::time::Duration::from_secs(207)),
@@ -1505,7 +1523,6 @@ mod tests {
             let tracks = [
                 TrackRow {
                     key: "g1".to_string(),
-                    number: Some(1),
                     title: "Drane".to_string(),
                     plays: 14,
                     duration: Some(std::time::Duration::from_secs(377)),
@@ -1515,7 +1532,6 @@ mod tests {
                 },
                 TrackRow {
                     key: "g2".to_string(),
-                    number: Some(2),
                     title: "Eutow".to_string(),
                     plays: 27,
                     duration: Some(std::time::Duration::from_secs(255)),
@@ -1525,7 +1541,6 @@ mod tests {
                 },
                 TrackRow {
                     key: "g3".to_string(),
-                    number: Some(3),
                     title: "C/Pach".to_string(),
                     plays: 8,
                     duration: Some(std::time::Duration::from_secs(237)),
@@ -1535,7 +1550,6 @@ mod tests {
                 },
                 TrackRow {
                     key: "g4".to_string(),
-                    number: Some(4),
                     title: "Gnit".to_string(),
                     plays: 19,
                     duration: Some(std::time::Duration::from_secs(353)),

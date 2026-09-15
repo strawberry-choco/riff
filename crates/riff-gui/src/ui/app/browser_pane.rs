@@ -379,7 +379,7 @@ impl RiffApp {
 
     /// The Tracks column (the stage's last column): the existing
     /// `DetailColumn` shape — breadcrumb trail, album header with Play all /
-    /// Shuffle, and the track table. Entity listings are their own columns
+    /// Shuffle, and the album's track list. Entity listings are their own columns
     /// now, so the widget receives no rows.
     fn render_tracks_column(
         &mut self,

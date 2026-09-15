@@ -45,6 +45,11 @@ pub const INDENT_STEP: f32 = 36.0;
 /// Horizontal padding of the icon strip inside a row.
 const ICON_GAP: f32 = 8.0;
 
+/// Floor under the label's wrap width when a row carries a right-aligned
+/// meta cluster: a pathologically narrow row keeps a readable title instead
+/// of letting the text column collapse.
+const MIN_LABEL_FREE_W: f32 = 24.0;
+
 /// The equalizer-bars indicator: four bars, like the mockup's now-playing
 /// glyph.
 pub const EQ_BAR_COUNT: usize = 4;
@@ -159,6 +164,17 @@ pub fn ghost_icon_button(
 
 // --- Tree rows --------------------------------------------------------------------
 
+/// The right-aligned value cluster on a track row: `N · M:SS` (present
+/// parts joined with middle dots). Painted text only — the label carries
+/// the accessibility name. Track rows (the All Tracks list, the album's
+/// Tracks column) pass one; sidebar rows keep `None`.
+pub struct RowMeta {
+    /// Finished plays, straight from the store's play history.
+    pub plays: Option<u32>,
+    /// Track duration; formatted with `playerbar::format_duration`.
+    pub time: Option<Duration>,
+}
+
 /// One 40px sidebar tree row: indent level, optional leading glyph, label,
 /// selection state, and now-playing state. Rows paint their own hover fill
 /// ([`Palette::row_hover`], the design's amber wash), selected fill
@@ -180,6 +196,9 @@ pub struct TreeRow<'a> {
     /// every sidebar row, from the counts read model). `None` paints no
     /// count; the accessibility label gains a `(count)` suffix when present.
     pub count: Option<usize>,
+    /// The right-aligned value cluster (`plays · time`) on track rows;
+    /// `None` paints none (the sidebar's plain rows).
+    pub meta: Option<RowMeta>,
     /// Whether this row is the current selection.
     pub selected: bool,
     /// Whether this row IS the track currently loaded in the player; paints
@@ -192,6 +211,75 @@ pub struct TreeRow<'a> {
     /// is an affordance only — toggling stays with the caller's click
     /// handling.
     pub disclosure: Option<bool>,
+}
+
+/// The row's right-aligned value cluster text: the present parts of
+/// [`RowMeta`] joined with middle dots (`12 · 3:45`). Painted only — the
+/// row's accessibility name stays the label.
+fn meta_cluster(meta: &RowMeta) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(2);
+    if let Some(plays) = meta.plays {
+        parts.push(plays.to_string());
+    }
+    if let Some(time) = meta.time {
+        parts.push(super::playerbar::format_duration(time));
+    }
+    parts.join(" \u{b7} ")
+}
+
+/// Paint the row's label and, on track rows, the right-aligned meta cluster
+/// (`plays · time`) beside it. The label lays out to the left of the
+/// cluster, truncating with an ellipsis when a long title would overdraw it;
+/// a row without a cluster keeps the plain single-line label. `count_w` is
+/// the measured width of the row's right-aligned count, if any, so the
+/// cluster dodges it.
+#[expect(clippy::too_many_arguments, reason = "one row-paint call")]
+fn paint_row_label_and_meta(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    palette: &Palette,
+    row: &TreeRow<'_>,
+    ink: egui::Color32,
+    font: egui::FontId,
+    x: f32,
+    rect: egui::Rect,
+    count_w: Option<f32>,
+) {
+    let Some(meta) = row.meta.as_ref() else {
+        painter.text(
+            egui::pos2(x, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            row.label,
+            font,
+            ink,
+        );
+        return;
+    };
+    let text = meta_cluster(meta);
+    let meta_w = ui
+        .fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), palette.ink_3))
+        .size()
+        .x;
+    let meta_right =
+        rect.right() - INDENT_BASE - count_w.unwrap_or(0.0) - count_w.map_or(0.0, |_| 12.0);
+    painter.text(
+        egui::pos2(meta_right, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        text,
+        font.clone(),
+        palette.ink_3,
+    );
+    let label_w = (meta_right - meta_w - 12.0 - x).max(MIN_LABEL_FREE_W);
+    let mut job = egui::text::LayoutJob::simple(row.label.to_owned(), font, ink, label_w);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('\u{2026}');
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    painter.galley(
+        egui::pos2(x, rect.center().y - galley.size().y / 2.0),
+        galley,
+        ink,
+    );
 }
 
 /// Draw one tree row and return its full response — clicks, double-clicks,
@@ -290,17 +378,22 @@ pub fn tree_row(
         palette.ink
     };
     let font = egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional);
-    painter.text(
-        egui::pos2(x, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        row.label,
-        font,
-        ink,
-    );
+
+    // The row's right edge holds the live count (sidebar rows) and, on track
+    // rows, the meta cluster (`Album · plays · time`). The label lays out to
+    // the left of whichever is painted there, so a long title truncates with
+    // an ellipsis instead of overdrawing the cluster.
+    let right_edge = rect.right() - INDENT_BASE;
+    let count_w = row.count.map(|count| {
+        ui.fonts_mut(|f| f.layout_no_wrap(count.to_string(), font.clone(), palette.ink_3))
+            .size()
+            .x
+    });
+    paint_row_label_and_meta(ui, &painter, palette, &row, ink, font, x, rect, count_w);
 
     if let Some(count) = row.count {
         painter.text(
-            egui::pos2(rect.right() - INDENT_BASE, rect.center().y),
+            egui::pos2(right_edge, rect.center().y),
             egui::Align2::RIGHT_CENTER,
             count.to_string(),
             egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional),
@@ -452,6 +545,7 @@ pub fn sidebar_footer(
             cover: None,
             label: "Add folder",
             count: None,
+            meta: None,
             selected: false,
             now_playing: false,
             playing: false,

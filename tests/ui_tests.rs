@@ -420,7 +420,6 @@ mod tests {
                 skip_hidden_files: false,
                 scan_formats: vec!["flac".to_string(), "mp3".to_string()],
                 read_embedded_artwork: false,
-                ..ScanPrefs::default()
             },
             "first-frame restore must hydrate the Library Scan preferences into the session"
         );
@@ -2066,6 +2065,7 @@ mod tests {
                             cover: None,
                             label: "All Tracks",
                             count: None,
+                            meta: None,
                             selected: false,
                             now_playing: false,
                             playing: false,
@@ -2113,6 +2113,7 @@ mod tests {
                             cover: None,
                             label: "All Tracks",
                             count: Some(12),
+                            meta: None,
                             selected: false,
                             now_playing: false,
                             playing: false,
@@ -2129,6 +2130,7 @@ mod tests {
                             cover: None,
                             label: "Artists",
                             count: None,
+                            meta: None,
                             selected: false,
                             now_playing: false,
                             playing: false,
@@ -4184,7 +4186,8 @@ mod tests {
         );
 
         // About has no existing content and shows a clear placeholder.
-        for section in [SettingsSection::About] {
+        {
+            let section = SettingsSection::About;
             let mut harness = settings_modal_harness(&content, section);
             harness.run();
             let expected = format!("{} settings are not implemented yet.", section.label());
@@ -4485,6 +4488,7 @@ mod tests {
                     cover: None,
                     label: &label,
                     count: None,
+                    meta: None,
                     selected: false,
                     now_playing: false,
                     playing: false,
@@ -4637,6 +4641,7 @@ mod tests {
                                 cover: None,
                                 label,
                                 count: None,
+                                meta: None,
                                 selected: false,
                                 now_playing: false,
                                 playing: false,
@@ -4692,6 +4697,7 @@ mod tests {
                             cover: None,
                             label: "Beta",
                             count: None,
+                            meta: None,
                             selected: false,
                             now_playing: false,
                             playing: false,
@@ -6548,7 +6554,7 @@ mod browser_column_ui_tests {
     }
 
     #[test]
-    fn test_track_table_renders_columns_and_reports_row_gestures() {
+    fn test_track_list_renders_rows_and_reports_row_gestures() {
         use egui_kittest::kittest::Queryable;
         use riff_gui::ui::detail::{
             Crumb, DetailAction, DetailColumn, TrackRow, show_detail_column,
@@ -6563,7 +6569,6 @@ mod browser_column_ui_tests {
         let tracks = vec![
             TrackRow {
                 key: "t1".to_string(),
-                number: Some(5),
                 title: "Magic Window".to_string(),
                 plays: 3,
                 duration: Some(Duration::from_secs(205)),
@@ -6573,7 +6578,6 @@ mod browser_column_ui_tests {
             },
             TrackRow {
                 key: "t2".to_string(),
-                number: None,
                 title: "Over the Horizon".to_string(),
                 plays: 0,
                 duration: None,
@@ -6599,41 +6603,13 @@ mod browser_column_ui_tests {
             );
         harness.run();
 
-        // The table's four columns head the listing.
-        for header in ["#", "Title", "Plays", "Time"] {
-            assert!(
-                harness.query_by_label(header).is_some(),
-                "the track table's '{header}' column header renders"
-            );
-        }
-
-        // Row values: the tagged track number, the play count, and the
-        // mm:ss readout; the unnumbered track falls back to its listing
-        // position and the unknown duration to the dash.
+        // Every track's title renders as its row's label — the shared 40px
+        // track row. The right-aligned album · plays · time cluster is
+        // painted text, so only the row labels are (kittest-)queryable here.
         assert!(
             harness.query_by_label("Magic Window").is_some()
                 && harness.query_by_label("Over the Horizon").is_some(),
             "every track's title renders as its row's label"
-        );
-        assert!(
-            harness.query_by_label("5").is_some(),
-            "the tagged track number renders in the # column"
-        );
-        assert!(
-            harness.query_by_label("2").is_some(),
-            "an unnumbered track falls back to its 1-based position"
-        );
-        assert!(
-            harness.query_by_label("3").is_some(),
-            "the play count renders in the Plays column"
-        );
-        assert!(
-            harness.query_by_label("03:25").is_some(),
-            "the duration renders mm:ss in the Time column"
-        );
-        assert!(
-            harness.query_by_label("\u{2014}").is_some(),
-            "an unknown duration renders the dash"
         );
 
         // Single click selects the row; double click starts it playing.
@@ -6671,7 +6647,6 @@ mod browser_column_ui_tests {
         let tracks = vec![
             TrackRow {
                 key: "plain".to_string(),
-                number: Some(1),
                 title: "Not A Favorite".to_string(),
                 plays: 0,
                 duration: None,
@@ -6681,7 +6656,6 @@ mod browser_column_ui_tests {
             },
             TrackRow {
                 key: "loved".to_string(),
-                number: Some(2),
                 title: "Loved Song".to_string(),
                 plays: 7,
                 duration: None,
@@ -7333,7 +7307,7 @@ mod browser_column_ui_tests {
         harness.run();
 
         // Album level: the breadcrumb trail reads the section root and one
-        // crumb per path entry, and the header + track table resolve from
+        // crumb per path entry, and the header + track list resolve from
         // the store.
         assert!(
             harness.query_by_label("Artists").is_some()
@@ -7350,24 +7324,19 @@ mod browser_column_ui_tests {
         assert!(
             harness.query_by_label("Magic Window").is_some()
                 && harness.query_by_label("Dawn Chorus").is_some(),
-            "the track table resolves the album's tracks"
+            "the track list resolves the album's tracks"
         );
-        assert!(
-            harness.query_by_label("3").is_some(),
-            "play counts come from the store's play history"
-        );
-        assert!(
-            harness.query_by_label("03:25").is_some(),
-            "durations render mm:ss"
-        );
+        // Plays and durations ride in each row's right-aligned
+        // `album · plays · time` cluster — painted text, so their values are
+        // pinned visually by the detail-column golden, not by widget labels.
         assert!(
             harness.query_by_label("Remove from Favorites").is_some()
                 && harness.query_by_label("Add to Favorites").is_some(),
             "each row's favorite control reflects its stored flag"
         );
 
-        // Above the album level the Tracks column carries no header or
-        // track table — entity listings are their own columns now; only
+        // Above the album level the Tracks column carries no header or track
+        // list — entity listings are their own columns now; only
         // the breadcrumb trail renders.
         harness.state_mut().library.browser_path =
             vec![BrowserSelection::Artist("Boards of Canada".to_string())];
@@ -8013,7 +7982,6 @@ mod browser_column_ui_tests {
         let mut cache = IconCache::new();
         let tracks = vec![TrackRow {
             key: "t1".to_string(),
-            number: Some(5),
             title: "Magic Window".to_string(),
             plays: 3,
             duration: Some(Duration::from_secs(205)),
@@ -8141,7 +8109,6 @@ mod browser_column_ui_tests {
         };
         let tracks = vec![TrackRow {
             key: "t1".to_string(),
-            number: Some(1),
             title: "Magic Window".to_string(),
             plays: 3,
             duration: Some(Duration::from_secs(205)),

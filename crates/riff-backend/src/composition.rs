@@ -80,6 +80,10 @@ impl AppRuntime {
     /// Open the Application Store at `store_path`, wire every real adapter
     /// into its port, and spawn the worker threads. Store open/migration
     /// failures are returned to the caller — never silent fallbacks.
+    // One linear wiring sequence, and the order is load-bearing: every
+    // handle's clones must be taken before its consumer moves it. Splitting
+    // it into helpers would hide that order behind call boundaries.
+    #[allow(clippy::too_many_lines)]
     pub fn spawn(store_path: &Path) -> Result<Self, StoreError> {
         // The store: one shared connection behind an internal mutex serves
         // every store port; both session generations bump inside the store's
@@ -129,8 +133,19 @@ impl AppRuntime {
         let engine_cmd_tx = cmd_tx.clone();
         let app_state = playback.clone();
         let engine_queries = library_query_store.clone();
+        // Stop flags for the request-channel workers. Nothing sets them yet:
+        // the handles they pair with are still dropped below, so production
+        // behaviour is unchanged until the lifecycle that owns both lands.
+        let engine_stop = Arc::new(AtomicBool::new(false));
         let _audio_thread = thread::spawn(move || {
-            run_engine_thread(cmd_rx, engine_cmd_tx, update_tx, app_state, engine_queries);
+            run_engine_thread(
+                cmd_rx,
+                engine_cmd_tx,
+                update_tx,
+                app_state,
+                engine_queries,
+                engine_stop,
+            );
         });
 
         // Playback Coordinator: applies Playback Updates to session state
@@ -157,11 +172,13 @@ impl AppRuntime {
         // (design-handoff issue 12). A read failure falls back to the
         // historical defaults rather than failing the scan.
         let scan_settings = settings_store.clone();
+        let scan_stop = Arc::new(AtomicBool::new(false));
         let (scans, scan_worker) = ScanService::new(
             Box::new(LoftyMetadataReader::new()),
             Box::new(library_query_store.clone()),
             Box::new(library_mutation_store.clone()),
             cancel_flag,
+            scan_stop,
             move |path| {
                 let options = scan_settings.load_settings().map_or_else(
                     |e| {
@@ -179,8 +196,14 @@ impl AppRuntime {
 
         // Background services (ADR 0006): real adapters, dedicated worker
         // threads — spawned here exactly like the Audio Engine.
-        let (tag_edits, covers) =
-            spawn_background_services(library_query_store.clone(), library_mutation_store.clone());
+        let tag_edit_stop = Arc::new(AtomicBool::new(false));
+        let cover_stop = Arc::new(AtomicBool::new(false));
+        let (tag_edits, covers) = spawn_background_services(
+            library_query_store.clone(),
+            library_mutation_store.clone(),
+            tag_edit_stop,
+            cover_stop,
+        );
 
         // The UI's `Box<dyn Transport>` and the tray's transport are
         // `ChannelTransport`s wired with the same shared recorder, so every
@@ -289,6 +312,8 @@ fn spawn_fs_watcher(scans: ScanService) -> Arc<Mutex<Option<WatcherManager>>> {
 fn spawn_background_services(
     library_queries: SqliteStore,
     library_mutations: SqliteStore,
+    tag_edit_stop: Arc<AtomicBool>,
+    cover_stop: Arc<AtomicBool>,
 ) -> (TagEditService, CoverService) {
     // The cover worker reads the artwork policy fresh per resolution so
     // the Settings pane's "Read embedded artwork" toggle applies
@@ -299,6 +324,7 @@ fn spawn_background_services(
         Box::new(LoftyMetadataWriter::new()),
         Box::new(library_queries),
         Box::new(library_mutations),
+        tag_edit_stop,
     );
     let _handle = thread::spawn(move || tag_worker.run());
 
@@ -315,6 +341,7 @@ fn spawn_background_services(
         Box::new(LoftyMetadataReader::new()),
         Box::new(ImageCoverLoader::new()),
         cover_policy,
+        cover_stop,
     );
     let _handle = thread::spawn(move || cover_worker.run());
 
@@ -331,6 +358,7 @@ fn run_engine_thread(
     update_tx: crossbeam_channel::Sender<riff_playback::domain::PlaybackUpdate>,
     state: Arc<Mutex<PlaybackSession>>,
     library_queries: SqliteStore,
+    stop: Arc<AtomicBool>,
 ) {
     let decoder_factory: DecoderFactory =
         Box::new(|| Box::new(SymphoniaDecoder::new(default_codec_registry())));
@@ -342,6 +370,7 @@ fn run_engine_thread(
         decoder_factory,
         Box::new(CpalAudioOutput::new()),
         state,
+        stop,
     );
     engine.run();
 }

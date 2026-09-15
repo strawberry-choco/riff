@@ -96,6 +96,7 @@ mod tests {
             Box::new(queries.clone()),
             Box::new(mutations),
             cancel_flag,
+            crate::inert_stop_flag(),
             move |path| scanner.scan(path, &ScanOptions::default()),
         );
         std::thread::spawn(move || worker.run());
@@ -162,6 +163,7 @@ mod tests {
             Box::new(MockLibraryQueryStore::default()),
             Box::new(MockLibraryMutationStore::new()),
             Arc::new(AtomicBool::new(false)),
+            crate::inert_stop_flag(),
             move |_path| Vec::new(),
         );
         std::thread::spawn(move || worker.run());
@@ -218,6 +220,7 @@ mod tests {
             Box::new(MockLibraryQueryStore::default()),
             Box::new(MockLibraryMutationStore::new()),
             Arc::new(AtomicBool::new(false)),
+            crate::inert_stop_flag(),
             move |_path| {
                 let _ = release_rx.recv();
                 Vec::new()

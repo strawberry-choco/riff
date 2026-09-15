@@ -68,6 +68,19 @@ pub use riff_persistence::store::ScanOptions;
 pub use std::sync::atomic::AtomicBool;
 pub use std::sync::{Arc, Mutex};
 
+/// An `Arc<AtomicBool>` stop flag no test ever sets.
+///
+/// The service workers take their stop flag as a constructor argument, and
+/// every test that builds a worker by hand ends it the way the code did
+/// before the runtime gained a lifecycle: by dropping the front-end handle.
+/// Those tests therefore need a flag that stays false for the whole test.
+/// Tests that do exercise shutdown take their flags from the
+/// `RuntimeLifecycle` the Composition Root returns instead of from here.
+#[must_use]
+pub fn inert_stop_flag() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
+}
+
 // Test utilities that can be used across test modules
 pub mod test_utils {
     use crate::domain::{TrackId, TrackMetadata};

@@ -23,13 +23,22 @@
 use crate::app::store::{LibraryMutationStore, LibraryQueryStore};
 use crate::app::traits::{MetadataWriter, TagEdit};
 use crate::domain::{Track, TrackId};
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 /// Failure reason reported when the edited Track no longer resolves from the
 /// Application Store (removed mid-edit, or the read failed): nothing is
 /// persisted. Exact wording is product behavior (spec user story 2).
 const TRACK_NO_LONGER_IN_LIBRARY: &str = "Track is no longer in the library";
+
+/// How long [`TagEditWorker::run`] waits for the next request before it looks
+/// at its stop flag. The worker is idle almost all the time, so the wait must
+/// expire: with a blocking `recv` the thread could never be asked to stop
+/// without dropping every [`TagEditService`] front end first.
+const WORKER_POLL: Duration = Duration::from_millis(10);
 
 /// One requested Tag Edit: the Track's identity (its full file path), the
 /// file to write, and the edit itself. Pure application-layer DTO.
@@ -79,12 +88,14 @@ impl TagEditService {
     /// Wire a matched ([`TagEditService`], [`TagEditWorker`]) pair over fresh
     /// unbounded channels. Box the returned service as the UI's
     /// `Box<dyn TagEdits>` handle and run the worker on its own thread
-    /// (`worker.run()`), exactly like the Audio Engine.
+    /// (`worker.run()`), exactly like the Audio Engine. `stop` is the
+    /// Composition Root's shutdown request for that thread.
     #[must_use]
     pub fn new(
         writer: Box<dyn MetadataWriter + Send>,
         library_queries: Box<dyn LibraryQueryStore + Send>,
         library_mutations: Box<dyn LibraryMutationStore + Send>,
+        stop: Arc<AtomicBool>,
     ) -> (Self, TagEditWorker) {
         let (request_tx, request_rx) = unbounded();
         let (outcome_tx, outcome_rx) = unbounded();
@@ -99,6 +110,7 @@ impl TagEditService {
                 writer,
                 library_queries,
                 library_mutations,
+                stop,
             },
         )
     }
@@ -126,16 +138,30 @@ pub struct TagEditWorker {
     writer: Box<dyn MetadataWriter + Send>,
     library_queries: Box<dyn LibraryQueryStore + Send>,
     library_mutations: Box<dyn LibraryMutationStore + Send>,
+    /// Cooperative stop request from the Composition Root; see [`Self::run`].
+    stop: Arc<AtomicBool>,
 }
 
 impl TagEditWorker {
-    /// Block processing submitted edits until every [`TagEditService`] front
-    /// end is dropped. Spawns nothing; run this on the dedicated tag-edit
-    /// thread.
+    /// Process submitted edits until a stop request arrives or every
+    /// [`TagEditService`] front end is dropped. Spawns nothing; run this on
+    /// the dedicated tag-edit thread.
+    ///
+    /// The receive polls on [`WORKER_POLL`] instead of blocking so the stop
+    /// flag can be observed while no edit is submitted — the worker's normal
+    /// state. A stop is honored between edits: the edit in flight always
+    /// finishes and reports its outcome, because a half-applied durable
+    /// change is exactly what this service exists to prevent.
     pub fn run(mut self) {
-        while let Ok(request) = self.request_rx.recv() {
-            let outcome = self.process(request);
-            let _ = self.outcome_tx.send(outcome);
+        while !self.stop.load(Ordering::Relaxed) {
+            match self.request_rx.recv_timeout(WORKER_POLL) {
+                Ok(request) => {
+                    let outcome = self.process(request);
+                    let _ = self.outcome_tx.send(outcome);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
         }
     }
 

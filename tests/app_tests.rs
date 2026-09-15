@@ -2689,6 +2689,7 @@ mod scan_service_tests {
             Box::new(scratch.queries.clone()),
             Box::new(scratch.mutations.clone()),
             cancel_flag,
+            inert_stop_flag(),
             move |path| scanner.scan(path, &ScanOptions::default()),
         );
         std::thread::spawn(move || worker.run());
@@ -2980,6 +2981,7 @@ mod scan_service_tests {
             Box::new(FailingFreshnessQueries),
             Box::new(scratch.mutations.clone()),
             cancel_flag,
+            inert_stop_flag(),
             move |path| scanner.scan(path, &ScanOptions::default()),
         );
         std::thread::spawn(move || worker.run());
@@ -3082,6 +3084,7 @@ mod scan_service_tests {
             Box::new(FailingFreshnessQueries),
             Box::new(FailingCommitMutations),
             cancel_flag,
+            inert_stop_flag(),
             move |path| scanner.scan(path, &ScanOptions::default()),
         );
         std::thread::spawn(move || worker.run());
@@ -3650,6 +3653,7 @@ mod audio_engine_tests {
                 factory,
                 Box::new(SharedOutput(out_handle)),
                 thread_state,
+                inert_stop_flag(),
             );
             engine.run();
         });
@@ -4402,6 +4406,7 @@ mod tag_edit_service_tests {
             Box::new(SharedWriter(Arc::clone(&writer))),
             Box::new(SharedQueries(Arc::clone(&queries))),
             Box::new(SharedMutations(Arc::clone(&mutations))),
+            inert_stop_flag(),
         );
         std::thread::spawn(move || worker.run());
         Harness {
@@ -4793,6 +4798,7 @@ mod cover_service_tests {
                 gate: gate.map(Mutex::new),
             }),
             Box::new(|| true),
+            inert_stop_flag(),
         );
         std::thread::spawn(move || worker.run());
         Harness {
@@ -4915,6 +4921,7 @@ mod cover_service_tests {
                 calls: Arc::clone(&loader_calls),
             }),
             Box::new(|| false),
+            inert_stop_flag(),
         );
         std::thread::spawn(move || worker.run());
 

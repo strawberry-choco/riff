@@ -93,6 +93,9 @@ fn wire_pipeline(
         Box::new(queries),
         Box::new(mutations),
         cancel_flag,
+        // The bench runs the worker until the process exits; it is never
+        // asked to stop.
+        Arc::new(AtomicBool::new(false)),
         move |path| scanner.scan(path, &ScanOptions::default()),
     );
     std::thread::spawn(move || worker.run());

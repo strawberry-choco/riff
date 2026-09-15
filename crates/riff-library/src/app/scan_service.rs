@@ -28,18 +28,24 @@ use crate::app::MutexExt;
 use crate::app::scan::build_tracks;
 use crate::app::store::{FullScanSummary, LibraryMutationStore, LibraryQueryStore};
 use crate::app::traits::MetadataReader;
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use riff_persistence::track::TrackId;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// Tracks per durable commit. Every batch commits to the Application Store
 /// as ONE immediate transaction first — an interrupted (or cancelled) scan
 /// keeps all committed batches (spec user story 3).
 pub const SCAN_BATCH_SIZE: usize = 10;
+
+/// How long [`ScanWorker::run`] waits for the next request before it looks at
+/// its stop flag. The worker is idle almost all the time, so the wait must
+/// expire: with a blocking `recv` the thread could never be asked to stop
+/// without dropping every [`ScanService`] front end first.
+const WORKER_POLL: Duration = Duration::from_millis(10);
 
 /// The filesystem walk, injected as a plain closure so the app layer stays
 /// free of infrastructure types: the composition root binds the real scanner
@@ -125,14 +131,21 @@ impl ScanService {
     /// unbounded channels. Box the returned service as the UI's
     /// `Box<dyn Scans>` handle, share clones with the watcher, and run the
     /// worker on its own thread (`worker.run()`), exactly like the Audio
-    /// Engine. `cancel_flag` is caller-created so the composition root can
-    /// bind the same flag into the real scanner it closes over in `walk`.
+    /// Engine.
+    ///
+    /// Both flags are caller-created. `cancel_flag` is shared with the real
+    /// scanner the composition root closes over in `walk`, so one cancellation
+    /// reaches the walk and the batch loop alike. `stop` is the Composition
+    /// Root's shutdown request: a different lever from cancellation, because
+    /// it ends the worker itself (after the scan in flight has settled) rather
+    /// than aborting the scan running on it.
     #[must_use]
     pub fn new(
         reader: Box<dyn MetadataReader + Send>,
         queries: Box<dyn LibraryQueryStore + Send>,
         mutations: Box<dyn LibraryMutationStore + Send>,
         cancel_flag: Arc<AtomicBool>,
+        stop: Arc<AtomicBool>,
         walk: impl Fn(&Path) -> Vec<PathBuf> + Send + 'static,
     ) -> (Self, ScanWorker) {
         let (request_tx, request_rx) = unbounded();
@@ -154,6 +167,7 @@ impl ScanService {
                 queries,
                 mutations,
                 walk: Box::new(walk),
+                stop,
             },
         )
     }
@@ -205,6 +219,8 @@ pub struct ScanWorker {
     queries: Box<dyn LibraryQueryStore + Send>,
     mutations: Box<dyn LibraryMutationStore + Send>,
     walk: Walk,
+    /// Cooperative stop request from the Composition Root; see [`Self::run`].
+    stop: Arc<AtomicBool>,
 }
 
 /// How one directory scan ended, before mapping onto published outcomes.
@@ -220,12 +236,30 @@ enum ScanEnd {
 }
 
 impl ScanWorker {
-    /// Block processing requested scans until every [`ScanService`] front
-    /// end is dropped. Spawns nothing; run this on the dedicated scan
-    /// thread.
+    /// Process requested scans until a stop request arrives or every
+    /// [`ScanService`] front end is dropped. Spawns nothing; run this on the
+    /// dedicated scan thread.
+    ///
+    /// The receive polls on [`WORKER_POLL`] instead of blocking so the stop
+    /// flag can be observed while no scan is requested — the worker's normal
+    /// state. A stop is honored between scans, never inside one: the scan in
+    /// flight ends through the ordinary cancel path (see
+    /// [`Self::scan_one`]), which is what keeps its committed batches.
     pub fn run(mut self) {
-        while let Ok(path) = self.request_rx.recv() {
-            self.scan_one(path);
+        while !self.stop.load(Ordering::Relaxed) {
+            match self.request_rx.recv_timeout(WORKER_POLL) {
+                Ok(path) => {
+                    // A request dequeued in the same instant as the stop must
+                    // not reset the cancel flag and start a fresh full scan
+                    // that shutdown would then have to wait out.
+                    if self.stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    self.scan_one(path);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
         }
     }
 
@@ -566,6 +600,7 @@ mod tests {
             }),
             Box::new(MockMutations),
             Arc::clone(&cancel),
+            Arc::new(AtomicBool::new(false)),
             make_walk(),
         );
         let path = PathBuf::from("/music");
@@ -583,6 +618,7 @@ mod tests {
             }),
             Box::new(MockMutations),
             Arc::clone(&cancel),
+            Arc::new(AtomicBool::new(false)),
             make_walk(),
         );
         let path = PathBuf::from("/music");

@@ -10,8 +10,9 @@
 //! Queue.
 //!
 //! Threading: the module exposes only the blocking [`AudioEngine::run`];
-//! `main.rs` remains the sole thread spawner and runs it on the dedicated
-//! audio engine thread.
+//! the Composition Root is the sole thread spawner and runs it on the
+//! dedicated audio engine thread, and it is the only thing that asks the
+//! loop to stop, through the flag it passes to [`AudioEngine::new`].
 //!
 //! Pure-Rust: uses only the port traits. Concrete decoder/output
 //! implementations live in `riff-infra`.
@@ -22,6 +23,7 @@ use crate::infra::ports::{AudioDecoder, AudioFormatInfo, AudioOutput, DecoderFac
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use riff_persistence::store::LibraryQueryStore;
 use riff_persistence::track::TrackId;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -57,11 +59,21 @@ pub struct AudioEngine {
     decoder_factory: DecoderFactory,
     output: Box<dyn AudioOutput + Send>,
     session: Arc<Mutex<PlaybackSession>>,
+    /// Cooperative stop request from the Composition Root, honored between
+    /// commands (see [`AudioEngine::run`]).
+    stop: Arc<AtomicBool>,
 }
 
 impl AudioEngine {
-    /// Construct an engine with the given ports and channels.
+    /// Construct an engine with the given ports and channels. `stop` is the
+    /// Composition Root's cooperative stop request: the loop observes it
+    /// between commands and returns, which is what lets the runtime shut the
+    /// audio thread down without closing the command channel.
     #[must_use]
+    // The engine's ports are its constructor's whole argument list; grouping
+    // them would only add an indirection between the Composition Root and
+    // the wiring it owns.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cmd_rx: Receiver<PlaybackCommand>,
         cmd_tx: Sender<PlaybackCommand>,
@@ -70,6 +82,7 @@ impl AudioEngine {
         decoder_factory: DecoderFactory,
         output: Box<dyn AudioOutput + Send>,
         session: Arc<Mutex<PlaybackSession>>,
+        stop: Arc<AtomicBool>,
     ) -> Self {
         Self {
             cmd_rx,
@@ -79,12 +92,15 @@ impl AudioEngine {
             decoder_factory,
             output,
             session,
+            stop,
         }
     }
 
-    /// Run the engine's main loop. Blocks until the command channel is closed.
-    /// This is the ONLY blocking entry point — the composition root spawns it
-    /// on the dedicated audio thread.
+    /// Run the engine's main loop. Blocks until the command channel is closed
+    /// or a stop request arrives; either way the loop returns only after the
+    /// command it has already received is fully processed, so a stop never
+    /// truncates work in flight. This is the ONLY blocking entry point — the
+    /// composition root spawns it on the dedicated audio thread.
     // The engine loop is one continuous command pump; splitting it would
     // scatter the shared decode state across many small helpers.
     #[allow(clippy::too_many_lines)]
@@ -110,19 +126,15 @@ impl AudioEngine {
         let mut position = Duration::ZERO;
 
         loop {
-            // Block while idle; while a track is loaded, poll so a queued
-            // command lands between decode chunks instead of after EOF.
-            let cmd = if primary_decoder.is_some() {
-                match self.cmd_rx.recv_timeout(COMMAND_POLL) {
-                    Ok(cmd) => Some(cmd),
-                    Err(RecvTimeoutError::Timeout) => None,
-                    Err(RecvTimeoutError::Disconnected) => break,
-                }
-            } else {
-                match self.cmd_rx.recv() {
-                    Ok(cmd) => Some(cmd),
-                    Err(_) => break,
-                }
+            // Always poll, never block indefinitely. The same 10 ms tick that
+            // lets a queued command land between decode chunks (instead of
+            // after EOF) is also what lets an IDLE engine observe a stop
+            // request — a blocking `recv()` here would strand the thread
+            // until the command channel closed.
+            let cmd = match self.cmd_rx.recv_timeout(COMMAND_POLL) {
+                Ok(cmd) => Some(cmd),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => break,
             };
 
             if let Some(cmd) = cmd {
@@ -414,6 +426,15 @@ impl AudioEngine {
                         }
                     }
                 }
+            }
+
+            // Stop only BETWEEN commands: whatever command was just received
+            // has been fully processed by now, so the engine's self-dispatch
+            // — Next / Previous / AddToQueue re-dispatching a fresh `Play`
+            // through our own `cmd_tx` for the gapless handoff — can never be
+            // truncated by a stop request.
+            if self.stop.load(Ordering::Relaxed) {
+                break;
             }
 
             // Decode one chunk per tick while the stream runs; the command

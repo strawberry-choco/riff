@@ -310,6 +310,61 @@ impl RiffApp {
         }
     }
 
+    /// Test-only constructor: the production wiring surface minus everything
+    /// the platform supplies.
+    ///
+    /// It fills in what [`Self::new`] takes from the host — no tray icon, an
+    /// empty watcher-manager handle, a fresh quit flag, and a real visibility
+    /// channel pair — so a test can build the whole shell over mock ports with
+    /// no audio device, no tray, and no Application Store. The returned sender
+    /// lets a test push a Show/Hide request through the same path the tray
+    /// uses; on Linux there is nothing to drain it, so it is inert there.
+    ///
+    /// It delegates to [`Self::new`] rather than repeating the struct literal,
+    /// so the two constructors cannot drift field-for-field. That is also why
+    /// it is `doc(hidden)`: `new` stays the one production path.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_test(
+        playback: Arc<Mutex<PlaybackSession>>,
+        library: Arc<Mutex<LibrarySession>>,
+        transport: Box<dyn Transport>,
+        scans: Box<dyn Scans>,
+        settings_store: Box<dyn SettingsStore>,
+        playlist_store: Box<dyn PlaylistStore>,
+        library_mutations: Box<dyn LibraryMutationStore>,
+        views: SessionViews,
+        tag_edits: Box<dyn TagEdits>,
+        covers: Box<dyn Covers>,
+        backend_events: Arc<Mutex<BackendEvents>>,
+    ) -> (Self, crate::ui::window_visibility::VisibilityTx) {
+        let (visibility_tx, visibility_listener) =
+            crate::ui::window_visibility::spawn_visibility_listener();
+        #[cfg(target_os = "linux")]
+        drop(visibility_listener);
+
+        let app = Self::new(
+            playback,
+            library,
+            transport,
+            scans,
+            Arc::new(Mutex::new(None)),
+            #[cfg(not(target_os = "linux"))]
+            None,
+            Arc::new(AtomicBool::new(false)),
+            settings_store,
+            playlist_store,
+            library_mutations,
+            views,
+            tag_edits,
+            covers,
+            backend_events,
+            #[cfg(not(target_os = "linux"))]
+            visibility_listener,
+        );
+        (app, visibility_tx)
+    }
+
     /// Apply the active theme to the context (REQ-UI-007, Issue 01). The
     /// palette is resolved from the token module — dark (mockup) or light
     /// (derived per ADR 0004), with High Contrast as a token-set variant over

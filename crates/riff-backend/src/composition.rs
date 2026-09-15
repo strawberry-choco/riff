@@ -4,13 +4,17 @@
 //! ports, and spawns the worker threads (audio engine, playback coordinator,
 //! scan worker, watcher forwarder, tag-edit and cover workers) exactly as
 //! the frontend's binary entry point did before backend-crate-split
-//! issue 08. The frontend then becomes a thin composition over the returned
-//! [`AppRuntime`] handles.
+//! issue 08.
+//!
+//! It returns two halves. [`AppRuntime`] is what the frontend renders with;
+//! [`RuntimeLifecycle`] owns the worker threads and the levers that end
+//! them, so the process that spawns the workers is also the process that
+//! joins them. The frontend becomes a thin composition over both.
 
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::unbounded;
 
@@ -39,9 +43,9 @@ use crate::app::watcher_manager::WatcherManager;
 
 pub use riff_infra::store::default_store_path;
 
-/// The composed application: every handle the frontend renders with, plus
-/// the worker threads it drives — all produced by one [`AppRuntime::spawn`]
-/// call over the Composition Root.
+/// The composed application: every handle the frontend renders with — one
+/// half of what [`AppRuntime::spawn`] returns. The worker threads that drive
+/// this state belong to the other half, [`RuntimeLifecycle`].
 pub struct AppRuntime {
     /// The shared playback session (engine, coordinator, transport, tray).
     pub playback: Arc<Mutex<PlaybackSession>>,
@@ -76,15 +80,110 @@ pub struct AppRuntime {
     pub covers: Box<dyn riff_library::app::cover_service::Covers>,
 }
 
+/// The other half of [`AppRuntime::spawn`]: the worker threads the runtime
+/// started, plus every lever that ends them.
+///
+/// It deliberately holds nothing the UI renders with, and it has no `Drop`
+/// impl: shutdown is an explicit call, so a runtime is never torn down as a
+/// side effect of a value going out of scope. That also keeps `shutdown`
+/// idempotent — each handle is `take()`n before it is joined, so a second
+/// call finds nothing left to do and returns immediately.
+///
+/// There is exactly one method, [`Self::shutdown`].
+pub struct RuntimeLifecycle {
+    /// The audio engine thread. Joined first: its exit drops the update
+    /// sender, which is what ends the coordinator.
+    audio: Option<JoinHandle<()>>,
+    /// The Playback Coordinator thread.
+    coordinator: Option<JoinHandle<()>>,
+    /// The Library Scan worker thread.
+    scan: Option<JoinHandle<()>>,
+    /// The Tag Edit worker thread.
+    tag_edit: Option<JoinHandle<()>>,
+    /// The Cover worker thread.
+    cover: Option<JoinHandle<()>>,
+    /// The filesystem-event forwarder thread.
+    fs_forwarder: Option<JoinHandle<()>>,
+    /// Cooperative stop requests, one per worker that does not already exit
+    /// on a channel disconnect. The coordinator and the forwarder have none:
+    /// they end when their upstream channel closes.
+    engine_stop: Arc<AtomicBool>,
+    scan_stop: Arc<AtomicBool>,
+    tag_edit_stop: Arc<AtomicBool>,
+    cover_stop: Arc<AtomicBool>,
+    /// The scan worker's cancel flag. Held as its own clone rather than
+    /// reached through `Scans::cancel`, so shutdown does not depend on a
+    /// front-end handle the UI may already have moved or dropped.
+    scan_cancel: Arc<AtomicBool>,
+    /// The watcher-manager cell. Clearing it drops the filesystem watcher,
+    /// which drops the event sender the forwarder is parked on.
+    watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
+}
+
+impl RuntimeLifecycle {
+    /// Stop every worker thread and wait for it to return.
+    ///
+    /// The sequence matters:
+    ///
+    /// 1. Raise the four stop flags, so each request-channel worker returns
+    ///    at its next poll.
+    /// 2. Cancel the scan in flight. It aborts at its next batch boundary,
+    ///    and the batches already committed stay — durability is per batch,
+    ///    so an interrupted scan never rolls work back (spec user story 3).
+    /// 3. Clear the watcher, which drops the event sender the forwarder is
+    ///    blocked on, so that loop exits without needing a flag of its own.
+    /// 4. Join, in dependency order: the audio engine first, because its exit
+    ///    is what disconnects the coordinator's update channel.
+    ///
+    /// A second call is a no-op: every handle has already been taken.
+    pub fn shutdown(&mut self) {
+        self.engine_stop.store(true, Ordering::Relaxed);
+        self.scan_stop.store(true, Ordering::Relaxed);
+        self.tag_edit_stop.store(true, Ordering::Relaxed);
+        self.cover_stop.store(true, Ordering::Relaxed);
+
+        self.scan_cancel.store(true, Ordering::Relaxed);
+
+        *self.watcher_manager.lock_or_recover() = None;
+
+        join_worker(self.audio.take(), "audio engine");
+        join_worker(self.coordinator.take(), "playback coordinator");
+        join_worker(self.scan.take(), "library scan worker");
+        join_worker(self.tag_edit.take(), "tag-edit worker");
+        join_worker(self.cover.take(), "cover worker");
+        join_worker(self.fs_forwarder.take(), "filesystem-event forwarder");
+    }
+}
+
+/// Join one worker thread, naming the stage. A worker that panicked is
+/// reported here rather than taking the shutting-down process with it, and
+/// the log line names the stage, which is the only way to tell a wedged join
+/// from a slow one.
+fn join_worker(handle: Option<JoinHandle<()>>, stage: &str) {
+    let Some(handle) = handle else {
+        // Already joined: a repeated `shutdown` finds no handle to wait on.
+        return;
+    };
+    tracing::debug!("Joining the {stage} thread");
+    if let Err(panic) = handle.join() {
+        tracing::error!("The {stage} thread panicked: {panic:?}");
+    }
+}
+
 impl AppRuntime {
     /// Open the Application Store at `store_path`, wire every real adapter
     /// into its port, and spawn the worker threads. Store open/migration
     /// failures are returned to the caller — never silent fallbacks.
+    ///
+    /// Returns the runtime and its lifecycle as two halves: the frontend
+    /// builds the app from the first and keeps the second to stop the worker
+    /// threads with. See [`RuntimeLifecycle::shutdown`].
     // One linear wiring sequence, and the order is load-bearing: every
-    // handle's clones must be taken before its consumer moves it. Splitting
-    // it into helpers would hide that order behind call boundaries.
+    // handle's clones — including each worker's stop flag — must be taken
+    // before its consumer moves it. Splitting it into helpers would hide
+    // that order behind call boundaries.
     #[allow(clippy::too_many_lines)]
-    pub fn spawn(store_path: &Path) -> Result<Self, StoreError> {
+    pub fn spawn(store_path: &Path) -> Result<(Self, RuntimeLifecycle), StoreError> {
         // The store: one shared connection behind an internal mutex serves
         // every store port; both session generations bump inside the store's
         // mutation impls, and the change channel feeds the event inbox.
@@ -133,24 +232,27 @@ impl AppRuntime {
         let engine_cmd_tx = cmd_tx.clone();
         let app_state = playback.clone();
         let engine_queries = library_query_store.clone();
-        // Stop flags for the request-channel workers. Nothing sets them yet:
-        // the handles they pair with are still dropped below, so production
-        // behaviour is unchanged until the lifecycle that owns both lands.
+        // Stop flags for the request-channel workers. Each one is raised by
+        // `RuntimeLifecycle::shutdown`; the lifecycle keeps the original and
+        // the worker gets the clone.
         let engine_stop = Arc::new(AtomicBool::new(false));
-        let _audio_thread = thread::spawn(move || {
+        let engine_stop_worker = Arc::clone(&engine_stop);
+        let audio_thread = thread::spawn(move || {
             run_engine_thread(
                 cmd_rx,
                 engine_cmd_tx,
                 update_tx,
                 app_state,
                 engine_queries,
-                engine_stop,
+                engine_stop_worker,
             );
         });
 
         // Playback Coordinator: applies Playback Updates to session state
-        // and owns playback continuation, on its dedicated thread.
-        let _update_processor = PlaybackCoordinator::spawn(
+        // and owns playback continuation, on its dedicated thread. It needs
+        // no stop flag — the engine thread's exit drops `update_tx` and
+        // disconnects this loop.
+        let coordinator = PlaybackCoordinator::spawn(
             playback.clone(),
             update_rx,
             cmd_tx.clone(),
@@ -165,6 +267,10 @@ impl AppRuntime {
         // infra scanner to the SAME cancel flag the service cancels through,
         // so the app layer never names infra types.
         let cancel_flag = Arc::new(AtomicBool::new(false));
+        // The lifecycle keeps its own clone: shutdown cancels the scan in
+        // flight through this flag rather than calling back through the
+        // `Scans` front end, which the UI holds by then.
+        let scan_cancel = Arc::clone(&cancel_flag);
         let scanner = AudioFileScanner::new(cancel_flag.clone());
         // A settings clone bound into the walk so each scan reads the
         // Library Scan options fresh — the Settings pane's toggles and
@@ -173,12 +279,13 @@ impl AppRuntime {
         // historical defaults rather than failing the scan.
         let scan_settings = settings_store.clone();
         let scan_stop = Arc::new(AtomicBool::new(false));
+        let scan_stop_worker = Arc::clone(&scan_stop);
         let (scans, scan_worker) = ScanService::new(
             Box::new(LoftyMetadataReader::new()),
             Box::new(library_query_store.clone()),
             Box::new(library_mutation_store.clone()),
             cancel_flag,
-            scan_stop,
+            scan_stop_worker,
             move |path| {
                 let options = scan_settings.load_settings().map_or_else(
                     |e| {
@@ -190,19 +297,19 @@ impl AppRuntime {
                 scanner.scan(path, &options)
             },
         );
-        let _scan_thread = thread::spawn(move || scan_worker.run());
+        let scan = thread::spawn(move || scan_worker.run());
 
-        let watcher_manager = spawn_fs_watcher(scans.clone());
+        let (watcher_manager, fs_forwarder) = spawn_fs_watcher(scans.clone());
 
         // Background services (ADR 0006): real adapters, dedicated worker
         // threads — spawned here exactly like the Audio Engine.
         let tag_edit_stop = Arc::new(AtomicBool::new(false));
         let cover_stop = Arc::new(AtomicBool::new(false));
-        let (tag_edits, covers) = spawn_background_services(
+        let (tag_edits, covers, tag_edit, cover) = spawn_background_services(
             library_query_store.clone(),
             library_mutation_store.clone(),
-            tag_edit_stop,
-            cover_stop,
+            Arc::clone(&tag_edit_stop),
+            Arc::clone(&cover_stop),
         );
 
         // The UI's `Box<dyn Transport>` and the tray's transport are
@@ -224,14 +331,14 @@ impl AppRuntime {
 
         let quit_flag = Arc::new(AtomicBool::new(false));
 
-        Ok(Self {
+        let runtime = Self {
             playback,
             library,
             backend_events,
             ui_transport,
             tray_transport,
             scans,
-            watcher_manager,
+            watcher_manager: Arc::clone(&watcher_manager),
             quit_flag,
             settings: Box::new(settings_store),
             playlists: Box::new(playlist_store),
@@ -239,7 +346,24 @@ impl AppRuntime {
             session_views,
             tag_edits: Box::new(tag_edits),
             covers: Box::new(covers),
-        })
+        };
+
+        let lifecycle = RuntimeLifecycle {
+            audio: Some(audio_thread),
+            coordinator: Some(coordinator),
+            scan: Some(scan),
+            tag_edit: Some(tag_edit),
+            cover: Some(cover),
+            fs_forwarder: Some(fs_forwarder),
+            engine_stop,
+            scan_stop,
+            tag_edit_stop,
+            cover_stop,
+            scan_cancel,
+            watcher_manager,
+        };
+
+        Ok((runtime, lifecycle))
     }
 }
 
@@ -278,8 +402,13 @@ fn open_application_store(
 }
 
 /// Create the filesystem watcher and its manager, and spawn the thread that
-/// forwards watch events. Returns the shared manager handle.
-fn spawn_fs_watcher(scans: ScanService) -> Arc<Mutex<Option<WatcherManager>>> {
+/// forwards watch events. Returns the shared manager handle plus the
+/// forwarder's join handle.
+///
+/// The forwarder has no stop flag by design: clearing the manager cell in
+/// [`RuntimeLifecycle::shutdown`] drops the watcher, which drops
+/// `fs_event_tx`, which makes the `recv()` below error out and end the loop.
+fn spawn_fs_watcher(scans: ScanService) -> (Arc<Mutex<Option<WatcherManager>>>, JoinHandle<()>) {
     let (fs_event_tx, fs_event_rx) = unbounded::<Vec<std::path::PathBuf>>();
     let watcher: Option<Box<dyn crate::app::traits::FilesystemWatch>> =
         match FilesystemWatcher::new(fs_event_tx) {
@@ -293,7 +422,7 @@ fn spawn_fs_watcher(scans: ScanService) -> Arc<Mutex<Option<WatcherManager>>> {
     let watcher_manager = Arc::new(Mutex::new(Some(WatcherManager::new(watcher, scans))));
 
     let thread_manager = watcher_manager.clone();
-    let _handle = thread::spawn(move || {
+    let handle = thread::spawn(move || {
         while let Ok(changed_paths) = fs_event_rx.recv() {
             if let Some(ref mut mgr) = *thread_manager.lock_or_recover() {
                 mgr.on_fs_events(&changed_paths);
@@ -301,20 +430,20 @@ fn spawn_fs_watcher(scans: ScanService) -> Arc<Mutex<Option<WatcherManager>>> {
         }
     });
 
-    watcher_manager
+    (watcher_manager, handle)
 }
 
 /// Composition-root wiring for the background services (ADR 0006): construct
 /// the real Tag Edit and Cover service pairs over real adapters and run each
 /// blocking worker on its dedicated thread — exactly like the Audio Engine.
 /// Returns the front-end handles the UI holds boxed (`Box<dyn TagEdits>`,
-/// `Box<dyn Covers>`).
+/// `Box<dyn Covers>`) plus each worker's join handle, in that order.
 fn spawn_background_services(
     library_queries: SqliteStore,
     library_mutations: SqliteStore,
     tag_edit_stop: Arc<AtomicBool>,
     cover_stop: Arc<AtomicBool>,
-) -> (TagEditService, CoverService) {
+) -> (TagEditService, CoverService, JoinHandle<()>, JoinHandle<()>) {
     // The cover worker reads the artwork policy fresh per resolution so
     // the Settings pane's "Read embedded artwork" toggle applies
     // immediately (design-handoff issue 12); a read failure falls back to
@@ -326,7 +455,7 @@ fn spawn_background_services(
         Box::new(library_mutations),
         tag_edit_stop,
     );
-    let _handle = thread::spawn(move || tag_worker.run());
+    let tag_edit = thread::spawn(move || tag_worker.run());
 
     let cover_policy: CoverPolicy = Box::new(move || {
         cover_settings.load_settings().map_or_else(
@@ -343,9 +472,9 @@ fn spawn_background_services(
         cover_policy,
         cover_stop,
     );
-    let _handle = thread::spawn(move || cover_worker.run());
+    let cover = thread::spawn(move || cover_worker.run());
 
-    (tag_edits, covers)
+    (tag_edits, covers, tag_edit, cover)
 }
 
 /// Composition-root wiring for the audio engine thread: construct the real

@@ -6,7 +6,7 @@ For the end-to-end sequences that these threads participate in, see [./data-flow
 
 ## Threads
 
-Every worker thread is spawned by the Composition Root — `AppRuntime::spawn` in `riff-backend/src/composition.rs` — except the tray thread, which the frontend spawns. The cpal callback thread is owned by the operating system audio stack.
+Every worker thread is spawned and joined by the Composition Root — `AppRuntime::spawn` in `riff-backend/src/composition.rs`, which returns the frontend's handles alongside a `RuntimeLifecycle` whose `shutdown` stops each worker and waits for it — except the tray thread, which the frontend spawns. The cpal callback thread is owned by the operating system audio stack.
 
 | Thread | Responsibility | Spawned in |
 |--------|----------------|------------|
@@ -20,7 +20,7 @@ Every worker thread is spawned by the Composition Root — `AppRuntime::spawn` i
 | Cover worker | Receives cover requests, resolves embedded/filesystem art, decodes it to RGBA through the bounded LRU in the `CoverService`, and returns results to the UI. | `composition.rs` (`CoverService::new` + worker run) |
 | Tray event thread (non-Linux) | Dispatches system tray menu events (play/pause, next, previous, show/hide, quit) through the tray's recording `ChannelTransport`. | `riff-gui/src/ui/tray.rs` |
 
-The audio engine thread is the heart of playback. It is a single long-lived loop that blocks on `cmd_rx.recv()` waiting for a `PlaybackCommand`. When it receives `Play(track_id)` it resolves the Track through the store query port, opens a decoder through the injected `DecoderFactory` (which mints a fresh symphonia `CodecRegistry` per decoder, so the Opus adapter decodes correctly), starts the cpal stream, and enters an inner decode loop that runs until the track ends or a command interrupts it.
+The audio engine thread is the heart of playback. It is a single long-lived loop that polls `cmd_rx` for a `PlaybackCommand` — on the 10 ms `COMMAND_POLL` interval, whether or not a track is loaded, so that an idle engine can still observe a stop request. When it receives `Play(TrackId)` it resolves the Track through the store query port, opens a decoder through the injected `DecoderFactory` (which mints a fresh symphonia `CodecRegistry` per decoder, so the Opus adapter decodes correctly), starts the cpal stream, and enters an inner decode loop that runs until the track ends or a command interrupts it.
 
 ## Wiring at Startup
 
@@ -36,7 +36,20 @@ let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
 let (update_tx, update_rx) = unbounded::<PlaybackUpdate>();
 ```
 
-One shared `SqliteStore` connection serves every store port view; both session generations (library and playlist) bump inside the store's mutation impls, and the `StoreChanged` stream feeds the event inbox. The UI's `Box<dyn Transport>` and the tray's transport are both `ChannelTransport`s wired with the same shared recorder closure, so every dispatched command is reported onto one observable event inbox before being forwarded to the engine's command channel. The scan service, watcher manager, tag-edit service, and cover service are constructed over the real adapters here, and their workers' thread handles are owned by the runtime. The frontend then receives everything it renders with as one `AppRuntime` value.
+One shared `SqliteStore` connection serves every store port view; both session generations (library and playlist) bump inside the store's mutation impls, and the `StoreChanged` stream feeds the event inbox. The UI's `Box<dyn Transport>` and the tray's transport are both `ChannelTransport`s wired with the same shared recorder closure, so every dispatched command is reported onto one observable event inbox before being forwarded to the engine's command channel. The scan service, watcher manager, tag-edit service, and cover service are constructed over the real adapters here, and their worker threads are owned by the returned `RuntimeLifecycle`. The frontend then receives everything it renders with as one `AppRuntime` value.
+
+## Shutdown
+
+`AppRuntime::spawn` returns `(AppRuntime, RuntimeLifecycle)`; `main.rs` builds the app from the first half and calls `lifecycle.shutdown()` once `eframe::run_native` has returned. Tray Quit is unchanged — it still sets `quit_flag` and closes the viewport, and the viewport closing is what ends the event loop.
+
+`shutdown` is idempotent (each handle is taken before it is joined, so a second call returns immediately) and runs in a fixed order:
+
+1. Raise the stop flag of every worker that has one: the audio engine, the scan worker, the tag-edit worker, and the cover worker. The coordinator and the filesystem-event forwarder need none — they exit when their upstream channel disconnects.
+2. Set the scan cancel flag, so a scan in flight aborts at its next batch boundary. The batches already committed stay: durability is per batch, and an interrupted scan never rolls work back.
+3. Clear the watcher-manager cell, which drops the filesystem watcher and therefore the event sender the forwarder is parked on.
+4. Join, in dependency order — audio engine first, because the engine's exit is what disconnects the coordinator's update channel, then the coordinator, scan, tag-edit, cover, and forwarder.
+
+A stop is always honored *between* units of work, never inside one: the engine finishes the command it is holding (the gapless self-dispatch through `cmd_tx` is never truncated), the tag-edit worker reports the outcome of the edit it is holding, and a running scan ends through the ordinary cancel path.
 
 ## The Playback Coordinator in Detail
 

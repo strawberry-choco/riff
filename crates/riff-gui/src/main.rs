@@ -16,7 +16,8 @@ fn main() {
              (no data-local directory available): {e}"
         )
     });
-    let rt = AppRuntime::spawn(&store_path).unwrap_or_else(|e| panic!("fatal: {e}"));
+    let (rt, mut lifecycle) =
+        AppRuntime::spawn(&store_path).unwrap_or_else(|e| panic!("fatal: {e}"));
 
     let options = eframe::NativeOptions {
         // Frameless launch (Issue 04, ADR 0005): OS decorations are replaced
@@ -85,6 +86,13 @@ fn main() {
     );
 
     run_native_app(app, options);
+
+    // The window closed and `app` has been dropped, so nothing renders with
+    // this runtime any more: stop the worker threads it spawned and wait for
+    // each one to return. Tray Quit is untouched by this — it still sets
+    // `quit_flag` and closes the viewport, and closing the viewport is what
+    // gets us here.
+    lifecycle.shutdown();
 }
 
 /// Hand the composed [`RiffApp`] to eframe: frameless native window with the

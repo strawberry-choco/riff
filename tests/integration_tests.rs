@@ -480,9 +480,16 @@ mod composition_root_tests {
     use crate::domain::TrackId;
     use riff_backend::app::events::{BackendEvent, NoticeSeverity, NoticeSource};
     use riff_backend::app::scan_service::{ScanOutcome, Scans};
-    use riff_backend::composition::AppRuntime;
-    use std::path::Path;
+    use riff_backend::app::tag_edit_service::TagEditRequest;
+    use riff_backend::app::traits::TagEdit;
+    use riff_backend::composition::{AppRuntime, RuntimeLifecycle};
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
+
+    /// How long any single shutdown may take before this suite calls it
+    /// wedged. Generous next to the 10 ms poll the workers return on, so a
+    /// loaded machine does not turn a slow join into a failure.
+    const SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
 
     /// Write a tiny but fully valid PCM WAV file (0.1 s of mono 8 kHz audio)
     /// so the real scanner and metadata-reader adapters have a real audio
@@ -527,6 +534,40 @@ mod composition_root_tests {
         }
     }
 
+    /// Shuts a spawned runtime's worker threads down on the way out of scope,
+    /// panics included.
+    ///
+    /// A test that spawns real worker threads must never leave them running
+    /// for the next test in the same process, and an assertion failure in the
+    /// middle of a test body would otherwise skip the shutdown entirely.
+    struct LifecycleGuard(RuntimeLifecycle);
+
+    impl Drop for LifecycleGuard {
+        fn drop(&mut self) {
+            self.0.shutdown();
+        }
+    }
+
+    /// Run `shutdown` on a helper thread and wait for it to return within
+    /// [`SHUTDOWN_BUDGET`].
+    ///
+    /// A wedged join then fails the calling test with a message naming the
+    /// join order, instead of hanging the suite with no output at all.
+    fn shutdown_within_budget(mut lifecycle: RuntimeLifecycle, what: &str) {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            lifecycle.shutdown();
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(SHUTDOWN_BUDGET).is_ok(),
+            "{what}: shutdown() never returned within {SHUTDOWN_BUDGET:?}, so at least one \
+             worker thread is still running. Workers are joined in dependency order — audio \
+             engine, playback coordinator, library scan worker, tag-edit worker, cover worker, \
+             filesystem-event forwarder — so the first stage still running is the one that hung"
+        );
+    }
+
     /// The Settings Library pane's persisted scan options flow through the
     /// real composition into the scan pipeline (design-handoff issue 12):
     /// disabled formats are never indexed, hidden entries are skipped, and
@@ -544,7 +585,9 @@ mod composition_root_tests {
         write_minimal_wav(&music.join("dropped.mp3"));
         write_minimal_wav(&hidden.join("buried.wav"));
 
-        let mut rt = AppRuntime::spawn(&db_path).expect("runtime must spawn over a fresh store");
+        let (mut rt, lifecycle) =
+            AppRuntime::spawn(&db_path).expect("runtime must spawn over a fresh store");
+        let _lifecycle = LifecycleGuard(lifecycle);
 
         // The pane's persisted options: index WAV only, keep the historical
         // skip-hidden default.
@@ -594,7 +637,9 @@ mod composition_root_tests {
         write_minimal_wav(&music.join("song_b.wav"));
 
         // The seam under test: one spawn over a scratch Application Store.
-        let mut rt = AppRuntime::spawn(&db_path).expect("runtime must spawn over a fresh store");
+        let (mut rt, lifecycle) =
+            AppRuntime::spawn(&db_path).expect("runtime must spawn over a fresh store");
+        let _lifecycle = LifecycleGuard(lifecycle);
 
         // The audio pipeline runs: a Play command for a missing track travels
         // the UI transport into the audio-engine thread, comes back as a
@@ -658,6 +703,136 @@ mod composition_root_tests {
                     .any(|ev| matches!(ev, BackendEvent::LibraryChanged { .. }))
                     .then_some(())
             },
+        );
+    }
+
+    /// The runtime owns thread death as well as birth: `shutdown` ends every
+    /// worker it spawned and waits for each one to return.
+    #[test]
+    fn test_shutdown_joins_every_worker_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+
+        // The runtime half stays alive across the shutdown. That is the
+        // realistic case — the window closes while the handles the app
+        // rendered with still exist — and the one where a worker could
+        // deadlock on state the frontend still holds.
+        let (_rt, lifecycle) =
+            AppRuntime::spawn(&db_path).expect("runtime must spawn over a fresh store");
+
+        shutdown_within_budget(lifecycle, "a freshly spawned runtime");
+    }
+
+    /// Every join handle is `Option`-wrapped and taken before it is joined, so
+    /// shutting down twice is not an error and not a second join.
+    #[test]
+    fn test_second_shutdown_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let (_rt, mut lifecycle) =
+            AppRuntime::spawn(&db_path).expect("runtime must spawn over a fresh store");
+
+        lifecycle.shutdown();
+
+        // Anything other than an immediate return fails here — a double-join
+        // panic, or simply blocking on a handle that is already joined.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            lifecycle.shutdown();
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(SHUTDOWN_BUDGET).is_ok(),
+            "a second shutdown() must return immediately: every join handle has already been \
+             taken, so there is nothing left to wait on"
+        );
+    }
+
+    /// Cancelling a scan in flight must not roll work back. The domain
+    /// contract is durability per batch — the batches that committed stay —
+    /// so this asserts consistency, not a count.
+    #[test]
+    fn test_scan_in_flight_during_shutdown_keeps_its_committed_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let music = dir.path().join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        // More files than one ~10-track batch, so a cancellation can land at a
+        // batch boundary rather than after the whole walk.
+        for i in 0..25 {
+            write_minimal_wav(&music.join(format!("song_{i:02}.wav")));
+        }
+
+        let (mut rt, lifecycle) =
+            AppRuntime::spawn(&db_path).expect("runtime must spawn over a fresh store");
+
+        // Request the scan and shut down immediately. Whichever side wins the
+        // race, shutdown must return and the store must still be usable.
+        rt.scans.request(music.clone());
+
+        shutdown_within_budget(lifecycle, "a runtime with a scan in flight");
+
+        let counts = rt.session_views.sidebar_counts(1);
+        assert!(
+            counts.tracks <= 25,
+            "an interrupted scan cannot have committed more tracks than the fixture holds, \
+             got {}",
+            counts.tracks
+        );
+        assert_eq!(
+            rt.session_views.track_list("", 0).total,
+            counts.tracks,
+            "the store stays consistent after a shutdown that raced a scan: the sidebar count \
+             and the track list must still agree"
+        );
+    }
+
+    /// The UI keeps its front-end handles after shutdown, and a frame can
+    /// still run before the process exits. Each seam must answer — never
+    /// block, never panic. The workers are only ever poked through those
+    /// seams, so this is also the check that no front end reaches into a
+    /// worker that is already gone.
+    #[test]
+    fn test_service_front_ends_do_not_hang_after_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let (rt, mut lifecycle) =
+            AppRuntime::spawn(&db_path).expect("runtime must spawn over a fresh store");
+
+        lifecycle.shutdown();
+
+        let scans = rt.scans.clone();
+        let tag_edits = rt.tag_edits;
+        let covers = rt.covers;
+
+        // Run on a helper thread so a wedged front end fails this test rather
+        // than hanging the suite.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let nowhere = PathBuf::from("/riff/shutdown/does/not/exist");
+
+            scans.request(nowhere.clone());
+            let _ = scans.poll();
+
+            tag_edits.submit(TagEditRequest {
+                track_id: TrackId("gone.wav".to_string()),
+                path: nowhere.clone(),
+                edit: TagEdit::default(),
+            });
+            let _ = tag_edits.poll();
+
+            let track_id = TrackId("gone.wav".to_string());
+            covers.request(track_id, nowhere);
+            let _ = covers.poll();
+
+            let _ = done_tx.send(());
+        });
+
+        assert!(
+            done_rx.recv_timeout(SHUTDOWN_BUDGET).is_ok(),
+            "the scan, tag-edit and cover front ends must all return after shutdown; one of \
+             them is still blocked, which means it is waiting on a worker that has already \
+             exited"
         );
     }
 }

@@ -43,6 +43,32 @@ pub const BROWSER_ROW_H: f32 = 48.0;
 /// Edge size of a row's cover thumbnail.
 pub const THUMB_SIZE: f32 = 36.0;
 
+/// Left room before the thumbnail, thumbnail size, and gap to the text:
+/// the text column starts 52px into the row.
+const THUMB_TEXT_GAP: f32 = 6.0 + THUMB_SIZE + 10.0;
+
+/// Right padding on the text column so wrapped lines don't touch the pane
+/// edge.
+const TEXT_RIGHT_PAD: f32 = 6.0;
+
+/// Floor under the text column's wrap width: a pathologically narrow pane
+/// keeps a usable (still wrapping) column instead of collapsing it.
+const MIN_TEXT_W: f32 = 60.0;
+
+/// Gap between the row's label line and its muted detail line.
+const TEXT_GAP: f32 = 4.0;
+
+/// Vertical inset of a wrapped row's text block within its grown row.
+const TEXT_INSET_Y: f32 = 8.0;
+
+/// A row's label (and optional muted detail line) laid out wrapped at the
+/// text column's width — the measurement the row's height and the list
+/// walker share.
+struct RowText {
+    label: std::sync::Arc<egui::Galley>,
+    detail: Option<std::sync::Arc<egui::Galley>>,
+}
+
 /// Height of the header strip above the rows (sort control, genre chips).
 pub const HEADER_H: f32 = 28.0;
 
@@ -271,7 +297,11 @@ fn chip(
     response.on_hover_text(label)
 }
 
-/// The list layout: virtualized 48px rows, one per visible window index.
+/// The list layout: rows flowing top-down, each at its natural height —
+/// the classic 48px slot, taller when a wrapped label (or detail line)
+/// needs more room. Rows are culled to the visible viewport, so only the
+/// window in hand is materialized; the walk still measures every row above
+/// the window so positions stay exact.
 fn show_browser_list(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -279,17 +309,43 @@ fn show_browser_list(
     column: &mut BrowserColumn<'_>,
     actions: &mut Vec<BrowserAction>,
 ) {
-    egui::ScrollArea::vertical().show_rows(ui, BROWSER_ROW_H, column.total, |ui, row_range| {
-        for i in row_range {
-            let Some(item) = (column.item)(i) else {
-                continue;
-            };
-            let response = browser_row(ui, cache, palette, &item);
-            if response.clicked() {
-                actions.push(BrowserAction::Select(item.key));
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .id_salt("browser_list_rows")
+        .show_viewport(ui, |ui, viewport| {
+            let total = column.total;
+            let mut y = 0.0_f32;
+            for i in 0..total {
+                let Some(item) = (column.item)(i) else {
+                    // The provider declined this slot; reserve a default row
+                    // so the walk stays in step with the provider.
+                    y += BROWSER_ROW_H;
+                    ui.advance_cursor_after_rect(egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(ui.available_width(), BROWSER_ROW_H),
+                    ));
+                    continue;
+                };
+                let h = browser_row_height(ui, palette, &item);
+                if y + h <= viewport.min.y || y >= viewport.max.y {
+                    // Above or below the visible window: reserve the slot
+                    // without materializing the row.
+                    ui.advance_cursor_after_rect(egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(ui.available_width(), h),
+                    ));
+                } else {
+                    let response = browser_row(ui, cache, palette, &item);
+                    if response.clicked() {
+                        actions.push(BrowserAction::Select(item.key));
+                    }
+                }
+                y += h;
+                if y >= viewport.max.y {
+                    break;
+                }
             }
-        }
-    });
+        });
 }
 
 /// The grid layout: square tiles (thumbnail + label) flowing two per row —
@@ -424,23 +480,85 @@ pub fn detail_entity_row(
     browser_row(ui, cache, palette, item)
 }
 
-/// One 48px browser row: an optional rounded cover thumbnail (or its
-/// placeholder slot), the label with its muted detail line, and selection
-/// fill. Clicks stay with the caller, exactly like [`super::sidebar`]'s
-/// row widgets.
+/// The text column's wrap width: the row width minus the thumbnail slot and
+/// edge padding.
+fn text_w(row_w: f32) -> f32 {
+    (row_w - THUMB_TEXT_GAP - TEXT_RIGHT_PAD).max(MIN_TEXT_W)
+}
+
+/// Lay out the row's label (and muted detail line) wrapped at the text
+/// column's width. Memoized by egui's galley cache, so the measure passes
+/// and the paint passes share one layout.
+fn layout_row_text(ui: &egui::Ui, palette: &Palette, item: &BrowserItem) -> RowText {
+    let ink = if item.now_playing {
+        palette.brand_primary
+    } else {
+        palette.ink
+    };
+    let label_font = egui::FontId::new(super::theme::TEXT_SM, egui::FontFamily::Proportional);
+    let detail_font = egui::FontId::new(super::theme::TEXT_XS, egui::FontFamily::Proportional);
+    let wrap = text_w(ui.available_width());
+    ui.fonts_mut(|f| RowText {
+        label: f.layout(item.label.clone(), label_font, ink, wrap),
+        detail: item
+            .detail
+            .as_ref()
+            .map(|d| f.layout(d.clone(), detail_font, palette.ink_3, wrap)),
+    })
+}
+
+/// The label/detail block's laid-out height: label, the gap, then the
+/// detail line when present.
+fn text_block_h(text: &RowText) -> f32 {
+    text.label.size().y + text.detail.as_ref().map_or(0.0, |g| TEXT_GAP + g.size().y)
+}
+
+/// Whether the row's text wraps past its single-line slot: the label or the
+/// detail line broke onto a second line at the text column's width. The
+/// classic 48px row fits one label line over one detail line; anything that
+/// wraps must grow.
+fn row_wraps(text: &RowText) -> bool {
+    text.label.rows.len() > 1 || text.detail.as_ref().is_some_and(|g| g.rows.len() > 1)
+}
+
+/// The natural height of one browser row: the classic 48px slot, grown when
+/// the wrapped label (or detail) needs more room. Pure measurement — the
+/// list walker uses it to place rows of varying heights, so it must agree
+/// exactly with [`browser_row`]'s own allocation.
+fn browser_row_height(ui: &egui::Ui, palette: &Palette, item: &BrowserItem) -> f32 {
+    let text = layout_row_text(ui, palette, item);
+    if row_wraps(&text) {
+        text_block_h(&text) + 2.0 * TEXT_INSET_Y
+    } else {
+        BROWSER_ROW_H
+    }
+}
+
+/// One browser row: an optional rounded cover thumbnail (or its placeholder
+/// slot), the label with its muted detail line, and selection fill. Clicks
+/// stay with the caller, exactly like [`super::sidebar`]'s row widgets.
 ///
-/// The muted detail line (a count, an artist · year, the artist under a
-/// track) folds into the accessibility label — `"Label (detail)"`, the same
-/// shape the sidebar rows speak — so it is read, not just painted
-/// (handoff issue 16).
+/// The text wraps within the text column, so a label (or detail line) too
+/// long for one line breaks onto the next and the row grows to fit it —
+/// the classic 48px slot renders exactly as before. The muted detail line
+/// (a count, an artist · year, the artist under a track) folds into the
+/// accessibility label — `"Label (detail)"`, the same shape the sidebar
+/// rows speak — so it is read, not just painted (handoff issue 16).
 fn browser_row(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
     item: &BrowserItem,
 ) -> egui::Response {
+    let text = layout_row_text(ui, palette, item);
+    let wraps = row_wraps(&text);
+    let row_h = if wraps {
+        text_block_h(&text) + 2.0 * TEXT_INSET_Y
+    } else {
+        BROWSER_ROW_H
+    };
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), BROWSER_ROW_H),
+        egui::vec2(ui.available_width(), row_h),
         egui::Sense::click(),
     );
     let painter = ui.painter_at(rect);
@@ -494,33 +612,7 @@ fn browser_row(
     } else {
         palette.ink
     };
-    match &item.detail {
-        Some(detail) => {
-            painter.text(
-                egui::pos2(text_x, rect.center().y - 8.0),
-                egui::Align2::LEFT_CENTER,
-                &item.label,
-                egui::FontId::new(super::theme::TEXT_SM, egui::FontFamily::Proportional),
-                ink,
-            );
-            painter.text(
-                egui::pos2(text_x, rect.center().y + 9.0),
-                egui::Align2::LEFT_CENTER,
-                detail,
-                egui::FontId::new(super::theme::TEXT_XS, egui::FontFamily::Proportional),
-                palette.ink_3,
-            );
-        }
-        None => {
-            painter.text(
-                egui::pos2(text_x, rect.center().y),
-                egui::Align2::LEFT_CENTER,
-                &item.label,
-                egui::FontId::new(super::theme::TEXT_SM, egui::FontFamily::Proportional),
-                ink,
-            );
-        }
-    }
+    paint_row_text(painter, palette, item, &text, rect, text_x, ink, wraps);
 
     response.widget_info(|| {
         egui::WidgetInfo::labeled(
@@ -530,4 +622,61 @@ fn browser_row(
         )
     });
     response
+}
+
+/// Paint the row's label (and muted detail line) right of the thumbnail:
+/// the classic single-line anchors when the text fits the 48px slot, the
+/// wrapped block under the row's fixed inset when it wraps.
+#[allow(clippy::too_many_arguments, reason = "one painter call per row")]
+fn paint_row_text(
+    painter: egui::Painter,
+    palette: &Palette,
+    item: &BrowserItem,
+    text: &RowText,
+    rect: egui::Rect,
+    text_x: f32,
+    ink: egui::Color32,
+    wraps: bool,
+) {
+    if wraps {
+        // The wrapped block sits under a fixed inset, the detail line
+        // directly under the label's last line.
+        let top = rect.top() + TEXT_INSET_Y;
+        painter.galley(egui::pos2(text_x, top), text.label.clone(), ink);
+        if let Some(detail) = &text.detail {
+            painter.galley(
+                egui::pos2(text_x, top + text.label.size().y + TEXT_GAP),
+                detail.clone(),
+                palette.ink_3,
+            );
+        }
+    } else {
+        match &item.detail {
+            Some(detail) => {
+                painter.text(
+                    egui::pos2(text_x, rect.center().y - 8.0),
+                    egui::Align2::LEFT_CENTER,
+                    &item.label,
+                    egui::FontId::new(super::theme::TEXT_SM, egui::FontFamily::Proportional),
+                    ink,
+                );
+                painter.text(
+                    egui::pos2(text_x, rect.center().y + 9.0),
+                    egui::Align2::LEFT_CENTER,
+                    detail,
+                    egui::FontId::new(super::theme::TEXT_XS, egui::FontFamily::Proportional),
+                    palette.ink_3,
+                );
+            }
+            None => {
+                painter.text(
+                    egui::pos2(text_x, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    &item.label,
+                    egui::FontId::new(super::theme::TEXT_SM, egui::FontFamily::Proportional),
+                    ink,
+                );
+            }
+        }
+    }
 }

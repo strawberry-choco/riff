@@ -1,7 +1,7 @@
 //! The selection panel (design-handoff issue 10), since the elastic-column
 //! task the **inspector**: the stage's rightmost column, shown only while a
 //! selection exists. A readout of the selected entity or track — its art,
-//! title, subtitle, and a details grid — with the orange **Play album**
+//! title, subtitle, and a details list — with the orange **Play album**
 //! action, plus **Add to Queue** in its inspector form. A selection readout,
 //! not a view: it follows the live selection, and the Now Playing view stays
 //! untouched.
@@ -29,7 +29,7 @@ pub enum SelectionAction {
     Queue,
 }
 
-/// One row of the details grid: the display values the app resolved from
+/// One item of the details list: the display values the app resolved from
 /// the store — the widget formats, it never re-derives.
 #[derive(Debug, Clone)]
 pub struct SelectionDetail {
@@ -47,7 +47,7 @@ pub struct SelectionPanel<'a> {
     pub title: Option<&'a str>,
     /// `"Artist · Year"`-style secondary line.
     pub subtitle: Option<&'a str>,
-    /// The details grid rows, resolved by the caller.
+    /// The details list rows, resolved by the caller.
     pub details: &'a [SelectionDetail],
     /// Whether the quick-action row renders **Add to Queue** beside **Play
     /// album** (the elastic-column inspector). `false` keeps the panel's
@@ -93,7 +93,7 @@ pub fn show_selection_panel(
             play_album_button(ui, cache, palette, actions);
         }
         ui.add_space(12.0);
-        details_grid(ui, palette, panel.details);
+        details_list(ui, palette, panel.details);
     } else {
         ui.add_space(12.0);
         ui.label(egui::RichText::new(EMPTY_TITLE).color(palette.ink_2));
@@ -257,38 +257,30 @@ fn action_button(
     }
 }
 
-/// The details grid: one muted label per row with its value right-aligned
-/// at the opposite edge (design: `Artist … Boards of Canada`).
-fn details_grid(ui: &mut egui::Ui, palette: &Palette, details: &[SelectionDetail]) {
+/// Vertical gap between two detail items.
+const DETAILS_ITEM_GAP: f32 = 8.0;
+
+/// The details list: one muted label on its own line, its value on the next,
+/// both hugging the panel's left edge; the gap between items keeps the
+/// stacked readout scannable (design: the label above the value it names).
+fn details_list(ui: &mut egui::Ui, palette: &Palette, details: &[SelectionDetail]) {
     ui.label(
         egui::RichText::new("DETAILS")
             .text_style(egui::TextStyle::Small)
             .color(palette.ink_3),
     );
     ui.add_space(4.0);
-    // Each column takes half the panel width, so the right-aligned value
-    // column hugs the panel's opposite edge (design: `Artist … Boards of
-    // Canada`).
-    let col_w = ui.available_width() / 2.0;
-    egui::Grid::new("selection_details")
-        .num_columns(2)
-        .min_col_width(col_w)
-        .spacing([8.0, 6.0])
-        .show(ui, |ui| {
-            for detail in details {
-                ui.label(
-                    egui::RichText::new(&detail.label)
-                        .text_style(egui::TextStyle::Small)
-                        .color(palette.ink_3),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(&detail.value)
-                            .text_style(egui::TextStyle::Small)
-                            .color(palette.ink),
-                    );
-                });
-                ui.end_row();
-            }
-        });
+    for detail in details {
+        ui.label(
+            egui::RichText::new(&detail.label)
+                .text_style(egui::TextStyle::Small)
+                .color(palette.ink_3),
+        );
+        ui.label(
+            egui::RichText::new(&detail.value)
+                .text_style(egui::TextStyle::Small)
+                .color(palette.ink),
+        );
+        ui.add_space(DETAILS_ITEM_GAP);
+    }
 }

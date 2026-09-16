@@ -5563,8 +5563,6 @@ mod browser_column_ui_tests {
                         layout: BrowserLayout::List,
                         sort_desc: false,
                         show_sort: true,
-                        genres: &[],
-                        genre_filter: None,
                         total: items.len(),
                         item: &mut fixture_item,
                         empty_title: "",
@@ -5634,8 +5632,6 @@ mod browser_column_ui_tests {
                         layout: BrowserLayout::List,
                         sort_desc: false,
                         show_sort: false,
-                        genres: &[],
-                        genre_filter: None,
                         total: items.len(),
                         item: &mut fixture_item,
                         empty_title: "",
@@ -5698,8 +5694,6 @@ mod browser_column_ui_tests {
                         layout: BrowserLayout::List,
                         sort_desc: false,
                         show_sort: false,
-                        genres: &[],
-                        genre_filter: None,
                         total: items.len(),
                         item: &mut fixture_item,
                         empty_title: "",
@@ -5755,8 +5749,6 @@ mod browser_column_ui_tests {
                         layout: BrowserLayout::Grid,
                         sort_desc: false,
                         show_sort: false,
-                        genres: &[],
-                        genre_filter: None,
                         total: items.len(),
                         item: &mut fixture_item,
                         empty_title: "",
@@ -5793,8 +5785,6 @@ mod browser_column_ui_tests {
                         layout: BrowserLayout::List,
                         sort_desc: false,
                         show_sort: true,
-                        genres: &[],
-                        genre_filter: None,
                         total: 0,
                         item: &mut fixture_item,
                         empty_title: "No tracks yet",
@@ -5838,8 +5828,6 @@ mod browser_column_ui_tests {
                             layout: BrowserLayout::List,
                             sort_desc,
                             show_sort: true,
-                            genres: &[],
-                            genre_filter: None,
                             total: items.len(),
                             item: &mut fixture_item,
                             empty_title: "",
@@ -5894,8 +5882,6 @@ mod browser_column_ui_tests {
                         layout: BrowserLayout::List,
                         sort_desc: false,
                         show_sort: false,
-                        genres: &[],
-                        genre_filter: None,
                         total: items.len(),
                         item: &mut fixture_item,
                         empty_title: "",
@@ -5917,179 +5903,6 @@ mod browser_column_ui_tests {
     }
 
     #[test]
-    fn test_browser_column_genre_chips_filter_and_clear() {
-        use egui_kittest::kittest::Queryable;
-
-        use riff_backend::domain::GenreCount;
-
-        // Leaked so the harness closure can hold the slice for its 'static
-        // bound without the outer helper closure consuming it.
-        let genres: &'static [GenreCount] = Box::leak(
-            vec![
-                GenreCount {
-                    genre: "Electronic".to_string(),
-                    tracks: 12,
-                },
-                GenreCount {
-                    genre: "Rock".to_string(),
-                    tracks: 4,
-                },
-            ]
-            .into_boxed_slice(),
-        );
-        let run_column = |genre_filter: Option<&'static str>| {
-            let palette = Palette::dark();
-            let mut cache = IconCache::new();
-            let items = fixture_items();
-            let mut harness = egui_kittest::Harness::builder()
-                .with_size(egui::vec2(320.0, 300.0))
-                .with_pixels_per_point(1.0)
-                .build_ui_state(
-                    move |ui, actions: &mut Vec<BrowserAction>| {
-                        let mut fixture_item = provider(&items);
-                        let column = BrowserColumn {
-                            layout: BrowserLayout::List,
-                            sort_desc: false,
-                            show_sort: true,
-                            genres,
-                            genre_filter,
-                            total: items.len(),
-                            item: &mut fixture_item,
-                            empty_title: "",
-                            empty_hint: "",
-                        };
-                        riff_gui::ui::browser::show_browser_column(
-                            ui, &mut cache, &palette, column, actions,
-                        );
-                    },
-                    Vec::new(),
-                );
-            harness.run();
-            harness
-        };
-
-        // The chip row: an All chip plus one chip per genre, alongside the
-        // sort control.
-        let mut harness = run_column(None);
-        for label in ["All genres", "Genre: Electronic", "Genre: Rock"] {
-            assert!(
-                harness.query_by_label(label).is_some(),
-                "chip '{label}' must render above the artist list"
-            );
-        }
-
-        // Clicking a genre chip narrows the list to that genre.
-        harness.get_by_label("Genre: Electronic").click();
-        harness.run();
-        assert!(
-            harness
-                .state()
-                .contains(&BrowserAction::SetGenreFilter(Some(
-                    "Electronic".to_string()
-                ))),
-            "clicking a genre chip reports the chosen genre"
-        );
-
-        // Clicking All clears the filter.
-        let mut harness = run_column(Some("Electronic"));
-        harness.get_by_label("All genres").click();
-        harness.run();
-        assert!(
-            harness
-                .state()
-                .contains(&BrowserAction::SetGenreFilter(None)),
-            "clicking All clears the genre filter"
-        );
-    }
-
-    #[test]
-    fn test_chips_and_sort_are_operable_from_the_keyboard() {
-        use egui_kittest::kittest::Queryable;
-        use riff_backend::domain::GenreCount;
-
-        // Handoff issue 16: the A–Z sort control and the genre filter chips
-        // must be keyboard-reachable and Enter-activatable, not mouse-only —
-        // a keyboard listener can reorder and narrow the listing.
-        let genres: &'static [GenreCount] = Box::leak(
-            vec![
-                GenreCount {
-                    genre: "Electronic".to_string(),
-                    tracks: 12,
-                },
-                GenreCount {
-                    genre: "Rock".to_string(),
-                    tracks: 4,
-                },
-            ]
-            .into_boxed_slice(),
-        );
-        let palette = Palette::dark();
-        let mut cache = IconCache::new();
-        let items = fixture_items();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(320.0, 300.0))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                move |ui, actions: &mut Vec<BrowserAction>| {
-                    let mut fixture_item = provider(&items);
-                    let column = BrowserColumn {
-                        layout: BrowserLayout::List,
-                        sort_desc: false,
-                        show_sort: true,
-                        genres,
-                        genre_filter: None,
-                        total: items.len(),
-                        item: &mut fixture_item,
-                        empty_title: "",
-                        empty_hint: "",
-                    };
-                    riff_gui::ui::browser::show_browser_column(
-                        ui, &mut cache, &palette, column, actions,
-                    );
-                },
-                Vec::new(),
-            );
-        harness.run();
-
-        // The sort control is individually focusable, and Enter on it
-        // reports the same ToggleSort a click does.
-        harness.get_by_label("Sort Z to A").focus();
-        harness.run();
-        assert!(
-            harness.get_by_label("Sort Z to A").is_focused(),
-            "the A–Z sort control is keyboard-reachable"
-        );
-        harness.key_press(egui::Key::Enter);
-        harness.run();
-        assert!(
-            harness.state().contains(&BrowserAction::ToggleSort),
-            "Enter on the focused sort control must report ToggleSort, got {:?}",
-            harness.state()
-        );
-
-        // A genre chip is individually focusable, and Enter on it reports
-        // the same SetGenreFilter a click does.
-        harness.run();
-        harness.get_by_label("Genre: Electronic").focus();
-        harness.run();
-        assert!(
-            harness.get_by_label("Genre: Electronic").is_focused(),
-            "a genre chip is keyboard-reachable"
-        );
-        harness.key_press(egui::Key::Enter);
-        harness.run();
-        assert!(
-            harness
-                .state()
-                .contains(&BrowserAction::SetGenreFilter(Some(
-                    "Electronic".to_string()
-                ))),
-            "Enter on the focused chip must report the genre filter, got {:?}",
-            harness.state()
-        );
-    }
-
-    #[test]
     fn test_browser_column_grid_renders_the_same_items_and_reports_selection() {
         use egui_kittest::kittest::Queryable;
 
@@ -6106,8 +5919,6 @@ mod browser_column_ui_tests {
                         layout: BrowserLayout::Grid,
                         sort_desc: false,
                         show_sort: true,
-                        genres: &[],
-                        genre_filter: None,
                         total: items.len(),
                         item: &mut fixture_item,
                         empty_title: "",
@@ -6174,15 +5985,6 @@ mod browser_column_ui_tests {
         assert!(library.browser_sort_desc, "ToggleSort flips to Z–A");
         apply_browser_action(BrowserAction::ToggleSort, &mut library);
         assert!(!library.browser_sort_desc, "another toggle returns to A–Z");
-
-        // Genre chips set and clear the artist filter.
-        apply_browser_action(
-            BrowserAction::SetGenreFilter(Some("Electronic".to_string())),
-            &mut library,
-        );
-        assert_eq!(library.genre_filter.as_deref(), Some("Electronic"));
-        apply_browser_action(BrowserAction::SetGenreFilter(None), &mut library);
-        assert_eq!(library.genre_filter, None);
     }
 
     #[test]
@@ -7084,7 +6886,11 @@ mod browser_column_ui_tests {
     /// no rows.
     fn render_detail_state_ui(ui: &mut egui::Ui, s: &mut DetailRenderState) {
         let palette = Palette::dark();
-        let content = riff_gui::ui::app::resolve_detail_content(&mut s.views, &s.library);
+        let content = riff_gui::ui::app::resolve_detail_content(
+            &mut s.views,
+            &s.library,
+            &s.library.search_query,
+        );
         let column = riff_gui::ui::detail::DetailColumn {
             breadcrumb: &content.breadcrumb,
             header: content.header.as_ref(),
@@ -7822,8 +7628,6 @@ mod browser_column_ui_tests {
                         layout: BrowserLayout::List,
                         sort_desc: false,
                         show_sort: true,
-                        genres: &[],
-                        genre_filter: None,
                         total: items.len(),
                         item: &mut fixture_item,
                         empty_title: "",
@@ -8040,8 +7844,6 @@ mod browser_column_ui_tests {
                                 layout: BrowserLayout::List,
                                 sort_desc: false,
                                 show_sort: false,
-                                genres: &[],
-                                genre_filter: None,
                                 total: items.len(),
                                 item: &mut fixture_item,
                                 empty_title: "",
@@ -8351,6 +8153,86 @@ mod whole_frame_tests {
                 StoreGeneration::new(),
             ),
         )
+    }
+
+    /// A shell whose transport is a shared recording handle, so a test can
+    /// assert exactly which play intents a frame emitted (the filtered
+    /// header batch contract). The library query port is a pre-configured
+    /// mock standing in for the Application Store.
+    fn recording_transport_shell(mock: MockLibraryQueryStore) -> (Shell, Arc<MockTransport>) {
+        let transport = Arc::new(MockTransport::new());
+        #[derive(Clone)]
+        struct SharedTransport(Arc<MockTransport>);
+        impl Transport for SharedTransport {
+            fn play(&self, track: riff_backend::domain::TrackId) {
+                self.0.play(track);
+            }
+            fn pause(&self) {
+                self.0.pause();
+            }
+            fn resume(&self) {
+                self.0.resume();
+            }
+            fn stop(&self) {
+                self.0.stop();
+            }
+            fn seek(&self, session: &PlaybackSession, secs: f32) {
+                self.0.seek(session, secs);
+            }
+            fn set_volume(&self, session: &mut PlaybackSession, vol: f32) {
+                self.0.set_volume(session, vol);
+            }
+            fn toggle_mute(&self, session: &mut PlaybackSession) {
+                self.0.toggle_mute(session);
+            }
+            fn next(&self) {
+                self.0.next();
+            }
+            fn previous(&self) {
+                self.0.previous();
+            }
+            fn play_next(&self, track: riff_backend::domain::TrackId) {
+                self.0.play_next(track);
+            }
+            fn add_to_queue(&self, track: riff_backend::domain::TrackId) {
+                self.0.add_to_queue(track);
+            }
+            fn play_many(
+                &self,
+                first: riff_backend::domain::TrackId,
+                rest: Vec<riff_backend::domain::TrackId>,
+            ) {
+                self.0.play_many(first, rest);
+            }
+            fn toggle_shuffle(&self, session: &mut PlaybackSession) {
+                self.0.toggle_shuffle(session);
+            }
+            fn toggle_repeat(&self, session: &mut PlaybackSession) {
+                self.0.toggle_repeat(session);
+            }
+            fn play_pause(&self, session: &PlaybackSession) {
+                self.0.play_pause(session);
+            }
+        }
+
+        let settings_calls = Arc::new(Mutex::new(Vec::new()));
+        let shell = build(
+            Box::new(SharedTransport(Arc::clone(&transport))),
+            MockScans::default(),
+            Box::new(MockSettingsStore::with_shared_calls(Arc::clone(
+                &settings_calls,
+            ))),
+            settings_calls,
+            Box::new(MockPlaylistStore::default()),
+            Box::new(MockLibraryMutationStore::new()),
+            SessionViews::new(
+                Box::new(mock),
+                Box::new(MockPlaylistStore::default()),
+                StoreGeneration::new(),
+                StoreGeneration::new(),
+            ),
+        );
+        (shell, transport)
     }
 
     /// A shell over a real `SQLite` Application Store holding one playlist of
@@ -8724,6 +8606,548 @@ mod whole_frame_tests {
                 .count(),
             1,
             "the tapped row re-renders with the committed flag"
+        );
+    }
+
+    // --- Query filters the section's columns (issue 04) ---------------------
+    //
+    // The single-list search stage and its global "no matches" gate are gone:
+    // a query leaves the open section's columns in place, and each column
+    // lists only the entities that match. These tests drive the real app
+    // shell over a mock query port, asserting what the user sees (which rows
+    // render per section and query).
+
+    /// An album fixture (one album per row of the Albums root).
+    fn album(title: &str, artist: &str, year: u32) -> riff_backend::domain::Album {
+        riff_backend::domain::Album {
+            title: title.to_string(),
+            artist: artist.to_string(),
+            tracks: Vec::new(),
+            year: Some(year),
+            genre: None,
+        }
+    }
+
+    /// An artist fixture (one artist per row of the Artists root). `albums`
+    /// carries the artist's album keys: in the hit listing these are the
+    /// hit-album keys (exactly as the store's `hit_artists` answers them);
+    /// in the full browsing listing they are all the artist's album keys
+    /// (the mock's `artist_albums` serves the same list for every artist,
+    /// so a clearing fixture names its albums through this count).
+    fn artist(name: &str, album_keys: &[&str]) -> riff_backend::domain::Artist {
+        riff_backend::domain::Artist {
+            name: name.to_string(),
+            albums: album_keys.iter().map(|k| k.to_string()).collect(),
+        }
+    }
+
+    /// A track fixture for the album-hit-tracks / album-tracks reads.
+    fn track(id: &str, title: &str) -> riff_backend::domain::Track {
+        crate::test_utils::create_test_track_with_metadata(
+            id,
+            &format!("/music/{id}"),
+            "Artist",
+            title,
+            "Album",
+        )
+    }
+
+    /// The Albums root under a query lists only hit albums, in canonical hit
+    /// order, with the sort control hidden — the query no longer takes over
+    /// the stage as a flat track list.
+    #[test]
+    fn test_albums_root_under_a_query_lists_hit_albums_with_sort_hidden() {
+        use riff_backend::app::state::LibrarySection;
+
+        let (mut shell, _transport) = recording_transport_shell(MockLibraryQueryStore {
+            hit_albums: vec![
+                album("Geogaddi", "Boards of Canada", 2002),
+                album("Tri Repetae", "Autechre", 1995),
+            ],
+            matching_searches: vec!["geo".to_string()],
+            ..Default::default()
+        });
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Albums;
+            library.search_query = "geo".to_string();
+        }
+        shell.harness.step();
+
+        // The Albums column stays in place (not the flat search stage), and
+        // its rows are the hit albums, not the full album list.
+        assert!(
+            shell
+                .harness
+                .query_by_label("Geogaddi (Boards of Canada \u{b7} 2002)")
+                .is_some(),
+            "a hit album's title renders in the Albums column"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("Tri Repetae (Autechre \u{b7} 1995)")
+                .is_some(),
+            "a second hit album renders in the Albums column"
+        );
+        assert!(
+            shell.harness.query_by_label("Sort Z to A").is_none()
+                && shell.harness.query_by_label("Sort A to Z").is_none(),
+            "the sort control is hidden under a query (canonical hit order)"
+        );
+    }
+
+    /// The Albums root's empty copy is query-aware: a query matching no
+    /// album explains itself, it never shows the full empty-library copy.
+    #[test]
+    fn test_albums_root_empty_copy_is_query_aware() {
+        use riff_backend::app::state::LibrarySection;
+
+        let (mut shell, _transport) = recording_transport_shell(MockLibraryQueryStore {
+            // The library HAS albums — the query just matches none of them.
+            hit_albums: Vec::new(),
+            matching_searches: vec!["geo".to_string()],
+            ..Default::default()
+        });
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Albums;
+            library.search_query = "zzz".to_string();
+        }
+        shell.harness.step();
+
+        assert!(
+            shell.harness.query_by_label("No matching albums").is_some(),
+            "the Albums column explains a filtered-to-empty list"
+        );
+        assert!(
+            shell
+                .harness
+                .query_all_by_label("Nothing in your library matches 'zzz'.")
+                .next()
+                .is_some(),
+            "the empty hint names the query"
+        );
+    }
+
+    /// Clearing the query restores the full Albums column (the general
+    /// "clear restores" contract, pinned on the Albums root).
+    #[test]
+    fn test_clearing_the_query_restores_the_full_albums_column() {
+        use riff_backend::app::state::LibrarySection;
+
+        let (mut shell, _transport) = recording_transport_shell(MockLibraryQueryStore {
+            // A single artist whose album table holds both albums: the
+            // Albums root's flat listing derives from the per-artist tables,
+            // and the mock serves `artist_albums` per artist.
+            artists: vec![artist("Boards of Canada", &["geogaddi", "homework"])],
+            albums: vec![
+                album("Geogaddi", "Boards of Canada", 2002),
+                album("Homework", "Boards of Canada", 1997),
+            ],
+            hit_albums: vec![album("Geogaddi", "Boards of Canada", 2002)],
+            matching_searches: vec!["geo".to_string()],
+            ..Default::default()
+        });
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Albums;
+            library.search_query = "geo".to_string();
+        }
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label("Homework (Boards of Canada \u{b7} 1997)")
+                .is_none(),
+            "under the query only the hit album shows"
+        );
+
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.search_query.clear();
+        }
+        shell.harness.step();
+
+        assert!(
+            shell
+                .harness
+                .query_by_label("Geogaddi (Boards of Canada \u{b7} 2002)")
+                .is_some()
+                && shell
+                    .harness
+                    .query_by_label("Homework (Boards of Canada \u{b7} 1997)")
+                    .is_some(),
+            "clearing the query restores the full Albums column"
+        );
+    }
+
+    /// The Artists root under a query lists only hit artists, each row
+    /// carrying its hit-album count, with the A–Z sort control hidden.
+    #[test]
+    fn test_artists_root_under_a_query_lists_hit_artists() {
+        use riff_backend::app::state::LibrarySection;
+
+        let (mut shell, _transport) = recording_transport_shell(MockLibraryQueryStore {
+            artists: vec![
+                artist("Boards of Canada", &["geogaddi", "campfire"]),
+                artist("Portishead", &["dummy"]),
+            ],
+            hit_artists: vec![
+                artist("Boards of Canada", &["geogaddi"]),
+                artist("Portishead", &["dummy"]),
+            ],
+            matching_searches: vec!["geo".to_string()],
+            ..Default::default()
+        });
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Artists;
+            library.search_query = "geo".to_string();
+        }
+        shell.harness.step();
+
+        // The Artists column stays in place and lists the hit artists.
+        assert!(
+            shell
+                .harness
+                .query_by_label("Boards of Canada (1 album)")
+                .is_some(),
+            "a hit artist's row renders with its hit-album count"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("Portishead (1 album)")
+                .is_some(),
+            "every hit artist renders under the query"
+        );
+        assert!(
+            shell.harness.query_by_label("Sort Z to A").is_none()
+                && shell.harness.query_by_label("Sort A to Z").is_none(),
+            "the Artists root's sort control is hidden under a query"
+        );
+    }
+
+    /// A name-hit artist drills to ALL its albums — the downward name-hit
+    /// expansion — even the albums with no hit of their own.
+    #[test]
+    fn test_name_hit_artist_drills_to_all_its_albums() {
+        use riff_backend::app::state::{BrowserSelection, LibrarySection};
+
+        let (mut shell, _transport) = recording_transport_shell(MockLibraryQueryStore {
+            artists: vec![artist("Boards of Canada", &["geogaddi", "campfire"])],
+            albums: vec![
+                album("Geogaddi", "Boards of Canada", 2002),
+                album("Campfire Headphase", "Boards of Canada", 2005),
+            ],
+            hit_artists: vec![artist("Boards of Canada", &["geogaddi"])],
+            album_name_hits: vec!["Boards of Canada - Geogaddi".to_string()],
+            matching_searches: vec!["boards".to_string()],
+            ..Default::default()
+        });
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Artists;
+            library.search_query = "boards".to_string();
+            // Drill into the artist.
+            library.browser_path = vec![BrowserSelection::Artist("Boards of Canada".to_string())];
+        }
+        shell.harness.step();
+
+        assert!(
+            shell
+                .harness
+                .query_by_label("Geogaddi (Boards of Canada \u{b7} 2002)")
+                .is_some(),
+            "the name-hit artist's hit album drills"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("Campfire Headphase (Boards of Canada \u{b7} 2005)")
+                .is_some(),
+            "a name-hit artist expands into ALL its albums, including non-hits"
+        );
+    }
+
+    /// A track-hit artist's drill shows only its hit albums.
+    #[test]
+    fn test_track_hit_artist_drill_shows_only_hit_albums() {
+        use riff_backend::app::state::{BrowserSelection, LibrarySection};
+
+        let (mut shell, _transport) = recording_transport_shell(MockLibraryQueryStore {
+            artists: vec![artist("Portishead", &["dummy", "third"])],
+            albums: vec![
+                album("Dummy", "Portishead", 1994),
+                album("Third", "Portishead", 2021),
+            ],
+            hit_artists: vec![artist("Portishead", &["dummy"])],
+            // Only Dummy carries the matching member track.
+            album_name_hits: vec!["Portishead - Dummy".to_string()],
+            matching_searches: vec!["roads".to_string()],
+            ..Default::default()
+        });
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Artists;
+            library.search_query = "roads".to_string();
+            library.browser_path = vec![BrowserSelection::Artist("Portishead".to_string())];
+        }
+        shell.harness.step();
+
+        assert!(
+            shell
+                .harness
+                .query_by_label("Dummy (Portishead \u{b7} 1994)")
+                .is_some(),
+            "a track-hit artist's hit album drills"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("Third (Portishead \u{b7} 2021)")
+                .is_none(),
+            "a track-hit artist's non-hit albums stay out of the drill"
+        );
+    }
+
+    /// The album drill under a query shows only the album's hit tracks; a
+    /// name-hit album opens its full track list instead.
+    #[test]
+    fn test_album_drill_shows_hit_tracks_unless_the_album_is_a_name_hit() {
+        use riff_backend::app::state::{BrowserSelection, LibrarySection};
+
+        // First: a track-hit album (a member track matches) drills its hit
+        // tracks only.
+        let (mut shell, _transport) = recording_transport_shell(MockLibraryQueryStore {
+            albums: vec![album("Geogaddi", "Boards of Canada", 2002)],
+            album_tracks: vec![
+                track("g1.mp3", "Ready Let's Go"),
+                track("g2.mp3", "Music Is Math"),
+            ],
+            album_hit_tracks: vec![track("g2.mp3", "Music Is Math")],
+            matching_searches: vec!["math".to_string()],
+            ..Default::default()
+        });
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Albums;
+            library.search_query = "math".to_string();
+            library.browser_path = vec![BrowserSelection::Album {
+                artist: "Boards of Canada".to_string(),
+                title: "Geogaddi".to_string(),
+            }];
+        }
+        shell.harness.step();
+
+        assert!(
+            shell.harness.query_by_label("Music Is Math").is_some(),
+            "the matching track drills in its album"
+        );
+        assert!(
+            shell.harness.query_by_label("Ready Let's Go").is_none(),
+            "a track-hit album's non-matching tracks stay out"
+        );
+
+        // Second: the same album as a NAME hit opens its full track list.
+        let (mut shell, _transport) = recording_transport_shell(MockLibraryQueryStore {
+            albums: vec![album("Geogaddi", "Boards of Canada", 2002)],
+            album_tracks: vec![
+                track("g1.mp3", "Ready Let's Go"),
+                track("g2.mp3", "Music Is Math"),
+            ],
+            album_hit_tracks: vec![track("g2.mp3", "Music Is Math")],
+            album_name_hits: vec!["Boards of Canada - Geogaddi".to_string()],
+            matching_searches: vec!["geogaddi".to_string()],
+            ..Default::default()
+        });
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Albums;
+            library.search_query = "geogaddi".to_string();
+            library.browser_path = vec![BrowserSelection::Album {
+                artist: "Boards of Canada".to_string(),
+                title: "Geogaddi".to_string(),
+            }];
+        }
+        shell.harness.step();
+
+        assert!(
+            shell.harness.query_by_label("Ready Let's Go").is_some()
+                && shell.harness.query_by_label("Music Is Math").is_some(),
+            "a name-hit album opens its full track list (never a dead-end)"
+        );
+    }
+
+    /// The Albums root renders no genre chip row — the search filters the
+    /// hit albums without any genre-chip surface (issue 04 keeps search
+    /// display-independent).
+    #[test]
+    fn test_albums_root_renders_no_genre_chips_under_a_query() {
+        use riff_backend::app::state::LibrarySection;
+        use riff_backend::domain::GenreCount;
+
+        let (mut shell, _transport) = recording_transport_shell(MockLibraryQueryStore {
+            artists: vec![artist("Boards of Canada", &["geogaddi"])],
+            albums: vec![album("Geogaddi", "Boards of Canada", 2002)],
+            hit_albums: vec![album("Geogaddi", "Boards of Canada", 2002)],
+            genre_counts: vec![GenreCount {
+                genre: "Electronic".to_string(),
+                tracks: 42,
+            }],
+            matching_searches: vec!["geo".to_string()],
+            ..Default::default()
+        });
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Albums;
+            library.search_query = "geo".to_string();
+        }
+        shell.harness.step();
+
+        // The genre chip row does not render, yet the hit listing works.
+        assert!(
+            shell
+                .harness
+                .query_by_label("Geogaddi (Boards of Canada \u{b7} 2002)")
+                .is_some(),
+            "the search still lists hit albums"
+        );
+        assert!(
+            shell.harness.query_by_label("All genres").is_none(),
+            "no genre chip row renders on the Albums root"
+        );
+    }
+
+    /// The Tracks column's Play all under a query starts exactly the shown
+    /// (filtered) rows — pinned through the recorded transport.
+    #[test]
+    fn test_album_header_play_all_starts_the_shown_filtered_rows() {
+        use riff_backend::app::state::{BrowserSelection, LibrarySection};
+
+        let (mut shell, transport) = recording_transport_shell(MockLibraryQueryStore {
+            albums: vec![album("Geogaddi", "Boards of Canada", 2002)],
+            album_tracks: vec![
+                track("g1.mp3", "Ready Let's Go"),
+                track("g2.mp3", "Music Is Math"),
+            ],
+            album_hit_tracks: vec![track("g2.mp3", "Music Is Math")],
+            matching_searches: vec!["math".to_string()],
+            ..Default::default()
+        });
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Albums;
+            library.search_query = "math".to_string();
+            library.browser_path = vec![BrowserSelection::Album {
+                artist: "Boards of Canada".to_string(),
+                title: "Geogaddi".to_string(),
+            }];
+        }
+        shell.harness.step();
+
+        assert!(
+            shell.harness.query_by_label("Music Is Math").is_some(),
+            "the filtered Tracks column shows only the hit track"
+        );
+        assert!(
+            shell.harness.query_by_label("Ready Let's Go").is_none(),
+            "the filtered Tracks column hides the non-hit track"
+        );
+
+        shell.harness.get_by_label("Play all").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        let intents = transport.recorded();
+        let batches: Vec<_> = intents
+            .iter()
+            .filter(|i| matches!(i, crate::mocks::TransportIntent::PlayMany(..)))
+            .collect();
+        assert_eq!(
+            batches.len(),
+            1,
+            "Play all emits exactly one batch: {intents:?}"
+        );
+        assert!(
+            matches!(
+                batches[0],
+                crate::mocks::TransportIntent::PlayMany(first, rest)
+                    if first == &riff_backend::domain::TrackId("g2.mp3".to_string())
+                        && rest.is_empty()
+            ),
+            "the batch starts the FIRST shown (filtered) row and nothing else: {intents:?}"
+        );
+    }
+
+    /// The Folders tree stays browsable under a query: it shows the pruned
+    /// tree, never the flat track list.
+    #[test]
+    fn test_folders_stay_pruned_under_a_query() {
+        use riff_backend::app::state::BrowseMode;
+        use std::path::PathBuf;
+
+        let root = PathBuf::from("/music");
+        let child = root.join("boards");
+        let (mut shell, _transport) = recording_transport_shell(MockLibraryQueryStore {
+            folder_has_audio: true,
+            folder_search_match: true,
+            folder_children: vec![child.clone()],
+            folder_direct_tracks: vec![track("t1.mp3", "Ready Let's Go")],
+            matching_searches: vec!["geo".to_string()],
+            ..Default::default()
+        });
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.browse_mode = BrowseMode::Folders;
+            library.library_paths = vec![root.clone()];
+            library.search_query = "geo".to_string();
+        }
+        shell.harness.step();
+
+        // Open the root node: folder nodes collapse by default, so the
+        // child only renders after the root's disclosure toggles.
+        shell.harness.get_by_label("music").click();
+        shell.harness.step();
+
+        // The Folders tree renders (its roots), not a flat search listing.
+        assert!(
+            shell.harness.query_by_label("music").is_some(),
+            "the folder root stays in the tree under a query"
+        );
+        assert!(
+            shell.harness.query_by_label("boards").is_some(),
+            "a matching child folder stays pruned INTO the tree"
+        );
+    }
+
+    /// All Tracks under a query filters the flat list exactly as today — the
+    /// query-aware flat path, not a section takeover.
+    #[test]
+    fn test_all_tracks_filters_the_flat_list_under_a_query() {
+        use riff_backend::app::state::LibrarySection;
+
+        let (mut shell, _transport) = recording_transport_shell(MockLibraryQueryStore {
+            flat: vec![track("a.mp3", "Alpha"), track("b.mp3", "Beta")],
+            search: vec![track("a.mp3", "Alpha")],
+            matching_searches: vec!["alp".to_string()],
+            ..Default::default()
+        });
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::AllTracks;
+            library.search_query = "alp".to_string();
+        }
+        shell.harness.step();
+
+        assert!(
+            shell.harness.query_by_label("Artist - Alpha").is_some(),
+            "the matching track shows in the flat list under the query"
+        );
+        assert!(
+            shell.harness.query_by_label("Artist - Beta").is_none(),
+            "non-matching tracks stay out of the flat list under the query"
         );
     }
 }

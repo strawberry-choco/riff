@@ -32,10 +32,11 @@ fn test_store_fresh_start_creates_file_and_applies_initial_migration_once() {
     // The shipped initial set: v1 (foundation) + v2 (typed settings tables)
     // + v3 (playlists) + v4 (library collection) + v5 (playback prefs)
     // + v6 (track favorites) + v7 (browser layout) + v8 (library scan prefs)
-    // + v9 (smart lists collapsed) + v10 (drop the missing-artwork strategy).
+    // + v9 (smart lists collapsed) + v10 (drop the missing-artwork strategy)
+    // + v11 (lowercased entity search keys).
     assert_eq!(
         applied.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     );
 }
 
@@ -97,10 +98,10 @@ fn test_store_double_apply_is_idempotent() {
             mapped.collect()
         })
         .expect("reading schema_migrations must work");
-    assert_eq!(rows.len(), 10, "no duplicate migration rows allowed");
+    assert_eq!(rows.len(), 11, "no duplicate migration rows allowed");
     assert_eq!(
         rows.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     );
 
     let applied_at: i64 = store
@@ -185,6 +186,101 @@ fn test_store_migration_010_drops_the_missing_artwork_strategy_column() {
     );
 }
 
+/// Migration 011 adds write-time-lowercased key columns to the entity
+/// tables (`artists.name_lower`, `albums.album_artist_lower` /
+/// `albums.title_lower`) so entity name matching can be case-insensitive —
+/// SQLite's `instr` is case-sensitive, and the tracks' derived `search_text`
+/// is the same precedent. Simulate a store that predates the migration —
+/// un-apply 011 and drop the columns — then reopen through the full
+/// migration path: the columns must come back and existing rows must be
+/// backfilled lowercased.
+#[test]
+fn test_store_migration_011_backfills_lowercased_entity_search_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+
+    // A fully migrated fresh store is the base.
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    // Roll back to the 010-era schema: forget migration 011 and drop its
+    // columns, then seed entity rows exactly as a pre-011 scan would have.
+    store
+        .with_connection(|conn| {
+            conn.execute_batch(
+                "DELETE FROM schema_migrations WHERE version = 11;
+                 ALTER TABLE artists DROP COLUMN name_lower;
+                 ALTER TABLE albums DROP COLUMN album_artist_lower;
+                 ALTER TABLE albums DROP COLUMN title_lower;
+                 INSERT INTO artists(name) VALUES ('The Zeta');
+                 INSERT INTO albums(album_artist, title, year, genre)
+                   VALUES ('The Zeta', 'New Wave', 2019, 'Rock');",
+            )
+        })
+        .expect("rolling back to the 010-era schema must work");
+    drop(store);
+
+    // Reopening applies only the pending migration 011: the lowercased key
+    // columns come back and the pre-existing rows are backfilled.
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let upgraded = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (name_lower, album_artist_lower, title_lower): (String, String, String) = upgraded
+        .with_connection(|conn| {
+            conn.query_row(
+                "SELECT a.name_lower, al.album_artist_lower, al.title_lower
+                 FROM artists a JOIN albums al ON al.album_artist = a.name
+                 WHERE a.name = 'The Zeta'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .expect("the backfilled columns must be readable");
+    assert_eq!(name_lower, "the zeta", "artist names backfill lowercased");
+    assert_eq!(
+        album_artist_lower, "the zeta",
+        "album artist keys backfill lowercased"
+    );
+    assert_eq!(title_lower, "new wave", "album titles backfill lowercased");
+}
+
+/// The scan/tag-edit write path derives the lowercased key columns in Rust,
+/// so non-Latin names stay case-insensitive exactly like `search_text` (a
+/// SQL-only backfill could only fold ASCII).
+#[test]
+fn test_store_scan_writes_rust_lowercased_entity_search_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    store
+        .apply_scan_batch(std::slice::from_ref(&browsing_track(
+            "f:\\cyg\\1.mp3",
+            "Лебединое",
+            "Чайковский",
+            "Балеты",
+            Some(1),
+            Some(1890),
+        )))
+        .expect("batch applies");
+
+    let (name_lower, title_lower): (String, String) = store
+        .with_connection(|conn| {
+            conn.query_row(
+                "SELECT a.name_lower, al.title_lower
+                 FROM artists a JOIN albums al ON al.album_artist = a.name",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("the derived columns must be readable");
+    assert_eq!(name_lower, "чайковский", "Rust-lowercased artist key");
+    assert_eq!(title_lower, "балеты", "Rust-lowercased album title");
+}
+
 #[test]
 fn test_store_checksum_tamper_is_fatal() {
     let dir = tempfile::tempdir().unwrap();
@@ -220,7 +316,7 @@ fn test_store_checksum_tamper_is_fatal() {
         })
         .expect("reading schema_migrations must work");
     assert_eq!(
-        rows, 10,
+        rows, 11,
         "all shipped migration rows must exist, none re-applied"
     );
 }
@@ -2682,6 +2778,842 @@ fn test_album_tracks_in_genre_returns_matching_tracks_in_canonical_order() {
         store
             .album_tracks_in_genre("Alpha", "LP", "Techno")
             .expect("unknown genre")
+            .is_empty()
+    );
+}
+
+// --- Application Store: entity hit queries (search-across-library-entity-columns issue 01) --
+
+/// The entity-hit fixture library: name-hit albums (by artist and by title),
+/// track-hit albums (neither name matches), a descendant-only album that must
+/// stay out, non-Latin names, and literal wildcard characters.
+fn entity_hit_fixtures() -> Vec<Track> {
+    vec![
+        browsing_track(
+            "f:\\z\\nw\\01 - Opening.mp3",
+            "Opening",
+            "Zeta",
+            "New Wave",
+            Some(1),
+            Some(2019),
+        ),
+        browsing_track(
+            "f:\\z\\nw\\02 - Middle.mp3",
+            "Middle",
+            "Zeta",
+            "New Wave",
+            Some(2),
+            Some(2019),
+        ),
+        // Missing number sorts before numbered tracks (legacy 0 slot).
+        browsing_track(
+            "f:\\z\\nw\\zz - Unnumbered.mp3",
+            "Unnumbered",
+            "Zeta",
+            "New Wave",
+            None,
+            Some(2019),
+        ),
+        browsing_track(
+            "f:\\z\\a sides\\1.mp3",
+            "A1",
+            "Zeta",
+            "A Sides",
+            Some(1),
+            Some(2010),
+        ),
+        browsing_track(
+            "f:\\z\\old hits\\1.mp3",
+            "O1",
+            "Zeta",
+            "Old Hits",
+            Some(1),
+            None,
+        ),
+        browsing_track(
+            "f:\\a\\only\\1.mp3",
+            "Alpha One",
+            "Alpha",
+            "Only",
+            Some(1),
+            Some(1999),
+        ),
+        browsing_track(
+            "f:\\a\\only\\2.mp3",
+            "Alpha Two",
+            "Alpha",
+            "Only",
+            Some(2),
+            Some(1999),
+        ),
+        browsing_track(
+            "f:\\v\\songs\\1.mp3",
+            "Summer",
+            "Various Artists",
+            "Songs",
+            Some(1),
+            Some(2020),
+        ),
+        browsing_track(
+            "f:\\t\\ballet\\1.mp3",
+            "Лебединое озеро",
+            "Чайковский",
+            "Балеты",
+            Some(1),
+            Some(1890),
+        ),
+        browsing_track(
+            "f:\\p\\stage\\1.mp3",
+            "100% Live",
+            "Idol",
+            "Stage",
+            Some(1),
+            Some(2001),
+        ),
+    ]
+}
+
+/// Seed the entity-hit fixture library and return the store.
+fn seeded_entity_hit_store() -> (tempfile::TempDir, riff_infra::store::SqliteStore) {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    store
+        .apply_scan_batch(&entity_hit_fixtures())
+        .expect("fixtures apply");
+    (dir, store)
+}
+
+/// The `(artist, title)` key tuples of a hit-album listing, for assertion.
+fn hit_album_keys(albums: &[Album]) -> Vec<(&str, &str)> {
+    albums
+        .iter()
+        .map(|album| (album.artist.as_str(), album.title.as_str()))
+        .collect()
+}
+
+#[test]
+fn test_hit_albums_list_name_hits_and_track_hits_in_canonical_order() {
+    let (_dir, store) = seeded_entity_hit_store();
+
+    // A name-hit album (its title matches) lists with ALL of its hit tracks.
+    let wave = store.hit_albums("wave", 0, 100).expect("hit albums query");
+    assert_eq!(
+        hit_album_keys(&wave),
+        [("Zeta", "New Wave")],
+        "a title name-hit appears, in canonical order"
+    );
+    assert_eq!(
+        wave[0]
+            .tracks
+            .iter()
+            .map(|id| id.0.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "f:\\z\\nw\\zz - Unnumbered.mp3",
+            "f:\\z\\nw\\01 - Opening.mp3",
+            "f:\\z\\nw\\02 - Middle.mp3",
+        ],
+        "the album carries its hit tracks in canonical album-track order \
+         (missing numbers first, then number, then path)"
+    );
+    assert_eq!(
+        store.hit_albums_count("wave").expect("hit count"),
+        1,
+        "count agrees with the listing"
+    );
+
+    // An artist name-hit surfaces every album of that artist.
+    let zeta = store.hit_albums("z", 0, 100).expect("hit albums query");
+    assert_eq!(
+        hit_album_keys(&zeta),
+        [
+            ("Zeta", "New Wave"),
+            ("Zeta", "A Sides"),
+            ("Zeta", "Old Hits")
+        ],
+        "album artist name-hits list every album in canonical browsing order \
+         (year descending, missing year last, then title)"
+    );
+
+    // A track-hit album — neither its artist nor its title matches — still
+    // appears, carrying only the matching track.
+    let alpha_one = store
+        .hit_albums("alpha one", 0, 100)
+        .expect("hit albums query");
+    assert_eq!(
+        hit_album_keys(&alpha_one),
+        [("Alpha", "Only")],
+        "a track hit surfaces its album (upward propagation)"
+    );
+    assert_eq!(
+        alpha_one[0]
+            .tracks
+            .iter()
+            .map(|id| id.0.as_str())
+            .collect::<Vec<_>>(),
+        ["f:\\a\\only\\1.mp3"],
+        "only the matching track rides along"
+    );
+    assert!(
+        store
+            .hit_albums("zzz-no-match", 0, 100)
+            .expect("no-match query")
+            .is_empty(),
+        "an album whose track is the only match must not appear for other queries"
+    );
+}
+
+#[test]
+fn test_hit_albums_matching_is_literal_and_case_insensitive_including_non_latin() {
+    let (_dir, store) = seeded_entity_hit_store();
+
+    // Non-Latin name matching folds case like the tracks' search text.
+    for query in ["чайковский", "ЧАЙКОВСКИЙ"] {
+        assert_eq!(
+            hit_album_keys(&store.hit_albums(query, 0, 100).expect("hit albums query")),
+            [("Чайковский", "Балеты")],
+            "non-Latin album artist matching is case-insensitive for {query:?}"
+        );
+    }
+
+    // Non-Latin track matching surfaces the album upward.
+    assert_eq!(
+        hit_album_keys(
+            &store
+                .hit_albums("лебединое", 0, 100)
+                .expect("hit albums query")
+        ),
+        [("Чайковский", "Балеты")],
+        "a non-Latin track hit surfaces its album"
+    );
+
+    // Literal `%` and `_` have no wildcard meaning: `%` matches only the
+    // track that actually contains the character — it must NOT match every
+    // album the way LIKE would.
+    assert_eq!(
+        hit_album_keys(&store.hit_albums("100%", 0, 100).expect("hit albums query")),
+        [("Idol", "Stage")],
+        "a literal percent matches the track carrying it"
+    );
+    assert_eq!(
+        hit_album_keys(&store.hit_albums("%", 0, 100).expect("bare percent")),
+        [("Idol", "Stage")],
+        "bare % matches exactly the row carrying the character (no LIKE semantics)"
+    );
+    assert!(
+        store
+            .hit_albums("_", 0, 100)
+            .expect("bare underscore")
+            .is_empty(),
+        "bare _ must not match every row (no LIKE semantics)"
+    );
+}
+
+#[test]
+fn test_hit_albums_windows_are_bounded_with_correct_totals() {
+    let (_dir, store) = seeded_entity_hit_store();
+
+    // "z" hits three Zeta albums; windows slice that set deterministically.
+    assert_eq!(
+        store.hit_albums_count("z").expect("hit count"),
+        3,
+        "the count is authoritative for the windowing"
+    );
+    assert_eq!(
+        hit_album_keys(&store.hit_albums("z", 0, 2).expect("window 0")),
+        [("Zeta", "New Wave"), ("Zeta", "A Sides")],
+        "the first window takes the first two canonical rows"
+    );
+    assert_eq!(
+        hit_album_keys(&store.hit_albums("z", 2, 10).expect("window 2")),
+        [("Zeta", "Old Hits")],
+        "the second window takes the remainder"
+    );
+    assert_eq!(
+        hit_album_keys(&store.hit_albums("z", 2, 1).expect("window 1")),
+        [("Zeta", "Old Hits")],
+        "an offset mid-library serves exactly the requested row"
+    );
+    assert!(
+        store
+            .hit_albums("z", 99, 10)
+            .expect("past-the-end window")
+            .is_empty(),
+        "a window past the end serves nothing"
+    );
+
+    // Unknown-query windows degrade to empty, never an error.
+    assert!(
+        store
+            .hit_albums("no such album", 0, 100)
+            .expect("no-match window")
+            .is_empty()
+    );
+}
+
+/// The `(name, [album keys])` shape of a hit-artist listing, for assertion.
+fn hit_artist_keys(artists: &[Artist]) -> Vec<(String, Vec<String>)> {
+    artists
+        .iter()
+        .map(|artist| (artist.name.clone(), artist.albums.clone()))
+        .collect()
+}
+
+#[test]
+fn test_hit_artists_list_name_hits_and_album_hits_with_only_hit_album_keys() {
+    let (_dir, store) = seeded_entity_hit_store();
+
+    // A name-hit artist carries every album (all are name-hits too), in
+    // canonical per-artist order.
+    assert_eq!(
+        hit_artist_keys(
+            &store
+                .hit_artists("zeta", 0, 100)
+                .expect("hit artists query")
+        ),
+        [(
+            "Zeta".to_string(),
+            vec![
+                "Zeta - New Wave".to_string(),
+                "Zeta - A Sides".to_string(),
+                "Zeta - Old Hits".to_string(),
+            ],
+        )],
+        "a name-hit artist expands into all of its albums"
+    );
+
+    // An artist reached only through a track hit appears with only the
+    // hit-album key.
+    assert_eq!(
+        hit_artist_keys(
+            &store
+                .hit_artists("alpha one", 0, 100)
+                .expect("hit artists query")
+        ),
+        [("Alpha".to_string(), vec!["Alpha - Only".to_string()])],
+        "a track hit surfaces its artist upward with only its hit-album key"
+    );
+
+    // Multiple artists in name-ascending order; Zeta's two hit albums ride
+    // in canonical order (year descending, missing year last).
+    assert_eq!(
+        hit_artist_keys(&store.hit_artists("1", 0, 100).expect("hit artists query")),
+        [
+            ("Idol".to_string(), vec!["Idol - Stage".to_string()]),
+            (
+                "Zeta".to_string(),
+                vec!["Zeta - A Sides".to_string(), "Zeta - Old Hits".to_string(),],
+            ),
+        ],
+        "hit artists list name-ascending, each carrying only its hit-album keys"
+    );
+
+    // Non-Latin: a track hit surfaces its artist.
+    assert_eq!(
+        hit_artist_keys(
+            &store
+                .hit_artists("лебединое", 0, 100)
+                .expect("hit artists query")
+        ),
+        [(
+            "Чайковский".to_string(),
+            vec!["Чайковский - Балеты".to_string()]
+        )],
+        "a non-Latin track hit surfaces its artist"
+    );
+
+    // No match: nobody, not an error.
+    assert!(
+        store
+            .hit_artists("zzz-no-match", 0, 100)
+            .expect("no-match query")
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .hit_artists_count("zeta")
+            .expect("hit count")
+            .to_string(),
+        "1",
+        "count agrees with the listing"
+    );
+    assert_eq!(
+        store.hit_artists_count("1").expect("hit count"),
+        2,
+        "count agrees with the multi-artist listing"
+    );
+}
+
+#[test]
+fn test_hit_artists_windows_are_bounded_with_correct_totals() {
+    let (_dir, store) = seeded_entity_hit_store();
+
+    assert_eq!(
+        store.hit_artists_count("1").expect("hit count"),
+        2,
+        "the count is authoritative for the windowing"
+    );
+    assert_eq!(
+        hit_artist_keys(&store.hit_artists("1", 0, 1).expect("window 0")),
+        [("Idol".to_string(), vec!["Idol - Stage".to_string()])],
+        "the first window takes the first canonical artist"
+    );
+    assert_eq!(
+        hit_artist_keys(&store.hit_artists("1", 1, 1).expect("window 1")),
+        [(
+            "Zeta".to_string(),
+            vec!["Zeta - A Sides".to_string(), "Zeta - Old Hits".to_string(),],
+        )],
+        "the second window takes the next artist with its hit-album keys intact"
+    );
+    assert!(
+        store
+            .hit_artists("1", 9, 10)
+            .expect("past-the-end window")
+            .is_empty(),
+        "a window past the end serves nothing"
+    );
+}
+
+#[test]
+fn test_album_hit_tracks_list_only_the_matching_tracks_in_canonical_order() {
+    let (_dir, store) = seeded_entity_hit_store();
+
+    // A name-hit album's tracks all match (the album title lives in each
+    // track's search text), in canonical album-track order.
+    assert_eq!(
+        store
+            .album_hit_tracks("Zeta", "New Wave", "wave")
+            .expect("album hit tracks")
+            .iter()
+            .map(|t| t.id.0.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "f:\\z\\nw\\zz - Unnumbered.mp3",
+            "f:\\z\\nw\\01 - Opening.mp3",
+            "f:\\z\\nw\\02 - Middle.mp3",
+        ],
+        "canonical album-track order: missing numbers first, then number, then path"
+    );
+
+    // A narrower query keeps only the matching member.
+    assert_eq!(
+        store
+            .album_hit_tracks("Zeta", "New Wave", "opening")
+            .expect("album hit tracks")
+            .iter()
+            .map(|t| t.id.0.as_str())
+            .collect::<Vec<_>>(),
+        ["f:\\z\\nw\\01 - Opening.mp3"],
+        "only the matching track of the album is listed"
+    );
+
+    // A track-hit album lists the single matching track.
+    assert_eq!(
+        store
+            .album_hit_tracks("Alpha", "Only", "alpha one")
+            .expect("album hit tracks")
+            .iter()
+            .map(|t| t.id.0.as_str())
+            .collect::<Vec<_>>(),
+        ["f:\\a\\only\\1.mp3"],
+        "the track hit drills to exactly the hit"
+    );
+
+    // Unknown albums and no-match queries degrade to empty.
+    assert!(
+        store
+            .album_hit_tracks("Zeta", "New Wave", "zzz")
+            .expect("no-match tracks")
+            .is_empty()
+    );
+    assert!(
+        store
+            .album_hit_tracks("Nobody", "Nothing", "wave")
+            .expect("unknown album")
+            .is_empty()
+    );
+}
+
+#[test]
+fn test_album_is_name_hit_distinguishes_name_hits_from_track_hits() {
+    let (_dir, store) = seeded_entity_hit_store();
+
+    // Title and album-artist matches are name hits.
+    assert!(
+        store
+            .album_is_name_hit("Zeta", "New Wave", "wave")
+            .expect("name hit query")
+    );
+    assert!(
+        store
+            .album_is_name_hit("Zeta", "New Wave", "zeta")
+            .expect("name hit query")
+    );
+    assert!(
+        store
+            .album_is_name_hit("Чайковский", "Балеты", "чайковский")
+            .expect("name hit query")
+    );
+
+    // A track-only match is NOT a name hit.
+    assert!(
+        !store
+            .album_is_name_hit("Zeta", "New Wave", "opening")
+            .expect("name hit query")
+    );
+    assert!(
+        !store
+            .album_is_name_hit("Alpha", "Only", "alpha one")
+            .expect("name hit query")
+    );
+
+    // Unknown albums and no-match queries answer false.
+    assert!(
+        !store
+            .album_is_name_hit("Zeta", "New Wave", "zzz")
+            .expect("name hit query")
+    );
+    assert!(
+        !store
+            .album_is_name_hit("Nobody", "Nothing", "wave")
+            .expect("name hit query")
+    );
+}
+
+/// The genre-hit fixture library: multiple artists and albums with explicit
+/// per-track genres, including a semicolon-separated multi-genre track and a
+/// name-hit album whose tracks do NOT match the query.
+fn genre_hit_fixtures() -> Vec<Track> {
+    vec![
+        genre_track(
+            "f:\\rockers\\hard\\1.mp3",
+            "Riff One",
+            "Rockers",
+            "Hard",
+            Some("Rock"),
+        ),
+        genre_track(
+            "f:\\rockers\\hard\\2.mp3",
+            "Riff Two",
+            "Rockers",
+            "Hard",
+            Some("Rock"),
+        ),
+        genre_track(
+            "f:\\rockers\\soft\\1.mp3",
+            "Ballad",
+            "Rockers",
+            "Soft",
+            Some("Rock"),
+        ),
+        genre_track(
+            "f:\\rockers\\road\\1.mp3",
+            "RR1",
+            "Rockers",
+            "Rocky Road",
+            Some("Rock"),
+        ),
+        genre_track(
+            "f:\\jazz\\blue\\1.mp3",
+            "Mellow",
+            "Jazzy",
+            "Blue",
+            Some("Jazz"),
+        ),
+        genre_track(
+            "f:\\jazz\\blue\\2.mp3",
+            "Smooth",
+            "Jazzy",
+            "Blue",
+            Some("Jazz"),
+        ),
+        genre_track(
+            "f:\\mixed\\both\\1.mp3",
+            "Omni",
+            "Mixed",
+            "Both",
+            Some("Rock; Jazz"),
+        ),
+        genre_track(
+            "f:\\mixed\\both\\2.mp3",
+            "Pop Hit",
+            "Mixed",
+            "Both",
+            Some("Pop"),
+        ),
+    ]
+}
+
+/// Seed the genre-hit fixture library and return the store.
+fn seeded_genre_hit_store() -> (tempfile::TempDir, riff_infra::store::SqliteStore) {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    store
+        .apply_scan_batch(&genre_hit_fixtures())
+        .expect("fixtures apply");
+    (dir, store)
+}
+
+#[test]
+fn test_hit_albums_in_genre_list_albums_that_hold_the_genre_and_hit() {
+    let (_dir, store) = seeded_genre_hit_store();
+
+    // A genre-bearing track hit surfaces its album, carrying only the
+    // genre-bearing hit tracks.
+    let riff = store
+        .hit_albums_in_genre("Rock", "riff", 0, 100)
+        .expect("genre hit albums query");
+    assert_eq!(
+        hit_album_keys(&riff),
+        [("Rockers", "Hard")],
+        "an album holding a hit Rock track appears"
+    );
+    assert_eq!(
+        riff[0]
+            .tracks
+            .iter()
+            .map(|id| id.0.as_str())
+            .collect::<Vec<_>>(),
+        ["f:\\rockers\\hard\\1.mp3", "f:\\rockers\\hard\\2.mp3"],
+        "both genre-bearing hit tracks ride along in canonical order"
+    );
+
+    // A name-hit album within the genre appears by its own name; its member
+    // tracks hit too (the album title lives in each track's search text).
+    let rocky = store
+        .hit_albums_in_genre("Rock", "rocky", 0, 100)
+        .expect("genre hit albums query");
+    assert_eq!(
+        hit_album_keys(&rocky),
+        [("Rockers", "Rocky Road")],
+        "a name-hit album within the genre appears (never a dead-end)"
+    );
+    assert_eq!(
+        rocky[0]
+            .tracks
+            .iter()
+            .map(|id| id.0.as_str())
+            .collect::<Vec<_>>(),
+        ["f:\\rockers\\road\\1.mp3"],
+        "the name-hit album's member track matches through its title too"
+    );
+
+    // Semicolon-separated genre segments match exactly: `Rock; Jazz` holds
+    // both genres; a track in a different genre never leaks in.
+    assert_eq!(
+        hit_album_keys(
+            &store
+                .hit_albums_in_genre("Rock", "omni", 0, 100)
+                .expect("genre hit albums query")
+        ),
+        [("Mixed", "Both")],
+        "a multi-genre track matches each of its segments"
+    );
+    assert_eq!(
+        hit_album_keys(
+            &store
+                .hit_albums_in_genre("Jazz", "omni", 0, 100)
+                .expect("genre hit albums query")
+        ),
+        [("Mixed", "Both")],
+        "the same track matches its other segment"
+    );
+    assert!(
+        store
+            .hit_albums_in_genre("Jazz", "riff", 0, 100)
+            .expect("genre hit albums query")
+            .is_empty(),
+        "a Rock-only hit never appears in Jazz"
+    );
+
+    // Canonical order within the genre: artist ascending, then year
+    // descending with missing years last, then title.
+    assert_eq!(
+        hit_album_keys(
+            &store
+                .hit_albums_in_genre("Rock", "r", 0, 100)
+                .expect("genre hit albums query")
+        ),
+        [
+            ("Rockers", "Hard"),
+            ("Rockers", "Rocky Road"),
+            ("Rockers", "Soft"),
+        ],
+        "canonical browsing order inside the genre (title-ascending on year ties)"
+    );
+    assert_eq!(
+        store
+            .hit_albums_in_genre_count("Rock", "r")
+            .expect("genre hit count"),
+        3,
+        "count agrees with the listing"
+    );
+}
+
+#[test]
+fn test_hit_albums_in_genre_windows_are_bounded_with_correct_totals() {
+    let (_dir, store) = seeded_genre_hit_store();
+
+    assert_eq!(
+        store
+            .hit_albums_in_genre_count("Rock", "r")
+            .expect("genre hit count"),
+        3
+    );
+    assert_eq!(
+        hit_album_keys(
+            &store
+                .hit_albums_in_genre("Rock", "r", 0, 2)
+                .expect("window 0")
+        ),
+        [("Rockers", "Hard"), ("Rockers", "Rocky Road")],
+        "the first window takes the first two canonical rows"
+    );
+    assert_eq!(
+        hit_album_keys(
+            &store
+                .hit_albums_in_genre("Rock", "r", 2, 10)
+                .expect("window 2")
+        ),
+        [("Rockers", "Soft")],
+        "the second window takes the remainder"
+    );
+}
+
+#[test]
+fn test_hit_artists_in_genre_list_artists_with_a_genre_scoped_hit_album() {
+    let (_dir, store) = seeded_genre_hit_store();
+
+    // The artist behind a genre-scoped hit album appears with only its
+    // genre-scoped hit-album keys.
+    assert_eq!(
+        hit_artist_keys(
+            &store
+                .hit_artists_in_genre("Rock", "riff", 0, 100)
+                .expect("genre hit artists query")
+        ),
+        [("Rockers".to_string(), vec!["Rockers - Hard".to_string()])],
+        "an artist with a genre-matching hit album appears with only its hit-album key"
+    );
+
+    // The multi-genre track surfaces its artist under each of its segments.
+    assert_eq!(
+        hit_artist_keys(
+            &store
+                .hit_artists_in_genre("Jazz", "omni", 0, 100)
+                .expect("genre hit artists query")
+        ),
+        [("Mixed".to_string(), vec!["Mixed - Both".to_string()])],
+        "the semicolon-separated track matches its Jazz segment too"
+    );
+
+    // A name-hit album within the genre expands the artist's hit keys.
+    assert_eq!(
+        hit_artist_keys(
+            &store
+                .hit_artists_in_genre("Rock", "rocky", 0, 100)
+                .expect("genre hit artists query")
+        ),
+        [(
+            "Rockers".to_string(),
+            vec!["Rockers - Rocky Road".to_string()]
+        )],
+        "a name-hit genre album is a genre-scoped hit for its artist"
+    );
+
+    // A genre with no hits answers empty.
+    assert!(
+        store
+            .hit_artists_in_genre("Jazz", "riff", 0, 100)
+            .expect("genre hit artists query")
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .hit_artists_in_genre_count("Rock", "riff")
+            .expect("genre hit artist count"),
+        1,
+        "count agrees with the listing"
+    );
+}
+
+#[test]
+fn test_album_hit_tracks_in_genre_filter_by_both_genre_and_query() {
+    let (_dir, store) = seeded_genre_hit_store();
+
+    assert_eq!(
+        store
+            .album_hit_tracks_in_genre("Rockers", "Hard", "Rock", "riff")
+            .expect("genre album hit tracks")
+            .iter()
+            .map(|t| t.id.0.as_str())
+            .collect::<Vec<_>>(),
+        ["f:\\rockers\\hard\\1.mp3", "f:\\rockers\\hard\\2.mp3"],
+        "both Rock tracks hit"
+    );
+    assert!(
+        store
+            .album_hit_tracks_in_genre("Rockers", "Hard", "Jazz", "riff")
+            .expect("genre album hit tracks")
+            .is_empty(),
+        "an album without the genre never answers"
+    );
+    assert_eq!(
+        store
+            .album_hit_tracks_in_genre("Mixed", "Both", "Jazz", "omni")
+            .expect("genre album hit tracks")
+            .iter()
+            .map(|t| t.id.0.as_str())
+            .collect::<Vec<_>>(),
+        ["f:\\mixed\\both\\1.mp3"],
+        "a semicolon-separated track matches its Jazz segment and the query"
+    );
+}
+
+#[test]
+fn test_hit_genre_counts_aggregate_hit_tracks_across_split_segments() {
+    let (_dir, store) = seeded_genre_hit_store();
+
+    // "o" hits tracks in Rock, Jazz (including the `Rock; Jazz` track under
+    // BOTH segments) and Pop — name-ascending, hit-track counts.
+    assert_eq!(
+        store.hit_genre_counts("o").expect("hit genre counts"),
+        vec![
+            GenreCount {
+                genre: "Jazz".to_string(),
+                tracks: 3,
+            },
+            GenreCount {
+                genre: "Pop".to_string(),
+                tracks: 1,
+            },
+            GenreCount {
+                genre: "Rock".to_string(),
+                tracks: 5,
+            },
+        ],
+        "hit-scoped genre counts split semicolon segments exactly like genre_counts"
+    );
+
+    // Matching is case-insensitive like every other hit read.
+    assert_eq!(
+        store.hit_genre_counts("O").expect("hit genre counts"),
+        store.hit_genre_counts("o").expect("hit genre counts"),
+        "case-insensitive aggregation"
+    );
+
+    // No hit tracks aggregate into nothing.
+    assert!(
+        store
+            .hit_genre_counts("zzz-no-match")
+            .expect("no-match counts")
             .is_empty()
     );
 }

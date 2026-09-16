@@ -16,11 +16,12 @@
 //! so the next call retries automatically.
 
 use crate::app::projection::{
-    BrowsingProjection, FolderProjection, GenreProjection, PlaylistProjection, ProjectionKey,
-    SmartPlaylistsProjection, TrackListProjection, WINDOW_SIZE,
+    BrowsingProjection, FolderProjection, GenreProjection, HitListProjection, HitProjection,
+    PlaylistProjection, ProjectionKey, SmartPlaylistsProjection, TrackListProjection, WINDOW_SIZE,
 };
 // The playlist view shapes are part of the seam's public surface: the
 // projection module itself is private, so UI code imports these from here.
+use crate::app::errors::StoreError;
 pub use crate::app::projection::{PlaylistEntryRow, PlaylistView};
 use crate::app::store::{LibraryCounts, LibraryQueryStore, PlaylistStore, StoreGeneration};
 use crate::domain::{
@@ -45,6 +46,22 @@ pub struct TrackListPage {
     /// projection's cache — handing a page out bumps a refcount instead of
     /// deep-copying the window's tracks.
     pub rows: Arc<[Track]>,
+}
+
+/// One page of a query-keyed entity hit listing (hit albums or hit artists):
+/// the authoritative total plus the cached rows of one window. The query
+/// itself is held inside the seam — callers pass only the current frame's
+/// intent and receive ready-to-render rows.
+pub struct HitPage<T> {
+    /// Total row count for the query as of the latest count read — the value
+    /// to size row virtualization with.
+    pub total: usize,
+    /// Row index `rows` starts at (the projection's window-aligned offset).
+    pub start: usize,
+    /// The cached rows of this window, in store order. Shared with the
+    /// projection's cache — handing a page out bumps a refcount instead of
+    /// deep-copying the window's rows.
+    pub rows: Arc<[T]>,
 }
 
 /// The counts read model behind every sidebar row (design-handoff issue
@@ -79,6 +96,16 @@ pub struct SessionViews {
     /// UI's call sites and invalidate via the playlist generation.
     playlist_queries: Box<dyn PlaylistStore>,
     tracks: TrackListProjection,
+    /// The two query-keyed hit-list projections (Albums and Artists roots
+    /// under a query): bounded windows keyed by the query text, so a
+    /// keystroke retarget drops stale rows even at an unchanged generation.
+    hit_albums: HitListProjection<Album>,
+    hit_artists: HitListProjection<Artist>,
+    /// The generation-cached scoped hit reads (an album's hit tracks, the
+    /// album name-hit boolean, hit albums/artists within a genre, hit-scoped
+    /// genre counts): bounded, generation-cached like the browsing/genre
+    /// reads, keyed by their full query signature.
+    hits: HitProjection,
     browsing: BrowsingProjection,
     folders: FolderProjection,
     smart_playlists: SmartPlaylistsProjection,
@@ -86,6 +113,27 @@ pub struct SessionViews {
     counts: CountsProjection,
     playback: PlaybackProjection,
     playlists: PlaylistProjection,
+}
+
+/// Assemble a full hit listing by reading bounded store windows until a
+/// short read signals the end of the list. The scoped hit reads (albums and
+/// artists within a genre) are windowed on the store port but serve the
+/// views as one generation-cached list, so the seam walks the windows here.
+fn read_all_hit_windows<T>(
+    mut read: impl FnMut(usize, usize) -> Result<Vec<T>, StoreError>,
+) -> Result<Vec<T>, StoreError> {
+    let mut all = Vec::new();
+    let mut offset = 0;
+    loop {
+        let window = read(offset, WINDOW_SIZE)?;
+        let len = window.len();
+        all.extend(window);
+        if len < WINDOW_SIZE {
+            break;
+        }
+        offset += WINDOW_SIZE;
+    }
+    Ok(all)
 }
 
 impl SessionViews {
@@ -104,6 +152,9 @@ impl SessionViews {
         // The projections observe the session counters internally from here
         // on: no per-call epoch crosses the seam again.
         let tracks = TrackListProjection::new(generation.clone(), ProjectionKey::Flat);
+        let hit_albums = HitListProjection::new(generation.clone());
+        let hit_artists = HitListProjection::new(generation.clone());
+        let hits = HitProjection::new(generation.clone());
         let browsing = BrowsingProjection::new(generation.clone());
         let folders = FolderProjection::new(generation.clone());
         let smart_playlists = SmartPlaylistsProjection::new(generation.clone());
@@ -115,6 +166,9 @@ impl SessionViews {
             queries,
             playlist_queries,
             tracks,
+            hit_albums,
+            hit_artists,
+            hits,
             browsing,
             folders,
             smart_playlists,
@@ -210,6 +264,249 @@ impl SessionViews {
         self.queries
             .search_count(query)
             .is_ok_and(|count| count > 0)
+    }
+
+    // --- Entity hit views (search across Library sections) -------------------
+
+    /// One visible window of the hit-albums listing for `query`, together
+    /// with the authoritative total row count — what the Albums root
+    /// renders under a query.
+    ///
+    /// The listing is a bounded-window projection keyed by the query text:
+    /// a keystroke retarget drops stale rows even at an unchanged
+    /// generation, cached windows are FIFO-capped, and a bumped generation
+    /// refetches. `offset` is any row index inside the wanted window; it is
+    /// aligned down to the projection's window size internally. On a store
+    /// error the page degrades to an empty window with a zero total (a
+    /// `tracing::warn!` carries the context) — the UI never sees a
+    /// `Result`.
+    pub fn hit_albums_page(&mut self, query: &str, offset: usize) -> HitPage<Album> {
+        let key = query.to_string();
+        if self.hit_albums.key() != key.as_str() {
+            self.hit_albums.set_key(key);
+        }
+
+        // Outer count read: authoritative from the store whenever the
+        // projection is invalidated; fresh frames reuse the cached count.
+        let outer_generation = self.hit_albums.observe();
+        let total = if self.hit_albums.is_fresh() {
+            self.hit_albums.total()
+        } else {
+            self.count_hit_albums(query)
+        };
+
+        let window_start = offset - (offset % WINDOW_SIZE);
+        self.hit_albums.request_window(window_start);
+
+        // Torn-count guard: if a mutation committed between the outer count
+        // read and here, recount so the cached total agrees with the
+        // refreshed rows; otherwise reuse the outer read (one COUNT query
+        // per frame max).
+        let generation = self.hit_albums.observe();
+        let effective_total = if generation == outer_generation {
+            total
+        } else {
+            self.count_hit_albums(query)
+        };
+
+        if let Err(e) = self.hit_albums.refresh(effective_total, &mut |o, l| {
+            self.queries.hit_albums(query, o, l)
+        }) {
+            tracing::warn!(
+                "Failed to refresh the hit-albums list (query {query:?}) from the store: {e}"
+            );
+        }
+
+        HitPage {
+            total: effective_total,
+            start: window_start,
+            rows: self.hit_albums.window(window_start).unwrap_or_default(),
+        }
+    }
+
+    /// The store's hit-album match count for `query`, defaulting to zero on
+    /// error so the paged read degrades without handling errors.
+    fn count_hit_albums(&self, query: &str) -> usize {
+        match self.queries.hit_albums_count(query) {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!("Failed to count hit albums for query {query:?} in the store: {e}");
+                0
+            }
+        }
+    }
+
+    /// One visible window of the hit-artists listing for `query`, together
+    /// with the authoritative total row count — what the Artists root
+    /// renders under a query. Same query-keyed window projection as
+    /// [`Self::hit_albums_page`]; degrades to an empty page on store error.
+    pub fn hit_artists_page(&mut self, query: &str, offset: usize) -> HitPage<Artist> {
+        let key = query.to_string();
+        if self.hit_artists.key() != key.as_str() {
+            self.hit_artists.set_key(key);
+        }
+
+        // Outer count read: authoritative from the store whenever the
+        // projection is invalidated; fresh frames reuse the cached count.
+        let outer_generation = self.hit_artists.observe();
+        let total = if self.hit_artists.is_fresh() {
+            self.hit_artists.total()
+        } else {
+            self.count_hit_artists(query)
+        };
+
+        let window_start = offset - (offset % WINDOW_SIZE);
+        self.hit_artists.request_window(window_start);
+
+        // Torn-count guard: same recount-if-mutated-between-reads contract
+        // as the track list, so `total` agrees with the refreshed rows.
+        let generation = self.hit_artists.observe();
+        let effective_total = if generation == outer_generation {
+            total
+        } else {
+            self.count_hit_artists(query)
+        };
+
+        if let Err(e) = self.hit_artists.refresh(effective_total, &mut |o, l| {
+            self.queries.hit_artists(query, o, l)
+        }) {
+            tracing::warn!(
+                "Failed to refresh the hit-artists list (query {query:?}) from the store: {e}"
+            );
+        }
+
+        HitPage {
+            total: effective_total,
+            start: window_start,
+            rows: self.hit_artists.window(window_start).unwrap_or_default(),
+        }
+    }
+
+    /// The store's hit-artist match count for `query`, defaulting to zero on
+    /// error so the paged read degrades without handling errors.
+    fn count_hit_artists(&self, query: &str) -> usize {
+        match self.queries.hit_artists_count(query) {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!("Failed to count hit artists for query {query:?} in the store: {e}");
+                0
+            }
+        }
+    }
+
+    /// One album's tracks that match `query`, in canonical album-track
+    /// order, cached per (album, query) per generation. Empty on a store
+    /// error (a `tracing::warn!` carries the context).
+    pub fn album_hit_tracks(
+        &mut self,
+        album_artist: &str,
+        album_title: &str,
+        query: &str,
+    ) -> Arc<[Track]> {
+        self.hits
+            .album_hit_tracks(album_artist, album_title, query, &mut |a, t, q| {
+                self.queries.album_hit_tracks(a, t, q)
+            })
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to load hit tracks for {album_title} (query {query:?}) from the store: {e}"
+                );
+                Arc::from([])
+            })
+    }
+
+    /// Whether `album` is itself a name hit for `query` (its album artist or
+    /// title matched), cached per (album, query) per generation. `false` on
+    /// a store error or for unknown albums.
+    pub fn album_is_name_hit(
+        &mut self,
+        album_artist: &str,
+        album_title: &str,
+        query: &str,
+    ) -> bool {
+        self.hits
+            .album_is_name_hit(album_artist, album_title, query, &mut |a, t, q| {
+                self.queries.album_is_name_hit(a, t, q)
+            })
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to check whether {album_title} is a name hit (query {query:?}) in the store: {e}"
+                );
+                false
+            })
+    }
+
+    /// The hit albums within `genre` for `query`, in canonical browsing
+    /// order, cached per (genre, query) per generation. The full list is
+    /// assembled from the store's bounded windows. Empty on a store error.
+    pub fn hit_albums_in_genre(&mut self, genre: &str, query: &str) -> Arc<[Album]> {
+        self.hits
+            .genre_albums(genre, query, &mut |g, q| {
+                read_all_hit_windows(|o, l| self.queries.hit_albums_in_genre(g, q, o, l))
+            })
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to load hit albums in genre {genre:?} (query {query:?}) from the store: {e}"
+                );
+                Arc::from([])
+            })
+    }
+
+    /// The hit artists within `genre` for `query`, name-ascending, each with
+    /// its genre-scoped hit-album keys, cached per (genre, query) per
+    /// generation. The full list is assembled from the store's bounded
+    /// windows. Empty on a store error.
+    pub fn hit_artists_in_genre(&mut self, genre: &str, query: &str) -> Arc<[Artist]> {
+        self.hits
+            .genre_artists(genre, query, &mut |g, q| {
+                read_all_hit_windows(|o, l| self.queries.hit_artists_in_genre(g, q, o, l))
+            })
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to load hit artists in genre {genre:?} (query {query:?}) from the store: {e}"
+                );
+                Arc::from([])
+            })
+    }
+
+    /// One album's tracks that match `query` among its `genre`-bearing
+    /// tracks, in canonical album-track order, cached per
+    /// (album, genre, query) per generation. Empty on a store error.
+    pub fn album_hit_tracks_in_genre(
+        &mut self,
+        album_artist: &str,
+        album_title: &str,
+        genre: &str,
+        query: &str,
+    ) -> Arc<[Track]> {
+        self.hits
+            .genre_album_tracks(
+                album_artist,
+                album_title,
+                genre,
+                query,
+                &mut |a, t, g, q| self.queries.album_hit_tracks_in_genre(a, t, g, q),
+            )
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to load hit tracks for {album_title} in genre {genre:?} (query {query:?}) from the store: {e}"
+                );
+                Arc::from([])
+            })
+    }
+
+    /// Every genre containing at least one hit track, with its hit-track
+    /// count, in canonical order, cached per query per generation — the
+    /// Genres root under a query. Empty on a store error.
+    pub fn hit_genre_counts(&mut self, query: &str) -> Arc<[GenreCount]> {
+        self.hits
+            .genre_counts(query, &mut |q| self.queries.hit_genre_counts(q))
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to load hit genre counts (query {query:?}) from the store: {e}"
+                );
+                Arc::from([])
+            })
     }
 
     // --- Artist / album browsing ---------------------------------------------

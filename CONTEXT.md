@@ -108,8 +108,24 @@ _Avoid_: update processor, track-end handler
 The operation that discovers audio files under a Library Path and commits them into the Library in durable batches; progress and completion are reported to the session, and an interrupted scan keeps committed batches.
 _Avoid_: scanner thread, directory walker
 
+**Detail Panel**:
+The rightmost selection readout showing the currently selected entity or Track — its art, title, secondary line, tag rows, and detail rows. It follows the live selection: single-clicking a Track anywhere shows that Track; selecting an Album, Artist, or Genre in the browser shows the entity readout.
+_Avoid_: inspector, selection panel, readout column
+
+**Inline Tag Editor**:
+The tag editing surface that lives inside the Detail Panel, replacing the retired Edit Tags modal. It renders one row per editable Metadata field; editing happens in place and saving commits through the Tag Edit service.
+_Avoid_: edit dialog, tag modal
+
+**Tag Aggregation**:
+In an Album readout, the way one tag row summarizes that field across every Track of the Album: all Tracks share the value → the value itself; the values differ → the orange `(different)` state; no Track carries the value → the grey `(none)` state. Tag rows on a single-Track readout show that Track's value directly.
+_Avoid_: merged value, average value
+
+**Batch Tag Edit**:
+Saving an edited tag row on an Album readout applies the edit to every Track of the Album. Each Track is its own durable change through the Tag Edit service, so a batch may partially fail; the failure is reported, never silent.
+_Avoid_: multi-edit, bulk write
+
 **Tag Edit**:
-The user action of editing a Track's Metadata through the edit dialog; saving commits the file tags and the Store facts as one durable change, and a failure leaves the dialog open with the reason.
+The user action of editing a Track's Metadata through the Inline Tag Editor; saving commits the file tags and the Store facts as one durable change, and a failure is reported inline with the reason.
 _Avoid_: metadata editor, tag writer
 
 **App Runtime**:

@@ -952,9 +952,6 @@ pub fn apply_browser_action(
         crate::ui::browser::BrowserAction::ToggleSort => {
             library.browser_sort_desc = !library.browser_sort_desc;
         }
-        crate::ui::browser::BrowserAction::SetGenreFilter(filter) => {
-            library.genre_filter = filter;
-        }
         crate::ui::browser::BrowserAction::Select(key) => {
             let selection = match library.library_section {
                 LibrarySection::Artists => Some(BrowserSelection::Artist(key)),
@@ -1246,7 +1243,15 @@ pub fn column_widths(available: f32, list_columns: usize, inspector: bool) -> Ve
 /// on the album level the album header plus its track list — genre-scoped
 /// in the Genres section. Entity listings below the album level are their
 /// own columns in the stage, so this resolver carries no rows.
-pub fn resolve_detail_content(views: &mut SessionViews, library: &LibrarySession) -> DetailContent {
+///
+/// Under a query the album drill shows only the album's hit tracks — a
+/// name-hit album (its own artist/title matched) opens its full track list
+/// instead, so the drill never dead-ends into an empty detail column.
+pub fn resolve_detail_content(
+    views: &mut SessionViews,
+    library: &LibrarySession,
+    query: &str,
+) -> DetailContent {
     use riff_backend::app::state::BrowserSelection;
 
     let root = match library.library_section {
@@ -1289,8 +1294,20 @@ pub fn resolve_detail_content(views: &mut SessionViews, library: &LibrarySession
         }),
         _ => None,
     };
+    // The album drill under a query: only the tracks that match — unless the
+    // album itself is a name-hit (its own artist/title matched the query), in
+    // which case the full track list opens so it never dead-ends empty.
+    let name_hit = !query.is_empty() && views.album_is_name_hit(artist, title, query);
     let tracks = match &genre {
+        Some(genre) if !name_hit => {
+            if query.is_empty() {
+                views.album_tracks_in_genre(artist, title, genre)
+            } else {
+                views.album_hit_tracks_in_genre(artist, title, genre, query)
+            }
+        }
         Some(genre) => views.album_tracks_in_genre(artist, title, genre),
+        None if !name_hit && !query.is_empty() => views.album_hit_tracks(artist, title, query),
         None => views.album_tracks(artist, title),
     };
     let current = views.playback_current().map(|t| t.id.clone());
@@ -2382,12 +2399,20 @@ impl RiffApp {
         let first_page = self.views.track_list(query, 0);
 
         if first_page.total == 0 {
-            crate::ui::browser::empty_state(
-                ui,
-                &self.theme.active,
-                "No tracks yet",
-                "Add a folder from the sidebar to start scanning your library.",
-            );
+            // Query-aware empty copy: the flat list explains a filtered-to-
+            // empty search, never the empty-library copy.
+            let (emp_title, emp_hint): (&str, String) = if query.is_empty() {
+                (
+                    "No tracks yet",
+                    "Add a folder from the sidebar to start scanning your library.".to_string(),
+                )
+            } else {
+                (
+                    "No matching tracks",
+                    format!("Nothing in your library matches '{query}'."),
+                )
+            };
+            crate::ui::browser::empty_state(ui, &self.theme.active, emp_title, &emp_hint);
             return;
         }
 

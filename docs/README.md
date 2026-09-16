@@ -57,6 +57,7 @@ What riff is, what it does, and how to use it.
 - [ADR 0005: Custom window chrome (frameless) on all platforms](adr/0005-frameless-window-chrome-on-all-platforms.md).
 - [ADR 0006: Background workers behind app-layer service seams](adr/0006-background-workers-behind-app-layer-service-seams.md) — Tag Edit and Cover services replace the worker threads spawned inline by `RiffApp`.
 - [ADR 0007: No write-side SessionStore facade](adr/0007-no-write-side-sessionstore-facade.md) — the three store-mutation ports stay separate; the store owns generation bumps, so a facade would be a pass-through.
+- [ADR 0010: Inline tag editor in the detail panel](adr/0010-inline-tag-editor-in-the-detail-panel.md) — the Edit Tags modal moves into the detail panel as an inline editor with album-level tag aggregation and batch save.
 
 ### Technical
 

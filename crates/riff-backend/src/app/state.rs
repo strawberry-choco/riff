@@ -147,9 +147,6 @@ pub struct LibrarySession {
     /// 08). Session state, not persisted — the design pins no default past
     /// A–Z.
     pub browser_sort_desc: bool,
-    /// The genre chip narrowing the browser column's artist/album listings
-    /// (issue 08). Session state; `None` is no filter.
-    pub genre_filter: Option<String>,
     /// The ordered drill-down path of entity selections (issue 08), deepest
     /// entry last: what the detail column (issue 09) resolves from the
     /// current (deepest) selection. Selecting at a level truncates any
@@ -224,7 +221,6 @@ impl Default for LibrarySession {
             selected_folder: None,
             browser_layout: BrowserLayout::default(),
             browser_sort_desc: false,
-            genre_filter: None,
             browser_path: Vec::new(),
             queue_open: false,
             ui_flags: UiFlags::default(),

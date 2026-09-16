@@ -9,7 +9,7 @@
 //! [`RiffApp`]'s fields, exactly like the methods they sit beside.
 
 use eframe::egui;
-use riff_backend::domain::{Artist, PlaylistId, SmartPlaylistKind, TrackId};
+use riff_backend::domain::{Album, Artist, PlaylistId, SmartPlaylistKind, TrackId};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -26,11 +26,11 @@ use super::{
 };
 
 /// The stage's single-column states: stages that are not a LIBRARY section's
-/// facet drill render exactly one full-width listing column. `Search` is the
-/// flat search-results listing; the rest are the existing single renderers.
+/// facet drill render exactly one full-width listing column. The user
+/// playlist, smart list, and Folders views are the existing single
+/// renderers; an active search query is no longer one of them (issue 04) —
+/// it filters the open section's own columns instead.
 enum SingleStage {
-    /// An active search query with results: the flat listing for the query.
-    Search,
     /// An opened user playlist.
     UserPlaylist(PlaylistId),
     /// An opened read-only smart list.
@@ -57,25 +57,13 @@ impl RiffApp {
         library: &mut LibrarySession,
         playback: &mut PlaybackSession,
     ) {
-        // Single-stage gating, mirroring the old browser-pane dispatch:
-        // an active search query takes over the whole stage (its results
-        // are the flat listing), then an opened playlist or smart list,
-        // then the Folders tree; the LIBRARY sections go through the
-        // column plan.
+        // Single-stage gating: an opened playlist or smart list, then the
+        // Folders tree. The single-list search stage is gone (issue 04): a
+        // query no longer takes over the stage — each LIBRARY section's own
+        // columns filter to hits instead, and the Folders tree keeps its
+        // pruned shape under a query.
         let query = library.search_query.clone();
-        let has_results = query.is_empty() || self.views.search_has_matches(&query);
-        if !has_results && !query.is_empty() {
-            browser::empty_state(
-                ui,
-                &self.theme.active,
-                "No tracks found",
-                &format!("Nothing in your library matches '{query}'."),
-            );
-            return;
-        }
-        let single = if !query.is_empty() {
-            Some(SingleStage::Search)
-        } else if let Some(pid) = self.playlist_view.clone() {
+        let single = if let Some(pid) = self.playlist_view.clone() {
             Some(SingleStage::UserPlaylist(pid))
         } else if let Some(kind) = self
             .smart_playlist_view
@@ -90,7 +78,6 @@ impl RiffApp {
 
         let plan: Vec<ColumnKind> = match &single {
             None => column_plan(library.library_section, &library.browser_path),
-            Some(SingleStage::Search) => vec![ColumnKind::Flat],
             Some(_) => vec![ColumnKind::Single],
         };
 
@@ -158,9 +145,9 @@ impl RiffApp {
     ) {
         match kind {
             ColumnKind::Root => match library.library_section {
-                LibrarySection::Artists => self.render_artists_browser(ui, library),
-                LibrarySection::Albums => self.render_albums_browser(ui, library),
-                LibrarySection::Genres => self.render_genres_browser(ui, library),
+                LibrarySection::Artists => self.render_artists_browser(ui, library, query),
+                LibrarySection::Albums => self.render_albums_browser(ui, library, query),
+                LibrarySection::Genres => self.render_genres_browser(ui, library, query),
                 LibrarySection::AllTracks => {
                     unreachable!("the All Tracks section plans a Flat column")
                 }
@@ -181,15 +168,26 @@ impl RiffApp {
                     return;
                 };
                 let artist = artist.clone();
-                let albums = self.views.artist_albums(&artist);
+                let albums = self.artist_drill_albums(&artist, query);
+                let (empty_title, empty_hint): (&str, String) = if query.is_empty() {
+                    (
+                        "No albums yet",
+                        "This artist has no albums in your library.".to_string(),
+                    )
+                } else {
+                    (
+                        "No matching albums",
+                        format!("Nothing in this view matches '{query}'."),
+                    )
+                };
                 self.render_albums_drill_column(
                     ui,
                     library,
                     &albums,
                     1,
                     LibrarySection::Artists,
-                    "No albums yet",
-                    "This artist has no albums in your library.",
+                    empty_title,
+                    &empty_hint,
                 );
             }
             ColumnKind::GenreArtists => {
@@ -217,8 +215,32 @@ impl RiffApp {
                     "This artist has no albums carrying this genre.",
                 );
             }
-            ColumnKind::Tracks => self.render_tracks_column(ui, library, playback),
+            ColumnKind::Tracks => self.render_tracks_column(ui, library, playback, query),
         }
+    }
+
+    /// The artist drill's album listing under the current query (issue 04):
+    /// a name-hit artist drills to *all* its albums (the downward name-hit
+    /// expansion); a track-hit artist's hit albums show — the albums that
+    /// are themselves name-hits or carry a matching track. With no query the
+    /// full album table serves unchanged.
+    fn artist_drill_albums(&mut self, artist: &str, query: &str) -> Vec<Album> {
+        let all: Vec<Album> = self.views.artist_albums(artist).to_vec();
+        if query.is_empty() || artist_name_hits(artist, query) {
+            return all;
+        }
+        // Track-hit artist: every album that is itself a hit (its own name
+        // matched, or a member track matched) shows; the others stay out.
+        all.into_iter()
+            .filter(|album| {
+                self.views
+                    .album_is_name_hit(&album.artist, &album.title, query)
+                    || !self
+                        .views
+                        .album_hit_tracks(&album.artist, &album.title, query)
+                        .is_empty()
+            })
+            .collect()
     }
 
     /// One albums drill column (Artists level 1 and Genres level 2 share the
@@ -283,8 +305,6 @@ impl RiffApp {
             layout: BrowserLayout::List,
             sort_desc: false,
             show_sort: false,
-            genres: &[],
-            genre_filter: None,
             total,
             item: &mut item,
             empty_title,
@@ -296,7 +316,7 @@ impl RiffApp {
                 browser::BrowserAction::Select(key) => {
                     apply_drill_action(section, level, key, library);
                 }
-                browser::BrowserAction::ToggleSort | browser::BrowserAction::SetGenreFilter(_) => {}
+                browser::BrowserAction::ToggleSort => {}
             }
         }
     }
@@ -359,8 +379,6 @@ impl RiffApp {
             layout: BrowserLayout::List,
             sort_desc: false,
             show_sort: false,
-            genres: &[],
-            genre_filter: None,
             total,
             item: &mut item,
             empty_title: "No artists in this genre",
@@ -372,7 +390,7 @@ impl RiffApp {
                 browser::BrowserAction::Select(key) => {
                     apply_drill_action(LibrarySection::Genres, 1, key, library);
                 }
-                browser::BrowserAction::ToggleSort | browser::BrowserAction::SetGenreFilter(_) => {}
+                browser::BrowserAction::ToggleSort => {}
             }
         }
     }
@@ -386,15 +404,29 @@ impl RiffApp {
         ui: &mut egui::Ui,
         library: &mut LibrarySession,
         playback: &mut PlaybackSession,
+        query: &str,
     ) {
-        let content = resolve_detail_content(&mut self.views, library);
-        // The play batch the album header's actions start: the album's
-        // tracks in store order (genre-scoped in the Genres path).
+        let content = resolve_detail_content(&mut self.views, library, query);
+        // The play batch the album header's actions start: the shown
+        // (filtered) tracks in store order — under a query that is exactly
+        // what the Tracks column renders, so Play all / Shuffle start the
+        // visible rows (genre-scoped in the Genres path).
         let album_tracks: Vec<TrackId> = content
             .tracks
             .iter()
             .map(|row| TrackId(row.key.clone()))
             .collect();
+        let (empty_title, empty_hint): (&str, String) = if query.is_empty() {
+            (
+                "Nothing here yet",
+                "This selection has nothing to show.".to_string(),
+            )
+        } else {
+            (
+                "No matching tracks",
+                format!("Nothing in this view matches '{query}'."),
+            )
+        };
         let mut actions = Vec::new();
         crate::ui::detail::show_detail_column(
             ui,
@@ -405,8 +437,8 @@ impl RiffApp {
                 header: content.header.as_ref(),
                 tracks: &content.tracks,
                 rows: &[],
-                empty_title: "Nothing here yet",
-                empty_hint: "This selection has nothing to show.",
+                empty_title,
+                empty_hint: &empty_hint,
             },
             &mut actions,
         );
@@ -426,26 +458,42 @@ impl RiffApp {
     /// small cover thumbnail (open decision 3: the first album's cover) and
     /// the A–Z sort control above the list. Selecting a row drills into the
     /// artist at the root level — the path restarts from here.
-    fn render_artists_browser(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
+    ///
+    /// Under a query the root lists only hit artists in canonical hit order
+    /// (the A–Z sort control is hidden), each row carrying its hit-album
+    /// count. The genre chip filter is not part of this column (issue 04
+    /// keeps search display-independent): no genre chips render, and the
+    /// listing is never genre-filtered.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the root renderer's query path (hit rows) stays in one function"
+    )]
+    fn render_artists_browser(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        query: &str,
+    ) {
         use riff_backend::app::state::BrowserSelection;
 
         let palette = self.theme.active;
-        let genre = library.genre_filter.clone();
         let sort_desc = library.browser_sort_desc;
+        let hit = !query.is_empty();
 
-        let artists: Arc<[Artist]> = match &genre {
-            Some(g) => self.views.artists_in_genre(g),
-            None => self.views.artists(),
+        // The full (non-query) listing derives from the artists projection;
+        // the hit listing serves the paged hit-artist projection, each row
+        // carrying its hit-album keys so the count line is the hit-album
+        // count.
+        let mut rows: Vec<(String, usize)> = if hit {
+            Vec::new()
+        } else {
+            self.views
+                .artists()
+                .iter()
+                .map(|a| (a.name.clone(), a.albums.len()))
+                .collect()
         };
-        // artists() is name-ascending; the sort control flips the render
-        // order only, the store keeps the canonical ordering. The album
-        // count rides along so the row's detail line can match the Albums
-        // browser's `Artist · Year` and Genres' `N tracks` shape.
-        let mut rows: Vec<(&str, usize)> = artists
-            .iter()
-            .map(|a| (a.name.as_str(), a.albums.len()))
-            .collect();
-        if sort_desc {
+        if sort_desc && !hit {
             rows.reverse();
         }
         // The root column highlights the path's first entry: the artist the
@@ -461,8 +509,31 @@ impl RiffApp {
         let textures = &mut self.cover_textures;
         let lru_keys = &mut self.cover_lru_keys;
         let ctx = ui.ctx().clone();
+        // Anchor read: sizes the row range with the authoritative total
+        // (computed before the closure borrows `views` mutably).
+        let total = if hit {
+            views.hit_artists_page(query, 0).total
+        } else {
+            rows.len()
+        };
+        // Paged hit-artist rows: one page cached in hand per frame, refetched
+        // only when the row walks out of it (the flat-grid pattern).
+        let mut hit_page: Option<riff_backend::app::views::HitPage<Artist>> = None;
         let mut item = |i: usize| -> Option<browser::BrowserItem> {
-            let (name, album_count) = *rows.get(i)?;
+            let (name, album_count) = if hit {
+                if hit_page
+                    .as_ref()
+                    .is_none_or(|p| p.start + p.rows.len() <= i)
+                {
+                    hit_page = Some(views.hit_artists_page(query, i));
+                }
+                let page = hit_page.as_ref()?;
+                let artist = page.rows.get(i - page.start)?;
+                (artist.name.clone(), artist.albums.len())
+            } else {
+                let (name, count) = rows.get(i)?.clone();
+                (name, count)
+            };
             // The row's small cover thumbnail: the first album's cover
             // (open decision 3), requested through the first album's first
             // track — the Cover Service resolves by track path, the texture
@@ -474,7 +545,7 @@ impl RiffApp {
                 1 => "1 album".to_string(),
                 n => format!("{n} albums"),
             };
-            let albums = views.artist_albums(name);
+            let albums = views.artist_albums(&name);
             let thumbnail = albums
                 .first()
                 .and_then(|album| album.tracks.first())
@@ -490,35 +561,33 @@ impl RiffApp {
                     )
                 });
             Some(browser::BrowserItem {
-                key: name.to_owned(),
-                label: name.to_owned(),
+                key: name.clone(),
+                label: name.clone(),
                 detail: Some(detail),
                 thumbnail,
-                selected: selected.as_deref() == Some(name),
+                selected: selected.as_deref() == Some(name.as_str()),
                 now_playing: false,
             })
         };
-        let (empty_title, empty_hint) = if genre.is_some() {
+        let (empty_title, empty_hint): (&str, String) = if hit {
             (
-                "No artists in this genre",
-                "Clear the genre filter above to see every artist.",
+                "No matching artists",
+                format!("Nothing in your library matches '{query}'."),
             )
         } else {
             (
                 "No artists yet",
-                "Add a folder from the sidebar to start scanning your library.",
+                "Add a folder from the sidebar to start scanning your library.".to_string(),
             )
         };
         let column = browser::BrowserColumn {
             layout: library.browser_layout,
             sort_desc,
-            show_sort: true,
-            genres: &[],
-            genre_filter: genre.as_deref(),
-            total: rows.len(),
+            show_sort: !hit,
+            total,
             item: &mut item,
             empty_title,
-            empty_hint,
+            empty_hint: &empty_hint,
         };
         browser::show_browser_column(ui, &mut self.icons, &palette, column, &mut actions);
         for action in actions {
@@ -531,31 +600,44 @@ impl RiffApp {
     /// listing derives from the per-artist album tables via
     /// [`browser::flat_slot`] — no whole-library album query exists, and the
     /// prefix-sum table means only the visible slots' artists are fetched.
-    fn render_albums_browser(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
+    ///
+    /// Under a query the root lists only hit albums in canonical hit order
+    /// (the A–Z sort control is hidden), an album matching by its own
+    /// artist/title or by any member track. The genre chip filter is not
+    /// part of this column (issue 04 keeps search display-independent): no
+    /// genre chips render, and the listing is never genre-filtered.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the root renderer's query path (hit rows) stays in one function"
+    )]
+    fn render_albums_browser(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        query: &str,
+    ) {
         use riff_backend::app::state::BrowserSelection;
 
         let palette = self.theme.active;
-        let genre = library.genre_filter.clone();
         let sort_desc = library.browser_sort_desc;
+        let hit = !query.is_empty();
 
-        let artists: Arc<[Artist]> = match &genre {
-            Some(g) => self.views.artists_in_genre(g),
-            None => self.views.artists(),
-        };
-        // Prefix-sum table over per-artist album counts (the genre-filtered
-        // counts come from the filtered projection); flat_slot maps the
+        // Prefix-sum table over per-artist album counts; flat_slot maps the
         // listing index through, flipping to Z–A when the sort is reversed.
+        // Only the non-query listing walks it — under a query the hit
+        // listing serves its own paged rows in canonical hit order.
+        let artists: Arc<[Artist]> = if hit {
+            Arc::from([])
+        } else {
+            self.views.artists()
+        };
         let mut counts: Vec<usize> = Vec::with_capacity(artists.len() + 1);
         counts.push(0);
         for artist in artists.iter() {
-            let n = match &genre {
-                Some(g) => self.views.artist_albums_in_genre(&artist.name, g).len(),
-                None => artist.albums.len(),
-            };
             let last = counts.last().copied().unwrap_or(0);
-            counts.push(last + n);
+            counts.push(last + artist.albums.len());
         }
-        let total = counts.last().copied().unwrap_or(0);
+        let full_total = counts.last().copied().unwrap_or(0);
         // The root column highlights the path's first entry: the album the
         // listener is drilled into.
         let selected = match library.browser_path.first() {
@@ -571,14 +653,31 @@ impl RiffApp {
         let textures = &mut self.cover_textures;
         let lru_keys = &mut self.cover_lru_keys;
         let ctx = ui.ctx().clone();
+        // Anchor read: sizes the row range with the authoritative total
+        // (computed before the closure borrows `views` mutably).
+        let total = if hit {
+            views.hit_albums_page(query, 0).total
+        } else {
+            full_total
+        };
+        // Paged hit-album rows: one page cached in hand per frame, refetched
+        // only when the row walks out of it (the flat-grid pattern).
+        let mut hit_page: Option<riff_backend::app::views::HitPage<Album>> = None;
         let mut item = |i: usize| -> Option<browser::BrowserItem> {
-            let (ai, slot) = browser::flat_slot(&counts, i, sort_desc)?;
-            let artist = artists.get(ai)?;
-            let albums = match &genre {
-                Some(g) => views.artist_albums_in_genre(&artist.name, g),
-                None => views.artist_albums(&artist.name),
+            let album: Album = if hit {
+                if hit_page
+                    .as_ref()
+                    .is_none_or(|p| p.start + p.rows.len() <= i)
+                {
+                    hit_page = Some(views.hit_albums_page(query, i));
+                }
+                let page = hit_page.as_ref()?;
+                page.rows.get(i - page.start)?.clone()
+            } else {
+                let (ai, slot) = browser::flat_slot(&counts, i, sort_desc)?;
+                let artist = artists.get(ai)?;
+                views.artist_albums(&artist.name).get(slot)?.clone()
             };
-            let album = albums.get(slot)?;
             // The album's cover, requested through its first track — the
             // same flow the artist rows and track listings use; a full miss
             // resolves the music-icon placeholder tile.
@@ -613,27 +712,25 @@ impl RiffApp {
                 now_playing: false,
             })
         };
-        let (empty_title, empty_hint) = if genre.is_some() {
+        let (empty_title, empty_hint): (&str, String) = if hit {
             (
-                "No albums in this genre",
-                "Clear the genre filter above to see every album.",
+                "No matching albums",
+                format!("Nothing in your library matches '{query}'."),
             )
         } else {
             (
                 "No albums yet",
-                "Add a folder from the sidebar to start scanning your library.",
+                "Add a folder from the sidebar to start scanning your library.".to_string(),
             )
         };
         let column = browser::BrowserColumn {
             layout: library.browser_layout,
             sort_desc,
-            show_sort: true,
-            genres: &[],
-            genre_filter: genre.as_deref(),
+            show_sort: !hit,
             total,
             item: &mut item,
             empty_title,
-            empty_hint,
+            empty_hint: &empty_hint,
         };
         browser::show_browser_column(ui, &mut self.icons, &palette, column, &mut actions);
         for action in actions {
@@ -644,7 +741,16 @@ impl RiffApp {
     /// The Genres variant (handoff issue 08): every genre with its track
     /// count from the genre read model (handoff issue 02), ordered A–Z by
     /// the sort control. Selecting a genre drills into it at the root level.
-    fn render_genres_browser(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
+    ///
+    /// The query is threaded in for the stage's uniform signature; hit-scoped
+    /// genre counts under a query are the spec's isolated cut (issue 05) and
+    /// land separately.
+    fn render_genres_browser(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        _query: &str,
+    ) {
         use riff_backend::app::state::BrowserSelection;
 
         let palette = self.theme.active;
@@ -674,8 +780,6 @@ impl RiffApp {
             layout: library.browser_layout,
             sort_desc,
             show_sort: true,
-            genres: &[],
-            genre_filter: None,
             total,
             item: &mut item,
             empty_title: "No genres yet",
@@ -745,8 +849,6 @@ impl RiffApp {
             layout: riff_backend::app::state::BrowserLayout::Grid,
             sort_desc: false,
             show_sort: false,
-            genres: &[],
-            genre_filter: None,
             total,
             item: &mut item,
             empty_title: "No tracks yet",
@@ -788,4 +890,14 @@ fn stage_column_scope(
             .id_salt(salt),
         add_contents,
     );
+}
+
+/// Whether `artist`'s name is itself a hit for `query` — the literal,
+/// case-insensitive substring rule (the query lowercased in Rust) the store
+/// applies to its write-time-lowercased `name_lower` column. The artist
+/// drill column needs the name-hit decision to pick its listing: a name-hit
+/// artist expands into all its albums; a track-hit artist shows only its
+/// hit albums.
+fn artist_name_hits(artist: &str, query: &str) -> bool {
+    !query.is_empty() && artist.to_lowercase().contains(&query.to_lowercase())
 }

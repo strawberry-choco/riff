@@ -164,7 +164,7 @@ pub mod mocks {
     /// slice's [`MetadataWriter`] port that the real lofty writer serves.
     use riff_library::app::errors::LibraryError as LibraryErrorL;
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     /// Scripted [`AudioDecoder`]: `open` returns a configured format (or an
@@ -572,10 +572,19 @@ pub mod mocks {
     /// Recording [`SettingsStore`]: starts from defaults, applies every save
     /// to in-memory state (so hydration round-trips), records the call
     /// sequence, and can be switched to fail every mutation.
+    ///
+    /// The `calls` log is owned, which is what the suites that call
+    /// `Preferences` themselves want. A test that hands the mock to something
+    /// which owns it — the app shell — cannot read `calls` back afterwards, so
+    /// it builds the mock with [`Self::with_shared_calls`] and reads the log
+    /// through the handle it keeps.
     pub struct MockSettingsStore {
         pub state: Settings,
         pub calls: Vec<SettingsCall>,
         pub fail: bool,
+        /// A second copy of every recorded call, for the owned-elsewhere case.
+        /// `None` in the owned-and-inspected style.
+        pub shared_calls: Option<Arc<Mutex<Vec<SettingsCall>>>>,
     }
 
     impl Default for MockSettingsStore {
@@ -588,7 +597,30 @@ pub mod mocks {
                 },
                 calls: Vec::new(),
                 fail: false,
+                shared_calls: None,
             }
+        }
+    }
+
+    impl MockSettingsStore {
+        /// A mock that also records into `shared`, which the caller keeps and
+        /// reads after the owner holding the mock has dropped.
+        pub fn with_shared_calls(shared: Arc<Mutex<Vec<SettingsCall>>>) -> Self {
+            Self {
+                shared_calls: Some(shared),
+                ..Self::default()
+            }
+        }
+
+        /// Record one mutation, into the owned log and the shared one alike.
+        fn record(&mut self, call: SettingsCall) {
+            if let Some(shared) = &self.shared_calls {
+                shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(call.clone());
+            }
+            self.calls.push(call);
         }
     }
 
@@ -605,7 +637,7 @@ pub mod mocks {
                 return Err(StoreError::InvalidOperation("mock settings failure".into()));
             }
             self.state.scalars = scalars.clone();
-            self.calls.push(SettingsCall::Scalars);
+            self.record(SettingsCall::Scalars);
             Ok(())
         }
 
@@ -614,7 +646,7 @@ pub mod mocks {
                 return Err(StoreError::InvalidOperation("mock settings failure".into()));
             }
             self.state.library_paths = paths.to_vec();
-            self.calls.push(SettingsCall::LibraryPaths);
+            self.record(SettingsCall::LibraryPaths);
             Ok(())
         }
 
@@ -629,7 +661,7 @@ pub mod mocks {
                 return Err(StoreError::InvalidOperation("mock settings failure".into()));
             }
             self.state.watch_states.clone_from(states);
-            self.calls.push(SettingsCall::WatchStates);
+            self.record(SettingsCall::WatchStates);
             Ok(())
         }
     }
@@ -1348,11 +1380,41 @@ pub mod mocks {
         }
     }
 
-    /// No-op [`Scans`] for UI tests that exercise `RiffApp` but never trigger
-    /// a scan. `request`/`cancel` are fire-and-forget; `poll` and
-    /// `is_scanning` always return empty/false.
-    #[derive(Default)]
-    pub struct MockScans;
+    /// Scripted [`Scans`] front end for UI tests that drive `RiffApp`: the
+    /// test queues the outcomes the app will poll, and the mock records the
+    /// paths the app asked for. `request`/`cancel` stay fire-and-forget;
+    /// `poll` hands back the queue and empties it.
+    ///
+    /// `Clone` shares the queue, so a test keeps a handle after boxing another
+    /// clone into the app. `is_scanning` is always false: the shell never
+    /// gates rendering on it, so modelling an in-flight scan would be
+    /// modelling something no test here can observe.
+    #[derive(Clone, Default)]
+    pub struct MockScans {
+        /// Outcomes the next `poll` returns, oldest first.
+        pub queued: Arc<Mutex<Vec<riff_library::app::scan_service::ScanOutcome>>>,
+        /// Every path `request` was called with, in call order.
+        pub requested: Arc<Mutex<Vec<PathBuf>>>,
+    }
+
+    impl MockScans {
+        /// Queue one outcome for the app's next `poll`.
+        pub fn queue(&self, outcome: riff_library::app::scan_service::ScanOutcome) {
+            lock_cell(&self.queued).push(outcome);
+        }
+
+        /// The paths `request` was called with so far.
+        pub fn requested_paths(&self) -> Vec<PathBuf> {
+            lock_cell(&self.requested).clone()
+        }
+    }
+
+    /// Lock a mock's shared cell, tolerating poisoning: one failing test must
+    /// not cascade into every later test through a poisoned mock.
+    pub(crate) fn lock_cell<T>(cell: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        cell.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     /// No-op [`TagEdits`] for UI tests that exercise `RiffApp` but never submit
     /// a tag edit. `submit` discards; `poll` always returns `None`.
@@ -1368,11 +1430,16 @@ pub mod mocks {
 // --- Minimal trait impls for the no-op UI test mocks -----------------------
 
 impl riff_library::app::scan_service::Scans for crate::mocks::MockScans {
-    fn request(&self, _path: std::path::PathBuf) {}
-    fn cancel(&self) {}
-    fn poll(&self) -> Vec<riff_library::app::scan_service::ScanOutcome> {
-        Vec::new()
+    fn request(&self, path: std::path::PathBuf) {
+        crate::mocks::lock_cell(&self.requested).push(path);
     }
+
+    fn cancel(&self) {}
+
+    fn poll(&self) -> Vec<riff_library::app::scan_service::ScanOutcome> {
+        std::mem::take(&mut *crate::mocks::lock_cell(&self.queued))
+    }
+
     fn is_scanning(&self, _path: &std::path::Path) -> bool {
         false
     }

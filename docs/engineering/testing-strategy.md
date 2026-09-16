@@ -27,7 +27,7 @@ The suites compile and run green: `cargo test --all-targets` builds every worksp
 `tests/mod.rs` is the single crate root. Beyond declaring the six suite modules, it provides three helper modules:
 
 - `test_utils` — factory functions `create_test_track`, `create_test_track_with_metadata`, and `float_close` (approximate `f32` comparison for audio-parameter assertions).
-- `mocks` — scripted implementations of the port traits (`MockAudioDecoder`, `MockAudioOutput`, `MockMetadataReader`, `MockCoverLoader`, `MockMetadataWriter`, `MockTransport`, and store fakes) so app-layer behavior is tested at the seams without real audio hardware or media files. Mocks implement the ports through the `riff-backend` re-export surface.
+- `mocks` — scripted implementations of the port traits (`MockAudioDecoder`, `MockAudioOutput`, `MockMetadataReader`, `MockCoverLoader`, `MockMetadataWriter`, `MockTransport`, and store fakes) so app-layer behavior is tested at the seams without real audio hardware or media files. Mocks implement the ports through the `riff-backend` re-export surface. Three of them are the service front ends the app shell polls — `MockScans` (a scriptable outcome queue), `MockTagEdits`, and `MockCovers` — and `MockSettingsStore` can additionally record into a caller-held `Arc<Mutex<_>>` via `with_shared_calls`, which is how a test reads the log back after the shell has taken ownership of the store.
 - `integration_helpers` — paired `PlaybackSession`/`LibrarySession` test fixtures.
 
 Suite modules bring these into scope with `use super::*` and refer to production code through per-crate imports (`riff_backend::`, `riff_infra::`, `riff_library::`, `riff_gui::`).
@@ -48,6 +48,16 @@ A few observations about the current coverage, stated neutrally:
 - Decoding real audio end to end would need sample media files, which are not checked in; behavior at the media ports is covered through the mocks and the lofty round-trip tests.
 
 Commands: run everything with `cargo test --all-targets`; run one crate's suite with `cargo test -p riff-infra` or `cargo test -p riff-tests`; run one module with `cargo test domain_tests`; see output with `cargo test -- --nocapture`.
+
+### Whole-frame tests (the app shell, headlessly)
+
+`ui_tests.rs` also carries `whole_frame_tests`, the suite that drives the *real* app shell through its `eframe::App` interface rather than testing a view function in isolation. This is the seam for anything whose contract is the frame loop itself — what one frame does, in order, to state a test can observe.
+
+- **Harness.** `egui_kittest` with its `eframe` feature, via `HarnessBuilder::build_eframe`, which calls the app's `logic` then its `ui` for every step. The default `LazyRenderer` means no wgpu device and no window, so these tests carry none of the golden suite's GPU cost or flakiness.
+- **Construction.** `RiffApp::new_for_test` (`#[doc(hidden)]`) fills in what the platform normally supplies — no tray icon, an empty watcher handle, a fresh quit flag, a real visibility channel — and *delegates* to the production constructor so the two cannot drift field-for-field.
+- **Timing.** The harness runs the frame body twice inside `build_eframe` (one AccessKit warm-up frame, one settling step), so a test must mutate state after the harness exists and then `step()` once per frame it wants to observe. A selection applied at the end of a frame renders one frame later.
+- **Seams asserted through.** The rendered output (accessibility tree), the mock call records, and the live sessions the app actually holds. Note that the titlebar's scan-status line is *painted*, not drawn as a widget, so it has no accessibility node: the session slot the painter reads is that contract's observable seam and is what the titlebar renders verbatim.
+- **Prove the test can fail.** Each frame-loop assertion was verified by temporarily no-op'ing the production call it covers — for the playlist reorder test, making `commit_playlist_reorder` a self-drop — and confirming the test fails. A frame test that passes with the behaviour removed is the most expensive kind of green.
 
 ## Recommendations
 

@@ -677,6 +677,115 @@ pub trait LibraryQueryStore {
         album_title: &str,
         genre: &str,
     ) -> Result<Vec<Track>, StoreError>;
+
+    // --- Entity hit reads (search across Library sections) -----------------
+
+    /// One bounded window of hit albums for `query`, in the canonical
+    /// browsing order the Albums root renders (album artist ascending, then
+    /// year descending with missing years last, then title ascending). An
+    /// album hits when its album artist or title matches `query`
+    /// case-insensitively (a name hit) or any member track matches (a track
+    /// hit) — matching is literal substring over the write-time-lowercased
+    /// key columns and the tracks' derived `search_text`. Each returned
+    /// album carries only its hit track ids, in canonical album-track order.
+    fn hit_albums(
+        &self,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Album>, StoreError>;
+
+    /// Total number of hit albums for [`Self::hit_albums`] semantics.
+    fn hit_albums_count(&self, query: &str) -> Result<usize, StoreError>;
+
+    /// One bounded window of hit artists for `query`, name-ascending. An
+    /// artist hits when its name matches `query` case-insensitively (literal
+    /// substring over the write-time-lowercased name column) or any of its
+    /// albums is a hit; each artist carries only its hit-album keys in
+    /// canonical browsing order (year descending with missing years last,
+    /// then title ascending).
+    fn hit_artists(
+        &self,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Artist>, StoreError>;
+
+    /// Total number of hit artists for [`Self::hit_artists`] semantics.
+    fn hit_artists_count(&self, query: &str) -> Result<usize, StoreError>;
+
+    /// One album's tracks that match `query`, in canonical album-track
+    /// order (track number ascending with missing numbers first, path
+    /// tiebreak). Unknown albums yield an empty `Vec`.
+    fn album_hit_tracks(
+        &self,
+        album_artist: &str,
+        album_title: &str,
+        query: &str,
+    ) -> Result<Vec<Track>, StoreError>;
+
+    /// Whether `album` is itself a name hit for `query` — its album artist
+    /// or title matches case-insensitively — as opposed to a track hit.
+    /// Unknown albums yield `false`.
+    fn album_is_name_hit(
+        &self,
+        album_artist: &str,
+        album_title: &str,
+        query: &str,
+    ) -> Result<bool, StoreError>;
+
+    /// One bounded window of hit albums within `genre` for `query`, in the
+    /// canonical browsing order. An album appears when it holds at least one
+    /// track with `genre` (semicolon-separated entries, exactly like
+    /// [`Self::artists_in_genre`]) and is itself a hit — its album artist or
+    /// title matches, or a genre-bearing member track matches. Each returned
+    /// album carries only the genre-bearing hit track ids in canonical
+    /// album-track order.
+    fn hit_albums_in_genre(
+        &self,
+        genre: &str,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Album>, StoreError>;
+
+    /// Total number of hit albums within `genre` for
+    /// [`Self::hit_albums_in_genre`] semantics.
+    fn hit_albums_in_genre_count(&self, genre: &str, query: &str) -> Result<usize, StoreError>;
+
+    /// One bounded window of hit artists within `genre` for `query`,
+    /// name-ascending. An artist appears when at least one of its albums is
+    /// a genre-scoped hit (holds a `genre`-bearing track and is itself a
+    /// hit); each artist carries only those genre-scoped hit-album keys in
+    /// canonical browsing order.
+    fn hit_artists_in_genre(
+        &self,
+        genre: &str,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Artist>, StoreError>;
+
+    /// Total number of hit artists within `genre` for
+    /// [`Self::hit_artists_in_genre`] semantics.
+    fn hit_artists_in_genre_count(&self, genre: &str, query: &str) -> Result<usize, StoreError>;
+
+    /// One album's tracks that match `query` among the tracks carrying
+    /// `genre` (semicolon-separated entries), in canonical album-track
+    /// order.
+    fn album_hit_tracks_in_genre(
+        &self,
+        album_artist: &str,
+        album_title: &str,
+        genre: &str,
+        query: &str,
+    ) -> Result<Vec<Track>, StoreError>;
+
+    /// Every genre containing at least one hit track, name-ascending, with
+    /// its hit-track count. Semicolon-separated genre segments split exactly
+    /// like [`Self::genre_counts`] — a hit track tagged `"Rock; Jazz"`
+    /// counts once per entry.
+    fn hit_genre_counts(&self, query: &str) -> Result<Vec<GenreCount>, StoreError>;
 }
 
 /// Notification the `Application Store` emits (best-effort) over a

@@ -15,8 +15,8 @@ pub use riff_library::app::{
     errors::LibraryError,
     playlist_manager::{PlaylistManager, PlaylistManagerWorker, Playlists},
     projection::{
-        BrowsingProjection, FolderProjection, GenreProjection, PlaylistProjection,
-        SmartPlaylistsProjection, TrackListProjection,
+        BrowsingProjection, FolderProjection, GenreProjection, HitListProjection, HitProjection,
+        PlaylistProjection, SmartPlaylistsProjection, TrackListProjection,
     },
     scan::build_tracks,
     scan_service::{SCAN_BATCH_SIZE, ScanOutcome, ScanService, ScanWorker, Scans},

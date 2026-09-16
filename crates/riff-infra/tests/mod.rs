@@ -36,7 +36,7 @@ pub use riff_persistence::store::{
     StoreMigrations, WatchState,
 };
 pub use riff_persistence::track::{
-    Album, Artist, CoverSource, SmartPlaylistKind, Track, TrackId, TrackMetadata,
+    Album, Artist, CoverSource, GenreCount, SmartPlaylistKind, Track, TrackId, TrackMetadata,
 };
 
 // Standard-library names referenced unqualified in some suites.

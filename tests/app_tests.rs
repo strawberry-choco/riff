@@ -951,6 +951,119 @@ mod tests {
                 .unwrap()
                 .album_tracks_in_genre(album_artist, album_title, genre)
         }
+
+        fn hit_albums(
+            &self,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            self.0.lock().unwrap().hit_albums(query, offset, limit)
+        }
+
+        fn hit_albums_count(&self, query: &str) -> Result<usize, StoreError> {
+            self.0.lock().unwrap().hit_albums_count(query)
+        }
+
+        fn hit_artists(
+            &self,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            self.0.lock().unwrap().hit_artists(query, offset, limit)
+        }
+
+        fn hit_artists_count(&self, query: &str) -> Result<usize, StoreError> {
+            self.0.lock().unwrap().hit_artists_count(query)
+        }
+
+        fn album_hit_tracks(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+            query: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .album_hit_tracks(album_artist, album_title, query)
+        }
+
+        fn album_is_name_hit(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+            query: &str,
+        ) -> Result<bool, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .album_is_name_hit(album_artist, album_title, query)
+        }
+
+        fn hit_albums_in_genre(
+            &self,
+            genre: &str,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .hit_albums_in_genre(genre, query, offset, limit)
+        }
+
+        fn hit_albums_in_genre_count(&self, genre: &str, query: &str) -> Result<usize, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .hit_albums_in_genre_count(genre, query)
+        }
+
+        fn hit_artists_in_genre(
+            &self,
+            genre: &str,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .hit_artists_in_genre(genre, query, offset, limit)
+        }
+
+        fn hit_artists_in_genre_count(
+            &self,
+            genre: &str,
+            query: &str,
+        ) -> Result<usize, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .hit_artists_in_genre_count(genre, query)
+        }
+
+        fn album_hit_tracks_in_genre(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+            genre: &str,
+            query: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.0.lock().unwrap().album_hit_tracks_in_genre(
+                album_artist,
+                album_title,
+                genre,
+                query,
+            )
+        }
+
+        fn hit_genre_counts(&self, query: &str) -> Result<Vec<GenreCount>, StoreError> {
+            self.0.lock().unwrap().hit_genre_counts(query)
+        }
     }
 
     /// Test-side handle to the shared mock: locks on every access so
@@ -1304,6 +1417,567 @@ mod tests {
             )),
             1,
             "one album's genre-filtered tracks fetch once per generation"
+        );
+    }
+
+    // --- Hit views: query-keyed entity search across Library sections --------
+    //
+    // The entity-level hit reads the section columns render under a query
+    // (spec "Entity-level search across Library sections"). The two root
+    // listings (albums, artists) are bounded-window projections keyed by the
+    // query text, mirroring the flat track-list projection: a keystroke
+    // retarget drops stale rows even at an unchanged generation, cached
+    // windows are FIFO-capped, and a generation bump refetches. The scoped
+    // hit reads are bounded, generation-cached reads like the browsing/genre
+    // projections. Every read warns and degrades to a default on store error.
+
+    /// A canned hit-album fixture: `rows` deterministic albums in canonical
+    /// order.
+    fn hit_album_fixture(rows: usize) -> Vec<Album> {
+        (0..rows)
+            .map(|n| Album {
+                title: format!("Album {n}"),
+                artist: "Alpha".to_string(),
+                tracks: vec![TrackId(format!("f:\\a\\{n}.mp3"))],
+                year: Some(2000),
+                genre: None,
+            })
+            .collect()
+    }
+
+    /// A canned hit-artist fixture: `rows` deterministic artists in canonical
+    /// order, each with one hit album.
+    fn hit_artist_fixture(rows: usize) -> Vec<Artist> {
+        (0..rows)
+            .map(|n| Artist {
+                name: format!("Artist {n}"),
+                albums: vec![format!("Artist {n} - One")],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_hit_albums_page_serves_windows_and_total() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            hit_albums: hit_album_fixture(120),
+            ..Default::default()
+        });
+
+        let page = views.hit_albums_page("q", 0);
+        assert_eq!(page.total, 120);
+        assert_eq!(page.start, 0);
+        assert_eq!(page.rows.len(), 50);
+        assert_eq!(page.rows[0].title, "Album 0");
+
+        let page = views.hit_albums_page("q", 50);
+        assert_eq!(page.start, 50);
+        assert_eq!(page.rows.len(), 50);
+        assert_eq!(page.rows[49].title, "Album 99");
+
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitAlbums(0, 50)),
+            1,
+            "each requested window is fetched once at the projection's window size"
+        );
+        assert_eq!(mock.count_of(&LibraryQueryCall::HitAlbums(50, 50)), 1);
+    }
+
+    #[test]
+    fn test_hit_albums_retargets_on_keystroke() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            hit_albums: hit_album_fixture(10),
+            ..Default::default()
+        });
+        views.hit_albums_page("q", 0);
+
+        // The next keystroke retargets at an unchanged generation: the stale
+        // query's rows must drop and the new query refetch.
+        views.hit_albums_page("qu", 0);
+
+        // Returning to the first query proves its rows were dropped by the
+        // retarget — a fresh fetch, not a cache hit.
+        views.hit_albums_page("q", 0);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitAlbums(0, 50)),
+            3,
+            "a keystroke retarget drops the stale query's cached rows even at an unchanged generation"
+        );
+    }
+
+    #[test]
+    fn test_hit_albums_cache_is_bounded_fifo() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            hit_albums: hit_album_fixture(500),
+            ..Default::default()
+        });
+
+        for offset in [0, 50, 100, 150, 200, 250, 300, 350, 400] {
+            views.hit_albums_page("q", offset);
+        }
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitAlbums(0, 50)),
+            1,
+            "all requested windows load"
+        );
+
+        // Asking for the oldest window again must fetch it anew: it was
+        // evicted once the bound was exceeded.
+        views.hit_albums_page("q", 0);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitAlbums(0, 50)),
+            2,
+            "the oldest window was evicted once the bound was exceeded"
+        );
+
+        // The newest window remains cached.
+        let before = mock.count_of(&LibraryQueryCall::HitAlbums(400, 50));
+        views.hit_albums_page("q", 400);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitAlbums(400, 50)),
+            before,
+            "the newest window remains cached"
+        );
+    }
+
+    #[test]
+    fn test_hit_albums_refetch_after_a_generation_bump() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            hit_albums: hit_album_fixture(10),
+            ..Default::default()
+        });
+        assert_eq!(views.hit_albums_page("q", 0).total, 10);
+
+        // A committed mutation bumps the generation: the stale rows drop, the
+        // next frame refetches and recounts.
+        generation.bump();
+        assert_eq!(views.hit_albums_page("q", 0).total, 10);
+
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitAlbums(0, 50)),
+            2,
+            "a generation bump drops the cached hit windows"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitAlbumsCount),
+            2,
+            "an invalidated frame recounts"
+        );
+    }
+
+    #[test]
+    fn test_hit_albums_query_actually_filters_rows() {
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
+            hit_albums: hit_album_fixture(10),
+            matching_searches: vec!["q".to_string()],
+            ..Default::default()
+        });
+
+        // A matching query serves its rows; a non-matching query serves
+        // none. An implementation that silently made the query handling
+        // unconditional would mix the two — serving canned rows for a
+        // non-matching query, or no rows for a matching one.
+        let page = views.hit_albums_page("q", 0);
+        assert_eq!(page.total, 10);
+        assert_eq!(
+            page.rows.len(),
+            10,
+            "a matching query serves its rows, not an unconditional fetch"
+        );
+        let page = views.hit_albums_page("none", 0);
+        assert_eq!(
+            page.total, 0,
+            "a non-matching query degrades to an empty page"
+        );
+        assert!(page.rows.is_empty());
+    }
+
+    #[test]
+    fn test_scoped_hit_reads_pass_the_query_through() {
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
+            album_hit_tracks: vec![projection_track(1)],
+            album_name_hits: vec!["Alpha - One".to_string()],
+            hit_genre_counts: vec![GenreCount {
+                genre: "Rock".to_string(),
+                tracks: 2,
+            }],
+            matching_searches: vec!["q".to_string()],
+            ..Default::default()
+        });
+
+        // Query "q" matches; "none" does not — an implementation that
+        // silently made the query handling unconditional would answer
+        // identically for both.
+        assert_eq!(views.album_hit_tracks("Alpha", "One", "q").len(), 1);
+        assert!(views.album_is_name_hit("Alpha", "One", "q"));
+        assert_eq!(views.hit_genre_counts("q").len(), 1);
+
+        assert!(views.album_hit_tracks("Alpha", "One", "none").is_empty());
+        assert!(!views.album_is_name_hit("Alpha", "One", "none"));
+        assert!(views.hit_genre_counts("none").is_empty());
+    }
+
+    #[test]
+    fn test_hit_albums_degrades_on_store_error() {
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
+            hit_albums: hit_album_fixture(10),
+            failing: vec![FailingQuery::HitAlbums, FailingQuery::HitAlbumsCount],
+            ..Default::default()
+        });
+
+        let page = views.hit_albums_page("q", 0);
+        assert_eq!(page.total, 0, "a store error degrades the total to zero");
+        assert!(
+            page.rows.is_empty(),
+            "a store error degrades to an empty page — the UI never sees a Result"
+        );
+    }
+
+    #[test]
+    fn test_hit_artists_page_serves_windows_and_total() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            hit_artists: hit_artist_fixture(120),
+            ..Default::default()
+        });
+
+        let page = views.hit_artists_page("q", 0);
+        assert_eq!(page.total, 120);
+        assert_eq!(page.start, 0);
+        assert_eq!(page.rows.len(), 50);
+        assert_eq!(page.rows[0].name, "Artist 0");
+
+        let page = views.hit_artists_page("q", 50);
+        assert_eq!(page.start, 50);
+        assert_eq!(page.rows.len(), 50);
+        assert_eq!(page.rows[49].name, "Artist 99");
+
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitArtists(0, 50)),
+            1,
+            "each requested window is fetched once at the projection's window size"
+        );
+        assert_eq!(mock.count_of(&LibraryQueryCall::HitArtists(50, 50)), 1);
+    }
+
+    #[test]
+    fn test_hit_artists_retargets_on_keystroke() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            hit_artists: hit_artist_fixture(10),
+            ..Default::default()
+        });
+        views.hit_artists_page("q", 0);
+
+        // A keystroke at an unchanged generation must refetch, not serve the
+        // previous query's rows.
+        views.hit_artists_page("qu", 0);
+        views.hit_artists_page("q", 0);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitArtists(0, 50)),
+            3,
+            "a keystroke retarget drops the stale query's cached rows even at an unchanged generation"
+        );
+    }
+
+    #[test]
+    fn test_hit_artists_degrades_on_store_error() {
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
+            hit_artists: hit_artist_fixture(10),
+            failing: vec![FailingQuery::HitArtists, FailingQuery::HitArtistsCount],
+            ..Default::default()
+        });
+
+        let page = views.hit_artists_page("q", 0);
+        assert_eq!(page.total, 0, "a store error degrades the total to zero");
+        assert!(
+            page.rows.is_empty(),
+            "a store error degrades to an empty page — the UI never sees a Result"
+        );
+    }
+
+    #[test]
+    fn test_album_hit_tracks_cached_per_album_and_query() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            album_hit_tracks: vec![projection_track(1)],
+            ..Default::default()
+        });
+        assert_eq!(views.album_hit_tracks("Alpha", "One", "q").len(), 1);
+        assert_eq!(
+            views.album_hit_tracks("Alpha", "One", "q").len(),
+            1,
+            "an album's hit tracks serve the cache at the same (album, query)"
+        );
+        assert_eq!(
+            views.album_hit_tracks("Alpha", "One", "qu").len(),
+            1,
+            "a new query refetches at the unchanged generation"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::AlbumHitTracks(
+                "Alpha".to_string(),
+                "One".to_string()
+            )),
+            2,
+            "one fetch per (album, query)"
+        );
+
+        // Degrade-on-error: the UI never sees a Result.
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
+            failing: vec![FailingQuery::AlbumHitTracks],
+            ..Default::default()
+        });
+        assert!(
+            views.album_hit_tracks("Alpha", "One", "q").is_empty(),
+            "a store error degrades to an empty track list"
+        );
+    }
+
+    #[test]
+    fn test_album_name_hit_cached_per_album_and_query() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            album_name_hits: vec!["Alpha - One".to_string()],
+            ..Default::default()
+        });
+        assert!(views.album_is_name_hit("Alpha", "One", "q"));
+        assert!(views.album_is_name_hit("Alpha", "One", "q"), "cached");
+        assert!(
+            !views.album_is_name_hit("Beta", "Two", "q"),
+            "an unknown album yields false"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::AlbumIsNameHit(
+                "Alpha".to_string(),
+                "One".to_string()
+            )),
+            1,
+            "the boolean fetches once per (album, query)"
+        );
+
+        // Degrade-on-error: the UI never sees a Result.
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
+            failing: vec![FailingQuery::AlbumIsNameHit],
+            ..Default::default()
+        });
+        assert!(
+            !views.album_is_name_hit("Alpha", "One", "q"),
+            "a store error degrades to false"
+        );
+    }
+
+    #[test]
+    fn test_hit_albums_in_genre_assembles_the_full_list_from_windows() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            hit_albums_in_genre: hit_album_fixture(120),
+            ..Default::default()
+        });
+
+        let albums = views.hit_albums_in_genre("Rock", "q");
+        assert_eq!(
+            albums.len(),
+            120,
+            "the full hit list assembles across bounded store windows"
+        );
+        assert_eq!(albums[119].title, "Album 119");
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitAlbumsInGenre(
+                "Rock".to_string(),
+                0,
+                50
+            )),
+            1
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitAlbumsInGenre(
+                "Rock".to_string(),
+                100,
+                50
+            )),
+            1
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitAlbumsInGenre(
+                "Rock".to_string(),
+                150,
+                50
+            )),
+            0,
+            "the window loop stops at a short read"
+        );
+
+        // Cached across frames at the same (genre, query); a new query
+        // refetches.
+        assert_eq!(views.hit_albums_in_genre("Rock", "q").len(), 120);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitAlbumsInGenre(
+                "Rock".to_string(),
+                0,
+                50
+            )),
+            1,
+            "cached per (genre, query)"
+        );
+        assert_eq!(views.hit_albums_in_genre("Rock", "qu").len(), 120);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitAlbumsInGenre(
+                "Rock".to_string(),
+                0,
+                50
+            )),
+            2,
+            "a new query refetches at the unchanged generation"
+        );
+
+        // Degrade-on-error: the UI never sees a Result.
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
+            failing: vec![FailingQuery::HitAlbumsInGenre],
+            ..Default::default()
+        });
+        assert!(
+            views.hit_albums_in_genre("Rock", "q").is_empty(),
+            "a store error degrades to an empty album list"
+        );
+    }
+
+    #[test]
+    fn test_hit_artists_in_genre_assembles_the_full_list_from_windows() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            hit_artists_in_genre: hit_artist_fixture(120),
+            ..Default::default()
+        });
+
+        let artists = views.hit_artists_in_genre("Rock", "q");
+        assert_eq!(
+            artists.len(),
+            120,
+            "the full hit list assembles across bounded store windows"
+        );
+        assert_eq!(artists[119].name, "Artist 119");
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitArtistsInGenre(
+                "Rock".to_string(),
+                0,
+                50
+            )),
+            1
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitArtistsInGenre(
+                "Rock".to_string(),
+                150,
+                50
+            )),
+            0,
+            "the window loop stops at a short read"
+        );
+
+        // Cached across frames at the same (genre, query).
+        assert_eq!(views.hit_artists_in_genre("Rock", "q").len(), 120);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitArtistsInGenre(
+                "Rock".to_string(),
+                0,
+                50
+            )),
+            1,
+            "cached per (genre, query)"
+        );
+
+        // Degrade-on-error: the UI never sees a Result.
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
+            failing: vec![FailingQuery::HitArtistsInGenre],
+            ..Default::default()
+        });
+        assert!(
+            views.hit_artists_in_genre("Rock", "q").is_empty(),
+            "a store error degrades to an empty artist list"
+        );
+    }
+
+    #[test]
+    fn test_album_hit_tracks_in_genre_cached_and_degrades_on_error() {
+        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
+            album_hit_tracks_in_genre: vec![projection_track(1)],
+            ..Default::default()
+        });
+        assert_eq!(
+            views
+                .album_hit_tracks_in_genre("Alpha", "One", "Rock", "q")
+                .len(),
+            1
+        );
+        assert_eq!(
+            views
+                .album_hit_tracks_in_genre("Alpha", "One", "Rock", "q")
+                .len(),
+            1,
+            "cached at the same (album, genre, query)"
+        );
+        assert_eq!(
+            views
+                .album_hit_tracks_in_genre("Alpha", "One", "Rock", "qu")
+                .len(),
+            1,
+            "a new query refetches at the unchanged generation"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::AlbumHitTracksInGenre(
+                "Alpha".to_string(),
+                "One".to_string(),
+                "Rock".to_string()
+            )),
+            2,
+            "one fetch per (album, genre, query)"
+        );
+
+        // Degrade-on-error: the UI never sees a Result.
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
+            failing: vec![FailingQuery::AlbumHitTracksInGenre],
+            ..Default::default()
+        });
+        assert!(
+            views
+                .album_hit_tracks_in_genre("Alpha", "One", "Rock", "q")
+                .is_empty(),
+            "a store error degrades to an empty track list"
+        );
+    }
+
+    #[test]
+    fn test_hit_genre_counts_fetch_once_per_generation_and_refetch_on_bump() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            hit_genre_counts: vec![
+                GenreCount {
+                    genre: "Rock".to_string(),
+                    tracks: 2,
+                },
+                GenreCount {
+                    genre: "Jazz".to_string(),
+                    tracks: 1,
+                },
+            ],
+            ..Default::default()
+        });
+        assert_eq!(views.hit_genre_counts("q")[0].genre, "Rock");
+        assert_eq!(
+            views.hit_genre_counts("q").len(),
+            2,
+            "cached at the same query"
+        );
+
+        generation.bump();
+        let _ = views.hit_genre_counts("q");
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitGenreCounts),
+            2,
+            "a generation bump drops the cached hit genre rows"
+        );
+
+        // Degrade-on-error: the UI never sees a Result.
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
+            failing: vec![FailingQuery::HitGenreCounts],
+            ..Default::default()
+        });
+        assert!(
+            views.hit_genre_counts("q").is_empty(),
+            "a store error degrades to an empty genre list"
         );
     }
 
@@ -2851,6 +3525,72 @@ mod scan_service_tests {
         ) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
+
+        fn hit_albums(&self, _q: &str, _o: usize, _l: usize) -> Result<Vec<Album>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn hit_albums_count(&self, _q: &str) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn hit_artists(&self, _q: &str, _o: usize, _l: usize) -> Result<Vec<Artist>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn hit_artists_count(&self, _q: &str) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn album_hit_tracks(&self, _a: &str, _t: &str, _q: &str) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn album_is_name_hit(&self, _a: &str, _t: &str, _q: &str) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        fn hit_albums_in_genre(
+            &self,
+            _g: &str,
+            _q: &str,
+            _o: usize,
+            _l: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn hit_albums_in_genre_count(&self, _g: &str, _q: &str) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn hit_artists_in_genre(
+            &self,
+            _g: &str,
+            _q: &str,
+            _o: usize,
+            _l: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn hit_artists_in_genre_count(&self, _g: &str, _q: &str) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn album_hit_tracks_in_genre(
+            &self,
+            _a: &str,
+            _t: &str,
+            _g: &str,
+            _q: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn hit_genre_counts(&self, _q: &str) -> Result<Vec<crate::domain::GenreCount>, StoreError> {
+            Ok(Vec::new())
+        }
     }
 
     /// [`LibraryMutationStore`] whose scan batches always fail to commit —
@@ -3610,6 +4350,72 @@ mod audio_engine_tests {
         ) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
+
+        fn hit_albums(&self, _q: &str, _o: usize, _l: usize) -> Result<Vec<Album>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn hit_albums_count(&self, _q: &str) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn hit_artists(&self, _q: &str, _o: usize, _l: usize) -> Result<Vec<Artist>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn hit_artists_count(&self, _q: &str) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn album_hit_tracks(&self, _a: &str, _t: &str, _q: &str) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn album_is_name_hit(&self, _a: &str, _t: &str, _q: &str) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        fn hit_albums_in_genre(
+            &self,
+            _g: &str,
+            _q: &str,
+            _o: usize,
+            _l: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn hit_albums_in_genre_count(&self, _g: &str, _q: &str) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn hit_artists_in_genre(
+            &self,
+            _g: &str,
+            _q: &str,
+            _o: usize,
+            _l: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn hit_artists_in_genre_count(&self, _g: &str, _q: &str) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn album_hit_tracks_in_genre(
+            &self,
+            _a: &str,
+            _t: &str,
+            _g: &str,
+            _q: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn hit_genre_counts(&self, _q: &str) -> Result<Vec<crate::domain::GenreCount>, StoreError> {
+            Ok(Vec::new())
+        }
     }
 
     // --- Harness --------------------------------------------------------------
@@ -4331,6 +5137,72 @@ mod tag_edit_service_tests {
             _album_title: &str,
             _genre: &str,
         ) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn hit_albums(&self, _q: &str, _o: usize, _l: usize) -> Result<Vec<Album>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn hit_albums_count(&self, _q: &str) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn hit_artists(&self, _q: &str, _o: usize, _l: usize) -> Result<Vec<Artist>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn hit_artists_count(&self, _q: &str) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn album_hit_tracks(&self, _a: &str, _t: &str, _q: &str) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn album_is_name_hit(&self, _a: &str, _t: &str, _q: &str) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        fn hit_albums_in_genre(
+            &self,
+            _g: &str,
+            _q: &str,
+            _o: usize,
+            _l: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn hit_albums_in_genre_count(&self, _g: &str, _q: &str) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn hit_artists_in_genre(
+            &self,
+            _g: &str,
+            _q: &str,
+            _o: usize,
+            _l: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn hit_artists_in_genre_count(&self, _g: &str, _q: &str) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn album_hit_tracks_in_genre(
+            &self,
+            _a: &str,
+            _t: &str,
+            _g: &str,
+            _q: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn hit_genre_counts(&self, _q: &str) -> Result<Vec<crate::domain::GenreCount>, StoreError> {
             Ok(Vec::new())
         }
     }

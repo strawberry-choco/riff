@@ -543,6 +543,89 @@ mod tests {
         ) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
+
+        fn hit_albums(
+            &self,
+            _query: &str,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn hit_albums_count(&self, _query: &str) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+        fn hit_artists(
+            &self,
+            _query: &str,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn hit_artists_count(&self, _query: &str) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+        fn album_hit_tracks(
+            &self,
+            _album_artist: &str,
+            _album_title: &str,
+            _query: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn album_is_name_hit(
+            &self,
+            _album_artist: &str,
+            _album_title: &str,
+            _query: &str,
+        ) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        fn hit_albums_in_genre(
+            &self,
+            _genre: &str,
+            _query: &str,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn hit_albums_in_genre_count(
+            &self,
+            _genre: &str,
+            _query: &str,
+        ) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+        fn hit_artists_in_genre(
+            &self,
+            _genre: &str,
+            _query: &str,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn hit_artists_in_genre_count(
+            &self,
+            _genre: &str,
+            _query: &str,
+        ) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+        fn album_hit_tracks_in_genre(
+            &self,
+            _album_artist: &str,
+            _album_title: &str,
+            _genre: &str,
+            _query: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn hit_genre_counts(&self, _query: &str) -> Result<Vec<GenreCount>, StoreError> {
+            Ok(Vec::new())
+        }
     }
 
     struct MockMutations;

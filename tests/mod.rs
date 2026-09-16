@@ -1011,6 +1011,18 @@ pub mod mocks {
         ArtistsInGenre(String),
         ArtistAlbumsInGenre(String, String),
         AlbumTracksInGenre(String, String, String),
+        HitAlbums(usize, usize),
+        HitAlbumsCount,
+        HitArtists(usize, usize),
+        HitArtistsCount,
+        AlbumHitTracks(String, String),
+        AlbumIsNameHit(String, String),
+        HitAlbumsInGenre(String, usize, usize),
+        HitAlbumsInGenreCount(String),
+        HitArtistsInGenre(String, usize, usize),
+        HitArtistsInGenreCount(String),
+        AlbumHitTracksInGenre(String, String, String),
+        HitGenreCounts,
     }
 
     /// Which [`LibraryQueryStore`] query fails while listed in
@@ -1024,6 +1036,18 @@ pub mod mocks {
         TrackIdsInFolderTree,
         GenreCounts,
         LibraryCounts,
+        HitAlbums,
+        HitAlbumsCount,
+        HitArtists,
+        HitArtistsCount,
+        AlbumHitTracks,
+        AlbumIsNameHit,
+        HitAlbumsInGenre,
+        HitAlbumsInGenreCount,
+        HitArtistsInGenre,
+        HitArtistsInGenreCount,
+        AlbumHitTracksInGenre,
+        HitGenreCounts,
     }
 
     /// Canned [`LibraryQueryStore`] fake standing in for the Application
@@ -1072,6 +1096,22 @@ pub mod mocks {
         pub genre_albums: Vec<Album>,
         /// Tracks served by `album_tracks_in_genre` for any album/genre.
         pub genre_album_tracks: Vec<Track>,
+        /// Albums served by `hit_albums`, in canonical order.
+        pub hit_albums: Vec<Album>,
+        /// Artists served by `hit_artists`, name-ascending.
+        pub hit_artists: Vec<Artist>,
+        /// Tracks served by `album_hit_tracks` for any album.
+        pub album_hit_tracks: Vec<Track>,
+        /// Albums whose `album_is_name_hit` answers `true` (keys "artist - title").
+        pub album_name_hits: Vec<String>,
+        /// Albums served by `hit_albums_in_genre`, in canonical order.
+        pub hit_albums_in_genre: Vec<Album>,
+        /// Artists served by `hit_artists_in_genre`, name-ascending.
+        pub hit_artists_in_genre: Vec<Artist>,
+        /// Tracks served by `album_hit_tracks_in_genre` for any album/genre.
+        pub album_hit_tracks_in_genre: Vec<Track>,
+        /// Rows served by `hit_genre_counts`.
+        pub hit_genre_counts: Vec<GenreCount>,
         /// Answer served by `folder_has_audio`.
         pub folder_has_audio: bool,
         /// Answer served by `folder_has_search_match`.
@@ -1114,6 +1154,14 @@ pub mod mocks {
                 genre_artists: Vec::new(),
                 genre_albums: Vec::new(),
                 genre_album_tracks: Vec::new(),
+                hit_albums: Vec::new(),
+                hit_artists: Vec::new(),
+                album_hit_tracks: Vec::new(),
+                album_name_hits: Vec::new(),
+                hit_albums_in_genre: Vec::new(),
+                hit_artists_in_genre: Vec::new(),
+                album_hit_tracks_in_genre: Vec::new(),
+                hit_genre_counts: Vec::new(),
                 folder_has_audio: true,
                 folder_search_match: true,
                 folder_tree_ids: Vec::new(),
@@ -1377,6 +1425,244 @@ pub mod mocks {
                 genre.to_string(),
             ));
             Ok(self.genre_album_tracks.clone())
+        }
+
+        fn hit_albums(
+            &self,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            self.record(LibraryQueryCall::HitAlbums(offset, limit));
+            if self.failing.contains(&FailingQuery::HitAlbums) {
+                return Err(StoreError::InvalidOperation("hit albums boom".to_string()));
+            }
+            if !self.search_matches(query) {
+                return Ok(Vec::new());
+            }
+            Ok(self
+                .hit_albums
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
+        fn hit_albums_count(&self, query: &str) -> Result<usize, StoreError> {
+            self.record(LibraryQueryCall::HitAlbumsCount);
+            if self.failing.contains(&FailingQuery::HitAlbumsCount) {
+                return Err(StoreError::InvalidOperation(
+                    "hit albums count boom".to_string(),
+                ));
+            }
+            if !self.search_matches(query) {
+                return Ok(0);
+            }
+            Ok(self.hit_albums.len())
+        }
+
+        fn hit_artists(
+            &self,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            self.record(LibraryQueryCall::HitArtists(offset, limit));
+            if self.failing.contains(&FailingQuery::HitArtists) {
+                return Err(StoreError::InvalidOperation("hit artists boom".to_string()));
+            }
+            if !self.search_matches(query) {
+                return Ok(Vec::new());
+            }
+            Ok(self
+                .hit_artists
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
+        fn hit_artists_count(&self, query: &str) -> Result<usize, StoreError> {
+            self.record(LibraryQueryCall::HitArtistsCount);
+            if self.failing.contains(&FailingQuery::HitArtistsCount) {
+                return Err(StoreError::InvalidOperation(
+                    "hit artists count boom".to_string(),
+                ));
+            }
+            if !self.search_matches(query) {
+                return Ok(0);
+            }
+            Ok(self.hit_artists.len())
+        }
+
+        fn album_hit_tracks(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+            query: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.record(LibraryQueryCall::AlbumHitTracks(
+                album_artist.to_string(),
+                album_title.to_string(),
+            ));
+            if self.failing.contains(&FailingQuery::AlbumHitTracks) {
+                return Err(StoreError::InvalidOperation(
+                    "album hit tracks boom".to_string(),
+                ));
+            }
+            if !self.search_matches(query) {
+                return Ok(Vec::new());
+            }
+            Ok(self.album_hit_tracks.clone())
+        }
+
+        fn album_is_name_hit(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+            query: &str,
+        ) -> Result<bool, StoreError> {
+            self.record(LibraryQueryCall::AlbumIsNameHit(
+                album_artist.to_string(),
+                album_title.to_string(),
+            ));
+            if self.failing.contains(&FailingQuery::AlbumIsNameHit) {
+                return Err(StoreError::InvalidOperation(
+                    "album name hit boom".to_string(),
+                ));
+            }
+            if !self.search_matches(query) {
+                return Ok(false);
+            }
+            Ok(self
+                .album_name_hits
+                .contains(&format!("{album_artist} - {album_title}")))
+        }
+
+        fn hit_albums_in_genre(
+            &self,
+            genre: &str,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            self.record(LibraryQueryCall::HitAlbumsInGenre(
+                genre.to_string(),
+                offset,
+                limit,
+            ));
+            if self.failing.contains(&FailingQuery::HitAlbumsInGenre) {
+                return Err(StoreError::InvalidOperation(
+                    "hit albums in genre boom".to_string(),
+                ));
+            }
+            if !self.search_matches(query) {
+                return Ok(Vec::new());
+            }
+            Ok(self
+                .hit_albums_in_genre
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
+        fn hit_albums_in_genre_count(&self, genre: &str, query: &str) -> Result<usize, StoreError> {
+            self.record(LibraryQueryCall::HitAlbumsInGenreCount(genre.to_string()));
+            if self.failing.contains(&FailingQuery::HitAlbumsInGenreCount) {
+                return Err(StoreError::InvalidOperation(
+                    "hit albums in genre count boom".to_string(),
+                ));
+            }
+            if !self.search_matches(query) {
+                return Ok(0);
+            }
+            Ok(self.hit_albums_in_genre.len())
+        }
+
+        fn hit_artists_in_genre(
+            &self,
+            genre: &str,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            self.record(LibraryQueryCall::HitArtistsInGenre(
+                genre.to_string(),
+                offset,
+                limit,
+            ));
+            if self.failing.contains(&FailingQuery::HitArtistsInGenre) {
+                return Err(StoreError::InvalidOperation(
+                    "hit artists in genre boom".to_string(),
+                ));
+            }
+            if !self.search_matches(query) {
+                return Ok(Vec::new());
+            }
+            Ok(self
+                .hit_artists_in_genre
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
+        fn hit_artists_in_genre_count(
+            &self,
+            genre: &str,
+            query: &str,
+        ) -> Result<usize, StoreError> {
+            self.record(LibraryQueryCall::HitArtistsInGenreCount(genre.to_string()));
+            if self.failing.contains(&FailingQuery::HitArtistsInGenreCount) {
+                return Err(StoreError::InvalidOperation(
+                    "hit artists in genre count boom".to_string(),
+                ));
+            }
+            if !self.search_matches(query) {
+                return Ok(0);
+            }
+            Ok(self.hit_artists_in_genre.len())
+        }
+
+        fn album_hit_tracks_in_genre(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+            genre: &str,
+            query: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.record(LibraryQueryCall::AlbumHitTracksInGenre(
+                album_artist.to_string(),
+                album_title.to_string(),
+                genre.to_string(),
+            ));
+            if self.failing.contains(&FailingQuery::AlbumHitTracksInGenre) {
+                return Err(StoreError::InvalidOperation(
+                    "album hit tracks in genre boom".to_string(),
+                ));
+            }
+            if !self.search_matches(query) {
+                return Ok(Vec::new());
+            }
+            Ok(self.album_hit_tracks_in_genre.clone())
+        }
+
+        fn hit_genre_counts(&self, query: &str) -> Result<Vec<GenreCount>, StoreError> {
+            self.record(LibraryQueryCall::HitGenreCounts);
+            if self.failing.contains(&FailingQuery::HitGenreCounts) {
+                return Err(StoreError::InvalidOperation(
+                    "hit genre counts boom".to_string(),
+                ));
+            }
+            if !self.search_matches(query) {
+                return Ok(Vec::new());
+            }
+            Ok(self.hit_genre_counts.clone())
         }
     }
 

@@ -1056,10 +1056,9 @@ mod tests {
 
     /// The browser column (the explorer's entity-list widget) at the elastic
     /// stage's preferred column width ([`riff_gui::ui::theme::COLUMN_WIDTH`],
-    /// 280): the A–Z sort control, the artist variant's genre chip row (one
-    /// filter engaged), and list rows with placeholder thumbnail slots,
-    /// secondary detail lines, one selected and one now-playing row. Rendered
-    /// idle so the snapshot is deterministic.
+    /// 280): the A–Z sort control and list rows with placeholder thumbnail
+    /// slots, secondary detail lines, one selected and one now-playing row.
+    /// Rendered idle so the snapshot is deterministic.
     #[test]
     fn browser_column_dark_matches_golden_baseline() {
         snapshot(
@@ -1071,7 +1070,6 @@ mod tests {
     }
 
     fn draw_browser_column(ui: &mut egui::Ui, palette: &Palette) {
-        use riff_backend::domain::GenreCount;
         use riff_gui::ui::browser::{self, BrowserColumn, BrowserItem};
         use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::theme::SURFACE_BG;
@@ -1100,27 +1098,11 @@ mod tests {
                 now_playing,
             })
             .collect();
-        let genres = [
-            GenreCount {
-                genre: "Electronic".to_string(),
-                tracks: 42,
-            },
-            GenreCount {
-                genre: "Jazz".to_string(),
-                tracks: 31,
-            },
-            GenreCount {
-                genre: "Rock".to_string(),
-                tracks: 19,
-            },
-        ];
         let mut provider = |i: usize| items.get(i).cloned();
         let column = BrowserColumn {
             layout: riff_backend::app::state::BrowserLayout::List,
             sort_desc: false,
             show_sort: true,
-            genres: &genres,
-            genre_filter: Some("Electronic"),
             total: items.len(),
             item: &mut provider,
             empty_title: "",
@@ -1376,8 +1358,8 @@ mod tests {
 
     /// The elastic stage's Artists drill-down composition: the three list
     /// columns the stage sizes side by side — the Artists root (A–Z sort,
-    /// genre chips, artist rows) · the artist's Albums column (list rows,
-    /// no sort, no chips) · the Tracks column (breadcrumb
+    /// artist rows) · the artist's Albums column (list rows, no sort) · the
+    /// Tracks column (breadcrumb
     /// `Artists / Boards of Canada / Geogaddi`, album header, track table).
     #[test]
     fn elastic_artists_drilled_dark_matches_golden_baseline() {
@@ -1390,7 +1372,6 @@ mod tests {
     }
 
     fn draw_elastic_artists_drilled(ui: &mut egui::Ui, palette: &Palette) {
-        use riff_backend::domain::GenreCount;
         use riff_gui::ui::browser::{self, BrowserColumn, BrowserItem};
         use riff_gui::ui::detail::{self, Crumb, DetailColumn};
         use riff_gui::ui::icons::IconCache;
@@ -1425,27 +1406,11 @@ mod tests {
                         now_playing,
                     })
                     .collect();
-                let genres = [
-                    GenreCount {
-                        genre: "Electronic".to_string(),
-                        tracks: 42,
-                    },
-                    GenreCount {
-                        genre: "Jazz".to_string(),
-                        tracks: 31,
-                    },
-                    GenreCount {
-                        genre: "Rock".to_string(),
-                        tracks: 19,
-                    },
-                ];
                 let mut provider = |i: usize| items.get(i).cloned();
                 let column = BrowserColumn {
                     layout: riff_backend::app::state::BrowserLayout::List,
                     sort_desc: false,
                     show_sort: true,
-                    genres: &genres,
-                    genre_filter: Some("Electronic"),
                     total: items.len(),
                     item: &mut provider,
                     empty_title: "",
@@ -1487,8 +1452,6 @@ mod tests {
                     layout: riff_backend::app::state::BrowserLayout::List,
                     sort_desc: false,
                     show_sort: false,
-                    genres: &[],
-                    genre_filter: None,
                     total: items.len(),
                     item: &mut provider,
                     empty_title: "",
@@ -1576,8 +1539,6 @@ mod tests {
                     layout: riff_backend::app::state::BrowserLayout::List,
                     sort_desc: false,
                     show_sort: true,
-                    genres: &[],
-                    genre_filter: None,
                     total: items.len(),
                     item: &mut provider,
                     empty_title: "",
@@ -1610,8 +1571,6 @@ mod tests {
                     layout: riff_backend::app::state::BrowserLayout::List,
                     sort_desc: false,
                     show_sort: false,
-                    genres: &[],
-                    genre_filter: None,
                     total: items.len(),
                     item: &mut provider,
                     empty_title: "",
@@ -1644,8 +1603,6 @@ mod tests {
                     layout: riff_backend::app::state::BrowserLayout::List,
                     sort_desc: false,
                     show_sort: false,
-                    genres: &[],
-                    genre_filter: None,
                     total: items.len(),
                     item: &mut provider,
                     empty_title: "",
@@ -1792,8 +1749,6 @@ mod tests {
                         layout: riff_backend::app::state::BrowserLayout::List,
                         sort_desc: false,
                         show_sort: false,
-                        genres: &[],
-                        genre_filter: None,
                         total: items.len(),
                         item: &mut provider,
                         empty_title: "",
@@ -2185,8 +2140,6 @@ mod tests {
             layout: BrowserLayout::Grid,
             sort_desc: false,
             show_sort: true,
-            genres: &[],
-            genre_filter: None,
             total: items.len(),
             item: &mut provider,
             empty_title: "",
@@ -2488,8 +2441,6 @@ mod tests {
             layout: riff_backend::app::state::BrowserLayout::List,
             sort_desc: false,
             show_sort: true,
-            genres: &[],
-            genre_filter: None,
             total: 0,
             item: &mut provider,
             empty_title: "No artists yet",
@@ -2622,8 +2573,6 @@ mod tests {
                     layout: riff_backend::app::state::BrowserLayout::List,
                     sort_desc: false,
                     show_sort: true,
-                    genres: &[],
-                    genre_filter: None,
                     total: items.len(),
                     item: &mut provider,
                     empty_title: "",
@@ -2710,8 +2659,6 @@ mod tests {
                     layout: riff_backend::app::state::BrowserLayout::List,
                     sort_desc: false,
                     show_sort: false,
-                    genres: &[],
-                    genre_filter: None,
                     total: items.len(),
                     item: &mut provider,
                     empty_title: "",
@@ -2857,8 +2804,6 @@ mod tests {
                         layout: riff_backend::app::state::BrowserLayout::List,
                         sort_desc: false,
                         show_sort: false,
-                        genres: &[],
-                        genre_filter: None,
                         total: items.len(),
                         item: &mut provider,
                         empty_title: "",
@@ -3588,6 +3533,183 @@ mod tests {
                     );
                 });
             });
+        }
+    }
+
+    // --- Query filters the section's columns (issue 04) ---------------------
+    //
+    // Goldens for the entity-level search contract: a query leaves the open
+    // section's columns in place and each column lists its hits — the Albums
+    // root under a query (sort control hidden), the query-aware empty copy,
+    // and the Folders tree staying pruned rather than yanked into the flat
+    // list.
+
+    /// The Albums root under a query: only hit albums in canonical hit
+    /// order with no A–Z sort control (the hit ordering is fixed) — the
+    /// stage keeps its section columns, the root lists the hits.
+    #[test]
+    fn elastic_albums_under_query_dark_matches_golden_baseline() {
+        snapshot(
+            "elastic_albums_under_query_dark",
+            egui::vec2(riff_gui::ui::theme::COLUMN_WIDTH, 420.0),
+            Palette::dark(),
+            draw_albums_root_under_query,
+        );
+    }
+
+    fn draw_albums_root_under_query(ui: &mut egui::Ui, palette: &Palette) {
+        use riff_gui::ui::browser::{self, BrowserColumn, BrowserItem};
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::theme::SURFACE_BG;
+
+        // Full-canvas background (determinism rule).
+        let background = ui.ctx().layer_painter(egui::LayerId::background());
+        background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
+
+        let mut cache = IconCache::new();
+        // The root under a query: hit albums only, no sort control (canonical
+        // hit order, exactly like the app's render_albums_browser under a
+        // non-empty query).
+        let items: Vec<BrowserItem> = [
+            ("Geogaddi", "Boards of Canada \u{b7} 2002", false),
+            (
+                "Music Has the Right to Children",
+                "Boards of Canada \u{b7} 1998",
+                true, // selected
+            ),
+            ("Tri Repetae", "Autechre \u{b7} 1995", false),
+        ]
+        .into_iter()
+        .map(|(label, detail, selected)| BrowserItem {
+            key: format!("Boards\u{1f}{label}"),
+            label: label.to_string(),
+            detail: Some(detail.to_string()),
+            thumbnail: None,
+            selected,
+            now_playing: false,
+        })
+        .collect();
+        let mut provider = |i: usize| items.get(i).cloned();
+        let column = BrowserColumn {
+            layout: riff_backend::app::state::BrowserLayout::List,
+            sort_desc: false,
+            show_sort: false,
+            total: items.len(),
+            item: &mut provider,
+            empty_title: "No matching albums",
+            empty_hint: "Nothing in your library matches 'geo'.",
+        };
+        browser::show_browser_column(ui, &mut cache, palette, column, &mut Vec::new());
+    }
+
+    /// The query-aware empty copy in a section column: a filtered-to-empty
+    /// Albums root explains the query instead of the empty-library copy.
+    #[test]
+    fn browser_column_query_empty_dark_matches_golden_baseline() {
+        snapshot(
+            "browser_column_query_empty_dark",
+            egui::vec2(riff_gui::ui::theme::COLUMN_WIDTH, 300.0),
+            Palette::dark(),
+            draw_browser_column_query_empty,
+        );
+    }
+
+    fn draw_browser_column_query_empty(ui: &mut egui::Ui, palette: &Palette) {
+        use riff_gui::ui::browser::{self, BrowserColumn};
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::theme::SURFACE_BG;
+
+        // Full-canvas background (determinism rule).
+        let background = ui.ctx().layer_painter(egui::LayerId::background());
+        background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
+
+        let mut cache = IconCache::new();
+        let mut provider = |_: usize| None;
+        let column = BrowserColumn {
+            layout: riff_backend::app::state::BrowserLayout::List,
+            sort_desc: false,
+            show_sort: false,
+            total: 0,
+            item: &mut provider,
+            empty_title: "No matching albums",
+            empty_hint: "Nothing in your library matches 'zzz'.",
+        };
+        browser::show_browser_column(ui, &mut cache, palette, column, &mut Vec::new());
+    }
+
+    /// The Folders tree under a query: branches with no match are pruned and
+    /// the tree stays in place — the query never yanks it into the flat list.
+    #[test]
+    fn folder_tree_pruned_dark_matches_golden_baseline() {
+        snapshot_animating(
+            "folder_tree_pruned_dark",
+            egui::vec2(riff_gui::ui::theme::COLUMN_WIDTH, 420.0),
+            Palette::dark(),
+            draw_folder_tree_pruned,
+        );
+    }
+
+    fn draw_folder_tree_pruned(ui: &mut egui::Ui, palette: &Palette) {
+        use riff_gui::ui::icons::{Icon, IconCache};
+        use riff_gui::ui::sidebar::{self, TreeRow};
+        use riff_gui::ui::theme::SURFACE_BG;
+
+        // Full-canvas background (determinism rule).
+        let background = ui.ctx().layer_painter(egui::LayerId::background());
+        background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
+
+        let mut cache = IconCache::new();
+        // The pruned shape of `draw_folder_tree` under a query: branches
+        // without a match (e.g. "Autechre", "Tomorrow's Harvest") drop out,
+        // the matched branch stays — the tree, not the flat list.
+        let nodes = [
+            FolderNode {
+                label: "Music",
+                level: 0,
+                disclosure: Some(true),
+                selected: false,
+                now_playing: false,
+                playing: false,
+                icon: Some(Icon::FolderOpen),
+            },
+            FolderNode {
+                label: "Boards of Canada",
+                level: 1,
+                disclosure: Some(false),
+                selected: true,
+                now_playing: false,
+                playing: false,
+                icon: Some(Icon::Folder),
+            },
+            FolderNode {
+                label: "01. Ready Let's Go",
+                level: 2,
+                disclosure: None,
+                selected: false,
+                now_playing: true,
+                playing: true,
+                icon: None,
+            },
+        ];
+        for node in nodes {
+            sidebar::tree_row(
+                ui,
+                &mut cache,
+                palette,
+                TreeRow {
+                    indent_level: node.level,
+                    icon: node.icon,
+                    cover: None,
+                    label: node.label,
+                    count: None,
+                    meta: None,
+                    favorite: None,
+                    selected: node.selected,
+                    now_playing: node.now_playing,
+                    playing: node.playing,
+                    disclosure: node.disclosure,
+                },
+            );
         }
     }
 }

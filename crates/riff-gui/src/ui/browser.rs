@@ -1,9 +1,8 @@
 //! The browser column (design-handoff issue 08): the first pane of the
 //! three-pane explorer. A generic list column that renders every section's
 //! rows — artists with cover thumbnails, plus All Tracks / Albums / Genres /
-//! Folders / smart-list / playlist rows — with an A–Z sort control and genre
-//! filter chips on the artist variant, honoring the top bar's list/grid
-//! toggle.
+//! Folders / smart-list / playlist rows — with an A–Z sort control, honoring
+//! the top bar's list/grid toggle.
 //!
 //! Pure widget seam, same discipline as [`crate::ui::sidebar`] and
 //! [`crate::ui::topbar`]: widgets paint from [`Palette`] tokens and report
@@ -81,9 +80,6 @@ pub enum BrowserAction {
     /// The A–Z sort control was clicked; the caller flips the session's
     /// sort direction.
     ToggleSort,
-    /// A genre chip was clicked: `Some(genre)` narrows the listing to that
-    /// genre, `None` clears the filter (the All chip).
-    SetGenreFilter(Option<String>),
 }
 
 /// One frame of the browser column: what to render and how.
@@ -96,10 +92,6 @@ pub struct BrowserColumn<'a> {
     /// variants the sort can actually order (artists, albums, genres) do;
     /// paged track listings keep their canonical store order.
     pub show_sort: bool,
-    /// Genre chips (artist variant); empty renders no chip row.
-    pub genres: &'a [riff_backend::domain::GenreCount],
-    /// The currently selected genre chip, if any.
-    pub genre_filter: Option<&'a str>,
     /// Total row count; `item` is consulted only for the visible window.
     pub total: usize,
     /// Row provider: map an index in `0..total` to its item. `FnMut`
@@ -120,19 +112,10 @@ pub fn show_browser_column(
     mut column: BrowserColumn<'_>,
     actions: &mut Vec<BrowserAction>,
 ) {
-    // Header first, even for empty sections: a filtered-to-empty list must
-    // keep its chips visible so the filter can be cleared.
+    // Header first, even for empty sections: the sort control stays
+    // visible so the listing can always be re-ordered.
     if column.show_sort && sort_button(ui, palette, column.sort_desc) {
         actions.push(BrowserAction::ToggleSort);
-    }
-    if !column.genres.is_empty()
-        && let Some(click) = genre_chips(ui, palette, column.genres, column.genre_filter)
-    {
-        let filter = match click {
-            GenreChipClick::All => None,
-            GenreChipClick::Genre(genre) => Some(genre),
-        };
-        actions.push(BrowserAction::SetGenreFilter(filter));
     }
     if column.total == 0 {
         // Friendly empty state, never a raw error: what the section is and
@@ -217,84 +200,6 @@ fn sort_button(ui: &mut egui::Ui, palette: &Palette, sort_desc: bool) -> bool {
         .inner
     })
     .inner
-}
-
-/// What a genre-chip click chose this frame: `All` clears the filter, a
-/// genre name narrows the listing to it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GenreChipClick {
-    /// The All chip: clear the filter.
-    All,
-    /// A genre chip: narrow to this genre.
-    Genre(String),
-}
-
-/// The genre filter chip row: an All chip first, then one chip per genre
-/// with its track count. The active chip carries the brand tint. Returns
-/// the chip the listener clicked this frame, if any.
-fn genre_chips(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    genres: &[riff_backend::domain::GenreCount],
-    selected: Option<&str>,
-) -> Option<GenreChipClick> {
-    let mut chosen = None;
-    ui.allocate_ui(egui::vec2(ui.available_width(), HEADER_H), |ui| {
-        ui.with_layout(
-            egui::Layout::left_to_right(egui::Align::Center)
-                .with_main_wrap(true)
-                .with_cross_align(egui::Align::Center),
-            |ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.spacing_mut().item_spacing.y = 4.0;
-
-                if chip(ui, palette, "All", "All genres", selected.is_none()).clicked() {
-                    chosen = Some(GenreChipClick::All);
-                }
-                for genre in genres {
-                    let active = selected == Some(genre.genre.as_str());
-                    if chip(
-                        ui,
-                        palette,
-                        &genre.genre,
-                        &format!("Genre: {}", genre.genre),
-                        active,
-                    )
-                    .clicked()
-                    {
-                        chosen = Some(GenreChipClick::Genre(genre.genre.clone()));
-                    }
-                }
-            },
-        );
-    });
-    chosen
-}
-
-/// One filter chip: a small rounded pill; the active one carries the brand
-/// tint, idle ones the surface fill.
-fn chip(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    text: &str,
-    label: &str,
-    active: bool,
-) -> egui::Response {
-    let (fill, ink) = if active {
-        (palette.brand_primary, palette.background)
-    } else {
-        (palette.surface_2, palette.ink_2)
-    };
-    let button = egui::Button::new(
-        egui::RichText::new(text)
-            .text_style(egui::TextStyle::Small)
-            .color(ink),
-    )
-    .fill(fill)
-    .corner_radius(super::theme::RADIUS_FULL);
-    let response = ui.add(button);
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-    response.on_hover_text(label)
 }
 
 /// The list layout: rows flowing top-down, each at its natural height —

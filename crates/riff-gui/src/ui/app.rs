@@ -562,6 +562,17 @@ impl RiffApp {
         );
     }
 
+    /// Commit one track's favorite flag: the heart every track row carries.
+    /// One immediate durable transaction through the store port, and the
+    /// committed mutation bumps the library generation, so the projections
+    /// re-resolve the row on the next frame with zero caller action
+    /// (ADR 0002). A failed commit changes nothing and is logged.
+    fn commit_track_favorite(&mut self, id: &TrackId, favorite: bool) {
+        if let Err(e) = self.library_mutations.set_track_favorite(id, favorite) {
+            tracing::warn!("Failed to commit the favorite flag for {}: {e}", id.0);
+        }
+    }
+
     /// One library-list track row (Issue 07): a 40px tree row with the
     /// animated equalizer indicator on the now-playing row, click/double-click
     /// handling, and the shared context menu.
@@ -615,7 +626,7 @@ impl RiffApp {
         // as it lands (the placeholder lives under a separate key).
         let cover = Some(self.resolve_cover_texture(ui.ctx(), &track.id.0).id());
 
-        let response = sidebar::tree_row(
+        let row = sidebar::tree_row(
             ui,
             &mut self.icons,
             &self.theme.active,
@@ -629,21 +640,25 @@ impl RiffApp {
                     plays: Some(track.play_count),
                     time: track.duration,
                 }),
+                favorite: Some(track.favorite),
                 selected: is_selected,
                 now_playing: is_current,
                 playing: is_current && playing,
                 disclosure: None,
             },
         );
-        if response.clicked() {
+        if row.response.clicked() {
             library.selected_track = Some(track.id.clone());
         }
-        if response.double_clicked() {
+        if row.response.double_clicked() {
             library.selected_track = Some(track.id.clone());
             self.transport.play(track.id.clone());
         }
+        if let Some(favorite) = row.favorite_toggled {
+            self.commit_track_favorite(&track.id, favorite);
+        }
         self.attach_track_menu(
-            &response,
+            &row.response,
             library,
             &track.id,
             Some(track),
@@ -2144,13 +2159,14 @@ impl RiffApp {
                     label,
                     count: Some(count),
                     meta: None,
+                    favorite: None,
                     selected: library_section_live && library.library_section == section,
                     now_playing: false,
                     playing: false,
                     disclosure: None,
                 },
             );
-            if row.clicked() {
+            if row.response.clicked() {
                 library.view_mode = ViewMode::Library;
                 library.browse_mode = BrowseMode::Library;
                 library.library_section = section;
@@ -2175,13 +2191,14 @@ impl RiffApp {
                 label: "Folders",
                 count: Some(counts.folder_roots),
                 meta: None,
+                favorite: None,
                 selected: folder_section_live,
                 now_playing: false,
                 playing: false,
                 disclosure: None,
             },
         );
-        if folders_row.clicked() {
+        if folders_row.response.clicked() {
             library.view_mode = ViewMode::Library;
             library.browse_mode = BrowseMode::Folders;
             // A browse-mode switch resets the drill-down path along with the
@@ -2282,13 +2299,14 @@ impl RiffApp {
                     label: kind.display_name(),
                     count: Some(smart_count(kind)),
                     meta: None,
+                    favorite: None,
                     selected: self.smart_playlist_view == Some(kind),
                     now_playing: false,
                     playing: false,
                     disclosure: None,
                 },
             );
-            if row.clicked() {
+            if row.response.clicked() {
                 library.view_mode = ViewMode::Library;
                 library.browse_mode = BrowseMode::Library;
                 // Opening a smart list leaves the browser's drill-down path
@@ -2791,12 +2809,14 @@ impl RiffApp {
                 label: &label,
                 count: None,
                 meta: None,
+                favorite: Some(track.favorite),
                 selected: is_selected,
                 now_playing: is_current,
                 playing: is_current && playing,
                 disclosure: None,
             },
         );
+        let favorite_toggled = outcome.favorite_toggled;
         let response = outcome.response;
         if response.clicked() {
             library.selected_track = Some(track.id.clone());
@@ -2804,6 +2824,9 @@ impl RiffApp {
         if response.double_clicked() {
             library.selected_track = Some(track.id.clone());
             self.transport.play(track.id.clone());
+        }
+        if let Some(favorite) = favorite_toggled {
+            self.commit_track_favorite(&track.id, favorite);
         }
         if let Some(from) = outcome.drop_from {
             // One immediate durable transaction; the committed mutation
@@ -2994,7 +3017,7 @@ impl RiffApp {
         let mut collapsing =
             CollapsingState::load_with_default_open(ui.ctx(), id, contains_current || is_selected);
 
-        let response = sidebar::tree_row(
+        let row = sidebar::tree_row(
             ui,
             &mut self.icons,
             &palette,
@@ -3009,6 +3032,7 @@ impl RiffApp {
                 label: &label,
                 count: None,
                 meta: None,
+                favorite: None,
                 selected: is_selected,
                 now_playing: false,
                 playing: false,
@@ -3019,15 +3043,15 @@ impl RiffApp {
         // Same gestures as before the restyle: single click toggles + selects,
         // double click plays the subtree, and the whole-list context menu
         // rides on the row.
-        if response.clicked() {
+        if row.response.clicked() {
             collapsing.toggle(ui);
             library.selected_folder = Some(path.to_path_buf());
         }
-        if response.double_clicked() {
+        if row.response.double_clicked() {
             play_folder(&folder_track_ids, self.transport.as_ref());
         }
         if !folder_track_ids.is_empty() {
-            show_list_context_menu(&response, self.transport.as_ref(), &folder_track_ids);
+            show_list_context_menu(&row.response, self.transport.as_ref(), &folder_track_ids);
         }
         collapsing.store(ui.ctx());
 

@@ -704,34 +704,7 @@ pub fn show_queue_panel(
                     );
 
                     if entries.is_empty() {
-                        let empty_center = egui::pos2(
-                            ui.max_rect().center().x,
-                            ui.max_rect().top() + QUEUE_PANEL_HEADER_H + sidebar::ROW_H / 2.0,
-                        );
-                        ui.painter().text(
-                            empty_center,
-                            egui::Align2::CENTER_CENTER,
-                            "Queue is empty",
-                            egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional),
-                            palette.ink_3,
-                        );
-                        // Register the empty state as a labeled widget so
-                        // assistive tech (and the harness) can read it.
-                        ui.interact(
-                            egui::Rect::from_center_size(
-                                empty_center,
-                                egui::vec2(QUEUE_PANEL_W - 16.0, sidebar::ROW_H),
-                            ),
-                            egui::Id::new("playerbar_queue_panel_empty"),
-                            egui::Sense::hover(),
-                        )
-                        .widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::WidgetType::Label,
-                                true,
-                                "Queue is empty",
-                            )
-                        });
+                        show_queue_panel_empty(ui, palette);
                         return;
                     }
 
@@ -752,7 +725,7 @@ pub fn show_queue_panel(
                                         let Some(entry) = entries.get(i) else {
                                             continue;
                                         };
-                                        let response = sidebar::tree_row(
+                                        let row = sidebar::tree_row(
                                             ui,
                                             cache,
                                             palette,
@@ -763,23 +736,50 @@ pub fn show_queue_panel(
                                                 label: &entry.label,
                                                 count: None,
                                                 meta: None,
+                                                favorite: None,
                                                 selected: false,
                                                 now_playing: false,
                                                 playing: false,
                                                 disclosure: None,
                                             },
                                         );
-                                        if response.clicked() {
+                                        if row.response.clicked() {
                                             actions
                                                 .push(PlayerBarAction::PlayNext(entry.id.clone()));
                                         }
-                                        response.on_hover_text("Queue this track to play next");
+                                        row.response.on_hover_text("Queue this track to play next");
                                     }
                                 });
                         },
                     );
                 });
         });
+}
+
+/// The queue panel's empty state: the centered "Queue is empty" line,
+/// registered as a labeled widget so assistive tech (and the harness) can read
+/// it.
+fn show_queue_panel_empty(ui: &egui::Ui, palette: &Palette) {
+    let empty_center = egui::pos2(
+        ui.max_rect().center().x,
+        ui.max_rect().top() + QUEUE_PANEL_HEADER_H + sidebar::ROW_H / 2.0,
+    );
+    ui.painter().text(
+        empty_center,
+        egui::Align2::CENTER_CENTER,
+        "Queue is empty",
+        egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional),
+        palette.ink_3,
+    );
+    ui.interact(
+        egui::Rect::from_center_size(
+            empty_center,
+            egui::vec2(QUEUE_PANEL_W - 16.0, sidebar::ROW_H),
+        ),
+        egui::Id::new("playerbar_queue_panel_empty"),
+        egui::Sense::hover(),
+    )
+    .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Queue is empty"));
 }
 
 // --- Painters & controls ---------------------------------------------------------

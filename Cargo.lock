@@ -4178,6 +4178,7 @@ name = "riff-tests"
 version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
+ "eframe",
  "egui",
  "egui_kittest",
  "image",

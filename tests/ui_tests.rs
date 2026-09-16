@@ -4431,191 +4431,13 @@ mod tests {
         );
     }
 
-    /// Harness state for
-    /// [`test_playlist_reorder_render_reflects_new_order_without_explicit_invalidation`]:
-    /// the production seam/store pairing plus the row ids in the order the
-    /// LAST frame rendered them.
-    struct ReorderRenderState {
-        views: riff_backend::app::views::SessionViews,
-        store: riff_infra::store::SqliteStore,
-        pid: PlaylistId,
-        rendered: Vec<String>,
-        cache: icons::IconCache,
-    }
-
-    /// The production playlist-view data path, replicated frame-for-frame:
-    /// rows come from `views.playlist_view` as `Arc` clones, each valid
-    /// entry renders through [`sidebar::reorderable_row`], and a drop
-    /// commits through the store port — nothing else.
-    fn render_reorder_state_ui(ui: &mut egui::Ui, s: &mut ReorderRenderState) {
-        let palette = theme::Palette::dark();
-        // Exactly `render_playlist_view`'s read: ready-to-render rows from
-        // the seam, Arc'd out before any widget call.
-        let Some(view) = s.views.playlist_view(&s.pid) else {
-            s.rendered.clear();
-            return;
-        };
-        s.rendered = view
-            .rows
-            .iter()
-            .map(|(id, _, _)| {
-                PathBuf::from(&id.0)
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .unwrap_or(&id.0)
-                    .to_string()
-            })
-            .collect();
-
-        for (index, (_tid, track, valid)) in view.rows.iter().enumerate() {
-            if !*valid {
-                continue;
-            }
-            let Some(track) = track else { continue };
-            let label = format!(
-                "Artist - {}",
-                track.metadata.display_title(&track.file_path)
-            );
-            let outcome = sidebar::reorderable_row(
-                ui,
-                &mut s.cache,
-                &palette,
-                egui::Id::new(("riff_stale_fixture", index)),
-                index,
-                sidebar::TreeRow {
-                    indent_level: 0,
-                    icon: None,
-                    cover: None,
-                    label: &label,
-                    count: None,
-                    meta: None,
-                    selected: false,
-                    now_playing: false,
-                    playing: false,
-                    disclosure: None,
-                },
-            );
-            if let Some(from) = outcome.drop_from {
-                // The UI action path: commit and nothing else — no reload,
-                // no cache clear, no patch.
-                riff_gui::ui::app::commit_playlist_reorder(
-                    &mut s.views,
-                    &mut s.store,
-                    &s.pid,
-                    from,
-                    index,
-                );
-            }
-        }
-    }
-
-    /// The core Phase 3 property, pinned at the render level: a drag-reorder
-    /// committed through the UI action path (`commit_playlist_reorder`, the
-    /// same call `render_reorderable_playlist_row` makes on a drop) is
-    /// reflected by the NEXT rendered frame's rows with NO explicit
-    /// invalidation, cache clear, or reload anywhere in the flow — the
-    /// committed mutation bumps the playlist generation and the seam's
-    /// projection refetches on its own (ADR 0002).
-    #[test]
-    fn test_playlist_reorder_render_reflects_new_order_without_explicit_invalidation() {
-        use egui_kittest::kittest::Queryable;
-
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("riff.sqlite3");
-        let (changes_tx, _changes_rx) =
-            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
-        let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
-            .expect("opening a fresh store must work");
-
-        // Three real audio files indexed into the Library, so every entry
-        // resolves valid and renders as a reorderable row.
-        let mut track_ids = Vec::new();
-        for (file, title) in [
-            ("one.mp3", "Alpha"),
-            ("two.mp3", "Beta"),
-            ("three.mp3", "Gamma"),
-        ] {
-            let path = dir.path().join(file);
-            std::fs::write(&path, b"fake audio bytes").expect("scratch file writes");
-            let track = crate::test_utils::create_test_track_with_metadata(
-                &path.to_string_lossy(),
-                &path.to_string_lossy(),
-                "Artist",
-                title,
-                "Album",
-            );
-            store
-                .apply_scan_batch(std::slice::from_ref(&track))
-                .expect("seed scan commits");
-            track_ids.push(track.id);
-        }
-
-        let mut store_for_views = store.clone();
-        let pid = store_for_views
-            .create_playlist("Gym", &track_ids)
-            .expect("create works");
-        let mut views = riff_backend::app::views::SessionViews::new(
-            Box::new(store.clone()),
-            Box::new(store_for_views),
-            store.library_generation(),
-            store.playlist_generation(),
-        );
-
-        // Warm the projection the way an open playlist view would, then hand
-        // the SAME seam instance to the harness — one instance across the
-        // commit boundary is what makes staleness observable.
-        assert_eq!(views.playlists().len(), 1);
-        assert_eq!(views.playlist_view(&pid).expect("view").rows.len(), 3);
-
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(320.0, sidebar::ROW_H * 3.0))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                render_reorder_state_ui,
-                ReorderRenderState {
-                    views,
-                    store,
-                    pid,
-                    rendered: Vec::new(),
-                    cache: icons::IconCache::new(),
-                },
-            );
-        harness.run();
-        assert_eq!(
-            harness.state().rendered,
-            vec!["one", "two", "three"],
-            "the first frame renders the seeded order"
-        );
-
-        // Drag row 0 ("one") onto row 2 ("three"): press, move, release.
-        let src = harness.get_by_label("Artist - Alpha").rect();
-        let dst = harness.get_by_label("Artist - Gamma").rect();
-        harness.drag_at(src.center());
-        harness.run();
-        harness.hover_at(dst.center());
-        harness.run();
-        harness.drop_at(dst.center());
-        harness.run();
-
-        // The next rendered frame reflects the committed reorder — with no
-        // explicit invalidation call anywhere in the flow.
-        assert_eq!(
-            harness.state().rendered,
-            vec!["two", "three", "one"],
-            "rendered rows reflect the committed reorder without explicit invalidation"
-        );
-        // The store committed the same order.
-        assert_eq!(
-            harness.state().store.load_playlists().unwrap()[0].tracks,
-            vec![
-                track_ids[1].clone(),
-                track_ids[2].clone(),
-                track_ids[0].clone()
-            ],
-            "the drag persisted through the PlaylistStore"
-        );
-    }
-
+    // The playlist-reorder render contract was pinned here by a
+    // hand-replicated copy of the playlist render path. It is now pinned
+    // through the real shell instead:
+    // whole_frame_tests::test_playlist_view_reflects_a_committed_reorder_on_the_next_real_frame
+    // drags a real playlist row, commits through the real drop path, and
+    // asserts the next real frame's rendered order. Do not reintroduce a
+    // replica: a copy of production code cannot fail when production breaks.
     #[test]
     fn test_playlist_entry_rows_drag_reorder_reports_the_move() {
         use egui_kittest::kittest::Queryable;
@@ -8322,6 +8144,456 @@ mod browser_column_ui_tests {
                 .get_by_role(egui::accesskit::Role::TextInput)
                 .is_focused(),
             "Tab past the last control wraps back to the top bar search"
+        );
+    }
+}
+
+/// Whole-frame tests: the real app shell, driven through its `eframe::App`
+/// interface by the headless kittest harness, over the mock port kit.
+///
+/// These pin the frame loop's contracts where they actually run instead of
+/// restating them in comments or hand-replicating a slice of the render path.
+/// The harness calls the app's `logic` and then its `ui` for every step, so one
+/// `step()` is one frame per queued input event (and one frame when nothing is
+/// queued).
+///
+/// Three seams are asserted through, each where it is the highest available:
+/// the rendered output (the accessibility tree), the mock call records, and the
+/// live sessions the app actually holds. The titlebar's status line is
+/// *painted* rather than drawn as a widget, so it has no accessibility node —
+/// the session slot the painter reads is that contract's observable seam, and
+/// it is what the titlebar renders verbatim.
+#[cfg(test)]
+mod whole_frame_tests {
+    use egui_kittest::kittest::Queryable;
+    use riff_backend::app::MutexExt;
+    use riff_backend::app::events::BackendEvents;
+    use riff_backend::app::scan_service::ScanOutcome;
+    use riff_backend::app::state::{LibrarySession, LibraryStatus, PlaybackSession, ViewMode};
+    use riff_backend::app::store::StoreGeneration;
+    use riff_backend::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
+    use riff_backend::app::transport::Transport;
+    use riff_backend::app::views::SessionViews;
+    use riff_backend::domain::PlaylistId;
+    use riff_gui::ui::RiffApp;
+    use std::sync::{Arc, Mutex};
+
+    use crate::mocks::{
+        MockCovers, MockLibraryMutationStore, MockLibraryQueryStore, MockPlaylistStore, MockScans,
+        MockSettingsStore, MockTagEdits, MockTransport, SettingsCall,
+    };
+    use crate::test_utils::{create_test_track_with_metadata, float_close};
+
+    /// The window size. Wide enough that the sidebar, the elastic stage, and the
+    /// control bar all render without collapsing to zero.
+    const WINDOW: egui::Vec2 = egui::vec2(1280.0, 800.0);
+
+    /// A shell plus the handles a test needs to observe what a frame did.
+    struct Shell {
+        /// The harness owns the app; `state_mut()` reaches it between frames.
+        harness: egui_kittest::Harness<'static, RiffApp>,
+        /// The live playback session the app writes UI-owned fields back to.
+        playback: Arc<Mutex<PlaybackSession>>,
+        /// The live library session the app holds for the whole frame.
+        library: Arc<Mutex<LibrarySession>>,
+        /// The event inbox the app drains at the start of every frame.
+        backend_events: Arc<Mutex<BackendEvents>>,
+        /// The scripted scan front end the app polls every frame.
+        scans: MockScans,
+        /// Every settings mutation the app committed at a frame end.
+        settings_calls: Arc<Mutex<Vec<SettingsCall>>>,
+    }
+
+    /// Build a shell from fully-specified ports.
+    ///
+    /// `build_eframe` runs the app's `logic`/`ui` for its own warm-up frames
+    /// (one to initialise AccessKit, one to settle), so by the time this
+    /// returns the app has already rendered — and `first_frame` hydration has
+    /// already happened. A test must therefore mutate state *after* the shell
+    /// exists and then `step()` once per frame it wants to observe.
+    fn build(
+        transport: Box<dyn Transport>,
+        scans: MockScans,
+        settings_store: Box<dyn SettingsStore>,
+        settings_calls: Arc<Mutex<Vec<SettingsCall>>>,
+        playlist_store: Box<dyn PlaylistStore>,
+        library_mutations: Box<dyn LibraryMutationStore>,
+        views: SessionViews,
+    ) -> Shell {
+        let playback = Arc::new(Mutex::new(PlaybackSession::default()));
+        let library = Arc::new(Mutex::new(LibrarySession::default()));
+        let backend_events = Arc::new(Mutex::new(BackendEvents::default()));
+
+        let (app, _visibility_tx) = RiffApp::new_for_test(
+            Arc::clone(&playback),
+            Arc::clone(&library),
+            transport,
+            Box::new(scans.clone()),
+            settings_store,
+            playlist_store,
+            library_mutations,
+            views,
+            Box::new(MockTagEdits),
+            Box::new(MockCovers),
+            Arc::clone(&backend_events),
+        );
+
+        let harness = egui_kittest::Harness::builder()
+            .with_size(WINDOW)
+            .build_eframe(|cc| {
+                // The same font install `main.rs` performs, because the shell's
+                // named families (`riff-inter-semibold` and friends) are
+                // required by the render path — a frame panics without them.
+                riff_gui::ui::fonts::configure_fonts(&cc.egui_ctx);
+                app
+            });
+
+        Shell {
+            harness,
+            playback,
+            library,
+            backend_events,
+            scans,
+            settings_calls,
+        }
+    }
+
+    /// A shell over the mock port kit: no Application Store, no audio device,
+    /// no tray icon.
+    fn mock_shell() -> Shell {
+        let settings_calls = Arc::new(Mutex::new(Vec::new()));
+        let scans = MockScans::default();
+        build(
+            Box::new(MockTransport::new()),
+            scans,
+            Box::new(MockSettingsStore::with_shared_calls(Arc::clone(
+                &settings_calls,
+            ))),
+            settings_calls,
+            Box::new(MockPlaylistStore::default()),
+            Box::new(MockLibraryMutationStore::new()),
+            SessionViews::new(
+                Box::new(MockLibraryQueryStore::default()),
+                Box::new(MockPlaylistStore::default()),
+                StoreGeneration::new(),
+                StoreGeneration::new(),
+            ),
+        )
+    }
+
+    /// A shell over a real `SQLite` Application Store holding one playlist of
+    /// three tracks, so the playlist view renders real reorderable rows.
+    ///
+    /// The temp dir comes back too: the store lives in it and must outlive the
+    /// shell.
+    fn store_shell() -> (Shell, tempfile::TempDir, PlaylistId) {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let db_path = dir.path().join("riff.sqlite3");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("opening a fresh store must work");
+
+        let mut track_ids = Vec::new();
+        for (file, title) in [
+            ("one.mp3", "Alpha"),
+            ("two.mp3", "Beta"),
+            ("three.mp3", "Gamma"),
+        ] {
+            let path = dir.path().join(file);
+            std::fs::write(&path, b"fake audio bytes").expect("scratch file writes");
+            let track = create_test_track_with_metadata(
+                &path.to_string_lossy(),
+                &path.to_string_lossy(),
+                "Artist",
+                title,
+                "Album",
+            );
+            store
+                .apply_scan_batch(std::slice::from_ref(&track))
+                .expect("seed scan commits");
+            track_ids.push(track.id);
+        }
+
+        // The playlist is committed before the shell exists, so its first read
+        // already has rows rather than racing a refetch.
+        let mut playlist_port = store.clone();
+        let pid = playlist_port
+            .create_playlist("Gym", &track_ids)
+            .expect("creating the playlist works");
+        let library_generation = store.library_generation();
+        let playlist_generation = store.playlist_generation();
+
+        let settings_calls = Arc::new(Mutex::new(Vec::new()));
+        let shell = build(
+            Box::new(MockTransport::new()),
+            MockScans::default(),
+            Box::new(MockSettingsStore::with_shared_calls(Arc::clone(
+                &settings_calls,
+            ))),
+            settings_calls,
+            Box::new(store.clone()),
+            Box::new(store.clone()),
+            SessionViews::new(
+                Box::new(store.clone()),
+                Box::new(store),
+                library_generation,
+                playlist_generation,
+            ),
+        );
+        (shell, dir, pid)
+    }
+
+    /// Where a rendered node sits vertically, for order assertions. Uses the
+    /// first match, so a label that also appears elsewhere cannot panic the
+    /// query.
+    fn y_of(harness: &egui_kittest::Harness<'static, RiffApp>, label: &str) -> f32 {
+        harness
+            .query_all_by_label(label)
+            .next()
+            .unwrap_or_else(|| panic!("no rendered node labelled {label}"))
+            .rect()
+            .center()
+            .y
+    }
+
+    /// The harness itself, on a bare mock shell. This is the canary: if the
+    /// eframe-backed harness stops driving the shell, every other test here
+    /// fails for confusing reasons, and this one names the cause.
+    #[test]
+    fn real_frame_drives_the_app_shell() {
+        let mut shell = mock_shell();
+        shell.harness.step();
+
+        assert!(
+            shell.harness.query_all_by_label("Play").next().is_some(),
+            "a real frame must render the transport controls"
+        );
+        assert!(
+            shell.backend_events.lock_or_recover().events().is_empty(),
+            "a frame drains the backend event inbox it rendered from"
+        );
+        assert!(
+            shell.library.lock_or_recover().scan_status.is_none(),
+            "a frame with nothing to report leaves the status line empty"
+        );
+        // The write-back covers only the five UI-owned fields, so the
+        // engine-owned playback state is exactly what the session left.
+        assert_eq!(
+            shell.playback.lock_or_recover().playback_state,
+            crate::domain::PlaybackState::Stopped,
+            "a plain frame must not clobber the engine-owned playback state"
+        );
+    }
+
+    /// Frame order, front half: the inbox is drained before anything renders,
+    /// and a typed notice reaches the status line by the end of that frame.
+    #[test]
+    fn test_backend_notice_lands_on_the_status_line_through_a_real_frame() {
+        let (notice_tx, notice_rx) = crossbeam_channel::unbounded::<String>();
+        let mut shell = mock_shell();
+        shell
+            .backend_events
+            .lock_or_recover()
+            .subscribe_playback_notices(notice_rx);
+
+        // A typed notice in the only shape the inbox produces one: the
+        // coordinator's pre-formatted playback failure, which the drain stamps
+        // with playback source and error severity on its way out.
+        notice_tx
+            .send("Playback error: the decoder fell over".to_string())
+            .expect("the notice channel is live");
+
+        assert!(
+            shell.library.lock_or_recover().scan_status.is_none(),
+            "nothing has been announced before the frame that drains it"
+        );
+
+        shell.harness.step();
+
+        assert_eq!(
+            shell.library.lock_or_recover().scan_status.as_deref(),
+            Some("Playback error: the decoder fell over"),
+            "one frame carries a drained typed notice to the status line"
+        );
+    }
+
+    /// Frame order, service half: the app polls the scan service before it
+    /// renders, and the polled outcome is on the status line by frame end.
+    #[test]
+    fn test_scan_outcome_lands_on_the_status_line_through_a_real_frame() {
+        let root = std::path::PathBuf::from("/rift/music");
+        let mut shell = mock_shell();
+
+        // The outcome the worker would have published; the app polls it at the
+        // start of the next frame.
+        shell.scans.queue(ScanOutcome::Complete {
+            path: root.clone(),
+            total_files: 3,
+        });
+
+        shell.harness.step();
+
+        let library = shell.library.lock_or_recover();
+        assert_eq!(
+            library.scan_status.as_deref(),
+            Some("Scan complete: 3 tracks"),
+            "the queued outcome is on the status line by frame end"
+        );
+        assert_eq!(
+            library.library_statuses.get(&root),
+            Some(&LibraryStatus::Scanned(3)),
+            "and the per-root status the panes read moves with it"
+        );
+    }
+
+    /// Frame order, back half: a preference change made in the sessions alone
+    /// is durable by construction — the frame-end commit lands it, and it only
+    /// lands when something actually drifted.
+    #[test]
+    fn test_preference_change_survives_a_full_frame() {
+        let mut shell = mock_shell();
+
+        // A session-only change, exactly as a settings handler leaves it: no
+        // persist call anywhere, just a mutated session field.
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.scan_prefs.skip_hidden_files = !library.scan_prefs.skip_hidden_files;
+        }
+
+        assert!(
+            shell.settings_calls.lock_or_recover().is_empty(),
+            "nothing is persisted before the frame that sees the change"
+        );
+
+        shell.harness.step();
+        assert_eq!(
+            shell.settings_calls.lock_or_recover().as_slice(),
+            [SettingsCall::Scalars],
+            "the frame-end commit lands the drifted scalars in the store"
+        );
+
+        // The commit is a diff against the last-committed snapshot, so a frame
+        // with no drift writes nothing at all.
+        shell.harness.step();
+        assert_eq!(
+            shell.settings_calls.lock_or_recover().len(),
+            1,
+            "a frame with no drift does not re-save"
+        );
+
+        // ...and a second drift commits again, so the first save was the change
+        // rather than a one-off.
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.scan_prefs.skip_hidden_files = !library.scan_prefs.skip_hidden_files;
+        }
+        shell.harness.step();
+        assert_eq!(
+            shell.settings_calls.lock_or_recover().len(),
+            2,
+            "a later drift commits too, so the diff keeps tracking the sessions"
+        );
+    }
+
+    /// The frame-end write-back, pinned field by field. Every field the UI owns
+    /// is asserted, so a future UI-owned field cannot silently miss the
+    /// write-back and be clobbered by the next frame's snapshot.
+    #[test]
+    fn test_ui_owned_playback_fields_reach_the_live_session_at_frame_end() {
+        let mut shell = mock_shell();
+        shell.harness.step();
+        let before = shell.playback.lock_or_recover().clone();
+
+        // Drive each field through the control that owns it — the real widgets,
+        // not a re-implementation of the write-back.
+        shell.harness.get_by_label("Mute").click();
+        shell.harness.step();
+
+        shell.harness.get_by_label("Toggle shuffle").click();
+        shell.harness.step();
+
+        shell.harness.get_by_label("Cycle repeat mode").click();
+        shell.harness.step();
+
+        // The volume slider is one full-width hit region, so a click lands at
+        // its centre: fraction 0.5. The default is not 0.5, so this is a change.
+        shell.harness.get_by_label("Volume").click();
+        shell.harness.step();
+
+        // ReplayGain lives in the Settings modal's Playback pane, so open that
+        // view and switch sections through their real controls. Each selection
+        // is applied at the end of the frame that reported it, so the pane it
+        // selects renders one frame later.
+        shell.library.lock_or_recover().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.get_by_label("Playback").click();
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.get_by_label("ReplayGain").click();
+        shell.harness.step();
+
+        let live = shell.playback.lock_or_recover();
+        assert_ne!(
+            live.muted, before.muted,
+            "mute reaches the live session at frame end (was {})",
+            before.muted
+        );
+        assert_ne!(
+            live.queue.shuffle, before.queue.shuffle,
+            "shuffle reaches the live session at frame end (was {})",
+            before.queue.shuffle
+        );
+        assert_ne!(
+            live.queue.repeat, before.queue.repeat,
+            "repeat reaches the live session at frame end (was {:?})",
+            before.queue.repeat
+        );
+        assert!(
+            !float_close(live.current_volume, before.current_volume),
+            "volume reaches the live session at frame end (was {})",
+            before.current_volume
+        );
+        assert_ne!(
+            live.replaygain_enabled, before.replaygain_enabled,
+            "replay-gain reaches the live session at frame end (was {})",
+            before.replaygain_enabled
+        );
+    }
+
+    /// The render contract the hand-replicated helper used to pin: a reorder
+    /// committed through the real drop path is reflected by the next rendered
+    /// frame, with no explicit invalidation anywhere. Here the drag, the
+    /// commit, and the re-read all happen inside real frames.
+    #[test]
+    fn test_playlist_view_reflects_a_committed_reorder_on_the_next_real_frame() {
+        let (mut shell, _dir, _pid) = store_shell();
+        shell.harness.step();
+
+        // Open the playlist from the sidebar, exactly as a user does.
+        shell.harness.get_by_label("Gym").click();
+        shell.harness.step();
+
+        assert!(
+            y_of(&shell.harness, "Artist - Alpha") < y_of(&shell.harness, "Artist - Beta")
+                && y_of(&shell.harness, "Artist - Beta") < y_of(&shell.harness, "Artist - Gamma"),
+            "the first real frame renders the seeded order top to bottom"
+        );
+
+        // Drag the first row onto the third: press, move, release.
+        let src = shell.harness.get_by_label("Artist - Alpha").rect();
+        let dst = shell.harness.get_by_label("Artist - Gamma").rect();
+        shell.harness.drag_at(src.center());
+        shell.harness.step();
+        shell.harness.hover_at(dst.center());
+        shell.harness.step();
+        shell.harness.drop_at(dst.center());
+        shell.harness.step();
+
+        assert!(
+            y_of(&shell.harness, "Artist - Beta") < y_of(&shell.harness, "Artist - Gamma")
+                && y_of(&shell.harness, "Artist - Gamma") < y_of(&shell.harness, "Artist - Alpha"),
+            "the next real frame renders the committed order with no explicit invalidation"
         );
     }
 }

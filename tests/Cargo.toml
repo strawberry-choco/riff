@@ -38,7 +38,11 @@ riff-gui     = { path = "../crates/riff-gui" }
 
 # Golden-image tests render real egui frames headlessly (kittest + wgpu).
 egui = "0.35"
-egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
+egui_kittest = { version = "0.35", features = ["wgpu", "snapshot", "eframe"] }
+# The whole-frame tests drive the real app through its `eframe::App` impl, so
+# this crate names `eframe::CreationContext` directly (the kittest `eframe`
+# feature pulls the crate in, but a direct dependency is what lets us name it).
+eframe = "0.35"
 
 # Test helpers used at test-runtime by app suites.
 tempfile = "3.8"

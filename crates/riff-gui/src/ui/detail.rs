@@ -1,8 +1,8 @@
 //! The detail column (design-handoff issue 09): the middle pane of the
 //! three-pane explorer. A breadcrumb trail over the drilled path, the album
-//! header with **Play all** and **Shuffle**, and the album's track list — one
-//! row per track with its favorite control, the same 40px
-//! [`super::sidebar::tree_row`] shape the All Tracks list speaks, with the
+//! header with **Play all** and **Shuffle**, and the album's track list: one
+//! shared 40px [`super::sidebar::tree_row`] per track — the same shape the
+//! All Tracks list speaks, favorite control included — with the
 //! `Plays · Time` cluster on the right.
 //!
 //! Pure widget seam, same discipline as [`crate::ui::browser`]: widgets
@@ -199,15 +199,13 @@ fn action_button(ui: &mut egui::Ui, palette: &Palette, text: &str, label: &str) 
     ui.add(button).on_hover_text(label).clicked()
 }
 
-/// Column width of the track list's favorite control.
-const FAVORITE_COL_W: f32 = 24.0;
-
-/// The album's track list: one shared 40px track row per track — the same
-/// [`super::sidebar::tree_row`] shape the All Tracks list speaks — with the
-/// favorite control leading and the `Plays · Time` cluster on the right.
-/// Rows cull to the visible viewport; single click selects, double
-/// click starts the track, the same gestures every track listing in the app
-/// speaks.
+/// The album's track list: one shared 40px track row per track, the same
+/// [`super::sidebar::tree_row`] shape every other track listing in the app
+/// speaks, with its favorite control in the row's leading cell and the
+/// `plays · time` cluster on the right. Rows cull to the visible
+/// viewport; single click selects, double click starts the track, the same
+/// gestures every track listing speaks. A row's favorite toggle lands here as
+/// [`DetailAction::SetFavorite`], carrying the flag's NEW value.
 fn track_list(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -224,66 +222,39 @@ fn track_list(
                 let Some(track) = tracks.get(i) else {
                     continue;
                 };
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    favorite_control(ui, cache, palette, track, actions);
-                    let response = super::sidebar::tree_row(
-                        ui,
-                        cache,
-                        palette,
-                        super::sidebar::TreeRow {
-                            indent_level: 0,
-                            icon: None,
-                            cover: None,
-                            label: &track.title,
-                            count: None,
-                            meta: Some(track.meta()),
-                            selected: track.selected,
-                            now_playing: track.now_playing,
-                            playing: false,
-                            disclosure: None,
-                        },
-                    );
-                    if response.clicked() {
-                        actions.push(DetailAction::SelectTrack(track.key.clone()));
-                    }
-                    if response.double_clicked() {
-                        actions.push(DetailAction::SelectTrack(track.key.clone()));
-                        actions.push(DetailAction::PlayTrack(track.key.clone()));
-                    }
-                });
+                let row = super::sidebar::tree_row(
+                    ui,
+                    cache,
+                    palette,
+                    super::sidebar::TreeRow {
+                        indent_level: 0,
+                        icon: None,
+                        cover: None,
+                        label: &track.title,
+                        count: None,
+                        meta: Some(track.meta()),
+                        favorite: Some(track.favorite),
+                        selected: track.selected,
+                        now_playing: track.now_playing,
+                        playing: false,
+                        disclosure: None,
+                    },
+                );
+                if row.response.clicked() {
+                    actions.push(DetailAction::SelectTrack(track.key.clone()));
+                }
+                if row.response.double_clicked() {
+                    actions.push(DetailAction::SelectTrack(track.key.clone()));
+                    actions.push(DetailAction::PlayTrack(track.key.clone()));
+                }
+                if let Some(favorite) = row.favorite_toggled {
+                    actions.push(DetailAction::SetFavorite {
+                        key: track.key.clone(),
+                        favorite,
+                    });
+                }
             }
         });
-}
-
-/// The row's favorite control (handoff issue 09): a heart in the brand tint
-/// when the track IS a favorite, muted when not. Clicking reports
-/// [`DetailAction::SetFavorite`] with the flag's NEW value — the caller
-/// commits exactly that through the store's favorite setter.
-fn favorite_control(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    track: &TrackRow,
-    actions: &mut Vec<DetailAction>,
-) {
-    let (label, tint) = if track.favorite {
-        ("Remove from Favorites", palette.brand_primary)
-    } else {
-        ("Add to Favorites", palette.ink_3)
-    };
-    let texture = cache.texture(ui.ctx(), super::icons::Icon::Heart, 14.0, tint);
-    let button = egui::Button::image(egui::Image::new((texture, egui::vec2(14.0, 14.0))));
-    let response = ui
-        .add_sized([FAVORITE_COL_W, 20.0], button)
-        .on_hover_text(label);
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-    if response.clicked() {
-        actions.push(DetailAction::SetFavorite {
-            key: track.key.clone(),
-            favorite: !track.favorite,
-        });
-    }
 }
 
 /// The breadcrumb trail: one button per earlier level (clicking one reports

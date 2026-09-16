@@ -2055,7 +2055,7 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, events: &mut Vec<&'static str>| {
-                    let response = sidebar::tree_row(
+                    let row = sidebar::tree_row(
                         ui,
                         &mut cache,
                         &palette,
@@ -2066,13 +2066,14 @@ mod tests {
                             label: "All Tracks",
                             count: None,
                             meta: None,
+                            favorite: None,
                             selected: false,
                             now_playing: false,
                             playing: false,
                             disclosure: None,
                         },
                     );
-                    if response.clicked() {
+                    if row.response.clicked() {
                         events.push("clicked");
                     }
                 },
@@ -2086,6 +2087,71 @@ mod tests {
             harness.state(),
             &vec!["clicked"],
             "a row click must be observable so selection keeps working"
+        );
+    }
+
+    #[test]
+    fn test_tree_row_favorite_control_owns_its_click_and_reports_the_new_flag() {
+        use egui_kittest::kittest::Queryable;
+
+        let palette = theme::Palette::dark();
+        let mut cache = icons::IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 48.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, events: &mut Vec<&'static str>| {
+                    let row = sidebar::tree_row(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        sidebar::TreeRow {
+                            indent_level: 0,
+                            icon: None,
+                            cover: None,
+                            label: "All Tracks",
+                            count: None,
+                            meta: None,
+                            favorite: Some(false),
+                            selected: false,
+                            now_playing: false,
+                            playing: false,
+                            disclosure: None,
+                        },
+                    );
+                    if row.response.clicked() {
+                        events.push("row");
+                    }
+                    if let Some(favorite) = row.favorite_toggled {
+                        events.push(if favorite {
+                            "favorite on"
+                        } else {
+                            "favorite off"
+                        });
+                    }
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // The heart owns its click: it reports the flag's NEW value, and the
+        // row it sits in must NOT also select (its click area starts to the
+        // right of the heart's cell).
+        harness.get_by_label("Add to Favorites").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec!["favorite on"],
+            "a heart click toggles the flag and never selects the row"
+        );
+
+        // The row body keeps its own gesture, unchanged.
+        harness.get_by_label("All Tracks").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec!["favorite on", "row"],
+            "clicking the row body still reports the row's click"
         );
     }
 
@@ -2114,6 +2180,7 @@ mod tests {
                             label: "All Tracks",
                             count: Some(12),
                             meta: None,
+                            favorite: None,
                             selected: false,
                             now_playing: false,
                             playing: false,
@@ -2131,6 +2198,7 @@ mod tests {
                             label: "Artists",
                             count: None,
                             meta: None,
+                            favorite: None,
                             selected: false,
                             now_playing: false,
                             playing: false,
@@ -4464,6 +4532,7 @@ mod tests {
                                 label,
                                 count: None,
                                 meta: None,
+                                favorite: None,
                                 selected: false,
                                 now_playing: false,
                                 playing: false,
@@ -4520,6 +4589,7 @@ mod tests {
                             label: "Beta",
                             count: None,
                             meta: None,
+                            favorite: None,
                             selected: false,
                             now_playing: false,
                             playing: false,
@@ -8171,7 +8241,9 @@ mod whole_frame_tests {
     use riff_backend::app::scan_service::ScanOutcome;
     use riff_backend::app::state::{LibrarySession, LibraryStatus, PlaybackSession, ViewMode};
     use riff_backend::app::store::StoreGeneration;
-    use riff_backend::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
+    use riff_backend::app::store::{
+        LibraryMutationStore, LibraryQueryStore, PlaylistStore, SettingsStore,
+    };
     use riff_backend::app::transport::Transport;
     use riff_backend::app::views::SessionViews;
     use riff_backend::domain::PlaylistId;
@@ -8286,7 +8358,12 @@ mod whole_frame_tests {
     ///
     /// The temp dir comes back too: the store lives in it and must outlive the
     /// shell.
-    fn store_shell() -> (Shell, tempfile::TempDir, PlaylistId) {
+    fn store_shell() -> (
+        Shell,
+        tempfile::TempDir,
+        PlaylistId,
+        riff_infra::store::SqliteStore,
+    ) {
         let dir = tempfile::tempdir().expect("a scratch directory");
         let db_path = dir.path().join("riff.sqlite3");
         let (changes_tx, _changes_rx) =
@@ -8336,12 +8413,12 @@ mod whole_frame_tests {
             Box::new(store.clone()),
             SessionViews::new(
                 Box::new(store.clone()),
-                Box::new(store),
+                Box::new(store.clone()),
                 library_generation,
                 playlist_generation,
             ),
         );
-        (shell, dir, pid)
+        (shell, dir, pid, store)
     }
 
     /// Where a rendered node sits vertically, for order assertions. Uses the
@@ -8567,7 +8644,7 @@ mod whole_frame_tests {
     /// commit, and the re-read all happen inside real frames.
     #[test]
     fn test_playlist_view_reflects_a_committed_reorder_on_the_next_real_frame() {
-        let (mut shell, _dir, _pid) = store_shell();
+        let (mut shell, _dir, _pid, _store) = store_shell();
         shell.harness.step();
 
         // Open the playlist from the sidebar, exactly as a user does.
@@ -8594,6 +8671,59 @@ mod whole_frame_tests {
             y_of(&shell.harness, "Artist - Beta") < y_of(&shell.harness, "Artist - Gamma")
                 && y_of(&shell.harness, "Artist - Gamma") < y_of(&shell.harness, "Artist - Alpha"),
             "the next real frame renders the committed order with no explicit invalidation"
+        );
+    }
+
+    /// Every track listing carries the heart (the shared row's leading cell),
+    /// and the All Tracks list is a track listing like any other: clicking a
+    /// row's heart commits the flag through the Application Store, selects
+    /// nothing, and the tapped row re-renders as a favorite on the next real
+    /// frame with no explicit invalidation.
+    #[test]
+    fn test_flat_list_favorite_control_commits_through_the_store() {
+        use riff_backend::domain::SmartPlaylistKind;
+
+        let (mut shell, _dir, _pid, store) = store_shell();
+        shell.harness.step();
+
+        assert_eq!(
+            shell.harness.query_all_by_label("Add to Favorites").count(),
+            3,
+            "every row of the flat list carries the favorite control"
+        );
+
+        shell
+            .harness
+            .query_all_by_label("Add to Favorites")
+            .next()
+            .expect("a heart to click")
+            .click();
+
+        // The click commits inside the frame that processes it (and that frame
+        // has already painted its rows); the next frame reads the committed
+        // flag through the projections, so no explicit invalidation is needed.
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            shell.library.lock_or_recover().selected_track.is_none(),
+            "a heart click must not select the row it lives in"
+        );
+        assert_eq!(
+            store
+                .smart_playlist(SmartPlaylistKind::Favorites, usize::MAX)
+                .expect("the Favorites smart list reads")
+                .len(),
+            1,
+            "the heart committed the flag through the store"
+        );
+        assert_eq!(
+            shell
+                .harness
+                .query_all_by_label("Remove from Favorites")
+                .count(),
+            1,
+            "the tapped row re-renders with the committed flag"
         );
     }
 }

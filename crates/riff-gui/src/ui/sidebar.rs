@@ -5,7 +5,9 @@
 //! sectioned nav (LIBRARY / SMART LISTS / PLAYLISTS) on 40px tree rows with
 //! hover states and right-aligned live counts, an animated equalizer-bars
 //! indicator on the now-playing row, playlist rows whose edit/delete
-//! affordances reveal on hover, and an Add-folder / last-scan footer.
+//! affordances reveal on hover, and an Add-folder / last-scan footer. Track
+//! rows carry the favorite control in their leading cell, so every track
+//! listing in the app speaks one row shape.
 //!
 //! Everything here is a pure widget seam: widgets paint from [`Palette`]
 //! tokens (ADR 0004), report actions instead of mutating app state, and
@@ -28,6 +30,15 @@ pub const ROW_H: f32 = 40.0;
 /// sized `ROW_H - 8` (32×32), so width and height always match and the tile
 /// never exceeds the 40px row it sits in.
 pub const ROW_COVER: f32 = ROW_H - 8.0;
+
+/// Column width of a track row's favorite control: the heart's own cell at
+/// the row's leading edge. The cell sits INSIDE the row (not beside it), so
+/// the hover and selection washes cover it and the row reads as one 40px
+/// band.
+pub const FAVORITE_COL_W: f32 = 24.0;
+
+/// Glyph size of the favorite control's heart.
+const HEART_SIZE: f32 = 14.0;
 
 /// Search-box height (`h-8`).
 pub const SEARCH_H: f32 = 32.0;
@@ -199,6 +210,16 @@ pub struct TreeRow<'a> {
     /// The right-aligned value cluster (`plays · time`) on track rows;
     /// `None` paints none (the sidebar's plain rows).
     pub meta: Option<RowMeta>,
+    /// The track's favorite flag, on rows that ARE track rows (the All Tracks
+    /// list, the album's Tracks column, a playlist's entries, the folder
+    /// tree's tracks): `Some(..)` paints the interactive heart in the row's
+    /// leading [`FAVORITE_COL_W`] cell — brand-tinted when the track IS a
+    /// favorite, muted when not — and reports the toggle through
+    /// [`TreeRowResponse::favorite_toggled`]. `None` paints no cell and
+    /// leaves the row's click area whole, which is what every non-track row
+    /// (sidebar sections, folders, smart lists, playlists, Up Next, the queue
+    /// panel) wants.
+    pub favorite: Option<bool>,
     /// Whether this row is the current selection.
     pub selected: bool,
     /// Whether this row IS the track currently loaded in the player; paints
@@ -282,36 +303,183 @@ fn paint_row_label_and_meta(
     );
 }
 
-/// Draw one tree row and return its full response — clicks, double-clicks,
-/// hover, and context menus all stay with the caller so existing behaviors
-/// (selection, play-on-double-click, context menus) are untouched.
-pub fn tree_row(
-    ui: &mut egui::Ui,
+/// What one tree row reported this frame.
+pub struct TreeRowResponse {
+    /// The row's own response: clicks, double-clicks, hover, and context
+    /// menus all stay with the caller, exactly as they do for a plain row.
+    pub response: egui::Response,
+    /// `Some(new_value)` when the row's favorite control was clicked this
+    /// frame — the flag's NEW value, so the caller commits exactly that and
+    /// never re-derives it. `None` otherwise, and always `None` on rows
+    /// without a control.
+    pub favorite_toggled: Option<bool>,
+}
+
+/// One row's allocated cells: the favorite control (track rows only), the row
+/// body, and their responses.
+struct RowCells {
+    /// The favorite control's cell and response; `None` on rows without one.
+    heart: Option<(egui::Rect, egui::Response)>,
+    /// The row body: everything right of the favorite cell.
+    rect: egui::Rect,
+    /// The row body's response — the one callers hand to their menu wiring.
+    response: egui::Response,
+    /// Row body plus favorite cell: the shape the fills and the focus ring
+    /// cover, so the row reads as one 40px band.
+    whole: egui::Rect,
+}
+
+impl RowCells {
+    /// Whether the row reads as hovered. The favorite cell counts: the wash
+    /// must not blink off while the pointer is on the heart.
+    fn hovered(&self) -> bool {
+        self.response.hovered() || self.heart.as_ref().is_some_and(|(_, r)| r.hovered())
+    }
+}
+
+/// Allocate one row's cells. A track row's favorite control gets its own
+/// [`FAVORITE_COL_W`] cell at the row's leading edge, laid out BEFORE the row
+/// body so the tab walk reaches the heart before the title (the handoff
+/// order), and the body's click area starts to the right of it — clicking
+/// the heart can never select, or play, the row. Rows without a control keep
+/// the single full-width click area every sidebar row has.
+fn allocate_row_cells(ui: &mut egui::Ui, row: &TreeRow<'_>) -> RowCells {
+    if row.favorite.is_none() {
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), ROW_H),
+            egui::Sense::click(),
+        );
+        return RowCells {
+            heart: None,
+            rect,
+            response,
+            whole: rect,
+        };
+    }
+    let (heart_rect, heart_response, rect, response) = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let (heart_rect, heart_response) =
+                ui.allocate_exact_size(egui::vec2(FAVORITE_COL_W, ROW_H), egui::Sense::click());
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), ROW_H),
+                egui::Sense::click(),
+            );
+            (heart_rect, heart_response, rect, response)
+        })
+        .inner;
+    RowCells {
+        heart: Some((heart_rect, heart_response)),
+        rect,
+        response,
+        whole: heart_rect.union(rect),
+    }
+}
+
+/// Paint one row: the background band, the favorite control, the leading glyph
+/// strip, then the label and its value clusters. Split from [`tree_row`] so the
+/// row's cells are laid out and registered before anything paints, and split
+/// per band below so no single piece grows past a screenful.
+fn paint_row(
+    ui: &egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
-    row: TreeRow<'_>,
-) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), ROW_H),
-        egui::Sense::click(),
-    );
-    let painter = ui.painter_at(rect);
+    row: &TreeRow<'_>,
+    cells: &RowCells,
+) {
+    let painter = ui.painter_at(cells.whole);
+    paint_row_band(ui, palette, row, cells, &painter);
+    paint_favorite(ui, cache, palette, row, cells, &painter);
+    let x = paint_row_leading(ui, cache, palette, row, cells, &painter);
+    paint_row_label(ui, palette, row, cells, &painter, x);
+}
 
+/// The row's background band: the selected fill, the hover wash, and the row's
+/// own focus ring. The favorite cell counts as hovered, so the wash never
+/// blinks off while the pointer crosses the heart.
+fn paint_row_band(
+    ui: &egui::Ui,
+    palette: &Palette,
+    row: &TreeRow<'_>,
+    cells: &RowCells,
+    painter: &egui::Painter,
+) {
     if row.selected {
-        painter.rect_filled(rect, theme::RADIUS_MD, palette.surface_3);
-    } else if response.hovered() {
-        painter.rect_filled(rect, theme::RADIUS_MD, palette.row_hover);
+        painter.rect_filled(cells.whole, theme::RADIUS_MD, palette.surface_3);
+    } else if cells.hovered() {
+        painter.rect_filled(cells.whole, theme::RADIUS_MD, palette.row_hover);
     }
-    if let Some(ring) = theme::focus_ring_stroke(palette, ui.memory(|m| m.has_focus(response.id))) {
-        painter.rect_stroke(rect, theme::RADIUS_MD, ring, egui::StrokeKind::Inside);
+    if let Some(ring) =
+        theme::focus_ring_stroke(palette, ui.memory(|m| m.has_focus(cells.response.id)))
+    {
+        painter.rect_stroke(
+            cells.whole,
+            theme::RADIUS_MD,
+            ring,
+            egui::StrokeKind::Inside,
+        );
     }
+}
 
-    let mut x = rect.left() + indent_px(row.indent_level);
+/// The favorite control (track rows): a heart in the brand tint when the track
+/// IS a favorite, muted when not, painted into the row's leading cell. It
+/// carries its own focus ring, so the keyboard can see where it is without
+/// moving the row's. Rows without a control paint nothing here.
+fn paint_favorite(
+    ui: &egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    row: &TreeRow<'_>,
+    cells: &RowCells,
+    painter: &egui::Painter,
+) {
+    let (Some(favorite), Some((heart_rect, heart_response))) = (row.favorite, cells.heart.as_ref())
+    else {
+        return;
+    };
+    let (label, tint) = if favorite {
+        ("Remove from Favorites", palette.brand_primary)
+    } else {
+        ("Add to Favorites", palette.ink_3)
+    };
+    if let Some(ring) =
+        theme::focus_ring_stroke(palette, ui.memory(|m| m.has_focus(heart_response.id)))
+    {
+        painter.rect_stroke(
+            heart_rect.shrink(2.0),
+            theme::RADIUS_SM,
+            ring,
+            egui::StrokeKind::Inside,
+        );
+    }
+    let texture = cache.texture(ui.ctx(), Icon::Heart, HEART_SIZE, tint);
+    painter.image(
+        texture,
+        egui::Rect::from_center_size(heart_rect.center(), egui::vec2(HEART_SIZE, HEART_SIZE)),
+        UV_FULL,
+        tint,
+    );
+    heart_response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    heart_response.clone().on_hover_text(label);
+}
+
+/// The row's leading strip, painted left to right: the disclosure chevron, the
+/// cover tile, the leading glyph, and the equalizer indicator. Returns where
+/// the label starts.
+fn paint_row_leading(
+    ui: &egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    row: &TreeRow<'_>,
+    cells: &RowCells,
+    painter: &egui::Painter,
+) -> f32 {
+    let mut x = cells.rect.left() + indent_px(row.indent_level);
 
     if let Some(open) = row.disclosure {
         let chevron = if open { "\u{25BE}" } else { "\u{25B8}" };
         painter.text(
-            egui::pos2(x + 6.0, rect.center().y),
+            egui::pos2(x + 6.0, cells.rect.center().y),
             egui::Align2::CENTER_CENTER,
             chevron,
             egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional),
@@ -324,7 +492,7 @@ pub fn tree_row(
         // A square cover-art tile on the row's leading edge, centered in
         // the row and sized so it never exceeds the row height.
         let cover_rect = egui::Rect::from_min_size(
-            egui::pos2(x + 4.0, rect.center().y - ROW_COVER / 2.0),
+            egui::pos2(x + 4.0, cells.rect.center().y - ROW_COVER / 2.0),
             egui::vec2(ROW_COVER, ROW_COVER),
         );
         painter.image(cover_id, cover_rect, UV_FULL, theme::TEXTURE_TINT);
@@ -345,7 +513,7 @@ pub fn tree_row(
         };
         let tex_id = cache.texture(ui.ctx(), icon, 16.0, tint);
         let icon_rect = egui::Rect::from_center_size(
-            egui::pos2(x + 8.0, rect.center().y),
+            egui::pos2(x + 8.0, cells.rect.center().y),
             egui::vec2(16.0, 16.0),
         );
         painter.image(tex_id, icon_rect, UV_FULL, tint);
@@ -353,7 +521,7 @@ pub fn tree_row(
     }
 
     if row.now_playing {
-        // The animated equalizer-bars indicator replaces the old ▶ glyph.
+        // The animated equalizer-bars indicator replaces the old play glyph.
         let phase = if row.playing {
             ui.ctx().input(|i| i.time)
         } else {
@@ -361,10 +529,10 @@ pub fn tree_row(
         };
         let heights = equalizer_heights(phase);
         let eq_rect = egui::Rect::from_center_size(
-            egui::pos2(x + 7.0, rect.center().y),
+            egui::pos2(x + 7.0, cells.rect.center().y),
             egui::vec2(14.0, 14.0),
         );
-        paint_equalizer(&painter, eq_rect, palette.brand_primary, &heights);
+        paint_equalizer(painter, eq_rect, palette.brand_primary, &heights);
         x += 14.0 + ICON_GAP;
         if row.playing {
             // Keep the bars dancing between repaints.
@@ -372,6 +540,21 @@ pub fn tree_row(
         }
     }
 
+    x
+}
+
+/// The row's label and its right-aligned value clusters: the meta cluster
+/// (`Album · plays · time`) on track rows and the live count on sidebar rows,
+/// with the label laid out to their left so a long title truncates instead of
+/// overdrawing them.
+fn paint_row_label(
+    ui: &egui::Ui,
+    palette: &Palette,
+    row: &TreeRow<'_>,
+    cells: &RowCells,
+    painter: &egui::Painter,
+    x: f32,
+) {
     let ink = if row.now_playing {
         palette.brand_primary
     } else {
@@ -379,21 +562,17 @@ pub fn tree_row(
     };
     let font = egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional);
 
-    // The row's right edge holds the live count (sidebar rows) and, on track
-    // rows, the meta cluster (`Album · plays · time`). The label lays out to
-    // the left of whichever is painted there, so a long title truncates with
-    // an ellipsis instead of overdrawing the cluster.
-    let right_edge = rect.right() - INDENT_BASE;
+    let right_edge = cells.rect.right() - INDENT_BASE;
     let count_w = row.count.map(|count| {
         ui.fonts_mut(|f| f.layout_no_wrap(count.to_string(), font.clone(), palette.ink_3))
             .size()
             .x
     });
-    paint_row_label_and_meta(ui, &painter, palette, &row, ink, font, x, rect, count_w);
+    paint_row_label_and_meta(ui, painter, palette, row, ink, font, x, cells.rect, count_w);
 
     if let Some(count) = row.count {
         painter.text(
-            egui::pos2(right_edge, rect.center().y),
+            egui::pos2(right_edge, cells.rect.center().y),
             egui::Align2::RIGHT_CENTER,
             count.to_string(),
             egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional),
@@ -408,10 +587,32 @@ pub fn tree_row(
         Some(count) => format!("{} ({count})", row.label),
         None => row.label.to_owned(),
     };
-    response.widget_info(|| {
+    cells.response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::SelectableLabel, row.selected, &labeled)
     });
-    response
+}
+
+/// Draw one tree row and return what it reported — clicks, double-clicks,
+/// hover, and context menus all stay with the caller so existing behaviors
+/// (selection, play-on-double-click, context menus) are untouched. Track rows
+/// (`favorite: Some(..)`) additionally report their favorite control's toggle
+/// through [`TreeRowResponse::favorite_toggled`], with the flag's NEW value.
+pub fn tree_row(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    row: TreeRow<'_>,
+) -> TreeRowResponse {
+    let cells = allocate_row_cells(ui, &row);
+    paint_row(ui, cache, palette, &row, &cells);
+    let favorite_toggled = match (row.favorite, cells.heart.as_ref()) {
+        (Some(favorite), Some((_, heart))) if heart.clicked() => Some(!favorite),
+        _ => None,
+    };
+    TreeRowResponse {
+        response: cells.response,
+        favorite_toggled,
+    }
 }
 
 // --- Playlist rows ------------------------------------------------------------------
@@ -546,12 +747,14 @@ pub fn sidebar_footer(
             label: "Add folder",
             count: None,
             meta: None,
+            favorite: None,
             selected: false,
             now_playing: false,
             playing: false,
             disclosure: None,
         },
     )
+    .response
     .clicked();
 
     if let Some(stamp) = last_scan {
@@ -611,6 +814,9 @@ pub struct ReorderableRow {
     pub response: egui::Response,
     /// Source index of a drag released over THIS row this frame, if any.
     pub drop_from: Option<usize>,
+    /// The wrapped row's favorite control, when it carries one:
+    /// `Some(new_value)` on the frame it was clicked, else `None`.
+    pub favorite_toggled: Option<bool>,
 }
 
 /// One 40px tree row wrapped in built-in drag-and-drop support: press-drag
@@ -652,7 +858,7 @@ pub fn reorderable_row(
         egui::Sense::hover(),
     );
 
-    let response = if ui.ctx().is_being_dragged(id) {
+    let (response, favorite_toggled) = if ui.ctx().is_being_dragged(id) {
         // This row is in flight: carry the payload and paint it into a
         // floating tooltip layer that follows the pointer (what
         // `Ui::dnd_drag_source` does for its own wrappers).
@@ -665,26 +871,28 @@ pub fn reorderable_row(
             |ui| tree_row(ui, cache, palette, row),
         );
         if let Some(pointer_pos) = ui.ctx().pointer_interact_pos() {
-            let delta = pointer_pos - floated.response.rect.center();
+            let delta = pointer_pos - floated.inner.response.rect.center();
             ui.ctx().transform_layer_shapes(
                 layer_id,
                 egui::emath::TSTransform::from_translation(delta),
             );
         }
-        // A floating row takes no part in hit-testing.
-        slot_response
+        // A floating row takes no part in hit-testing, and its controls do
+        // not fire: the drag gesture in flight owns the interaction.
+        (slot_response, None)
     } else {
         // Drag hit-area first, row on top: clicks land on the row, drags on
         // the hit-area (see the module-level note above).
         let drag_area = ui
             .interact(slot_rect, id, egui::Sense::drag())
             .on_hover_cursor(egui::CursorIcon::Grab);
-        let row_response = ui
+        let row = ui
             .scope_builder(egui::UiBuilder::new().max_rect(slot_rect), |ui| {
                 tree_row(ui, cache, palette, row)
             })
             .inner;
-        drag_area | row_response
+        let favorite_toggled = row.favorite_toggled;
+        (drag_area | row.response, favorite_toggled)
     };
 
     // Ring the hovered drop target while a row is in flight — egui
@@ -706,5 +914,6 @@ pub fn reorderable_row(
     ReorderableRow {
         response,
         drop_from,
+        favorite_toggled,
     }
 }

@@ -481,7 +481,7 @@ fn up_next_section(
                     let Some(entry) = content.up_next.get(i) else {
                         continue;
                     };
-                    let response = sidebar::tree_row(
+                    let row = sidebar::tree_row(
                         ui,
                         cache,
                         palette,
@@ -492,16 +492,17 @@ fn up_next_section(
                             label: &entry.label,
                             count: None,
                             meta: None,
+                            favorite: None,
                             selected: false,
                             now_playing: false,
                             playing: false,
                             disclosure: None,
                         },
                     );
-                    if response.clicked() {
+                    if row.response.clicked() {
                         actions.push(NowPlayingAction::PlayNext(entry.id.clone()));
                     }
-                    response.on_hover_text("Queue this track to play next");
+                    row.response.on_hover_text("Queue this track to play next");
                 }
             });
     });

@@ -257,6 +257,7 @@ mod tests {
                         label: "All Tracks",
                         count: None,
                         meta: None,
+                        favorite: None,
                         selected: false,
                         now_playing: false,
                         playing: false,
@@ -498,6 +499,7 @@ mod tests {
                             label,
                             count: Some(count),
                             meta: None,
+                            favorite: None,
                             selected,
                             now_playing: false,
                             playing: false,
@@ -528,6 +530,7 @@ mod tests {
                             label: name,
                             count: Some(count),
                             meta: None,
+                            favorite: None,
                             selected: i == 1,
                             now_playing: false,
                             playing: false,
@@ -560,6 +563,7 @@ mod tests {
                         label: "01. Moonlight Sonata",
                         count: None,
                         meta: None,
+                        favorite: None,
                         selected: false,
                         now_playing: true,
                         playing,
@@ -577,6 +581,7 @@ mod tests {
                         label: "02. Für Elise",
                         count: None,
                         meta: None,
+                        favorite: None,
                         selected: false,
                         now_playing: false,
                         playing: false,
@@ -768,14 +773,17 @@ mod tests {
         // Same row shape `RiffApp::render_track_row` produces for the flat
         // list: indent 0, no leading glyph, "Artist - Title" label, and the
         // right-aligned `Plays · Time` cluster.
+        // ... favorite control included: this is the row the flat list
+        // renders, hearts and all.
         let rows = [
-            ("Daft Punk - One More Time", 54, 337, false, false),
+            ("Daft Punk - One More Time", 54, 337, false, false, true),
             (
                 "Radiohead - Weird Fishes",
                 31,
                 318,
                 false,
                 true, // now-playing, idle
+                false,
             ),
             (
                 "Miles Davis - So What",
@@ -783,12 +791,13 @@ mod tests {
                 562,
                 true, // selected
                 false,
+                true,
             ),
-            ("Portishead - Roads", 76, 303, false, false),
-            ("Burial - Archangel", 22, 240, false, false),
-            ("Nils Frahm - Says", 9, 412, false, false),
+            ("Portishead - Roads", 76, 303, false, false, false),
+            ("Burial - Archangel", 22, 240, false, false, false),
+            ("Nils Frahm - Says", 9, 412, false, false, false),
         ];
-        for (label, plays, time, selected, now_playing) in rows {
+        for (label, plays, time, selected, now_playing, favorite) in rows {
             sidebar::tree_row(
                 ui,
                 &mut cache,
@@ -803,6 +812,7 @@ mod tests {
                         plays: Some(plays),
                         time: Some(std::time::Duration::from_secs(time)),
                     }),
+                    favorite: Some(favorite),
                     selected,
                     now_playing,
                     playing: false,
@@ -2288,6 +2298,7 @@ mod tests {
                     label: node.label,
                     count: None,
                     meta: None,
+                    favorite: None,
                     selected: node.selected,
                     now_playing: node.now_playing,
                     playing: node.playing,

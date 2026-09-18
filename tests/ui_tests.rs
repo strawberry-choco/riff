@@ -712,69 +712,6 @@ mod tests {
         assert!(suggestions.is_empty());
     }
 
-    // --- "Edit Tags" modal state (REQ-ML-008) ---------------------------------
-
-    /// A track carrying every supported tag value.
-    fn fully_tagged_track() -> Track {
-        let mut track = crate::test_utils::create_test_track(
-            "music/artist/album/01.flac",
-            "music/artist/album/01.flac",
-        );
-        track.metadata = TrackMetadata {
-            title: Some("Original Title".to_string()),
-            artist: Some("Original Artist".to_string()),
-            album: Some("Original Album".to_string()),
-            album_artist: Some("Original Album Artist".to_string()),
-            genre: Some("Jazz".to_string()),
-            year: Some(1959),
-            track_number: Some(3),
-            ..Default::default()
-        };
-        track
-    }
-
-    #[test]
-    fn test_tag_edit_modal_opens_prefilled_with_current_track_tags() {
-        let track = fully_tagged_track();
-
-        let state = TagEditState::from_track(&track);
-
-        // Every supported tag is pre-filled with the track's current value,
-        // so the user edits in place instead of re-typing everything.
-        assert_eq!(state.title, "Original Title");
-        assert_eq!(state.artist, "Original Artist");
-        assert_eq!(state.album, "Original Album");
-        assert_eq!(state.album_artist, "Original Album Artist");
-        assert_eq!(state.genre, "Jazz");
-        assert_eq!(state.year, "1959");
-        assert_eq!(state.track_number, "3");
-        // The modal targets the clicked track's file.
-        assert_eq!(state.track_id, track.id);
-        assert_eq!(state.path, track.file_path);
-        // Freshly opened: no error, no save in flight.
-        assert!(state.error.is_none());
-        assert!(!state.saving);
-    }
-
-    #[test]
-    fn test_tag_edit_modal_prefill_starts_blank_for_untagged_track() {
-        let track = crate::test_utils::create_test_track("plain.mp3", "plain.mp3");
-
-        let state = TagEditState::from_track(&track);
-
-        // Missing tags surface as empty fields, never as errors or
-        // leftover placeholders.
-        assert_eq!(state.title, "");
-        assert_eq!(state.artist, "");
-        assert_eq!(state.album, "");
-        assert_eq!(state.album_artist, "");
-        assert_eq!(state.genre, "");
-        assert_eq!(state.year, "");
-        assert_eq!(state.track_number, "");
-        assert!(state.error.is_none());
-        assert!(!state.saving);
-    }
-
     // --- cover-cache LRU helper ---------------------------------------------------
 
     #[test]
@@ -4896,25 +4833,22 @@ mod settings_scalar_handler_tests {
 // The UI no longer owns worker threads or channel protocols (ADR 0006): it
 // submits intent and polls outcomes through the boxed `TagEdits`/`Covers`
 // handles. These tests drive the exact production code paths — the free
-// functions `submit_tag_edit_fields`, `apply_tag_edit_outcome`,
-// `request_cover_intent`, and `cache_polled_covers` that the RiffApp
-// methods delegate to — over recording fakes, with no threads and no disk
-// I/O.
+// inline tag-edit functions, `request_cover_intent`, and `cache_polled_covers`
+// that the RiffApp methods delegate to — over recording fakes, with no
+// threads and no disk I/O.
 #[cfg(test)]
 mod background_service_ui_tests {
     use super::*;
     use riff_backend::app::cover_service::Covers;
     use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
-    use riff_gui::ui::app::{
-        apply_tag_edit_outcome, cache_polled_covers, request_cover_intent, submit_tag_edit_fields,
-    };
+    use riff_gui::ui::app::{cache_polled_covers, request_cover_intent};
     use riff_library::app::traits::CoverImage;
     use std::path::PathBuf;
     use std::sync::Mutex;
 
     /// Recording [`TagEdits`] fake: captures every submitted request and
-    /// never yields outcomes (outcomes are injected through
-    /// [`apply_tag_edit_outcome`] directly).
+    /// never yields outcomes (outcomes are injected through the inline
+    /// outcome functions directly).
     struct RecordingTagEdits {
         submitted: Mutex<Vec<TagEditRequest>>,
     }
@@ -4979,40 +4913,119 @@ mod background_service_ui_tests {
         }
     }
 
-    /// An open "Edit Tags" modal mid-save for `/music/t1.mp3`.
-    fn saving_modal() -> TagEditState {
-        TagEditState {
+    // --- Inline editor (Issue 02): the draft, the single-track submit, and
+    // the outcome routing ------------------------------------------------
+
+    /// A draft opened from `/music/t1.mp3`'s readout with Title typed over its
+    /// original; all other buffers still match their originals.
+    fn inline_draft() -> TagDraft {
+        TagDraft {
+            kind: riff_gui::ui::selection::DraftKind::Track,
             track_id: TrackId("/music/t1.mp3".to_string()),
             path: PathBuf::from("/music/t1.mp3"),
-            title: "Old Title".to_string(),
-            artist: "Artist".to_string(),
-            album: "Album".to_string(),
-            album_artist: "Album Artist".to_string(),
-            genre: "Genre".to_string(),
-            year: "1999".to_string(),
-            track_number: "7".to_string(),
+            album_tracks: Vec::new(),
+            fields: [
+                "New Title".to_string(),
+                "Artist".to_string(),
+                "Album".to_string(),
+                "Album Artist".to_string(),
+                "Genre".to_string(),
+                "2001".to_string(),
+                "7".to_string(),
+            ],
+            originals: [
+                "Old Title".to_string(),
+                "Artist".to_string(),
+                "Album".to_string(),
+                "Album Artist".to_string(),
+                "Genre".to_string(),
+                "2001".to_string(),
+                "7".to_string(),
+            ],
             error: None,
-            saving: true,
+            saving: false,
+            batch: None,
+            focus_first: false,
         }
     }
 
     #[test]
-    fn test_saved_outcome_closes_dialog_and_sets_status_line() {
-        let mut modal = Some(saving_modal());
+    fn test_inline_submit_sends_one_request_with_the_draft_fields() {
+        use riff_gui::ui::app::submit_inline_tag_edit_fields;
+
+        let mut draft = inline_draft();
+        let edits = RecordingTagEdits::new();
+        let mut in_flight = None;
+
+        submit_inline_tag_edit_fields(&mut draft, &edits, &mut in_flight);
+
+        let requests = edits.requests();
+        assert_eq!(requests.len(), 1, "a single-track save is one request");
+        let request = &requests[0];
+        assert_eq!(request.track_id.0, "/music/t1.mp3");
+        assert_eq!(request.path, PathBuf::from("/music/t1.mp3"));
+        assert_eq!(request.edit.title.as_deref(), Some("New Title"));
+        assert_eq!(request.edit.artist.as_deref(), Some("Artist"));
+        assert_eq!(request.edit.album.as_deref(), Some("Album"));
+        assert_eq!(request.edit.album_artist.as_deref(), Some("Album Artist"));
+        assert_eq!(request.edit.genre.as_deref(), Some("Genre"));
+        assert_eq!(request.edit.year, Some(2001));
+        assert_eq!(request.edit.track_number, Some(7));
+        assert!(draft.saving, "the draft flips into its saving state");
+        assert!(draft.error.is_none());
+        assert_eq!(
+            in_flight,
+            Some((
+                TrackId("/music/t1.mp3".to_string()),
+                PathBuf::from("/music/t1.mp3")
+            )),
+            "the outstanding record enables outcome matching"
+        );
+    }
+
+    #[test]
+    fn test_inline_invalid_numeric_submit_keeps_draft_open_without_submitting() {
+        use riff_gui::ui::app::submit_inline_tag_edit_fields;
+        use riff_gui::ui::selection::TagField;
+
+        let mut draft = inline_draft();
+        draft.fields[TagField::Year.index()] = "not a number".to_string();
+        let edits = RecordingTagEdits::new();
+        let mut in_flight = None;
+
+        submit_inline_tag_edit_fields(&mut draft, &edits, &mut in_flight);
+
+        assert!(
+            edits.requests().is_empty(),
+            "invalid fields must not reach the service"
+        );
+        assert!(draft.error.is_some(), "the parse error surfaces inline");
+        assert!(!draft.saving, "the draft stays open, not saving");
+        assert!(in_flight.is_none());
+    }
+
+    #[test]
+    fn test_inline_saved_outcome_closes_draft_and_sets_status_line() {
+        use riff_gui::ui::app::apply_inline_tag_edit_outcome;
+
+        let mut draft = Some(inline_draft());
+        if let Some(d) = draft.as_mut() {
+            d.saving = true;
+        }
         let mut in_flight = Some((
             TrackId("/music/t1.mp3".to_string()),
             PathBuf::from("/music/t1.mp3"),
         ));
         let mut status = None;
 
-        apply_tag_edit_outcome(
+        apply_inline_tag_edit_outcome(
             TagEditOutcome::Saved,
-            &mut modal,
+            &mut draft,
             &mut in_flight,
             &mut status,
         );
 
-        assert!(modal.is_none(), "a saved edit closes the dialog");
+        assert!(draft.is_none(), "a saved edit closes the inline editor");
         assert_eq!(
             status.as_deref(),
             Some("Tags saved for t1.mp3"),
@@ -5022,138 +5035,423 @@ mod background_service_ui_tests {
     }
 
     #[test]
-    fn test_failed_outcome_keeps_dialog_open_with_reason() {
-        let mut modal = Some(saving_modal());
+    fn test_inline_failed_outcome_keeps_draft_open_with_inline_reason() {
+        use riff_gui::ui::app::apply_inline_tag_edit_outcome;
+
+        let mut draft = Some(inline_draft());
+        if let Some(d) = draft.as_mut() {
+            d.saving = true;
+        }
         let mut in_flight = Some((
             TrackId("/music/t1.mp3".to_string()),
             PathBuf::from("/music/t1.mp3"),
         ));
         let mut status = Some("earlier message".to_string());
 
-        apply_tag_edit_outcome(
+        apply_inline_tag_edit_outcome(
             TagEditOutcome::Failed {
                 reason: "permission denied".to_string(),
             },
-            &mut modal,
+            &mut draft,
             &mut in_flight,
             &mut status,
         );
 
-        let modal = modal.expect("a failed edit keeps the dialog open");
-        assert_eq!(modal.error.as_deref(), Some("permission denied"));
-        assert!(!modal.saving, "the save spinner stops");
-        // No silent success: the previous status line is left untouched.
-        assert_eq!(status.as_deref(), Some("earlier message"));
+        let draft = draft.expect("a failed edit keeps the editor open");
+        assert_eq!(draft.error.as_deref(), Some("permission denied"));
+        assert!(!draft.saving, "the save spinner stops");
+        assert_eq!(
+            status.as_deref(),
+            Some("earlier message"),
+            "a failed inline save does not clear the status line"
+        );
     }
 
     #[test]
-    fn test_outcome_for_another_track_leaves_modal_untouched() {
-        // The user opened a different track's editor while a save was in
-        // flight: its outcome must not close or alter the new dialog.
-        let mut modal = Some(saving_modal());
+    fn test_inline_outcome_after_selection_change_still_reaches_status_line() {
+        use riff_gui::ui::app::apply_inline_tag_edit_outcome;
+
+        // The selection moved while the write was in flight, so the draft was
+        // already discarded — the outcome must still land on the status line
+        // and never resurrect the editor.
+        let mut draft: Option<TagDraft> = None;
         let mut in_flight = Some((
-            TrackId("/music/other.mp3".to_string()),
-            PathBuf::from("/music/other.mp3"),
+            TrackId("/music/t1.mp3".to_string()),
+            PathBuf::from("/music/t1.mp3"),
         ));
         let mut status = None;
 
-        apply_tag_edit_outcome(
-            TagEditOutcome::Failed {
-                reason: "stale failure".to_string(),
-            },
-            &mut modal,
-            &mut in_flight,
-            &mut status,
-        );
-
-        let untouched = modal
-            .as_ref()
-            .expect("an unrelated outcome leaves the dialog open");
-        assert!(untouched.error.is_none());
-        assert!(untouched.saving);
-
-        apply_tag_edit_outcome(
+        apply_inline_tag_edit_outcome(
             TagEditOutcome::Saved,
-            &mut modal,
+            &mut draft,
             &mut in_flight,
             &mut status,
         );
-        assert!(
-            modal.is_some(),
-            "an unrelated save must not close the open dialog"
+
+        assert_eq!(
+            status.as_deref(),
+            Some("Tags saved for t1.mp3"),
+            "the outcome still reaches the status line after the selection moved"
         );
+        assert!(draft.is_none(), "the discarded draft is never resurrected");
     }
 
     #[test]
-    fn test_outcome_without_outstanding_request_is_ignored() {
-        let mut modal = Some(saving_modal());
-        let mut in_flight = None;
-        let mut status = None;
+    fn test_inline_draft_is_current_only_for_its_selection() {
+        use riff_gui::ui::app::{InspectorContent, InspectorKind, inline_draft_is_current};
+        use riff_gui::ui::selection::TagDraft;
 
-        apply_tag_edit_outcome(
-            TagEditOutcome::Saved,
-            &mut modal,
-            &mut in_flight,
-            &mut status,
-        );
-
+        let draft = TagDraft {
+            kind: riff_gui::ui::selection::DraftKind::Track,
+            track_id: TrackId("/music/t1.mp3".to_string()),
+            path: PathBuf::from("/music/t1.mp3"),
+            album_tracks: Vec::new(),
+            fields: Default::default(),
+            originals: Default::default(),
+            error: None,
+            saving: false,
+            batch: None,
+            focus_first: false,
+        };
+        let content = |kind: InspectorKind, track_ids: Vec<TrackId>| InspectorContent {
+            visible: true,
+            kind,
+            title: None,
+            subtitle: None,
+            art_track: None,
+            track_ids,
+            details: Vec::new(),
+            tags: Vec::new(),
+        };
+        assert!(inline_draft_is_current(
+            &draft,
+            &content(
+                InspectorKind::Track,
+                vec![TrackId("/music/t1.mp3".to_string())]
+            )
+        ));
         assert!(
-            modal.is_some(),
-            "nothing outstanding means nothing to close"
+            !inline_draft_is_current(
+                &draft,
+                &content(
+                    InspectorKind::Track,
+                    vec![TrackId("/music/t9.mp3".to_string())]
+                )
+            ),
+            "a different track's readout discards the draft"
         );
-        assert!(status.is_none());
+        assert!(
+            !inline_draft_is_current(
+                &draft,
+                &content(
+                    InspectorKind::Album,
+                    vec![TrackId("/music/t1.mp3".to_string())]
+                )
+            ),
+            "an album readout never hosts a track draft"
+        );
+        assert!(
+            !inline_draft_is_current(&draft, &content(InspectorKind::Artist, Vec::new())),
+            "an artist readout never hosts a track draft"
+        );
+    }
+
+    // --- Album batch editing (Issue 03) ------------------------------------------
+
+    /// An album draft over three tracks, opened against a readout where Title
+    /// showed "Old Album" and Year "2001" shared across the album, Genre was a
+    /// `(different)` row left empty; Title and Year were then edited over.
+    fn album_draft() -> TagDraft {
+        TagDraft {
+            kind: riff_gui::ui::selection::DraftKind::Album,
+            track_id: TrackId(String::new()),
+            path: PathBuf::new(),
+            album_tracks: vec![
+                (
+                    TrackId("/music/a1.mp3".to_string()),
+                    PathBuf::from("/music/a1.mp3"),
+                ),
+                (
+                    TrackId("/music/a2.mp3".to_string()),
+                    PathBuf::from("/music/a2.mp3"),
+                ),
+                (
+                    TrackId("/music/a3.mp3".to_string()),
+                    PathBuf::from("/music/a3.mp3"),
+                ),
+            ],
+            fields: [
+                "New Album".to_string(),
+                "Artist".to_string(),
+                "Album".to_string(),
+                "Album Artist".to_string(),
+                String::new(),
+                "2002".to_string(),
+                String::new(),
+            ],
+            originals: [
+                "Old Album".to_string(),
+                "Artist".to_string(),
+                "Album".to_string(),
+                "Album Artist".to_string(),
+                String::new(),
+                "2001".to_string(),
+                String::new(),
+            ],
+            error: None,
+            saving: false,
+            batch: None,
+            focus_first: false,
+        }
     }
 
     #[test]
-    fn test_parse_invalid_submit_keeps_dialog_open_without_submitting() {
-        let mut modal = saving_modal();
-        modal.year = "not a number".to_string();
-        modal.saving = false;
+    fn test_inline_batch_submits_one_request_per_track_with_only_dirty_fields() {
+        use riff_gui::ui::app::{BatchInFlight, submit_inline_batch_fields};
+
+        let mut draft = album_draft();
         let edits = RecordingTagEdits::new();
-        let mut in_flight = None;
+        let mut batch: Option<BatchInFlight> = None;
 
-        submit_tag_edit_fields(&mut modal, &edits, &mut in_flight);
+        submit_inline_batch_fields(&mut draft, &edits, &mut batch);
+
+        let requests = edits.requests();
+        assert_eq!(
+            requests.len(),
+            3,
+            "an album save is exactly one request per album track"
+        );
+        assert_eq!(requests[0].track_id.0, "/music/a1.mp3");
+        assert_eq!(requests[2].track_id.0, "/music/a3.mp3");
+        assert_eq!(requests[0].path, PathBuf::from("/music/a1.mp3"));
+        for request in &requests {
+            assert_eq!(
+                request.edit.title.as_deref(),
+                Some("New Album"),
+                "a dirty field is present on every track request"
+            );
+            assert_eq!(request.edit.year, Some(2002));
+            // Untouched fields stay `None`: the batch never rewrites them.
+            assert_eq!(request.edit.artist, None);
+            assert_eq!(request.edit.album, None);
+            assert_eq!(request.edit.album_artist, None);
+            assert_eq!(request.edit.track_number, None);
+            assert_eq!(
+                request.edit.genre, None,
+                "a (different) row left empty is untouched and skipped"
+            );
+        }
+        assert!(draft.saving, "the draft flips into its saving state");
+        assert!(draft.error.is_none());
+        let status = draft.batch.as_ref().expect("a batch is now in flight");
+        assert_eq!(status.total, 3);
+        assert!(!status.done());
+        assert!(batch.is_some(), "the outstanding batch is recorded");
+    }
+
+    #[test]
+    fn test_inline_batch_untouched_editor_submits_nothing() {
+        use riff_gui::ui::app::{BatchInFlight, submit_inline_batch_fields};
+
+        // Nothing edited back to its readout value: the album save would be
+        // an empty batch, so it submits nothing and writes no files.
+        let mut draft = album_draft();
+        draft.fields[0].clone_from(&draft.originals[0]);
+        draft.fields[5].clone_from(&draft.originals[5]);
+        let edits = RecordingTagEdits::new();
+        let mut batch: Option<BatchInFlight> = None;
+
+        submit_inline_batch_fields(&mut draft, &edits, &mut batch);
+
+        assert!(edits.requests().is_empty(), "nothing dirty submits nothing");
+        assert!(batch.is_none());
+        assert!(!draft.saving);
+    }
+
+    #[test]
+    fn test_inline_batch_invalid_numeric_keeps_draft_open_without_submitting() {
+        use riff_gui::ui::app::{BatchInFlight, submit_inline_batch_fields};
+        use riff_gui::ui::selection::TagField;
+
+        let mut draft = album_draft();
+        draft.fields[TagField::Year.index()] = "not a number".to_string();
+        let edits = RecordingTagEdits::new();
+        let mut batch: Option<BatchInFlight> = None;
+
+        submit_inline_batch_fields(&mut draft, &edits, &mut batch);
 
         assert!(
             edits.requests().is_empty(),
             "invalid fields must not reach the service"
         );
-        assert!(modal.error.is_some(), "the parse error surfaces");
-        assert!(!modal.saving, "the modal stays open, not saving");
-        assert!(in_flight.is_none());
+        assert!(draft.error.is_some(), "the parse error surfaces inline");
+        assert!(!draft.saving);
+        assert!(batch.is_none());
     }
 
     #[test]
-    fn test_valid_submit_sends_request_and_marks_saving() {
-        let mut modal = saving_modal();
-        modal.year = "2001".to_string();
-        modal.track_number = String::new(); // empty means "leave unset"
+    fn test_inline_batch_outcomes_build_the_partial_failure_summary() {
+        use riff_gui::ui::app::{apply_inline_batch_outcome, submit_inline_batch_fields};
+
+        let mut draft = Some(album_draft());
         let edits = RecordingTagEdits::new();
-        let mut in_flight = None;
+        let mut batch = None;
+        submit_inline_batch_fields(draft.as_mut().unwrap(), &edits, &mut batch);
+        let mut status = Some("earlier message".to_string());
 
-        submit_tag_edit_fields(&mut modal, &edits, &mut in_flight);
-
-        let requests = edits.requests();
-        assert_eq!(requests.len(), 1, "exactly one request submitted");
-        let request = &requests[0];
-        assert_eq!(request.track_id.0, "/music/t1.mp3");
-        assert_eq!(request.path, PathBuf::from("/music/t1.mp3"));
+        // Two saves, then one failure: the tallies land in order.
+        apply_inline_batch_outcome(TagEditOutcome::Saved, &mut draft, &mut batch, &mut status);
         assert_eq!(
-            request.edit.title.as_deref(),
-            Some("Old Title"),
-            "the edited field values travel with the request"
+            status.as_deref(),
+            Some("Tags saved for a1.mp3"),
+            "each save reaches the status line with its own file name"
         );
-        assert_eq!(request.edit.year, Some(2001));
-        assert_eq!(request.edit.track_number, None);
-        assert!(modal.saving, "the modal flips into its saving state");
-        assert!(modal.error.is_none());
+        assert!(
+            status.is_some() && status.as_ref().unwrap() == "Tags saved for a1.mp3",
+            "the last outcome wins"
+        );
+        apply_inline_batch_outcome(TagEditOutcome::Saved, &mut draft, &mut batch, &mut status);
+        apply_inline_batch_outcome(
+            TagEditOutcome::Failed {
+                reason: "permission denied".to_string(),
+            },
+            &mut draft,
+            &mut batch,
+            &mut status,
+        );
+
+        assert!(
+            status.as_deref() == Some("permission denied"),
+            "a failed request surfaces its reason on the status line"
+        );
+        assert!(
+            batch.is_none(),
+            "the batch is consumed when its last outcome lands"
+        );
+        let draft = draft.expect("the draft stays open after a batch");
+        assert!(!draft.saving, "the spinner stops when the batch lands");
+        let batch = draft.batch.as_ref().expect("the draft keeps its tallies");
+        assert!(batch.done());
         assert_eq!(
-            in_flight,
-            Some((
-                TrackId("/music/t1.mp3".to_string()),
-                PathBuf::from("/music/t1.mp3")
-            )),
-            "the outstanding record enables outcome matching"
+            batch.summary().as_deref(),
+            Some("Saved 2 of 3 tracks — 1 failed: permission denied"),
+            "the summary reports the partial failure honestly, first reason"
+        );
+    }
+
+    #[test]
+    fn test_inline_batch_all_saved_summary() {
+        use riff_gui::ui::selection::BatchStatus;
+
+        let mut status = BatchStatus {
+            total: 3,
+            saved: 3,
+            failed: 0,
+            first_failure: None,
+        };
+        assert!(status.done());
+        assert_eq!(status.summary().as_deref(), Some("Saved 3 of 3 tracks"));
+
+        // Still outstanding: no summary while the bar spins.
+        status.saved = 1;
+        assert!(!status.done());
+        assert_eq!(status.summary(), None);
+        assert!(
+            !BatchStatus {
+                total: 3,
+                saved: 1,
+                failed: 0,
+                first_failure: None
+            }
+            .done()
+        );
+    }
+
+    #[test]
+    fn test_inline_batch_outcomes_reach_status_line_after_selection_change() {
+        use riff_gui::ui::app::{apply_inline_batch_outcome, submit_inline_batch_fields};
+
+        // The selection moved while the batch was in flight: the draft is
+        // gone, but the outstanding outcomes still land on the status line —
+        // the editor is never resurrected.
+        let mut draft: Option<TagDraft> = None;
+        let edits = RecordingTagEdits::new();
+        let mut batch = None;
+        submit_inline_batch_fields(&mut album_draft(), &edits, &mut batch);
+        let mut status = None;
+
+        for _ in 0..3 {
+            apply_inline_batch_outcome(TagEditOutcome::Saved, &mut draft, &mut batch, &mut status);
+        }
+
+        assert_eq!(
+            status.as_deref(),
+            Some("Tags saved for a3.mp3"),
+            "each outcome still reaches the status line after the selection moved"
+        );
+        assert!(draft.is_none(), "the discarded draft is never resurrected");
+        assert!(batch.is_none());
+    }
+
+    #[test]
+    fn test_inline_album_draft_is_current_only_for_its_album() {
+        use riff_gui::ui::app::{InspectorContent, InspectorKind, inline_draft_is_current};
+        use riff_gui::ui::selection::DraftKind;
+
+        let draft = TagDraft {
+            kind: DraftKind::Album,
+            track_id: TrackId(String::new()),
+            path: PathBuf::new(),
+            album_tracks: vec![
+                (TrackId("/music/a1.mp3".to_string()), PathBuf::new()),
+                (TrackId("/music/a2.mp3".to_string()), PathBuf::new()),
+            ],
+            fields: Default::default(),
+            originals: Default::default(),
+            error: None,
+            saving: false,
+            batch: None,
+            focus_first: false,
+        };
+        let content = |kind: InspectorKind, track_ids: Vec<TrackId>| InspectorContent {
+            visible: true,
+            kind,
+            title: None,
+            subtitle: None,
+            art_track: None,
+            track_ids,
+            details: Vec::new(),
+            tags: Vec::new(),
+        };
+        assert!(inline_draft_is_current(
+            &draft,
+            &content(
+                InspectorKind::Album,
+                vec![
+                    TrackId("/music/a1.mp3".to_string()),
+                    TrackId("/music/a2.mp3".to_string())
+                ]
+            )
+        ));
+        assert!(
+            !inline_draft_is_current(
+                &draft,
+                &content(
+                    InspectorKind::Album,
+                    vec![TrackId("/music/a9.mp3".to_string())]
+                )
+            ),
+            "a different album's readout discards the album draft"
+        );
+        assert!(
+            !inline_draft_is_current(
+                &draft,
+                &content(
+                    InspectorKind::Track,
+                    vec![TrackId("/music/a1.mp3".to_string())]
+                )
+            ),
+            "a track readout discards the album draft"
         );
     }
 
@@ -5565,6 +5863,7 @@ mod browser_column_ui_tests {
                         show_sort: true,
                         total: items.len(),
                         item: &mut fixture_item,
+                        virtualize: false,
                         empty_title: "",
                         empty_hint: "",
                     };
@@ -5634,6 +5933,7 @@ mod browser_column_ui_tests {
                         show_sort: false,
                         total: items.len(),
                         item: &mut fixture_item,
+                        virtualize: false,
                         empty_title: "",
                         empty_hint: "",
                     };
@@ -5696,6 +5996,7 @@ mod browser_column_ui_tests {
                         show_sort: false,
                         total: items.len(),
                         item: &mut fixture_item,
+                        virtualize: false,
                         empty_title: "",
                         empty_hint: "",
                     };
@@ -5751,6 +6052,7 @@ mod browser_column_ui_tests {
                         show_sort: false,
                         total: items.len(),
                         item: &mut fixture_item,
+                        virtualize: false,
                         empty_title: "",
                         empty_hint: "",
                     };
@@ -5787,6 +6089,7 @@ mod browser_column_ui_tests {
                         show_sort: true,
                         total: 0,
                         item: &mut fixture_item,
+                        virtualize: false,
                         empty_title: "No tracks yet",
                         empty_hint: "Add a folder to start scanning your library.",
                     };
@@ -5830,6 +6133,7 @@ mod browser_column_ui_tests {
                             show_sort: true,
                             total: items.len(),
                             item: &mut fixture_item,
+                            virtualize: false,
                             empty_title: "",
                             empty_hint: "",
                         };
@@ -5884,6 +6188,7 @@ mod browser_column_ui_tests {
                         show_sort: false,
                         total: items.len(),
                         item: &mut fixture_item,
+                        virtualize: false,
                         empty_title: "",
                         empty_hint: "",
                     };
@@ -5921,6 +6226,7 @@ mod browser_column_ui_tests {
                         show_sort: true,
                         total: items.len(),
                         item: &mut fixture_item,
+                        virtualize: false,
                         empty_title: "",
                         empty_hint: "",
                     };
@@ -5959,6 +6265,98 @@ mod browser_column_ui_tests {
                 .state()
                 .contains(&BrowserAction::Select("beta".to_string())),
             "clicking a tile reports its selection by key"
+        );
+    }
+
+    #[test]
+    fn test_virtualized_list_consults_the_provider_only_for_the_on_screen_window() {
+        use egui_kittest::kittest::Queryable;
+
+        // The artists-root idle-CPU fix: a virtualized list reserves
+        // default-height slots for rows above the viewport without consulting
+        // the provider, so the provider's per-row work (paged store reads,
+        // cover intents) stays bounded to the on-screen window instead of
+        // running once per walked row every frame.
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let total = 200usize;
+        let calls: std::rc::Rc<std::cell::RefCell<Vec<usize>>> = Default::default();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<BrowserAction>| {
+                    let calls = std::rc::Rc::clone(&calls);
+                    let mut item = move |i: usize| -> Option<BrowserItem> {
+                        calls.borrow_mut().push(i);
+                        Some(BrowserItem {
+                            key: format!("row-{i}"),
+                            label: format!("Row {i}"),
+                            detail: None,
+                            thumbnail: None,
+                            selected: false,
+                            now_playing: false,
+                        })
+                    };
+                    let column = BrowserColumn {
+                        layout: BrowserLayout::List,
+                        sort_desc: false,
+                        show_sort: false,
+                        total,
+                        item: &mut item,
+                        virtualize: true,
+                        empty_title: "",
+                        empty_hint: "",
+                    };
+                    riff_gui::ui::browser::show_browser_column(
+                        ui, &mut cache, &palette, column, actions,
+                    );
+                },
+                Vec::new(),
+            );
+        harness.run();
+        calls.borrow_mut().clear();
+
+        // Scroll the viewport deep into the list, one rendered row at a time
+        // (rows cull as they leave the viewport, exactly like the
+        // artists-column test), until a row far past the first window shows.
+        let mut guard = 0;
+        while harness.query_by_label("Row 60").is_none() && guard < 200 {
+            let mut scrolled = false;
+            for probe in 0..150 {
+                let label = format!("Row {probe}");
+                if let Some(row) = harness.query_by_label(&label) {
+                    row.scroll_down();
+                    scrolled = true;
+                    break;
+                }
+            }
+            assert!(scrolled, "a rendered row must exist to scroll");
+            harness.step();
+            guard += 1;
+        }
+        assert!(
+            guard < 200,
+            "scrolling must reach the deep row within the step budget"
+        );
+
+        // From the settled deep position, one frame's walk consults the
+        // provider only for the on-screen window — never the rows above it.
+        calls.borrow_mut().clear();
+        harness.step();
+        let calls = calls.borrow();
+        assert!(
+            !calls.is_empty(),
+            "the on-screen window must render after scrolling"
+        );
+        assert!(
+            calls.iter().all(|&i| i >= 50),
+            "rows above the viewport must not consult the provider: {calls:?}"
+        );
+        assert!(
+            calls.len() < 30,
+            "provider work stays bounded to the visible window: {} calls",
+            calls.len()
         );
     }
 
@@ -6962,6 +7360,62 @@ mod browser_column_ui_tests {
         (t1, t2)
     }
 
+    /// Three tracks of one album covering every per-field aggregation state:
+    /// Title/Year/Track Number differ between tracks, Album and Album Artist
+    /// agree, Artist is mixed present/missing, and Genre is missing on every
+    /// track. The genre-missing track (t3) also drives a Track readout's
+    /// grey `(none)` state.
+    fn seed_varied_album(
+        store: &mut riff_infra::store::SqliteStore,
+    ) -> [riff_backend::domain::Track; 3] {
+        use riff_backend::app::store::LibraryMutationStore as _;
+        use riff_backend::domain::TrackMetadata;
+
+        let mut t1 = crate::test_utils::create_test_track(
+            "music/Mixed Artist/Varied/01.flac",
+            "music/Mixed Artist/Varied/01.flac",
+        );
+        t1.metadata = TrackMetadata {
+            title: Some("Song A".to_string()),
+            artist: Some("Artist One".to_string()),
+            album: Some("Varied".to_string()),
+            album_artist: Some("Mixed".to_string()),
+            track_number: Some(1),
+            year: Some(2001),
+            ..TrackMetadata::default()
+        };
+        let mut t2 = crate::test_utils::create_test_track(
+            "music/Mixed Artist/Varied/02.flac",
+            "music/Mixed Artist/Varied/02.flac",
+        );
+        t2.metadata = TrackMetadata {
+            title: Some("Song B".to_string()),
+            artist: None,
+            album: Some("Varied".to_string()),
+            album_artist: Some("Mixed".to_string()),
+            track_number: Some(2),
+            year: Some(2002),
+            ..TrackMetadata::default()
+        };
+        let mut t3 = crate::test_utils::create_test_track(
+            "music/Mixed Artist/Varied/03.flac",
+            "music/Mixed Artist/Varied/03.flac",
+        );
+        t3.metadata = TrackMetadata {
+            title: Some("Song C".to_string()),
+            artist: Some("Artist Three".to_string()),
+            album: Some("Varied".to_string()),
+            album_artist: Some("Mixed".to_string()),
+            track_number: Some(3),
+            year: Some(2003),
+            ..TrackMetadata::default()
+        };
+        store
+            .apply_scan_batch(&[t1.clone(), t2.clone(), t3.clone()])
+            .unwrap();
+        [t1, t2, t3]
+    }
+
     #[test]
     fn test_tracks_column_resolves_the_librarys_data_and_stays_fresh() {
         use egui_kittest::kittest::Queryable;
@@ -7136,6 +7590,8 @@ mod browser_column_ui_tests {
                         title: Some("Tomorrow's Harvest"),
                         subtitle: Some("Boards of Canada \u{b7} 2013"),
                         details: &details,
+                        tags: &[],
+                        editor: None,
                         single: false,
                         queue: false,
                     };
@@ -7205,6 +7661,8 @@ mod browser_column_ui_tests {
                         title: None,
                         subtitle: None,
                         details: &[],
+                        tags: &[],
+                        editor: None,
                         single: false,
                         queue: false,
                     };
@@ -7227,6 +7685,433 @@ mod browser_column_ui_tests {
         assert!(
             harness.state().is_empty(),
             "the empty state reports nothing"
+        );
+    }
+
+    #[test]
+    fn test_selection_panel_renders_the_tag_section_in_the_four_states() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::selection::{
+            SelectionAction, SelectionPanel, TagField, TagRow, TagRowState, show_selection_panel,
+        };
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        // One row per display state: a shared value, the orange `(different)`
+        // aggregation, and the grey `(none)` of a field no track carries.
+        // The widget renders the resolved text and state; it never re-derives.
+        let tags = vec![
+            TagRow {
+                field: TagField::Title,
+                state: TagRowState::Value,
+                text: "Nothing Is Real".to_string(),
+                originals: vec![Some("Nothing Is Real".to_string())],
+            },
+            TagRow {
+                field: TagField::Year,
+                state: TagRowState::Different,
+                text: "(different)".to_string(),
+                originals: vec![Some("1999".to_string()), Some("2013".to_string())],
+            },
+            TagRow {
+                field: TagField::Genre,
+                state: TagRowState::None,
+                text: "(none)".to_string(),
+                originals: vec![None],
+            },
+        ];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 640.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<SelectionAction>| {
+                    let panel = SelectionPanel {
+                        art: None,
+                        title: Some("Some Album"),
+                        subtitle: Some("Some Artist \u{b7} 2013"),
+                        details: &[],
+                        tags: &tags,
+                        editor: None,
+                        single: false,
+                        queue: false,
+                    };
+                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // The section names itself and resolves each row's label and display
+        // text exactly as the app layer resolved them.
+        assert!(
+            harness.query_by_label("TAGS").is_some(),
+            "the tag section header renders"
+        );
+        for (label, text) in [
+            ("Title", "Nothing Is Real"),
+            ("Year", "(different)"),
+            ("Genre", "(none)"),
+        ] {
+            assert!(
+                harness.query_by_label(label).is_some() && harness.query_by_label(text).is_some(),
+                "the tag row '{label}: {text}' renders"
+            );
+        }
+    }
+
+    #[test]
+    fn test_selection_panel_inline_editor_renders_prefilled_fields_and_reports_the_bar() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::selection::{
+            SelectionAction, SelectionPanel, TagDraft, TagField, TagRow, TagRowState,
+            show_selection_panel,
+        };
+        use std::path::PathBuf;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        // A readout where Title shows a value, Genre is grey `(none)`, and
+        // Year shows its value — the draft must open with Title and Year
+        // prefilled and the `(none)` Genre as an empty buffer.
+        let tags = vec![
+            TagRow {
+                field: TagField::Title,
+                state: TagRowState::Value,
+                text: "Old Title".to_string(),
+                originals: vec![Some("Old Title".to_string())],
+            },
+            TagRow {
+                field: TagField::Genre,
+                state: TagRowState::None,
+                text: "(none)".to_string(),
+                originals: vec![None],
+            },
+            TagRow {
+                field: TagField::Year,
+                state: TagRowState::Value,
+                text: "2002".to_string(),
+                originals: vec![Some("2002".to_string())],
+            },
+        ];
+        let mut draft = TagDraft::for_track(
+            TrackId("t1.mp3".to_string()),
+            PathBuf::from("t1.mp3"),
+            &tags,
+        );
+        assert_eq!(
+            draft.fields[TagField::Title.index()],
+            "Old Title",
+            "a value row prefills its buffer from the readout"
+        );
+        assert_eq!(
+            draft.fields[TagField::Genre.index()],
+            "",
+            "a (none) row opens as an empty buffer"
+        );
+        assert_eq!(draft.fields[TagField::Year.index()], "2002");
+        assert!(
+            !draft.any_dirty(),
+            "a fresh draft is never dirty by construction"
+        );
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 900.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<SelectionAction>| {
+                    let panel = SelectionPanel {
+                        art: None,
+                        title: Some("Old Title"),
+                        subtitle: Some("Some Artist"),
+                        details: &[],
+                        tags: &tags,
+                        editor: Some(&mut draft),
+                        single: true,
+                        queue: true,
+                    };
+                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // The editor renders the fields and the Save bar; typing into the
+        // focused field writes the draft buffer and marks it dirty.
+        assert!(
+            harness.query_by_label("TAGS").is_some(),
+            "the editor keeps the tag section header"
+        );
+        assert!(
+            harness.query_by_label("Save").is_some() && harness.query_by_label("Cancel").is_some(),
+            "the Save bar renders"
+        );
+        let title_field = harness
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .next()
+            .expect("the editor renders its fields");
+        title_field.focus();
+        harness.run();
+        harness
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .next()
+            .expect("the editor still renders its fields")
+            .type_text("X");
+        harness.run();
+        drop(harness);
+
+        assert!(
+            draft.fields[TagField::Title.index()].contains('X'),
+            "typing writes the focused field's draft buffer"
+        );
+        assert!(
+            draft.is_dirty(TagField::Title),
+            "an edited field is dirty against its original"
+        );
+        assert!(draft.any_dirty());
+        assert!(draft.fields[TagField::Genre.index()].is_empty());
+        assert!(
+            !draft.is_dirty(TagField::Genre),
+            "the untouched (none) row stays clean"
+        );
+    }
+
+    #[test]
+    fn test_selection_panel_inline_editor_reports_save_on_enter_and_cancel_on_escape() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::selection::{
+            SelectionAction, SelectionPanel, TagDraft, TagField, TagRow, TagRowState,
+            show_selection_panel,
+        };
+        use std::path::PathBuf;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let tags = vec![TagRow {
+            field: TagField::Title,
+            state: TagRowState::Value,
+            text: "Old Title".to_string(),
+            originals: vec![Some("Old Title".to_string())],
+        }];
+        let mut draft = TagDraft::for_track(
+            TrackId("t1.mp3".to_string()),
+            PathBuf::from("t1.mp3"),
+            &tags,
+        );
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 900.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<SelectionAction>| {
+                    let panel = SelectionPanel {
+                        art: None,
+                        title: Some("Old Title"),
+                        subtitle: Some("Some Artist"),
+                        details: &[],
+                        tags: &tags,
+                        editor: Some(&mut draft),
+                        single: true,
+                        queue: true,
+                    };
+                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![SelectionAction::SaveTagEdit],
+            "Enter saves the inline edit"
+        );
+
+        // The Save button reports the same action as Enter.
+        harness.get_by_label("Save").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![SelectionAction::SaveTagEdit, SelectionAction::SaveTagEdit],
+            "the Save button reports the same intent as Enter"
+        );
+
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![
+                SelectionAction::SaveTagEdit,
+                SelectionAction::SaveTagEdit,
+                SelectionAction::CancelTagEdit,
+            ],
+            "Escape discards the inline edit"
+        );
+    }
+
+    #[test]
+    fn test_selection_panel_inline_editor_disables_save_while_a_write_is_in_flight() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::selection::{
+            SelectionAction, SelectionPanel, TagDraft, TagField, TagRow, TagRowState,
+            show_selection_panel,
+        };
+        use std::path::PathBuf;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let tags = vec![TagRow {
+            field: TagField::Title,
+            state: TagRowState::Value,
+            text: "Old Title".to_string(),
+            originals: vec![Some("Old Title".to_string())],
+        }];
+        let mut draft = TagDraft::for_track(
+            TrackId("t1.mp3".to_string()),
+            PathBuf::from("t1.mp3"),
+            &tags,
+        );
+        draft.saving = true;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 900.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<SelectionAction>| {
+                    let panel = SelectionPanel {
+                        art: None,
+                        title: Some("Old Title"),
+                        subtitle: Some("Some Artist"),
+                        details: &[],
+                        tags: &tags,
+                        editor: Some(&mut draft),
+                        single: true,
+                        queue: true,
+                    };
+                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                },
+                Vec::new(),
+            );
+        // The save spinner asks to repaint every frame, so step instead of run.
+        harness.run_steps(2);
+
+        harness.get_by_label("Save").click();
+        harness.run_steps(2);
+        assert!(
+            harness.state().is_empty(),
+            "a double-submit is impossible: Save is disabled while the write is in flight"
+        );
+    }
+
+    #[test]
+    fn test_selection_panel_inline_editor_shows_batch_progress_and_summary() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::selection::{
+            BatchStatus, SelectionAction, SelectionPanel, TagDraft, TagField, TagRow, TagRowState,
+            show_selection_panel,
+        };
+        use std::path::PathBuf;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let tags = vec![TagRow {
+            field: TagField::Title,
+            state: TagRowState::Value,
+            text: "Shared Title".to_string(),
+            originals: vec![Some("Shared Title".to_string()); 2],
+        }];
+        let mut draft = TagDraft::for_album(
+            vec![
+                (
+                    TrackId("/music/a1.mp3".to_string()),
+                    PathBuf::from("/music/a1.mp3"),
+                ),
+                (
+                    TrackId("/music/a2.mp3".to_string()),
+                    PathBuf::from("/music/a2.mp3"),
+                ),
+            ],
+            &tags,
+        );
+        draft.batch = Some(BatchStatus {
+            total: 2,
+            saved: 1,
+            failed: 1,
+            first_failure: Some("permission denied".to_string()),
+        });
+        draft.saving = false;
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 900.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<SelectionAction>| {
+                    let panel = SelectionPanel {
+                        art: None,
+                        title: Some("Shared Title"),
+                        subtitle: Some("Some Artist"),
+                        details: &[],
+                        tags: &tags,
+                        editor: Some(&mut draft),
+                        single: false,
+                        queue: true,
+                    };
+                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        assert!(
+            harness
+                .query_by_label("Saved 1 of 2 tracks — 1 failed: permission denied")
+                .is_some(),
+            "a landed batch renders its partial-failure summary under the bar"
+        );
+    }
+
+    #[test]
+    fn test_selection_panel_tag_row_click_reports_start_edit() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::selection::{
+            SelectionAction, SelectionPanel, TagField, TagRow, TagRowState, show_selection_panel,
+        };
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let tags = vec![TagRow {
+            field: TagField::Title,
+            state: TagRowState::Value,
+            text: "Tag Title".to_string(),
+            originals: vec![Some("Tag Title".to_string())],
+        }];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 640.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<SelectionAction>| {
+                    let panel = SelectionPanel {
+                        art: None,
+                        title: Some("Panel Title"),
+                        subtitle: Some("Some Artist"),
+                        details: &[],
+                        tags: &tags,
+                        editor: None,
+                        single: false,
+                        queue: false,
+                    };
+                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // A tag row value is editable: clicking it reports the edit intent
+        // the app turns into a per-selection draft.
+        harness.get_by_label("Tag Title").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![SelectionAction::StartEdit],
+            "clicking a tag row reports StartEdit"
         );
     }
 
@@ -7306,6 +8191,8 @@ mod browser_column_ui_tests {
                         title: Some("Tomorrow's Harvest"),
                         subtitle: Some("Boards of Canada \u{b7} 2013"),
                         details: &[],
+                        tags: &[],
+                        editor: None,
                         single: false,
                         queue: true,
                     };
@@ -7349,6 +8236,8 @@ mod browser_column_ui_tests {
                         title: Some("Magic Window"),
                         subtitle: Some("Boards of Canada"),
                         details: &[],
+                        tags: &[],
+                        editor: None,
                         single: true,
                         queue: true,
                     };
@@ -7460,8 +8349,10 @@ mod browser_column_ui_tests {
                 .map(|d| d.value.clone())
         };
         assert_eq!(detail("Artist").as_deref(), Some("Boards of Canada"));
-        assert_eq!(detail("Released").as_deref(), Some("2002"));
-        assert_eq!(detail("Genre").as_deref(), Some("Electronic"));
+        assert!(
+            detail("Released").is_none() && detail("Genre").is_none(),
+            "the Released and Genre rows moved into the tag section (Issue 01)"
+        );
         assert_eq!(
             detail("Tracks").as_deref(),
             Some("2 \u{b7} 03:25"),
@@ -7475,6 +8366,52 @@ mod browser_column_ui_tests {
         assert!(
             detail("Path").is_some_and(|p| p.ends_with("Geogaddi")),
             "the path row names the album's folder"
+        );
+
+        // The album's tag section: fields the two tracks share resolve to
+        // the value with both tracks' originals; the differing Title and
+        // Track Number fields resolve to `(different)`, never a partial.
+        let tag = |label: &str| {
+            content
+                .tags
+                .iter()
+                .find(|r| r.field.label() == label)
+                .unwrap()
+        };
+        assert_eq!(
+            content.tags.len(),
+            7,
+            "the tag section carries the seven fields"
+        );
+        for (label, value) in [
+            ("Artist", "Boards of Canada"),
+            ("Album", "Geogaddi"),
+            ("Album Artist", "Boards of Canada"),
+            ("Genre", "Electronic"),
+            ("Year", "2002"),
+        ] {
+            let row = tag(label);
+            assert_eq!(row.text, value, "the '{label}' row shows the shared value");
+            assert_eq!(
+                row.originals,
+                vec![Some(value.to_string()); 2],
+                "the '{label}' row carries both tracks' original values"
+            );
+        }
+        assert_eq!(tag("Title").text, "(different)");
+        assert_eq!(
+            tag("Title").originals,
+            vec![
+                Some("Magic Window".to_string()),
+                Some("Dawn Chorus".to_string()),
+            ],
+            "a differing title is a distinct value, never a partial"
+        );
+        assert_eq!(tag("Track Number").text, "(different)");
+        assert_eq!(
+            tag("Track Number").originals,
+            vec![Some("1".to_string()), Some("2".to_string())],
+            "a differing track number is a distinct value, never a partial"
         );
 
         // Artist selection: name, album count, cover, and the artist's
@@ -7504,6 +8441,10 @@ mod browser_column_ui_tests {
         assert_eq!(content.kind, InspectorKind::Genre);
         assert_eq!(content.title.as_deref(), Some("Electronic"));
         assert_eq!(content.subtitle.as_deref(), Some("2 tracks"));
+        assert!(
+            content.tags.is_empty(),
+            "a genre readout carries no tag section"
+        );
         assert_eq!(
             content.track_ids,
             vec![t1.id.clone(), _t2.id.clone()],
@@ -7575,6 +8516,208 @@ mod browser_column_ui_tests {
         );
     }
 
+    #[test]
+    fn test_inspector_tag_section_aggregates_each_field_across_the_album() {
+        use riff_backend::app::state::{BrowserSelection, LibrarySection};
+        use riff_gui::ui::app::{InspectorKind, resolve_inspector};
+        use riff_gui::ui::selection::{TagField, TagRowState};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("opening a fresh store must work");
+        let [t1, _t2, t3] = seed_varied_album(&mut store);
+        let mut views = riff_backend::app::views::SessionViews::new(
+            Box::new(store.clone()),
+            Box::new(store.clone()),
+            store.library_generation(),
+            store.playlist_generation(),
+        );
+
+        // The album readout resolves one tag row per field in the stable
+        // modal order, with each field's rule: shared value, `(different)`
+        // for differing values or a mix of present/missing, `(none)` when no
+        // track carries it — missing is a distinct comparison value.
+        let library = riff_backend::app::state::LibrarySession {
+            library_section: LibrarySection::Albums,
+            browser_path: vec![BrowserSelection::Album {
+                artist: "Mixed".to_string(),
+                title: "Varied".to_string(),
+            }],
+            ..riff_backend::app::state::LibrarySession::default()
+        };
+        let content = resolve_inspector(&mut views, &library);
+        assert!(content.visible, "the varied album shows the inspector");
+        assert_eq!(content.kind, InspectorKind::Album);
+        let labels: Vec<&str> = content.tags.iter().map(|r| r.field.label()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Title",
+                "Artist",
+                "Album",
+                "Album Artist",
+                "Genre",
+                "Year",
+                "Track Number",
+            ],
+            "the tag rows resolve in the seven-field modal order, Duration excluded"
+        );
+        let row = |field: TagField| content.tags.iter().find(|r| r.field == field).unwrap();
+        assert_eq!(row(TagField::Title).state, TagRowState::Different);
+        assert_eq!(
+            row(TagField::Title).originals,
+            vec![
+                Some("Song A".to_string()),
+                Some("Song B".to_string()),
+                Some("Song C".to_string()),
+            ],
+            "differing titles stay distinct, never a majority guess"
+        );
+        assert_eq!(
+            row(TagField::Artist).state,
+            TagRowState::Different,
+            "a mix of present and missing artists is different, never a partial value"
+        );
+        assert_eq!(
+            row(TagField::Artist).originals,
+            vec![
+                Some("Artist One".to_string()),
+                None,
+                Some("Artist Three".to_string()),
+            ],
+            "a missing artist is a distinct comparison value"
+        );
+        assert_eq!(row(TagField::Album).state, TagRowState::Value);
+        assert_eq!(row(TagField::Album).text, "Varied");
+        assert_eq!(
+            row(TagField::Album).originals,
+            vec![Some("Varied".to_string()); 3],
+            "an agreeing field carries the shared value and every original"
+        );
+        assert_eq!(row(TagField::AlbumArtist).state, TagRowState::Value);
+        assert_eq!(
+            row(TagField::AlbumArtist).text,
+            "Mixed",
+            "a field every track carries in agreement resolves to the value"
+        );
+        assert_eq!(row(TagField::Genre).state, TagRowState::None);
+        assert_eq!(
+            row(TagField::Genre).text,
+            "(none)",
+            "a field no track carries resolves to grey (none)"
+        );
+        assert_eq!(
+            row(TagField::Genre).originals,
+            vec![None, None, None],
+            "the missing values are distinct per track"
+        );
+        assert_eq!(row(TagField::Year).state, TagRowState::Different);
+        assert_eq!(row(TagField::TrackNumber).state, TagRowState::Different);
+
+        // The album readout's detail grid keeps the non-tag facts; Released
+        // and Genre rows are gone (their facts moved into the tag section).
+        let detail = |label: &str| {
+            content
+                .details
+                .iter()
+                .find(|d| d.label == label)
+                .map(|d| d.value.clone())
+        };
+        assert_eq!(detail("Artist").as_deref(), Some("Mixed"));
+        assert!(detail("Released").is_none() && detail("Genre").is_none());
+        assert!(detail("Tracks").is_some() && detail("Plays").is_some());
+        assert!(detail("Last played").is_some() && detail("Path").is_some());
+
+        // The track readout shows that track's value row-by-row, a missing
+        // tag as grey `(none)`, and per-field originals the editor diff
+        // bases (tickets 02/03) — the redundant Artist/Album/Genre rows are
+        // gone, the Plays/Last played/Path rows stay.
+        let library = riff_backend::app::state::LibrarySession {
+            selected_track: Some(t3.id.clone()),
+            ..riff_backend::app::state::LibrarySession::default()
+        };
+        let content = resolve_inspector(&mut views, &library);
+        assert!(content.visible, "the selected track shows the inspector");
+        assert_eq!(content.kind, InspectorKind::Track);
+        let row = |field: TagField| content.tags.iter().find(|r| r.field == field).unwrap();
+        assert_eq!(row(TagField::Title).state, TagRowState::Value);
+        assert_eq!(row(TagField::Title).text, "Song C");
+        assert_eq!(
+            row(TagField::Title).originals,
+            vec![Some("Song C".to_string())],
+            "a single-track readout carries that track's value as its original"
+        );
+        assert_eq!(row(TagField::Genre).state, TagRowState::None);
+        assert_eq!(
+            row(TagField::Genre).text,
+            "(none)",
+            "a tag the track does not carry renders (none), not an em-dash"
+        );
+        assert_eq!(row(TagField::Genre).originals, vec![None]);
+        assert_eq!(row(TagField::Year).state, TagRowState::Value);
+        assert_eq!(row(TagField::Year).text, "2003");
+        let detail = |label: &str| {
+            content
+                .details
+                .iter()
+                .find(|d| d.label == label)
+                .map(|d| d.value.clone())
+        };
+        assert!(detail("Artist").is_none() && detail("Album").is_none());
+        assert!(detail("Genre").is_none());
+        assert!(detail("Plays").is_some() && detail("Last played").is_some());
+        assert!(detail("Path").is_some());
+
+        // Artist and Genre entity readouts carry no tag section; the artist
+        // readout shows the album through the selection's name. A genre the
+        // store no longer carries resolves hidden, never a stale readout.
+        let library = riff_backend::app::state::LibrarySession {
+            browser_path: vec![BrowserSelection::Artist("Mixed".to_string())],
+            ..riff_backend::app::state::LibrarySession::default()
+        };
+        let content = resolve_inspector(&mut views, &library);
+        assert!(content.visible);
+        assert!(
+            content.tags.is_empty(),
+            "an artist readout has no tag section"
+        );
+        let library = riff_backend::app::state::LibrarySession {
+            browser_path: vec![BrowserSelection::Genre("Nonexistent".to_string())],
+            ..riff_backend::app::state::LibrarySession::default()
+        };
+        assert!(
+            !resolve_inspector(&mut views, &library).visible,
+            "a genre with no tracks resolves hidden"
+        );
+
+        // The selected-track-before-entity precedence keeps holding: the
+        // track's rows render, the album never leaks into them.
+        let library = riff_backend::app::state::LibrarySession {
+            library_section: LibrarySection::Albums,
+            browser_path: vec![BrowserSelection::Album {
+                artist: "Mixed".to_string(),
+                title: "Varied".to_string(),
+            }],
+            selected_track: Some(t1.id.clone()),
+            ..riff_backend::app::state::LibrarySession::default()
+        };
+        let content = resolve_inspector(&mut views, &library);
+        assert_eq!(content.kind, InspectorKind::Track);
+        assert_eq!(
+            content
+                .tags
+                .iter()
+                .find(|r| r.field == TagField::Title)
+                .unwrap()
+                .text,
+            "Song A",
+            "the clicked track wins over the album in the drill-down path"
+        );
+    }
+
     // --- Flat-slot mapping (the Albums variant derives its listing from
     // the per-artist album tables) ----------------------------------------------
 
@@ -7630,6 +8773,7 @@ mod browser_column_ui_tests {
                         show_sort: true,
                         total: items.len(),
                         item: &mut fixture_item,
+                        virtualize: false,
                         empty_title: "",
                         empty_hint: "",
                     };
@@ -7745,6 +8889,8 @@ mod browser_column_ui_tests {
                         title: Some("Tomorrow's Harvest"),
                         subtitle: Some("Boards of Canada \u{b7} 2013"),
                         details: &[],
+                        tags: &[],
+                        editor: None,
                         single: false,
                         queue: false,
                     };
@@ -7846,6 +8992,7 @@ mod browser_column_ui_tests {
                                 show_sort: false,
                                 total: items.len(),
                                 item: &mut fixture_item,
+                                virtualize: false,
                                 empty_title: "",
                                 empty_hint: "",
                             };
@@ -7865,6 +9012,8 @@ mod browser_column_ui_tests {
                                 title: Some("Tomorrow's Harvest"),
                                 subtitle: None,
                                 details: &[],
+                                tags: &[],
+                                editor: None,
                                 single: false,
                                 queue: false,
                             };
@@ -8737,11 +9886,10 @@ mod whole_frame_tests {
         use riff_backend::app::state::LibrarySection;
 
         let (mut shell, _transport) = recording_transport_shell(MockLibraryQueryStore {
-            // A single artist whose album table holds both albums: the
-            // Albums root's flat listing derives from the per-artist tables,
-            // and the mock serves `artist_albums` per artist.
-            artists: vec![artist("Boards of Canada", &["geogaddi", "homework"])],
-            albums: vec![
+            // The Albums root's flat listing is the paged flat windowed query
+            // over every album (paginate-browse-columns issue 03): the mock
+            // seeds `paged_albums` in canonical browsing order.
+            paged_albums: vec![
                 album("Geogaddi", "Boards of Canada", 2002),
                 album("Homework", "Boards of Canada", 1997),
             ],
@@ -9148,6 +10296,452 @@ mod whole_frame_tests {
         assert!(
             shell.harness.query_by_label("Artist - Beta").is_none(),
             "non-matching tracks stay out of the flat list under the query"
+        );
+    }
+
+    // --- Browse pagination (paginate-browse-columns 02) --------------------
+    //
+    // The browse columns render one window in hand: only the visible window
+    // reaches the store, and a refetch happens only when a visible row walks
+    // past it. The shared query handle lets a test assert exactly which
+    // windows the pane fetched.
+
+    use riff_backend::app::errors::StoreError;
+    use riff_backend::app::store::SortDirection;
+    use riff_backend::domain::{Album, Artist, GenreCount, SmartPlaylistKind, Track};
+
+    /// [`LibraryQueryStore`] view over one shared [`MockLibraryQueryStore`]
+    /// behind a mutex: the shell takes ownership of the port, the test keeps
+    /// the handle for recordings and post-wire configuration changes.
+    #[derive(Clone)]
+    struct SharedQueries(Arc<Mutex<MockLibraryQueryStore>>);
+
+    impl LibraryQueryStore for SharedQueries {
+        fn get_track(
+            &self,
+            id: &riff_backend::domain::TrackId,
+        ) -> Result<Option<Track>, StoreError> {
+            self.0.lock().unwrap().get_track(id)
+        }
+        fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, StoreError> {
+            self.0.lock().unwrap().tracks_window(offset, limit)
+        }
+        fn track_count(&self) -> Result<usize, StoreError> {
+            self.0.lock().unwrap().track_count()
+        }
+        fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
+            self.0.lock().unwrap().library_counts()
+        }
+        fn all_track_ids(&self) -> Result<Vec<riff_backend::domain::TrackId>, StoreError> {
+            self.0.lock().unwrap().all_track_ids()
+        }
+        fn search_window(
+            &self,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.0.lock().unwrap().search_window(query, offset, limit)
+        }
+        fn search_count(&self, query: &str) -> Result<usize, StoreError> {
+            self.0.lock().unwrap().search_count(query)
+        }
+        fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
+            self.0.lock().unwrap().all_artists()
+        }
+        fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, StoreError> {
+            self.0.lock().unwrap().artist_albums(artist)
+        }
+        fn album_tracks(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .album_tracks(album_artist, album_title)
+        }
+        fn folder_has_audio(&self, folder: &std::path::Path) -> Result<bool, StoreError> {
+            self.0.lock().unwrap().folder_has_audio(folder)
+        }
+        fn folder_has_search_match(
+            &self,
+            folder: &std::path::Path,
+            query: &str,
+        ) -> Result<bool, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .folder_has_search_match(folder, query)
+        }
+        fn track_ids_in_folder_tree(
+            &self,
+            folder: &std::path::Path,
+        ) -> Result<Vec<riff_backend::domain::TrackId>, StoreError> {
+            self.0.lock().unwrap().track_ids_in_folder_tree(folder)
+        }
+        fn tracks_in_folder(&self, folder: &std::path::Path) -> Result<Vec<Track>, StoreError> {
+            self.0.lock().unwrap().tracks_in_folder(folder)
+        }
+        fn folder_track_count(&self, folder: &std::path::Path) -> Result<usize, StoreError> {
+            self.0.lock().unwrap().folder_track_count(folder)
+        }
+        fn last_full_scan(
+            &self,
+        ) -> Result<Option<riff_backend::app::store::FullScanSummary>, StoreError> {
+            self.0.lock().unwrap().last_full_scan()
+        }
+        fn subdirs_with_audio(
+            &self,
+            folder: &std::path::Path,
+        ) -> Result<Vec<std::path::PathBuf>, StoreError> {
+            self.0.lock().unwrap().subdirs_with_audio(folder)
+        }
+        fn smart_playlist(
+            &self,
+            kind: SmartPlaylistKind,
+            limit: usize,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.0.lock().unwrap().smart_playlist(kind, limit)
+        }
+        fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
+            self.0.lock().unwrap().smart_list_counts()
+        }
+        fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
+            self.0.lock().unwrap().genre_counts()
+        }
+        fn artists_in_genre(&self, genre: &str) -> Result<Vec<Artist>, StoreError> {
+            self.0.lock().unwrap().artists_in_genre(genre)
+        }
+        fn artist_albums_in_genre(
+            &self,
+            artist: &str,
+            genre: &str,
+        ) -> Result<Vec<Album>, StoreError> {
+            self.0.lock().unwrap().artist_albums_in_genre(artist, genre)
+        }
+        fn album_tracks_in_genre(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+            genre: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .album_tracks_in_genre(album_artist, album_title, genre)
+        }
+        fn hit_albums(
+            &self,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            self.0.lock().unwrap().hit_albums(query, offset, limit)
+        }
+        fn hit_albums_count(&self, query: &str) -> Result<usize, StoreError> {
+            self.0.lock().unwrap().hit_albums_count(query)
+        }
+        fn hit_artists(
+            &self,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            self.0.lock().unwrap().hit_artists(query, offset, limit)
+        }
+        fn hit_artists_count(&self, query: &str) -> Result<usize, StoreError> {
+            self.0.lock().unwrap().hit_artists_count(query)
+        }
+        fn album_hit_tracks(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+            query: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .album_hit_tracks(album_artist, album_title, query)
+        }
+        fn album_is_name_hit(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+            query: &str,
+        ) -> Result<bool, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .album_is_name_hit(album_artist, album_title, query)
+        }
+        fn hit_albums_in_genre(
+            &self,
+            genre: &str,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .hit_albums_in_genre(genre, query, offset, limit)
+        }
+        fn hit_albums_in_genre_count(&self, genre: &str, query: &str) -> Result<usize, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .hit_albums_in_genre_count(genre, query)
+        }
+        fn hit_artists_in_genre(
+            &self,
+            genre: &str,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .hit_artists_in_genre(genre, query, offset, limit)
+        }
+        fn hit_artists_in_genre_count(
+            &self,
+            genre: &str,
+            query: &str,
+        ) -> Result<usize, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .hit_artists_in_genre_count(genre, query)
+        }
+        fn album_hit_tracks_in_genre(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+            genre: &str,
+            query: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.0.lock().unwrap().album_hit_tracks_in_genre(
+                album_artist,
+                album_title,
+                genre,
+                query,
+            )
+        }
+        fn hit_genre_counts(&self, query: &str) -> Result<Vec<GenreCount>, StoreError> {
+            self.0.lock().unwrap().hit_genre_counts(query)
+        }
+        fn artists_window(
+            &self,
+            direction: SortDirection,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .artists_window(direction, offset, limit)
+        }
+        fn artists_count(&self) -> Result<usize, StoreError> {
+            self.0.lock().unwrap().artists_count()
+        }
+        fn albums_window(
+            &self,
+            direction: SortDirection,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .albums_window(direction, offset, limit)
+        }
+        fn albums_count(&self) -> Result<usize, StoreError> {
+            self.0.lock().unwrap().albums_count()
+        }
+        fn genres_window(
+            &self,
+            direction: SortDirection,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<GenreCount>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .genres_window(direction, offset, limit)
+        }
+        fn genres_count(&self) -> Result<usize, StoreError> {
+            self.0.lock().unwrap().genres_count()
+        }
+        fn artists_in_genre_window(
+            &self,
+            genre: &str,
+            direction: SortDirection,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .artists_in_genre_window(genre, direction, offset, limit)
+        }
+        fn artists_in_genre_count(&self, genre: &str) -> Result<usize, StoreError> {
+            self.0.lock().unwrap().artists_in_genre_count(genre)
+        }
+        fn artist_albums_in_genre_window(
+            &self,
+            artist: &str,
+            genre: &str,
+            direction: SortDirection,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .artist_albums_in_genre_window(artist, genre, direction, offset, limit)
+        }
+        fn artist_albums_in_genre_count(
+            &self,
+            artist: &str,
+            genre: &str,
+        ) -> Result<usize, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .artist_albums_in_genre_count(artist, genre)
+        }
+    }
+
+    /// A shell over a shared query mock, returning the shared handle so the
+    /// test can assert exactly which store reads the pane performed.
+    fn shared_query_shell(
+        mock: MockLibraryQueryStore,
+    ) -> (Shell, Arc<Mutex<MockLibraryQueryStore>>) {
+        let shared = Arc::new(Mutex::new(mock));
+        let settings_calls = Arc::new(Mutex::new(Vec::new()));
+        let shell = build(
+            Box::new(MockTransport::new()),
+            MockScans::default(),
+            Box::new(MockSettingsStore::with_shared_calls(Arc::clone(
+                &settings_calls,
+            ))),
+            settings_calls,
+            Box::new(MockPlaylistStore::default()),
+            Box::new(MockLibraryMutationStore::new()),
+            SessionViews::new(
+                Box::new(SharedQueries(Arc::clone(&shared))),
+                Box::new(MockPlaylistStore::default()),
+                StoreGeneration::new(),
+                StoreGeneration::new(),
+            ),
+        );
+        (shell, shared)
+    }
+
+    /// The Artists column renders one window in hand: the first frame fetches
+    /// only the visible window (never the whole 120-row library), and a
+    /// refetch happens only when a visible row walks past the window in hand.
+    #[test]
+    fn test_artists_column_fetches_only_the_window_in_hand() {
+        use egui_kittest::kittest::Queryable;
+        use riff_backend::app::state::LibrarySection;
+
+        let artists: Vec<riff_backend::domain::Artist> = (0..120)
+            .map(|i| artist(&format!("Artist {i:03}"), &["debut"]))
+            .collect();
+        let (mut shell, shared) = shared_query_shell(MockLibraryQueryStore {
+            artists,
+            ..Default::default()
+        });
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Artists;
+        }
+        shell.harness.step();
+
+        // The pane served the window in hand: no window beyond 0 reached the
+        // store (the whole 120-row list never materializes), whatever the
+        // shell's warm-up frames already cached.
+        let windows = shared.lock().unwrap().window_calls();
+        assert!(
+            windows.iter().all(|(o, l)| *o == 0 && *l == 50),
+            "the first frame fetches only the visible window, never beyond it: {windows:?}"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("Artist 000 (1 album)")
+                .is_some(),
+            "the first window's rows render"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("Artist 099 (1 album)")
+                .is_none(),
+            "rows beyond the window in hand never materialize on first view"
+        );
+
+        // Scrolling a visible row down walks it past the window in hand: the
+        // pane refetches exactly the next window and renders its rows. Each
+        // AccessKit scroll step re-queries a row still in the rendered tree
+        // (rows cull as they leave the viewport) until a row of the next
+        // window becomes visible.
+        let target = "Artist 060 (1 album)";
+        let probes = [
+            "Artist 000 (1 album)",
+            "Artist 004 (1 album)",
+            "Artist 008 (1 album)",
+            "Artist 012 (1 album)",
+            "Artist 016 (1 album)",
+            "Artist 020 (1 album)",
+            "Artist 024 (1 album)",
+            "Artist 028 (1 album)",
+            "Artist 032 (1 album)",
+            "Artist 036 (1 album)",
+            "Artist 040 (1 album)",
+            "Artist 044 (1 album)",
+            "Artist 048 (1 album)",
+            "Artist 052 (1 album)",
+            "Artist 056 (1 album)",
+        ];
+        let mut guard = 0;
+        while shell.harness.query_by_label(target).is_none() && guard < 80 {
+            let row = probes
+                .iter()
+                .find_map(|label| shell.harness.query_by_label(label))
+                .expect("a rendered artist row to scroll");
+            row.scroll_down();
+            shell.harness.step();
+            guard += 1;
+        }
+        assert!(
+            guard < 80,
+            "scrolling must reach the next window within the step budget"
+        );
+
+        // Sanity: the scroll moved — the first row is culled from the tree.
+        assert!(
+            shell
+                .harness
+                .query_by_label("Artist 000 (1 album)")
+                .is_none(),
+            "scrolling must cull the first row from the rendered tree"
+        );
+        let windows = shared.lock().unwrap().window_calls();
+        assert!(
+            windows.contains(&(50, 50)),
+            "scrolling past the window in hand refetches exactly the next window: {windows:?}"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("Artist 060 (1 album)")
+                .is_some(),
+            "the refetched window's rows render after scrolling"
         );
     }
 }

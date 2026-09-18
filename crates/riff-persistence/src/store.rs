@@ -507,6 +507,19 @@ pub struct LibraryCounts {
     pub genres: usize,
 }
 
+/// The explicit A–Z / Z–A direction of a store listing read. Paged browse
+/// reads take this so the direction lands in the query's `ORDER BY`: page
+/// offsets stay aligned when the sort reverses, and `Descending` is exact
+/// descending SQL order rather than an in-memory reversal of an ascending
+/// copy (paginate-browse-columns spec, user story 15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SortDirection {
+    /// A–Z: the list's canonical ascending order.
+    Ascending,
+    /// Z–A: the exact reversed order, applied in SQL.
+    Descending,
+}
+
 /// Port for reading the Library collection section of the Application Store.
 ///
 /// Flat-list and search reads are bounded windows (ADR 0003): callers fetch
@@ -786,6 +799,92 @@ pub trait LibraryQueryStore {
     /// like [`Self::genre_counts`] — a hit track tagged `"Rock; Jazz"`
     /// counts once per entry.
     fn hit_genre_counts(&self, query: &str) -> Result<Vec<GenreCount>, StoreError>;
+
+    // --- Paged browse reads (paginate-browse-columns) ----------------------
+    //
+    // The browse columns (Artists, Albums, Genres) and the genre drill-downs
+    // serve bounded windows with authoritative totals exactly like the flat
+    // and hit listings (ADR 0003). Each windowed read takes the list's
+    // explicit [`SortDirection`] so the A–Z / Z–A toggle lands in the SQL
+    // `ORDER BY` — page offsets stay aligned when the sort reverses, and
+    // descending is exact descending SQL order, not an in-memory reversal.
+
+    /// One bounded window of artists, name-ascending (byte-wise) or
+    /// name-descending per `direction`, each artist carrying its album keys
+    /// in canonical browsing order — year descending with missing years
+    /// last, then title ascending.
+    fn artists_window(
+        &self,
+        direction: SortDirection,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Artist>, StoreError>;
+
+    /// Total number of artists (for the Artists root projection).
+    fn artists_count(&self) -> Result<usize, StoreError>;
+
+    /// One bounded window over every album in the flat browsing order
+    /// (album artist ascending, then year descending with missing years
+    /// last, then title ascending) — or its exact reversal per `direction` —
+    /// each album carrying its full track ids in album-track order.
+    fn albums_window(
+        &self,
+        direction: SortDirection,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Album>, StoreError>;
+
+    /// Total number of albums (for the Albums root projection).
+    fn albums_count(&self) -> Result<usize, StoreError>;
+
+    /// One bounded window of genre entries, name-ascending or
+    /// name-descending per `direction`, each carrying its per-track count
+    /// aggregated exactly like [`Self::genre_counts`] (semicolon-separated
+    /// segments count once per entry).
+    fn genres_window(
+        &self,
+        direction: SortDirection,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<GenreCount>, StoreError>;
+
+    /// Total number of genre entries (for the Genres root projection).
+    fn genres_count(&self) -> Result<usize, StoreError>;
+
+    /// One bounded window of artists having at least one Track with `genre`,
+    /// name-ascending or name-descending per `direction`, each with only the
+    /// album keys of albums holding at least one matching track, in
+    /// canonical browsing order. Matching follows [`Self::artists_in_genre`]
+    /// (semicolon-separated entries). Unknown genres yield an empty `Vec`.
+    fn artists_in_genre_window(
+        &self,
+        genre: &str,
+        direction: SortDirection,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Artist>, StoreError>;
+
+    /// Total number of artists within `genre` for
+    /// [`Self::artists_in_genre_window`] semantics.
+    fn artists_in_genre_count(&self, genre: &str) -> Result<usize, StoreError>;
+
+    /// One bounded window of one artist's albums holding at least one Track
+    /// with `genre`, in canonical browsing order or its exact reversal per
+    /// `direction`, each carrying only its matching track ids in album-track
+    /// order. Matching follows [`Self::artists_in_genre`]. Unknown artists or
+    /// genres yield an empty `Vec`.
+    fn artist_albums_in_genre_window(
+        &self,
+        artist: &str,
+        genre: &str,
+        direction: SortDirection,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Album>, StoreError>;
+
+    /// Total number of albums within `artist` and `genre` for
+    /// [`Self::artist_albums_in_genre_window`] semantics.
+    fn artist_albums_in_genre_count(&self, artist: &str, genre: &str) -> Result<usize, StoreError>;
 }
 
 /// Notification the `Application Store` emits (best-effort) over a

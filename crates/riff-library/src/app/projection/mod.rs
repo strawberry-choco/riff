@@ -24,6 +24,7 @@ mod playlists;
 mod queue;
 mod smart;
 mod track_list;
+mod windowed_list;
 
 pub use browsing::BrowsingProjection;
 pub use counts::CountsProjection;
@@ -35,3 +36,4 @@ pub use playlists::{PlaylistEntryRow, PlaylistProjection, PlaylistView};
 pub use queue::PlaybackQueue;
 pub use smart::SmartPlaylistsProjection;
 pub use track_list::{ProjectionKey, TrackListProjection, WINDOW_SIZE};
+pub use windowed_list::{BrowseList, BrowseProjectionKey, WindowedListProjection};

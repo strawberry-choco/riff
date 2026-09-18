@@ -626,6 +626,78 @@ mod tests {
         fn hit_genre_counts(&self, _query: &str) -> Result<Vec<GenreCount>, StoreError> {
             Ok(Vec::new())
         }
+
+        fn artists_window(
+            &self,
+            _direction: crate::app::store::SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn artists_count(&self) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn albums_window(
+            &self,
+            _direction: crate::app::store::SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn albums_count(&self) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn genres_window(
+            &self,
+            _direction: crate::app::store::SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<Vec<GenreCount>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn genres_count(&self) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn artists_in_genre_window(
+            &self,
+            _genre: &str,
+            _direction: crate::app::store::SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn artists_in_genre_count(&self, _genre: &str) -> Result<usize, StoreError> {
+            Ok(0)
+        }
+
+        fn artist_albums_in_genre_window(
+            &self,
+            _artist: &str,
+            _genre: &str,
+            _direction: crate::app::store::SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn artist_albums_in_genre_count(
+            &self,
+            _artist: &str,
+            _genre: &str,
+        ) -> Result<usize, StoreError> {
+            Ok(0)
+        }
     }
 
     struct MockMutations;

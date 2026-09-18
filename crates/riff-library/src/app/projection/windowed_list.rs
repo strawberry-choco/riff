@@ -1,25 +1,58 @@
-//! The query-keyed hit-listing Session Projection (ADR 0002): bounded
-//! windows over the entity hit reads, keyed by the query text so a keystroke
-//! retarget drops stale rows even at an unchanged generation.
+//! The generic bounded-window list projection the browse columns are built
+//! on (paginate-browse-columns issue 01): one windowed-list projection in
+//! the library read seam, parameterized by a per-list query-signature key
+//! that includes the sort direction. It is the flat list's proven semantics
+//! (ADR 0003) made generic — bounded window map, FIFO window cap, stamped
+//! authoritative total, generation-keyed staleness, and query-keyed
+//! retargeting — so every paged browse read parities with All Tracks by
+//! sharing the same [`WINDOW_SIZE`] and [`MAX_CACHED_WINDOWS`].
 
-use crate::app::store::{GenerationCache, StoreError, StoreGeneration};
+use super::track_list::{MAX_CACHED_WINDOWS, WINDOW_SIZE};
+use crate::app::store::{GenerationCache, SortDirection, StoreError, StoreGeneration};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-/// The one window size and window-cache bound the seam's bounded-window
-/// projections share (both defined by the flat list's projection, so every
-/// paged read parities with All Tracks by construction).
-use super::track_list::{MAX_CACHED_WINDOWS, WINDOW_SIZE};
+/// Which bounded browse listing a projection serves, plus the sort
+/// direction that scopes it. Every mutable element of the read — the list
+/// identity *and* the A–Z / Z–A direction — is part of the query
+/// signature, so retargeting either (switching genre, reversing the sort)
+/// drops cached rows even at an unchanged generation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BrowseList {
+    /// The Artists root list (issue 02).
+    Artists,
+    /// The Albums root list (issue 03).
+    Albums,
+    /// The Genres root list (issue 04).
+    Genres,
+    /// The artists-within-a-genre drill list (issue 05); the payload is the
+    /// genre.
+    ArtistsInGenre(String),
+    /// The albums-within-an-artist-and-genre drill list (issue 05).
+    ArtistAlbumsInGenre { artist: String, genre: String },
+}
 
-/// The cached payload of one query-keyed hit listing: the authoritative
-/// total plus the bounded window map.
-struct HitListRows<T> {
+/// The per-list query-signature key of one paged browse read: which listing
+/// plus the direction, so retargeting either drops cached rows even at an
+/// unchanged generation (paginate-browse-columns issue 01, checkbox 2).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BrowseProjectionKey {
+    /// The browse listing this projection serves.
+    pub list: BrowseList,
+    /// The A–Z / Z–A direction baked into the query signature: reversing
+    /// the sort retargets the projection exactly like switching lists.
+    pub direction: SortDirection,
+}
+
+/// The cached payload of one query signature: the authoritative total plus
+/// the bounded window map.
+struct WindowedListRows<T> {
     total: usize,
     windows: HashMap<usize, Arc<[T]>>,
     eviction_order: VecDeque<usize>,
 }
 
-impl<T> Default for HitListRows<T> {
+impl<T> Default for WindowedListRows<T> {
     fn default() -> Self {
         Self {
             total: 0,
@@ -29,45 +62,52 @@ impl<T> Default for HitListRows<T> {
     }
 }
 
-/// Bounded window cache for one query-keyed entity hit listing (hit albums,
-/// hit artists).
+/// Generic bounded window cache for one store list read, keyed by a
+/// caller-shaped query signature `K` (e.g. the browse list plus sort
+/// direction) over rows `T`.
 ///
 /// Per frame the UI declares which window offsets are visible
 /// ([`Self::request_window`]) and calls [`Self::refresh`] with a loader
-/// bound to the query port. A query change ([`Self::set_key`]) drops cached
-/// rows even at an unchanged generation — retargeting the view on every
-/// keystroke without waiting for a store mutation. Fresh windows serve from
-/// cache; a bumped generation refetches every declared window.
-pub struct HitListProjection<T> {
-    /// The query text this projection serves. A change invalidates cached
-    /// rows even at an unchanged generation.
-    key: String,
-    /// Generation-keyed slot holding [`HitListRows`]; keyed by the query
-    /// text so a retarget drops rows even at an unchanged generation.
-    cache: GenerationCache<String, HitListRows<T>>,
+/// bound to the store port. A key change ([`Self::set_key`]) drops cached
+/// rows even at an unchanged generation; a bumped generation refetches
+/// every declared window. Fresh windows serve from cache; invalidated
+/// frames refetch.
+pub struct WindowedListProjection<K, T> {
+    /// The query signature this projection serves. A change invalidates
+    /// cached rows even at an unchanged generation.
+    key: K,
+    /// Generation-keyed slot holding [`WindowedListRows`]; keyed by the
+    /// query signature so a retarget drops rows even at an unchanged
+    /// generation.
+    cache: GenerationCache<K, WindowedListRows<T>>,
     /// Window offsets declared since the last successful refresh.
     pending_requests: Vec<usize>,
 }
 
-impl<T> HitListProjection<T> {
+impl<K, T> WindowedListProjection<K, T>
+where
+    K: Clone + PartialEq,
+{
+    /// Start a projection observing `generation`, serving `key`'s list.
     #[must_use]
-    pub fn new(generation: StoreGeneration) -> Self {
+    pub fn new(generation: StoreGeneration, key: K) -> Self {
         Self {
-            key: String::new(),
+            key,
             cache: GenerationCache::new(generation),
             pending_requests: Vec::new(),
         }
     }
 
-    /// The query text this projection serves.
+    /// The query signature this projection serves.
     #[must_use]
-    pub fn key(&self) -> &str {
+    pub fn key(&self) -> &K {
         &self.key
     }
 
-    /// Retarget the projection to another query. Cached rows from the old
-    /// query are dropped even at an unchanged generation.
-    pub fn set_key(&mut self, key: String) {
+    /// Retarget the projection to another query signature (e.g. the sort
+    /// direction flipped or a genre switch). Cached rows from the old
+    /// signature are dropped even at an unchanged generation.
+    pub fn set_key(&mut self, key: K) {
         if key != self.key {
             self.key = key;
             self.cache.invalidate();
@@ -100,8 +140,9 @@ impl<T> HitListProjection<T> {
             .cloned()
     }
 
-    /// Whether cached rows reflect the session counter's current epoch.
-    /// Projections reload when this returns `false`.
+    /// Whether cached rows reflect the session counter's current epoch AND
+    /// the current query signature. Projections reload when this returns
+    /// `false`.
     #[must_use]
     pub fn is_fresh(&self) -> bool {
         let epoch = self.cache.observe();
@@ -150,7 +191,7 @@ impl<T> HitListProjection<T> {
         }
 
         let mut rows = if stale {
-            HitListRows::default()
+            WindowedListRows::default()
         } else {
             self.cache.take_value().expect("holds implied an entry")
         };
@@ -168,7 +209,7 @@ impl<T> HitListProjection<T> {
 
     /// Keep at most [`MAX_CACHED_WINDOWS`] windows, evicting the oldest
     /// inserted ones first.
-    fn enforce_bound(rows: &mut HitListRows<T>) {
+    fn enforce_bound(rows: &mut WindowedListRows<T>) {
         while rows.windows.len() > MAX_CACHED_WINDOWS {
             let oldest = rows
                 .eviction_order

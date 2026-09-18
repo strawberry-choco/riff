@@ -1105,6 +1105,7 @@ mod tests {
             show_sort: true,
             total: items.len(),
             item: &mut provider,
+            virtualize: false,
             empty_title: "",
             empty_hint: "",
         };
@@ -1210,6 +1211,108 @@ mod tests {
         ]
     }
 
+    /// The tag-section rows the golden compositions render: an album
+    /// readout's aggregation — shared values, a `(different)` Title and Track
+    /// Number, a `(none)` Genre — and a single-track readout's per-track
+    /// values with a `(none)` for the track's missing genre (Issue 01).
+    /// Artist/Genre readouts pass an empty slice. The `(different)`/`(none)`
+    /// text colors come from the palette's warning / muted tokens (never
+    /// hardcoded colors).
+    fn golden_tag_rows(single: bool) -> Vec<riff_gui::ui::selection::TagRow> {
+        use riff_gui::ui::selection::{TagField, TagRow, TagRowState};
+
+        let row = |field: TagField,
+                   state: TagRowState,
+                   text: &str,
+                   originals: Vec<Option<String>>| TagRow {
+            field,
+            state,
+            text: text.to_string(),
+            originals,
+        };
+        if single {
+            vec![
+                row(
+                    TagField::Title,
+                    TagRowState::Value,
+                    "Beware the Friendly Stranger",
+                    vec![Some("Beware the Friendly Stranger".into())],
+                ),
+                row(
+                    TagField::Artist,
+                    TagRowState::Value,
+                    "Boards of Canada",
+                    vec![Some("Boards of Canada".into())],
+                ),
+                row(
+                    TagField::Album,
+                    TagRowState::Value,
+                    "Geogaddi",
+                    vec![Some("Geogaddi".into())],
+                ),
+                row(
+                    TagField::AlbumArtist,
+                    TagRowState::Value,
+                    "Boards of Canada",
+                    vec![Some("Boards of Canada".into())],
+                ),
+                row(TagField::Genre, TagRowState::None, "(none)", vec![None]),
+                row(
+                    TagField::Year,
+                    TagRowState::Value,
+                    "2002",
+                    vec![Some("2002".into())],
+                ),
+                row(
+                    TagField::TrackNumber,
+                    TagRowState::Value,
+                    "1",
+                    vec![Some("1".into())],
+                ),
+            ]
+        } else {
+            vec![
+                row(
+                    TagField::Title,
+                    TagRowState::Different,
+                    "(different)",
+                    vec![Some("Nothing Is Real".into()); 8],
+                ),
+                row(
+                    TagField::Artist,
+                    TagRowState::Value,
+                    "Boards of Canada",
+                    vec![Some("Boards of Canada".into()); 8],
+                ),
+                row(
+                    TagField::Album,
+                    TagRowState::Value,
+                    "Tomorrow's Harvest",
+                    vec![Some("Tomorrow's Harvest".into()); 8],
+                ),
+                row(
+                    TagField::AlbumArtist,
+                    TagRowState::Value,
+                    "Boards of Canada",
+                    vec![Some("Boards of Canada".into()); 8],
+                ),
+                row(TagField::Genre, TagRowState::None, "(none)", vec![None; 8]),
+                row(
+                    TagField::Year,
+                    TagRowState::Value,
+                    "2013",
+                    vec![Some("2013".into()); 8],
+                ),
+                row(
+                    TagField::TrackNumber,
+                    TagRowState::Different,
+                    "(different)",
+                    vec![Some("1".into()); 8],
+                ),
+            ]
+        }
+    }
+
     /// The selection panel (the inspector's content widget — the collapsible
     /// panel the elastic stage shows as its rightmost column while a
     /// selection exists) at the inspector's width
@@ -1223,7 +1326,7 @@ mod tests {
     fn selection_panel_dark_matches_golden_baseline() {
         snapshot(
             "selection_panel_dark",
-            egui::vec2(riff_gui::ui::theme::INSPECTOR_WIDTH, 640.0),
+            egui::vec2(riff_gui::ui::theme::INSPECTOR_WIDTH, 1000.0),
             Palette::dark(),
             draw_selection_panel,
         );
@@ -1254,11 +1357,14 @@ mod tests {
                 value: "8 \u{b7} 27:16".to_string(),
             },
         ];
+        let tags = golden_tag_rows(false);
         let panel = SelectionPanel {
             art: None,
             title: Some("Tomorrow's Harvest"),
             subtitle: Some("Boards of Canada \u{b7} 2013"),
             details: &details,
+            tags: &tags,
+            editor: None,
             single: false,
             // The golden pins the panel's single Play album action — the
             // rendering the original fixed pane used; the inspector's Play /
@@ -1413,6 +1519,7 @@ mod tests {
                     show_sort: true,
                     total: items.len(),
                     item: &mut provider,
+                    virtualize: false,
                     empty_title: "",
                     empty_hint: "",
                 };
@@ -1454,6 +1561,7 @@ mod tests {
                     show_sort: false,
                     total: items.len(),
                     item: &mut provider,
+                    virtualize: false,
                     empty_title: "",
                     empty_hint: "",
                 };
@@ -1541,6 +1649,7 @@ mod tests {
                     show_sort: true,
                     total: items.len(),
                     item: &mut provider,
+                    virtualize: false,
                     empty_title: "",
                     empty_hint: "",
                 };
@@ -1573,6 +1682,7 @@ mod tests {
                     show_sort: false,
                     total: items.len(),
                     item: &mut provider,
+                    virtualize: false,
                     empty_title: "",
                     empty_hint: "",
                 };
@@ -1605,6 +1715,7 @@ mod tests {
                     show_sort: false,
                     total: items.len(),
                     item: &mut provider,
+                    virtualize: false,
                     empty_title: "",
                     empty_hint: "",
                 };
@@ -1686,7 +1797,7 @@ mod tests {
     fn elastic_all_tracks_inspector_dark_matches_golden_baseline() {
         snapshot(
             "elastic_all_tracks_inspector_dark",
-            egui::vec2(900.0, 640.0),
+            egui::vec2(900.0, 1000.0),
             Palette::dark(),
             draw_elastic_all_tracks_inspector,
         );
@@ -1705,11 +1816,15 @@ mod tests {
         let mut cache = IconCache::new();
         let widths = stage_column_widths(ui, 1, true);
 
+        // The inspector's tag section adds seven rows, so the stage grows to a
+        // thousand pixels of height.
+        let stage_height = 1000.0;
+
         horizontal_stage(
             ui,
             &widths,
             Some(riff_gui::ui::theme::INSPECTOR_WIDTH),
-            640.0,
+            stage_height,
             |ui, column| {
                 // Column 1 — the flat Tracks listing: track rows keyed by
                 // `TrackId`, one selected and one now-playing (idle).
@@ -1751,6 +1866,7 @@ mod tests {
                         show_sort: false,
                         total: items.len(),
                         item: &mut provider,
+                        virtualize: false,
                         empty_title: "",
                         empty_hint: "",
                     };
@@ -1774,6 +1890,7 @@ mod tests {
                         value: "8 \u{b7} 27:16".to_string(),
                     },
                 ];
+                let tags = golden_tag_rows(false);
                 egui::Frame::new()
                     .inner_margin(egui::Margin::same(16))
                     .show(ui, |ui| {
@@ -1782,6 +1899,8 @@ mod tests {
                             title: Some("Tomorrow's Harvest"),
                             subtitle: Some("Boards of Canada \u{b7} 2013"),
                             details: &details,
+                            tags: &tags,
+                            editor: None,
                             single: false,
                             queue: true,
                         };
@@ -2142,6 +2261,7 @@ mod tests {
             show_sort: true,
             total: items.len(),
             item: &mut provider,
+            virtualize: false,
             empty_title: "",
             empty_hint: "",
         };
@@ -2322,46 +2442,6 @@ mod tests {
 
     // --- P1-7: the hand-built modals and prompts -------------------------------
 
-    /// The Edit Tags modal: the track path, one labeled field per editable
-    /// tag, and Save / Cancel. Writing only ever happens on an explicit Save,
-    /// so rendering it is side-effect free.
-    #[test]
-    fn tag_edit_modal_dark_matches_golden_baseline() {
-        snapshot(
-            "tag_edit_modal_dark",
-            egui::vec2(560.0, 460.0),
-            Palette::dark(),
-            draw_tag_edit_modal,
-        );
-    }
-
-    fn draw_tag_edit_modal(ui: &mut egui::Ui, palette: &Palette) {
-        use riff_backend::domain::TrackId;
-        use riff_gui::ui::app::TagEditState;
-        use riff_gui::ui::theme::SURFACE_BG;
-
-        // Full-canvas background (determinism rule).
-        let background = ui.ctx().layer_painter(egui::LayerId::background());
-        background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
-
-        let mut state = TagEditState {
-            track_id: TrackId("f:\\music\\geogaddi\\01.flac".to_string()),
-            path: std::path::PathBuf::from(
-                "F:\\music\\Boards of Canada\\Geogaddi\\01. Ready Let's Go.flac",
-            ),
-            title: "Ready Let's Go".to_string(),
-            artist: "Boards of Canada".to_string(),
-            album: "Geogaddi".to_string(),
-            album_artist: "Boards of Canada".to_string(),
-            genre: "Electronic".to_string(),
-            year: "2002".to_string(),
-            track_number: "1".to_string(),
-            error: None,
-            saving: false,
-        };
-        let _ = riff_gui::ui::prompts::tag_edit_modal(ui.ctx(), palette, &mut state);
-    }
-
     /// The destructive Clear Library confirmation: the warning line in the
     /// palette's warning token over Confirm / Cancel.
     #[test]
@@ -2443,6 +2523,7 @@ mod tests {
             show_sort: true,
             total: 0,
             item: &mut provider,
+            virtualize: false,
             empty_title: "No artists yet",
             empty_hint: "Add a music folder to fill your library.",
         };
@@ -2575,6 +2656,7 @@ mod tests {
                     show_sort: true,
                     total: items.len(),
                     item: &mut provider,
+                    virtualize: false,
                     empty_title: "",
                     empty_hint: "",
                 };
@@ -2661,6 +2743,7 @@ mod tests {
                     show_sort: false,
                     total: items.len(),
                     item: &mut provider,
+                    virtualize: false,
                     empty_title: "",
                     empty_hint: "",
                 };
@@ -2751,7 +2834,7 @@ mod tests {
     fn elastic_inspector_track_dark_matches_golden_baseline() {
         snapshot(
             "elastic_inspector_track_dark",
-            egui::vec2(900.0, 640.0),
+            egui::vec2(900.0, 1000.0),
             Palette::dark(),
             |ui, palette| draw_elastic_inspector(ui, palette, InspectorVariant::Track),
         );
@@ -2770,11 +2853,21 @@ mod tests {
         let mut cache = IconCache::new();
         let widths = stage_column_widths(ui, 1, true);
 
+        // The Track readout carries the seven-row tag section, so the stage
+        // gets a thousand pixels of height; the short Artist/Genre entity
+        // readouts stay at the panel's original six-forty (their goldens
+        // must not move).
+        let stage_height = if kind == InspectorVariant::Track {
+            1000.0
+        } else {
+            640.0
+        };
+
         horizontal_stage(
             ui,
             &widths,
             Some(riff_gui::ui::theme::INSPECTOR_WIDTH),
-            640.0,
+            stage_height,
             |ui, column| {
                 if column == 0 {
                     let rows = [
@@ -2806,6 +2899,7 @@ mod tests {
                         show_sort: false,
                         total: items.len(),
                         item: &mut provider,
+                        virtualize: false,
                         empty_title: "",
                         empty_hint: "",
                     };
@@ -2863,6 +2957,11 @@ mod tests {
                         true,
                     ),
                 };
+                // Artist and Genre entity readouts carry no tag section.
+                let tags = match kind {
+                    InspectorVariant::Artist | InspectorVariant::Genre => Vec::new(),
+                    _ => golden_tag_rows(single),
+                };
                 egui::Frame::new()
                     .inner_margin(egui::Margin::same(16))
                     .show(ui, |ui| {
@@ -2871,6 +2970,8 @@ mod tests {
                             title: Some(title),
                             subtitle: Some(subtitle),
                             details: &details,
+                            tags: &tags,
+                            editor: None,
                             single,
                             queue: true,
                         };
@@ -3269,7 +3370,7 @@ mod tests {
     fn selection_panel_art_dark_matches_golden_baseline() {
         snapshot(
             "selection_panel_art_dark",
-            egui::vec2(riff_gui::ui::theme::INSPECTOR_WIDTH, 640.0),
+            egui::vec2(riff_gui::ui::theme::INSPECTOR_WIDTH, 1000.0),
             Palette::dark(),
             |ui, palette| draw_selection_panel_with(ui, palette, true, false),
         );
@@ -3280,7 +3381,7 @@ mod tests {
     fn selection_panel_single_dark_matches_golden_baseline() {
         snapshot(
             "selection_panel_single_dark",
-            egui::vec2(riff_gui::ui::theme::INSPECTOR_WIDTH, 640.0),
+            egui::vec2(riff_gui::ui::theme::INSPECTOR_WIDTH, 1000.0),
             Palette::dark(),
             |ui, palette| draw_selection_panel_with(ui, palette, false, true),
         );
@@ -3366,11 +3467,14 @@ mod tests {
         } else {
             "Boards of Canada · 2013"
         };
+        let tags = golden_tag_rows(single);
         let panel = SelectionPanel {
             art: art.as_ref(),
             title: Some(title),
             subtitle: Some(subtitle),
             details: &details,
+            tags: &tags,
+            editor: None,
             single,
             queue: false,
         };
@@ -3596,6 +3700,7 @@ mod tests {
             show_sort: false,
             total: items.len(),
             item: &mut provider,
+            virtualize: false,
             empty_title: "No matching albums",
             empty_hint: "Nothing in your library matches 'geo'.",
         };
@@ -3631,6 +3736,7 @@ mod tests {
             show_sort: false,
             total: 0,
             item: &mut provider,
+            virtualize: false,
             empty_title: "No matching albums",
             empty_hint: "Nothing in your library matches 'zzz'.",
         };

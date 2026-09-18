@@ -10,7 +10,12 @@ pub const WINDOW_SIZE: usize = 50;
 
 /// Cached-window bound before FIFO eviction kicks in. Generous for one
 /// screen of scrolling; keeps memory bounded regardless of library size.
-const MAX_CACHED_WINDOWS: usize = 8;
+///
+/// The ONE house for the window-cache bound (beside [`WINDOW_SIZE`], the
+/// flat list's home): every bounded-window projection in the seam shares
+/// these two constants, so later paged browse reads parity with All Tracks
+/// by construction (paginate-browse-columns spec, user story 14).
+pub(crate) const MAX_CACHED_WINDOWS: usize = 8;
 
 /// The query signature a projection was created (or retargeted) for. A key
 /// change invalidates cached rows even at an unchanged generation.

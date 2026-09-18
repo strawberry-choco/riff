@@ -13,6 +13,8 @@
 //! applies them. Rendered headlessly in `tests/ui_tests.rs`.
 
 use eframe::egui;
+use riff_backend::domain::TrackId;
+use std::path::PathBuf;
 
 use super::icons::IconCache;
 use super::theme::Palette;
@@ -29,6 +31,14 @@ pub enum SelectionAction {
     /// the end of the playback queue, following the context menu's per-track
     /// queue precedent.
     Queue,
+    /// Save the open inline editor's draft through the Tag Edits seam
+    /// (the Save button or Enter).
+    SaveTagEdit,
+    /// Discard the open inline editor's draft (the Cancel button or Escape).
+    CancelTagEdit,
+    /// Enter edit mode for the current readout: the user clicked a tag row
+    /// and the app opens the per-selection draft.
+    StartEdit,
 }
 
 /// One item of the details list: the display values the app resolved from
@@ -37,6 +47,226 @@ pub enum SelectionAction {
 pub struct SelectionDetail {
     pub label: String,
     pub value: String,
+}
+
+/// The seven editable tag fields, in the modal's stable order (Duration is
+/// derived data and is never a tag row).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagField {
+    Title,
+    Artist,
+    Album,
+    AlbumArtist,
+    Genre,
+    Year,
+    TrackNumber,
+}
+
+impl TagField {
+    /// The seven fields in the stable modal order the tag section renders.
+    pub const ALL: [TagField; 7] = [
+        TagField::Title,
+        TagField::Artist,
+        TagField::Album,
+        TagField::AlbumArtist,
+        TagField::Genre,
+        TagField::Year,
+        TagField::TrackNumber,
+    ];
+
+    /// The row's display label, as the modal named the field.
+    pub fn label(self) -> &'static str {
+        match self {
+            TagField::Title => "Title",
+            TagField::Artist => "Artist",
+            TagField::Album => "Album",
+            TagField::AlbumArtist => "Album Artist",
+            TagField::Genre => "Genre",
+            TagField::Year => "Year",
+            TagField::TrackNumber => "Track Number",
+        }
+    }
+
+    /// The field's index into draft buffers and the model's stable order.
+    pub const fn index(self) -> usize {
+        match self {
+            TagField::Title => 0,
+            TagField::Artist => 1,
+            TagField::Album => 2,
+            TagField::AlbumArtist => 3,
+            TagField::Genre => 4,
+            TagField::Year => 5,
+            TagField::TrackNumber => 6,
+        }
+    }
+}
+
+/// The resolved display state of one tag row: the shared value, the orange
+/// `(different)` state, or the grey `(none)` state (a tag no track carries).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagRowState {
+    Value,
+    Different,
+    None,
+}
+
+/// One resolved tag row: the stable field, the display state (which drives
+/// the color: ink / warning / muted ink — never a hardcoded color), the
+/// resolved display text (`<value>` / `(different)` / `(none)`), and the
+/// per-track original values in track order — the diff bases the inline
+/// editor's draft owns (tickets 02/03), never fabricated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagRow {
+    pub field: TagField,
+    pub state: TagRowState,
+    pub text: String,
+    pub originals: Vec<Option<String>>,
+}
+
+/// The inline editor's per-selection draft: the seven field buffers the
+/// widget renders, prefilled from the resolved readout, plus the selection's
+/// identity and the save-flow states the app layer owns. The widget edits
+/// the buffers and reports Save/Cancel; the app layer owns the draft's
+/// lifecycle — created when editing starts, discarded when the selection
+/// leaves, submitted through the Tag Edits seam (ADR 0006).
+#[derive(Debug, Clone)]
+pub struct TagDraft {
+    /// Which readout the draft belongs to: a Track's per-track draft, or an
+    /// Album's dirty-only batch draft.
+    pub kind: DraftKind,
+    /// The single Track being edited (a [`DraftKind::Track`] draft); also the
+    /// staleness key for track drafts.
+    pub track_id: TrackId,
+    /// The track's file path — the durable-change target (Track drafts).
+    pub path: PathBuf,
+    /// The album's track targets, one `(track, path)` per Track in store
+    /// order (a [`DraftKind::Album`] draft). Empty for a Track draft.
+    pub album_tracks: Vec<(TrackId, PathBuf)>,
+    /// The seven field buffers in [`TagField::ALL`] order.
+    pub fields: [String; 7],
+    /// The readout value each buffer started from — an untouched buffer is
+    /// exactly its original, so nothing is ever "dirty by construction" (a
+    /// `(different)` / `(none)` row opens as an empty buffer against an
+    /// empty original).
+    pub originals: [String; 7],
+    /// The inline failure reason: a failed save keeps the draft open with it.
+    pub error: Option<String>,
+    /// Whether a save is in flight: Save is disabled and the bar spins.
+    pub saving: bool,
+    /// The Album batch's outcome tallies while its requests are outstanding
+    /// (None for Track drafts and idled Album drafts): the Save bar spins
+    /// until [`BatchStatus::done`] and then shows the summary line.
+    pub batch: Option<BatchStatus>,
+    /// One-shot focus request for the first tag field (Issue 04's entry
+    /// point): the "Edit Tags" context item opens the draft and asks the
+    /// next rendered frame to focus Title; consumed the frame it lands.
+    pub focus_first: bool,
+}
+
+/// Which readout the inline editor's draft belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftKind {
+    /// A single Track readout: one durable change on Save.
+    Track,
+    /// An Album readout: saving submits one request per album Track, with
+    /// only the dirty fields present — N durable changes (ticket 03).
+    Album,
+}
+
+/// The Album batch's outcome tallies, resolved from polled outcomes in
+/// submission order (the worker serializes the batch). The Save bar spins
+/// while requests are outstanding and renders the summary line on completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchStatus {
+    pub total: usize,
+    pub saved: usize,
+    pub failed: usize,
+    /// The first failure reason, kept only for the orange summary line.
+    pub first_failure: Option<String>,
+}
+
+impl BatchStatus {
+    /// Whether every request of the batch has landed.
+    pub fn done(&self) -> bool {
+        self.saved + self.failed == self.total
+    }
+
+    /// The completion line: "Saved N of M tracks", or "Saved N of M tracks —
+    /// k failed: <reason>" for a partial failure. `None` while requests are
+    /// outstanding.
+    pub fn summary(&self) -> Option<String> {
+        if self.done() {
+            let base = format!("Saved {} of {} tracks", self.saved, self.total);
+            Some(match (&self.first_failure, self.failed) {
+                (Some(reason), _) => format!("{base} — {} failed: {reason}", self.failed),
+                (None, 1..) => format!("{base} — {} failed", self.failed),
+                (None, 0) => base,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl TagDraft {
+    /// Open the editor for a track readout from its resolved rows: every
+    /// buffer prefills from the displayed value, grey `(none)` rows opening
+    /// empty (an unseen value can never be saved as if it were typed).
+    pub fn for_track(track_id: TrackId, path: PathBuf, tags: &[TagRow]) -> Self {
+        let mut draft = Self::blank(tags);
+        draft.kind = DraftKind::Track;
+        draft.track_id = track_id;
+        draft.path = path;
+        draft
+    }
+
+    /// Open the editor for an album readout from its resolved rows: the
+    /// buffers prefill from the displayed aggregation (grey `(different)` /
+    /// `(none)` rows open empty), and the per-track targets carry the album's
+    /// tracks in store order for the dirty-only batch.
+    pub fn for_album(album_tracks: Vec<(TrackId, PathBuf)>, tags: &[TagRow]) -> Self {
+        let mut draft = Self::blank(tags);
+        draft.kind = DraftKind::Album;
+        draft.album_tracks = album_tracks;
+        draft
+    }
+
+    /// Both constructors' shared shape: the prefilled buffers against
+    /// identical originals, target-less and idle.
+    fn blank(tags: &[TagRow]) -> Self {
+        let mut fields = vec![String::new(); TagField::ALL.len()];
+        let mut originals = vec![String::new(); TagField::ALL.len()];
+        for row in tags {
+            if row.state == TagRowState::Value {
+                fields[row.field.index()].clone_from(&row.text);
+                originals[row.field.index()].clone_from(&row.text);
+            }
+        }
+        Self {
+            kind: DraftKind::Track,
+            track_id: TrackId(String::new()),
+            path: PathBuf::new(),
+            album_tracks: Vec::new(),
+            fields: fields.try_into().expect("the seven tag fields stay seven"),
+            originals: originals
+                .try_into()
+                .expect("the seven tag fields stay seven"),
+            error: None,
+            saving: false,
+            batch: None,
+            focus_first: false,
+        }
+    }
+
+    /// Whether the field's buffer differs from the value the readout showed.
+    pub fn is_dirty(&self, field: TagField) -> bool {
+        self.fields[field.index()] != self.originals[field.index()]
+    }
+
+    /// Whether any of the seven buffers differ from the readout.
+    pub fn any_dirty(&self) -> bool {
+        TagField::ALL.iter().any(|&field| self.is_dirty(field))
+    }
 }
 
 /// One frame of the selection panel: what to render and how. `title: None`
@@ -51,6 +281,17 @@ pub struct SelectionPanel<'a> {
     pub subtitle: Option<&'a str>,
     /// The details list rows, resolved by the caller.
     pub details: &'a [SelectionDetail],
+    /// The tag section rows (Title → Track Number), resolved by the caller —
+    /// empty for readouts without tag rows (Artist / Genre entities). The
+    /// widget renders the resolved text and state only; it never re-derives
+    /// aggregation.
+    pub tags: &'a [TagRow],
+    /// The open inline editor's draft when the readout is being edited.
+    /// Present, the seven tag rows render as in-place fields with the Save
+    /// bar; `None` renders the read-only tag section. The widget edits the
+    /// draft's buffers and reports the bar's actions — the app layer owns the
+    /// draft and the request.
+    pub editor: Option<&'a mut TagDraft>,
     /// Whether the readout is a single track (a track row single-clicked in
     /// any listing). The primary action then reads **Play** and plays just
     /// that one track; entity readouts read **Play album** and start the
@@ -98,6 +339,13 @@ pub fn show_selection_panel(
             action_row(ui, cache, palette, panel.single, actions);
         } else {
             primary_play_button(ui, cache, palette, panel.single, actions);
+        }
+        ui.add_space(12.0);
+        let mut panel = panel;
+        if let Some(editor) = panel.editor.as_deref_mut() {
+            editor_section(ui, palette, editor, actions);
+        } else if !panel.tags.is_empty() {
+            tag_section(ui, palette, panel.tags, actions);
         }
         ui.add_space(12.0);
         details_list(ui, palette, panel.details);
@@ -274,6 +522,144 @@ fn action_button(
 
 /// Vertical gap between two detail items.
 const DETAILS_ITEM_GAP: f32 = 8.0;
+
+/// The inline editor: one in-place field per tag field, prefilled from the
+/// draft's buffers, an inline error line, and the Save bar (Save, spinner
+/// while a write is in flight, Cancel). The widget edits the buffers and
+/// reports the bar's actions; it never submits — the app layer owns the
+/// request. **Enter** saves and **Esc** discards (REQ-UI-007); Tab moves
+/// between fields through egui's default focus traversal.
+fn editor_section(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    draft: &mut TagDraft,
+    actions: &mut Vec<SelectionAction>,
+) {
+    ui.label(
+        egui::RichText::new("TAGS")
+            .text_style(egui::TextStyle::Small)
+            .color(palette.ink_3),
+    );
+    ui.add_space(4.0);
+    for field in TagField::ALL {
+        ui.label(
+            egui::RichText::new(field.label())
+                .text_style(egui::TextStyle::Small)
+                .color(palette.ink_3),
+        );
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut draft.fields[field.index()])
+                .desired_width(ui.available_width()),
+        );
+        // The entry point (Issue 04) focuses the editor's first tag field;
+        // the request lands on the next frame, so this one-shot flag is
+        // consumed here rather than carrying state across frames.
+        if field == TagField::Title && draft.focus_first {
+            response.request_focus();
+            draft.focus_first = false;
+        }
+        ui.add_space(DETAILS_ITEM_GAP);
+    }
+
+    if let Some(error) = &draft.error {
+        ui.colored_label(palette.error, error);
+        ui.add_space(DETAILS_ITEM_GAP);
+    }
+
+    // A batch save is in flight while any of its requests is outstanding
+    // (ticket 03): the bar spins and Save stays disabled. An Album draft
+    // with nothing dirty submits nothing, so its Save stays disabled too.
+    let batch_in_flight = draft.batch.as_ref().is_some_and(|b| !b.done());
+    let save_enabled =
+        !(draft.saving || batch_in_flight || draft.kind == DraftKind::Album && !draft.any_dirty());
+
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(save_enabled, egui::Button::new("Save"))
+            .clicked()
+        {
+            actions.push(SelectionAction::SaveTagEdit);
+        }
+        if ui.button("Cancel").clicked() {
+            actions.push(SelectionAction::CancelTagEdit);
+        }
+        if draft.saving || batch_in_flight {
+            ui.spinner();
+        }
+    });
+
+    // The batch's outcome line lands under the bar once every request has:
+    // "Saved N of M tracks", or "... — k failed: <reason>" in the warning
+    // token. The widget formats the resolved tallies only.
+    if let Some(batch) = &draft.batch
+        && let Some(summary) = batch.summary()
+    {
+        let color = if batch.failed > 0 {
+            palette.warning
+        } else {
+            palette.ink
+        };
+        ui.label(
+            egui::RichText::new(summary)
+                .text_style(egui::TextStyle::Small)
+                .color(color),
+        );
+    }
+
+    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        actions.push(SelectionAction::SaveTagEdit);
+    }
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        actions.push(SelectionAction::CancelTagEdit);
+    }
+}
+
+/// The tag section: one row per tag field — the field label on its own
+/// muted line, the resolved display text beside it colored by state: ink for
+/// a shared value, the warning token for `(different)`, muted ink for
+/// `(none)`. Mirrors the details grid's label-above-value rhythm so the
+/// readout stays scannable. The value is clickable: it reports
+/// [`SelectionAction::StartEdit`] so the app opens the per-selection draft
+/// (the same entry the retired modal's context item leads to).
+fn tag_section(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    tags: &[TagRow],
+    actions: &mut Vec<SelectionAction>,
+) {
+    ui.label(
+        egui::RichText::new("TAGS")
+            .text_style(egui::TextStyle::Small)
+            .color(palette.ink_3),
+    );
+    ui.add_space(4.0);
+    for row in tags {
+        let color = match row.state {
+            TagRowState::Value => palette.ink,
+            TagRowState::Different => palette.warning,
+            TagRowState::None => palette.ink_3,
+        };
+        ui.label(
+            egui::RichText::new(row.field.label())
+                .text_style(egui::TextStyle::Small)
+                .color(palette.ink_3),
+        );
+        if ui
+            .add(
+                egui::Label::new(
+                    egui::RichText::new(&row.text)
+                        .text_style(egui::TextStyle::Small)
+                        .color(color),
+                )
+                .sense(egui::Sense::click()),
+            )
+            .clicked()
+        {
+            actions.push(SelectionAction::StartEdit);
+        }
+        ui.add_space(DETAILS_ITEM_GAP);
+    }
+}
 
 /// The details list: one muted label on its own line, its value on the next,
 /// both hugging the panel's left edge; the gap between items keeps the

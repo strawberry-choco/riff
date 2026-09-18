@@ -1574,6 +1574,56 @@ mod tests {
         assert_eq!(drag_region_action(false, false), None);
     }
 
+    // --- Tray "Show Window" -> viewport commands (REQ-SI-001) -------------------
+    //
+    // The tray runs on its own thread and cannot call into the egui context, so
+    // it sends a visibility request and the frame loop turns it into viewport
+    // commands. That mapping is the whole contract, and it is where the reported
+    // failure lived: the loop gated the show on `viewport().visible()`, which
+    // egui derives only from minimized/occluded state — state egui-winit never
+    // fills in — so a window hidden to the tray kept reporting as visible and
+    // the request was dropped. The commands must follow the *request*.
+
+    #[test]
+    fn test_a_tray_show_request_carries_the_window_back_to_the_foreground() {
+        use riff_gui::ui::window_visibility::{VisibilityMessage, viewport_commands_for};
+
+        // The regression itself: the request is honored whatever the loop
+        // believes about the current state, and focus comes last because the OS
+        // will not focus a window it has not un-hidden yet.
+        assert_eq!(
+            viewport_commands_for(VisibilityMessage(true), false),
+            vec![
+                egui::ViewportCommand::Visible(true),
+                egui::ViewportCommand::Focus,
+            ]
+        );
+        // A window the user minimized (titlebar button) is a separate OS state:
+        // un-hiding alone leaves it iconified, so the show restores it too.
+        assert_eq!(
+            viewport_commands_for(VisibilityMessage(true), true),
+            vec![
+                egui::ViewportCommand::Visible(true),
+                egui::ViewportCommand::Minimized(false),
+                egui::ViewportCommand::Focus,
+            ]
+        );
+        // The hide request is the command the close-to-tray path issues itself.
+        assert_eq!(
+            viewport_commands_for(VisibilityMessage(false), false),
+            vec![egui::ViewportCommand::Visible(false)]
+        );
+    }
+
+    #[test]
+    fn test_egui_reports_no_visibility_so_the_app_keeps_its_own_record() {
+        // Documents the trap the test above guards: `ViewportInfo::visible` is
+        // derived from minimized/occluded state only, and egui-winit reports
+        // neither for a hidden window. If upstream starts reporting real
+        // visibility, this fails and the app-side record can be retired.
+        assert_eq!(egui::ViewportInfo::default().visible(), None);
+    }
+
     // --- Hardcoded-color sweep (Issue 03) --------------------------------------
     //
     // ADR 0004: every color in view code must come from the active palette's
@@ -7641,6 +7691,74 @@ mod browser_column_ui_tests {
             harness.state(),
             &vec![SelectionAction::PlayAlbum],
             "the Play album button reports its action"
+        );
+    }
+
+    /// The inspector column has a fixed height and clips its content, so a
+    /// readout taller than the column must scroll — otherwise its tail is
+    /// unreachable. Pinned at the widget seam: the details grid below the
+    /// fold is scrolled into view, and the `SELECTION` header stays put.
+    #[test]
+    fn test_selection_panel_scrolls_the_readout_under_its_pinned_header() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::selection::{
+            SelectionAction, SelectionDetail, SelectionPanel, show_selection_panel,
+        };
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let details: Vec<SelectionDetail> = (0..12)
+            .map(|i| SelectionDetail {
+                label: format!("Detail {i}"),
+                value: format!("Value {i}"),
+            })
+            .collect();
+        // Short enough that the 200 px art block plus the title and action
+        // rows leave the details grid below the fold.
+        const VIEW_H: f32 = 320.0;
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, VIEW_H))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<SelectionAction>| {
+                    let panel = SelectionPanel {
+                        art: None,
+                        title: Some("Tomorrow's Harvest"),
+                        subtitle: Some("Boards of Canada \u{b7} 2013"),
+                        details: &details,
+                        tags: &[],
+                        editor: None,
+                        single: false,
+                        queue: false,
+                    };
+                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        let header_y = harness.get_by_label("SELECTION").rect().top();
+        let tail = harness.get_by_label("Detail 11").rect();
+        assert!(
+            tail.top() > VIEW_H,
+            "the last detail row starts below the fold: {tail:?} in a {VIEW_H} px column"
+        );
+
+        harness.get_by_label("Detail 11").scroll_to_me();
+        harness.run();
+        let scrolled = harness.get_by_label("Detail 11").rect();
+        assert!(
+            scrolled.top() < tail.top(),
+            "the readout scrolls toward its tail: {tail:?} → {scrolled:?}"
+        );
+        assert!(
+            scrolled.bottom() <= VIEW_H,
+            "scrolling brings the last detail row into the column: {scrolled:?}"
+        );
+        assert!(
+            harness.get_by_label("SELECTION").rect().top() == header_y,
+            "the header stays pinned while the readout scrolls"
         );
     }
 

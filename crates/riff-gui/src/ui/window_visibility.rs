@@ -12,6 +12,7 @@
 //! frontend-only channels (the other being the tray quit flag).
 
 use crossbeam_channel::Receiver;
+use eframe::egui;
 
 /// A frontend-local request from the tray (or the close-to-tray path in
 /// [`RiffApp`]) to flip the window's visible state.
@@ -44,6 +45,33 @@ impl VisibilityListener {
 
 /// Frontend-local message type for the visibility channel.
 pub type VisibilityTx = crossbeam_channel::Sender<VisibilityMessage>;
+
+/// The viewport commands that carry out one visibility request.
+///
+/// `Visible` and `Minimized` are independent OS states, so showing a window
+/// the user minimized (titlebar button, Win+D) needs both: `Visible(true)` on
+/// an iconified window leaves it iconified. `Focus` comes last because the OS
+/// will not hand focus to a window it has just un-hidden.
+///
+/// This is a pure mapping rather than an inline sequence because the app cannot
+/// check what state the window is in first: eframe never reports real
+/// visibility back to it, so the request is the only signal a change is due.
+pub fn viewport_commands_for(
+    request: VisibilityMessage,
+    minimized: bool,
+) -> Vec<egui::ViewportCommand> {
+    match request {
+        VisibilityMessage(true) => {
+            let mut commands = vec![egui::ViewportCommand::Visible(true)];
+            if minimized {
+                commands.push(egui::ViewportCommand::Minimized(false));
+            }
+            commands.push(egui::ViewportCommand::Focus);
+            commands
+        }
+        VisibilityMessage(false) => vec![egui::ViewportCommand::Visible(false)],
+    }
+}
 
 /// Build the frontend-local visibility channel pair. Callers pass the sender
 /// to the tray thread (over `create_tray`) and keep the [`VisibilityListener`]

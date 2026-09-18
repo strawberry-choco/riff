@@ -315,6 +315,11 @@ const ART_H: f32 = 200.0;
 const PLAY_H: f32 = 32.0;
 
 /// Render the selection panel and append observed [`SelectionAction`]s.
+///
+/// The header stays pinned and the readout under it scrolls: the body is
+/// routinely taller than the inspector column (the 200 px art block plus
+/// seven tag rows and the details grid), and the stage's column clips rather
+/// than grows, which would leave the tail of the metadata unreachable.
 pub fn show_selection_panel(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -323,6 +328,22 @@ pub fn show_selection_panel(
     actions: &mut Vec<SelectionAction>,
 ) {
     header(ui, palette, panel.title.is_some());
+    egui::ScrollArea::vertical()
+        .id_salt("selection_panel_readout")
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            readout(ui, cache, palette, panel, actions);
+        });
+}
+
+/// The panel's body: art, title line, quick actions, tag section, details.
+fn readout(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    mut panel: SelectionPanel<'_>,
+    actions: &mut Vec<SelectionAction>,
+) {
     if let Some(title) = panel.title {
         album_art(ui, palette, panel.art);
         ui.add_space(12.0);
@@ -341,7 +362,6 @@ pub fn show_selection_panel(
             primary_play_button(ui, cache, palette, panel.single, actions);
         }
         ui.add_space(12.0);
-        let mut panel = panel;
         if let Some(editor) = panel.editor.as_deref_mut() {
             editor_section(ui, palette, editor, actions);
         } else if !panel.tags.is_empty() {

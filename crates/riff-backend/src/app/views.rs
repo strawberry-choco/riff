@@ -15,24 +15,34 @@
 //! Projections only stamp their loaded generation after a successful fetch,
 //! so the next call retries automatically.
 
+use crate::app::projection::{BrowseList, BrowseProjectionKey};
 use crate::app::projection::{
     BrowsingProjection, FolderProjection, GenreProjection, HitListProjection, HitProjection,
     PlaylistProjection, ProjectionKey, SmartPlaylistsProjection, TrackListProjection, WINDOW_SIZE,
+    WindowedListProjection,
 };
 // The playlist view shapes are part of the seam's public surface: the
 // projection module itself is private, so UI code imports these from here.
 use crate::app::errors::StoreError;
 pub use crate::app::projection::{PlaylistEntryRow, PlaylistView};
-use crate::app::store::{LibraryCounts, LibraryQueryStore, PlaylistStore, StoreGeneration};
+use crate::app::store::{
+    LibraryCounts, LibraryQueryStore, PlaylistStore, SortDirection, StoreGeneration,
+};
 use crate::domain::{
     Album, Artist, GenreCount, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
 };
 use riff_library::app::projection::CountsProjection;
 use riff_playback::app::projection::PlaybackProjection;
 use riff_playback::domain::PlaybackQueue;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
+
+/// Max entries in [`SessionViews`]'s per-artist first-track LRU. The cache
+/// exists to keep the artists root's cover thumbnails off per-row projection
+/// work; a cap keeps it bounded regardless of library size.
+const ARTIST_FIRST_TRACK_CACHE_CAP: usize = 1000;
 
 /// One page of the flat/search track list: the authoritative total plus the
 /// cached rows of one window.
@@ -48,10 +58,11 @@ pub struct TrackListPage {
     pub rows: Arc<[Track]>,
 }
 
-/// One page of a query-keyed entity hit listing (hit albums or hit artists):
-/// the authoritative total plus the cached rows of one window. The query
-/// itself is held inside the seam — callers pass only the current frame's
-/// intent and receive ready-to-render rows.
+/// One page of a query-keyed entity hit listing (hit albums or hit artists)
+/// OR a paged browse listing (the Artists / Albums / Genres columns and the
+/// genre drill-downs): the authoritative total plus the cached rows of one
+/// window. The query itself is held inside the seam — callers pass only the
+/// current frame's intent and receive ready-to-render rows.
 pub struct HitPage<T> {
     /// Total row count for the query as of the latest count read — the value
     /// to size row virtualization with.
@@ -101,12 +112,29 @@ pub struct SessionViews {
     /// keystroke retarget drops stale rows even at an unchanged generation.
     hit_albums: HitListProjection<Album>,
     hit_artists: HitListProjection<Artist>,
+    /// The paged browse projections (paginate-browse-columns): one bounded
+    /// window cache per browse root — Artists, Albums, Genres — plus the two
+    /// genre drill-downs. Each is keyed by its query signature (the listing
+    /// plus the sort direction), so retargeting either drops cached rows
+    /// even at an unchanged generation.
+    artists_pages: WindowedListProjection<BrowseProjectionKey, Artist>,
+    albums_pages: WindowedListProjection<BrowseProjectionKey, Album>,
+    genres_pages: WindowedListProjection<BrowseProjectionKey, GenreCount>,
+    genre_artists_pages: WindowedListProjection<BrowseProjectionKey, Artist>,
+    genre_albums_pages: WindowedListProjection<BrowseProjectionKey, Album>,
     /// The generation-cached scoped hit reads (an album's hit tracks, the
     /// album name-hit boolean, hit albums/artists within a genre, hit-scoped
     /// genre counts): bounded, generation-cached like the browsing/genre
     /// reads, keyed by their full query signature.
     hits: HitProjection,
     browsing: BrowsingProjection,
+    /// Per-artist first-track ids (the artists-root cover thumbnails), LRU
+    /// evicted beyond [`ARTIST_FIRST_TRACK_CACHE_CAP`]. The browsing
+    /// projection already caches per generation; this second layer lets the
+    /// artists root resolve one track per artist without per-row projection
+    /// bookkeeping on every frame.
+    artist_first_track_cache: HashMap<String, TrackId>,
+    artist_first_track_lru: Vec<String>,
     folders: FolderProjection,
     smart_playlists: SmartPlaylistsProjection,
     genres: GenreProjection,
@@ -154,6 +182,44 @@ impl SessionViews {
         let tracks = TrackListProjection::new(generation.clone(), ProjectionKey::Flat);
         let hit_albums = HitListProjection::new(generation.clone());
         let hit_artists = HitListProjection::new(generation.clone());
+        let artists_pages = WindowedListProjection::new(
+            generation.clone(),
+            BrowseProjectionKey {
+                list: BrowseList::Artists,
+                direction: SortDirection::Ascending,
+            },
+        );
+        let albums_pages = WindowedListProjection::new(
+            generation.clone(),
+            BrowseProjectionKey {
+                list: BrowseList::Albums,
+                direction: SortDirection::Ascending,
+            },
+        );
+        let genres_pages = WindowedListProjection::new(
+            generation.clone(),
+            BrowseProjectionKey {
+                list: BrowseList::Genres,
+                direction: SortDirection::Ascending,
+            },
+        );
+        let genre_artists_pages = WindowedListProjection::new(
+            generation.clone(),
+            BrowseProjectionKey {
+                list: BrowseList::ArtistsInGenre(String::new()),
+                direction: SortDirection::Ascending,
+            },
+        );
+        let genre_albums_pages = WindowedListProjection::new(
+            generation.clone(),
+            BrowseProjectionKey {
+                list: BrowseList::ArtistAlbumsInGenre {
+                    artist: String::new(),
+                    genre: String::new(),
+                },
+                direction: SortDirection::Ascending,
+            },
+        );
         let hits = HitProjection::new(generation.clone());
         let browsing = BrowsingProjection::new(generation.clone());
         let folders = FolderProjection::new(generation.clone());
@@ -168,8 +234,15 @@ impl SessionViews {
             tracks,
             hit_albums,
             hit_artists,
+            artists_pages,
+            albums_pages,
+            genres_pages,
+            genre_artists_pages,
+            genre_albums_pages,
             hits,
             browsing,
+            artist_first_track_cache: HashMap::new(),
+            artist_first_track_lru: Vec::new(),
             folders,
             smart_playlists,
             genres,
@@ -509,6 +582,335 @@ impl SessionViews {
             })
     }
 
+    // --- Paged browse reads (paginate-browse-columns) ------------------------
+    //
+    // The browse columns (Artists, Albums, Genres) and the genre drill-downs
+    // render one bounded window in hand exactly like All Tracks: each read
+    // serves the authoritative total, a window-aligned start, and the cached
+    // rows of one window. The sort direction is part of the query signature —
+    // reversing A–Z / Z–A retargets the projection so page offsets stay
+    // aligned when the direction flips (the direction lands in the store's
+    // `ORDER BY`, not an in-memory reversal). On a store error the page
+    // degrades to an empty window with a zero total (a `tracing::warn!`
+    // carries the context) — the UI never sees a `Result`.
+
+    /// One visible window of the Artists root, name-ascending or
+    /// name-descending per `direction`, with the authoritative total — what
+    /// the Artists column renders. `offset` is any row index inside the
+    /// wanted window; it is aligned down to the projection's window size
+    /// internally.
+    pub fn artists_page(&mut self, direction: SortDirection, offset: usize) -> HitPage<Artist> {
+        let key = BrowseProjectionKey {
+            list: BrowseList::Artists,
+            direction,
+        };
+        if self.artists_pages.key() != &key {
+            self.artists_pages.set_key(key);
+        }
+
+        let outer_generation = self.artists_pages.observe();
+        let total = if self.artists_pages.is_fresh() {
+            self.artists_pages.total()
+        } else {
+            self.count_artists()
+        };
+
+        let window_start = offset - (offset % WINDOW_SIZE);
+        self.artists_pages.request_window(window_start);
+
+        let generation = self.artists_pages.observe();
+        let effective_total = if generation == outer_generation {
+            total
+        } else {
+            self.count_artists()
+        };
+
+        if let Err(e) = self.artists_pages.refresh(effective_total, &mut |o, l| {
+            self.queries.artists_window(direction, o, l)
+        }) {
+            tracing::warn!(
+                "Failed to refresh the artists list (direction {direction:?}) from the store: {e}"
+            );
+        }
+
+        HitPage {
+            total: effective_total,
+            start: window_start,
+            rows: self.artists_pages.window(window_start).unwrap_or_default(),
+        }
+    }
+
+    /// The store's total artist count, defaulting to zero on error so the
+    /// paged read degrades without handling errors.
+    fn count_artists(&self) -> usize {
+        match self.queries.artists_count() {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!("Failed to count artists in the store: {e}");
+                0
+            }
+        }
+    }
+
+    /// One visible window of the Albums root over the flat browsing order
+    /// (or its exact reversal per `direction`), with the authoritative total
+    /// — what the Albums column renders. Each album carries its full track
+    /// ids, so the cover thumbnail and detail line need no extra queries.
+    pub fn albums_page(&mut self, direction: SortDirection, offset: usize) -> HitPage<Album> {
+        let key = BrowseProjectionKey {
+            list: BrowseList::Albums,
+            direction,
+        };
+        if self.albums_pages.key() != &key {
+            self.albums_pages.set_key(key);
+        }
+
+        let outer_generation = self.albums_pages.observe();
+        let total = if self.albums_pages.is_fresh() {
+            self.albums_pages.total()
+        } else {
+            self.count_albums()
+        };
+
+        let window_start = offset - (offset % WINDOW_SIZE);
+        self.albums_pages.request_window(window_start);
+
+        let generation = self.albums_pages.observe();
+        let effective_total = if generation == outer_generation {
+            total
+        } else {
+            self.count_albums()
+        };
+
+        if let Err(e) = self.albums_pages.refresh(effective_total, &mut |o, l| {
+            self.queries.albums_window(direction, o, l)
+        }) {
+            tracing::warn!(
+                "Failed to refresh the albums list (direction {direction:?}) from the store: {e}"
+            );
+        }
+
+        HitPage {
+            total: effective_total,
+            start: window_start,
+            rows: self.albums_pages.window(window_start).unwrap_or_default(),
+        }
+    }
+
+    /// The store's total album count, defaulting to zero on error so the
+    /// paged read degrades without handling errors.
+    fn count_albums(&self) -> usize {
+        match self.queries.albums_count() {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!("Failed to count albums in the store: {e}");
+                0
+            }
+        }
+    }
+
+    /// One visible window of the Genres root, name-ascending or
+    /// name-descending per `direction`, with the authoritative total — what
+    /// the Genres column renders. Each row carries its per-track count.
+    pub fn genres_page(&mut self, direction: SortDirection, offset: usize) -> HitPage<GenreCount> {
+        let key = BrowseProjectionKey {
+            list: BrowseList::Genres,
+            direction,
+        };
+        if self.genres_pages.key() != &key {
+            self.genres_pages.set_key(key);
+        }
+
+        let outer_generation = self.genres_pages.observe();
+        let total = if self.genres_pages.is_fresh() {
+            self.genres_pages.total()
+        } else {
+            self.count_genres()
+        };
+
+        let window_start = offset - (offset % WINDOW_SIZE);
+        self.genres_pages.request_window(window_start);
+
+        let generation = self.genres_pages.observe();
+        let effective_total = if generation == outer_generation {
+            total
+        } else {
+            self.count_genres()
+        };
+
+        if let Err(e) = self.genres_pages.refresh(effective_total, &mut |o, l| {
+            self.queries.genres_window(direction, o, l)
+        }) {
+            tracing::warn!(
+                "Failed to refresh the genres list (direction {direction:?}) from the store: {e}"
+            );
+        }
+
+        HitPage {
+            total: effective_total,
+            start: window_start,
+            rows: self.genres_pages.window(window_start).unwrap_or_default(),
+        }
+    }
+
+    /// The store's total genre count, defaulting to zero on error so the
+    /// paged read degrades without handling errors.
+    fn count_genres(&self) -> usize {
+        match self.queries.genres_count() {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!("Failed to count genres in the store: {e}");
+                0
+            }
+        }
+    }
+
+    /// One visible window of a genre's artists, name-ascending or
+    /// name-descending per `direction`, with the authoritative total — what
+    /// the genre drill's artists column renders. A genre change retargets
+    /// the projection, dropping stale rows even at an unchanged generation.
+    pub fn artists_in_genre_page(
+        &mut self,
+        genre: &str,
+        direction: SortDirection,
+        offset: usize,
+    ) -> HitPage<Artist> {
+        let key = BrowseProjectionKey {
+            list: BrowseList::ArtistsInGenre(genre.to_string()),
+            direction,
+        };
+        if self.genre_artists_pages.key() != &key {
+            self.genre_artists_pages.set_key(key);
+        }
+
+        let outer_generation = self.genre_artists_pages.observe();
+        let total = if self.genre_artists_pages.is_fresh() {
+            self.genre_artists_pages.total()
+        } else {
+            self.count_artists_in_genre(genre)
+        };
+
+        let window_start = offset - (offset % WINDOW_SIZE);
+        self.genre_artists_pages.request_window(window_start);
+
+        let generation = self.genre_artists_pages.observe();
+        let effective_total = if generation == outer_generation {
+            total
+        } else {
+            self.count_artists_in_genre(genre)
+        };
+
+        if let Err(e) = self
+            .genre_artists_pages
+            .refresh(effective_total, &mut |o, l| {
+                self.queries.artists_in_genre_window(genre, direction, o, l)
+            })
+        {
+            tracing::warn!(
+                "Failed to refresh the artists list in genre {genre:?} (direction {direction:?}) \
+                 from the store: {e}"
+            );
+        }
+
+        HitPage {
+            total: effective_total,
+            start: window_start,
+            rows: self
+                .genre_artists_pages
+                .window(window_start)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The store's total artist count within `genre`, defaulting to zero on
+    /// error so the paged read degrades without handling errors.
+    fn count_artists_in_genre(&self, genre: &str) -> usize {
+        match self.queries.artists_in_genre_count(genre) {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!("Failed to count artists in genre {genre:?} in the store: {e}");
+                0
+            }
+        }
+    }
+
+    /// One visible window of an artist's albums within `genre`, in canonical
+    /// browsing order or its exact reversal per `direction`, with the
+    /// authoritative total — what the genre drill's album column renders. A
+    /// genre or artist change retargets the projection, dropping stale rows
+    /// even at an unchanged generation.
+    pub fn artist_albums_in_genre_page(
+        &mut self,
+        artist: &str,
+        genre: &str,
+        direction: SortDirection,
+        offset: usize,
+    ) -> HitPage<Album> {
+        let key = BrowseProjectionKey {
+            list: BrowseList::ArtistAlbumsInGenre {
+                artist: artist.to_string(),
+                genre: genre.to_string(),
+            },
+            direction,
+        };
+        if self.genre_albums_pages.key() != &key {
+            self.genre_albums_pages.set_key(key);
+        }
+
+        let outer_generation = self.genre_albums_pages.observe();
+        let total = if self.genre_albums_pages.is_fresh() {
+            self.genre_albums_pages.total()
+        } else {
+            self.count_artist_albums_in_genre(artist, genre)
+        };
+
+        let window_start = offset - (offset % WINDOW_SIZE);
+        self.genre_albums_pages.request_window(window_start);
+
+        let generation = self.genre_albums_pages.observe();
+        let effective_total = if generation == outer_generation {
+            total
+        } else {
+            self.count_artist_albums_in_genre(artist, genre)
+        };
+
+        if let Err(e) = self
+            .genre_albums_pages
+            .refresh(effective_total, &mut |o, l| {
+                self.queries
+                    .artist_albums_in_genre_window(artist, genre, direction, o, l)
+            })
+        {
+            tracing::warn!(
+                "Failed to refresh the albums list for {artist} in genre {genre:?} \
+                 (direction {direction:?}) from the store: {e}"
+            );
+        }
+
+        HitPage {
+            total: effective_total,
+            start: window_start,
+            rows: self
+                .genre_albums_pages
+                .window(window_start)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The store's total album count within `artist` and `genre`, defaulting
+    /// to zero on error so the paged read degrades without handling errors.
+    fn count_artist_albums_in_genre(&self, artist: &str, genre: &str) -> usize {
+        match self.queries.artist_albums_in_genre_count(artist, genre) {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to count albums for {artist} in genre {genre:?} in the store: {e}"
+                );
+                0
+            }
+        }
+    }
+
     // --- Artist / album browsing ---------------------------------------------
 
     /// Every artist name-ascending, cached per generation. Fresh frames
@@ -544,6 +946,37 @@ impl SessionViews {
                 tracing::warn!("Failed to load tracks for {album_title}: {e}");
                 Arc::from([])
             })
+    }
+
+    /// The first track (by file path) of an artist's first album, used for
+    /// the artists-root cover thumbnails. Served from a bounded per-artist
+    /// LRU so the artists root never repeats the projection reads per row
+    /// (the root renders the whole visible window through this seam).
+    pub fn artist_first_track(&mut self, artist: &str) -> Option<TrackId> {
+        if let Some(track_id) = self.artist_first_track_cache.get(artist) {
+            let _ = crate::app::lru_insert(
+                &mut self.artist_first_track_lru,
+                artist.to_string(),
+                ARTIST_FIRST_TRACK_CACHE_CAP,
+            );
+            return Some(track_id.clone());
+        }
+        let albums = self.artist_albums(artist);
+        let first_album = albums.first()?;
+        let first_track = self
+            .album_tracks(&first_album.artist, &first_album.title)
+            .first()
+            .map(|track| track.id.clone())?;
+        for old in crate::app::lru_insert(
+            &mut self.artist_first_track_lru,
+            artist.to_string(),
+            ARTIST_FIRST_TRACK_CACHE_CAP,
+        ) {
+            self.artist_first_track_cache.remove(&old);
+        }
+        self.artist_first_track_cache
+            .insert(artist.to_string(), first_track.clone());
+        Some(first_track)
     }
 
     // --- Genre read model -------------------------------------------------------

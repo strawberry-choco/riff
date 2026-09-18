@@ -2368,6 +2368,381 @@ fn test_all_artists_lists_names_az_with_canonical_album_keys() {
     );
 }
 
+// --- Paged browse reads (paginate-browse-columns 02-05) -------------------
+//
+// Bounded windows + authoritative totals pinned against real SQLite: window
+// slicing, exact descending order per direction, and count semantics.
+
+#[test]
+fn test_artists_window_slices_name_order_both_directions_and_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    // Fresh store: no artists.
+    assert_eq!(store.artists_count().expect("count works"), 0);
+    assert!(
+        store
+            .artists_window(SortDirection::Ascending, 0, 10)
+            .expect("empty window works")
+            .is_empty(),
+        "a fresh store has no artist rows"
+    );
+
+    // Insertion deliberately out of alphabetical order, with years chosen so
+    // canonical album order differs from first-added order.
+    store
+        .apply_scan_batch(&[
+            browsing_track("f:\\z\\1.mp3", "Z1", "Zulu", "Late", Some(1), Some(2020)),
+            browsing_track("f:\\a\\2.mp3", "A2", "Alpha", "Early", Some(2), Some(1980)),
+            browsing_track("f:\\a\\1.mp3", "A1", "Alpha", "Dated", Some(1), None),
+            browsing_track("f:\\a\\3.mp3", "A3", "Alpha", "Early", Some(3), Some(1980)),
+            browsing_track("f:\\b\\1.mp3", "B1", "Bravo", "Debut", Some(1), Some(1995)),
+        ])
+        .expect("batch applies");
+
+    assert_eq!(store.artists_count().expect("count works"), 3);
+
+    let asc_first = store
+        .artists_window(SortDirection::Ascending, 0, 2)
+        .expect("window works");
+    assert_eq!(
+        asc_first
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Alpha", "Bravo"],
+        "the window is name-ascending byte-wise"
+    );
+    // The windowed artist rows keep their canonical album keys, exactly like
+    // `all_artists` (newest-first, missing year last, then title).
+    assert_eq!(
+        asc_first[0].albums,
+        vec!["Alpha - Early".to_string(), "Alpha - Dated".to_string()],
+        "an artist's embedded keys arrive canonical in a window too"
+    );
+
+    let asc_tail = store
+        .artists_window(SortDirection::Ascending, 2, 10)
+        .expect("window works");
+    assert_eq!(
+        asc_tail.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+        ["Zulu"],
+        "the tail window returns the remaining rows"
+    );
+
+    let desc_first = store
+        .artists_window(SortDirection::Descending, 0, 2)
+        .expect("window works");
+    assert_eq!(
+        desc_first
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Zulu", "Bravo"],
+        "descending is exact descending SQL order, not an in-memory reversal"
+    );
+
+    let desc_tail = store
+        .artists_window(SortDirection::Descending, 2, 10)
+        .expect("window works");
+    assert_eq!(
+        desc_tail
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Alpha"],
+        "the descending tail completes the reversed list"
+    );
+
+    // Windows past the end yield empty slices in both directions.
+    assert!(
+        store
+            .artists_window(SortDirection::Ascending, 100, 5)
+            .expect("past-end window works")
+            .is_empty(),
+        "offset past the end yields an empty window"
+    );
+    assert!(
+        store
+            .artists_window(SortDirection::Descending, 100, 5)
+            .expect("past-end window works")
+            .is_empty(),
+        "descending past the end yields an empty window"
+    );
+}
+
+#[test]
+fn test_albums_window_flat_order_slices_and_counts_in_both_directions() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    store
+        .apply_scan_batch(&[
+            browsing_track("f:\\z\\1.mp3", "Z1", "Zulu", "Late", Some(1), Some(2020)),
+            browsing_track("f:\\a\\1.mp3", "A1", "Alpha", "Old", Some(1), Some(1980)),
+            browsing_track("f:\\a\\2.mp3", "A2", "Alpha", "New", Some(2), Some(2021)),
+            browsing_track("f:\\b\\1.mp3", "B1", "Bravo", "Debut", Some(1), None),
+        ])
+        .expect("batch applies");
+
+    assert_eq!(store.albums_count().expect("count works"), 4);
+
+    // Canonical flat browsing order: album artist ascending, year descending
+    // with missing years last, then title ascending.
+    let asc = store
+        .albums_window(SortDirection::Ascending, 0, 10)
+        .expect("window works");
+    assert_eq!(
+        asc.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
+        ["New", "Old", "Debut", "Late"],
+        "flat browsing order: artist asc, year desc, missing year last, title asc"
+    );
+
+    // Each album carries its full track ids in album-track order.
+    let new = asc.iter().find(|a| a.title == "New").unwrap();
+    assert_eq!(new.tracks, vec![TrackId("f:\\a\\2.mp3".to_string())]);
+    assert_eq!(new.artist, "Alpha");
+
+    let desc = store
+        .albums_window(SortDirection::Descending, 0, 10)
+        .expect("window works");
+    assert_eq!(
+        desc.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
+        ["Late", "Debut", "Old", "New"],
+        "descending is the exact reversal of the flat browsing order"
+    );
+
+    // Slicing a window mid-list keeps the order alignment.
+    let asc_mid = store
+        .albums_window(SortDirection::Ascending, 1, 2)
+        .expect("window works");
+    assert_eq!(
+        asc_mid.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
+        ["Old", "Debut"],
+        "offset/limit slicing lands on the canonical order"
+    );
+}
+
+#[test]
+fn test_genres_window_counts_and_orders_both_directions() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    // A track tagged "Rock; Jazz" counts once per entry; byte-wise
+    // case-sensitivity means "rock" is a distinct entry from "Rock".
+    store
+        .apply_scan_batch(&[
+            genre_track("f:\\1.mp3", "One", "Duo", "A", Some("Rock; Jazz")),
+            genre_track("f:\\2.mp3", "Two", "Duo", "A", Some("Ambient")),
+            genre_track("f:\\3.mp3", "Three", "Duo", "A", Some("rock")),
+        ])
+        .expect("batch applies");
+
+    assert_eq!(store.genres_count().expect("count works"), 4);
+
+    let asc = store
+        .genres_window(SortDirection::Ascending, 0, 10)
+        .expect("window works");
+    assert_eq!(
+        asc.iter().map(|g| g.genre.as_str()).collect::<Vec<_>>(),
+        ["Ambient", "Jazz", "Rock", "rock"],
+        "name-ascending byte-wise, semicolon segments split per entry"
+    );
+    assert_eq!(
+        asc[2].tracks, 1,
+        "the case-sensitive Rock entry holds one track"
+    );
+
+    let desc = store
+        .genres_window(SortDirection::Descending, 0, 10)
+        .expect("window works");
+    assert_eq!(
+        desc.iter().map(|g| g.genre.as_str()).collect::<Vec<_>>(),
+        ["rock", "Rock", "Jazz", "Ambient"],
+        "descending is the exact reversed genre order"
+    );
+}
+
+#[test]
+fn test_artists_in_genre_window_and_count_are_scoped_and_ordered() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    store
+        .apply_scan_batch(&[
+            genre_track("f:\\r1.mp3", "R1", "Rockers", "RB", Some("Rock")),
+            genre_track("f:\\r2.mp3", "R2", "Rockers", "RB2", Some("Rock")),
+            genre_track("f:\\a1.mp3", "A1", "Ambientia", "AB", Some("Ambient")),
+            genre_track("f:\\m1.mp3", "M1", "Rockers", "RB", Some("Metal")),
+            // A Pop artist with no Rock track: Pops never appears for Rock.
+            genre_track("f:\\p1.mp3", "P1", "Pops", "PB", Some("Pop")),
+        ])
+        .expect("batch applies");
+
+    assert_eq!(
+        store.artists_in_genre_count("Rock").expect("count works"),
+        1,
+        "the count is distinct artists — Rockers is one artist with two Rock albums"
+    );
+    assert_eq!(
+        store
+            .artists_in_genre_count("Ambient")
+            .expect("count works"),
+        1
+    );
+    assert_eq!(
+        store
+            .artists_in_genre_count("Nothing")
+            .expect("count works"),
+        0,
+        "unknown genres count zero"
+    );
+
+    let asc = store
+        .artists_in_genre_window("Rock", SortDirection::Ascending, 0, 10)
+        .expect("window works");
+    assert_eq!(
+        asc.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+        ["Rockers"],
+        "only artists with a Rock album appear, name-ascending"
+    );
+    assert_eq!(
+        asc[0].albums,
+        vec!["Rockers - RB".to_string(), "Rockers - RB2".to_string()],
+        "the artist carries its genre-scoped album keys in canonical order"
+    );
+
+    let desc = store
+        .artists_in_genre_window("Rock", SortDirection::Descending, 0, 10)
+        .expect("window works");
+    assert_eq!(
+        desc.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+        ["Rockers"],
+        "descending keeps the same scoped set in reversed order"
+    );
+}
+
+#[test]
+fn test_artist_albums_in_genre_window_and_count_are_scoped_and_ordered() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    store
+        .apply_scan_batch(&[
+            genre_track("f:\\r1.mp3", "R1", "Rockers", "Old", Some("Rock")),
+            genre_track("f:\\r2.mp3", "R2", "Rockers", "New", Some("Rock")),
+            genre_track("f:\\m1.mp3", "M1", "Rockers", "Old", Some("Metal")),
+            genre_track("f:\\m2.mp3", "M2", "Rockers", "Metal Album", Some("Metal")),
+        ])
+        .expect("batch applies");
+
+    assert_eq!(
+        store
+            .artist_albums_in_genre_count("Rockers", "Rock")
+            .expect("count works"),
+        2,
+        "only albums holding a Rock track count"
+    );
+    assert_eq!(
+        store
+            .artist_albums_in_genre_count("Rockers", "Nothing")
+            .expect("count works"),
+        0
+    );
+
+    let asc = store
+        .artist_albums_in_genre_window("Rockers", "Rock", SortDirection::Ascending, 0, 10)
+        .expect("window works");
+    assert_eq!(
+        asc.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
+        ["New", "Old"],
+        "canonical browsing order: year descending with missing years last, title asc"
+    );
+    assert_eq!(
+        asc[1].tracks,
+        vec![TrackId("f:\\r1.mp3".to_string())],
+        "each album carries only its matching track ids"
+    );
+
+    let desc = store
+        .artist_albums_in_genre_window("Rockers", "Rock", SortDirection::Descending, 0, 10)
+        .expect("window works");
+    assert_eq!(
+        desc.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
+        ["Old", "New"],
+        "descending is the exact reversed canonical order"
+    );
+}
+
+#[test]
+fn test_artist_albums_in_genre_window_slices_offset() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    store
+        .apply_scan_batch(&[
+            genre_track("f:\\1.mp3", "1", "A", "Zeta", Some("Rock")),
+            genre_track("f:\\2.mp3", "2", "A", "Alpha", Some("Rock")),
+            genre_track("f:\\3.mp3", "3", "A", "Mid", Some("Rock")),
+        ])
+        .expect("batch applies");
+
+    let mid = store
+        .artist_albums_in_genre_window("A", "Rock", SortDirection::Ascending, 1, 1)
+        .expect("window works");
+    assert_eq!(
+        mid.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
+        ["Mid"],
+        "offset/limit slicing lands on the canonical order"
+    );
+}
+
+#[test]
+fn test_artist_albums_in_genre_unknown_scopes_yield_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    store
+        .apply_scan_batch(&[genre_track("f:\\1.mp3", "1", "A", "Zeta", Some("Rock"))])
+        .expect("batch applies");
+
+    assert!(
+        store
+            .artist_albums_in_genre_window("Nobody", "Rock", SortDirection::Ascending, 0, 10)
+            .expect("unknown artist window")
+            .is_empty(),
+        "unknown artists yield no albums"
+    );
+    assert!(
+        store
+            .artist_albums_in_genre_window("A", "Nothing", SortDirection::Ascending, 0, 10)
+            .expect("unknown genre window")
+            .is_empty(),
+        "unknown genres yield no albums"
+    );
+}
+
 #[test]
 fn test_artist_albums_orders_newest_first_missing_year_last_title_tiebreak() {
     let dir = tempfile::tempdir().unwrap();

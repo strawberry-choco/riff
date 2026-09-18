@@ -98,6 +98,15 @@ pub struct BrowserColumn<'a> {
     /// because providers page through the Session Views projections, whose
     /// caches are per-generation mutable state.
     pub item: &'a mut dyn FnMut(usize) -> Option<BrowserItem>,
+    /// When `true`, the list walker reserves default-height slots for rows
+    /// entirely above the viewport without consulting `item`, so the
+    /// provider only serves the on-screen window (plus the row crossing the
+    /// bottom edge). Per-row provider work — paged store reads, cover
+    /// intents — stays bounded to what is visible instead of running once
+    /// per walked row every frame (the artists-root idle-CPU fix). Heights
+    /// of rows above the viewport are approximated at the default; they are
+    /// never rendered, so nothing visible changes.
+    pub virtualize: bool,
     /// Friendly empty-state title when `total == 0`.
     pub empty_title: &'a str,
     /// Friendly empty-state hint when `total == 0`.
@@ -220,7 +229,37 @@ fn show_browser_list(
         .show_viewport(ui, |ui, viewport| {
             let total = column.total;
             let mut y = 0.0_f32;
-            for i in 0..total {
+            let mut start = 0;
+            if column.virtualize {
+                // Virtualization: rows whose default slot ends above the
+                // viewport are reserved in one jump at the default height —
+                // the provider is consulted only for the on-screen window,
+                // so per-row work (paged store reads, cover intents) stays
+                // bounded to what is visible. Exact heights of rows above
+                // the viewport are approximated at the default; they are
+                // never rendered, so nothing visible changes (the same
+                // uniform-height trade-off egui's `show_rows` makes).
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "the floored quotient is a non-negative row index"
+                )]
+                let first = (viewport.min.y / BROWSER_ROW_H).floor() as usize;
+                start = first.min(total);
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "f32 keeps 48px row offsets exact for any real library"
+                )]
+                let jump_y = start as f32 * BROWSER_ROW_H;
+                y = jump_y;
+                if start > 0 {
+                    ui.advance_cursor_after_rect(egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(ui.available_width(), y),
+                    ));
+                }
+            }
+            for i in start..total {
                 let Some(item) = (column.item)(i) else {
                     // The provider declined this slot; reserve a default row
                     // so the walk stays in step with the provider.

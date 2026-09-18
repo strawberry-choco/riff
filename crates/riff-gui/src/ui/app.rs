@@ -187,6 +187,10 @@ pub struct RiffApp {
     /// on every logic tick — no backend state, no audio engine involvement.
     #[cfg(not(target_os = "linux"))]
     visibility_listener: crate::ui::window_visibility::VisibilityListener,
+    /// Whether the app has hidden the window to the tray. The app's own record,
+    /// because egui never reports real visibility back to it (see `logic`).
+    #[cfg(not(target_os = "linux"))]
+    window_hidden: bool,
     /// The Backend Events inbox: the observable surface both the Transport
     /// wrapper and the tray thread record dispatched commands onto, and the
     /// inbox the UI drains at the start of every frame.
@@ -268,6 +272,8 @@ impl RiffApp {
             last_tray_tooltip: String::new(),
             #[cfg(not(target_os = "linux"))]
             visibility_listener,
+            #[cfg(not(target_os = "linux"))]
+            window_hidden: false,
             quit_flag,
             backend_events,
         }
@@ -691,9 +697,10 @@ impl RiffApp {
 }
 
 impl eframe::App for RiffApp {
-    /// Per-frame logic that also runs while the window is hidden (eframe 0.34
-    /// calls `logic` before every `ui`, and on repaints while hidden). No UI
-    /// may be shown here — only state checks and viewport commands.
+    /// Per-frame logic that also runs while the window is hidden (eframe 0.35
+    /// calls `logic` before every `ui`, and on the throttled repaints it gives
+    /// an invisible window). No UI may be shown here — only state checks and
+    /// viewport commands.
     ///
     /// Implements close-to-tray on macOS/Windows (REQ-SI-001): an OS close
     /// (X / Alt+F4 / Cmd+Q) is vetoed and the window hides to the tray with
@@ -702,41 +709,40 @@ impl eframe::App for RiffApp {
     /// no-op `logic` applies and closing quits normally.
     #[cfg(not(target_os = "linux"))]
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let hidden = !ctx.input(|i| i.viewport().visible().unwrap_or(true));
-
         if self.quit_flag.load(Ordering::Relaxed) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
 
-        // While hidden ui() never runs, so keep a slow repaint loop alive to
-        // keep observing the tray quit flag and visibility toggles.
-        if hidden {
+        // A window that is off-screen renders nothing, so this slow repaint loop
+        // is what wakes the event loop for the next tray request at all.
+        // Off-screen comes from the app's own record plus the reported minimized
+        // state: egui derives `viewport().visible()` from minimized/occluded
+        // state that egui-winit never fills in, so a window hidden to the tray
+        // keeps reporting as visible — which is what made the tray's Show Window
+        // a no-op.
+        let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        if self.window_hidden || minimized {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
 
-        // Tray Quit while hidden: ui() cannot observe quit_flag, so initiate
-        // the close here. (When visible, the same check in ui() does it.)
-        // Reconcile frontend-local visibility requests (drained from the tray's
-        // own channel, Issue 03) with the real viewport visibility. No backend
-        // state is touched — visibility is ephemeral frontend state.
-        let want_visible = match self.visibility_listener.drain() {
-            Some(m) => m.0,
-            None => !hidden,
-        };
-        if want_visible && hidden {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        } else if !want_visible && !hidden {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        // Reconcile frontend-local visibility requests, drained from the tray's
+        // own channel (Issue 03). Every request is carried out whether or not
+        // this tick already believes it is in that state; no backend state is
+        // touched — visibility is ephemeral frontend state.
+        if let Some(request) = self.visibility_listener.drain() {
+            self.window_hidden = !request.0;
+            for command in crate::ui::window_visibility::viewport_commands_for(request, minimized) {
+                ctx.send_viewport_cmd(command);
+            }
         }
 
         // Close-to-tray: veto the OS close request and hide instead (frontend-
-        // local; no backend state touched). This only runs when NOT quitting —
-        // a quit-initiated close goes through above.
-        if !self.quit_flag.load(Ordering::Relaxed) && ctx.input(|i| i.viewport().close_requested())
-        {
+        // local; no backend state touched). Only reached when not quitting — a
+        // quit-initiated close went through the check at the top.
+        if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.window_hidden = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
     }

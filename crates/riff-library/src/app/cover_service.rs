@@ -13,8 +13,10 @@ use std::time::Duration;
 
 /// Max entries per cover cache (the UI's positive texture cache and this
 /// module's negative cache alike); the oldest entries are evicted LRU-style
-/// beyond this cap.
-pub const COVER_CACHE_CAP: usize = 50;
+/// beyond this cap. Sized to hold comfortably more than a full browser
+/// column's visible window, so fast scrolling never thrashes the cache
+/// (the artists-root idle-CPU fix).
+pub const COVER_CACHE_CAP: usize = 200;
 
 /// How long [`CoverWorker::next_accepted`] waits for the next request before
 /// it looks at its stop flag. The worker is idle almost all the time, so the

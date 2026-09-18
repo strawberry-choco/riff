@@ -51,12 +51,14 @@ pub use riff_backend::app::gapless::{
 pub use riff_backend::app::state::{
     LibrarySession, LibraryStatus, PlaybackQueue, PlaybackSession, WatchState, replaygain_factor,
 };
+pub use riff_backend::app::store::SortDirection;
 pub use riff_backend::app::transport::clamp_seek;
 pub use riff_backend::domain::{
     Album, Artist, PlaybackCommand, PlaybackPosition, PlaybackState, PlaybackUpdate, Playlist,
     PlaylistId, RepeatMode, SmartPlaylistKind, Track, TrackId, TrackMetadata,
 };
-pub use riff_gui::ui::app::{TagEditState, format_duration, lru_insert};
+pub use riff_gui::ui::app::{format_duration, lru_insert};
+pub use riff_gui::ui::selection::TagDraft;
 pub use riff_gui::ui::settings::{expand_tilde, suggest_directories};
 pub use riff_infra::audio::{CpalAudioOutput, SymphoniaDecoder};
 pub use riff_infra::filesystem::{AudioFileScanner, FilesystemWatcher};
@@ -65,6 +67,7 @@ pub use riff_infra::media::{ImageCoverLoader, LoftyMetadataReader, LoftyMetadata
 pub use riff_persistence::store::ScanOptions;
 
 // Standard-library names referenced unqualified in some suites.
+pub use std::path::PathBuf;
 pub use std::sync::atomic::AtomicBool;
 pub use std::sync::{Arc, Mutex};
 
@@ -150,6 +153,7 @@ pub mod mocks {
     use riff_backend::app::state::PlaybackSession;
     use riff_backend::app::store::{
         LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings, SettingsStore,
+        SortDirection,
     };
     use riff_backend::app::traits::{
         AudioDecoder, AudioFormatInfo, AudioOutput, CoverImage, CoverLoader, MetadataReader,
@@ -1023,6 +1027,16 @@ pub mod mocks {
         HitArtistsInGenreCount(String),
         AlbumHitTracksInGenre(String, String, String),
         HitGenreCounts,
+        ArtistsWindow(usize, usize),
+        ArtistsCount,
+        AlbumsWindow(usize, usize),
+        AlbumsCount,
+        GenresWindow(usize, usize),
+        GenresCount,
+        ArtistsInGenreWindow(usize, usize),
+        ArtistsInGenreCount,
+        ArtistAlbumsInGenreWindow(usize, usize),
+        ArtistAlbumsInGenreCount,
     }
 
     /// Which [`LibraryQueryStore`] query fails while listed in
@@ -1048,6 +1062,16 @@ pub mod mocks {
         HitArtistsInGenreCount,
         AlbumHitTracksInGenre,
         HitGenreCounts,
+        ArtistsWindow,
+        ArtistsCount,
+        AlbumsWindow,
+        AlbumsCount,
+        GenresWindow,
+        GenresCount,
+        ArtistsInGenreWindow,
+        ArtistsInGenreCount,
+        ArtistAlbumsInGenreWindow,
+        ArtistAlbumsInGenreCount,
     }
 
     /// Canned [`LibraryQueryStore`] fake standing in for the Application
@@ -1112,6 +1136,12 @@ pub mod mocks {
         pub album_hit_tracks_in_genre: Vec<Track>,
         /// Rows served by `hit_genre_counts`.
         pub hit_genre_counts: Vec<GenreCount>,
+        /// Albums served by `albums_window` (flat browsing order); the
+        /// windowed read slices this with the direction applied.
+        pub paged_albums: Vec<Album>,
+        /// Rows served by `genres_window`; the windowed read slices this with
+        /// the direction applied.
+        pub paged_genres: Vec<GenreCount>,
         /// Answer served by `folder_has_audio`.
         pub folder_has_audio: bool,
         /// Answer served by `folder_has_search_match`.
@@ -1162,6 +1192,8 @@ pub mod mocks {
                 hit_artists_in_genre: Vec::new(),
                 album_hit_tracks_in_genre: Vec::new(),
                 hit_genre_counts: Vec::new(),
+                paged_albums: Vec::new(),
+                paged_genres: Vec::new(),
                 folder_has_audio: true,
                 folder_search_match: true,
                 folder_tree_ids: Vec::new(),
@@ -1180,8 +1212,8 @@ pub mod mocks {
             self.calls.lock().unwrap().clone()
         }
 
-        /// Every bounded-window fetch as `(offset, limit)` pairs — flat and
-        /// search windows alike — in call order.
+        /// Every bounded-window fetch as `(offset, limit)` pairs — flat,
+        /// search, and paged-browse windows alike — in call order.
         #[must_use]
         pub fn window_calls(&self) -> Vec<(usize, usize)> {
             self.calls
@@ -1190,7 +1222,14 @@ pub mod mocks {
                 .iter()
                 .filter_map(|call| match call {
                     LibraryQueryCall::TracksWindow(offset, limit)
-                    | LibraryQueryCall::SearchWindow(offset, limit) => Some((*offset, *limit)),
+                    | LibraryQueryCall::SearchWindow(offset, limit)
+                    | LibraryQueryCall::ArtistsWindow(offset, limit)
+                    | LibraryQueryCall::AlbumsWindow(offset, limit)
+                    | LibraryQueryCall::GenresWindow(offset, limit)
+                    | LibraryQueryCall::ArtistsInGenreWindow(offset, limit)
+                    | LibraryQueryCall::ArtistAlbumsInGenreWindow(offset, limit) => {
+                        Some((*offset, *limit))
+                    }
                     _ => None,
                 })
                 .collect()
@@ -1228,6 +1267,23 @@ pub mod mocks {
         /// Whether `query` counts as a match against the canned search rows.
         fn search_matches(&self, query: &str) -> bool {
             self.matching_searches.is_empty() || self.matching_searches.iter().any(|q| q == query)
+        }
+
+        /// Slice `rows` into one bounded window with the direction applied —
+        /// the shared backing of the paged browse window reads (albums,
+        /// genres, and the genre drill-downs all serve their canned list).
+        fn window_rows<T: Clone>(
+            &self,
+            rows: &[T],
+            direction: SortDirection,
+            offset: usize,
+            limit: usize,
+        ) -> Vec<T> {
+            let mut rows = rows.to_vec();
+            if direction == SortDirection::Descending {
+                rows.reverse();
+            }
+            rows.into_iter().skip(offset).take(limit).collect()
         }
     }
 
@@ -1663,6 +1719,148 @@ pub mod mocks {
                 return Ok(Vec::new());
             }
             Ok(self.hit_genre_counts.clone())
+        }
+
+        fn artists_window(
+            &self,
+            direction: SortDirection,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            self.record(LibraryQueryCall::ArtistsWindow(offset, limit));
+            if self.failing.contains(&FailingQuery::ArtistsWindow) {
+                return Err(StoreError::InvalidOperation(
+                    "artists window boom".to_string(),
+                ));
+            }
+            let mut rows: Vec<Artist> = self.artists.clone();
+            if direction == SortDirection::Descending {
+                rows.reverse();
+            }
+            Ok(rows.into_iter().skip(offset).take(limit).collect())
+        }
+
+        fn artists_count(&self) -> Result<usize, StoreError> {
+            self.record(LibraryQueryCall::ArtistsCount);
+            if self.failing.contains(&FailingQuery::ArtistsCount) {
+                return Err(StoreError::InvalidOperation(
+                    "artists count boom".to_string(),
+                ));
+            }
+            Ok(self.artists.len())
+        }
+
+        fn albums_window(
+            &self,
+            direction: SortDirection,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            self.record(LibraryQueryCall::AlbumsWindow(offset, limit));
+            if self.failing.contains(&FailingQuery::AlbumsWindow) {
+                return Err(StoreError::InvalidOperation(
+                    "albums window boom".to_string(),
+                ));
+            }
+            Ok(self.window_rows(&self.paged_albums, direction, offset, limit))
+        }
+
+        fn albums_count(&self) -> Result<usize, StoreError> {
+            self.record(LibraryQueryCall::AlbumsCount);
+            if self.failing.contains(&FailingQuery::AlbumsCount) {
+                return Err(StoreError::InvalidOperation(
+                    "albums count boom".to_string(),
+                ));
+            }
+            Ok(self.paged_albums.len())
+        }
+
+        fn genres_window(
+            &self,
+            direction: SortDirection,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<GenreCount>, StoreError> {
+            self.record(LibraryQueryCall::GenresWindow(offset, limit));
+            if self.failing.contains(&FailingQuery::GenresWindow) {
+                return Err(StoreError::InvalidOperation(
+                    "genres window boom".to_string(),
+                ));
+            }
+            Ok(self.window_rows(&self.paged_genres, direction, offset, limit))
+        }
+
+        fn genres_count(&self) -> Result<usize, StoreError> {
+            self.record(LibraryQueryCall::GenresCount);
+            if self.failing.contains(&FailingQuery::GenresCount) {
+                return Err(StoreError::InvalidOperation(
+                    "genres count boom".to_string(),
+                ));
+            }
+            Ok(self.paged_genres.len())
+        }
+
+        fn artists_in_genre_window(
+            &self,
+            _genre: &str,
+            direction: SortDirection,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            self.record(LibraryQueryCall::ArtistsInGenreWindow(offset, limit));
+            if self.failing.contains(&FailingQuery::ArtistsInGenreWindow) {
+                return Err(StoreError::InvalidOperation(
+                    "genre artists window boom".to_string(),
+                ));
+            }
+            Ok(self.window_rows(&self.genre_artists, direction, offset, limit))
+        }
+
+        fn artists_in_genre_count(&self, _genre: &str) -> Result<usize, StoreError> {
+            self.record(LibraryQueryCall::ArtistsInGenreCount);
+            if self.failing.contains(&FailingQuery::ArtistsInGenreCount) {
+                return Err(StoreError::InvalidOperation(
+                    "genre artists count boom".to_string(),
+                ));
+            }
+            Ok(self.genre_artists.len())
+        }
+
+        fn artist_albums_in_genre_window(
+            &self,
+            _artist: &str,
+            _genre: &str,
+            direction: SortDirection,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            self.record(LibraryQueryCall::ArtistAlbumsInGenreWindow(offset, limit));
+            if self
+                .failing
+                .contains(&FailingQuery::ArtistAlbumsInGenreWindow)
+            {
+                return Err(StoreError::InvalidOperation(
+                    "genre album window boom".to_string(),
+                ));
+            }
+            Ok(self.window_rows(&self.genre_albums, direction, offset, limit))
+        }
+
+        fn artist_albums_in_genre_count(
+            &self,
+            _artist: &str,
+            _genre: &str,
+        ) -> Result<usize, StoreError> {
+            self.record(LibraryQueryCall::ArtistAlbumsInGenreCount);
+            if self
+                .failing
+                .contains(&FailingQuery::ArtistAlbumsInGenreCount)
+            {
+                return Err(StoreError::InvalidOperation(
+                    "genre album count boom".to_string(),
+                ));
+            }
+            Ok(self.genre_albums.len())
         }
     }
 

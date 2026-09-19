@@ -1,7 +1,7 @@
 //! Cover art resolution: embedded first, then filesystem fallback.
 
 use crate::app::errors::LibraryError;
-use crate::infra::ports::{CoverImage, CoverLoader, MetadataReader};
+use crate::infra::ports::{CoverLoader, DecodedCover, MetadataReader, RequestedSize};
 use riff_persistence::track::CoverSource;
 use std::path::Path;
 
@@ -22,16 +22,18 @@ impl CoverResolver {
         }
     }
 
-    /// Resolve cover art for `track_path`. `read_embedded_artwork == false`
-    /// (the Settings Library pane's "Read embedded artwork" toggle,
-    /// design-handoff issue 12) skips the tag read entirely and goes
-    /// straight to the filesystem fallback — the tags are never opened for
-    /// art.
+    /// Resolve cover art for `track_path`, scaled to fit `size`.
+    /// `read_embedded_artwork == false` (the Settings Library pane's "Read
+    /// embedded artwork" toggle, design-handoff issue 12) skips the tag read
+    /// entirely and goes straight to the filesystem fallback — the tags are
+    /// never opened for art. The decoded pixels come back from the loader
+    /// adapter; this resolver only ever names the source.
     pub fn resolve(
         &self,
         track_path: &Path,
         read_embedded_artwork: bool,
-    ) -> Result<Option<CoverImage>, LibraryError> {
+        size: RequestedSize,
+    ) -> Result<Option<DecodedCover>, LibraryError> {
         let source = if read_embedded_artwork {
             self.metadata_reader.read_cover_source(track_path)?
         } else {
@@ -40,11 +42,11 @@ impl CoverResolver {
 
         match source {
             CoverSource::Embedded(_) | CoverSource::Filesystem(_) => {
-                self.cover_loader.load_cover(&source)
+                self.cover_loader.load_cover(&source, size)
             }
             CoverSource::None => {
                 let fallback = Self::find_filesystem_cover(track_path)?;
-                self.cover_loader.load_cover(&fallback)
+                self.cover_loader.load_cover(&fallback, size)
             }
         }
     }

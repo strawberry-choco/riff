@@ -19,9 +19,9 @@ use riff_backend::app::state::{
 use super::super::browser;
 use super::super::theme;
 use super::{
-    ColumnKind, RiffApp, apply_browser_action, apply_detail_action, apply_drill_action,
-    column_plan, column_widths, request_cover_intent, resolve_detail_content, resolve_inspector,
-    smart_list_openable,
+    COVER_THUMB, ColumnKind, RiffApp, apply_browser_action, apply_detail_action,
+    apply_drill_action, column_plan, column_widths, request_cover_intent, resolve_detail_content,
+    resolve_inspector, smart_list_openable,
 };
 
 /// The stage's single-column states: stages that are not a LIBRARY section's
@@ -264,13 +264,19 @@ impl RiffApp {
             // music-icon placeholder tile.
             let thumbnail = album.tracks.first().map(|tid| {
                 request_cover_intent(
-                    textures.contains_key(&tid.0),
+                    textures,
                     covers.as_ref(),
                     tid.clone(),
                     PathBuf::from(&tid.0),
+                    COVER_THUMB,
                 );
                 crate::ui::cover_placeholder::lookup_cover_texture(
-                    textures, lru_keys, &ctx, &palette, &tid.0,
+                    textures,
+                    lru_keys,
+                    &ctx,
+                    &palette,
+                    &tid.0,
+                    COVER_THUMB,
                 )
             });
             let detail = album.year.map_or_else(
@@ -375,13 +381,19 @@ impl RiffApp {
                 .and_then(|album| album.tracks.first())
                 .map(|tid| {
                     request_cover_intent(
-                        textures.contains_key(&tid.0),
+                        textures,
                         covers.as_ref(),
                         tid.clone(),
                         PathBuf::from(&tid.0),
+                        COVER_THUMB,
                     );
                     crate::ui::cover_placeholder::lookup_cover_texture(
-                        textures, lru_keys, &ctx, &palette, &tid.0,
+                        textures,
+                        lru_keys,
+                        &ctx,
+                        &palette,
+                        &tid.0,
+                        COVER_THUMB,
                     )
                 });
             let selected = matches!(
@@ -479,13 +491,19 @@ impl RiffApp {
             // music-icon placeholder tile.
             let thumbnail = album.tracks.first().map(|tid| {
                 request_cover_intent(
-                    textures.contains_key(&tid.0),
+                    textures,
                     covers.as_ref(),
                     tid.clone(),
                     PathBuf::from(&tid.0),
+                    COVER_THUMB,
                 );
                 crate::ui::cover_placeholder::lookup_cover_texture(
-                    textures, lru_keys, &ctx, &palette, &tid.0,
+                    textures,
+                    lru_keys,
+                    &ctx,
+                    &palette,
+                    &tid.0,
+                    COVER_THUMB,
                 )
             });
             let detail = album.year.map_or_else(
@@ -701,13 +719,19 @@ impl RiffApp {
             };
             let thumbnail = views.artist_first_track(&name).map(|tid| {
                 request_cover_intent(
-                    textures.contains_key(&tid.0),
+                    textures,
                     covers.as_ref(),
                     tid.clone(),
                     PathBuf::from(&tid.0),
+                    COVER_THUMB,
                 );
                 crate::ui::cover_placeholder::lookup_cover_texture(
-                    textures, lru_keys, &ctx, &palette, &tid.0,
+                    textures,
+                    lru_keys,
+                    &ctx,
+                    &palette,
+                    &tid.0,
+                    COVER_THUMB,
                 )
             });
             Some(browser::BrowserItem {
@@ -880,13 +904,19 @@ impl RiffApp {
                 .first()
                 .map(|tid| {
                     request_cover_intent(
-                        textures.contains_key(&tid.0),
+                        textures,
                         covers.as_ref(),
                         tid.clone(),
                         PathBuf::from(&tid.0),
+                        COVER_THUMB,
                     );
                     crate::ui::cover_placeholder::lookup_cover_texture(
-                        textures, lru_keys, &ctx, &palette, &tid.0,
+                        textures,
+                        lru_keys,
+                        &ctx,
+                        &palette,
+                        &tid.0,
+                        COVER_THUMB,
                     )
                     .into()
                 })

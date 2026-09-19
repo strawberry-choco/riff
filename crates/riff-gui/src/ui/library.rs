@@ -76,13 +76,6 @@ pub const GLOW_LAYERS: [GlowLayer; 3] = [
     },
 ];
 
-/// The brand tint for one glow layer: the palette's primary scaled by the
-/// layer's alpha fraction — never a flat literal (ADR 0004).
-#[must_use]
-pub fn glow_color(palette: &Palette, layer: GlowLayer) -> egui::Color32 {
-    palette.brand_primary.gamma_multiply(layer.alpha)
-}
-
 /// Full-texture UV rect for [`egui::Painter::image`].
 const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
@@ -131,7 +124,7 @@ pub fn empty_state_hero(ui: &mut egui::Ui, cache: &mut IconCache, palette: &Pale
         painter.circle_filled(
             disc_center,
             disc_radius + layer.spread,
-            glow_color(palette, *layer),
+            theme::glow(palette, layer.alpha),
         );
     }
 
@@ -149,7 +142,7 @@ pub fn empty_state_hero(ui: &mut egui::Ui, cache: &mut IconCache, palette: &Pale
     // Disc glyph at the mockup's muted-foreground/40 strength. The texture is
     // rasterized with the tint baked in, so it is drawn at its own colors
     // ([`theme::TEXTURE_TINT`]).
-    let glyph_tint = palette.ink_3.gamma_multiply(0.4);
+    let glyph_tint = theme::hero_glyph(palette);
     let tex_id = cache.texture(ui.ctx(), Icon::Disc, HERO_DISC_ICON_SIZE, glyph_tint);
     let icon_rect = egui::Rect::from_center_size(
         disc_center,

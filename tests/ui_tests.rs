@@ -1640,9 +1640,19 @@ mod tests {
     // constructors and named constants, keeping this ticket and every later
     // restyle ticket (07–12) token-pure by construction.
 
-    /// True when a code line constructs an egui color from scratch: any
-    /// `Color32`/`Rgba` `from_*` constructor or associated constant. Values
-    /// already derived from tokens never appear in the `Type::` path form.
+    /// True when a code line derives an egui color instead of reading one: a
+    /// `Color32`/`Rgba` construction from scratch (any `from_*` constructor or
+    /// associated constant), or a palette color scaled into a new one at the
+    /// call site (`gamma_multiply`, `linear_multiply`, `to_opaque`, …).
+    ///
+    /// The constructor path alone was not enough: `palette.error
+    /// .gamma_multiply(0.1)` reads a token and passed clean while still
+    /// deciding a color outside the design system. Reading a color's channels
+    /// (`color.r()` for a texture name, `px.a() == 0` to skip a pixel) is not
+    /// a derivation and stays unflagged, and [`theme::blend_over`] stays
+    /// sanctioned too — it is the helper the token module exposes for
+    /// composing colors, and its one view caller composites rasterized
+    /// texture pixels rather than choosing a style.
     fn hardcoded_color_literal(line: &str) -> bool {
         for marker in ["Color32::", "Rgba::"] {
             let mut search = 0;
@@ -1659,13 +1669,22 @@ mod tests {
                 search = start;
             }
         }
-        false
+        [
+            ".gamma_multiply(",
+            ".gamma_multiply_u8(",
+            ".linear_multiply(",
+            ".to_opaque(",
+            ".to_normalized_rgba(",
+            ".to_normalized_gamma_f32(",
+        ]
+        .iter()
+        .any(|derives| line.contains(derives))
     }
 
-    /// Collect `path:line` pairs where UI-layer source hardcodes an egui
-    /// color. `theme.rs` is exempt: it is the sanctioned home of the token
-    /// literals themselves. Comment lines are skipped so prose may name the
-    /// APIs it bans.
+    /// Collect `path:line` pairs where UI-layer source derives an egui color.
+    /// `theme.rs` is exempt: it is the sanctioned home of the token literals
+    /// and of the helpers that derive from them. Comment lines are skipped so
+    /// prose may name the APIs it bans.
     fn hardcoded_color_violations() -> Vec<String> {
         fn scan_dir(dir: &std::path::Path, violations: &mut Vec<String>) {
             let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
@@ -1717,6 +1736,37 @@ mod tests {
              found hardcoded colors:\n{}",
             violations.join("\n")
         );
+    }
+
+    #[test]
+    fn test_the_color_sweep_flags_derivations_but_not_channel_reads() {
+        // The hole the widening closed: a palette color scaled at a call site
+        // decides a color outside the design system without naming a
+        // constructor, so it must fail the sweep — as must a literal.
+        for derives in [
+            "    let fill = palette.error.gamma_multiply(0.1);",
+            "    let wash = palette.ink_3.gamma_multiply(0.4);",
+            "    let ring = theme::INK.linear_multiply(0.5);",
+            "    let edge = palette.border.gamma_multiply_u8(200);",
+            "    let flat = Color32::from_rgb(0, 0, 0);",
+        ] {
+            assert!(hardcoded_color_literal(derives), "sweep misses {derives}");
+        }
+        // Reading a color's channels composes nothing, and `blend_over` is the
+        // helper the token module exposes for composing them: both stay clean,
+        // or the sweep would be arguing with the design system instead of
+        // protecting it.
+        for benign in [
+            "    let key = (icon, px, color.r(), color.g(), color.b());",
+            "    if px.a() == 0 { continue; }",
+            "    image.pixels[i] = theme::blend_over(image.pixels[i], *px);",
+            "    painter.galley(pos, galley, palette.ink);",
+        ] {
+            assert!(
+                !hardcoded_color_literal(benign),
+                "sweep false-positives {benign}"
+            );
+        }
     }
 
     #[test]
@@ -3559,12 +3609,13 @@ mod tests {
     #[test]
     fn test_disc_glow_color_is_derived_from_the_brand_token() {
         // ADR 0004: no flat color literals in view code — every glow tint is
-        // the palette's brand primary scaled by the layer's alpha fraction.
+        // the palette's brand primary scaled by the layer's alpha fraction,
+        // and the scaling is the token module's helper, not a call site.
         let palette = riff_gui::ui::theme::Palette::dark();
         for layer in &library::GLOW_LAYERS {
             assert_eq!(
-                library::glow_color(&palette, *layer),
-                riff_gui::ui::theme::BRAND_500.gamma_multiply(layer.alpha),
+                riff_gui::ui::theme::glow(&palette, layer.alpha),
+                palette.brand_primary.gamma_multiply(layer.alpha),
                 "the glow tint derives from brand_primary"
             );
         }
@@ -4043,11 +4094,11 @@ mod tests {
         // Ghost styling: transparent until hover, then destructive @ 10%.
         let dark = theme::Palette::dark();
         assert_eq!(
-            settings::destructive_ghost_fill(&dark, false),
+            theme::destructive_fill(&dark, false),
             egui::Color32::TRANSPARENT
         );
         assert_eq!(
-            settings::destructive_ghost_fill(&dark, true),
+            theme::destructive_fill(&dark, true),
             dark.error.gamma_multiply(0.1)
         );
     }

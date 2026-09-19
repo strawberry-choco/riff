@@ -145,6 +145,11 @@ pub const BORDER: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255,
 /// Named here so view code never constructs a flat color literal (ADR 0004).
 pub const TEXTURE_TINT: Color32 = Color32::WHITE;
 
+/// Fully transparent. The placeholder an icon glyph falls back to when
+/// rasterization fails; at alpha 0 the channel values are theme-independent,
+/// so this is the one color a view may want that no [`Palette`] slot supplies.
+pub const TRANSPARENT: Color32 = Color32::TRANSPARENT;
+
 /// `--riff-state-success` — `#22c55e`.
 pub const STATE_SUCCESS: Color32 = Color32::from_rgb(0x22, 0xc5, 0x5e);
 /// `--riff-state-warning` — aliases `--riff-brand-500`.
@@ -358,6 +363,33 @@ pub fn blend_over(bottom: egui::Color32, top: egui::Color32) -> egui::Color32 {
         channel(bottom.b(), top.b()),
         u8::MAX,
     )
+}
+
+/// The brand glow wash at `alpha`: the palette's primary scaled by a layer's
+/// alpha fraction. The only sanctioned way to dim a palette color — view code
+/// reads a tint from here instead of scaling one at a call site (ADR 0004),
+/// which is what the color sweep in `tests/ui_tests.rs` enforces.
+#[must_use]
+pub fn glow(palette: &Palette, alpha: f32) -> Color32 {
+    palette.brand_primary.gamma_multiply(alpha)
+}
+
+/// The tint a hero glyph is rasterized with: the palette's muted ink at the
+/// mockup's `muted-foreground/40` strength.
+#[must_use]
+pub fn hero_glyph(palette: &Palette) -> Color32 {
+    palette.ink_3.gamma_multiply(0.4)
+}
+
+/// The destructive ghost button's fill: transparent until hovered, then the
+/// error token at the mockup's 10% (`hover:bg-destructive/10`).
+#[must_use]
+pub fn destructive_fill(palette: &Palette, hovered: bool) -> Color32 {
+    if hovered {
+        palette.error.gamma_multiply(0.1)
+    } else {
+        TRANSPARENT
+    }
 }
 
 /// Convert a radius token (px) into an egui [`CornerRadius`], clamping the

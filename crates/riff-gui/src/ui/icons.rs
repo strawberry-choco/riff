@@ -256,11 +256,11 @@ impl IconCache {
 
         let image = rasterize(icon.svg(), px as usize, color).unwrap_or_else(|| {
             tracing::warn!("Failed to rasterize icon {}", icon.asset_name());
-            // Invisible placeholder, derived from a token rather than a flat
-            // constructor (ADR 0004): rasterization never fails for vendored
-            // sources, so this only ever shows as a blank pixel.
-            let clear = theme::INK.gamma_multiply(0.0);
-            egui::ColorImage::new([1, 1], vec![clear])
+            // Invisible placeholder, read from the token module rather than a
+            // flat transparent constructor (ADR 0004): rasterization never
+            // fails for vendored sources, so this only ever shows as a blank
+            // pixel.
+            egui::ColorImage::new([1, 1], vec![theme::TRANSPARENT])
         });
         // The key rides along in the texture name so distinct entries can
         // never alias one texture id.

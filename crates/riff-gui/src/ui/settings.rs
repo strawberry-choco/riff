@@ -1404,12 +1404,12 @@ fn preference_row(
 
     let pill_rect = egui::Rect::from_center_size(
         egui::pos2(
-            rect.right() - 16.0 - super::toggle_switch::TOGGLE_W / 2.0,
+            rect.right() - 16.0 - theme::geometry::toggle::TOGGLE_W / 2.0,
             rect.center().y,
         ),
         egui::vec2(
-            super::toggle_switch::TOGGLE_W,
-            super::toggle_switch::TOGGLE_H,
+            theme::geometry::toggle::TOGGLE_W,
+            theme::geometry::toggle::TOGGLE_H,
         ),
     );
     let toggled = super::toggle_switch::toggle_switch_at(

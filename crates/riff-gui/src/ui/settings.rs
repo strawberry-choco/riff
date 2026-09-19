@@ -1,4 +1,9 @@
 use crate::ui::icons::{Icon, IconCache};
+use crate::ui::theme::geometry::settings::{
+    ACTION_BTN_H, ACTIONS_ROW_H, CHIP_GAP, CHIP_H, CHIP_LABEL_PAD, CLEAR_ROW_H, DOT_SIZE, FOOTER_H,
+    HEADER_GAP, LIBRARY_ROW_H, MODAL_HEADER_H, MODAL_MAX_H, MODAL_MAX_W, MODAL_PAD, NAV_ITEM_H,
+    NAV_W, PREF_ROW_H, SCAN_CARD_H, SECTION_GAP, SMALL_BTN_H, TRASH_BTN, WATCH_BOX,
+};
 use crate::ui::theme::{self, Palette};
 use eframe::egui;
 use riff_backend::app::MutexExt;
@@ -355,41 +360,6 @@ pub enum SettingsAction {
     /// Set the "Read embedded artwork" preference.
     SetReadEmbeddedArtwork(bool),
 }
-
-// --- Mockup dimensions ---------------------------------------------------------
-
-/// Gap between a section header and its card (`mb-4`): 16px.
-const HEADER_GAP: f32 = 16.0;
-
-/// Gap between sections (`mb-8` on each `<section>`): 32px.
-const SECTION_GAP: f32 = 32.0;
-
-/// Height of one library row (`px-4 py-3` over ~24px of content).
-const LIBRARY_ROW_H: f32 = 48.0;
-
-/// Height of the Add Library / Scan All actions row (`px-4 py-4`).
-const ACTIONS_ROW_H: f32 = 64.0;
-
-/// Height of one preference row (`px-4 py-3` over title + description).
-const PREF_ROW_H: f32 = 60.0;
-
-/// Height of the Clear Library note row (`mt-4`, single line).
-const CLEAR_ROW_H: f32 = 28.0;
-
-/// Status-dot diameter (`w-2 h-2`): 8px.
-const DOT_SIZE: f32 = 8.0;
-
-/// Secondary-button height (`px-3 py-1.5` at `text-xs`).
-const SMALL_BTN_H: f32 = 27.0;
-
-/// Primary/secondary action-button height (`px-4 py-2` at `text-sm`).
-const ACTION_BTN_H: f32 = 34.0;
-
-/// Trash affordance hit area (`w-7 h-7`): 28px square.
-const TRASH_BTN: f32 = 28.0;
-
-/// Watch checkbox square size (a native checkbox at xs text ≈ 14px).
-const WATCH_BOX: f32 = 14.0;
 
 /// Full-texture UV rect for [`egui::Painter::image`] (sidebar precedent).
 const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -1026,21 +996,6 @@ fn clear_row(ui: &mut egui::Ui, palette: &Palette, actions: &mut Vec<SettingsAct
     }
 }
 
-/// Height of one format chip (the small secondary-button geometry).
-const CHIP_H: f32 = 27.0;
-
-/// Horizontal padding inside a format chip around its label.
-const CHIP_LABEL_PAD: f32 = 12.0;
-
-/// Gap between adjacent format chips.
-const CHIP_GAP: f32 = 8.0;
-
-/// Height of the last-full-scan card.
-const SCAN_CARD_H: f32 = 76.0;
-
-/// Height of the pane footer's action row.
-const FOOTER_H: f32 = 48.0;
-
 /// The format chips card: one toggle chip per [`AUDIO_EXTENSIONS`] entry;
 /// enabled formats are indexed on the next scan (design-handoff issue 12).
 fn formats_card(
@@ -1465,24 +1420,6 @@ fn info_lines(ui: &mut egui::Ui, palette: &Palette) {
 }
 
 // --- Sectioned modal (issue 11) --------------------------------------------------
-
-/// Modal card width cap (`max-w-3xl`-ish).
-const MODAL_MAX_W: f32 = 760.0;
-
-/// Modal card height cap.
-const MODAL_MAX_H: f32 = 600.0;
-
-/// Backdrop margin around the card (`p-8`).
-const MODAL_PAD: f32 = 32.0;
-
-/// Header height (title row + close control).
-const MODAL_HEADER_H: f32 = 56.0;
-
-/// Left-nav column width.
-const NAV_W: f32 = 180.0;
-
-/// One left-nav row's height (`py-2` at text-sm).
-const NAV_ITEM_H: f32 = 32.0;
 
 /// Draw the sectioned Settings modal (Issue 11): a centered card with a
 /// header, a left nav listing [`SettingsSection::ALL`], and the current

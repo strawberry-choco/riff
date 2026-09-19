@@ -483,6 +483,60 @@ pub mod geometry {
         /// Height of the Play album button (design: the 32px action row).
         pub const PLAY_H: f32 = 32.0;
     }
+
+    /// The Settings modal: its card and left nav, the library pane's rows and
+    /// actions, the preference rows and their controls. [`SECTION_GAP`] is the
+    /// gap between Settings `<section>`s — the same word as Now Playing's
+    /// 16px [`SECTION_GAP`](super::now_playing::SECTION_GAP), a different
+    /// measurement.
+    pub mod settings {
+        /// Gap between a section header and its card (`mb-4`): 16px.
+        pub const HEADER_GAP: f32 = 16.0;
+        /// Gap between sections (`mb-8` on each `<section>`): 32px.
+        pub const SECTION_GAP: f32 = 32.0;
+        /// Height of one library row (`px-4 py-3` over ~24px of content).
+        pub const LIBRARY_ROW_H: f32 = 48.0;
+        /// Height of the Add Library / Scan All actions row (`px-4 py-4`).
+        pub const ACTIONS_ROW_H: f32 = 64.0;
+        /// Height of one preference row (`px-4 py-3` over title +
+        /// description).
+        pub const PREF_ROW_H: f32 = 60.0;
+        /// Height of the Clear Library note row (`mt-4`, single line).
+        pub const CLEAR_ROW_H: f32 = 28.0;
+        /// Status-dot diameter (`w-2 h-2`): 8px.
+        pub const DOT_SIZE: f32 = 8.0;
+        /// Secondary-button height (`px-3 py-1.5` at `text-xs`).
+        pub const SMALL_BTN_H: f32 = 27.0;
+        /// Primary/secondary action-button height (`px-4 py-2` at `text-sm`).
+        pub const ACTION_BTN_H: f32 = 34.0;
+        /// Trash affordance hit area (`w-7 h-7`): 28px square.
+        pub const TRASH_BTN: f32 = 28.0;
+        /// Watch checkbox square size (a native checkbox at xs text ≈ 14px).
+        pub const WATCH_BOX: f32 = 14.0;
+        /// Height of one format chip — literally the small secondary button,
+        /// named separately because it is a different control.
+        pub const CHIP_H: f32 = SMALL_BTN_H;
+        /// Horizontal padding inside a format chip around its label.
+        pub const CHIP_LABEL_PAD: f32 = 12.0;
+        /// Gap between adjacent format chips.
+        pub const CHIP_GAP: f32 = 8.0;
+        /// Height of the last-full-scan card.
+        pub const SCAN_CARD_H: f32 = 76.0;
+        /// Height of the pane footer's action row.
+        pub const FOOTER_H: f32 = 48.0;
+        /// Modal card width cap (`max-w-3xl`-ish).
+        pub const MODAL_MAX_W: f32 = 760.0;
+        /// Modal card height cap.
+        pub const MODAL_MAX_H: f32 = 600.0;
+        /// Backdrop margin around the card (`p-8`).
+        pub const MODAL_PAD: f32 = 32.0;
+        /// Header height (title row + close control).
+        pub const MODAL_HEADER_H: f32 = 56.0;
+        /// Left-nav column width.
+        pub const NAV_W: f32 = 180.0;
+        /// One left-nav row's height (`py-2` at text-sm).
+        pub const NAV_ITEM_H: f32 = 32.0;
+    }
 }
 
 // --- Semantic palette ---------------------------------------------------------

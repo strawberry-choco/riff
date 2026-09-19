@@ -170,12 +170,25 @@ pub const TRANSPARENT: Color32 = Color32::TRANSPARENT;
 
 /// `--riff-state-success` — `#22c55e`.
 pub const STATE_SUCCESS: Color32 = Color32::from_rgb(0x22, 0xc5, 0x5e);
-/// `--riff-state-warning` — aliases `--riff-brand-500`.
-pub const STATE_WARNING: Color32 = BRAND_500;
+/// Warning — `#eab308`. This was `--riff-state-warning`, which the design
+/// sheet aliased to `--riff-brand-500`, so amber meant "primary action",
+/// "playback progress", "keyboard focus" and "this field differs" at once
+/// (design-handoff review P2-17). Brand amber keeps the first two; warning is
+/// the yellow it reads as everywhere else — and it is yellow, not the brand
+/// orange, at every call site that paints warning *text* with it.
+pub const STATE_WARNING: Color32 = Color32::from_rgb(0xea, 0xb3, 0x08);
 /// `--riff-state-error` — `#ef4444`.
 pub const STATE_ERROR: Color32 = Color32::from_rgb(0xef, 0x44, 0x44);
 /// `--riff-state-info` — `#3b82f6`.
 pub const STATE_INFO: Color32 = Color32::from_rgb(0x3b, 0x82, 0xf6);
+
+/// The keyboard-focus / selection ring — `#a78bfa`, a violet no other token in
+/// the system wears. `--riff-ring` was the brand amber, which is the collision
+/// [`STATE_WARNING`] documents; High Contrast has always overridden the ring
+/// ([`HC_FOCUS_RING`]) and the base palettes now separate it the same way, so
+/// "this is the focused control" is never a shade of "this is the primary
+/// action".
+pub const FOCUS_RING: Color32 = Color32::from_rgb(0xa7, 0x8b, 0xfa);
 
 // --- Radius scale (`--riff-radius-*`) ----------------------------------------
 
@@ -577,10 +590,16 @@ pub mod geometry {
 
 // --- Semantic palette ---------------------------------------------------------
 
-/// The focus-ring color High Contrast variants swap in for the brand ring
-/// (REQ-UI-007): a bright yellow that reads as "keyboard focus" on both
-/// palettes.
+/// The focus-ring color the High Contrast variants swap in for the base ring
+/// (REQ-UI-007): a bright gold that reads as "keyboard focus" on a dark
+/// surface — and, because a light panel needs the same hue pushed the other
+/// way, a deep gold for the light family. The bright one measures 1.01:1
+/// against a light panel, so sharing it across families would hide the ring in
+/// exactly the mode that exists to make it obvious.
 const HC_FOCUS_RING: Color32 = Color32::from_rgb(0xff, 0xd7, 0x00);
+
+/// See [`HC_FOCUS_RING`].
+const HC_FOCUS_RING_LIGHT: Color32 = Color32::from_rgb(0x7a, 0x5f, 0x00);
 
 /// A semantic color set resolved from the raw tokens above: every themed
 /// surface reads its colors from an instance of this struct, never from the
@@ -620,18 +639,24 @@ pub struct Palette {
     pub on_brand: Color32,
     /// Success status (`--riff-state-success`).
     pub success: Color32,
-    /// Warning status (`--riff-state-warning`).
+    /// Warning status — [`STATE_WARNING`] on dark, its deep-amber end on light,
+    /// because this slot paints text.
     pub warning: Color32,
     /// Error/destructive status (`--riff-state-error`).
     pub error: Color32,
     /// Info status (`--riff-state-info`).
     pub info: Color32,
-    /// Keyboard-focus/selection ring (`--riff-ring`).
+    /// Keyboard-focus/selection ring: [`FOCUS_RING`] on dark, a deeper violet on
+    /// light, and [`HC_FOCUS_RING`] in both High Contrast variants. Never the
+    /// brand amber.
     pub focus_ring: Color32,
 }
 
 impl Palette {
-    /// The mockup's dark palette verbatim.
+    /// The dark palette: the mockup's surfaces, brand and `ink`, with the
+    /// muted ink rungs, `warning` and `focus_ring` lifted off their extracted
+    /// values — the first two for AA contrast, the third to stop the focus ring
+    /// wearing the brand's hue.
     #[must_use]
     pub const fn dark() -> Self {
         Self {
@@ -653,7 +678,7 @@ impl Palette {
             warning: STATE_WARNING,
             error: STATE_ERROR,
             info: STATE_INFO,
-            focus_ring: BRAND_500,
+            focus_ring: FOCUS_RING,
         }
     }
 
@@ -697,18 +722,27 @@ impl Palette {
             brand_primary: BRAND_500,
             on_brand: SURFACE_BG,
             success: STATE_SUCCESS,
-            warning: STATE_WARNING,
+            // Warning carries text — the Clear Library confirmation, a tag
+            // row's `(different)` state, an unindexed path's status — and a
+            // bright yellow on a light panel reads at 1.25:1, so light wears
+            // the deep amber end of the same hue instead: the same job, legible
+            // on its own surfaces.
+            warning: Color32::from_rgb(0x85, 0x4d, 0x0e),
             error: STATE_ERROR,
             info: STATE_INFO,
-            focus_ring: BRAND_500,
+            // Violet again rather than the dark family's lavender: the ring is
+            // a UI component and needs 3:1 against the surfaces it sits on,
+            // which `#a78bfa` does not clear on light.
+            focus_ring: Color32::from_rgb(0x6d, 0x28, 0xd9),
         }
     }
 
     /// The High Contrast token-set variant over this base palette (ADR 0004):
     /// text pinned to the extreme of the base, secondary ink strengthened,
     /// line alphas roughly doubled, and the focus ring swapped to
-    /// [`HC_FOCUS_RING`]. Surfaces, brand, and status colors inherit the base
-    /// so each variant stays recognizably its own design.
+    /// [`HC_FOCUS_RING`] / [`HC_FOCUS_RING_LIGHT`]. Surfaces, brand, and status
+    /// colors inherit the base so each variant stays recognizably its own
+    /// design.
     #[must_use]
     pub fn high_contrast(&self) -> Self {
         let mut variant = *self;
@@ -718,13 +752,14 @@ impl Palette {
             variant.ink_2 = Color32::from_gray(200);
             variant.line = Color32::from_rgba_unmultiplied_const(255, 255, 255, 40);
             variant.border = Color32::from_rgba_unmultiplied_const(255, 255, 255, 50);
+            variant.focus_ring = HC_FOCUS_RING;
         } else {
             variant.ink = Color32::BLACK;
             variant.ink_2 = Color32::from_gray(55);
             variant.line = Color32::from_rgba_unmultiplied_const(0, 0, 0, 40);
             variant.border = Color32::from_rgba_unmultiplied_const(0, 0, 0, 50);
+            variant.focus_ring = HC_FOCUS_RING_LIGHT;
         }
-        variant.focus_ring = HC_FOCUS_RING;
         variant
     }
 }

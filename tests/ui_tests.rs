@@ -806,6 +806,20 @@ mod tests {
     }
 
     #[test]
+    fn test_spacing_scale_steps_are_the_values_the_views_already_used() {
+        // The scale was declared from the numbers in the views' own
+        // `item_spacing` assignments and gap geometry, so adopting it moved
+        // values rather than changing them. Pinned like the radius and brand
+        // ramps: a step that drifts is a restyle, not a refactor.
+        assert!((theme::SPACE_XS - 4.0).abs() < f32::EPSILON);
+        assert!((theme::SPACE_SM - 6.0).abs() < f32::EPSILON);
+        assert!((theme::SPACE_MD - 8.0).abs() < f32::EPSILON);
+        assert!((theme::SPACE_LG - 12.0).abs() < f32::EPSILON);
+        assert!((theme::SPACE_XL - 16.0).abs() < f32::EPSILON);
+        assert!((theme::SPACE_XXL - 24.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn test_radius_scale_constants_match_the_mockup() {
         // --riff-radius-sm/md/lg/xl/full.
         assert!((theme::RADIUS_SM - 4.0).abs() < f32::EPSILON);

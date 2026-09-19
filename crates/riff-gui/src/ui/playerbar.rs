@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use super::icons::{Icon, IconCache};
 use super::sidebar;
+use super::theme::geometry::sidebar::ROW_H;
 use super::theme::{self, Palette};
 use riff_backend::domain::{PlaybackState, RepeatMode, TrackId};
 
@@ -674,7 +675,7 @@ pub fn show_queue_panel(
     entries: &[super::now_playing::UpNextEntry],
     actions: &mut Vec<PlayerBarAction>,
 ) {
-    let list_h = (entries.len() as f32 * sidebar::ROW_H).min(QUEUE_PANEL_MAX_LIST_H);
+    let list_h = (entries.len() as f32 * ROW_H).min(QUEUE_PANEL_MAX_LIST_H);
 
     egui::Area::new(egui::Id::new("playerbar_queue_panel"))
         .order(egui::Order::Foreground)
@@ -720,7 +721,7 @@ pub fn show_queue_panel(
                             egui::ScrollArea::vertical()
                                 .id_salt("playerbar_queue_panel_rows")
                                 .auto_shrink(false)
-                                .show_rows(ui, sidebar::ROW_H, entries.len(), |ui, range| {
+                                .show_rows(ui, ROW_H, entries.len(), |ui, range| {
                                     for i in range {
                                         let Some(entry) = entries.get(i) else {
                                             continue;
@@ -762,7 +763,7 @@ pub fn show_queue_panel(
 fn show_queue_panel_empty(ui: &egui::Ui, palette: &Palette) {
     let empty_center = egui::pos2(
         ui.max_rect().center().x,
-        ui.max_rect().top() + QUEUE_PANEL_HEADER_H + sidebar::ROW_H / 2.0,
+        ui.max_rect().top() + QUEUE_PANEL_HEADER_H + ROW_H / 2.0,
     );
     ui.painter().text(
         empty_center,
@@ -772,10 +773,7 @@ fn show_queue_panel_empty(ui: &egui::Ui, palette: &Palette) {
         palette.ink_3,
     );
     ui.interact(
-        egui::Rect::from_center_size(
-            empty_center,
-            egui::vec2(QUEUE_PANEL_W - 16.0, sidebar::ROW_H),
-        ),
+        egui::Rect::from_center_size(empty_center, egui::vec2(QUEUE_PANEL_W - 16.0, ROW_H)),
         egui::Id::new("playerbar_queue_panel_empty"),
         egui::Sense::hover(),
     )

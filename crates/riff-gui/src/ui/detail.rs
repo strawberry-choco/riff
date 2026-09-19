@@ -244,44 +244,49 @@ fn track_list(
         }
         None => scroll_area = scroll_area.id_salt("tracks_column_list"),
     }
-    scroll_area.show_rows(ui, super::sidebar::ROW_H, total, |ui, row_range| {
-        for i in row_range {
-            let Some(track) = tracks.get(i) else {
-                continue;
-            };
-            let row = super::sidebar::tree_row(
-                ui,
-                cache,
-                palette,
-                super::sidebar::TreeRow {
-                    indent_level: 0,
-                    icon: None,
-                    cover: None,
-                    label: &track.title,
-                    count: None,
-                    meta: Some(track.meta()),
-                    favorite: Some(track.favorite),
-                    selected: track.selected,
-                    now_playing: track.now_playing,
-                    playing: false,
-                    disclosure: None,
-                },
-            );
-            if row.response.clicked() {
-                actions.push(DetailAction::SelectTrack(track.key.clone()));
+    scroll_area.show_rows(
+        ui,
+        theme::geometry::sidebar::ROW_H,
+        total,
+        |ui, row_range| {
+            for i in row_range {
+                let Some(track) = tracks.get(i) else {
+                    continue;
+                };
+                let row = super::sidebar::tree_row(
+                    ui,
+                    cache,
+                    palette,
+                    super::sidebar::TreeRow {
+                        indent_level: 0,
+                        icon: None,
+                        cover: None,
+                        label: &track.title,
+                        count: None,
+                        meta: Some(track.meta()),
+                        favorite: Some(track.favorite),
+                        selected: track.selected,
+                        now_playing: track.now_playing,
+                        playing: false,
+                        disclosure: None,
+                    },
+                );
+                if row.response.clicked() {
+                    actions.push(DetailAction::SelectTrack(track.key.clone()));
+                }
+                if row.response.double_clicked() {
+                    actions.push(DetailAction::SelectTrack(track.key.clone()));
+                    actions.push(DetailAction::PlayTrack(track.key.clone()));
+                }
+                if let Some(favorite) = row.favorite_toggled {
+                    actions.push(DetailAction::SetFavorite {
+                        key: track.key.clone(),
+                        favorite,
+                    });
+                }
             }
-            if row.response.double_clicked() {
-                actions.push(DetailAction::SelectTrack(track.key.clone()));
-                actions.push(DetailAction::PlayTrack(track.key.clone()));
-            }
-            if let Some(favorite) = row.favorite_toggled {
-                actions.push(DetailAction::SetFavorite {
-                    key: track.key.clone(),
-                    favorite,
-                });
-            }
-        }
-    });
+        },
+    );
 }
 
 /// The breadcrumb trail: one button per earlier level (clicking one reports

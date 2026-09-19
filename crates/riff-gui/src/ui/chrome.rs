@@ -17,7 +17,8 @@
 //! harness (`tests/golden_tests.rs`, `shell_chrome_dark`).
 
 use super::icons::{Icon, IconCache, icon_button};
-use super::sidebar::{SEARCH_H, ghost_icon_button, search_ring_stroke};
+use super::sidebar::{ghost_icon_button, search_ring_stroke};
+use super::theme::geometry::sidebar::SEARCH_H;
 use super::theme::geometry::titlebar::{
     CAPTION_BTN_H, CAPTION_BTN_W, CAPTION_GAP, SEARCH_EDGE_INSET, SEARCH_GAP, SEARCH_MAX_W,
     WORDMARK_GAP,

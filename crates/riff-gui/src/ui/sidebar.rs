@@ -19,51 +19,11 @@ use eframe::egui;
 use std::time::Duration;
 
 use super::icons::{Icon, IconCache};
+use super::theme::geometry::sidebar::{
+    EQ_BAR_COUNT, FAVORITE_COL_W, HEART_SIZE, ICON_GAP, INDENT_BASE, INDENT_SCALE, INDENT_STEP,
+    MIN_LABEL_FREE_W, ROW_COVER, ROW_H,
+};
 use super::theme::{self, Palette};
-
-// --- Mockup dimensions --------------------------------------------------------
-
-/// Tree-row height (`h-10`): every sidebar row is exactly 40px tall.
-pub const ROW_H: f32 = 40.0;
-
-/// Track-row cover thumbnail on library track rows: a square cover-art tile
-/// sized `ROW_H - 8` (32×32), so width and height always match and the tile
-/// never exceeds the 40px row it sits in.
-pub const ROW_COVER: f32 = ROW_H - 8.0;
-
-/// Column width of a track row's favorite control: the heart's own cell at
-/// the row's leading edge. The cell sits INSIDE the row (not beside it), so
-/// the hover and selection washes cover it and the row reads as one 40px
-/// band.
-pub const FAVORITE_COL_W: f32 = 24.0;
-
-/// Glyph size of the favorite control's heart.
-const HEART_SIZE: f32 = 14.0;
-
-/// Search-box height (`h-8`).
-pub const SEARCH_H: f32 = 32.0;
-
-/// First-level indent: content starts 12px into the row.
-pub const INDENT_BASE: f32 = 12.0;
-
-/// The mockup's three-level indent scale, verbatim: 12 / 44 / 80px.
-const INDENT_SCALE: [f32; 3] = [12.0, 44.0, 80.0];
-
-/// Indent step between tree levels past the mockup's third; deep levels keep
-/// stepping so deep trees never fold into one edge.
-pub const INDENT_STEP: f32 = 36.0;
-
-/// Horizontal padding of the icon strip inside a row.
-const ICON_GAP: f32 = 8.0;
-
-/// Floor under the label's wrap width when a row carries a right-aligned
-/// meta cluster: a pathologically narrow row keeps a readable title instead
-/// of letting the text column collapse.
-const MIN_LABEL_FREE_W: f32 = 24.0;
-
-/// The equalizer-bars indicator: four bars, like the mockup's now-playing
-/// glyph.
-pub const EQ_BAR_COUNT: usize = 4;
 
 /// The three-level indent scale: 12/44/80px for levels 0/1/2. Levels beyond
 /// the mockup's three keep stepping (see [`INDENT_STEP`]) so deep trees never

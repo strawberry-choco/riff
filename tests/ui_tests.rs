@@ -2046,7 +2046,7 @@ mod tests {
     #[test]
     fn test_sidebar_tree_rows_use_the_mockup_40px_height_and_indent_scale() {
         // Mockup: tree rows are exactly 40px tall...
-        assert!((sidebar::ROW_H - 40.0).abs() < f32::EPSILON);
+        assert!((theme::geometry::sidebar::ROW_H - 40.0).abs() < f32::EPSILON);
         // ...on the three-level indent scale 12/44/80px.
         assert!((sidebar::indent_px(0) - 12.0).abs() < f32::EPSILON);
         assert!((sidebar::indent_px(1) - 44.0).abs() < f32::EPSILON);
@@ -4570,7 +4570,7 @@ mod tests {
         let mut cache = icons::IconCache::new();
         let labels = ["Alpha", "Beta", "Gamma"];
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(256.0, sidebar::ROW_H * 3.0))
+            .with_size(egui::vec2(256.0, theme::geometry::sidebar::ROW_H * 3.0))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 move |ui, moves: &mut Vec<(usize, usize)>| {
@@ -4628,7 +4628,7 @@ mod tests {
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(256.0, sidebar::ROW_H * 2.0))
+            .with_size(egui::vec2(256.0, theme::geometry::sidebar::ROW_H * 2.0))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 move |ui, events: &mut Vec<&'static str>| {
@@ -4760,7 +4760,7 @@ mod tests {
         let mut cache = icons::IconCache::new();
         let btn_id = egui::Id::new("tooltip_probe");
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(64.0, sidebar::ROW_H))
+            .with_size(egui::vec2(64.0, theme::geometry::sidebar::ROW_H))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 move |ui, opened: &mut Vec<bool>| {
@@ -4817,7 +4817,7 @@ mod tests {
         let ink = theme::Palette::dark().ink;
 
         #[expect(clippy::cast_precision_loss)]
-        let view_h = VIEW_ROWS as f32 * sidebar::ROW_H;
+        let view_h = VIEW_ROWS as f32 * theme::geometry::sidebar::ROW_H;
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(280.0, view_h))
             .with_pixels_per_point(1.0)
@@ -4827,29 +4827,37 @@ mod tests {
                     egui::ScrollArea::vertical()
                         .id_salt("virtualization_fixture")
                         .auto_shrink(false)
-                        .show_rows(ui, sidebar::ROW_H, TOTAL_ROWS, |ui, range| {
-                            for i in range {
-                                rendered_this_frame += 1;
-                                let (rect, response) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), sidebar::ROW_H),
-                                    egui::Sense::hover(),
-                                );
-                                ui.painter().text(
-                                    rect.left_center() + egui::vec2(8.0, 0.0),
-                                    egui::Align2::LEFT_CENTER,
-                                    format!("Track {i:05}"),
-                                    egui::FontId::proportional(theme::TEXT_SM),
-                                    ink,
-                                );
-                                response.widget_info(|| {
-                                    egui::WidgetInfo::labeled(
-                                        egui::WidgetType::SelectableLabel,
-                                        false,
+                        .show_rows(
+                            ui,
+                            theme::geometry::sidebar::ROW_H,
+                            TOTAL_ROWS,
+                            |ui, range| {
+                                for i in range {
+                                    rendered_this_frame += 1;
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        egui::vec2(
+                                            ui.available_width(),
+                                            theme::geometry::sidebar::ROW_H,
+                                        ),
+                                        egui::Sense::hover(),
+                                    );
+                                    ui.painter().text(
+                                        rect.left_center() + egui::vec2(8.0, 0.0),
+                                        egui::Align2::LEFT_CENTER,
                                         format!("Track {i:05}"),
-                                    )
-                                });
-                            }
-                        });
+                                        egui::FontId::proportional(theme::TEXT_SM),
+                                        ink,
+                                    );
+                                    response.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::WidgetType::SelectableLabel,
+                                            false,
+                                            format!("Track {i:05}"),
+                                        )
+                                    });
+                                }
+                            },
+                        );
                     frame_counter.set(frame_counter.get().max(rendered_this_frame));
                 },
                 Vec::new(),

@@ -743,10 +743,13 @@ mod tests {
         assert_eq!(theme::SURFACE_2, egui::Color32::from_rgb(0x1e, 0x1e, 0x23));
         assert_eq!(theme::SURFACE_3, egui::Color32::from_rgb(0x26, 0x26, 0x2d));
 
-        // Ink ladder: --riff-ink / --riff-ink-2 / --riff-ink-3.
+        // Ink ladder. `ink` is the mockup's; the two muted rungs are the
+        // design handoff's hexes lifted until they clear AA, so the literals
+        // here are the post-retune tokens and the contrast test is what says
+        // why they are these numbers.
         assert_eq!(theme::INK, egui::Color32::from_rgb(0xed, 0xed, 0xf0));
-        assert_eq!(theme::INK_2, egui::Color32::from_rgb(0x9a, 0x9a, 0xa6));
-        assert_eq!(theme::INK_3, egui::Color32::from_rgb(0x6b, 0x6b, 0x77));
+        assert_eq!(theme::INK_2, egui::Color32::from_rgb(0xa8, 0xa8, 0xb4));
+        assert_eq!(theme::INK_3, egui::Color32::from_rgb(0x8e, 0x8e, 0x9a));
     }
 
     #[test]
@@ -897,10 +900,16 @@ mod tests {
         );
 
         // Ink flips while preserving the faintness hierarchy: on dark the
-        // primary ink is brightest; on light it is darkest.
+        // primary ink is brightest; on light it is darkest. `ink` mirrors; the
+        // muted rungs do not, because the channel-wise flip of an AA-compliant
+        // dark gray lands under 4.5:1 on a light panel — light's surfaces need
+        // darker text, not inverted text. They are chosen against the light
+        // ramp, which the contrast test enforces.
         assert_eq!(light.ink, egui::Color32::from_rgb(0x12, 0x12, 0x0f));
-        assert_eq!(light.ink_2, mirror(dark.ink_2));
-        assert_eq!(light.ink_3, mirror(dark.ink_3));
+        assert_eq!(light.ink_2, egui::Color32::from_rgb(0x47, 0x47, 0x40));
+        assert_eq!(light.ink_3, egui::Color32::from_rgb(0x5e, 0x5e, 0x55));
+        assert_ne!(light.ink_2, mirror(dark.ink_2));
+        assert_ne!(light.ink_3, mirror(dark.ink_3));
         assert!(lum(dark.ink) > lum(dark.ink_2) && lum(dark.ink_2) > lum(dark.ink_3));
         assert!(lum(light.ink) < lum(light.ink_2) && lum(light.ink_2) < lum(light.ink_3));
 
@@ -1798,6 +1807,133 @@ mod tests {
     /// which is structure rather than design.
     fn numeric_item_spacing(line: &str) -> bool {
         line.contains("item_spacing") && sets_a_nonzero_number(line)
+    }
+
+    /// WCAG 2.1 relative luminance: sRGB channels linearized and weighted.
+    #[expect(clippy::cast_possible_truncation)]
+    fn relative_luminance(color: egui::Color32) -> f32 {
+        let channel = |byte: u8| {
+            let s = f32::from(byte) / 255.0;
+            if s <= 0.04045 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+    }
+
+    /// WCAG 2.1 contrast ratio of two colors: `(lighter + 0.05) / (darker +
+    /// 0.05)`, from 1.0 (identical) to 21.0 (black on white).
+    fn contrast_ratio(a: egui::Color32, b: egui::Color32) -> f32 {
+        let (x, y) = (relative_luminance(a), relative_luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// The AA floor for normal-size text: what every muted label in the app is,
+    /// and what `ink_3` was failing at 3.40:1 on a panel while carrying
+    /// required text (design-handoff review P1-9).
+    const AA_NORMAL: f32 = 4.5;
+
+    /// A translucent [`egui::Color32`] over an opaque one. `Color32` stores its
+    /// channels premultiplied by their own alpha, so source-over here is the
+    /// stored top added onto the scaled bottom — which is why this is not
+    /// [`theme::blend_over`], whose contract is a straight-alpha color, like
+    /// the rasterized texture pixels it composes.
+    fn over(bottom: egui::Color32, top: egui::Color32) -> egui::Color32 {
+        let alpha = f32::from(top.a()) / 255.0;
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let channel = |b: u8, t: u8| {
+            (f32::from(t) + f32::from(b) * (1.0 - alpha))
+                .min(255.0)
+                .round() as u8
+        };
+        egui::Color32::from_rgb(
+            channel(bottom.r(), top.r()),
+            channel(bottom.g(), top.g()),
+            channel(bottom.b(), top.b()),
+        )
+    }
+
+    /// Every fill a text token can be painted on, for the contrast test: the
+    /// surface ramp plus the row washes. `row_hover` is composited because the
+    /// light family's wash is translucent and paints *over* a panel, while the
+    /// dark one is opaque.
+    fn text_fills(palette: &theme::Palette) -> [(&'static str, egui::Color32); 5] {
+        [
+            ("background", palette.background),
+            ("surface", palette.surface),
+            ("surface_2", palette.surface_2),
+            ("surface_3", palette.surface_3),
+            ("row_hover", over(palette.surface, palette.row_hover)),
+        ]
+    }
+
+    #[test]
+    fn test_text_tokens_clear_wcag_aa_on_every_fill_they_paint_on() {
+        for (dark, high_contrast) in [(true, false), (false, false), (true, true), (false, true)] {
+            let palette = theme::resolve(dark, high_contrast);
+            let family = format!(
+                "{}{}",
+                if dark { "dark" } else { "light" },
+                if high_contrast { "+HC" } else { "" }
+            );
+            let inks = [
+                ("ink", palette.ink),
+                ("ink_2", palette.ink_2),
+                ("ink_3", palette.ink_3),
+            ];
+            for (ink_name, ink) in inks {
+                for (fill_name, fill) in text_fills(&palette) {
+                    let ratio = contrast_ratio(ink, fill);
+                    assert!(
+                        ratio >= AA_NORMAL,
+                        "{family}: {ink_name} on {fill_name} reads {ratio:.2}:1, under the \
+                         {AA_NORMAL}:1 AA floor — retune the token in theme.rs, not the call site"
+                    );
+                }
+            }
+            // Text on brand fills has its own token, so the pair is checked too.
+            let on_brand = contrast_ratio(palette.on_brand, palette.brand_primary);
+            assert!(
+                on_brand >= AA_NORMAL,
+                "{family}: on_brand on brand_primary reads {on_brand:.2}:1"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ink_ladder_stays_distinguishable_after_the_aa_retune() {
+        // Clearing AA pulled the muted rungs toward the top of the ramp; this
+        // checks they did not collapse into one gray. 4.5 L* is around the
+        // smallest difference these labels show at text sizes.
+        for (dark, high_contrast) in [(true, false), (false, false), (true, true), (false, true)] {
+            let palette = theme::resolve(dark, high_contrast);
+            let rung = |luminance: f32| {
+                let t = if luminance > 0.008_856 {
+                    luminance.cbrt()
+                } else {
+                    luminance / 0.206_897 + 0.128_42
+                };
+                116.0 * t - 16.0
+            };
+            let (ink, ink_2, ink_3) = (
+                rung(relative_luminance(palette.ink)),
+                rung(relative_luminance(palette.ink_2)),
+                rung(relative_luminance(palette.ink_3)),
+            );
+            let family = if dark { "dark" } else { "light" };
+            let (gap_1, gap_2) = if dark {
+                (ink - ink_2, ink_2 - ink_3)
+            } else {
+                (ink_2 - ink, ink_3 - ink_2)
+            };
+            assert!(
+                gap_1 >= 4.5 && gap_2 >= 4.5,
+                "{family} ink ladder collapsed: rungs at {ink:.1}/{ink_2:.1}/{ink_3:.1} L* \
+                 (gaps {gap_1:.1} and {gap_2:.1})"
+            );
+        }
     }
 
     #[test]

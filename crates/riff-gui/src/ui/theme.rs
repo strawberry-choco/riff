@@ -15,8 +15,10 @@
 //!
 //! - **Dark** — the mockup tokens verbatim ([`Palette::dark`]).
 //! - **Light** — derived by rule per ADR 0004: surfaces invert (channel-wise
-//!   mirror), ink flips, brand amber is unchanged ([`Palette::light`]). The
-//!   result is consciously approximate until a light design exists.
+//!   mirror), ink flips its faintness order, brand amber is unchanged
+//!   ([`Palette::light`]). The two muted ink rungs are the deliberate exception
+//!   to the mirror: they are chosen so they clear WCAG AA on the light
+//!   surfaces, which a flip of the dark ramp does not.
 //!
 //! High Contrast ([`Palette::high_contrast`]) is a token-set variant over
 //! each base palette — never a third design.
@@ -119,13 +121,23 @@ pub const SURFACE_2: Color32 = Color32::from_rgb(0x1e, 0x1e, 0x23);
 pub const SURFACE_3: Color32 = Color32::from_rgb(0x26, 0x26, 0x2d);
 
 // --- Dark ink ladder (`--riff-ink`, `--riff-ink-2`, `--riff-ink-3`) ----------
+//
+// `ink` is the mockup's. `ink_2` and `ink_3` are NOT the extracted hexes
+// (`#9a9aa6`, `#6b6b77`): `ink_3` measured 3.61:1 on the window and 3.40:1 on
+// a panel, and it carries required text — durations, counts, every muted meta
+// line — so it was lifted until it clears WCAG 2.1 AA (4.5:1) on every fill it
+// paints on, and `ink_2` lifted with it to keep the three rungs distinguishable
+// rather than collapsing into one gray. The contrast test in `tests/ui_tests.rs`
+// is what holds all of them up.
 
 /// `--riff-ink` — `#ededf0`, primary text.
 pub const INK: Color32 = Color32::from_rgb(0xed, 0xed, 0xf0);
-/// `--riff-ink-2` — `#9a9aa6`, secondary text.
-pub const INK_2: Color32 = Color32::from_rgb(0x9a, 0x9a, 0xa6);
-/// `--riff-ink-3` — `#6b6b77`, tertiary/muted text.
-pub const INK_3: Color32 = Color32::from_rgb(0x6b, 0x6b, 0x77);
+/// `--riff-ink-2` — `#a8a8b4`, secondary text. Lifted from the mockup's
+/// `#9a9aa6` for ladder headroom above [`INK_3`].
+pub const INK_2: Color32 = Color32::from_rgb(0xa8, 0xa8, 0xb4);
+/// `--riff-ink-3` — `#8e8e9a`, tertiary/muted text. Lifted from the mockup's
+/// `#6b6b77`, which sat at 3.40:1 on a panel while carrying required text.
+pub const INK_3: Color32 = Color32::from_rgb(0x8e, 0x8e, 0x9a);
 
 // --- Row hover (`--riff-row-hover`) -------------------------------------------
 //
@@ -646,10 +658,11 @@ impl Palette {
     }
 
     /// The light palette derived by rule per ADR 0004: surfaces invert
-    /// (channel-wise mirror of the dark ramp), ink flips, lines flip their
-    /// base white→black at unchanged alphas, and brand amber plus status
-    /// colors are untouched. Known-imperfect by design until a proper light
-    /// design exists.
+    /// (channel-wise mirror of the dark ramp), ink flips its faintness order,
+    /// lines flip their base white→black at unchanged alphas, and brand amber
+    /// plus status colors are untouched. The muted ink rungs are the exception
+    /// to the mirror, chosen for AA contrast on light instead; the rest stays
+    /// consciously approximate until a proper light design exists.
     #[must_use]
     pub const fn light() -> Self {
         Self {
@@ -665,11 +678,17 @@ impl Palette {
             // the dark wash reads over its surface keeps the hover warm on
             // light too.
             row_hover: Color32::from_rgba_unmultiplied_const(0xf0, 0x82, 0x1e, 24),
-            // Mirrored ink ladder (#ededf0 → #12120f …); brightness inversion
+            // Mirrored ink ladder (#ededf0 → #12120f); brightness inversion
             // preserves the faintness hierarchy against the flipped surfaces.
             ink: Color32::from_rgb(0x12, 0x12, 0x0f),
-            ink_2: Color32::from_rgb(0x65, 0x65, 0x59),
-            ink_3: Color32::from_rgb(0x94, 0x94, 0x88),
+            // The two muted rungs are the exception to the mirror rule: the
+            // channel-wise flip of an AA-compliant dark gray (`#8e8e9a` →
+            // `#717165`) reads at 3.48:1 on a light panel, because a light
+            // surface needs *darker* text, not merely inverted text. So they
+            // are chosen against the light surfaces directly, at the same AA
+            // floor, keeping `ink_2` the darker of the two.
+            ink_2: Color32::from_rgb(0x47, 0x47, 0x40),
+            ink_3: Color32::from_rgb(0x5e, 0x5e, 0x55),
             // Black-based lines at the dark alphas (20 / 26).
             line: Color32::from_rgba_unmultiplied_const(0, 0, 0, 20),
             border: Color32::from_rgba_unmultiplied_const(0, 0, 0, 26),

@@ -44,6 +44,19 @@ Before submitting a change, confirm:
 
 For the full treatment, including key flows and the threading model, see [../technical/architecture.md](../technical/architecture.md).
 
+## Design Tokens
+
+`crates/riff-gui/src/ui/theme.rs` is the only place a design value is written, and the only place view code reads one from (ADR 0004). Colors and the `Palette` slots, corner radii, the type scale, the spacing scale (`SPACE_*`), the chrome dimensions, and the component geometry under `theme::geometry`, grouped by the surface that paints it — `sidebar`, `browser`, `titlebar`, `playerbar`, `seek`, `now_playing`, `inspector`, `settings`, `hero`, `glow`, `toggle`, `window`.
+
+The rules, and what each one is for:
+
+- **A view declares no design value of its own.** No `const ROW_H: f32 = 40.0;` in a view module, and no inline number where a token exists. Two surfaces each naming a bar `HEADER_H` at different heights is how the tokens drifted apart in the first place; under `theme::geometry` both keep their own name in their own namespace.
+- **A view derives no color of its own.** No `palette.error.gamma_multiply(0.1)` at a call site. Color math belongs beside the tokens it reads: `theme::glow`, `theme::hero_glyph`, `theme::destructive_fill`, `theme::blend_over`. Add a helper here rather than composing a color in a view.
+- **Contrast is a property of the tokens, not of the call sites.** If muted text is hard to read, fix `INK_3`; do not move the fifty-odd call sites to `INK_2`. The computed WCAG test holds every text token at 4.5:1 on the fills it paints on, in all four palette combinations.
+- **Structural stays with the algorithm.** Scroll and paging math, texture cache keys, a raster resolution, and how many rows a view asks its read model for are consequences of code, not of the design, and live in the view that computes them.
+
+Three mechanical sweeps in `tests/ui_tests.rs` enforce the first two rules against the source of `crates/riff-gui/src/ui/**` (`theme.rs` exempt, being the store): `test_view_code_contains_no_hardcoded_color_literals`, `test_view_code_declares_no_dimensions_of_its_own`, `test_view_code_sets_no_spacing_of_its_own`. A violation names the file and line, and the fix is always to move the value into `theme.rs` — never to widen a sweep.
+
 ## Linting with Clippy
 
 Lint levels are configured in `Cargo.toml` under `[lints.clippy]`, and tool-level options live in `clippy.toml`. The configuration enables the pedantic group as warnings, explicitly allows the nursery group, and carves out a small set of additional allowances:

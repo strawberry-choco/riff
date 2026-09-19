@@ -1,6 +1,6 @@
 # Issue tracker: Local Markdown
 
-Adopted 2026-08-09 by default during `/to-spec` (the setup skill was never run interactively): this repo has **no git remote**, so local markdown is the fitting tracker. Re-run `/setup-matt-pocock-skills` to switch trackers (e.g. to GitHub once a remote exists).
+Adopted 2026-08-09, re-confirmed 2026-09-19. Deliberate choice — `origin` points at `github.com/strawberry-choco/riff` and GitHub Issues are enabled, but planning artifacts stay out of the public issue queue. Switch trackers with `/setup-matt-pocock-skills` if that changes.
 
 Issues and specs for this repo live as markdown files in `.scratch/`.
 

@@ -438,6 +438,39 @@ pub mod geometry {
         /// Height of the panel's "Up Next" header line.
         pub const QUEUE_PANEL_HEADER_H: f32 = 28.0;
     }
+
+    /// The Now Playing stage: the 240px cover, its copy block, the seek row,
+    /// the Up Next list and the close affordance. [`HEADER_H`] is the Up Next
+    /// section's line, 24px — the same word as the browser column's 28px
+    /// [`HEADER_H`](super::browser::HEADER_H) because each names its own
+    /// surface's header, and neither is the other's.
+    pub mod now_playing {
+        /// Cover-art square (`w-60 h-60`): the Now Playing cover is exactly
+        /// 240px.
+        pub const COVER_SIZE: f32 = 240.0;
+        /// Stage inset above the cover: 40px, clearing the widest glow layer
+        /// (36px spread) so the halo never clips against the panel's top edge.
+        pub const STAGE_INSET: f32 = 40.0;
+        /// Gap between the cover and the title (`mb-6`, widened to 40px so the
+        /// title clears the widest glow layer's 36px spread): 40px.
+        pub const COPY_GAP: f32 = 40.0;
+        /// Gap between the title and the meta line (`mt-2`): 8px.
+        pub const TITLE_META_GAP: f32 = 8.0;
+        /// Gap between the meta line and the details line (`mt-1`): 4px.
+        pub const META_DETAILS_GAP: f32 = 4.0;
+        /// Gap between the copy block and the seek row.
+        pub const SEEK_GAP: f32 = 20.0;
+        /// Hit-area height of the seek row.
+        pub const SEEK_H: f32 = 24.0;
+        /// Gap between the seek row and the Up Next section.
+        pub const SECTION_GAP: f32 = 16.0;
+        /// Height of the Up Next section header line.
+        pub const HEADER_H: f32 = 24.0;
+        /// Close-affordance diameter.
+        pub const CLOSE_BTN: f32 = 28.0;
+        /// Inset of the close affordance from the stage corner.
+        pub const CLOSE_INSET: f32 = 12.0;
+    }
 }
 
 // --- Semantic palette ---------------------------------------------------------

@@ -23,53 +23,17 @@ use super::icons::{Icon, IconCache};
 use super::playerbar;
 use super::sidebar::{self, TreeRow};
 use super::theme::geometry::glow;
+use super::theme::geometry::now_playing::{
+    CLOSE_BTN, CLOSE_INSET, COPY_GAP, COVER_SIZE, HEADER_H, META_DETAILS_GAP, SECTION_GAP,
+    SEEK_GAP, SEEK_H, STAGE_INSET, TITLE_META_GAP,
+};
+use super::theme::geometry::seek::{TIME_LABEL_SPACE, TRACK_H};
 use super::theme::{self, Palette};
 use riff_backend::domain::{Track, TrackId, TrackMetadata};
 
-// --- Mockup dimensions ---------------------------------------------------------
-
-/// Cover-art square (`w-60 h-60`): the Now Playing cover is exactly 240px.
-pub const COVER_SIZE: f32 = 240.0;
-
-/// How many Up Next rows the stage previews (pre-restyle behavior).
+/// How many Up Next rows the stage previews (pre-restyle behavior). A read
+/// model bound the view asks for, not a dimension it paints, so it stays here.
 pub const UP_NEXT_LIMIT: usize = 5;
-
-/// Stage inset above the cover: 40px, clearing the widest glow layer
-/// (36px spread) so the halo never clips against the panel's top edge.
-const STAGE_INSET: f32 = 40.0;
-
-/// Gap between the cover and the title (`mb-6`, widened to 40px so the
-/// title clears the widest glow layer's 36px spread): 40px.
-const COPY_GAP: f32 = 40.0;
-
-/// Gap between the title and the meta line (`mt-2`): 8px.
-const TITLE_META_GAP: f32 = 8.0;
-
-/// Gap between the meta line and the details line (`mt-1`): 4px.
-const META_DETAILS_GAP: f32 = 4.0;
-
-/// Gap between the copy block and the seek row.
-const SEEK_GAP: f32 = 20.0;
-
-/// Hit-area height of the seek row.
-const SEEK_H: f32 = 24.0;
-
-/// Track thickness of the seek bar (mockup: 4px, as the playerbar's).
-const TRACK_H: f32 = 4.0;
-
-/// Horizontal room reserved at each end of the seek bar for the monospace
-/// time readouts.
-const TIME_LABEL_SPACE: f32 = 44.0;
-
-/// Gap between the seek row and the Up Next section.
-const SECTION_GAP: f32 = 16.0;
-
-/// Height of the Up Next section header line.
-const HEADER_H: f32 = 24.0;
-
-/// Close-affordance diameter and its inset from the stage corner.
-const CLOSE_BTN: f32 = 28.0;
-const CLOSE_INSET: f32 = 12.0;
 
 /// Full-texture UV rect for [`egui::Painter::image`] (sidebar precedent).
 const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));

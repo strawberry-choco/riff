@@ -73,7 +73,15 @@ pub trait MetadataWriter: Send {
 
 /// Trait for cover art loaders (implemented by infrastructure).
 pub trait CoverLoader: Send + Sync {
-    fn load_cover(&self, source: &CoverSource) -> Result<Option<CoverImage>, LibraryError>;
+    /// Decode `source` into RGBA8 pixels scaled to fit within `size`, or
+    /// `Ok(None)` when there is no cover. The decode lives here rather than in
+    /// the caller so no consumer — least of all the UI's render loop — pays
+    /// for it.
+    fn load_cover(
+        &self,
+        source: &CoverSource,
+        size: RequestedSize,
+    ) -> Result<Option<DecodedCover>, LibraryError>;
 }
 
 /// Trait for filesystem watchers (implemented by infrastructure).
@@ -96,23 +104,29 @@ pub trait FilesystemWatch: Send {
     fn unwatch(&mut self, path: &std::path::Path) -> Result<(), LibraryError>;
 }
 
-/// Container format of still-encoded cover bytes, detected by the loader.
+/// The display box the caller wants the cover to fit within.
 ///
-/// Own enum rather than an infrastructure crate's format type: the port DTO
-/// must not drag an image-decoding dependency into this crate. The image
-/// features enabled for cover loading are exactly JPEG and PNG, so these two
-/// variants cover every container the loader can hand out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CoverImageFormat {
-    Jpeg,
-    Png,
+/// Carried on the request so the worker can hand back pixels that are already
+/// the right size: the consumer never holds a full-resolution image it will
+/// only ever draw at thumbnail size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RequestedSize {
+    pub width: u32,
+    pub height: u32,
 }
 
-/// Decoded cover image ready for UI display.
-#[derive(Debug, Clone)]
-pub struct CoverImage {
-    pub data: Vec<u8>,
-    pub format: CoverImageFormat,
+/// Cover art decoded to RGBA8 pixels by the [`CoverLoader`] adapter.
+///
+/// A plain struct with no image-decoding dependency in this crate: the
+/// decoding itself is `riff-infra`'s job, and this is only the shape its
+/// result crosses the port boundary in. Produced on the cover worker thread,
+/// so a consumer's remaining work is the cheap wrap-and-upload step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedCover {
+    /// Unpremultiplied RGBA8, row-major, length `width * height * 4`.
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
 }
 
 use crate::domain::TrackMetadata;

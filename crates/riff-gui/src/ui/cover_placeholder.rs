@@ -16,16 +16,30 @@
 
 use eframe::egui;
 
-use crate::ui::app::{COVER_CACHE_CAP, lru_insert};
+use crate::ui::app::{COVER_CACHE_CAP, CoverCacheKey, cover_cache_key, lru_insert};
 use crate::ui::icons;
 use crate::ui::theme::{self, Palette};
+use riff_backend::app::traits::RequestedSize;
 
 /// Cache key under which the shared placeholder tile is stored. The `gen`
-/// prefix keeps it out of the real-cover lookups: the request flow (which
-/// checks the plain `TrackId` key) keeps treating the track as artless, so
-/// real art still resolves, lands under the plain key, and wins over the
-/// tile.
+/// prefix keeps it out of the real-cover lookups: the request flow keeps
+/// treating the track as artless, so real art still resolves, lands under the
+/// track's own key, and wins over the tile.
 pub const PLACEHOLDER_KEY: &str = "gen\u{1f}music-icon";
+
+/// The tile's entry in the composite key space. It is drawn scaled to
+/// whatever box the miss belongs to, so it needs one size-independent entry
+/// rather than one per canonical size.
+#[must_use]
+pub fn placeholder_cache_key() -> CoverCacheKey {
+    cover_cache_key(
+        PLACEHOLDER_KEY,
+        RequestedSize {
+            width: 0,
+            height: 0,
+        },
+    )
+}
 
 /// Render resolution of the tile in pixels. Every render site stretches
 /// the square to its own cover size — 40px browser thumbnails up to the
@@ -67,17 +81,20 @@ pub fn placeholder_image(palette: &Palette) -> egui::ColorImage {
 /// sites' `Option<TextureHandle>` seams, which keep their pre-texture
 /// fallbacks for the not-yet-rendered window.
 pub fn lookup_cover_texture<S: std::hash::BuildHasher>(
-    textures: &mut std::collections::HashMap<String, egui::TextureHandle, S>,
-    lru_keys: &mut Vec<String>,
+    textures: &mut std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
+    lru_keys: &mut Vec<CoverCacheKey>,
     ctx: &egui::Context,
     palette: &Palette,
     identity: &str,
+    size: RequestedSize,
 ) -> egui::TextureHandle {
     // Real art first — it always wins over the placeholder tile.
-    if let Some(texture) = touch(textures, lru_keys, identity) {
+    let key = cover_cache_key(identity, size);
+    if let Some(texture) = touch(textures, lru_keys, &key) {
         return texture;
     }
-    if let Some(texture) = touch(textures, lru_keys, PLACEHOLDER_KEY) {
+    let placeholder = placeholder_cache_key();
+    if let Some(texture) = touch(textures, lru_keys, &placeholder) {
         return texture;
     }
 
@@ -86,8 +103,8 @@ pub fn lookup_cover_texture<S: std::hash::BuildHasher>(
         placeholder_image(palette),
         egui::TextureOptions::default(),
     );
-    textures.insert(PLACEHOLDER_KEY.to_string(), texture.clone());
-    for old in lru_insert(lru_keys, PLACEHOLDER_KEY.to_string(), COVER_CACHE_CAP) {
+    textures.insert(placeholder.clone(), texture.clone());
+    for old in lru_insert(lru_keys, placeholder, COVER_CACHE_CAP) {
         textures.remove(&old);
     }
     texture
@@ -95,13 +112,13 @@ pub fn lookup_cover_texture<S: std::hash::BuildHasher>(
 
 /// Clone a cached texture, marking its key most-recently-used.
 fn touch<S: std::hash::BuildHasher>(
-    textures: &std::collections::HashMap<String, egui::TextureHandle, S>,
-    lru_keys: &mut Vec<String>,
-    key: &str,
+    textures: &std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
+    lru_keys: &mut Vec<CoverCacheKey>,
+    key: &CoverCacheKey,
 ) -> Option<egui::TextureHandle> {
     let texture = textures.get(key)?;
     lru_keys.retain(|k| k != key);
-    lru_keys.push(key.to_string());
+    lru_keys.push(key.clone());
     Some(texture.clone())
 }
 
@@ -109,9 +126,10 @@ fn touch<S: std::hash::BuildHasher>(
 /// Called when the tile's derivation inputs move — a palette-family flip
 /// re-renders it under the active tokens.
 pub fn evict_generated<S: std::hash::BuildHasher>(
-    textures: &mut std::collections::HashMap<String, egui::TextureHandle, S>,
-    lru_keys: &mut Vec<String>,
+    textures: &mut std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
+    lru_keys: &mut Vec<CoverCacheKey>,
 ) {
-    lru_keys.retain(|k| k != PLACEHOLDER_KEY);
-    textures.remove(PLACEHOLDER_KEY);
+    let placeholder = placeholder_cache_key();
+    lru_keys.retain(|k| *k != placeholder);
+    textures.remove(&placeholder);
 }

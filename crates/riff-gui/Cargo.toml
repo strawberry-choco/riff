@@ -35,10 +35,6 @@ epi = { package = "egui_extras", version = "0.35", features = ["image"] }
 # Lucide icon glyph rasterization for the shell chrome
 resvg = "0.48"
 
-# Cover-byte decoding for egui texture upload (the on-disk cover loader
-# adapter lives in riff-infra; this decode of in-memory bytes is UI work)
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

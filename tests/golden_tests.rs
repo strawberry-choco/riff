@@ -334,6 +334,10 @@ mod tests {
                     ui.ctx(),
                     &Palette::dark(),
                     IDENTITY,
+                    riff_library::app::traits::RequestedSize {
+                        width: 512,
+                        height: 512,
+                    },
                 );
                 let canvas = ui.available_rect_before_wrap();
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));

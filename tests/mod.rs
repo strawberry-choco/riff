@@ -156,8 +156,8 @@ pub mod mocks {
         SortDirection,
     };
     use riff_backend::app::traits::{
-        AudioDecoder, AudioFormatInfo, AudioOutput, CoverImage, CoverLoader, MetadataReader,
-        MetadataWriter, TagEdit,
+        AudioDecoder, AudioFormatInfo, AudioOutput, CoverLoader, DecodedCover, MetadataReader,
+        MetadataWriter, RequestedSize, TagEdit,
     };
     use riff_backend::app::transport::clamp_seek;
     use riff_backend::domain::{
@@ -478,15 +478,20 @@ pub mod mocks {
         }
     }
 
-    /// Canned [`CoverLoader`]: returns a configured image, `None`, or an
-    /// injected `LibraryError::CoverLoad`.
+    /// Canned [`CoverLoader`]: returns a configured decoded cover, `None`, or
+    /// an injected `LibraryError::CoverLoad`. The port belongs to the library
+    /// slice, so it answers in that slice's error copy (`LibraryErrorL`).
     pub struct MockCoverLoader {
-        pub result: Result<Option<CoverImage>, String>,
+        pub result: Result<Option<DecodedCover>, String>,
     }
 
     impl CoverLoader for MockCoverLoader {
-        fn load_cover(&self, _source: &CoverSource) -> Result<Option<CoverImage>, LibraryError> {
-            self.result.clone().map_err(LibraryError::CoverLoad)
+        fn load_cover(
+            &self,
+            _source: &CoverSource,
+            _size: RequestedSize,
+        ) -> Result<Option<DecodedCover>, LibraryErrorL> {
+            self.result.clone().map_err(LibraryErrorL::CoverLoad)
         }
     }
 
@@ -1937,12 +1942,19 @@ impl riff_backend::app::tag_edit_service::TagEdits for crate::mocks::MockTagEdit
 }
 
 impl riff_library::app::cover_service::Covers for crate::mocks::MockCovers {
-    fn request(&self, _track_id: riff_backend::domain::TrackId, _path: std::path::PathBuf) {}
+    fn request(
+        &self,
+        _track_id: riff_backend::domain::TrackId,
+        _path: std::path::PathBuf,
+        _size: riff_library::app::traits::RequestedSize,
+    ) {
+    }
     fn poll(
         &self,
     ) -> Vec<(
         riff_backend::domain::TrackId,
-        Option<riff_library::app::traits::CoverImage>,
+        riff_library::app::traits::RequestedSize,
+        Option<riff_library::app::traits::DecodedCover>,
     )> {
         Vec::new()
     }

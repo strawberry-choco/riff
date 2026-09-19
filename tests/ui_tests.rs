@@ -932,10 +932,15 @@ mod tests {
     fn test_placeholder_tile_is_shared_across_identities() {
         use riff_gui::ui::cover_placeholder::lookup_cover_texture;
         use riff_gui::ui::theme::Palette;
+        use riff_library::app::traits::RequestedSize;
 
         let ctx = placeholder_ctx();
         let mut textures = std::collections::HashMap::new();
         let mut lru_keys = Vec::new();
+        let thumb = RequestedSize {
+            width: 56,
+            height: 56,
+        };
 
         // The removed colour block was the only per-identity input, so two
         // artless items resolve to one shared cached tile.
@@ -945,6 +950,7 @@ mod tests {
             &ctx,
             &Palette::dark(),
             "a.mp3",
+            thumb,
         );
         let b = lookup_cover_texture(
             &mut textures,
@@ -952,8 +958,28 @@ mod tests {
             &ctx,
             &Palette::dark(),
             "b.mp3",
+            thumb,
         );
         assert!(a == b, "one tile serves every artless item");
+
+        // Real art is one texture per requested size, but the tile is scaled
+        // at draw time, so a miss answers with the same tile at any box.
+        let hero = RequestedSize {
+            width: 512,
+            height: 512,
+        };
+        let c = lookup_cover_texture(
+            &mut textures,
+            &mut lru_keys,
+            &ctx,
+            &Palette::dark(),
+            "a.mp3",
+            hero,
+        );
+        assert!(
+            a == c,
+            "the shared tile answers a miss at a size it was not first resolved at"
+        );
     }
 
     #[test]
@@ -994,15 +1020,22 @@ mod tests {
 
     #[test]
     fn test_lookup_caches_the_shared_placeholder_tile_on_a_full_miss() {
+        use riff_gui::ui::app::cover_cache_key;
         use riff_gui::ui::cover_placeholder::{
-            PLACEHOLDER_KEY, lookup_cover_texture, placeholder_image,
+            lookup_cover_texture, placeholder_cache_key, placeholder_image,
         };
         use riff_gui::ui::theme::Palette;
+        use riff_library::app::traits::RequestedSize;
 
         let ctx = placeholder_ctx();
         let mut textures = std::collections::HashMap::new();
         let mut lru_keys = Vec::new();
         let identity = "f:\\music\\artless.mp3";
+        let size = RequestedSize {
+            width: 56,
+            height: 56,
+        };
+        let tile_key = placeholder_cache_key();
 
         let tile = lookup_cover_texture(
             &mut textures,
@@ -1010,15 +1043,22 @@ mod tests {
             &ctx,
             &Palette::dark(),
             identity,
+            size,
         );
 
-        // The tile lands in the shared cache under the reserved key...
+        // The tile lands in the shared cache under its size-independent key,
+        // and the miss itself is never filed under the track's own key — that
+        // is what keeps real art able to win later.
         assert!(
-            textures.contains_key(PLACEHOLDER_KEY),
+            textures.contains_key(&tile_key),
             "the tile is cached for reuse"
         );
         assert!(
-            lru_keys.iter().any(|k| k == PLACEHOLDER_KEY),
+            !textures.contains_key(&cover_cache_key(identity, size)),
+            "an artless miss does not occupy the track's own key"
+        );
+        assert!(
+            lru_keys.contains(&tile_key),
             "the tile rides the shared LRU"
         );
 
@@ -1043,19 +1083,26 @@ mod tests {
             &ctx,
             &Palette::dark(),
             identity,
+            size,
         );
         assert!(tile == again, "the cached tile is served, not rebuilt");
     }
 
     #[test]
     fn test_real_art_wins_over_the_placeholder_tile() {
+        use riff_gui::ui::app::cover_cache_key;
         use riff_gui::ui::cover_placeholder::lookup_cover_texture;
         use riff_gui::ui::theme::Palette;
+        use riff_library::app::traits::RequestedSize;
 
         let ctx = placeholder_ctx();
         let mut textures = std::collections::HashMap::new();
         let mut lru_keys = Vec::new();
         let identity = "f:\\music\\artful.mp3";
+        let size = RequestedSize {
+            width: 56,
+            height: 56,
+        };
 
         // The tile is cached first (the artless window)...
         let _ = lookup_cover_texture(
@@ -1064,12 +1111,14 @@ mod tests {
             &ctx,
             &Palette::dark(),
             identity,
+            size,
         );
 
-        // ...then real art arrives through the poll path under the plain key.
+        // ...then real art arrives through the poll path under the track's
+        // own (identity, size) key.
         let art = real_texture(&ctx, identity);
-        textures.insert(identity.to_string(), art.clone());
-        lru_keys.push(identity.to_string());
+        textures.insert(cover_cache_key(identity, size), art.clone());
+        lru_keys.push(cover_cache_key(identity, size));
 
         let resolved = lookup_cover_texture(
             &mut textures,
@@ -1077,20 +1126,45 @@ mod tests {
             &ctx,
             &Palette::dark(),
             identity,
+            size,
         );
         assert!(resolved == art, "real art wins over the placeholder tile");
+
+        // The win is per size: a box that never received art still misses.
+        let hero = RequestedSize {
+            width: 512,
+            height: 512,
+        };
+        let other_size = lookup_cover_texture(
+            &mut textures,
+            &mut lru_keys,
+            &ctx,
+            &Palette::dark(),
+            identity,
+            hero,
+        );
+        assert!(
+            other_size != art,
+            "art cached at one size must not answer a request at another"
+        );
     }
 
     #[test]
     fn test_evict_generated_removes_only_the_placeholder_tile() {
+        use riff_gui::ui::app::cover_cache_key;
         use riff_gui::ui::cover_placeholder::{
-            PLACEHOLDER_KEY, evict_generated, lookup_cover_texture,
+            evict_generated, lookup_cover_texture, placeholder_cache_key,
         };
         use riff_gui::ui::theme::Palette;
+        use riff_library::app::traits::RequestedSize;
 
         let ctx = placeholder_ctx();
         let mut textures = std::collections::HashMap::new();
         let mut lru_keys = Vec::new();
+        let size = RequestedSize {
+            width: 56,
+            height: 56,
+        };
 
         let _ = lookup_cover_texture(
             &mut textures,
@@ -1098,26 +1172,28 @@ mod tests {
             &ctx,
             &Palette::dark(),
             "a.mp3",
+            size,
         );
         let art = real_texture(&ctx, "c.mp3");
-        textures.insert("c.mp3".to_string(), art);
-        lru_keys.push("c.mp3".to_string());
+        let art_key = cover_cache_key("c.mp3", size);
+        textures.insert(art_key.clone(), art);
+        lru_keys.push(art_key.clone());
 
         evict_generated(&mut textures, &mut lru_keys);
 
         assert!(
-            !textures.contains_key(PLACEHOLDER_KEY),
+            !textures.contains_key(&placeholder_cache_key()),
             "the tile leaves the cache"
         );
         assert!(
-            !lru_keys.iter().any(|k| k == PLACEHOLDER_KEY),
+            !lru_keys.contains(&placeholder_cache_key()),
             "the LRU list drops the tile"
         );
         assert!(
-            textures.contains_key("c.mp3"),
+            textures.contains_key(&art_key),
             "real covers survive the eviction"
         );
-        assert!(lru_keys.contains(&"c.mp3".to_string()));
+        assert!(lru_keys.contains(&art_key));
     }
 
     #[test]
@@ -4832,10 +4908,11 @@ mod background_service_ui_tests {
     use riff_backend::app::cover_service::Covers;
     use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
     use riff_gui::ui::app::{
-        InlineTagEditor, InspectorContent, InspectorKind, cache_polled_covers, request_cover_intent,
+        COVER_CACHE_CAP, InlineTagEditor, InspectorContent, InspectorKind, cache_polled_covers,
+        cover_cache_key, request_cover_intent,
     };
     use riff_gui::ui::selection::{TagField, TagRow, TagRowState};
-    use riff_library::app::traits::CoverImage;
+    use riff_library::app::traits::{DecodedCover, RequestedSize};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
@@ -4879,9 +4956,9 @@ mod background_service_ui_tests {
         }
     }
 
-    /// Recording [`Covers`] fake: counts request intent, serves nothing.
+    /// Recording [`Covers`] fake: captures request intent, serves nothing.
     struct RecordingCovers {
-        requested: Mutex<Vec<(TrackId, PathBuf)>>,
+        requested: Mutex<Vec<(TrackId, PathBuf, RequestedSize)>>,
     }
 
     impl RecordingCovers {
@@ -4891,28 +4968,28 @@ mod background_service_ui_tests {
             }
         }
 
-        fn requested(&self) -> Vec<(TrackId, PathBuf)> {
+        fn requested(&self) -> Vec<(TrackId, PathBuf, RequestedSize)> {
             self.requested.lock().unwrap().clone()
         }
     }
 
     impl Covers for RecordingCovers {
-        fn request(&self, track_id: TrackId, path: PathBuf) {
-            self.requested.lock().unwrap().push((track_id, path));
+        fn request(&self, track_id: TrackId, path: PathBuf, size: RequestedSize) {
+            self.requested.lock().unwrap().push((track_id, path, size));
         }
 
-        fn poll(&self) -> Vec<(TrackId, Option<CoverImage>)> {
+        fn poll(&self) -> Vec<(TrackId, RequestedSize, Option<DecodedCover>)> {
             Vec::new()
         }
     }
 
     /// Canned [`Covers`] fake whose single poll drains scripted results.
-    struct CannedCovers(Vec<(TrackId, Option<CoverImage>)>);
+    struct CannedCovers(Vec<(TrackId, RequestedSize, Option<DecodedCover>)>);
 
     impl Covers for CannedCovers {
-        fn request(&self, _track_id: TrackId, _path: PathBuf) {}
+        fn request(&self, _track_id: TrackId, _path: PathBuf, _size: RequestedSize) {}
 
-        fn poll(&self) -> Vec<(TrackId, Option<CoverImage>)> {
+        fn poll(&self) -> Vec<(TrackId, RequestedSize, Option<DecodedCover>)> {
             self.0.clone()
         }
     }
@@ -5411,63 +5488,221 @@ mod background_service_ui_tests {
     }
 
     #[test]
-    fn test_cover_intent_skips_cached_texture_but_requests_uncached() {
-        let covers = RecordingCovers::new();
+    fn test_cover_intent_requests_only_when_that_exact_size_is_uncached() {
         let id = TrackId("/music/t1.mp3".to_string());
         let path = PathBuf::from("/music/t1.mp3");
-
-        request_cover_intent(true, &covers, id.clone(), path.clone());
-        assert!(
-            covers.requested().is_empty(),
-            "a cached texture suppresses the request"
+        let thumb = RequestedSize {
+            width: 56,
+            height: 56,
+        };
+        let hero = RequestedSize {
+            width: 512,
+            height: 512,
+        };
+        let covers = RecordingCovers::new();
+        let ctx = egui::Context::default();
+        let hero_texture = ctx.load_texture(
+            "hero",
+            egui::ColorImage::from_rgba_unmultiplied([2, 2], &[0; 16]),
+            egui::TextureOptions::default(),
         );
+        let mut textures: std::collections::HashMap<_, egui::TextureHandle> =
+            std::collections::HashMap::new();
 
-        request_cover_intent(false, &covers, id.clone(), path.clone());
+        request_cover_intent(&textures, &covers, id.clone(), path.clone(), thumb);
         assert_eq!(
             covers.requested(),
-            vec![(id.clone(), path)],
-            "an uncached track sends intent to the service"
+            vec![(id.clone(), path.clone(), thumb)],
+            "an uncached track sends intent, with the box it wants, to the service"
+        );
+
+        // A hero upload exists; a thumbnail request is still a miss. Reusing
+        // the hero texture there would draw the wrong resolution and, worse,
+        // never fetch the right one.
+        textures.insert(cover_cache_key(&id.0, hero), hero_texture);
+        request_cover_intent(&textures, &covers, id.clone(), path.clone(), thumb);
+        assert_eq!(
+            covers.requested(),
+            vec![
+                (id.clone(), path.clone(), thumb),
+                (id.clone(), path.clone(), thumb),
+            ],
+            "a track cached at another size issues a fresh request at this size"
+        );
+
+        request_cover_intent(&textures, &covers, id.clone(), path.clone(), hero);
+        assert_eq!(
+            covers.requested().len(),
+            2,
+            "a texture already cached at exactly this box suppresses the request"
         );
     }
 
     #[test]
-    fn test_cache_polled_covers_inserts_textures_and_skips_artless() {
+    fn test_cache_polled_covers_uploads_the_delivered_pixels_untouched() {
         let ctx = egui::Context::default();
-        // A real 2x2 PNG: cache_polled_covers decodes the port's encoded
-        // bytes on the UI thread before building the texture.
-        let png: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
-            image::ImageBuffer::from_pixel(2, 2, image::Rgba([9, 9, 9, 255]));
-        let mut png_bytes = std::io::Cursor::new(Vec::new());
-        png.write_to(&mut png_bytes, image::ImageFormat::Png)
-            .unwrap();
-        let image = CoverImage {
-            data: png_bytes.into_inner(),
-            format: riff_library::app::traits::CoverImageFormat::Png,
+        let big = RequestedSize {
+            width: 512,
+            height: 512,
+        };
+        // 3x2 pixels handed over already decoded. The texture that comes out
+        // must be 3x2: a decode step would have had encoded bytes to read and
+        // nothing here supplies any.
+        let cover = DecodedCover {
+            rgba: vec![0; 3 * 2 * 4],
+            width: 3,
+            height: 2,
         };
         let covers = CannedCovers(vec![
-            (
-                TrackId("/music/art.mp3".to_string()),
-                Some(CoverImage {
-                    data: image.data.clone(),
-                    format: image.format,
-                }),
-            ),
-            (TrackId("/music/artless.mp3".to_string()), None),
+            (TrackId("/music/art.mp3".to_string()), big, Some(cover)),
+            (TrackId("/music/artless.mp3".to_string()), big, None),
         ]);
         let mut textures = std::collections::HashMap::new();
         let mut lru_keys = Vec::new();
 
         cache_polled_covers(&covers, &mut textures, &mut lru_keys, &ctx);
 
-        assert!(
-            textures.contains_key("/music/art.mp3"),
-            "resolved art becomes a texture keyed by track id"
+        let texture = textures
+            .get(&cover_cache_key("/music/art.mp3", big))
+            .expect("resolved art becomes a texture keyed by track and size");
+        assert_eq!(
+            texture.size(),
+            [3, 2],
+            "the uploaded texture is exactly the delivered pixel grid"
         );
         assert!(
-            !textures.contains_key("/music/artless.mp3"),
+            !textures.contains_key(&cover_cache_key("/music/artless.mp3", big)),
             "artless results create no texture (the service negative-caches them)"
         );
-        assert_eq!(lru_keys, vec!["/music/art.mp3".to_string()]);
+        assert_eq!(lru_keys, vec![cover_cache_key("/music/art.mp3", big)]);
+    }
+
+    #[test]
+    fn test_lru_eviction_counts_each_size_as_its_own_entry() {
+        // Fill the cache to the cap at one size, then land a new size for the
+        // OLDEST track: the cap is on cache entries, so the new composite key
+        // is entry cap+1 and evicts the oldest — while the track it belongs to
+        // keeps its freshly inserted texture.
+        let ctx = egui::Context::default();
+        let thumb = RequestedSize {
+            width: 56,
+            height: 56,
+        };
+        let hero = RequestedSize {
+            width: 512,
+            height: 512,
+        };
+        let cover = DecodedCover {
+            rgba: vec![0; 4],
+            width: 1,
+            height: 1,
+        };
+        let mut textures = std::collections::HashMap::new();
+        let mut lru_keys = Vec::new();
+
+        let track_at = |i: usize| TrackId(format!("/music/t{i:03}.mp3"));
+        let full: Vec<_> = (0..COVER_CACHE_CAP)
+            .map(|i| (track_at(i), thumb, Some(cover.clone())))
+            .collect();
+        cache_polled_covers(&CannedCovers(full), &mut textures, &mut lru_keys, &ctx);
+        assert_eq!(
+            textures.len(),
+            COVER_CACHE_CAP,
+            "exactly the cap, so nothing has been evicted yet"
+        );
+
+        let oldest = track_at(0);
+        let newcomer = CannedCovers(vec![(oldest.clone(), hero, Some(cover))]);
+        cache_polled_covers(&newcomer, &mut textures, &mut lru_keys, &ctx);
+
+        assert!(
+            !textures.contains_key(&cover_cache_key(&oldest.0, thumb)),
+            "the oldest entry of the whole cache is what the cap evicts"
+        );
+        assert!(
+            textures.contains_key(&cover_cache_key(&oldest.0, hero)),
+            "the entry that caused the eviction survives it"
+        );
+        assert!(
+            textures.contains_key(&cover_cache_key(&track_at(1).0, thumb)),
+            "the next-oldest track's thumbnail is untouched"
+        );
+        assert_eq!(
+            lru_keys.len(),
+            COVER_CACHE_CAP,
+            "the LRU order stays bounded to the cap across sizes"
+        );
+        assert_eq!(
+            textures.len(),
+            COVER_CACHE_CAP,
+            "one eviction per insertion past the cap"
+        );
+    }
+
+    #[test]
+    fn test_cache_polled_covers_keeps_one_texture_per_requested_size() {
+        // The same track polled at two boxes must produce two textures: a
+        // hero upload and a thumbnail upload are different pixels, and
+        // neither may stand in for the other.
+        let ctx = egui::Context::default();
+        let id = TrackId("/music/art.mp3".to_string());
+        let thumb = RequestedSize {
+            width: 56,
+            height: 56,
+        };
+        let hero = RequestedSize {
+            width: 512,
+            height: 512,
+        };
+        let covers = CannedCovers(vec![
+            (
+                id.clone(),
+                thumb,
+                Some(DecodedCover {
+                    rgba: vec![0; 4],
+                    width: 1,
+                    height: 1,
+                }),
+            ),
+            (
+                id.clone(),
+                hero,
+                Some(DecodedCover {
+                    rgba: vec![0; 16],
+                    width: 2,
+                    height: 2,
+                }),
+            ),
+        ]);
+        let mut textures = std::collections::HashMap::new();
+        let mut lru_keys = Vec::new();
+
+        cache_polled_covers(&covers, &mut textures, &mut lru_keys, &ctx);
+
+        assert_eq!(
+            textures.len(),
+            2,
+            "one track at two sizes is two cached textures"
+        );
+        assert_eq!(
+            textures
+                .get(&cover_cache_key(&id.0, thumb))
+                .map(|t| t.size()),
+            Some([1, 1]),
+            "the thumbnail entry holds the thumbnail pixels"
+        );
+        assert_eq!(
+            textures
+                .get(&cover_cache_key(&id.0, hero))
+                .map(|t| t.size()),
+            Some([2, 2]),
+            "the hero entry holds the hero pixels"
+        );
+        assert_eq!(
+            lru_keys.len(),
+            2,
+            "each size is its own entry in the LRU order"
+        );
     }
 }
 
@@ -10826,26 +11061,27 @@ mod whole_frame_tests {
     /// counts.
     fn browse_mock() -> MockLibraryQueryStore {
         use riff_backend::domain::GenreCount;
-        let mut mock = MockLibraryQueryStore::default();
-        mock.artists = (0..200)
-            .map(|i| riff_backend::domain::Artist {
-                name: format!("Artist {i:03}"),
-                albums: vec![format!("album-{i:03}")],
-            })
-            .collect();
-        mock.paged_genres = (0..200)
-            .map(|i| GenreCount {
-                genre: format!("Genre {i:03}"),
-                tracks: 1,
-            })
-            .collect();
-        mock.library_counts = riff_backend::app::store::LibraryCounts {
-            tracks: 0,
-            artists: 200,
-            albums: 0,
-            genres: 200,
-        };
-        mock
+        MockLibraryQueryStore {
+            artists: (0..200)
+                .map(|i| riff_backend::domain::Artist {
+                    name: format!("Artist {i:03}"),
+                    albums: vec![format!("album-{i:03}")],
+                })
+                .collect(),
+            paged_genres: (0..200)
+                .map(|i| GenreCount {
+                    genre: format!("Genre {i:03}"),
+                    tracks: 1,
+                })
+                .collect(),
+            library_counts: riff_backend::app::store::LibraryCounts {
+                tracks: 0,
+                artists: 200,
+                albums: 0,
+                genres: 200,
+            },
+            ..Default::default()
+        }
     }
 
     /// Scroll the harness's visible list downward until `target` renders or

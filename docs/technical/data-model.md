@@ -263,7 +263,11 @@ pub trait MetadataWriter: Send + Sync {
 }
 
 pub trait CoverLoader: Send + Sync {
-    fn load_cover(&self, source: &CoverSource) -> Result<Option<CoverImage>, LibraryError>;
+    fn load_cover(
+        &self,
+        source: &CoverSource,
+        size: RequestedSize,
+    ) -> Result<Option<DecodedCover>, LibraryError>;
 }
 
 pub trait FilesystemWatch: Send {
@@ -273,7 +277,7 @@ pub trait FilesystemWatch: Send {
 }
 ```
 
-Two supporting data types cross these traits — `AudioFormatInfo` (`sample_rate`, `channels`) and `CoverImage` (`width`, `height`, `rgba`).
+Two supporting data types cross these traits — `AudioFormatInfo` (`sample_rate`, `channels`) and `DecodedCover` (`rgba`, `width`, `height`), alongside the `RequestedSize` (`width`, `height`) box a cover is decoded to fit.
 
 The concrete implementations — `SymphoniaDecoder`, `CpalAudioOutput`, `LoftyMetadataReader`, `LoftyMetadataWriter`, `ImageCoverLoader`, `AudioFileScanner`, `FilesystemWatcher`, and `SqliteStore` — all live in `riff-infra`. `CpalAudioOutput` additionally exposes the richer surface the engine port maps onto (`initialize`/`start`, which owns the device-default-rate fallback, `clear_buffer`, `set_replaygain`, `effective_sample_rate`). See [./dependencies.md](./dependencies.md) for the crates behind them.
 

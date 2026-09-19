@@ -47,6 +47,6 @@ eframe = "0.35"
 # Test helpers used at test-runtime by app suites.
 tempfile = "3.8"
 crossbeam-channel = "0.5"
-# Decoding canned cover bytes in the UI cache test.
+# Counting pixels in headlessly rendered golden snapshots.
 image = { version = "0.25", default-features = false, features = ["png"] }
 

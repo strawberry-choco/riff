@@ -5863,7 +5863,9 @@ mod cover_service_tests {
     use riff_backend::app::cover_service::{COVER_CACHE_CAP, CoverService, Covers};
     use riff_backend::domain::CoverSource;
     use riff_library::app::errors::LibraryError;
-    use riff_library::app::traits::{AudioFormatInfo, CoverImage, CoverLoader, MetadataReader};
+    use riff_library::app::traits::{
+        AudioFormatInfo, CoverLoader, DecodedCover, MetadataReader, RequestedSize,
+    };
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5873,11 +5875,23 @@ mod cover_service_tests {
     /// declares it wedged.
     const TIMEOUT: Duration = Duration::from_secs(10);
 
-    /// One decoded cover image, distinct enough to assert identity.
-    fn test_image() -> CoverImage {
-        CoverImage {
-            data: vec![7; 4 * 4 * 4],
-            format: riff_library::app::traits::CoverImageFormat::Png,
+    /// The two boxes the dedup tests alternate between. Their only requirement
+    /// is that they differ, since `(track, size)` is what a job is keyed by.
+    const SMALL: RequestedSize = RequestedSize {
+        width: 64,
+        height: 64,
+    };
+    const LARGE: RequestedSize = RequestedSize {
+        width: 256,
+        height: 256,
+    };
+
+    /// One decoded cover, distinct enough to assert identity.
+    fn test_image() -> DecodedCover {
+        DecodedCover {
+            rgba: vec![7; 4 * 4 * 4],
+            width: 4,
+            height: 4,
         }
     }
 
@@ -5910,14 +5924,22 @@ mod cover_service_tests {
     /// the paired sender — a deterministic in-flight window for the dedup
     /// test (the test observes `calls == 1` before releasing).
     struct SharedLoader {
-        result: Result<Option<CoverImage>, String>,
+        result: Result<Option<DecodedCover>, String>,
         calls: Arc<AtomicUsize>,
+        /// Every box the service asked for, in arrival order — proves the
+        /// requested size reaches the port instead of being dropped on the way.
+        sizes: Arc<Mutex<Vec<RequestedSize>>>,
         gate: Option<Mutex<crossbeam_channel::Receiver<()>>>,
     }
 
     impl CoverLoader for SharedLoader {
-        fn load_cover(&self, _source: &CoverSource) -> Result<Option<CoverImage>, LibraryError> {
+        fn load_cover(
+            &self,
+            _source: &CoverSource,
+            size: RequestedSize,
+        ) -> Result<Option<DecodedCover>, LibraryError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.sizes.lock().unwrap().push(size);
             if let Some(ref gate) = self.gate {
                 let _ = gate.lock().unwrap().recv();
             }
@@ -5932,6 +5954,7 @@ mod cover_service_tests {
         service: CoverService,
         reader_calls: Arc<AtomicUsize>,
         loader_calls: Arc<AtomicUsize>,
+        loader_sizes: Arc<Mutex<Vec<RequestedSize>>>,
     }
 
     /// Wire a real service/worker pair over the counting fakes and run the
@@ -5939,7 +5962,7 @@ mod cover_service_tests {
     /// will (ADR 0006). Dropping `Harness.service` ends the thread.
     fn spawn_service(
         source: CoverSource,
-        loader_result: Result<Option<CoverImage>, String>,
+        loader_result: Result<Option<DecodedCover>, String>,
     ) -> Harness {
         spawn_with_gate(source, loader_result, None)
     }
@@ -5948,11 +5971,12 @@ mod cover_service_tests {
     /// must hold a resolve open mid-flight.
     fn spawn_with_gate(
         source: CoverSource,
-        loader_result: Result<Option<CoverImage>, String>,
+        loader_result: Result<Option<DecodedCover>, String>,
         gate: Option<crossbeam_channel::Receiver<()>>,
     ) -> Harness {
         let reader_calls = Arc::new(AtomicUsize::new(0));
         let loader_calls = Arc::new(AtomicUsize::new(0));
+        let loader_sizes = Arc::new(Mutex::new(Vec::new()));
         let (service, worker) = CoverService::new(
             Box::new(SharedReader {
                 source,
@@ -5961,6 +5985,7 @@ mod cover_service_tests {
             Box::new(SharedLoader {
                 result: loader_result,
                 calls: Arc::clone(&loader_calls),
+                sizes: Arc::clone(&loader_sizes),
                 gate: gate.map(Mutex::new),
             }),
             Box::new(|| true),
@@ -5971,6 +5996,7 @@ mod cover_service_tests {
             service,
             reader_calls,
             loader_calls,
+            loader_sizes,
         }
     }
 
@@ -5979,8 +6005,11 @@ mod cover_service_tests {
     /// accumulation cannot double-count). Spins on the public interface
     /// only; returning short of `expected` fails the caller's assertion
     /// instead of hanging CI.
-    fn poll_until(service: &dyn Covers, expected: usize) -> Vec<(TrackId, Option<CoverImage>)> {
-        let mut collected: Vec<(TrackId, Option<CoverImage>)> = Vec::new();
+    fn poll_until(
+        service: &dyn Covers,
+        expected: usize,
+    ) -> Vec<(TrackId, RequestedSize, Option<DecodedCover>)> {
+        let mut collected: Vec<(TrackId, RequestedSize, Option<DecodedCover>)> = Vec::new();
         let start = Instant::now();
         while collected.len() < expected && start.elapsed() < TIMEOUT {
             collected.extend(service.poll());
@@ -6000,17 +6029,20 @@ mod cover_service_tests {
         );
 
         let path = PathBuf::from("/music/t1.mp3");
-        h.service.request(TrackId::from_path(&path), path);
+        h.service.request(TrackId::from_path(&path), path, SMALL);
 
         let results = poll_until(&h.service, 1);
         assert_eq!(results.len(), 1, "exactly one resolved result");
         assert_eq!(results[0].0, TrackId::from_path(Path::new("/music/t1.mp3")));
-        let delivered = results[0].1.as_ref().expect("cover should resolve");
         assert_eq!(
-            (delivered.data.as_slice(), delivered.format),
-            (image.data.as_slice(), image.format)
+            results[0].1, SMALL,
+            "the result reports back the box it was requested at"
         );
-        assert_eq!(delivered.data, image.data);
+        let delivered = results[0].2.as_ref().expect("cover should resolve");
+        assert_eq!(
+            delivered, &image,
+            "the decoded pixels and their dimensions survive the worker-to-poll trip intact"
+        );
 
         // The resolver chain drove the real ports: one tag read, one load.
         assert_eq!(h.reader_calls.load(Ordering::SeqCst), 1);
@@ -6025,16 +6057,17 @@ mod cover_service_tests {
         let h = spawn_service(CoverSource::None, Ok(None));
 
         let path = PathBuf::from("/music/t1.mp3");
-        h.service.request(TrackId::from_path(&path), path.clone());
+        h.service
+            .request(TrackId::from_path(&path), path.clone(), SMALL);
 
         let results = poll_until(&h.service, 1);
         assert_eq!(results.len(), 1, "the artless resolve is still delivered");
-        assert!(results[0].1.is_none(), "no cover found");
+        assert!(results[0].2.is_none(), "no cover found");
         assert_eq!(h.reader_calls.load(Ordering::SeqCst), 1);
         assert_eq!(h.loader_calls.load(Ordering::SeqCst), 1);
 
         // Repeat request for the same artless track: suppressed at intake.
-        h.service.request(TrackId::from_path(&path), path);
+        h.service.request(TrackId::from_path(&path), path, SMALL);
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(
             h.reader_calls.load(Ordering::SeqCst),
@@ -6056,12 +6089,16 @@ mod cover_service_tests {
     /// to load, so the policy tests can pin which source reached the loader.
     struct RecordingLoader {
         seen: std::sync::Arc<Mutex<Vec<CoverSource>>>,
-        result: Result<Option<CoverImage>, String>,
+        result: Result<Option<DecodedCover>, String>,
         calls: Arc<AtomicUsize>,
     }
 
     impl CoverLoader for RecordingLoader {
-        fn load_cover(&self, source: &CoverSource) -> Result<Option<CoverImage>, LibraryError> {
+        fn load_cover(
+            &self,
+            source: &CoverSource,
+            _size: RequestedSize,
+        ) -> Result<Option<DecodedCover>, LibraryError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.seen.lock().unwrap().push(source.clone());
             self.result.clone().map_err(LibraryError::CoverLoad)
@@ -6092,12 +6129,12 @@ mod cover_service_tests {
         std::thread::spawn(move || worker.run());
 
         let path = PathBuf::from("/music/t1.mp3");
-        service.request(TrackId::from_path(&path), path);
+        service.request(TrackId::from_path(&path), path, SMALL);
         let results = poll_until(&service, 1);
 
         assert_eq!(results.len(), 1, "the resolve still delivers");
         assert!(
-            results[0].1.is_some(),
+            results[0].2.is_some(),
             "a filesystem fallback image still resolves"
         );
         assert_eq!(
@@ -6127,7 +6164,8 @@ mod cover_service_tests {
         );
 
         let path = PathBuf::from("/music/t1.mp3");
-        h.service.request(TrackId::from_path(&path), path.clone());
+        h.service
+            .request(TrackId::from_path(&path), path.clone(), SMALL);
 
         // Wait until the resolve is definitively mid-flight...
         let start = Instant::now();
@@ -6140,9 +6178,10 @@ mod cover_service_tests {
             "the first resolve never started"
         );
 
-        // ...then fire rapid duplicates for the same track.
+        // ...then fire rapid duplicates of the same (track, size).
         for _ in 0..3 {
-            h.service.request(TrackId::from_path(&path), path.clone());
+            h.service
+                .request(TrackId::from_path(&path), path.clone(), SMALL);
         }
 
         // Release the gate and let the worker settle completely.
@@ -6152,7 +6191,7 @@ mod cover_service_tests {
         let mut results = poll_until(&h.service, 1);
         results.extend(h.service.poll());
         assert_eq!(results.len(), 1, "one in-flight resolve, one polled result");
-        assert!(results[0].1.is_some());
+        assert!(results[0].2.is_some());
         assert_eq!(
             h.reader_calls.load(Ordering::SeqCst),
             1,
@@ -6175,7 +6214,7 @@ mod cover_service_tests {
         let track_path = |i: usize| PathBuf::from(format!("/music/t{i:02}.mp3"));
         for i in 0..=COVER_CACHE_CAP {
             let path = track_path(i);
-            h.service.request(TrackId::from_path(&path), path);
+            h.service.request(TrackId::from_path(&path), path, SMALL);
         }
         let first_round = poll_until(&h.service, COVER_CACHE_CAP + 1);
         assert_eq!(
@@ -6193,10 +6232,10 @@ mod cover_service_tests {
         // it again must re-resolve.
         let evicted_path = track_path(0);
         h.service
-            .request(TrackId::from_path(&evicted_path), evicted_path);
+            .request(TrackId::from_path(&evicted_path), evicted_path, SMALL);
         let retry = poll_until(&h.service, 1);
         assert_eq!(retry.len(), 1, "the evicted track re-resolves");
-        assert!(retry[0].1.is_none());
+        assert!(retry[0].2.is_none());
         assert_eq!(
             h.reader_calls.load(Ordering::SeqCst),
             COVER_CACHE_CAP + 2,
@@ -6208,7 +6247,7 @@ mod cover_service_tests {
         // t01 — so t02 is the neighbor asserted here.)
         let cached_path = track_path(2);
         h.service
-            .request(TrackId::from_path(&cached_path), cached_path);
+            .request(TrackId::from_path(&cached_path), cached_path, SMALL);
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(
             h.reader_calls.load(Ordering::SeqCst),
@@ -6228,26 +6267,105 @@ mod cover_service_tests {
         // Three distinct tracks, all resolvable.
         for i in 0..3 {
             let path = PathBuf::from(format!("/music/t{i}.mp3"));
-            h.service.request(TrackId::from_path(&path), path);
+            h.service.request(TrackId::from_path(&path), path, SMALL);
         }
 
         // Accumulate across polls until all three have drained.
         let results = poll_until(&h.service, 3);
         assert_eq!(results.len(), 3, "all three resolutions delivered");
-        let mut ids: Vec<String> = results.iter().map(|(id, _)| id.0.clone()).collect();
+        let mut ids: Vec<String> = results.iter().map(|(id, _, _)| id.0.clone()).collect();
         ids.sort();
         assert_eq!(
             ids,
             vec!["/music/t0.mp3", "/music/t1.mp3", "/music/t2.mp3"],
             "one result per track, keyed by TrackId"
         );
-        assert!(results.iter().all(|(_, cover)| cover.is_some()));
+        assert!(results.iter().all(|(_, _, cover)| cover.is_some()));
 
         // Everything was delivered exactly once; nothing remains to poll.
         std::thread::sleep(Duration::from_millis(50));
         assert!(
             h.service.poll().is_empty(),
             "poll must be empty once everything drained"
+        );
+    }
+
+    #[test]
+    fn test_same_track_at_a_different_size_is_a_separate_job() {
+        // The dedup key is (track, size). Gate the loader so the first resolve
+        // is observably in flight while the other requests arrive: a duplicate
+        // of the same box must be suppressed, but a different box is a
+        // separate job — the worker retains nothing decoded between them.
+        let (gate_tx, gate_rx) = crossbeam_channel::unbounded();
+        let h = spawn_with_gate(
+            CoverSource::Embedded(vec![1, 2, 3].into()),
+            Ok(Some(test_image())),
+            Some(gate_rx),
+        );
+
+        let path = PathBuf::from("/music/t1.mp3");
+        let id = TrackId::from_path(&path);
+        h.service.request(id.clone(), path.clone(), SMALL);
+        let start = Instant::now();
+        while h.loader_calls.load(Ordering::SeqCst) < 1 && start.elapsed() < TIMEOUT {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(h.loader_calls.load(Ordering::SeqCst), 1);
+
+        h.service.request(id.clone(), path.clone(), SMALL);
+        h.service.request(id.clone(), path.clone(), LARGE);
+
+        // One token each for the two jobs the gate is holding.
+        let _ = gate_tx.send(());
+        let _ = gate_tx.send(());
+
+        let results = poll_until(&h.service, 2);
+        let mut sizes: Vec<RequestedSize> = results.iter().map(|(_, size, _)| *size).collect();
+        sizes.sort_by_key(|s| s.width);
+        assert_eq!(
+            sizes,
+            vec![SMALL, LARGE],
+            "each distinct (track, size) pair comes back exactly once"
+        );
+        assert_eq!(
+            h.loader_calls.load(Ordering::SeqCst),
+            2,
+            "the duplicate box resolved once; the different box resolved again"
+        );
+        assert_eq!(
+            h.reader_calls.load(Ordering::SeqCst),
+            2,
+            "a second size means a second re-read, not a re-serve from memory"
+        );
+        assert_eq!(
+            h.loader_sizes.lock().unwrap().clone(),
+            vec![SMALL, LARGE],
+            "the requested box reaches the loader port, in request order"
+        );
+    }
+
+    #[test]
+    fn test_artless_track_is_skipped_at_every_requested_size() {
+        // "No art" is a property of the track, not of the box: one negative
+        // entry must suppress the track at a size never asked for before.
+        let h = spawn_service(CoverSource::None, Ok(None));
+
+        let path = PathBuf::from("/music/t1.mp3");
+        let id = TrackId::from_path(&path);
+        h.service.request(id.clone(), path.clone(), SMALL);
+        assert_eq!(poll_until(&h.service, 1).len(), 1);
+
+        h.service.request(id, path, LARGE);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            h.reader_calls.load(Ordering::SeqCst),
+            1,
+            "the track-wide negative cache must suppress a fresh size"
+        );
+        assert_eq!(h.loader_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            h.service.poll().is_empty(),
+            "a suppressed request must not produce a result"
         );
     }
 }

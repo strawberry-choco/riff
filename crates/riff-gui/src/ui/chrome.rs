@@ -18,6 +18,10 @@
 
 use super::icons::{Icon, IconCache, icon_button};
 use super::sidebar::{SEARCH_H, ghost_icon_button, search_ring_stroke};
+use super::theme::geometry::titlebar::{
+    CAPTION_BTN_H, CAPTION_BTN_W, CAPTION_GAP, SEARCH_EDGE_INSET, SEARCH_GAP, SEARCH_MAX_W,
+    WORDMARK_GAP,
+};
 use super::theme::{self, Palette};
 use eframe::egui;
 use riff_backend::app::state::{BrowseMode, ViewMode};
@@ -28,25 +32,6 @@ pub const MIN_STAGE_SIZE: egui::Vec2 = egui::vec2(520.0, 456.0);
 /// Full-texture UV rect for [`egui::Painter::image`] (sidebar precedent).
 const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
-/// Caption-button hit area: Windows-convention caption buttons are wide,
-/// full-height strips (not floating icon chips), so minimize/close get real
-/// pointer targets and the familiar hover fills.
-const CAPTION_BTN_W: f32 = 44.0;
-const CAPTION_BTN_H: f32 = 36.0;
-/// Gap between the nav-control cluster and the caption-button pair.
-const CAPTION_GAP: f32 = 12.0;
-/// Gap between the wordmark's equalizer glyph and its "riff" text (and
-/// between the wordmark and the scan status line).
-const WORDMARK_GAP: f32 = 16.0;
-/// Gap between the titlebar search field and the clusters on either side;
-/// the field shrinks before either cluster moves as the window narrows.
-const SEARCH_GAP: f32 = 16.0;
-/// Upper bound on the titlebar search field's width so it stays a field,
-/// not a second window; it shrinks with the window before the clusters move.
-const SEARCH_MAX_W: f32 = 520.0;
-/// Left inset of the titlebar search field when the window is wide enough
-/// to hit [`SEARCH_MAX_W`] — the same inset the content top bar used.
-const SEARCH_EDGE_INSET: f32 = 12.0;
 /// The static normalized bar heights of the wordmark's equalizer glyph — a
 /// fixed brand mark that moved into the titlebar from the content top bar.
 const WORDMARK_BARS: [f32; 4] = [0.55, 0.95, 0.7, 0.4];

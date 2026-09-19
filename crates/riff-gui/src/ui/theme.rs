@@ -471,6 +471,18 @@ pub mod geometry {
         /// Inset of the close affordance from the stage corner.
         pub const CLOSE_INSET: f32 = 12.0;
     }
+
+    /// The inspector column (the former selection panel): the album readout
+    /// shown while a selection exists. Its width is
+    /// [`INSPECTOR_WIDTH`](crate::ui::theme::INSPECTOR_WIDTH); the rows inside
+    /// it are the sidebar's.
+    pub mod inspector {
+        /// Art block height (design: the 268×200 cover block under the
+        /// header).
+        pub const ART_H: f32 = 200.0;
+        /// Height of the Play album button (design: the 32px action row).
+        pub const PLAY_H: f32 = 32.0;
+    }
 }
 
 // --- Semantic palette ---------------------------------------------------------

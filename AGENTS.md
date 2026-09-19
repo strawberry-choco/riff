@@ -91,6 +91,20 @@ cargo build --release -p riff-gui          # release build (LTO, stripped)
 
 `clippy.toml` configures Clippy (msrv, tool-level options). Lint levels are set in the root `Cargo.toml` under `[workspace.lints.clippy]` (pedantic with selected allowances) and inherited by every crate via `[lints] workspace = true`. CI config is `.github/workflows/ci.yml`; no `rustfmt.toml` (defaults apply). Architecture rules live in `docs/technical/architecture.md`. Feature requirements live in `docs/product/requirements.md`, statuses in `docs/product/features.md`, per-surface specs in `docs/product/specs/`. The full documentation index is in `docs/README.md`.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and specs are local markdown under `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles, each labelled with its default string. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
 <!-- code-review-graph MCP tools -->
 ## MCP Tools: code-review-graph
 

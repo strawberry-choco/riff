@@ -15,8 +15,7 @@ use riff_backend::app::state::LibrarySession;
 
 use super::super::selection;
 use super::{
-    InspectorKind, RiffApp, apply_selection_action, inline_draft_is_current, request_cover_intent,
-    resolve_inspector,
+    InspectorKind, RiffApp, apply_selection_action, request_cover_intent, resolve_inspector,
 };
 
 impl RiffApp {
@@ -27,16 +26,12 @@ impl RiffApp {
     /// method only runs when [`resolve_inspector`] resolved a readout.
     pub(super) fn render_inspector(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
         let content = resolve_inspector(&mut self.views, library);
-        // The draft never outlives its selection: a changed selection (or a
-        // readout the store no longer carries) discards it the next frame, so
-        // a stale half-typed edit can never leak onto a different Track. An
-        // already-submitted request keeps completing; only the editor stops
-        // rendering once its selection leaves.
-        if let Some(draft) = &self.inline_draft
-            && !inline_draft_is_current(draft, &content)
-        {
-            self.inline_draft = None;
-        }
+        // The draft never outlives its selection: the controller discards a
+        // changed selection (or a readout the store no longer carries) this
+        // frame, so a stale half-typed edit can never leak onto a different
+        // Track. An already-submitted request keeps completing; only the
+        // editor stops rendering once its selection leaves.
+        self.tag_editor.reconcile(&content);
         let art = content.art_track.as_ref().map(|tid| {
             // The cover intent goes through the selection's cover track —
             // same flow the browser column's thumbnails use; the texture
@@ -63,17 +58,10 @@ impl RiffApp {
             details: &content.details,
             tags: &content.tags,
             // The editor renders only while a draft is open for this exact
-            // readout: a Track draft on that track, an Album batch draft on
-            // that album (ticket 03).
-            editor: if self
-                .inline_draft
-                .as_ref()
-                .is_some_and(|draft| inline_draft_is_current(draft, &content))
-            {
-                self.inline_draft.as_mut()
-            } else {
-                None
-            },
+            // readout — a Track draft on that track, an Album batch draft on
+            // that album (ticket 03) — which the controller's reconcile
+            // just enforced.
+            editor: self.tag_editor.draft_mut(),
             // A track readout plays just that one track (the primary action
             // reads **Play**); entity readouts play their whole batch.
             single: content.kind == InspectorKind::Track,
@@ -105,14 +93,14 @@ impl RiffApp {
                     apply_selection_action(action, self.transport.as_ref(), &content.track_ids);
                 }
                 // The Save bar's intents belong to the editor flow: the
-                // app layer owns the draft and the request.
-                selection::SelectionAction::SaveTagEdit => self.submit_inline_tag_edit(),
-                selection::SelectionAction::CancelTagEdit => self.inline_draft = None,
+                // controller owns the draft and the request.
+                selection::SelectionAction::SaveTagEdit => self.tag_editor.save(),
+                selection::SelectionAction::CancelTagEdit => self.tag_editor.cancel(),
                 // A tag row click opens the per-selection draft — a Track
                 // draft on a track readout, an Album batch draft on an album
                 // readout — resolved through the same Session Views source.
                 selection::SelectionAction::StartEdit => {
-                    if self.inline_draft.is_none() {
+                    if self.tag_editor.draft().is_none() {
                         self.open_inline_draft(&content);
                     }
                 }

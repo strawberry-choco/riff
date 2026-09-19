@@ -18,22 +18,21 @@ mod browsing;
 mod counts;
 mod folders;
 mod genres;
-mod hit_list;
 mod hits;
 mod playlists;
 mod queue;
 mod smart;
-mod track_list;
 mod windowed_list;
 
 pub use browsing::BrowsingProjection;
 pub use counts::CountsProjection;
 pub use folders::FolderProjection;
 pub use genres::GenreProjection;
-pub use hit_list::HitListProjection;
 pub use hits::HitProjection;
 pub use playlists::{PlaylistEntryRow, PlaylistProjection, PlaylistView};
 pub use queue::PlaybackQueue;
 pub use smart::SmartPlaylistsProjection;
-pub use track_list::{ProjectionKey, TrackListProjection, WINDOW_SIZE};
-pub use windowed_list::{BrowseList, BrowseProjectionKey, WindowedListProjection};
+pub use windowed_list::{
+    BrowseList, BrowseProjectionKey, HitListProjection, ProjectionKey, TrackListProjection,
+    WINDOW_SIZE, WindowedListProjection,
+};

@@ -86,31 +86,26 @@ pub struct AppRuntime {
 /// It deliberately holds nothing the UI renders with, and it has no `Drop`
 /// impl: shutdown is an explicit call, so a runtime is never torn down as a
 /// side effect of a value going out of scope. That also keeps `shutdown`
-/// idempotent — each handle is `take()`n before it is joined, so a second
-/// call finds nothing left to do and returns immediately.
+/// idempotent — each cell's join handle is `take()`n before it is joined, so
+/// a second call finds nothing left to do and returns immediately.
 ///
 /// There is exactly one method, [`Self::shutdown`].
 pub struct RuntimeLifecycle {
-    /// The audio engine thread. Joined first: its exit drops the update
+    /// The audio engine thread cell. Joined first: its exit drops the update
     /// sender, which is what ends the coordinator.
-    audio: Option<JoinHandle<()>>,
-    /// The Playback Coordinator thread.
-    coordinator: Option<JoinHandle<()>>,
-    /// The Library Scan worker thread.
-    scan: Option<JoinHandle<()>>,
-    /// The Tag Edit worker thread.
-    tag_edit: Option<JoinHandle<()>>,
-    /// The Cover worker thread.
-    cover: Option<JoinHandle<()>>,
-    /// The filesystem-event forwarder thread.
-    fs_forwarder: Option<JoinHandle<()>>,
-    /// Cooperative stop requests, one per worker that does not already exit
-    /// on a channel disconnect. The coordinator and the forwarder have none:
-    /// they end when their upstream channel closes.
-    engine_stop: Arc<AtomicBool>,
-    scan_stop: Arc<AtomicBool>,
-    tag_edit_stop: Arc<AtomicBool>,
-    cover_stop: Arc<AtomicBool>,
+    audio: WorkerCell,
+    /// The Playback Coordinator thread cell. No stop lever: it exits when
+    /// the audio engine's exit drops its update channel.
+    coordinator: WorkerCell,
+    /// The Library Scan worker thread cell.
+    scan: WorkerCell,
+    /// The Tag Edit worker thread cell.
+    tag_edit: WorkerCell,
+    /// The Cover worker thread cell.
+    cover: WorkerCell,
+    /// The filesystem-event forwarder thread cell. No stop lever: it exits
+    /// when clearing the watcher drops the event sender it is parked on.
+    fs_forwarder: WorkerCell,
     /// The scan worker's cancel flag. Held as its own clone rather than
     /// reached through `Scans::cancel`, so shutdown does not depend on a
     /// front-end handle the UI may already have moved or dropped.
@@ -120,13 +115,70 @@ pub struct RuntimeLifecycle {
     watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
 }
 
+/// One worker thread's lifecycle cell: the optional cooperative stop lever
+/// shutdown raises to end it, plus its join handle.
+///
+/// Workers that stop by lever hold a cell with a lever — the audio engine,
+/// the library scan worker, the tag-edit worker, and the cover worker — each
+/// returns at its next poll once the lever is raised. Workers that exit when
+/// their upstream channel closes hold a cell without one — the playback
+/// coordinator (its update channel disconnects when the audio engine's exit
+/// drops the sender) and the filesystem-event forwarder (clearing the
+/// watcher drops the event sender it is parked on). Those exceptions are a
+/// property of each cell, not of the shutdown sequence.
+struct WorkerCell {
+    /// The cooperative stop lever, `None` for workers that end when their
+    /// upstream channel closes.
+    stop: Option<Arc<AtomicBool>>,
+    /// The worker thread's join handle; taken by [`Self::join`], so a second
+    /// shutdown finds no handle left to wait on.
+    join: Option<JoinHandle<()>>,
+}
+
+impl WorkerCell {
+    /// One worker thread: `stop` is the lever shutdown raises to end it, or
+    /// `None` when the worker exits on its upstream channel closing.
+    fn new(stop: Option<Arc<AtomicBool>>, join: JoinHandle<()>) -> Self {
+        Self {
+            stop,
+            join: Some(join),
+        }
+    }
+
+    /// Raise this cell's stop lever, if it has one. Workers without a lever
+    /// (the playback coordinator, the filesystem-event forwarder) exit when
+    /// their upstream channel closes instead.
+    fn raise_stop(&self) {
+        if let Some(stop) = &self.stop {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Join this cell's worker thread, naming the stage. A worker that
+    /// panicked is reported here rather than taking the shutting-down process
+    /// with it, and the log line names the stage, which is the only way to
+    /// tell a wedged join from a slow one. A second call finds no handle and
+    /// returns immediately.
+    fn join(&mut self, stage: &str) {
+        let Some(handle) = self.join.take() else {
+            // Already joined: a repeated `shutdown` finds no handle to wait on.
+            return;
+        };
+        tracing::debug!("Joining the {stage} thread");
+        if let Err(panic) = handle.join() {
+            tracing::error!("The {stage} thread panicked: {panic:?}");
+        }
+    }
+}
+
 impl RuntimeLifecycle {
     /// Stop every worker thread and wait for it to return.
     ///
     /// The sequence matters:
     ///
-    /// 1. Raise the four stop flags, so each request-channel worker returns
-    ///    at its next poll.
+    /// 1. Raise the stop levers, so each request-channel worker returns at
+    ///    its next poll. The coordinator and the forwarder hold no lever:
+    ///    they exit when their upstream channel closes.
     /// 2. Cancel the scan in flight. It aborts at its next batch boundary,
     ///    and the batches already committed stay — durability is per batch,
     ///    so an interrupted scan never rolls work back (spec user story 3).
@@ -137,36 +189,21 @@ impl RuntimeLifecycle {
     ///
     /// A second call is a no-op: every handle has already been taken.
     pub fn shutdown(&mut self) {
-        self.engine_stop.store(true, Ordering::Relaxed);
-        self.scan_stop.store(true, Ordering::Relaxed);
-        self.tag_edit_stop.store(true, Ordering::Relaxed);
-        self.cover_stop.store(true, Ordering::Relaxed);
+        self.audio.raise_stop();
+        self.scan.raise_stop();
+        self.tag_edit.raise_stop();
+        self.cover.raise_stop();
 
         self.scan_cancel.store(true, Ordering::Relaxed);
 
         *self.watcher_manager.lock_or_recover() = None;
 
-        join_worker(self.audio.take(), "audio engine");
-        join_worker(self.coordinator.take(), "playback coordinator");
-        join_worker(self.scan.take(), "library scan worker");
-        join_worker(self.tag_edit.take(), "tag-edit worker");
-        join_worker(self.cover.take(), "cover worker");
-        join_worker(self.fs_forwarder.take(), "filesystem-event forwarder");
-    }
-}
-
-/// Join one worker thread, naming the stage. A worker that panicked is
-/// reported here rather than taking the shutting-down process with it, and
-/// the log line names the stage, which is the only way to tell a wedged join
-/// from a slow one.
-fn join_worker(handle: Option<JoinHandle<()>>, stage: &str) {
-    let Some(handle) = handle else {
-        // Already joined: a repeated `shutdown` finds no handle to wait on.
-        return;
-    };
-    tracing::debug!("Joining the {stage} thread");
-    if let Err(panic) = handle.join() {
-        tracing::error!("The {stage} thread panicked: {panic:?}");
+        self.audio.join("audio engine");
+        self.coordinator.join("playback coordinator");
+        self.scan.join("library scan worker");
+        self.tag_edit.join("tag-edit worker");
+        self.cover.join("cover worker");
+        self.fs_forwarder.join("filesystem-event forwarder");
     }
 }
 
@@ -349,16 +386,12 @@ impl AppRuntime {
         };
 
         let lifecycle = RuntimeLifecycle {
-            audio: Some(audio_thread),
-            coordinator: Some(coordinator),
-            scan: Some(scan),
-            tag_edit: Some(tag_edit),
-            cover: Some(cover),
-            fs_forwarder: Some(fs_forwarder),
-            engine_stop,
-            scan_stop,
-            tag_edit_stop,
-            cover_stop,
+            audio: WorkerCell::new(Some(engine_stop), audio_thread),
+            coordinator: WorkerCell::new(None, coordinator),
+            scan: WorkerCell::new(Some(scan_stop), scan),
+            tag_edit: WorkerCell::new(Some(tag_edit_stop), tag_edit),
+            cover: WorkerCell::new(Some(cover_stop), cover),
+            fs_forwarder: WorkerCell::new(None, fs_forwarder),
             scan_cancel,
             watcher_manager,
         };

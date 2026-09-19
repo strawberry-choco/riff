@@ -4882,32 +4882,46 @@ mod settings_scalar_handler_tests {
 //
 // The UI no longer owns worker threads or channel protocols (ADR 0006): it
 // submits intent and polls outcomes through the boxed `TagEdits`/`Covers`
-// handles. These tests drive the exact production code paths — the free
-// inline tag-edit functions, `request_cover_intent`, and `cache_polled_covers`
-// that the RiffApp methods delegate to — over recording fakes, with no
-// threads and no disk I/O.
+// handles. These tests drive the exact production code paths — the render-free
+// inline Tag Edit controller, `request_cover_intent`, and `cache_polled_covers`
+// that the RiffApp delegates to — over recording fakes, with no threads and
+// no disk I/O.
 #[cfg(test)]
 mod background_service_ui_tests {
     use super::*;
     use riff_backend::app::cover_service::Covers;
     use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
-    use riff_gui::ui::app::{cache_polled_covers, request_cover_intent};
+    use riff_gui::ui::app::{
+        InlineTagEditor, InspectorContent, InspectorKind, cache_polled_covers, request_cover_intent,
+    };
+    use riff_gui::ui::selection::{TagField, TagRow, TagRowState};
     use riff_library::app::traits::CoverImage;
     use std::path::PathBuf;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     /// Recording [`TagEdits`] fake: captures every submitted request and
-    /// never yields outcomes (outcomes are injected through the inline
-    /// outcome functions directly).
-    struct RecordingTagEdits {
-        submitted: Mutex<Vec<TagEditRequest>>,
+    /// yields scripted outcomes from `poll` in order. `Clone` is a second
+    /// inspection handle over the same shared state, so the controller can
+    /// own one while the test inspects the other.
+    #[derive(Clone)]
+    struct FakeTagEdits {
+        submitted: Arc<Mutex<Vec<TagEditRequest>>>,
+        outcomes: Arc<Mutex<std::collections::VecDeque<TagEditOutcome>>>,
     }
 
-    impl RecordingTagEdits {
+    impl FakeTagEdits {
         fn new() -> Self {
             Self {
-                submitted: Mutex::new(Vec::new()),
+                submitted: Arc::new(Mutex::new(Vec::new())),
+                outcomes: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             }
+        }
+
+        /// A fake that yields `outcomes` from `poll` in order.
+        fn with_outcomes(outcomes: Vec<TagEditOutcome>) -> Self {
+            let fake = Self::new();
+            *fake.outcomes.lock().unwrap() = outcomes.into();
+            fake
         }
 
         fn requests(&self) -> Vec<TagEditRequest> {
@@ -4915,13 +4929,13 @@ mod background_service_ui_tests {
         }
     }
 
-    impl TagEdits for RecordingTagEdits {
+    impl TagEdits for FakeTagEdits {
         fn submit(&self, request: TagEditRequest) {
             self.submitted.lock().unwrap().push(request);
         }
 
         fn poll(&self) -> Option<TagEditOutcome> {
-            None
+            self.outcomes.lock().unwrap().pop_front()
         }
     }
 
@@ -4963,207 +4977,61 @@ mod background_service_ui_tests {
         }
     }
 
-    // --- Inline editor (Issue 02): the draft, the single-track submit, and
-    // the outcome routing ------------------------------------------------
+    // --- Inline editor (deepen-three-modules issue 02): the render-free
+    // controller -----------------------------------------------------------
 
-    /// A draft opened from `/music/t1.mp3`'s readout with Title typed over its
-    /// original; all other buffers still match their originals.
-    fn inline_draft() -> TagDraft {
-        TagDraft {
-            kind: riff_gui::ui::selection::DraftKind::Track,
-            track_id: TrackId("/music/t1.mp3".to_string()),
-            path: PathBuf::from("/music/t1.mp3"),
-            album_tracks: Vec::new(),
-            fields: [
-                "New Title".to_string(),
-                "Artist".to_string(),
-                "Album".to_string(),
-                "Album Artist".to_string(),
-                "Genre".to_string(),
-                "2001".to_string(),
-                "7".to_string(),
-            ],
-            originals: [
-                "Old Title".to_string(),
-                "Artist".to_string(),
-                "Album".to_string(),
-                "Album Artist".to_string(),
-                "Genre".to_string(),
-                "2001".to_string(),
-                "7".to_string(),
-            ],
-            error: None,
-            saving: false,
-            batch: None,
-            focus_first: false,
+    /// A readout tag row whose value is shared across the readout's tracks.
+    fn tag_row(field: TagField, text: &str) -> TagRow {
+        TagRow {
+            field,
+            state: TagRowState::Value,
+            text: text.to_string(),
+            originals: vec![Some(text.to_string())],
         }
     }
 
-    #[test]
-    fn test_inline_submit_sends_one_request_with_the_draft_fields() {
-        use riff_gui::ui::app::submit_inline_tag_edit_fields;
-
-        let mut draft = inline_draft();
-        let edits = RecordingTagEdits::new();
-        let mut in_flight = None;
-
-        submit_inline_tag_edit_fields(&mut draft, &edits, &mut in_flight);
-
-        let requests = edits.requests();
-        assert_eq!(requests.len(), 1, "a single-track save is one request");
-        let request = &requests[0];
-        assert_eq!(request.track_id.0, "/music/t1.mp3");
-        assert_eq!(request.path, PathBuf::from("/music/t1.mp3"));
-        assert_eq!(request.edit.title.as_deref(), Some("New Title"));
-        assert_eq!(request.edit.artist.as_deref(), Some("Artist"));
-        assert_eq!(request.edit.album.as_deref(), Some("Album"));
-        assert_eq!(request.edit.album_artist.as_deref(), Some("Album Artist"));
-        assert_eq!(request.edit.genre.as_deref(), Some("Genre"));
-        assert_eq!(request.edit.year, Some(2001));
-        assert_eq!(request.edit.track_number, Some(7));
-        assert!(draft.saving, "the draft flips into its saving state");
-        assert!(draft.error.is_none());
-        assert_eq!(
-            in_flight,
-            Some((
-                TrackId("/music/t1.mp3".to_string()),
-                PathBuf::from("/music/t1.mp3")
-            )),
-            "the outstanding record enables outcome matching"
-        );
+    /// The seven readout rows a track readout resolves: every field a shared
+    /// value, so the draft opens with each buffer equal to its original.
+    fn track_tags() -> Vec<TagRow> {
+        vec![
+            tag_row(TagField::Title, "Old Title"),
+            tag_row(TagField::Artist, "Artist"),
+            tag_row(TagField::Album, "Album"),
+            tag_row(TagField::AlbumArtist, "Album Artist"),
+            tag_row(TagField::Genre, "Genre"),
+            tag_row(TagField::Year, "2001"),
+            tag_row(TagField::TrackNumber, "7"),
+        ]
     }
 
-    #[test]
-    fn test_inline_invalid_numeric_submit_keeps_draft_open_without_submitting() {
-        use riff_gui::ui::app::submit_inline_tag_edit_fields;
-        use riff_gui::ui::selection::TagField;
-
-        let mut draft = inline_draft();
-        draft.fields[TagField::Year.index()] = "not a number".to_string();
-        let edits = RecordingTagEdits::new();
-        let mut in_flight = None;
-
-        submit_inline_tag_edit_fields(&mut draft, &edits, &mut in_flight);
-
-        assert!(
-            edits.requests().is_empty(),
-            "invalid fields must not reach the service"
-        );
-        assert!(draft.error.is_some(), "the parse error surfaces inline");
-        assert!(!draft.saving, "the draft stays open, not saving");
-        assert!(in_flight.is_none());
-    }
-
-    #[test]
-    fn test_inline_saved_outcome_closes_draft_and_sets_status_line() {
-        use riff_gui::ui::app::apply_inline_tag_edit_outcome;
-
-        let mut draft = Some(inline_draft());
-        if let Some(d) = draft.as_mut() {
-            d.saving = true;
-        }
-        let mut in_flight = Some((
-            TrackId("/music/t1.mp3".to_string()),
-            PathBuf::from("/music/t1.mp3"),
-        ));
-        let mut status = None;
-
-        apply_inline_tag_edit_outcome(
-            TagEditOutcome::Saved,
-            &mut draft,
-            &mut in_flight,
-            &mut status,
-        );
-
-        assert!(draft.is_none(), "a saved edit closes the inline editor");
-        assert_eq!(
-            status.as_deref(),
-            Some("Tags saved for t1.mp3"),
-            "the status line names the saved file"
-        );
-        assert!(in_flight.is_none(), "the outstanding record is consumed");
-    }
-
-    #[test]
-    fn test_inline_failed_outcome_keeps_draft_open_with_inline_reason() {
-        use riff_gui::ui::app::apply_inline_tag_edit_outcome;
-
-        let mut draft = Some(inline_draft());
-        if let Some(d) = draft.as_mut() {
-            d.saving = true;
-        }
-        let mut in_flight = Some((
-            TrackId("/music/t1.mp3".to_string()),
-            PathBuf::from("/music/t1.mp3"),
-        ));
-        let mut status = Some("earlier message".to_string());
-
-        apply_inline_tag_edit_outcome(
-            TagEditOutcome::Failed {
-                reason: "permission denied".to_string(),
+    /// The seven readout rows an album readout resolves: Title and Year
+    /// shared, Genre a `(different)` row (opens empty, never rewritten),
+    /// Track Number a `(none)` row.
+    fn album_tags() -> Vec<TagRow> {
+        vec![
+            tag_row(TagField::Title, "Old Album"),
+            tag_row(TagField::Artist, "Artist"),
+            tag_row(TagField::Album, "Album"),
+            tag_row(TagField::AlbumArtist, "Album Artist"),
+            TagRow {
+                field: TagField::Genre,
+                state: TagRowState::Different,
+                text: "(different)".to_string(),
+                originals: vec![None, None, None],
             },
-            &mut draft,
-            &mut in_flight,
-            &mut status,
-        );
-
-        let draft = draft.expect("a failed edit keeps the editor open");
-        assert_eq!(draft.error.as_deref(), Some("permission denied"));
-        assert!(!draft.saving, "the save spinner stops");
-        assert_eq!(
-            status.as_deref(),
-            Some("earlier message"),
-            "a failed inline save does not clear the status line"
-        );
+            tag_row(TagField::Year, "2001"),
+            TagRow {
+                field: TagField::TrackNumber,
+                state: TagRowState::None,
+                text: "(none)".to_string(),
+                originals: vec![None, None, None],
+            },
+        ]
     }
 
-    #[test]
-    fn test_inline_outcome_after_selection_change_still_reaches_status_line() {
-        use riff_gui::ui::app::apply_inline_tag_edit_outcome;
-
-        // The selection moved while the write was in flight, so the draft was
-        // already discarded — the outcome must still land on the status line
-        // and never resurrect the editor.
-        let mut draft: Option<TagDraft> = None;
-        let mut in_flight = Some((
-            TrackId("/music/t1.mp3".to_string()),
-            PathBuf::from("/music/t1.mp3"),
-        ));
-        let mut status = None;
-
-        apply_inline_tag_edit_outcome(
-            TagEditOutcome::Saved,
-            &mut draft,
-            &mut in_flight,
-            &mut status,
-        );
-
-        assert_eq!(
-            status.as_deref(),
-            Some("Tags saved for t1.mp3"),
-            "the outcome still reaches the status line after the selection moved"
-        );
-        assert!(draft.is_none(), "the discarded draft is never resurrected");
-    }
-
-    #[test]
-    fn test_inline_draft_is_current_only_for_its_selection() {
-        use riff_gui::ui::app::{InspectorContent, InspectorKind, inline_draft_is_current};
-        use riff_gui::ui::selection::TagDraft;
-
-        let draft = TagDraft {
-            kind: riff_gui::ui::selection::DraftKind::Track,
-            track_id: TrackId("/music/t1.mp3".to_string()),
-            path: PathBuf::from("/music/t1.mp3"),
-            album_tracks: Vec::new(),
-            fields: Default::default(),
-            originals: Default::default(),
-            error: None,
-            saving: false,
-            batch: None,
-            focus_first: false,
-        };
-        let content = |kind: InspectorKind, track_ids: Vec<TrackId>| InspectorContent {
+    /// The inspector content a readout of `kind` over `track_ids` resolves.
+    fn content(kind: InspectorKind, track_ids: Vec<TrackId>) -> InspectorContent {
+        InspectorContent {
             visible: true,
             kind,
             title: None,
@@ -5172,51 +5040,30 @@ mod background_service_ui_tests {
             track_ids,
             details: Vec::new(),
             tags: Vec::new(),
-        };
-        assert!(inline_draft_is_current(
-            &draft,
-            &content(
-                InspectorKind::Track,
-                vec![TrackId("/music/t1.mp3".to_string())]
-            )
-        ));
-        assert!(
-            !inline_draft_is_current(
-                &draft,
-                &content(
-                    InspectorKind::Track,
-                    vec![TrackId("/music/t9.mp3".to_string())]
-                )
-            ),
-            "a different track's readout discards the draft"
-        );
-        assert!(
-            !inline_draft_is_current(
-                &draft,
-                &content(
-                    InspectorKind::Album,
-                    vec![TrackId("/music/t1.mp3".to_string())]
-                )
-            ),
-            "an album readout never hosts a track draft"
-        );
-        assert!(
-            !inline_draft_is_current(&draft, &content(InspectorKind::Artist, Vec::new())),
-            "an artist readout never hosts a track draft"
-        );
+        }
     }
 
-    // --- Album batch editing (Issue 03) ------------------------------------------
+    /// A fresh controller over `edits` with the single-track draft for
+    /// `/music/t1.mp3` open and Title typed over its original.
+    fn track_editor(edits: &FakeTagEdits) -> InlineTagEditor {
+        let mut editor = InlineTagEditor::new(Box::new(edits.clone()));
+        editor.open_track(
+            TrackId("/music/t1.mp3".to_string()),
+            PathBuf::from("/music/t1.mp3"),
+            &track_tags(),
+        );
+        if let Some(draft) = editor.draft_mut() {
+            draft.fields[TagField::Title.index()] = "New Title".to_string();
+        }
+        editor
+    }
 
-    /// An album draft over three tracks, opened against a readout where Title
-    /// showed "Old Album" and Year "2001" shared across the album, Genre was a
-    /// `(different)` row left empty; Title and Year were then edited over.
-    fn album_draft() -> TagDraft {
-        TagDraft {
-            kind: riff_gui::ui::selection::DraftKind::Album,
-            track_id: TrackId(String::new()),
-            path: PathBuf::new(),
-            album_tracks: vec![
+    /// A fresh controller over `edits` with an album draft over three tracks
+    /// open and Title and Year typed over their originals.
+    fn album_editor(edits: &FakeTagEdits) -> InlineTagEditor {
+        let mut editor = InlineTagEditor::new(Box::new(edits.clone()));
+        editor.open_album(
+            vec![
                 (
                     TrackId("/music/a1.mp3".to_string()),
                     PathBuf::from("/music/a1.mp3"),
@@ -5230,40 +5077,186 @@ mod background_service_ui_tests {
                     PathBuf::from("/music/a3.mp3"),
                 ),
             ],
-            fields: [
-                "New Album".to_string(),
-                "Artist".to_string(),
-                "Album".to_string(),
-                "Album Artist".to_string(),
-                String::new(),
-                "2002".to_string(),
-                String::new(),
-            ],
-            originals: [
-                "Old Album".to_string(),
-                "Artist".to_string(),
-                "Album".to_string(),
-                "Album Artist".to_string(),
-                String::new(),
-                "2001".to_string(),
-                String::new(),
-            ],
-            error: None,
-            saving: false,
-            batch: None,
-            focus_first: false,
+            &album_tags(),
+        );
+        if let Some(draft) = editor.draft_mut() {
+            draft.fields[TagField::Title.index()] = "New Album".to_string();
+            draft.fields[TagField::Year.index()] = "2002".to_string();
         }
+        editor
     }
 
     #[test]
-    fn test_inline_batch_submits_one_request_per_track_with_only_dirty_fields() {
-        use riff_gui::ui::app::{BatchInFlight, submit_inline_batch_fields};
+    fn test_editor_track_save_sends_one_request_with_the_draft_fields() {
+        let edits = FakeTagEdits::new();
+        let mut editor = track_editor(&edits);
 
-        let mut draft = album_draft();
-        let edits = RecordingTagEdits::new();
-        let mut batch: Option<BatchInFlight> = None;
+        editor.save();
 
-        submit_inline_batch_fields(&mut draft, &edits, &mut batch);
+        let requests = edits.requests();
+        assert_eq!(requests.len(), 1, "a single-track save is one request");
+        let request = &requests[0];
+        assert_eq!(request.track_id.0, "/music/t1.mp3");
+        assert_eq!(request.path, PathBuf::from("/music/t1.mp3"));
+        assert_eq!(request.edit.title.as_deref(), Some("New Title"));
+        assert_eq!(request.edit.artist.as_deref(), Some("Artist"));
+        assert_eq!(request.edit.album.as_deref(), Some("Album"));
+        assert_eq!(request.edit.album_artist.as_deref(), Some("Album Artist"));
+        assert_eq!(request.edit.genre.as_deref(), Some("Genre"));
+        assert_eq!(request.edit.year, Some(2001));
+        assert_eq!(request.edit.track_number, Some(7));
+        let draft = editor
+            .draft()
+            .expect("a submitted track save keeps the draft open");
+        assert!(draft.saving, "the draft flips into its saving state");
+        assert!(draft.error.is_none());
+    }
+
+    #[test]
+    fn test_editor_invalid_numeric_save_keeps_draft_open_without_submitting() {
+        let edits = FakeTagEdits::new();
+        let mut editor = track_editor(&edits);
+        if let Some(draft) = editor.draft_mut() {
+            draft.fields[TagField::Year.index()] = "not a number".to_string();
+        }
+
+        editor.save();
+
+        assert!(
+            edits.requests().is_empty(),
+            "invalid fields must not reach the service"
+        );
+        let draft = editor
+            .draft()
+            .expect("a failed submit keeps the editor open");
+        assert!(draft.error.is_some(), "the parse error surfaces inline");
+        assert!(!draft.saving, "the draft stays open, not saving");
+    }
+
+    #[test]
+    fn test_editor_saved_outcome_closes_draft_and_sets_status_line() {
+        let edits = FakeTagEdits::with_outcomes(vec![TagEditOutcome::Saved]);
+        let mut editor = track_editor(&edits);
+        editor.save();
+        let mut status = None;
+
+        editor.poll_outcomes(&mut status);
+
+        assert!(
+            editor.draft().is_none(),
+            "a saved edit closes the inline editor"
+        );
+        assert_eq!(
+            status.as_deref(),
+            Some("Tags saved for t1.mp3"),
+            "the status line names the saved file"
+        );
+    }
+
+    #[test]
+    fn test_editor_failed_outcome_keeps_draft_open_with_inline_reason() {
+        let edits = FakeTagEdits::with_outcomes(vec![TagEditOutcome::Failed {
+            reason: "permission denied".to_string(),
+        }]);
+        let mut editor = track_editor(&edits);
+        editor.save();
+        let mut status = Some("earlier message".to_string());
+
+        editor.poll_outcomes(&mut status);
+
+        let draft = editor.draft().expect("a failed edit keeps the editor open");
+        assert_eq!(draft.error.as_deref(), Some("permission denied"));
+        assert!(!draft.saving, "the save spinner stops");
+        assert_eq!(
+            status.as_deref(),
+            Some("earlier message"),
+            "a failed inline save does not clear the status line"
+        );
+    }
+
+    #[test]
+    fn test_editor_outcome_after_selection_change_still_reaches_status_line() {
+        // The selection moved while the write was in flight, so the draft was
+        // already discarded — the outcome must still land on the status line
+        // and never resurrect the editor.
+        let edits = FakeTagEdits::with_outcomes(vec![TagEditOutcome::Saved]);
+        let mut editor = track_editor(&edits);
+        editor.save();
+        editor.reconcile(&content(
+            InspectorKind::Track,
+            vec![TrackId("/music/t9.mp3".to_string())],
+        ));
+        assert!(
+            editor.draft().is_none(),
+            "the moved selection discarded the draft"
+        );
+        let mut status = None;
+
+        editor.poll_outcomes(&mut status);
+
+        assert_eq!(
+            status.as_deref(),
+            Some("Tags saved for t1.mp3"),
+            "the outcome still reaches the status line after the selection moved"
+        );
+        assert!(
+            editor.draft().is_none(),
+            "the discarded draft is never resurrected"
+        );
+    }
+
+    #[test]
+    fn test_editor_track_draft_discarded_on_selection_change() {
+        let edits = FakeTagEdits::new();
+
+        // The same track's readout keeps the draft.
+        let mut editor = track_editor(&edits);
+        editor.reconcile(&content(
+            InspectorKind::Track,
+            vec![TrackId("/music/t1.mp3".to_string())],
+        ));
+        assert!(
+            editor.draft().is_some(),
+            "the same track's readout keeps the draft"
+        );
+
+        // A different track's readout discards it.
+        let mut editor = track_editor(&edits);
+        editor.reconcile(&content(
+            InspectorKind::Track,
+            vec![TrackId("/music/t9.mp3".to_string())],
+        ));
+        assert!(
+            editor.draft().is_none(),
+            "a different track's readout discards the draft"
+        );
+
+        // An album readout never hosts a track draft.
+        let mut editor = track_editor(&edits);
+        editor.reconcile(&content(
+            InspectorKind::Album,
+            vec![TrackId("/music/t1.mp3".to_string())],
+        ));
+        assert!(
+            editor.draft().is_none(),
+            "an album readout never hosts a track draft"
+        );
+
+        // An artist readout never hosts one either.
+        let mut editor = track_editor(&edits);
+        editor.reconcile(&content(InspectorKind::Artist, Vec::new()));
+        assert!(
+            editor.draft().is_none(),
+            "an artist readout never hosts a track draft"
+        );
+    }
+
+    #[test]
+    fn test_editor_album_save_submits_one_request_per_track_with_only_dirty_fields() {
+        let edits = FakeTagEdits::new();
+        let mut editor = album_editor(&edits);
+
+        editor.save();
 
         let requests = edits.requests();
         assert_eq!(
@@ -5291,94 +5284,80 @@ mod background_service_ui_tests {
                 "a (different) row left empty is untouched and skipped"
             );
         }
+        let draft = editor
+            .draft()
+            .expect("a submitted album save keeps the draft open");
         assert!(draft.saving, "the draft flips into its saving state");
         assert!(draft.error.is_none());
         let status = draft.batch.as_ref().expect("a batch is now in flight");
         assert_eq!(status.total, 3);
         assert!(!status.done());
-        assert!(batch.is_some(), "the outstanding batch is recorded");
     }
 
     #[test]
-    fn test_inline_batch_untouched_editor_submits_nothing() {
-        use riff_gui::ui::app::{BatchInFlight, submit_inline_batch_fields};
-
+    fn test_editor_untouched_album_save_submits_nothing() {
         // Nothing edited back to its readout value: the album save would be
         // an empty batch, so it submits nothing and writes no files.
-        let mut draft = album_draft();
-        draft.fields[0].clone_from(&draft.originals[0]);
-        draft.fields[5].clone_from(&draft.originals[5]);
-        let edits = RecordingTagEdits::new();
-        let mut batch: Option<BatchInFlight> = None;
+        let edits = FakeTagEdits::new();
+        let mut editor = InlineTagEditor::new(Box::new(edits.clone()));
+        editor.open_album(
+            vec![(
+                TrackId("/music/a1.mp3".to_string()),
+                PathBuf::from("/music/a1.mp3"),
+            )],
+            &album_tags(),
+        );
 
-        submit_inline_batch_fields(&mut draft, &edits, &mut batch);
+        editor.save();
 
         assert!(edits.requests().is_empty(), "nothing dirty submits nothing");
-        assert!(batch.is_none());
+        let draft = editor.draft().expect("the editor stays open");
         assert!(!draft.saving);
     }
 
     #[test]
-    fn test_inline_batch_invalid_numeric_keeps_draft_open_without_submitting() {
-        use riff_gui::ui::app::{BatchInFlight, submit_inline_batch_fields};
-        use riff_gui::ui::selection::TagField;
+    fn test_editor_album_invalid_numeric_save_keeps_draft_open_without_submitting() {
+        let edits = FakeTagEdits::new();
+        let mut editor = album_editor(&edits);
+        if let Some(draft) = editor.draft_mut() {
+            draft.fields[TagField::Year.index()] = "not a number".to_string();
+        }
 
-        let mut draft = album_draft();
-        draft.fields[TagField::Year.index()] = "not a number".to_string();
-        let edits = RecordingTagEdits::new();
-        let mut batch: Option<BatchInFlight> = None;
-
-        submit_inline_batch_fields(&mut draft, &edits, &mut batch);
+        editor.save();
 
         assert!(
             edits.requests().is_empty(),
             "invalid fields must not reach the service"
         );
+        let draft = editor
+            .draft()
+            .expect("a failed submit keeps the editor open");
         assert!(draft.error.is_some(), "the parse error surfaces inline");
         assert!(!draft.saving);
-        assert!(batch.is_none());
     }
 
     #[test]
-    fn test_inline_batch_outcomes_build_the_partial_failure_summary() {
-        use riff_gui::ui::app::{apply_inline_batch_outcome, submit_inline_batch_fields};
-
-        let mut draft = Some(album_draft());
-        let edits = RecordingTagEdits::new();
-        let mut batch = None;
-        submit_inline_batch_fields(draft.as_mut().unwrap(), &edits, &mut batch);
-        let mut status = Some("earlier message".to_string());
-
-        // Two saves, then one failure: the tallies land in order.
-        apply_inline_batch_outcome(TagEditOutcome::Saved, &mut draft, &mut batch, &mut status);
-        assert_eq!(
-            status.as_deref(),
-            Some("Tags saved for a1.mp3"),
-            "each save reaches the status line with its own file name"
-        );
-        assert!(
-            status.is_some() && status.as_ref().unwrap() == "Tags saved for a1.mp3",
-            "the last outcome wins"
-        );
-        apply_inline_batch_outcome(TagEditOutcome::Saved, &mut draft, &mut batch, &mut status);
-        apply_inline_batch_outcome(
+    fn test_editor_batch_outcomes_build_the_partial_failure_summary() {
+        let edits = FakeTagEdits::with_outcomes(vec![
+            TagEditOutcome::Saved,
+            TagEditOutcome::Saved,
             TagEditOutcome::Failed {
                 reason: "permission denied".to_string(),
             },
-            &mut draft,
-            &mut batch,
-            &mut status,
-        );
+        ]);
+        let mut editor = album_editor(&edits);
+        editor.save();
+        let mut status = Some("earlier message".to_string());
 
-        assert!(
-            status.as_deref() == Some("permission denied"),
+        // Two saves, then one failure: the tallies land in order.
+        editor.poll_outcomes(&mut status);
+
+        assert_eq!(
+            status.as_deref(),
+            Some("permission denied"),
             "a failed request surfaces its reason on the status line"
         );
-        assert!(
-            batch.is_none(),
-            "the batch is consumed when its last outcome lands"
-        );
-        let draft = draft.expect("the draft stays open after a batch");
+        let draft = editor.draft().expect("the draft stays open after a batch");
         assert!(!draft.saving, "the spinner stops when the batch lands");
         let batch = draft.batch.as_ref().expect("the draft keeps its tallies");
         assert!(batch.done());
@@ -5390,7 +5369,7 @@ mod background_service_ui_tests {
     }
 
     #[test]
-    fn test_inline_batch_all_saved_summary() {
+    fn test_editor_batch_all_saved_summary() {
         use riff_gui::ui::selection::BatchStatus;
 
         let mut status = BatchStatus {
@@ -5418,89 +5397,75 @@ mod background_service_ui_tests {
     }
 
     #[test]
-    fn test_inline_batch_outcomes_reach_status_line_after_selection_change() {
-        use riff_gui::ui::app::{apply_inline_batch_outcome, submit_inline_batch_fields};
-
+    fn test_editor_batch_outcomes_reach_status_line_after_selection_change() {
         // The selection moved while the batch was in flight: the draft is
         // gone, but the outstanding outcomes still land on the status line —
         // the editor is never resurrected.
-        let mut draft: Option<TagDraft> = None;
-        let edits = RecordingTagEdits::new();
-        let mut batch = None;
-        submit_inline_batch_fields(&mut album_draft(), &edits, &mut batch);
+        let edits = FakeTagEdits::with_outcomes(vec![
+            TagEditOutcome::Saved,
+            TagEditOutcome::Saved,
+            TagEditOutcome::Saved,
+        ]);
+        let mut editor = album_editor(&edits);
+        editor.save();
+        editor.reconcile(&content(
+            InspectorKind::Album,
+            vec![TrackId("/music/a9.mp3".to_string())],
+        ));
+        assert!(editor.draft().is_none());
         let mut status = None;
 
-        for _ in 0..3 {
-            apply_inline_batch_outcome(TagEditOutcome::Saved, &mut draft, &mut batch, &mut status);
-        }
+        editor.poll_outcomes(&mut status);
 
         assert_eq!(
             status.as_deref(),
             Some("Tags saved for a3.mp3"),
             "each outcome still reaches the status line after the selection moved"
         );
-        assert!(draft.is_none(), "the discarded draft is never resurrected");
-        assert!(batch.is_none());
+        assert!(
+            editor.draft().is_none(),
+            "the discarded draft is never resurrected"
+        );
     }
 
     #[test]
-    fn test_inline_album_draft_is_current_only_for_its_album() {
-        use riff_gui::ui::app::{InspectorContent, InspectorKind, inline_draft_is_current};
-        use riff_gui::ui::selection::DraftKind;
+    fn test_editor_album_draft_discarded_on_selection_change() {
+        let edits = FakeTagEdits::new();
 
-        let draft = TagDraft {
-            kind: DraftKind::Album,
-            track_id: TrackId(String::new()),
-            path: PathBuf::new(),
-            album_tracks: vec![
-                (TrackId("/music/a1.mp3".to_string()), PathBuf::new()),
-                (TrackId("/music/a2.mp3".to_string()), PathBuf::new()),
+        // The same album's readout keeps the draft.
+        let mut editor = album_editor(&edits);
+        editor.reconcile(&content(
+            InspectorKind::Album,
+            vec![
+                TrackId("/music/a1.mp3".to_string()),
+                TrackId("/music/a2.mp3".to_string()),
+                TrackId("/music/a3.mp3".to_string()),
             ],
-            fields: Default::default(),
-            originals: Default::default(),
-            error: None,
-            saving: false,
-            batch: None,
-            focus_first: false,
-        };
-        let content = |kind: InspectorKind, track_ids: Vec<TrackId>| InspectorContent {
-            visible: true,
-            kind,
-            title: None,
-            subtitle: None,
-            art_track: None,
-            track_ids,
-            details: Vec::new(),
-            tags: Vec::new(),
-        };
-        assert!(inline_draft_is_current(
-            &draft,
-            &content(
-                InspectorKind::Album,
-                vec![
-                    TrackId("/music/a1.mp3".to_string()),
-                    TrackId("/music/a2.mp3".to_string())
-                ]
-            )
         ));
         assert!(
-            !inline_draft_is_current(
-                &draft,
-                &content(
-                    InspectorKind::Album,
-                    vec![TrackId("/music/a9.mp3".to_string())]
-                )
-            ),
+            editor.draft().is_some(),
+            "the same album's readout keeps the draft"
+        );
+
+        // A different album's readout discards it.
+        let mut editor = album_editor(&edits);
+        editor.reconcile(&content(
+            InspectorKind::Album,
+            vec![TrackId("/music/a9.mp3".to_string())],
+        ));
+        assert!(
+            editor.draft().is_none(),
             "a different album's readout discards the album draft"
         );
+
+        // A track readout discards the album draft.
+        let mut editor = album_editor(&edits);
+        editor.reconcile(&content(
+            InspectorKind::Track,
+            vec![TrackId("/music/a1.mp3".to_string())],
+        ));
         assert!(
-            !inline_draft_is_current(
-                &draft,
-                &content(
-                    InspectorKind::Track,
-                    vec![TrackId("/music/a1.mp3".to_string())]
-                )
-            ),
+            editor.draft().is_none(),
             "a track readout discards the album draft"
         );
     }

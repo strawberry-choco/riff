@@ -1,5 +1,8 @@
 mod browser_pane;
 mod selection_pane;
+mod tag_editor;
+
+pub use tag_editor::InlineTagEditor;
 
 use crate::ui::chrome::TitleBarAction;
 use crate::ui::now_playing::{NowPlayingAction, UpNextEntry};
@@ -18,8 +21,7 @@ use riff_backend::app::state::{
     ViewMode,
 };
 use riff_backend::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
-use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
-use riff_backend::app::traits::TagEdit;
+use riff_backend::app::tag_edit_service::TagEdits;
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
 use riff_backend::domain::{
@@ -86,20 +88,10 @@ pub struct RiffApp {
     /// The Cover Service front end (ADR 0006): sends resolve intent and
     /// yields drained results; dedup and the negative cache live behind it.
     covers: Box<dyn Covers>,
-    /// The Tag Edit Service front end (ADR 0006): submits save intent and
-    /// yields polled outcomes; the whole save flow lives behind it.
-    tag_edits: Box<dyn TagEdits>,
-    /// The inline editor's open per-selection draft (tickets 02/03): `Some`
-    /// while the Detail Panel is editing the selection; discarded the moment
-    /// the selection changes — the draft never outlives its selection.
-    inline_draft: Option<crate::ui::selection::TagDraft>,
-    /// The one inline Tag Edit currently outstanding, recorded at submit so a
-    /// polled outcome can be matched back to the draft (and its file name
-    /// shown in the status line) — outcomes themselves carry no identity.
-    inline_in_flight: Option<(TrackId, PathBuf)>,
-    /// An album batch's outstanding requests (ticket 03), serialized by the
-    /// worker and polled in submission order.
-    inline_batch_in_flight: Option<BatchInFlight>,
+    /// The Tag Edit Service front end (ADR 0006) lives inside the inline
+    /// editor's controller: submits save intent and yields polled outcomes;
+    /// the whole save flow lives behind it.
+    tag_editor: InlineTagEditor,
     /// Which read-only smart playlist is open in the library explorer, if any.
     /// Transient UI state (precedent: `tag_edit`); the playlist contents are
     /// re-computed from library data on every frame, so nothing is cached.
@@ -228,10 +220,7 @@ impl RiffApp {
             cover_textures: std::collections::HashMap::new(),
             cover_lru_keys: Vec::new(),
             covers,
-            tag_edits,
-            inline_draft: None,
-            inline_in_flight: None,
-            inline_batch_in_flight: None,
+            tag_editor: InlineTagEditor::new(tag_edits),
             smart_playlist_view: None,
             playlist_view: None,
             now_playing_cover_key: None,
@@ -422,36 +411,6 @@ impl RiffApp {
         );
     }
 
-    /// Drain polled Tag Edit outcomes from the service. On [`Saved`] the
-    /// inline editor's draft closes (or the album batch tallies), and the
-    /// status line reports the saved file; on `Failed` the draft keeps its
-    /// inline reason — there is no silent-success path. All outcome
-    /// application lives in the free inline outcome functions, which tests
-    /// drive.
-    fn poll_tag_edit_outcomes(&mut self, library: &mut LibrarySession) {
-        while let Some(outcome) = self.tag_edits.poll() {
-            // Outcomes carry no identity; the outstanding record captured at
-            // submit time routes the outcome to its flow. Only one edit is
-            // outstanding at a time: the album batch's record first, then the
-            // single-track inline record.
-            if self.inline_batch_in_flight.is_some() {
-                apply_inline_batch_outcome(
-                    outcome,
-                    &mut self.inline_draft,
-                    &mut self.inline_batch_in_flight,
-                    &mut library.scan_status,
-                );
-            } else if self.inline_in_flight.is_some() {
-                apply_inline_tag_edit_outcome(
-                    outcome,
-                    &mut self.inline_draft,
-                    &mut self.inline_in_flight,
-                    &mut library.scan_status,
-                );
-            }
-        }
-    }
-
     /// Consume polled cover results into the UI texture cache: rgba→texture
     /// conversion is the egui-bound work that stays on the main thread;
     /// every other caching concern lives in the service.
@@ -464,39 +423,11 @@ impl RiffApp {
         );
     }
 
-    /// Validate the inline editor's draft and submit its requests through the
-    /// Tag Edits seam, recording the outstanding record so the polled
-    /// outcomes can be applied to the draft (and the status line) later: a
-    /// single-Track draft's one request, or an Album draft's dirty-only batch.
-    fn submit_inline_tag_edit(&mut self) {
-        use crate::ui::selection::DraftKind;
-        let Some(ref mut draft) = self.inline_draft else {
-            return;
-        };
-        match draft.kind {
-            DraftKind::Track => {
-                submit_inline_tag_edit_fields(
-                    draft,
-                    self.tag_edits.as_ref(),
-                    &mut self.inline_in_flight,
-                );
-            }
-            DraftKind::Album => {
-                submit_inline_batch_fields(
-                    draft,
-                    self.tag_edits.as_ref(),
-                    &mut self.inline_batch_in_flight,
-                );
-            }
-        }
-    }
-
     /// Open the per-selection draft for the resolved readout: a Track draft
     /// for a track readout, an album batch draft for an album readout —
     /// targets resolved through the Session Views seam (the same source every
-    /// readout reads).
+    /// readout reads); the draft itself lives in the editor controller.
     fn open_inline_draft(&mut self, content: &InspectorContent) {
-        use crate::ui::selection::TagDraft;
         let tags = content.tags.clone();
         match content.kind {
             InspectorKind::Track => {
@@ -505,11 +436,8 @@ impl RiffApp {
                     .first()
                     .and_then(|id| self.views.selected_track(id))
                 {
-                    self.inline_draft = Some(TagDraft::for_track(
-                        track.id.clone(),
-                        track.file_path,
-                        &tags,
-                    ));
+                    self.tag_editor
+                        .open_track(track.id.clone(), track.file_path, &tags);
                 }
             }
             InspectorKind::Album => {
@@ -522,7 +450,7 @@ impl RiffApp {
                             .map(|track| (track.id.clone(), track.file_path))
                     })
                     .collect();
-                self.inline_draft = Some(TagDraft::for_album(targets, &tags));
+                self.tag_editor.open_album(targets, &tags);
             }
             InspectorKind::Artist | InspectorKind::Genre => {}
         }
@@ -557,7 +485,7 @@ impl RiffApp {
         // Arc clone out of the seam first: no `&self.views` borrow may live
         // across widget rendering.
         let playlists = self.views.playlists();
-        let inline_draft_slot = &mut self.inline_draft;
+        let tag_editor = &mut self.tag_editor;
         let selected_slot = &mut library.selected_track;
         let playlist_store_slot = self.playlist_store.as_mut();
         show_track_context_menu(
@@ -567,7 +495,7 @@ impl RiffApp {
                 track_id,
                 track,
                 selected_track: selected_slot,
-                inline_draft: inline_draft_slot,
+                tag_editor,
                 playlists,
                 playlist_store: playlist_store_slot,
                 remove_from_playlist,
@@ -791,7 +719,7 @@ impl eframe::App for RiffApp {
         apply_backend_events(self.drain_backend_events(), &mut library.scan_status);
 
         self.poll_library_updates(&mut library);
-        self.poll_tag_edit_outcomes(&mut library);
+        self.tag_editor.poll_outcomes(&mut library.scan_status);
         self.update_cover_cache(ui.ctx());
         self.poll_watchers();
 
@@ -3164,19 +3092,6 @@ impl RiffApp {
     }
 }
 
-/// Parse an optional numeric tag field; empty input means "leave unset".
-fn parse_number(label: &str, raw: &str) -> Result<Option<u32>, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        Ok(None)
-    } else {
-        trimmed
-            .parse::<u32>()
-            .map(Some)
-            .map_err(|_| format!("{label} must be a whole number"))
-    }
-}
-
 /// The UI's whole remaining cover responsibility (ADR 0006): ask the Cover
 /// Service for art unless the texture is already in the UI-owned cache.
 /// Free function so tests drive the exact production path without a window.
@@ -3188,48 +3103,6 @@ pub fn request_cover_intent(
 ) {
     if !texture_cached {
         covers.request(track_id, path);
-    }
-}
-
-/// Apply one polled Tag Edit outcome to the inline editor's draft, its
-/// outstanding request record, and the status line — the same code path
-/// `poll_tag_edit_outcomes` runs per outcome. `Saved` closes the matching
-/// draft and reports the saved file; `Failed` keeps the editor open with the
-/// reason inline. Outcomes carry no identity, so the record captured at
-/// submit time supplies both the match key and the file name; an outcome
-/// with no matching outstanding request is ignored. A draft that has already
-/// been discarded (the selection moved) never comes back: the status line
-/// still reports the outcome, the editor simply stays gone.
-pub fn apply_inline_tag_edit_outcome(
-    outcome: TagEditOutcome,
-    draft: &mut Option<crate::ui::selection::TagDraft>,
-    in_flight: &mut Option<(TrackId, PathBuf)>,
-    scan_status: &mut Option<String>,
-) {
-    let Some((track_id, path)) = in_flight.take() else {
-        return;
-    };
-    match outcome {
-        TagEditOutcome::Saved => {
-            let name = path.file_name().map_or_else(
-                || path.to_string_lossy().to_string(),
-                |n| n.to_string_lossy().to_string(),
-            );
-            *scan_status = Some(format!("Tags saved for {name}"));
-            tracing::info!("Tags written for {:?}", path);
-            if draft.as_ref().is_some_and(|d| d.track_id == track_id) {
-                *draft = None;
-            }
-        }
-        TagEditOutcome::Failed { reason } => {
-            tracing::warn!("Tag edit failed for {:?}: {}", path, reason);
-            if let Some(d) = draft.as_mut()
-                && d.track_id == track_id
-            {
-                d.error = Some(reason);
-                d.saving = false;
-            }
-        }
     }
 }
 
@@ -3249,230 +3122,6 @@ pub fn apply_backend_events(
         {
             *scan_status = Some(payload.message);
         }
-    }
-}
-
-/// Validate the inline editor's draft and submit one [`TagEditRequest`]
-/// through the service seam — the same durable path single-Track saves use
-/// today (ADR 0006). Invalid numeric fields keep the draft open with an
-/// inline reason and submit nothing; valid fields clear the error, flip the
-/// draft into its saving state, and record the outstanding request so its
-/// outcome can be matched later. Nothing is ever written without an explicit
-/// Save upstream.
-pub fn submit_inline_tag_edit_fields(
-    draft: &mut crate::ui::selection::TagDraft,
-    tag_edits: &dyn TagEdits,
-    in_flight: &mut Option<(TrackId, PathBuf)>,
-) {
-    use crate::ui::selection::TagField;
-    match (
-        parse_number("Year", &draft.fields[TagField::Year.index()]),
-        parse_number("Track number", &draft.fields[TagField::TrackNumber.index()]),
-    ) {
-        (Ok(year), Ok(track_number)) => {
-            draft.error = None;
-            draft.saving = true;
-            let request = TagEditRequest {
-                track_id: draft.track_id.clone(),
-                path: draft.path.clone(),
-                edit: TagEdit {
-                    title: Some(draft.fields[TagField::Title.index()].clone()),
-                    artist: Some(draft.fields[TagField::Artist.index()].clone()),
-                    album: Some(draft.fields[TagField::Album.index()].clone()),
-                    album_artist: Some(draft.fields[TagField::AlbumArtist.index()].clone()),
-                    genre: Some(draft.fields[TagField::Genre.index()].clone()),
-                    year,
-                    track_number,
-                    ..Default::default()
-                },
-            };
-            *in_flight = Some((request.track_id.clone(), request.path.clone()));
-            tag_edits.submit(request);
-        }
-        (Err(error), _) | (_, Err(error)) => {
-            draft.error = Some(error);
-        }
-    }
-}
-
-/// The album batch's outstanding requests, in submission order — the worker
-/// serializes the batch, so polled outcomes arrive in the same order and each
-/// lands on the record popped first. The tallies feed the draft's
-/// [`crate::ui::selection::BatchStatus`] the Save bar renders.
-#[derive(Debug, Clone)]
-pub struct BatchInFlight {
-    pending: std::collections::VecDeque<(TrackId, PathBuf)>,
-    total: usize,
-    saved: usize,
-    failed: usize,
-    first_failure: Option<String>,
-}
-
-impl BatchInFlight {
-    fn new(pending: std::collections::VecDeque<(TrackId, PathBuf)>) -> Self {
-        let total = pending.len();
-        Self {
-            pending,
-            total,
-            saved: 0,
-            failed: 0,
-            first_failure: None,
-        }
-    }
-}
-
-/// Submit the album draft's dirty-only batch: one [`TagEditRequest`] per
-/// album Track, carrying only the fields whose typed text differs from the
-/// row's originally displayed value (`Some`) — a `(different)` row left with
-/// an empty input is untouched, so it is skipped and can never blank a tag
-/// on every Track; clearing a shared tag stays a single-Track action. A
-/// fully untouched editor submits nothing and writes no files (Save is
-/// disabled while nothing is dirty). Invalid numeric fields keep the draft
-/// open with an inline reason and submit nothing.
-pub fn submit_inline_batch_fields(
-    draft: &mut crate::ui::selection::TagDraft,
-    tag_edits: &dyn TagEdits,
-    batch: &mut Option<BatchInFlight>,
-) {
-    use crate::ui::selection::TagField;
-
-    if !draft.any_dirty() {
-        return;
-    }
-    // Only a dirty numeric field is parsed: an untouched Year/Track Number
-    // stays `None` in every request rather than being rewritten.
-    let year = if draft.is_dirty(TagField::Year) {
-        match parse_number("Year", &draft.fields[TagField::Year.index()]) {
-            Ok(y) => y,
-            Err(error) => {
-                draft.error = Some(error);
-                return;
-            }
-        }
-    } else {
-        None
-    };
-    let track_number = if draft.is_dirty(TagField::TrackNumber) {
-        match parse_number("Track number", &draft.fields[TagField::TrackNumber.index()]) {
-            Ok(n) => n,
-            Err(error) => {
-                draft.error = Some(error);
-                return;
-            }
-        }
-    } else {
-        None
-    };
-    let value = |field: TagField| -> Option<String> {
-        draft
-            .is_dirty(field)
-            .then(|| draft.fields[field.index()].clone())
-    };
-    let pending = draft
-        .album_tracks
-        .iter()
-        .map(|(track_id, path)| {
-            let request = TagEditRequest {
-                track_id: track_id.clone(),
-                path: path.clone(),
-                edit: TagEdit {
-                    title: value(TagField::Title),
-                    artist: value(TagField::Artist),
-                    album: value(TagField::Album),
-                    album_artist: value(TagField::AlbumArtist),
-                    genre: value(TagField::Genre),
-                    year,
-                    track_number,
-                    ..Default::default()
-                },
-            };
-            tag_edits.submit(request);
-            (track_id.clone(), path.clone())
-        })
-        .collect::<std::collections::VecDeque<_>>();
-
-    draft.error = None;
-    draft.saving = true;
-    draft.batch = Some(crate::ui::selection::BatchStatus {
-        total: pending.len(),
-        saved: 0,
-        failed: 0,
-        first_failure: None,
-    });
-    *batch = Some(BatchInFlight::new(pending));
-}
-
-/// Apply one polled Tag Edit outcome to the album batch: each outcome lands
-/// on the next pending request in submission order (the worker serializes
-/// the batch), updating the draft's tallies and the status line — "Tags
-/// saved for X" per save, the failure reason per failure, exactly the
-/// per-request surface single-Track saves use. When the last outcome lands
-/// the draft stops saving, its [`crate::ui::selection::BatchStatus`] turns
-/// done, and the Save bar shows the "Saved N of M tracks" summary (orange
-/// when any failed). A draft that has already been discarded (the selection
-/// moved) never comes back; the status line still reports each outcome.
-pub fn apply_inline_batch_outcome(
-    outcome: TagEditOutcome,
-    draft: &mut Option<crate::ui::selection::TagDraft>,
-    batch: &mut Option<BatchInFlight>,
-    scan_status: &mut Option<String>,
-) {
-    let Some(in_flight) = batch.as_mut() else {
-        return;
-    };
-    let Some((_track_id, path)) = in_flight.pending.pop_front() else {
-        return;
-    };
-    match outcome {
-        TagEditOutcome::Saved => {
-            in_flight.saved += 1;
-            let name = path.file_name().map_or_else(
-                || path.to_string_lossy().to_string(),
-                |n| n.to_string_lossy().to_string(),
-            );
-            *scan_status = Some(format!("Tags saved for {name}"));
-        }
-        TagEditOutcome::Failed { reason } => {
-            in_flight.failed += 1;
-            in_flight.first_failure.get_or_insert(reason.clone());
-            *scan_status = Some(reason);
-        }
-    }
-    if let Some(d) = draft.as_mut() {
-        d.batch = Some(crate::ui::selection::BatchStatus {
-            total: in_flight.total,
-            saved: in_flight.saved,
-            failed: in_flight.failed,
-            first_failure: in_flight.first_failure.clone(),
-        });
-    }
-    if in_flight.pending.is_empty() {
-        *batch = None;
-        if let Some(d) = draft.as_mut() {
-            d.saving = false;
-        }
-    }
-}
-
-/// Whether the open inline draft still belongs to the resolved readout: the
-/// draft never outlives its selection — a changed selection discards it so a
-/// stale half-typed edit can never leak onto a different Track or Album
-/// (ticket 03). An Album draft belongs to the album whose track batch it
-/// targets; an Artist/Genre readout never hosts one.
-pub fn inline_draft_is_current(
-    draft: &crate::ui::selection::TagDraft,
-    content: &InspectorContent,
-) -> bool {
-    use crate::ui::selection::DraftKind;
-    match (draft.kind, content.kind) {
-        (DraftKind::Track, InspectorKind::Track) => {
-            content.track_ids.first() == Some(&draft.track_id)
-        }
-        (DraftKind::Album, InspectorKind::Album) => {
-            let ids: Vec<&TrackId> = draft.album_tracks.iter().map(|(id, _)| id).collect();
-            content.track_ids.iter().collect::<Vec<_>>() == ids
-        }
-        _ => false,
     }
 }
 
@@ -3554,9 +3203,10 @@ struct TrackMenuArgs<'a> {
     /// The selection slot: the "Edit Tags" item selects the Track before the
     /// inline editor opens, so the readout follows the entry point.
     selected_track: &'a mut Option<TrackId>,
-    /// The inline editor's draft slot: "Edit Tags" opens the per-selection
-    /// draft for that track (the retired modal's entry point, now un-gated).
-    inline_draft: &'a mut Option<crate::ui::selection::TagDraft>,
+    /// The inline editor's controller: "Edit Tags" opens the per-selection
+    /// draft for that track through it (the retired modal's entry point, now
+    /// un-gated).
+    tag_editor: &'a mut InlineTagEditor,
     /// The seam's `Arc`'d playlist snapshot, cloned out before rendering —
     /// it only names the "Add to Playlist" targets; mutations commit through
     /// the store and the projection invalidates itself.
@@ -3579,7 +3229,7 @@ fn show_track_context_menu(response: &egui::Response, args: TrackMenuArgs<'_>) {
         track_id,
         track,
         selected_track,
-        inline_draft,
+        tag_editor,
         playlists,
         playlist_store,
         remove_from_playlist,
@@ -3632,12 +3282,10 @@ fn show_track_context_menu(response: &egui::Response, args: TrackMenuArgs<'_>) {
             {
                 *selected_track = Some(tid.clone());
                 let rows = tag_rows(std::slice::from_ref(t));
-                *inline_draft = Some(crate::ui::selection::TagDraft::for_track(
-                    t.id.clone(),
-                    t.file_path.clone(),
-                    &rows,
-                ));
-                if let Some(draft) = inline_draft.as_mut() {
+                tag_editor.open_track(t.id.clone(), t.file_path.clone(), &rows);
+                // The "Edit Tags" entry point focuses the first tag field
+                // (Issue 04): the one-shot flag is consumed the frame it lands.
+                if let Some(draft) = tag_editor.draft_mut() {
                     draft.focus_first = true;
                 }
                 ui.close();

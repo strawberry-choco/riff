@@ -3639,7 +3639,7 @@ mod tests {
     #[test]
     fn test_now_playing_cover_uses_the_mockup_dimension() {
         assert!(
-            (now_playing::COVER_SIZE - 240.0).abs() < f32::EPSILON,
+            (theme::geometry::now_playing::COVER_SIZE - 240.0).abs() < f32::EPSILON,
             "the mockup cover is exactly 240px"
         );
     }

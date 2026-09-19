@@ -1810,7 +1810,6 @@ mod tests {
     }
 
     /// WCAG 2.1 relative luminance: sRGB channels linearized and weighted.
-    #[expect(clippy::cast_possible_truncation)]
     fn relative_luminance(color: egui::Color32) -> f32 {
         let channel = |byte: u8| {
             let s = f32::from(byte) / 255.0;

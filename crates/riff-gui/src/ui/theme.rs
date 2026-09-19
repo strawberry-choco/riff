@@ -300,7 +300,7 @@ pub mod geometry {
 
     /// The custom titlebar's clusters: wordmark, nav, scan status, the search
     /// band and the OS-convention caption buttons. The band's own height is
-    /// [TITLEBAR_H](crate::ui::theme::TITLEBAR_H).
+    /// [`TITLEBAR_H`](crate::ui::theme::TITLEBAR_H).
     pub mod titlebar {
         /// Caption-button hit area width: Windows-convention caption buttons
         /// are wide, full-height strips (not floating icon chips), so
@@ -325,6 +325,43 @@ pub mod geometry {
         /// enough to hit [`SEARCH_MAX_W`] — the same inset the content top bar
         /// used.
         pub const SEARCH_EDGE_INSET: f32 = 12.0;
+    }
+
+    /// The sidebar's tree row — the row height every list in the app lays out
+    /// with (the detail column, Now Playing's Up Next and the player bar's
+    /// queue panel all read [`ROW_H`] from here), plus what sits inside one.
+    pub mod sidebar {
+        /// Tree-row height (`h-10`): every sidebar row is exactly 40px tall.
+        pub const ROW_H: f32 = 40.0;
+        /// Track-row cover thumbnail on library track rows: a square cover-art
+        /// tile sized `ROW_H - 8` (32×32), so width and height always match
+        /// and the tile never exceeds the 40px row it sits in.
+        pub const ROW_COVER: f32 = ROW_H - 8.0;
+        /// Column width of a track row's favorite control: the heart's own cell
+        /// at the row's leading edge. The cell sits INSIDE the row (not beside
+        /// it), so the hover and selection washes cover it and the row reads as
+        /// one 40px band.
+        pub const FAVORITE_COL_W: f32 = 24.0;
+        /// Glyph size of the favorite control's heart.
+        pub const HEART_SIZE: f32 = 14.0;
+        /// Search-box height (`h-8`).
+        pub const SEARCH_H: f32 = 32.0;
+        /// First-level indent: content starts 12px into the row.
+        pub const INDENT_BASE: f32 = 12.0;
+        /// The mockup's three-level indent scale, verbatim: 12 / 44 / 80px.
+        pub const INDENT_SCALE: [f32; 3] = [12.0, 44.0, 80.0];
+        /// Indent step between tree levels past the mockup's third; deep levels
+        /// keep stepping so deep trees never fold into one edge.
+        pub const INDENT_STEP: f32 = 36.0;
+        /// Horizontal padding of the icon strip inside a row.
+        pub const ICON_GAP: f32 = 8.0;
+        /// Floor under the label's wrap width when a row carries a right-aligned
+        /// meta cluster: a pathologically narrow row keeps a readable title
+        /// instead of letting the text column collapse.
+        pub const MIN_LABEL_FREE_W: f32 = 24.0;
+        /// The equalizer-bars indicator: four bars, like the mockup's
+        /// now-playing glyph.
+        pub const EQ_BAR_COUNT: usize = 4;
     }
 }
 

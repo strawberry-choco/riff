@@ -464,7 +464,7 @@ fn up_next_section(
 
     if content.up_next.is_empty() {
         painter.text(
-            egui::pos2(cx, list_rect.top() + sidebar::ROW_H / 2.0),
+            egui::pos2(cx, list_rect.top() + theme::geometry::sidebar::ROW_H / 2.0),
             egui::Align2::CENTER_CENTER,
             "Queue is empty",
             body_font.clone(),
@@ -477,35 +477,40 @@ fn up_next_section(
         egui::ScrollArea::vertical()
             .id_salt("now_playing_up_next")
             .auto_shrink(false)
-            .show_rows(ui, sidebar::ROW_H, content.up_next.len(), |ui, range| {
-                for i in range {
-                    let Some(entry) = content.up_next.get(i) else {
-                        continue;
-                    };
-                    let row = sidebar::tree_row(
-                        ui,
-                        cache,
-                        palette,
-                        TreeRow {
-                            indent_level: 0,
-                            icon: None,
-                            cover: None,
-                            label: &entry.label,
-                            count: None,
-                            meta: None,
-                            favorite: None,
-                            selected: false,
-                            now_playing: false,
-                            playing: false,
-                            disclosure: None,
-                        },
-                    );
-                    if row.response.clicked() {
-                        actions.push(NowPlayingAction::PlayNext(entry.id.clone()));
+            .show_rows(
+                ui,
+                theme::geometry::sidebar::ROW_H,
+                content.up_next.len(),
+                |ui, range| {
+                    for i in range {
+                        let Some(entry) = content.up_next.get(i) else {
+                            continue;
+                        };
+                        let row = sidebar::tree_row(
+                            ui,
+                            cache,
+                            palette,
+                            TreeRow {
+                                indent_level: 0,
+                                icon: None,
+                                cover: None,
+                                label: &entry.label,
+                                count: None,
+                                meta: None,
+                                favorite: None,
+                                selected: false,
+                                now_playing: false,
+                                playing: false,
+                                disclosure: None,
+                            },
+                        );
+                        if row.response.clicked() {
+                            actions.push(NowPlayingAction::PlayNext(entry.id.clone()));
+                        }
+                        row.response.on_hover_text("Queue this track to play next");
                     }
-                    row.response.on_hover_text("Queue this track to play next");
-                }
-            });
+                },
+            );
     });
 }
 

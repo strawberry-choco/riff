@@ -7,7 +7,7 @@
 // `riff-infra`; every pre-existing assertion is unchanged.
 
 use super::*;
-use riff_library::app::traits::MetadataWriter;
+use riff_library::app::traits::{CoverLoader, MetadataWriter, RequestedSize};
 
 // --- ReplayGain tag parsing (pure) -------------------------------------------
 
@@ -238,6 +238,214 @@ fn test_lofty_metadata_reader_new() {
 fn test_image_cover_loader_new() {
     let _loader = ImageCoverLoader::new();
     // Loader creation test
+}
+
+// --- CoverLoader boundary: the adapter owns the decode ----------------------
+//
+// The cover port hands out decoded RGBA8 pixels, not still-encoded bytes, so
+// the `image` decode never runs on the UI thread (cover-decoding-on-worker
+// issue 01). These tests drive the real adapter over real encoded fixtures.
+
+/// Encode a `w`×`h` PNG whose every pixel is `rgba`, as the fixture an
+/// embedded cover or a cover file would carry.
+fn png_fixture(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
+    let buffer: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+        image::ImageBuffer::from_pixel(width, height, image::Rgba(rgba));
+    let mut out = std::io::Cursor::new(Vec::new());
+    buffer.write_to(&mut out, image::ImageFormat::Png).unwrap();
+    out.into_inner()
+}
+
+/// A box big enough that every fixture below fits inside it, used where a
+/// test is about something other than scaling.
+const BIG_BOX: RequestedSize = RequestedSize {
+    width: 512,
+    height: 512,
+};
+
+#[test]
+fn test_load_cover_decodes_embedded_png_to_rgba() {
+    // A 2x2 flat PNG is the whole fixture; the expected pixels below are the
+    // literal the fixture was built from, written out row-major.
+    let source = CoverSource::Embedded(png_fixture(2, 2, [9, 9, 9, 255]).into());
+
+    let cover = ImageCoverLoader::new()
+        .load_cover(&source, BIG_BOX)
+        .unwrap()
+        .expect("an embedded PNG resolves to a cover");
+
+    assert_eq!(
+        (cover.width, cover.height),
+        (2, 2),
+        "a source already inside the box keeps its own dimensions"
+    );
+    assert_eq!(
+        cover.rgba,
+        vec![9, 9, 9, 255, 9, 9, 9, 255, 9, 9, 9, 255, 9, 9, 9, 255],
+        "unpremultiplied RGBA8, row-major, length == width * height * 4"
+    );
+}
+
+#[test]
+fn test_load_cover_never_upscales_a_source_smaller_than_the_box() {
+    // A 4x4 cover asked for at hero size must stay 4x4: upscaling would spend
+    // pixels and memory inventing detail the artwork does not have.
+    let source = CoverSource::Embedded(png_fixture(4, 4, [9, 9, 9, 255]).into());
+
+    let cover = ImageCoverLoader::new()
+        .load_cover(
+            &source,
+            RequestedSize {
+                width: 512,
+                height: 512,
+            },
+        )
+        .unwrap()
+        .expect("a small cover still resolves");
+
+    assert_eq!(
+        (cover.width, cover.height),
+        (4, 4),
+        "the result is clamped to the source, not stretched to the box"
+    );
+    assert_eq!(
+        cover.rgba.len(),
+        4 * 4 * 4,
+        "the buffer is the source's own pixels"
+    );
+}
+
+#[test]
+fn test_load_cover_fits_a_wide_source_inside_the_requested_box() {
+    // 8x4 into a square 4x4 box: the width is the binding side, so the height
+    // scales with it. Exactly divisible, so the expectation is unambiguous.
+    let source = CoverSource::Embedded(png_fixture(8, 4, [9, 9, 9, 255]).into());
+
+    let cover = ImageCoverLoader::new()
+        .load_cover(
+            &source,
+            RequestedSize {
+                width: 4,
+                height: 4,
+            },
+        )
+        .unwrap()
+        .expect("an embedded PNG resolves to a cover");
+
+    assert_eq!(
+        (cover.width, cover.height),
+        (4, 2),
+        "contain-fit preserves the 2:1 aspect ratio inside the box"
+    );
+    assert_eq!(
+        cover.rgba.len(),
+        4 * 2 * 4,
+        "the pixel buffer matches the returned dimensions"
+    );
+}
+
+#[test]
+fn test_load_cover_fits_a_tall_source_inside_the_requested_box() {
+    // The mirror image of the wide case: height binds, width follows.
+    let source = CoverSource::Embedded(png_fixture(4, 8, [9, 9, 9, 255]).into());
+
+    let cover = ImageCoverLoader::new()
+        .load_cover(
+            &source,
+            RequestedSize {
+                width: 4,
+                height: 4,
+            },
+        )
+        .unwrap()
+        .expect("an embedded PNG resolves to a cover");
+
+    assert_eq!(
+        (cover.width, cover.height),
+        (2, 4),
+        "height binds, width scales"
+    );
+}
+
+#[test]
+fn test_load_cover_decodes_a_filesystem_cover_file() {
+    // The fallback cover (`cover.jpg` / `folder.png` / …) reaches the loader
+    // as a path, so reading the file is now the adapter's work too.
+    let dir = tempfile::tempdir().unwrap();
+    let cover_path = dir.path().join("cover.png");
+    std::fs::write(&cover_path, png_fixture(2, 2, [1, 2, 3, 255])).unwrap();
+
+    let cover = ImageCoverLoader::new()
+        .load_cover(&CoverSource::Filesystem(cover_path), BIG_BOX)
+        .unwrap()
+        .expect("a cover file resolves to a cover");
+
+    assert_eq!((cover.width, cover.height), (2, 2));
+    assert_eq!(
+        cover.rgba,
+        vec![1, 2, 3, 255, 1, 2, 3, 255, 1, 2, 3, 255, 1, 2, 3, 255]
+    );
+}
+
+#[test]
+fn test_load_cover_has_nothing_to_decode_for_a_track_without_artwork() {
+    // `CoverSource::None` is the artless case, not a failure: `Ok(None)` is
+    // what lets the worker negative-cache the track.
+    let cover = ImageCoverLoader::new()
+        .load_cover(&CoverSource::None, BIG_BOX)
+        .unwrap();
+
+    assert!(cover.is_none(), "no source means no decoded cover");
+}
+
+#[test]
+fn test_load_cover_reports_an_unreadable_cover_file_as_a_cover_load_error() {
+    let missing = std::path::PathBuf::from("Z:/definitely/not/a/cover.png");
+
+    let error = ImageCoverLoader::new()
+        .load_cover(&CoverSource::Filesystem(missing), BIG_BOX)
+        .expect_err("a cover file that cannot be read is not a cover");
+
+    assert!(
+        matches!(error, LibraryError::CoverLoad(ref message) if message.contains("read")),
+        "the failure must surface as a read error, got: {error}"
+    );
+}
+
+#[test]
+fn test_load_cover_reports_a_container_it_cannot_decode_as_a_cover_load_error() {
+    // A GIF header is a container the loader deliberately does not support:
+    // only JPEG and PNG are enabled. Owning the decode means owning the
+    // rejection too — it must surface as the existing cover-error path.
+    let gif = b"GIF89a\x01\x00\x01\x00\x00\x00\x00";
+    let source = CoverSource::Embedded(gif.as_slice().into());
+
+    let error = ImageCoverLoader::new()
+        .load_cover(&source, BIG_BOX)
+        .expect_err("an unsupported container is not a cover");
+
+    assert!(
+        matches!(error, LibraryError::CoverLoad(ref message) if message.contains("Unsupported")),
+        "the rejection must name itself as an unsupported format, got: {error}"
+    );
+}
+
+#[test]
+fn test_load_cover_reports_truncated_artwork_as_a_cover_load_error() {
+    // A PNG signature with no image behind it: the container is supported, so
+    // the failure is the decode's, and this is the case the adapter never
+    // used to face while it only handed out raw bytes.
+    let truncated = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    let source = CoverSource::Embedded(truncated.as_slice().into());
+
+    let error = ImageCoverLoader::new()
+        .load_cover(&source, BIG_BOX)
+        .expect_err("a truncated image is not a cover");
+
+    assert!(
+        matches!(error, LibraryError::CoverLoad(ref message) if message.contains("decode")),
+        "the failure must surface as a decode error, got: {error}"
+    );
 }
 
 #[test]

@@ -24,6 +24,7 @@ use riff_backend::app::state::{
 };
 use riff_backend::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
 use riff_backend::app::tag_edit_service::TagEdits;
+use riff_backend::app::traits::RequestedSize;
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
 use riff_backend::domain::{
@@ -84,8 +85,8 @@ pub struct RiffApp {
     /// per-path scan state live behind it. The watcher thread holds its own
     /// clone of the same shareable service.
     pub(crate) scans: Box<dyn Scans>,
-    cover_textures: std::collections::HashMap<String, egui::TextureHandle>,
-    cover_lru_keys: Vec<String>,
+    cover_textures: std::collections::HashMap<CoverCacheKey, egui::TextureHandle>,
+    cover_lru_keys: Vec<CoverCacheKey>,
     /// The Cover Service front end (ADR 0006): sends resolve intent and
     /// yields drained results; dedup and the negative cache live behind it.
     covers: Box<dyn Covers>,
@@ -366,12 +367,13 @@ impl RiffApp {
     /// UI-side check left is the texture cache (the texture LRU is
     /// UI-owned per the texture boundary); request deduplication and the
     /// negative cache live behind the service seam.
-    fn request_cover(&self, track_id: &TrackId, file_path: &Path) {
+    fn request_cover(&self, track_id: &TrackId, file_path: &Path, size: RequestedSize) {
         request_cover_intent(
-            self.cover_textures.contains_key(&track_id.0),
+            &self.cover_textures,
             self.covers.as_ref(),
             track_id.clone(),
             file_path.to_path_buf(),
+            size,
         );
     }
 
@@ -472,14 +474,20 @@ impl RiffApp {
     /// placeholder tile) resolves the shared music-icon placeholder tile
     /// into the cache — real art, when it arrives through the poll path,
     /// still wins.
-    fn resolve_cover_texture(&mut self, ctx: &egui::Context, key: &str) -> egui::TextureHandle {
+    fn resolve_cover_texture(
+        &mut self,
+        ctx: &egui::Context,
+        identity: &str,
+        size: RequestedSize,
+    ) -> egui::TextureHandle {
         let palette = self.theme.active;
         crate::ui::cover_placeholder::lookup_cover_texture(
             &mut self.cover_textures,
             &mut self.cover_lru_keys,
             ctx,
             &palette,
-            key,
+            identity,
+            size,
         )
     }
 
@@ -569,14 +577,17 @@ impl RiffApp {
         let is_current = current_track == Some(&track.id);
         let playing = playback.playback_state == PlaybackState::Playing;
 
-        self.request_cover(&track.id, &track.file_path);
+        self.request_cover(&track.id, &track.file_path, COVER_THUMB);
 
         // Every library track row carries a leading cover tile: the real
         // cover when one is cached, otherwise the shared music-icon
         // placeholder — artless tracks read as a uniform tile instead of an
         // empty gap. The request above keeps filling the cache with real art
         // as it lands (the placeholder lives under a separate key).
-        let cover = Some(self.resolve_cover_texture(ui.ctx(), &track.id.0).id());
+        let cover = Some(
+            self.resolve_cover_texture(ui.ctx(), &track.id.0, COVER_THUMB)
+                .id(),
+        );
 
         let row = sidebar::tree_row(
             ui,
@@ -1972,8 +1983,8 @@ impl RiffApp {
         if let Some(track) = self.views.playback_current() {
             let id = track.id.clone();
             let file_path = track.file_path.clone();
-            self.request_cover(&id, &file_path);
-            cover = Some(self.resolve_cover_texture(ui.ctx(), &id.0));
+            self.request_cover(&id, &file_path, COVER_THUMB);
+            cover = Some(self.resolve_cover_texture(ui.ctx(), &id.0, COVER_THUMB));
         }
 
         // The `{index}/{len}` queue-position label, formatted fresh each
@@ -2811,11 +2822,14 @@ impl RiffApp {
         let playing = playback.playback_state == PlaybackState::Playing;
         let label = label_artist_title(track);
 
-        self.request_cover(&track.id, &track.file_path);
+        self.request_cover(&track.id, &track.file_path, COVER_THUMB);
 
         // Same leading cover tile as the library rows: real art when cached,
         // otherwise the shared music-icon placeholder for artless tracks.
-        let cover = Some(self.resolve_cover_texture(ui.ctx(), &track.id.0).id());
+        let cover = Some(
+            self.resolve_cover_texture(ui.ctx(), &track.id.0, COVER_THUMB)
+                .id(),
+        );
 
         let outcome = sidebar::reorderable_row(
             ui,
@@ -2898,7 +2912,7 @@ impl RiffApp {
         if cover_key_changed {
             if let Some(track) = self.views.playback_current() {
                 let (id, file_path) = (track.id.clone(), track.file_path.clone());
-                self.request_cover(&id, &file_path);
+                self.request_cover(&id, &file_path, COVER_HERO);
                 self.now_playing_cover_key = Some(id.0);
             } else {
                 self.now_playing_cover_key = None;
@@ -2909,7 +2923,7 @@ impl RiffApp {
         let cover_key = self.now_playing_cover_key.take();
         let cover = cover_key
             .as_ref()
-            .map(|key| self.resolve_cover_texture(ui.ctx(), key));
+            .map(|key| self.resolve_cover_texture(ui.ctx(), key, COVER_HERO));
         self.now_playing_cover_key = cover_key;
         // Text block + Up Next rows formatted straight from the playback
         // projection's resolved tracks each frame; staleness is the
@@ -3102,17 +3116,55 @@ impl RiffApp {
     }
 }
 
+/// Key of the UI's texture cache: one artwork identity at one requested box.
+///
+/// The identity is a track path — albums and artists resolve through their
+/// first track — so it is a `String` rather than a [`TrackId`]. The size is
+/// part of the key because a hero upload and a thumbnail upload of the same
+/// track are different pixels, and neither may stand in for the other.
+pub type CoverCacheKey = (String, u32, u32);
+
+/// The cache key for one artwork identity at one requested box.
+#[must_use]
+pub fn cover_cache_key(identity: &str, size: RequestedSize) -> CoverCacheKey {
+    (identity.to_string(), size.width, size.height)
+}
+
+/// The canonical display boxes, one per kind of surface.
+///
+/// Surfaces ask for the nearest of these rather than their own exact pixel
+/// size: every distinct `(identity, size)` pair is a separate worker job and a
+/// separate texture, so an unbounded set of boxes would multiply both.
+pub const COVER_THUMB: RequestedSize = RequestedSize {
+    width: 56,
+    height: 56,
+};
+pub const COVER_CARD: RequestedSize = RequestedSize {
+    width: 200,
+    height: 200,
+};
+pub const COVER_HERO: RequestedSize = RequestedSize {
+    width: 512,
+    height: 512,
+};
+
 /// The UI's whole remaining cover responsibility (ADR 0006): ask the Cover
-/// Service for art unless the texture is already in the UI-owned cache.
-/// Free function so tests drive the exact production path without a window.
-pub fn request_cover_intent(
-    texture_cached: bool,
+/// Service for art unless that track at that exact box is already in the
+/// UI-owned cache. Free function so tests drive the exact production path
+/// without a window.
+///
+/// The cache check is made here rather than by the caller because the key it
+/// checks is the same composite the cache is written under: a track cached at
+/// hero size is still a miss at thumbnail size.
+pub fn request_cover_intent<S: std::hash::BuildHasher>(
+    textures: &std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
     covers: &dyn Covers,
     track_id: TrackId,
     path: PathBuf,
+    size: RequestedSize,
 ) {
-    if !texture_cached {
-        covers.request(track_id, path);
+    if !textures.contains_key(&cover_cache_key(&track_id.0, size)) {
+        covers.request(track_id, path, size);
     }
 }
 
@@ -3135,37 +3187,30 @@ pub fn apply_backend_events(
     }
 }
 
-/// Consume polled cover results into the UI texture cache: decode + rgba→
-/// texture conversion is the egui-bound work that stays on the main thread
-/// (the texture boundary, ADR 0006; the cover port hands out still-encoded
-/// bytes plus their container format); dedup and negative caching live
-/// behind the service seam, so artless results are simply dropped here.
+/// Consume polled cover results into the UI texture cache: wrapping already
+/// decoded pixels and uploading is the egui-bound work that stays on the main
+/// thread (the texture boundary, ADR 0006). The decode itself happened on the
+/// cover worker thread behind the port, so a frame can never block on it;
+/// dedup and negative caching live behind the service seam, so artless
+/// results are simply dropped here.
 pub fn cache_polled_covers<S: std::hash::BuildHasher>(
     covers: &dyn Covers,
-    textures: &mut std::collections::HashMap<String, egui::TextureHandle, S>,
-    lru_keys: &mut Vec<String>,
+    textures: &mut std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
+    lru_keys: &mut Vec<CoverCacheKey>,
     ctx: &egui::Context,
 ) {
-    for (track_id, cover_image) in covers.poll() {
-        let Some(cover_image) = cover_image else {
+    for (track_id, size, cover) in covers.poll() {
+        let Some(cover) = cover else {
             continue; // artless: the service negative-caches it
         };
-        let image_format = match cover_image.format {
-            riff_backend::app::traits::CoverImageFormat::Jpeg => image::ImageFormat::Jpeg,
-            riff_backend::app::traits::CoverImageFormat::Png => image::ImageFormat::Png,
-        };
-        let Ok(decoded) = image::load_from_memory_with_format(&cover_image.data, image_format)
-            .map_err(|e| tracing::warn!("Failed to decode cover for {}: {e}", track_id.0))
-        else {
-            continue;
-        };
-        let rgba = decoded.to_rgba8();
-        let (width, height) = rgba.dimensions();
-        let color_image =
-            egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            [cover.width as usize, cover.height as usize],
+            &cover.rgba,
+        );
         let texture = ctx.load_texture(&track_id.0, color_image, egui::TextureOptions::default());
-        textures.insert(track_id.0.clone(), texture);
-        for old in lru_insert(lru_keys, track_id.0, COVER_CACHE_CAP) {
+        let key = cover_cache_key(&track_id.0, size);
+        textures.insert(key.clone(), texture);
+        for old in lru_insert(lru_keys, key, COVER_CACHE_CAP) {
             textures.remove(&old);
         }
     }

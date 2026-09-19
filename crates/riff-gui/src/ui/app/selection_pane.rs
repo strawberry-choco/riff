@@ -15,7 +15,8 @@ use riff_backend::app::state::LibrarySession;
 
 use super::super::selection;
 use super::{
-    InspectorKind, RiffApp, apply_selection_action, request_cover_intent, resolve_inspector,
+    COVER_CARD, InspectorKind, RiffApp, apply_selection_action, request_cover_intent,
+    resolve_inspector,
 };
 
 impl RiffApp {
@@ -38,10 +39,11 @@ impl RiffApp {
             // comes from the UI LRU, and a full miss resolves the shared
             // music-icon placeholder tile.
             request_cover_intent(
-                self.cover_textures.contains_key(&tid.0),
+                &self.cover_textures,
                 self.covers.as_ref(),
                 tid.clone(),
                 PathBuf::from(&tid.0),
+                COVER_CARD,
             );
             crate::ui::cover_placeholder::lookup_cover_texture(
                 &mut self.cover_textures,
@@ -49,6 +51,7 @@ impl RiffApp {
                 ui.ctx(),
                 &self.theme.active,
                 &tid.0,
+                COVER_CARD,
             )
         });
         let panel = selection::SelectionPanel {

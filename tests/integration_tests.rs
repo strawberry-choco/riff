@@ -822,7 +822,14 @@ mod composition_root_tests {
             let _ = tag_edits.poll();
 
             let track_id = TrackId("gone.wav".to_string());
-            covers.request(track_id, nowhere);
+            covers.request(
+                track_id,
+                nowhere,
+                riff_library::app::traits::RequestedSize {
+                    width: 64,
+                    height: 64,
+                },
+            );
             let _ = covers.poll();
 
             let _ = done_tx.send(());

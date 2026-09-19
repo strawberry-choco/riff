@@ -81,21 +81,11 @@ pub trait MetadataReader: Send + Sync {
     >;
 }
 
-/// Trait for cover art loaders (implemented by infrastructure).
-pub trait CoverLoader: Send + Sync {
-    fn load_cover(&self, source: &CoverSource) -> Result<Option<CoverImage>, LibraryError>;
-}
-
 // Ports whose single definitions live in the library slice, re-exported so
 // existing `riff_backend::app::traits::` import paths keep resolving. The
-// real adapter implementations (lofty metadata writer, notify watcher) live
-// in `riff-infra` and implement these through riff-library's definitions.
-pub use riff_library::app::traits::{CoverImageFormat, FilesystemWatch, MetadataWriter, TagEdit};
-
-/// Decoded cover image ready for UI display.
-#[derive(Debug, Clone)]
-pub struct CoverImage {
-    pub width: u32,
-    pub height: u32,
-    pub rgba: Vec<u8>,
-}
+// real adapter implementations (lofty metadata writer, notify watcher, image
+// cover loader) live in `riff-infra` and implement these through
+// riff-library's definitions.
+pub use riff_library::app::traits::{
+    CoverLoader, DecodedCover, FilesystemWatch, MetadataWriter, RequestedSize, TagEdit,
+};

@@ -8,7 +8,8 @@ mod tests {
     use crate::mocks::{MockAudioDecoder, MockAudioOutput, MockCoverLoader, MockMetadataReader};
     use riff_backend::app::errors::{LibraryError, PlaybackError};
     use riff_backend::app::traits::{
-        AudioDecoder, AudioFormatInfo, AudioOutput, CoverImage, CoverLoader, MetadataReader,
+        AudioDecoder, AudioFormatInfo, AudioOutput, CoverLoader, DecodedCover, MetadataReader,
+        RequestedSize,
     };
     use riff_backend::domain::CoverSource;
     use std::path::PathBuf;
@@ -208,34 +209,48 @@ mod tests {
     }
 
     // --- CoverLoader boundary behavior (via MockCoverLoader) ------------------
+    //
+    // The port belongs to the library slice, so its error copy is
+    // `riff_library`'s rather than the backend's re-exported one.
 
     #[test]
     fn test_cover_loader_returns_image_none_or_error_per_configuration() {
-        let image = CoverImage {
+        use riff_library::app::errors::LibraryError as LibraryErrorL;
+
+        let image = DecodedCover {
             width: 2,
             height: 2,
             rgba: vec![255; 16],
+        };
+        let box_size = RequestedSize {
+            width: 64,
+            height: 64,
         };
         let with_image = MockCoverLoader {
             result: Ok(Some(image.clone())),
         };
         let loaded = with_image
-            .load_cover(&CoverSource::None)
+            .load_cover(&CoverSource::None, box_size)
             .unwrap()
             .expect("image expected");
         assert_eq!(loaded.width, 2);
         assert_eq!(loaded.rgba.len(), 16);
 
         let empty = MockCoverLoader { result: Ok(None) };
-        assert!(empty.load_cover(&CoverSource::None).unwrap().is_none());
+        assert!(
+            empty
+                .load_cover(&CoverSource::None, box_size)
+                .unwrap()
+                .is_none()
+        );
 
         let failing = MockCoverLoader {
             result: Err("decode failed".to_string()),
         };
         let err = failing
-            .load_cover(&CoverSource::Embedded(vec![9].into()))
+            .load_cover(&CoverSource::Embedded(vec![9].into()), box_size)
             .unwrap_err();
-        assert!(matches!(err, LibraryError::CoverLoad(_)));
+        assert!(matches!(err, LibraryErrorL::CoverLoad(_)));
         assert!(err.to_string().contains("decode failed"));
     }
 }

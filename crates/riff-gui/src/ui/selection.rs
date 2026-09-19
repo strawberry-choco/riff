@@ -17,6 +17,7 @@ use riff_backend::domain::TrackId;
 use std::path::PathBuf;
 
 use super::icons::IconCache;
+use super::theme::geometry::inspector::{ART_H, PLAY_H};
 use super::theme::{self, Palette};
 
 /// What the user did to the selection panel this frame; `app.rs` applies
@@ -309,11 +310,6 @@ pub struct SelectionPanel<'a> {
 const EMPTY_TITLE: &str = "Nothing selected";
 const EMPTY_HINT: &str = "Select an album in the browser to see it here.";
 
-/// Art block height (design: the 268×200 cover block under the header).
-const ART_H: f32 = 200.0;
-/// Height of the Play album button (design: the 32px action row).
-const PLAY_H: f32 = 32.0;
-
 /// Render the selection panel and append observed [`SelectionAction`]s.
 ///
 /// The header stays pinned and the readout under it scrolls: the body is
@@ -540,9 +536,6 @@ fn action_button(
     }
 }
 
-/// Vertical gap between two detail items.
-const DETAILS_ITEM_GAP: f32 = 8.0;
-
 /// The inline editor: one in-place field per tag field, prefilled from the
 /// draft's buffers, an inline error line, and the Save bar (Save, spinner
 /// while a write is in flight, Cancel). The widget edits the buffers and
@@ -578,12 +571,12 @@ fn editor_section(
             response.request_focus();
             draft.focus_first = false;
         }
-        ui.add_space(DETAILS_ITEM_GAP);
+        ui.add_space(theme::SPACE_MD);
     }
 
     if let Some(error) = &draft.error {
         ui.colored_label(palette.error, error);
-        ui.add_space(DETAILS_ITEM_GAP);
+        ui.add_space(theme::SPACE_MD);
     }
 
     // A batch save is in flight while any of its requests is outstanding
@@ -677,7 +670,7 @@ fn tag_section(
         {
             actions.push(SelectionAction::StartEdit);
         }
-        ui.add_space(DETAILS_ITEM_GAP);
+        ui.add_space(theme::SPACE_MD);
     }
 }
 
@@ -702,6 +695,6 @@ fn details_list(ui: &mut egui::Ui, palette: &Palette, details: &[SelectionDetail
                 .text_style(egui::TextStyle::Small)
                 .color(palette.ink),
         );
-        ui.add_space(DETAILS_ITEM_GAP);
+        ui.add_space(theme::SPACE_MD);
     }
 }

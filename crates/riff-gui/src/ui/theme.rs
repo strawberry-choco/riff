@@ -297,6 +297,35 @@ pub mod geometry {
         /// Stage inset around the hero group (`p-8`): 32px.
         pub const STAGE_INSET: f32 = 32.0;
     }
+
+    /// The custom titlebar's clusters: wordmark, nav, scan status, the search
+    /// band and the OS-convention caption buttons. The band's own height is
+    /// [TITLEBAR_H](crate::ui::theme::TITLEBAR_H).
+    pub mod titlebar {
+        /// Caption-button hit area width: Windows-convention caption buttons
+        /// are wide, full-height strips (not floating icon chips), so
+        /// minimize/maximize/close get real pointer targets.
+        pub const CAPTION_BTN_W: f32 = 44.0;
+        /// Caption-button hit area height, inside the 56px band.
+        pub const CAPTION_BTN_H: f32 = 36.0;
+        /// Gap between the nav-control cluster and the caption-button pair.
+        pub const CAPTION_GAP: f32 = 12.0;
+        /// Gap between the wordmark's equalizer glyph and its "riff" text (and
+        /// between the wordmark and the scan status line).
+        pub const WORDMARK_GAP: f32 = 16.0;
+        /// Gap between the titlebar search field and the clusters on either
+        /// side; the field shrinks before either cluster moves as the window
+        /// narrows.
+        pub const SEARCH_GAP: f32 = 16.0;
+        /// Upper bound on the titlebar search field's width so it stays a
+        /// field, not a second window; it shrinks with the window before the
+        /// clusters move.
+        pub const SEARCH_MAX_W: f32 = 520.0;
+        /// Left inset of the titlebar search field when the window is wide
+        /// enough to hit [`SEARCH_MAX_W`] — the same inset the content top bar
+        /// used.
+        pub const SEARCH_EDGE_INSET: f32 = 12.0;
+    }
 }
 
 // --- Semantic palette ---------------------------------------------------------

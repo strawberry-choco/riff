@@ -13,6 +13,9 @@
 use eframe::egui;
 
 use super::icons::IconCache;
+use super::theme::geometry::browser::{
+    HEADER_H, MIN_TEXT_W, ROW_H, TEXT_GAP, TEXT_INSET_Y, TEXT_RIGHT_PAD, THUMB_SIZE, THUMB_TEXT_GAP,
+};
 use super::theme::{self, Palette};
 
 /// One row/tile of the browser column.
@@ -34,32 +37,6 @@ pub struct BrowserItem {
     pub now_playing: bool,
 }
 
-/// Row height of the browser column's list mode: room for a 36px cover
-/// thumbnail (the artist variant's "small cover thumbnail") with breathing
-/// room.
-pub const BROWSER_ROW_H: f32 = 48.0;
-
-/// Edge size of a row's cover thumbnail.
-pub const THUMB_SIZE: f32 = 36.0;
-
-/// Left room before the thumbnail, thumbnail size, and gap to the text:
-/// the text column starts 52px into the row.
-const THUMB_TEXT_GAP: f32 = 6.0 + THUMB_SIZE + 10.0;
-
-/// Right padding on the text column so wrapped lines don't touch the pane
-/// edge.
-const TEXT_RIGHT_PAD: f32 = 6.0;
-
-/// Floor under the text column's wrap width: a pathologically narrow pane
-/// keeps a usable (still wrapping) column instead of collapsing it.
-const MIN_TEXT_W: f32 = 60.0;
-
-/// Gap between the row's label line and its muted detail line.
-const TEXT_GAP: f32 = 4.0;
-
-/// Vertical inset of a wrapped row's text block within its grown row.
-const TEXT_INSET_Y: f32 = 8.0;
-
 /// A row's label (and optional muted detail line) laid out wrapped at the
 /// text column's width — the measurement the row's height and the list
 /// walker share.
@@ -67,9 +44,6 @@ struct RowText {
     label: std::sync::Arc<egui::Galley>,
     detail: Option<std::sync::Arc<egui::Galley>>,
 }
-
-/// Height of the header strip above the rows (sort control, genre chips).
-pub const HEADER_H: f32 = 28.0;
 
 /// What the user did to the browser column this frame; `app.rs` applies
 /// these to the library session.
@@ -269,13 +243,13 @@ fn show_browser_list(
                 clippy::cast_sign_loss,
                 reason = "the floored quotient is a non-negative row index"
             )]
-            let first = (viewport.min.y / BROWSER_ROW_H).floor() as usize;
+            let first = (viewport.min.y / ROW_H).floor() as usize;
             start = first.min(total);
             #[expect(
                 clippy::cast_precision_loss,
                 reason = "f32 keeps 48px row offsets exact for any real library"
             )]
-            let jump_y = start as f32 * BROWSER_ROW_H;
+            let jump_y = start as f32 * ROW_H;
             y = jump_y;
             if start > 0 {
                 ui.advance_cursor_after_rect(egui::Rect::from_min_size(
@@ -288,10 +262,10 @@ fn show_browser_list(
             let Some(item) = (column.item)(i) else {
                 // The provider declined this slot; reserve a default row
                 // so the walk stays in step with the provider.
-                y += BROWSER_ROW_H;
+                y += ROW_H;
                 ui.advance_cursor_after_rect(egui::Rect::from_min_size(
                     ui.cursor().min,
-                    egui::vec2(ui.available_width(), BROWSER_ROW_H),
+                    egui::vec2(ui.available_width(), ROW_H),
                 ));
                 continue;
             };
@@ -390,7 +364,7 @@ fn browser_row_height(ui: &egui::Ui, palette: &Palette, item: &BrowserItem) -> f
     if row_wraps(&text) {
         text_block_h(&text) + 2.0 * TEXT_INSET_Y
     } else {
-        BROWSER_ROW_H
+        ROW_H
     }
 }
 
@@ -415,7 +389,7 @@ fn browser_row(
     let row_h = if wraps {
         text_block_h(&text) + 2.0 * TEXT_INSET_Y
     } else {
-        BROWSER_ROW_H
+        ROW_H
     };
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), row_h),

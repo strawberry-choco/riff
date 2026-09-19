@@ -6187,14 +6187,14 @@ mod browser_column_ui_tests {
             .query_by_label("A genre name far too long to fit the column's text width (12 tracks)")
             .unwrap_or_else(|| panic!("the long row renders"));
         assert!(
-            long.rect().height() > riff_gui::ui::browser::BROWSER_ROW_H,
+            long.rect().height() > riff_gui::ui::theme::geometry::browser::ROW_H,
             "a wrapped label grows its row past the classic slot: {:?}",
             long.rect()
         );
         let short = harness.get_by_label("Jazz (5 tracks)");
         assert_eq!(
             short.rect().height(),
-            riff_gui::ui::browser::BROWSER_ROW_H,
+            riff_gui::ui::theme::geometry::browser::ROW_H,
             "a single-line row keeps the classic 48px slot"
         );
     }

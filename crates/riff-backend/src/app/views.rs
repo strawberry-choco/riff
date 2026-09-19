@@ -180,8 +180,8 @@ impl SessionViews {
         // The projections observe the session counters internally from here
         // on: no per-call epoch crosses the seam again.
         let tracks = TrackListProjection::new(generation.clone(), ProjectionKey::Flat);
-        let hit_albums = HitListProjection::new(generation.clone());
-        let hit_artists = HitListProjection::new(generation.clone());
+        let hit_albums = HitListProjection::new(generation.clone(), String::new());
+        let hit_artists = HitListProjection::new(generation.clone(), String::new());
         let artists_pages = WindowedListProjection::new(
             generation.clone(),
             BrowseProjectionKey {
@@ -355,7 +355,7 @@ impl SessionViews {
     /// `Result`.
     pub fn hit_albums_page(&mut self, query: &str, offset: usize) -> HitPage<Album> {
         let key = query.to_string();
-        if self.hit_albums.key() != key.as_str() {
+        if self.hit_albums.key() != &key {
             self.hit_albums.set_key(key);
         }
 
@@ -415,7 +415,7 @@ impl SessionViews {
     /// [`Self::hit_albums_page`]; degrades to an empty page on store error.
     pub fn hit_artists_page(&mut self, query: &str, offset: usize) -> HitPage<Artist> {
         let key = query.to_string();
-        if self.hit_artists.key() != key.as_str() {
+        if self.hit_artists.key() != &key {
             self.hit_artists.set_key(key);
         }
 

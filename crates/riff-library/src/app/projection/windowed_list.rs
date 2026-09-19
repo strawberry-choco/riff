@@ -1,16 +1,50 @@
-//! The generic bounded-window list projection the browse columns are built
-//! on (paginate-browse-columns issue 01): one windowed-list projection in
-//! the library read seam, parameterized by a per-list query-signature key
-//! that includes the sort direction. It is the flat list's proven semantics
-//! (ADR 0003) made generic — bounded window map, FIFO window cap, stamped
-//! authoritative total, generation-keyed staleness, and query-keyed
-//! retargeting — so every paged browse read parities with All Tracks by
-//! sharing the same [`WINDOW_SIZE`] and [`MAX_CACHED_WINDOWS`].
+//! The ONE bounded-window list projection in the library read seam.
+//!
+//! Every paged list read — the flat All Tracks list, the query-keyed hit
+//! listings, and the browse columns — shares one generic
+//! [`WindowedListProjection`]: a generation-keyed cache slot, pending-window
+//! bookkeeping, the fetch-first-swap-later refresh algorithm (an error
+//! leaves the previous cache untouched), a FIFO window bound, and the shared
+//! [`WINDOW_SIZE`] / [`MAX_CACHED_WINDOWS`] constants. A bounded-window fix
+//! is applied here once and only here (deepen-three-modules issue 01).
+//!
+//! The concrete names the seam exposes — [`TrackListProjection`] and
+//! [`HitListProjection`] — are thin aliases over the generic, instantiated
+//! with their key and row types; their former duplicated module bodies are
+//! deleted. The two-phase count and torn-count guard that sit on top of
+//! these projections in the flat/search view path are per-view policy and
+//! live at the Session Views seam, not here.
 
-use super::track_list::{MAX_CACHED_WINDOWS, WINDOW_SIZE};
 use crate::app::store::{GenerationCache, SortDirection, StoreError, StoreGeneration};
+use crate::domain::Track;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+
+/// The one window size the seam's bounded-window projections share (the
+/// flat list's home before deepen-three-modules issue 01): every paged read
+/// fetches this many rows per window, so browse and hit lists parity with
+/// All Tracks by construction.
+pub const WINDOW_SIZE: usize = 50;
+
+/// Cached-window bound before FIFO eviction kicks in. Generous for one
+/// screen of scrolling; keeps memory bounded regardless of library size.
+///
+/// The ONE house for the window-cache bound (beside [`WINDOW_SIZE`]): every
+/// bounded-window projection in the seam shares these two constants, so all
+/// paged reads parity with All Tracks by construction.
+pub(crate) const MAX_CACHED_WINDOWS: usize = 8;
+
+/// The query signature a track-list projection was created (or retargeted)
+/// for. A key change invalidates cached rows even at an unchanged
+/// generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionKey {
+    /// The flat all-tracks list.
+    Flat,
+    /// Case-insensitive substring search over title/artist/album/album
+    /// artist; the payload is the raw query text.
+    Search(String),
+}
 
 /// Which bounded browse listing a projection serves, plus the sort
 /// direction that scopes it. Every mutable element of the read — the list
@@ -44,6 +78,15 @@ pub struct BrowseProjectionKey {
     pub direction: SortDirection,
 }
 
+/// The flat all-tracks / search track list: the bounded-window projection
+/// over one query signature (ADR 0002), keyed by [`ProjectionKey`].
+pub type TrackListProjection = WindowedListProjection<ProjectionKey, Track>;
+
+/// The query-keyed hit listings (hit albums, hit artists): the
+/// bounded-window projection keyed by the query text, so a keystroke
+/// retarget drops stale rows even at an unchanged generation (ADR 0002).
+pub type HitListProjection<T> = WindowedListProjection<String, T>;
+
 /// The cached payload of one query signature: the authoritative total plus
 /// the bounded window map.
 struct WindowedListRows<T> {
@@ -64,7 +107,7 @@ impl<T> Default for WindowedListRows<T> {
 
 /// Generic bounded window cache for one store list read, keyed by a
 /// caller-shaped query signature `K` (e.g. the browse list plus sort
-/// direction) over rows `T`.
+/// direction, or the flat/search query) over rows `T`.
 ///
 /// Per frame the UI declares which window offsets are visible
 /// ([`Self::request_window`]) and calls [`Self::refresh`] with a loader
@@ -105,8 +148,9 @@ where
     }
 
     /// Retarget the projection to another query signature (e.g. the sort
-    /// direction flipped or a genre switch). Cached rows from the old
-    /// signature are dropped even at an unchanged generation.
+    /// direction flipped, a genre switch, or the search box changed).
+    /// Cached rows from the old signature are dropped even at an unchanged
+    /// generation.
     pub fn set_key(&mut self, key: K) {
         if key != self.key {
             self.key = key;

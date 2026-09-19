@@ -365,13 +365,13 @@ mod tests {
     /// The unified shell chrome at exact token dimensions: 56px titlebar
     /// (wordmark, drag region, window + view controls), 280px sidebar,
     /// 88px playerbar strip, and the central stage. The harness renders at
-    /// exactly [`riff_gui::ui::chrome::MIN_WINDOW_SIZE`], so the golden pins both
+    /// exactly [`riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE`], so the golden pins both
     /// the panel sizes and the chrome-fitting minimum window.
     #[test]
     fn shell_chrome_dark_matches_golden_baseline() {
         snapshot(
             "shell_chrome_dark",
-            riff_gui::ui::chrome::MIN_WINDOW_SIZE,
+            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE,
             Palette::dark(),
             draw_shell_chrome,
         );
@@ -727,8 +727,10 @@ mod tests {
     /// the smallest real estate they must fit without clipping.
     fn library_stage_size() -> egui::Vec2 {
         egui::vec2(
-            riff_gui::ui::chrome::MIN_WINDOW_SIZE.x - theme::SIDEBAR_W,
-            riff_gui::ui::chrome::MIN_WINDOW_SIZE.y - theme::TITLEBAR_H - theme::PLAYERBAR_H,
+            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE.x - theme::SIDEBAR_W,
+            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE.y
+                - theme::TITLEBAR_H
+                - theme::PLAYERBAR_H,
         )
     }
 
@@ -1986,7 +1988,7 @@ mod tests {
     fn shell_chrome_light_matches_golden_baseline() {
         snapshot(
             "shell_chrome_light",
-            riff_gui::ui::chrome::MIN_WINDOW_SIZE,
+            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE,
             Palette::light(),
             draw_shell_chrome,
         );
@@ -2867,7 +2869,7 @@ mod tests {
 
     // --- P1-10: the narrow-window shrink branch --------------------------------
 
-    /// The stage at `chrome::MIN_WINDOW_SIZE`: `column_widths` shrinks every
+    /// The stage at `theme::geometry::window::MIN_WINDOW_SIZE`: `column_widths` shrinks every
     /// column proportionally once the width falls below the floors. Only the
     /// arithmetic was tested before.
     #[test]
@@ -3087,7 +3089,7 @@ mod tests {
     fn shell_chrome_scanning_dark_matches_golden_baseline() {
         snapshot(
             "shell_chrome_scanning_dark",
-            riff_gui::ui::chrome::MIN_WINDOW_SIZE,
+            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE,
             Palette::dark(),
             |ui, palette| {
                 draw_shell_chrome_with(
@@ -3110,7 +3112,7 @@ mod tests {
     fn shell_chrome_now_playing_dark_matches_golden_baseline() {
         snapshot(
             "shell_chrome_now_playing_dark",
-            riff_gui::ui::chrome::MIN_WINDOW_SIZE,
+            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE,
             Palette::dark(),
             |ui, palette| {
                 draw_shell_chrome_with(
@@ -3131,7 +3133,7 @@ mod tests {
     fn shell_chrome_settings_dark_matches_golden_baseline() {
         snapshot(
             "shell_chrome_settings_dark",
-            riff_gui::ui::chrome::MIN_WINDOW_SIZE,
+            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE,
             Palette::dark(),
             |ui, palette| {
                 draw_shell_chrome_with(

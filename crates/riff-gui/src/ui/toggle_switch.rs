@@ -13,24 +13,8 @@
 
 use eframe::egui;
 
+use super::theme::geometry::toggle::{KNOB_INSET, KNOB_SIZE, KNOB_TRAVEL, TOGGLE_H, TOGGLE_W};
 use super::theme::{self, Palette};
-
-// --- Mockup dimensions ---------------------------------------------------------
-
-/// Pill width (`w-9`): exactly 36px.
-pub const TOGGLE_W: f32 = 36.0;
-
-/// Pill height (`h-5`): exactly 20px.
-pub const TOGGLE_H: f32 = 20.0;
-
-/// Knob diameter (`w-4 h-4`): exactly 16px.
-pub const KNOB_SIZE: f32 = 16.0;
-
-/// Knob inset from the pill edge (`top-0.5 left-0.5`): 2px.
-pub const KNOB_INSET: f32 = 2.0;
-
-/// Horizontal knob travel when checked (`peer-checked:translate-x-4`): 16px.
-pub const KNOB_TRAVEL: f32 = 16.0;
 
 // --- Token-derived colors --------------------------------------------------------
 

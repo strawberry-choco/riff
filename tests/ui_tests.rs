@@ -3899,13 +3899,14 @@ mod tests {
 
     #[test]
     fn test_toggle_switch_dimensions_match_the_mockup_pill() {
+        use theme::geometry::toggle;
         // w-9 h-5 pill with a w-4 h-4 knob inset by 0.5 (2px).
-        assert!((toggle_switch::TOGGLE_W - 36.0).abs() < f32::EPSILON);
-        assert!((toggle_switch::TOGGLE_H - 20.0).abs() < f32::EPSILON);
-        assert!((toggle_switch::KNOB_SIZE - 16.0).abs() < f32::EPSILON);
-        assert!((toggle_switch::KNOB_INSET - 2.0).abs() < f32::EPSILON);
+        assert!((toggle::TOGGLE_W - 36.0).abs() < f32::EPSILON);
+        assert!((toggle::TOGGLE_H - 20.0).abs() < f32::EPSILON);
+        assert!((toggle::KNOB_SIZE - 16.0).abs() < f32::EPSILON);
+        assert!((toggle::KNOB_INSET - 2.0).abs() < f32::EPSILON);
         // peer-checked:translate-x-4 — the knob slides exactly 16px.
-        assert!((toggle_switch::KNOB_TRAVEL - 16.0).abs() < f32::EPSILON);
+        assert!((toggle::KNOB_TRAVEL - 16.0).abs() < f32::EPSILON);
     }
 
     #[test]

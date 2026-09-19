@@ -23,12 +23,10 @@ use super::theme::geometry::titlebar::{
     CAPTION_BTN_H, CAPTION_BTN_W, CAPTION_GAP, SEARCH_EDGE_INSET, SEARCH_GAP, SEARCH_MAX_W,
     WORDMARK_GAP,
 };
+use super::theme::geometry::window;
 use super::theme::{self, Palette};
 use eframe::egui;
 use riff_backend::app::state::{BrowseMode, ViewMode};
-
-/// Smallest main-stage area kept usable beside/between the fixed chrome.
-pub const MIN_STAGE_SIZE: egui::Vec2 = egui::vec2(520.0, 456.0);
 
 /// Full-texture UV rect for [`egui::Painter::image`] (sidebar precedent).
 const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -37,14 +35,6 @@ const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui:
 /// fixed brand mark that moved into the titlebar from the content top bar.
 const WORDMARK_BARS: [f32; 4] = [0.55, 0.95, 0.7, 0.4];
 
-/// Chrome-fitting minimum window size: sidebar + stage across, titlebar +
-/// playerbar + stage down. The window can never shrink below this, so the
-/// fixed 56/280/88 chrome never collapses.
-pub const MIN_WINDOW_SIZE: egui::Vec2 = egui::vec2(
-    theme::SIDEBAR_W + MIN_STAGE_SIZE.x,
-    theme::TITLEBAR_H + theme::PLAYERBAR_H + MIN_STAGE_SIZE.y,
-);
-
 /// Launch viewport configuration for the frameless window: the decorated
 /// window's launch size carries over unchanged, OS decorations are replaced
 /// by riff's custom titlebar, and the minimum size fits the fixed shell.
@@ -52,7 +42,7 @@ pub const MIN_WINDOW_SIZE: egui::Vec2 = egui::vec2(
 pub fn viewport_builder() -> egui::ViewportBuilder {
     egui::ViewportBuilder::default()
         .with_inner_size([1200.0, 800.0])
-        .with_min_inner_size([MIN_WINDOW_SIZE.x, MIN_WINDOW_SIZE.y])
+        .with_min_inner_size([window::MIN_WINDOW_SIZE.x, window::MIN_WINDOW_SIZE.y])
         .with_decorations(false)
 }
 

@@ -1,9 +1,15 @@
-//! Design-token foundation for the riff UI redesign (Issue 01, ADR 0004).
+//! The design system: every visual value riff ships with is declared here and
+//! read from here (ADR 0004) — colors, corner radii, the type scale, the
+//! spacing scale, the chrome dimensions, and the component geometry grouped by
+//! the surface that paints it. The color helpers below ([`blend_over`],
+//! [`glow`], [`destructive_fill`]) are the only sanctioned way to derive one
+//! color from another; view code never scales a token at a call site.
 //!
-//! Every color, radius, and chrome dimension the redesign's design-token
-//! sheet (`colors_and_type.css`) defines becomes a named constant here; view
-//! code must style itself from these tokens (directly or through
-//! [`Palette`]) instead of hardcoding colors.
+//! Two guards in `tests/ui_tests.rs` keep that true rather than merely
+//! intended: a source sweep that fails on a color derived outside this module,
+//! and one that fails on a geometry constant declared inside a view. What
+//! their absence had already produced is recorded in
+//! `.scratch/design-handoff/review-2026-09-19.md`.
 //!
 //! Two palettes ship:
 //!
@@ -222,14 +228,17 @@ pub const PLAYERBAR_H: f32 = 88.0;
 //
 // The dimensions the views paint with, grouped by the surface that owns them.
 // Grouped rather than flattened because two surfaces each calling a bar
-// `HEADER_H`, at different heights, is exactly how duplicate and disagreeing
-// tokens got written before; a shared module (`glow`, `seek`) holds the pieces
-// two surfaces genuinely paint with the same numbers.
+// `HEADER_H` — 28px in the browser column, 24px in Now Playing — is exactly how
+// duplicate, disagreeing tokens got written before; each keeps its own name
+// under its surface now. A shared module holds what two surfaces genuinely
+// paint with the same numbers: `glow` for the brand halo behind the hero disc
+// and the Now Playing cover, `seek` for the scrub track both bars draw.
 //
 // These are the views' own values moved, not a redesign: every number is what
 // the surface already painted with. Derived math belongs here beside the token
-// it derives from, and a dimension that only a layout algorithm could produce
-// (scroll and paging math, cache keys) belongs in the view that computes it.
+// it derives from, and a value that only an algorithm could produce — scroll
+// and paging math, texture cache keys, how many entries a view asks its read
+// model for — belongs in the view that computes it.
 
 pub mod geometry {
     /// The `ToggleSwitch` pill and knob.
@@ -482,6 +491,21 @@ pub mod geometry {
         pub const ART_H: f32 = 200.0;
         /// Height of the Play album button (design: the 32px action row).
         pub const PLAY_H: f32 = 32.0;
+    }
+
+    /// The shell's size policy: the fixed 56/280/88 chrome plus the least
+    /// main stage that stays usable beside it. Below [`MIN_WINDOW_SIZE`] the
+    /// panels would collapse, so the viewport refuses to shrink that far.
+    pub mod window {
+        /// Smallest main-stage area kept usable beside/between the fixed
+        /// chrome.
+        pub const MIN_STAGE_SIZE: egui::Vec2 = egui::vec2(520.0, 456.0);
+        /// Chrome-fitting minimum window size: sidebar + stage across, titlebar
+        /// + playerbar + stage down.
+        pub const MIN_WINDOW_SIZE: egui::Vec2 = egui::vec2(
+            crate::ui::theme::SIDEBAR_W + MIN_STAGE_SIZE.x,
+            crate::ui::theme::TITLEBAR_H + crate::ui::theme::PLAYERBAR_H + MIN_STAGE_SIZE.y,
+        );
     }
 
     /// The Settings modal: its card and left nav, the library pane's rows and

@@ -1797,13 +1797,14 @@ mod tests {
 
     #[test]
     fn test_min_window_size_fits_the_fixed_chrome() {
+        use theme::geometry::window;
         // The chrome-fitting minimum must leave room for the fixed panels
         // PLUS a usable main stage: sidebar + stage across, titlebar +
         // playerbar + stage down. A window below this would collapse the
         // fixed chrome.
-        let min = chrome::MIN_WINDOW_SIZE;
-        assert!(min.x >= theme::SIDEBAR_W + chrome::MIN_STAGE_SIZE.x);
-        assert!(min.y >= theme::TITLEBAR_H + theme::PLAYERBAR_H + chrome::MIN_STAGE_SIZE.y);
+        let min = window::MIN_WINDOW_SIZE;
+        assert!(min.x >= theme::SIDEBAR_W + window::MIN_STAGE_SIZE.x);
+        assert!(min.y >= theme::TITLEBAR_H + theme::PLAYERBAR_H + window::MIN_STAGE_SIZE.y);
 
         let builder = chrome::viewport_builder();
         assert_eq!(builder.min_inner_size, Some(min));

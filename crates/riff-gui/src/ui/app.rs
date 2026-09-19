@@ -766,7 +766,7 @@ impl eframe::App for RiffApp {
         let scan_status = library.scan_status.clone();
         egui::Panel::top("titlebar")
             .exact_size(theme::TITLEBAR_H)
-            .frame(egui::Frame::NONE)
+            .frame(egui::Frame::NONE.fill(self.theme.active.surface))
             .show(ui, |ui| {
                 let content = crate::ui::chrome::TitleBarContent {
                     scan_status: scan_status.as_deref(),
@@ -797,11 +797,16 @@ impl eframe::App for RiffApp {
         // Left 280px column: the library browser (search, Library/Folders
         // nav, playlists). Shared chrome per the mockup — present on every
         // view; only the main stage switches. The restyled content (issue 07)
-        // keeps a 12px inset from the panel edge.
+        // keeps a 12px inset from the panel edge, and the panel carries the
+        // surface token itself rather than inheriting a default.
         egui::Panel::left("sidebar")
             .exact_size(theme::SIDEBAR_W)
             .resizable(false)
-            .frame(egui::Frame::new().inner_margin(egui::Margin::same(12)))
+            .frame(
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::same(12))
+                    .fill(self.theme.active.surface),
+            )
             .show(ui, |ui| {
                 self.render_library_sidebar(ui, &mut library);
             });

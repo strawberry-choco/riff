@@ -1,16 +1,16 @@
 //! The browser column (design-handoff issue 08): the first pane of the
 //! three-pane explorer. A generic list column that renders every section's
 //! rows — artists with cover thumbnails, plus All Tracks / Albums / Genres /
-//! Folders / smart-list / playlist rows — with an A–Z sort control, honoring
-//! the top bar's list/grid toggle.
+//! Folders / smart-list / playlist rows — with an A–Z sort control. The
+//! browser is permanently list-only: the grid render path was retired
+//! end-to-end.
 //!
-//! Pure widget seam, same discipline as [`crate::ui::sidebar`] and
-//! [`crate::ui::topbar`]: widgets paint from [`Palette`] tokens and report
-//! [`BrowserAction`]s instead of mutating app state; `app.rs` applies them.
-//! Rendered headlessly in `tests/ui_tests.rs`.
+//! Pure widget seam, same discipline as [`crate::ui::sidebar`]: widgets paint
+//! from [`Palette`] tokens and report [`BrowserAction`]s instead of mutating
+//! app state; `app.rs` applies them. Rendered headlessly in
+//! `tests/ui_tests.rs`.
 
 use eframe::egui;
-use riff_backend::app::state::BrowserLayout;
 
 use super::icons::IconCache;
 use super::theme::Palette;
@@ -84,8 +84,6 @@ pub enum BrowserAction {
 
 /// One frame of the browser column: what to render and how.
 pub struct BrowserColumn<'a> {
-    /// List rows or grid tiles (the top bar's persisted toggle, issue 06).
-    pub layout: BrowserLayout,
     /// `true` when the A–Z sort is flipped to Z–A (drives the sort button).
     pub sort_desc: bool,
     /// Whether this variant shows the A–Z sort control at all — only the
@@ -113,14 +111,32 @@ pub struct BrowserColumn<'a> {
     pub empty_hint: &'a str,
 }
 
-/// Render the browser column and append observed [`BrowserAction`]s.
+/// Render the browser column and append observed [`BrowserAction`]s. No
+/// scroll memory: the column keys egui's state by the shared positional salt
+/// (the seam's plain rendering path — goldens and widget tests).
 pub fn show_browser_column(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
-    mut column: BrowserColumn<'_>,
+    column: BrowserColumn<'_>,
     actions: &mut Vec<BrowserAction>,
 ) {
+    show_browser_column_scrolled(ui, cache, palette, column, None, actions);
+}
+
+/// The app's per-Section render path: like [`show_browser_column`], but the
+/// list's `ScrollArea` takes a [`ScrollControl`] — the stable per-slot salt
+/// plus the offset to start at. Returns the actual vertical scroll offset
+/// after the frame (0 when nothing scrolled), so the Scroll Memory can
+/// record it back and stay the single source of truth between frames.
+pub fn show_browser_column_scrolled(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    mut column: BrowserColumn<'_>,
+    scroll: Option<super::scroll_memory::ScrollControl>,
+    actions: &mut Vec<BrowserAction>,
+) -> f32 {
     // Header first, even for empty sections: the sort control stays
     // visible so the listing can always be re-ordered.
     if column.show_sort && sort_button(ui, palette, column.sort_desc) {
@@ -130,16 +146,10 @@ pub fn show_browser_column(
         // Friendly empty state, never a raw error: what the section is and
         // the one hint that moves the listener forward.
         empty_state(ui, palette, column.empty_title, column.empty_hint);
-        return;
+        return 0.0;
     }
-    match column.layout {
-        BrowserLayout::List => show_browser_list(ui, cache, palette, &mut column, actions),
-        BrowserLayout::Grid => show_browser_grid(ui, cache, palette, &mut column, actions),
-    }
+    show_browser_list(ui, cache, palette, &mut column, scroll, actions)
 }
-
-/// Tile edge size in grid mode: two tiles per column width with a gutter.
-pub const TILE_SIZE: f32 = 132.0;
 
 /// Map a flat listing index into `(bucket, offset)` over a prefix-sum
 /// table `counts` (`counts[0] == 0`, monotone, `counts[n]` the total). The
@@ -216,119 +226,99 @@ fn sort_button(ui: &mut egui::Ui, palette: &Palette, sort_desc: bool) -> bool {
 /// needs more room. Rows are culled to the visible viewport, so only the
 /// window in hand is materialized; the walk still measures every row above
 /// the window so positions stay exact.
+///
+/// With a [`ScrollControl`] the list keys egui's state by the per-slot salt
+/// and starts the frame at the control's offset (saved, or 0 on a reset);
+/// without one it keeps the shared positional salt and egui's own state.
+/// Returns the actual vertical offset after the frame.
 fn show_browser_list(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
     column: &mut BrowserColumn<'_>,
+    scroll: Option<super::scroll_memory::ScrollControl>,
     actions: &mut Vec<BrowserAction>,
-) {
-    egui::ScrollArea::vertical()
+) -> f32 {
+    let mut scroll_area = egui::ScrollArea::vertical()
         .auto_shrink(false)
-        .id_salt("browser_list_rows")
-        .show_viewport(ui, |ui, viewport| {
-            let total = column.total;
-            let mut y = 0.0_f32;
-            let mut start = 0;
-            if column.virtualize {
-                // Virtualization: rows whose default slot ends above the
-                // viewport are reserved in one jump at the default height —
-                // the provider is consulted only for the on-screen window,
-                // so per-row work (paged store reads, cover intents) stays
-                // bounded to what is visible. Exact heights of rows above
-                // the viewport are approximated at the default; they are
-                // never rendered, so nothing visible changes (the same
-                // uniform-height trade-off egui's `show_rows` makes).
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "the floored quotient is a non-negative row index"
-                )]
-                let first = (viewport.min.y / BROWSER_ROW_H).floor() as usize;
-                start = first.min(total);
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "f32 keeps 48px row offsets exact for any real library"
-                )]
-                let jump_y = start as f32 * BROWSER_ROW_H;
-                y = jump_y;
-                if start > 0 {
-                    ui.advance_cursor_after_rect(egui::Rect::from_min_size(
-                        ui.cursor().min,
-                        egui::vec2(ui.available_width(), y),
-                    ));
+        .animated(false);
+    match scroll {
+        Some(control) => {
+            scroll_area = scroll_area.id_salt(control.salt);
+            if let Some(offset) = control.start {
+                scroll_area = scroll_area.vertical_scroll_offset(offset);
+            }
+        }
+        None => scroll_area = scroll_area.id_salt("browser_list_rows"),
+    }
+    let output = scroll_area.show_viewport(ui, |ui, viewport| {
+        let total = column.total;
+        let mut y = 0.0_f32;
+        let mut start = 0;
+        if column.virtualize {
+            // Virtualization: rows whose default slot ends above the
+            // viewport are reserved in one jump at the default height —
+            // the provider is consulted only for the on-screen window,
+            // so per-row work (paged store reads, cover intents) stays
+            // bounded to what is visible. Exact heights of rows above
+            // the viewport are approximated at the default; they are
+            // never rendered, so nothing visible changes (the same
+            // uniform-height trade-off egui's `show_rows` makes).
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "the floored quotient is a non-negative row index"
+            )]
+            let first = (viewport.min.y / BROWSER_ROW_H).floor() as usize;
+            start = first.min(total);
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "f32 keeps 48px row offsets exact for any real library"
+            )]
+            let jump_y = start as f32 * BROWSER_ROW_H;
+            y = jump_y;
+            if start > 0 {
+                ui.advance_cursor_after_rect(egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    egui::vec2(ui.available_width(), y),
+                ));
+            }
+        }
+        for i in start..total {
+            let Some(item) = (column.item)(i) else {
+                // The provider declined this slot; reserve a default row
+                // so the walk stays in step with the provider.
+                y += BROWSER_ROW_H;
+                ui.advance_cursor_after_rect(egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    egui::vec2(ui.available_width(), BROWSER_ROW_H),
+                ));
+                continue;
+            };
+            let h = browser_row_height(ui, palette, &item);
+            if y + h <= viewport.min.y || y >= viewport.max.y {
+                // Above or below the visible window: reserve the slot
+                // without materializing the row.
+                ui.advance_cursor_after_rect(egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    egui::vec2(ui.available_width(), h),
+                ));
+            } else {
+                let response = browser_row(ui, cache, palette, &item);
+                if response.clicked() {
+                    actions.push(BrowserAction::Select(item.key));
                 }
             }
-            for i in start..total {
-                let Some(item) = (column.item)(i) else {
-                    // The provider declined this slot; reserve a default row
-                    // so the walk stays in step with the provider.
-                    y += BROWSER_ROW_H;
-                    ui.advance_cursor_after_rect(egui::Rect::from_min_size(
-                        ui.cursor().min,
-                        egui::vec2(ui.available_width(), BROWSER_ROW_H),
-                    ));
-                    continue;
-                };
-                let h = browser_row_height(ui, palette, &item);
-                if y + h <= viewport.min.y || y >= viewport.max.y {
-                    // Above or below the visible window: reserve the slot
-                    // without materializing the row.
-                    ui.advance_cursor_after_rect(egui::Rect::from_min_size(
-                        ui.cursor().min,
-                        egui::vec2(ui.available_width(), h),
-                    ));
-                } else {
-                    let response = browser_row(ui, cache, palette, &item);
-                    if response.clicked() {
-                        actions.push(BrowserAction::Select(item.key));
-                    }
-                }
-                y += h;
-                if y >= viewport.max.y {
-                    break;
-                }
+            y += h;
+            if y >= viewport.max.y {
+                break;
             }
-        });
-}
-
-/// The grid layout: square tiles (thumbnail + label) flowing two per row —
-/// the same items the list shows, just denser visually. The provider is
-/// consulted only for the tiles currently on screen.
-fn show_browser_grid(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    column: &mut BrowserColumn<'_>,
-    actions: &mut Vec<BrowserAction>,
-) {
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the floored quotient is positive and small"
-    )]
-    let columns = ((ui.available_width() / (TILE_SIZE + 8.0)).floor() as usize).max(1);
-    let rows = column.total.div_ceil(columns);
-    egui::ScrollArea::vertical().show_rows(ui, TILE_SIZE + 24.0, rows, |ui, row_range| {
-        for grid_row in row_range {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                for c in 0..columns {
-                    let i = grid_row * columns + c;
-                    let Some(item) = (column.item)(i) else {
-                        continue;
-                    };
-                    let response = grid_tile(ui, cache, palette, &item);
-                    if response.clicked() {
-                        actions.push(BrowserAction::Select(item.key));
-                    }
-                }
-            });
         }
     });
+    output.state.offset.y
 }
 
-/// The row/tile's accessibility label: the primary text with the muted
+/// The row's accessibility label: the primary text with the muted
 /// detail line folded in `"Label (detail)"`-style when present (handoff
 /// issue 16) — counts must be read, not just painted.
 fn accessible_label(item: &BrowserItem) -> String {
@@ -336,80 +326,6 @@ fn accessible_label(item: &BrowserItem) -> String {
         Some(detail) => format!("{} ({detail})", item.label),
         None => item.label.clone(),
     }
-}
-
-/// One square grid tile: the thumbnail slot (placeholder well or cover
-/// texture) over the label.
-fn grid_tile(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    item: &BrowserItem,
-) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(TILE_SIZE, TILE_SIZE + 20.0),
-        egui::Sense::click(),
-    );
-    let painter = ui.painter_at(rect);
-
-    if item.selected {
-        painter.rect_filled(rect, super::theme::RADIUS_MD, palette.surface_3);
-    } else if response.hovered() {
-        painter.rect_filled(rect, super::theme::RADIUS_MD, palette.row_hover);
-    }
-    if let Some(ring) =
-        super::theme::focus_ring_stroke(palette, ui.memory(|m| m.has_focus(response.id)))
-    {
-        painter.rect_stroke(
-            rect,
-            super::theme::RADIUS_MD,
-            ring,
-            egui::StrokeKind::Inside,
-        );
-    }
-
-    let art = egui::Rect::from_min_size(
-        egui::pos2(rect.left() + 6.0, rect.top() + 6.0),
-        egui::vec2(TILE_SIZE - 12.0, TILE_SIZE - 12.0),
-    );
-    if let Some(texture) = &item.thumbnail {
-        painter.image(
-            texture.id(),
-            art,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            super::theme::TEXTURE_TINT,
-        );
-    } else {
-        painter.rect_filled(art, super::theme::RADIUS_SM, palette.surface_2);
-        let tex_id = cache.texture(ui.ctx(), super::icons::Icon::Music, 16.0, palette.ink_3);
-        painter.image(
-            tex_id,
-            egui::Rect::from_center_size(art.center(), egui::vec2(24.0, 24.0)),
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            palette.ink_3,
-        );
-    }
-
-    painter.text(
-        egui::pos2(rect.center().x, art.bottom() + 12.0),
-        egui::Align2::CENTER_CENTER,
-        &item.label,
-        egui::FontId::new(super::theme::TEXT_XS, egui::FontFamily::Proportional),
-        if item.now_playing {
-            palette.brand_primary
-        } else {
-            palette.ink
-        },
-    );
-
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(
-            egui::WidgetType::SelectableLabel,
-            item.selected,
-            accessible_label(item),
-        )
-    });
-    response
 }
 
 /// The detail column (issue 09) reuses the browser row for its entity

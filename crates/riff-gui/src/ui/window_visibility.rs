@@ -14,7 +14,7 @@
 use crossbeam_channel::Receiver;
 use eframe::egui;
 
-/// A frontend-local request from the tray (or the close-to-tray path in
+/// A frontend-local request from the tray or the custom titlebar X (via
 /// [`RiffApp`]) to flip the window's visible state.
 ///
 /// `true` → show and focus; `false` → hide. The sender never constructs

@@ -8,6 +8,18 @@ riff is an offline-first desktop music player. This context covers the language 
 One of the primary content areas selectable from the shared chrome — Library, Folders, or Settings; exactly one is visible at a time.
 _Avoid_: page, stage, screen, tab
 
+**Section**:
+One of the four Library browse surfaces selectable from the sidebar — All Tracks, Artists, Albums, or Genres; exactly one is active at a time, and each keeps its own Scroll Memory while the app runs.
+_Avoid_: view, tab, page
+
+**Drill Column**:
+A deeper list column revealed by selecting an entity in the browser path — an artist's Albums, a Genre's Artists, or a Genre artist's Albums. Selecting a different entity resets a Drill Column's scroll to the top.
+_Avoid_: subview, drill-down page
+
+**Scroll Memory**:
+The in-memory record of each Section's list scroll position, kept only while the app runs; restarting clears it. A Section's root list restores its position when the Section is reselected; a Drill Column resets on any selection or content change (search, sort, rescan).
+_Avoid_: scroll persistence, saved position
+
 **Now Playing**:
 A presentation mode that temporarily replaces the active View with the current Track's details; closing it always returns to the Library View.
 _Avoid_: now-playing page, player view

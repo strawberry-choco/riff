@@ -17,6 +17,7 @@
 //! harness (`tests/golden_tests.rs`, `shell_chrome_dark`).
 
 use super::icons::{Icon, IconCache, icon_button};
+use super::sidebar::{SEARCH_H, ghost_icon_button, search_ring_stroke};
 use super::theme::{self, Palette};
 use eframe::egui;
 use riff_backend::app::state::{BrowseMode, ViewMode};
@@ -37,6 +38,15 @@ const CAPTION_GAP: f32 = 12.0;
 /// Gap between the wordmark's equalizer glyph and its "riff" text (and
 /// between the wordmark and the scan status line).
 const WORDMARK_GAP: f32 = 16.0;
+/// Gap between the titlebar search field and the clusters on either side;
+/// the field shrinks before either cluster moves as the window narrows.
+const SEARCH_GAP: f32 = 16.0;
+/// Upper bound on the titlebar search field's width so it stays a field,
+/// not a second window; it shrinks with the window before the clusters move.
+const SEARCH_MAX_W: f32 = 520.0;
+/// Left inset of the titlebar search field when the window is wide enough
+/// to hit [`SEARCH_MAX_W`] — the same inset the content top bar used.
+const SEARCH_EDGE_INSET: f32 = 12.0;
 /// The static normalized bar heights of the wordmark's equalizer glyph — a
 /// fixed brand mark that moved into the titlebar from the content top bar.
 const WORDMARK_BARS: [f32; 4] = [0.55, 0.95, 0.7, 0.4];
@@ -122,10 +132,14 @@ pub enum WindowControl {
 impl WindowControl {
     /// The viewport command this control issues when clicked.
     ///
-    /// Close deliberately routes through [`egui::ViewportCommand::Close`] —
-    /// the same path as the OS close button — so close-to-tray (REQ-SI-001)
-    /// keeps vetoing it into a hide on macOS/Windows. It must never bypass
-    /// that logic with a hard exit, or closing would silently kill playback.
+    /// Minimize collapses the window. Close is only consumed on Linux, where
+    /// there is no tray: it sends the real [`egui::ViewportCommand::Close`],
+    /// which quits. On macOS/Windows the custom X is a hide gesture — the app
+    /// sends it through the frontend-local visibility channel
+    /// ([`crate::ui::window_visibility::VisibilityMessage(false)`]), never
+    /// through this method: with the close-to-tray veto gone, every `Close`
+    /// that reaches eframe quits, so a hard exit here would quit instead of
+    /// stowing to the tray.
     #[must_use]
     pub fn viewport_command(self) -> egui::ViewportCommand {
         match self {
@@ -188,18 +202,30 @@ pub enum TitleBarAction {
     GoSettings,
     /// Collapse the window to the taskbar.
     Minimize,
-    /// Toggle maximize/restore (routes through the vetoable close-to-tray path).
+    /// Toggle maximize/restore.
     ToggleMaximize,
-    /// Close the window (routes through the vetoable close-to-tray path).
+    /// Close the window. Split-close-paths: the app hides to the tray on
+    /// macOS/Windows (frontend-local visibility message) and really closes on
+    /// Linux (no tray).
     Close,
 }
 
 /// Draw the shell titlebar inside its panel: background, wordmark, scan
-/// status, the drag region, and the control cluster at the right edge
-/// (theme / Now Playing / Settings / Advanced toggles plus minimize/close).
+/// status, the global search field, the drag region, and the control cluster
+/// at the right edge (theme / Now Playing / Settings / Advanced toggles plus
+/// minimize/close).
 ///
 /// Must run inside a top panel of exactly [`crate::ui::theme::TITLEBAR_H`]
 /// height with no frame margins, so the drag region covers the full strip.
+///
+/// The global "Search or jump to…" field is shared chrome: it renders
+/// centered between the wordmark/scan-status cluster and the nav/caption
+/// cluster, capped at [`SEARCH_MAX_W`], and shrinks before either side as
+/// the window narrows. It edits `search_query` in place — pass the session's
+/// `search_query` so typing filters the library immediately — and keeps the
+/// former content-top-bar interaction contract: Ctrl+K request-focus,
+/// Escape clears + surrenders focus. Returns the field's response so the
+/// caller can keep driving the Ctrl+K request-focus shortcut.
 ///
 /// Observed actions are appended to `actions` — a buffer the caller owns and
 /// clears per frame, so idle frames never build a fresh `Vec`. The caller
@@ -209,8 +235,9 @@ pub fn show_titlebar(
     cache: &mut IconCache,
     palette: &Palette,
     content: &TitleBarContent<'_>,
+    search_query: &mut String,
     actions: &mut Vec<TitleBarAction>,
-) {
+) -> egui::Response {
     let rect = ui.max_rect();
 
     // Register the drag region FIRST so the buttons added below sit on top
@@ -244,16 +271,32 @@ pub fn show_titlebar(
         }
     }
 
-    // Scan status sits next to the wordmark, muted.
-    if let Some(status) = content.scan_status {
-        ui.painter().text(
-            egui::pos2(wordmark_right + WORDMARK_GAP, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            status,
-            egui::FontId::proportional(theme::TEXT_SM),
-            palette.ink_3,
-        );
-    }
+    // The left cluster's right edge: the wordmark, plus the scan status
+    // (measured so the search field never starts under it) when present.
+    let left_cluster_right = wordmark_right
+        + match content.scan_status {
+            Some(status) => {
+                let status_w = ui
+                    .painter()
+                    .layout_no_wrap(
+                        status.to_owned(),
+                        egui::FontId::proportional(theme::TEXT_SM),
+                        palette.ink_3,
+                    )
+                    .size()
+                    .x;
+                // Scan status sits next to the wordmark, muted.
+                ui.painter().text(
+                    egui::pos2(wordmark_right + WORDMARK_GAP, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    status,
+                    egui::FontId::proportional(theme::TEXT_SM),
+                    palette.ink_3,
+                );
+                WORDMARK_GAP + status_w
+            }
+            None => 0.0,
+        };
 
     // Window controls at the top-right corner: three caption-style hit strips
     // flush to the edge (Windows convention — minimize | maximize | close,
@@ -268,14 +311,45 @@ pub fn show_titlebar(
         rect.min,
         egui::pos2(minimize_left - CAPTION_GAP, rect.max.y),
     );
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(nav_rect)
-            .layout(egui::Layout::right_to_left(egui::Align::Center)),
-        |ui| {
-            show_titlebar_controls(ui, cache, palette, content, actions);
-        },
+    // The cluster's left edge: with the right-to-left layout the cursor's
+    // right edge lands left of the last (leftmost) control, exactly where
+    // the search field must clear.
+    let nav_left = ui
+        .scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(nav_rect)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| {
+                show_titlebar_controls(ui, cache, palette, content, actions);
+                ui.cursor().max.x
+            },
+        )
+        .inner;
+
+    // Global search field: centered between the left cluster and the nav
+    // cluster, capped at its maximum width. The field shrinks first as the
+    // window narrows — the clusters never move for it — and the minimum gap
+    // on both sides means it never collides with either cluster at the
+    // minimum window size.
+    let band_left = (left_cluster_right + SEARCH_GAP).max(rect.left() + SEARCH_EDGE_INSET);
+    let band_right = nav_left - SEARCH_GAP;
+    let search_w = (band_right - band_left).clamp(0.0, SEARCH_MAX_W);
+    let search_rect = egui::Rect::from_center_size(
+        egui::pos2(f32::midpoint(band_left, band_right), rect.center().y),
+        egui::vec2(search_w, SEARCH_H),
     );
+
+    // Read focus BEFORE painting so the ring lands on the same frame the
+    // field gains focus (sidebar precedent).
+    let id = egui::Id::new("riff_global_search");
+    let focused = ui.memory(|m| m.has_focus(id));
+    paint_search_well(ui, palette, search_rect, focused);
+
+    let response = show_search_field(ui, cache, palette, search_query, search_rect, id);
+
+    handle_search_dismiss(ui, id, focused, search_query);
+
+    response
 }
 
 /// The minimize | maximize | close caption strips: three caption-style hit
@@ -509,5 +583,93 @@ fn paint_equalizer_mark(painter: &egui::Painter, rect: egui::Rect, color: egui::
             bar_w / 2.0,
             color,
         );
+    }
+}
+
+/// The rounded input well behind the titlebar search field: surface-2 fill
+/// with the sidebar search's ring border — hairline when idle, focus ring
+/// when the field has keyboard focus. Moved here with the search field from
+/// the deleted content top bar.
+fn paint_search_well(ui: &egui::Ui, palette: &Palette, rect: egui::Rect, focused: bool) {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, theme::RADIUS_MD, palette.surface_2);
+    painter.rect_stroke(
+        rect,
+        theme::RADIUS_MD,
+        search_ring_stroke(palette, focused),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// The field inside the search well: search glyph, frameless text edit with
+/// the "Search or jump to…" hint, and a clear affordance while the query is
+/// non-empty. Returns the text edit's response for the caller's focus logic.
+fn show_search_field(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    query: &mut String,
+    search_rect: egui::Rect,
+    id: egui::Id,
+) -> egui::Response {
+    let inner = search_rect.shrink2(egui::vec2(10.0_f32, 4.0_f32));
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+
+            let tex_id = cache.texture(ui.ctx(), Icon::Search, 16.0, palette.ink_3);
+            let sized = egui::load::SizedTexture::new(tex_id, egui::vec2(16.0, 16.0));
+            ui.add(egui::Image::from_texture(sized));
+
+            let response = ui.add(
+                egui::TextEdit::singleline(query)
+                    .id(id)
+                    .frame(egui::Frame::NONE)
+                    .hint_text("Search or jump to…")
+                    .desired_width(ui.available_width() - 20.0),
+            );
+
+            if !query.is_empty() {
+                let clear_rect = egui::Rect::from_center_size(
+                    egui::pos2(inner.right() - 10.0, search_rect.center().y),
+                    egui::vec2(20.0, SEARCH_H - 8.0),
+                );
+                if ghost_icon_button(
+                    ui,
+                    cache,
+                    palette,
+                    clear_rect,
+                    id.with("clear"),
+                    Icon::Close,
+                    "Clear search",
+                    false,
+                ) {
+                    query.clear();
+                }
+            }
+
+            response
+        },
+    )
+    .inner
+}
+
+/// Keyboard dismissal (REQ-UI-007 parity): while the field has focus,
+/// Escape clears the query and gives the focus back, so a keyboard user can
+/// operate — and dismiss — the search entirely from the keyboard.
+///
+/// The gate is *last frame's* focus, not this frame's: egui itself clears
+/// keyboard focus during pass begin when Escape is pressed, so by the time
+/// widget code runs on the Escape frame the field no longer reports focus.
+fn handle_search_dismiss(ui: &egui::Ui, id: egui::Id, focused: bool, query: &mut String) {
+    let focus_key = id.with("had_focus");
+    let had_focus = focused || ui.memory(|m| m.data.get_temp::<bool>(focus_key).unwrap_or(false));
+    ui.memory_mut(|m| m.data.insert_temp(focus_key, focused));
+    if had_focus && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        query.clear();
+        ui.memory_mut(|m| m.surrender_focus(id));
     }
 }

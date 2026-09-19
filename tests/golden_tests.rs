@@ -401,13 +401,22 @@ mod tests {
         background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
 
         let mut cache = IconCache::new();
+        let mut search_query = String::new();
 
-        // Top chrome strip: merged frameless titlebar at TITLEBAR_H.
+        // Top chrome strip: merged frameless titlebar at TITLEBAR_H with the
+        // global search field in shared chrome.
         egui::Panel::top("titlebar")
             .exact_size(theme::TITLEBAR_H)
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
-                show_titlebar(ui, &mut cache, palette, &content, &mut Vec::new());
+                show_titlebar(
+                    ui,
+                    &mut cache,
+                    palette,
+                    &content,
+                    &mut search_query,
+                    &mut Vec::new(),
+                );
             });
 
         // Left chrome column: sidebar at SIDEBAR_W with representative
@@ -998,48 +1007,64 @@ mod tests {
         }
     }
 
-    // --- Content top bar (design-handoff issue 06) ------------------------------
+    // --- Titlebar search (shared chrome) --------------------------------------
     //
-    // The second content strip above the library stage: orange wordmark,
-    // "Search or jump to…" field, and the list/grid view toggles. Rendered
-    // idle (empty query so the hint text shows, list layout active) so the
-    // snapshot is deterministic.
+    // The global "Search or jump to…" field lives in the titlebar — shared
+    // chrome present on every View (the content top bar was deleted). These
+    // replace the former content-top-bar goldens: the same field, relocated
+    // to the chrome, centered between the wordmark/scan-status cluster and
+    // the nav/caption cluster. Rendered idle (empty query so the hint text
+    // shows) so the snapshot is deterministic.
 
     #[test]
-    fn top_bar_dark_matches_golden_baseline() {
+    fn titlebar_search_dark_matches_golden_baseline() {
         snapshot(
-            "top_bar_dark",
-            egui::vec2(800.0, theme::TOPBAR_H),
+            "titlebar_search_dark",
+            egui::vec2(800.0, theme::TITLEBAR_H),
             Palette::dark(),
-            draw_top_bar,
+            draw_titlebar_search,
         );
     }
 
-    fn draw_top_bar(ui: &mut egui::Ui, palette: &Palette) {
+    fn draw_titlebar_search(ui: &mut egui::Ui, palette: &Palette) {
+        draw_titlebar_search_with(ui, palette, false);
+    }
+
+    fn draw_titlebar_search_with(ui: &mut egui::Ui, palette: &Palette, search_focused: bool) {
+        use riff_gui::ui::chrome::{NavDestination, TitleBarContent, show_titlebar};
         use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::theme::SURFACE_BG;
-        use riff_gui::ui::topbar;
 
         // Full-canvas background (determinism rule).
         let background = ui.ctx().layer_painter(egui::LayerId::background());
         background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
 
+        if search_focused {
+            // The titlebar search field's stable id: focus it through
+            // memory, so the ring lands this frame.
+            ui.memory_mut(|m| m.request_focus(egui::Id::new("riff_global_search")));
+        }
+
         let mut cache = IconCache::new();
         let mut query = String::new();
-        let mut actions = Vec::new();
+        let content = TitleBarContent {
+            scan_status: None,
+            theme_dark: palette.dark,
+            advanced_mode: false,
+            active_nav: Some(NavDestination::Library),
+        };
 
-        egui::Panel::top("top_bar")
-            .exact_size(theme::TOPBAR_H)
+        egui::Panel::top("titlebar_search")
+            .exact_size(theme::TITLEBAR_H)
+            .frame(egui::Frame::NONE)
             .show(ui, |ui| {
-                topbar::show_top_bar(
+                show_titlebar(
                     ui,
                     &mut cache,
                     palette,
+                    &content,
                     &mut query,
-                    topbar::TopBarContent {
-                        layout: riff_backend::app::state::BrowserLayout::List,
-                    },
-                    &mut actions,
+                    &mut Vec::new(),
                 );
             });
     }
@@ -1050,9 +1075,9 @@ mod tests {
     // selection panel — the widgets the elastic stage (elastic-column spec)
     // composes side by side at the widths its sizing policy hands them. The
     // stage's own column compositions (sized by `column_widths`) are pinned
-    // by the `elastic_*_dark` goldens below. The list/grid toggle state and
-    // the top-bar search are pinned by `top_bar_dark`; the grid state gets
-    // its own baseline below.
+    // by the `elastic_*_dark` goldens below. The browser column is
+    // permanently list-only (the grid path was retired end-to-end); its
+    // rows and the top-bar search are pinned by their own baselines.
 
     /// The browser column (the explorer's entity-list widget) at the elastic
     /// stage's preferred column width ([`riff_gui::ui::theme::COLUMN_WIDTH`],
@@ -1100,7 +1125,6 @@ mod tests {
             .collect();
         let mut provider = |i: usize| items.get(i).cloned();
         let column = BrowserColumn {
-            layout: riff_backend::app::state::BrowserLayout::List,
             sort_desc: false,
             show_sort: true,
             total: items.len(),
@@ -1514,7 +1538,6 @@ mod tests {
                     .collect();
                 let mut provider = |i: usize| items.get(i).cloned();
                 let column = BrowserColumn {
-                    layout: riff_backend::app::state::BrowserLayout::List,
                     sort_desc: false,
                     show_sort: true,
                     total: items.len(),
@@ -1556,7 +1579,6 @@ mod tests {
                     .collect();
                 let mut provider = |i: usize| items.get(i).cloned();
                 let column = BrowserColumn {
-                    layout: riff_backend::app::state::BrowserLayout::List,
                     sort_desc: false,
                     show_sort: false,
                     total: items.len(),
@@ -1644,7 +1666,6 @@ mod tests {
                     .collect();
                 let mut provider = |i: usize| items.get(i).cloned();
                 let column = BrowserColumn {
-                    layout: riff_backend::app::state::BrowserLayout::List,
                     sort_desc: false,
                     show_sort: true,
                     total: items.len(),
@@ -1677,7 +1698,6 @@ mod tests {
                     .collect();
                 let mut provider = |i: usize| items.get(i).cloned();
                 let column = BrowserColumn {
-                    layout: riff_backend::app::state::BrowserLayout::List,
                     sort_desc: false,
                     show_sort: false,
                     total: items.len(),
@@ -1710,7 +1730,6 @@ mod tests {
                     .collect();
                 let mut provider = |i: usize| items.get(i).cloned();
                 let column = BrowserColumn {
-                    layout: riff_backend::app::state::BrowserLayout::List,
                     sort_desc: false,
                     show_sort: false,
                     total: items.len(),
@@ -1861,7 +1880,6 @@ mod tests {
                         .collect();
                     let mut provider = |i: usize| items.get(i).cloned();
                     let column = BrowserColumn {
-                        layout: riff_backend::app::state::BrowserLayout::List,
                         sort_desc: false,
                         show_sort: false,
                         total: items.len(),
@@ -1915,57 +1933,12 @@ mod tests {
             },
         );
     }
-
-    // --- Grid toggle state (design-handoff issue 15) -----------------------------
-    //
-    // The top bar with the grid layout engaged: the grid toggle carries the
-    // brand tint and the wordmark/search field stay put. Complements
-    // `top_bar_dark`, which pins the list state.
-
-    #[test]
-    fn top_bar_grid_dark_matches_golden_baseline() {
-        snapshot(
-            "top_bar_grid_dark",
-            egui::vec2(800.0, theme::TOPBAR_H),
-            Palette::dark(),
-            draw_top_bar_grid,
-        );
-    }
-
-    fn draw_top_bar_grid(ui: &mut egui::Ui, palette: &Palette) {
-        use riff_gui::ui::icons::IconCache;
-        use riff_gui::ui::theme::SURFACE_BG;
-        use riff_gui::ui::topbar;
-
-        // Full-canvas background (determinism rule).
-        let background = ui.ctx().layer_painter(egui::LayerId::background());
-        background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
-
-        let mut cache = IconCache::new();
-        let mut query = String::new();
-        let mut actions = Vec::new();
-
-        egui::Panel::top("top_bar_grid")
-            .exact_size(theme::TOPBAR_H)
-            .show(ui, |ui| {
-                topbar::show_top_bar(
-                    ui,
-                    &mut cache,
-                    palette,
-                    &mut query,
-                    topbar::TopBarContent {
-                        layout: riff_backend::app::state::BrowserLayout::Grid,
-                    },
-                    &mut actions,
-                );
-            });
-    }
     // =========================================================================
     // Gap-audit goldens (docs/engineering/golden-image-gaps.md)
     //
     // Everything below closes a gap the audit lists: the light palette and
-    // High Contrast (P0-1/2), the focus ring (P0-3), the grid and folder-tree
-    // code paths (P0-4/5), the unpinned surfaces (P1), state variants of
+    // High Contrast (P0-1/2), the focus ring (P0-3), the folder-tree code
+    // paths (P0-5), the unpinned surfaces (P1), state variants of
     // already-pinned regions (P2), and three cheap regression nets (P3).
     //
     // Same determinism rules as every golden above: fixed size, fixed DPI,
@@ -2026,12 +1999,12 @@ mod tests {
     }
 
     #[test]
-    fn top_bar_light_matches_golden_baseline() {
+    fn titlebar_search_light_matches_golden_baseline() {
         snapshot(
-            "top_bar_light",
-            egui::vec2(800.0, theme::TOPBAR_H),
+            "titlebar_search_light",
+            egui::vec2(800.0, theme::TITLEBAR_H),
             Palette::light(),
-            draw_top_bar,
+            draw_titlebar_search,
         );
     }
 
@@ -2099,29 +2072,29 @@ mod tests {
         );
     }
 
-    /// The most accessibility-critical pixel in the app: the focused search
-    /// well's ring, in the High Contrast variant that thickens it.
+    /// The most accessibility-critical pixel in the app: the focused titlebar
+    /// search well's ring, in the High Contrast variant that thickens it.
     #[test]
-    fn top_bar_search_focused_hc_matches_golden_baseline() {
+    fn titlebar_search_focused_hc_matches_golden_baseline() {
         snapshot(
-            "top_bar_search_focused_hc",
-            egui::vec2(800.0, theme::TOPBAR_H),
+            "titlebar_search_focused_hc",
+            egui::vec2(800.0, theme::TITLEBAR_H),
             Palette::dark().high_contrast(),
-            |ui, palette| draw_top_bar_with(ui, palette, true),
+            |ui, palette| draw_titlebar_search_with(ui, palette, true),
         );
     }
 
-    /// The global search well with keyboard focus — the ring
+    /// The titlebar search well with keyboard focus — the ring
     /// `sidebar::search_ring_stroke` paints. Focus is requested directly
     /// through memory (fully deterministic; the determinism rule bans
     /// *hover*-dependent rendering, not focus).
     #[test]
-    fn top_bar_search_focused_dark_matches_golden_baseline() {
+    fn titlebar_search_focused_dark_matches_golden_baseline() {
         snapshot(
-            "top_bar_search_focused_dark",
-            egui::vec2(800.0, theme::TOPBAR_H),
+            "titlebar_search_focused_dark",
+            egui::vec2(800.0, theme::TITLEBAR_H),
             Palette::dark(),
-            |ui, palette| draw_top_bar_with(ui, palette, true),
+            |ui, palette| draw_titlebar_search_with(ui, palette, true),
         );
     }
 
@@ -2136,41 +2109,6 @@ mod tests {
             Palette::dark(),
             draw_browser_column_focused,
         );
-    }
-
-    fn draw_top_bar_with(ui: &mut egui::Ui, palette: &Palette, search_focused: bool) {
-        use riff_gui::ui::icons::IconCache;
-        use riff_gui::ui::theme::SURFACE_BG;
-        use riff_gui::ui::topbar;
-
-        // Full-canvas background (determinism rule).
-        let background = ui.ctx().layer_painter(egui::LayerId::background());
-        background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
-
-        if search_focused {
-            // The global search field's stable id (`topbar::show_top_bar`):
-            // focus it through memory, so the ring lands this frame.
-            ui.memory_mut(|m| m.request_focus(egui::Id::new("riff_global_search")));
-        }
-
-        let mut cache = IconCache::new();
-        let mut query = String::new();
-        let mut actions = Vec::new();
-
-        egui::Panel::top("top_bar_focus_variant")
-            .exact_size(theme::TOPBAR_H)
-            .show(ui, |ui| {
-                topbar::show_top_bar(
-                    ui,
-                    &mut cache,
-                    palette,
-                    &mut query,
-                    topbar::TopBarContent {
-                        layout: riff_backend::app::state::BrowserLayout::List,
-                    },
-                    &mut actions,
-                );
-            });
     }
 
     /// The browser's own entity row with keyboard focus. Rendered through
@@ -2206,66 +2144,6 @@ mod tests {
                 response.request_focus();
             }
         }
-    }
-
-    // --- P0-4: the browser grid layout ----------------------------------------
-
-    /// `show_browser_grid` / `grid_tile` at the column's preferred width: two
-    /// [`riff_gui::ui::browser::TILE_SIZE`] tiles per row. The whole grid code
-    /// path was a blind spot — every other composition passes
-    /// `BrowserLayout::List`.
-    #[test]
-    fn browser_grid_dark_matches_golden_baseline() {
-        snapshot(
-            "browser_grid_dark",
-            egui::vec2(riff_gui::ui::theme::COLUMN_WIDTH, 420.0),
-            Palette::dark(),
-            draw_browser_grid,
-        );
-    }
-
-    fn draw_browser_grid(ui: &mut egui::Ui, palette: &Palette) {
-        use riff_backend::app::state::BrowserLayout;
-        use riff_gui::ui::browser::{self, BrowserColumn, BrowserItem};
-        use riff_gui::ui::icons::IconCache;
-        use riff_gui::ui::theme::SURFACE_BG;
-
-        // Full-canvas background (determinism rule).
-        let background = ui.ctx().layer_painter(egui::LayerId::background());
-        background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
-
-        let mut cache = IconCache::new();
-        let rows = [
-            ("Geogaddi", true, false),
-            ("Music Has the Right", false, false),
-            ("Tomorrow's Harvest", false, true),
-            ("Amber", false, false),
-            ("Tri Repetae", false, false),
-            ("Incunabula", false, false),
-        ];
-        let items: Vec<BrowserItem> = rows
-            .into_iter()
-            .map(|(label, selected, now_playing)| BrowserItem {
-                key: label.to_string(),
-                label: label.to_string(),
-                detail: None,
-                thumbnail: None,
-                selected,
-                now_playing,
-            })
-            .collect();
-        let mut provider = |i: usize| items.get(i).cloned();
-        let column = BrowserColumn {
-            layout: BrowserLayout::Grid,
-            sort_desc: false,
-            show_sort: true,
-            total: items.len(),
-            item: &mut provider,
-            virtualize: false,
-            empty_title: "",
-            empty_hint: "",
-        };
-        browser::show_browser_column(ui, &mut cache, palette, column, &mut Vec::new());
     }
 
     // --- P0-5: the Folders tree -----------------------------------------------
@@ -2518,7 +2396,6 @@ mod tests {
         let mut cache = IconCache::new();
         let mut provider = |_: usize| None;
         let column = BrowserColumn {
-            layout: riff_backend::app::state::BrowserLayout::List,
             sort_desc: false,
             show_sort: true,
             total: 0,
@@ -2651,7 +2528,6 @@ mod tests {
                     .collect();
                 let mut provider = |i: usize| items.get(i).cloned();
                 let column = BrowserColumn {
-                    layout: riff_backend::app::state::BrowserLayout::List,
                     sort_desc: false,
                     show_sort: true,
                     total: items.len(),
@@ -2738,7 +2614,6 @@ mod tests {
                     .collect();
                 let mut provider = |i: usize| items.get(i).cloned();
                 let column = BrowserColumn {
-                    layout: riff_backend::app::state::BrowserLayout::List,
                     sort_desc: false,
                     show_sort: false,
                     total: items.len(),
@@ -2894,7 +2769,6 @@ mod tests {
                         .collect();
                     let mut provider = |i: usize| items.get(i).cloned();
                     let column = BrowserColumn {
-                        layout: riff_backend::app::state::BrowserLayout::List,
                         sort_desc: false,
                         show_sort: false,
                         total: items.len(),
@@ -3695,7 +3569,6 @@ mod tests {
         .collect();
         let mut provider = |i: usize| items.get(i).cloned();
         let column = BrowserColumn {
-            layout: riff_backend::app::state::BrowserLayout::List,
             sort_desc: false,
             show_sort: false,
             total: items.len(),
@@ -3731,7 +3604,6 @@ mod tests {
         let mut cache = IconCache::new();
         let mut provider = |_: usize| None;
         let column = BrowserColumn {
-            layout: riff_backend::app::state::BrowserLayout::List,
             sort_desc: false,
             show_sort: false,
             total: 0,

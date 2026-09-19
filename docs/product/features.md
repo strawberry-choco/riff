@@ -76,17 +76,17 @@ The egui-based graphical interface: the main window, a dual-view library explore
 
 | Feature | Summary | Status | Priority | Depends On |
 |---|---|---|---|---|
-| Main Application Window | egui window with cross-platform support, close-to-tray on macOS/Windows | implemented | P0 | — |
+| Main Application Window | egui window with cross-platform support; custom titlebar close hides to tray on macOS/Windows, an OS close quits | implemented | P0 | — |
 | Library Explorer Panel | Dual library/folder views with toggle, folder playback, context menus, search | implemented | P0 | Library Search |
 | Column Browser Navigation | Section-driven elastic columns (Artists → Albums → Tracks; Genres → Artists → Albums → Tracks) with breadcrumb drill-down and a collapsible inspector offering Play / Add to Queue | implemented | P1 | Library Search, Library Persistence |
-| Content Top Bar | Global "Search or jump to…" field (Ctrl+K to focus, Escape to dismiss) and a persisted list/grid browser-layout toggle; the brand wordmark (sound-wave mark + "riff") lives in the window titlebar | implemented | P1 | Library Search |
+| Titlebar Search | Global "Search or jump to…" field in the titlebar (shared chrome, present on every View): Ctrl+K to focus, Escape to dismiss, typing filters the Library listing in real time | implemented | P1 | Library Search |
 | Player Control Bar | Transport controls, progress bar, volume with mute, stop behind advanced mode | implemented | P0 | Playback Control |
 | Cover Art Display | Display resolved cover art in the UI | implemented | P1 | Cover Art Resolution |
 | Now Playing View | Full track info, large cover art, clickable up-next queue | implemented | P2 | Playback Queue, Cover Art Display |
 | Progressive Disclosure | Advanced mode reveals the Advanced-only smart lists and the stop control; tag editing (REQ-UI-006) is available to every user | implemented | P1 | Smart Playlists, Tag Editing |
 | Keyboard Accessibility & High Contrast | Full keyboard navigation, visible focus indicator, persistent high-contrast theme | implemented | P1 | Main Application Window |
 
-**Main Application Window.** The whole UI is an egui application hosted by eframe, with window size and position persisted between sessions. On macOS and Windows, closing the window minimizes to the system tray with playback continuing rather than quitting; on Linux, closing the window quits, by design (see [./decisions/002-no-tray-on-linux.md](./decisions/002-no-tray-on-linux.md)).
+**Main Application Window.** The whole UI is an egui application hosted by eframe, with window size and position persisted between sessions. On macOS and Windows the split close paths apply: the custom titlebar close button hides the window to the system tray with playback continuing, while an OS-level close (Alt+F4, taskbar Close, Cmd+Q) and the tray's Quit quit for real; on Linux, where there is no tray, closing the window quits by design (see [./decisions/002-no-tray-on-linux.md](./decisions/002-no-tray-on-linux.md)).
 
 **Library Explorer Panel.** The left panel is a flat, always-visible sectioned nav with a live count on every row: LIBRARY (All Tracks, Artists, Albums, Genres, Folders — each opening the browser in its variant), SMART LISTS (Recently Added, Recently Played, Most Played, Favorites; Never Played and Lost Gems relocate behind Advanced mode), and PLAYLISTS. The Library variants browse by metadata — artist, then album (grouped by album artist, sorted by year), then track in track-number order. The Folders variant mirrors the disk: each library path is a root node, only directories that actually contain audio appear, and children load lazily so huge trees stay responsive. Double-clicking a folder replaces the queue with everything under it and starts playing; right-click menus on folders and tracks offer Play, Play Next, and Append to Queue. The currently playing track is marked in both views. A sidebar footer carries the Add-folder action and the "Last scan X ago" stamp.
 
@@ -108,11 +108,11 @@ Cross-platform integration with the desktop: the system tray and per-platform wi
 
 | Feature | Summary | Status | Priority | Depends On |
 |---|---|---|---|---|
-| System Tray Icon | Close-to-tray, restore, playback controls, quit (macOS/Windows only) | implemented | P1 | Main Application Window |
+| System Tray Icon | Hide-to-tray via the custom close, restore, playback controls, quit (macOS/Windows only) | implemented | P1 | Main Application Window |
 | Linux Folder Picker | Validated text-input folder picker with autocomplete and clear errors | implemented | P2 | Music Library Management |
 | Cross-platform Support | Linux, Windows, macOS window and audio compatibility | implemented | P0 | Main Application Window |
 
-**System Tray Icon.** On macOS and Windows, riff lives in the system tray (built on tray-icon and muda). Closing the window minimizes to the tray with playback continuing; the tooltip shows the current track as "Artist - Title"; left-click toggles the window; and the right-click menu offers Play/Pause, Next Track, Previous Track, Show Window, and Quit (which stops playback, then exits). It deliberately does not exist on Linux — the tray dependency stack (libayatana-appindicator) is not reliably present across distributions, so Linux builds run as a normal window-only application where closing the window quits. End-user details are in [./user-guide.md](./user-guide.md).
+**System Tray Icon.** On macOS and Windows, riff lives in the system tray (built on tray-icon and muda). The custom titlebar close hides the window to the tray with playback continuing; an OS close (Alt+F4 / taskbar Close / Cmd+Q) and the tray's Quit quit for real; the tooltip shows the current track as "Artist - Title"; left-click shows the window; and the right-click menu offers Play/Pause, Next Track, Previous Track, Show Window, and Quit (which stops playback, then exits). It deliberately does not exist on Linux — the tray dependency stack (libayatana-appindicator) is not reliably present across distributions, so Linux builds run as a normal window-only application where closing the window quits. End-user details are in [./user-guide.md](./user-guide.md).
 
 **Linux Folder Picker.** On Linux, where the native-dialog dependency stack is not assumed, "Add Library" is a text input field rather than a native dialog. Input is validated with autocomplete over existing directories; entering a path that does not exist, or points at a file rather than a directory, produces a clear error instead of a silent failure. The settings page documents the platform's limitations in-app, so the difference from macOS and Windows is explained where you configure it.
 

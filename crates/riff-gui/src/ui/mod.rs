@@ -9,12 +9,12 @@ pub mod library;
 pub mod now_playing;
 pub mod playerbar;
 pub mod prompts;
+pub mod scroll_memory;
 pub mod selection;
 pub mod settings;
 pub mod sidebar;
 pub mod theme;
 pub mod toggle_switch;
-pub mod topbar;
 pub mod tray;
 pub mod window_visibility;
 

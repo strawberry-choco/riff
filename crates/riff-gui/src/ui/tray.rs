@@ -18,6 +18,7 @@ use tray_icon::Icon;
 use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::ui::window_visibility::{VisibilityMessage, VisibilityTx};
+use eframe::egui;
 use riff_backend::app::ChannelTransport;
 use riff_backend::app::MutexExt;
 use riff_backend::app::state::PlaybackSession;
@@ -25,8 +26,15 @@ use riff_backend::app::transport::Transport;
 
 /// Create a system tray icon with playback controls.
 /// On Linux this is a no-op (tray-icon requires GTK which isn't always available).
+///
+/// The tray thread takes a clone of the egui context so it can wake a
+/// sleeping event loop on demand: `send_viewport_cmd` only queues into the
+/// frame output — it is applied on the next frame — and once a hidden window
+/// schedules no repaints, `ctx.request_repaint()` is the only thread-safe
+/// lever eframe exposes to make one run.
 #[cfg(not(target_os = "linux"))]
 pub fn create_tray(
+    ctx: egui::Context,
     transport: ChannelTransport,
     playback: Arc<Mutex<PlaybackSession>>,
     quit_flag: Arc<AtomicBool>,
@@ -87,11 +95,22 @@ pub fn create_tray(
                     transport.previous();
                 } else if id == show_window_id {
                     // Frontend-local: never touches backend state or the audio
-                    // engine. Even mid-decode, the UI thread picks this up on
-                    // its next logic tick (~200ms while hidden, <16ms visible).
+                    // engine. The UI thread picks this up on its next logic
+                    // tick; the repaint wakes a sleeping event loop (a hidden
+                    // window schedules no repaints, so without it the request
+                    // would sit in the channel until the next unrelated wake).
                     let _ = visibility_tx.send(VisibilityMessage(true));
+                    ctx.request_repaint();
                 } else if id == quit_id {
+                    // Enqueue the real close and wake the loop: `send_viewport_cmd`
+                    // only queues into the frame output (applied on the next
+                    // frame), so the repaint is what guarantees one runs. The
+                    // `quit_flag` store is only the tray loop's own break signal —
+                    // the actual quit is now eframe's close, handled uniformly
+                    // with OS close and a Linux X.
                     transport.stop();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    ctx.request_repaint();
                     quit_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
@@ -102,6 +121,7 @@ pub fn create_tray(
             }) = tray_channel.try_recv()
             {
                 let _ = visibility_tx.send(VisibilityMessage(true));
+                ctx.request_repaint();
             }
         }
     });

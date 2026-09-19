@@ -20,40 +20,14 @@ use std::time::Duration;
 
 use super::icons::{Icon, IconCache};
 use super::sidebar;
+use super::theme::geometry::playerbar::{
+    COVER, GHOST_BTN, MIN_INNER_H, PLAY_BTN, QUEUE_LABEL_SPACE, QUEUE_PANEL_HEADER_H,
+    QUEUE_PANEL_MAX_LIST_H, QUEUE_PANEL_W, VOLUME_THUMB, VOLUME_W,
+};
+use super::theme::geometry::seek::{TIME_LABEL_SPACE, TRACK_H};
+use super::theme::geometry::sidebar::ROW_H;
 use super::theme::{self, Palette};
 use riff_backend::domain::{PlaybackState, RepeatMode, TrackId};
-
-// --- Mockup dimensions ---------------------------------------------------------
-
-/// Cover-art square (`size-14`): the now-playing cover is exactly 56×56.
-pub const COVER: f32 = 56.0;
-
-/// The primary play/pause button diameter.
-pub const PLAY_BTN: f32 = 40.0;
-
-/// Circular ghost transport button diameter (previous/next/stop/toggles).
-pub const GHOST_BTN: f32 = 32.0;
-
-/// Track height of the seek row and the volume slider (mockup: 4px).
-pub const TRACK_H: f32 = 4.0;
-
-/// Width of the volume slider track.
-pub const VOLUME_W: f32 = 90.0;
-
-/// Round thumb diameter on the volume slider.
-const VOLUME_THUMB: f32 = 10.0;
-
-/// Horizontal room reserved at each end of the seek row for the monospace
-/// time readouts ("62:03" fits with margin).
-const TIME_LABEL_SPACE: f32 = 44.0;
-
-/// Horizontal room reserved for the queue position label ("999/999").
-const QUEUE_LABEL_SPACE: f32 = 52.0;
-
-/// Smallest useful inner height: a 16px seek-row hit area, an 8px gap, and
-/// the 40px primary button. Below this the bar degrades gracefully instead
-/// of overlapping its own rows.
-const MIN_INNER_H: f32 = PLAY_BTN + 16.0 + 8.0;
 
 /// Full-texture UV rect for [`egui::Painter::image`] (sidebar precedent).
 const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -643,19 +617,11 @@ fn transport_row(
 
 // --- Queue panel -------------------------------------------------------------------
 
-/// Queue panel width (a compact side sheet, not a second stage).
-const QUEUE_PANEL_W: f32 = 320.0;
-
-/// Tallest the queue panel's row list grows before it scrolls.
-const QUEUE_PANEL_MAX_LIST_H: f32 = 320.0;
-
 /// How many Up Next rows the queue panel's projection resolves (design-handoff
 /// issue 13). A sheet, not the whole queue — the scroll list is bounded like
-/// the Now Playing stage's window, just deeper.
+/// the Now Playing stage's window, just deeper. This is how many entries the
+/// view asks the read model for, not a dimension it paints, so it stays here.
 pub const QUEUE_PANEL_LIMIT: usize = 50;
-
-/// Height of the panel's "Up Next" header line.
-const QUEUE_PANEL_HEADER_H: f32 = 28.0;
 
 /// Reveal the queue panel (handoff issue 13): a floating sheet anchored
 /// above the player bar's right edge, listing the existing Up Next read
@@ -674,7 +640,7 @@ pub fn show_queue_panel(
     entries: &[super::now_playing::UpNextEntry],
     actions: &mut Vec<PlayerBarAction>,
 ) {
-    let list_h = (entries.len() as f32 * sidebar::ROW_H).min(QUEUE_PANEL_MAX_LIST_H);
+    let list_h = (entries.len() as f32 * ROW_H).min(QUEUE_PANEL_MAX_LIST_H);
 
     egui::Area::new(egui::Id::new("playerbar_queue_panel"))
         .order(egui::Order::Foreground)
@@ -720,7 +686,7 @@ pub fn show_queue_panel(
                             egui::ScrollArea::vertical()
                                 .id_salt("playerbar_queue_panel_rows")
                                 .auto_shrink(false)
-                                .show_rows(ui, sidebar::ROW_H, entries.len(), |ui, range| {
+                                .show_rows(ui, ROW_H, entries.len(), |ui, range| {
                                     for i in range {
                                         let Some(entry) = entries.get(i) else {
                                             continue;
@@ -762,7 +728,7 @@ pub fn show_queue_panel(
 fn show_queue_panel_empty(ui: &egui::Ui, palette: &Palette) {
     let empty_center = egui::pos2(
         ui.max_rect().center().x,
-        ui.max_rect().top() + QUEUE_PANEL_HEADER_H + sidebar::ROW_H / 2.0,
+        ui.max_rect().top() + QUEUE_PANEL_HEADER_H + ROW_H / 2.0,
     );
     ui.painter().text(
         empty_center,
@@ -772,10 +738,7 @@ fn show_queue_panel_empty(ui: &egui::Ui, palette: &Palette) {
         palette.ink_3,
     );
     ui.interact(
-        egui::Rect::from_center_size(
-            empty_center,
-            egui::vec2(QUEUE_PANEL_W - 16.0, sidebar::ROW_H),
-        ),
+        egui::Rect::from_center_size(empty_center, egui::vec2(QUEUE_PANEL_W - 16.0, ROW_H)),
         egui::Id::new("playerbar_queue_panel_empty"),
         egui::Sense::hover(),
     )

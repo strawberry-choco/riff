@@ -13,7 +13,7 @@
 use eframe::egui;
 
 use super::icons::IconCache;
-use super::theme::Palette;
+use super::theme::{self, Palette};
 
 /// One segment of the breadcrumb trail: the path from the browser column's
 /// section down to the entity now in the detail column (e.g. `Artists /
@@ -180,7 +180,7 @@ fn album_header(
 ) {
     ui.allocate_ui(egui::vec2(ui.available_width(), 64.0), |ui| {
         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.spacing_mut().item_spacing.x = theme::SPACE_LG;
             ui.vertical(|ui| {
                 ui.heading(&header.title);
                 if let Some(subtitle) = &header.subtitle {
@@ -244,44 +244,49 @@ fn track_list(
         }
         None => scroll_area = scroll_area.id_salt("tracks_column_list"),
     }
-    scroll_area.show_rows(ui, super::sidebar::ROW_H, total, |ui, row_range| {
-        for i in row_range {
-            let Some(track) = tracks.get(i) else {
-                continue;
-            };
-            let row = super::sidebar::tree_row(
-                ui,
-                cache,
-                palette,
-                super::sidebar::TreeRow {
-                    indent_level: 0,
-                    icon: None,
-                    cover: None,
-                    label: &track.title,
-                    count: None,
-                    meta: Some(track.meta()),
-                    favorite: Some(track.favorite),
-                    selected: track.selected,
-                    now_playing: track.now_playing,
-                    playing: false,
-                    disclosure: None,
-                },
-            );
-            if row.response.clicked() {
-                actions.push(DetailAction::SelectTrack(track.key.clone()));
+    scroll_area.show_rows(
+        ui,
+        theme::geometry::sidebar::ROW_H,
+        total,
+        |ui, row_range| {
+            for i in row_range {
+                let Some(track) = tracks.get(i) else {
+                    continue;
+                };
+                let row = super::sidebar::tree_row(
+                    ui,
+                    cache,
+                    palette,
+                    super::sidebar::TreeRow {
+                        indent_level: 0,
+                        icon: None,
+                        cover: None,
+                        label: &track.title,
+                        count: None,
+                        meta: Some(track.meta()),
+                        favorite: Some(track.favorite),
+                        selected: track.selected,
+                        now_playing: track.now_playing,
+                        playing: false,
+                        disclosure: None,
+                    },
+                );
+                if row.response.clicked() {
+                    actions.push(DetailAction::SelectTrack(track.key.clone()));
+                }
+                if row.response.double_clicked() {
+                    actions.push(DetailAction::SelectTrack(track.key.clone()));
+                    actions.push(DetailAction::PlayTrack(track.key.clone()));
+                }
+                if let Some(favorite) = row.favorite_toggled {
+                    actions.push(DetailAction::SetFavorite {
+                        key: track.key.clone(),
+                        favorite,
+                    });
+                }
             }
-            if row.response.double_clicked() {
-                actions.push(DetailAction::SelectTrack(track.key.clone()));
-                actions.push(DetailAction::PlayTrack(track.key.clone()));
-            }
-            if let Some(favorite) = row.favorite_toggled {
-                actions.push(DetailAction::SetFavorite {
-                    key: track.key.clone(),
-                    favorite,
-                });
-            }
-        }
-    });
+        },
+    );
 }
 
 /// The breadcrumb trail: one button per earlier level (clicking one reports
@@ -294,7 +299,7 @@ fn breadcrumb(
     actions: &mut Vec<DetailAction>,
 ) {
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().item_spacing.x = theme::SPACE_XS;
         let last = crumbs.len().saturating_sub(1);
         for (i, crumb) in crumbs.iter().enumerate() {
             if i > 0 {

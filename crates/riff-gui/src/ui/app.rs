@@ -2429,7 +2429,7 @@ impl RiffApp {
             .vertical_scroll_offset(start);
         let output = scroll_area.show_rows(
             ui,
-            crate::ui::sidebar::ROW_H,
+            theme::geometry::sidebar::ROW_H,
             first_page.total,
             |ui, row_range| {
                 let mut page: Option<riff_backend::app::views::TrackListPage> = None;
@@ -2504,7 +2504,7 @@ impl RiffApp {
 
         egui::ScrollArea::vertical().show_rows(
             ui,
-            crate::ui::sidebar::ROW_H,
+            theme::geometry::sidebar::ROW_H,
             tracks.len(),
             |ui, row_range| {
                 for i in row_range {
@@ -2729,7 +2729,7 @@ impl RiffApp {
         // final playability verdict (Library-known AND file exists on disk).
         egui::ScrollArea::vertical().show_rows(
             ui,
-            crate::ui::sidebar::ROW_H,
+            theme::geometry::sidebar::ROW_H,
             entries.len(),
             |ui, row_range| {
                 for i in row_range {

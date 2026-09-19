@@ -1,9 +1,15 @@
-//! Design-token foundation for the riff UI redesign (Issue 01, ADR 0004).
+//! The design system: every visual value riff ships with is declared here and
+//! read from here (ADR 0004) — colors, corner radii, the type scale, the
+//! spacing scale, the chrome dimensions, and the component geometry grouped by
+//! the surface that paints it. The color helpers below ([`blend_over`],
+//! [`glow`], [`destructive_fill`]) are the only sanctioned way to derive one
+//! color from another; view code never scales a token at a call site.
 //!
-//! Every color, radius, and chrome dimension the redesign's design-token
-//! sheet (`colors_and_type.css`) defines becomes a named constant here; view
-//! code must style itself from these tokens (directly or through
-//! [`Palette`]) instead of hardcoding colors.
+//! Two guards in `tests/ui_tests.rs` keep that true rather than merely
+//! intended: a source sweep that fails on a color derived outside this module,
+//! and one that fails on a geometry constant declared inside a view. What
+//! their absence had already produced is recorded in
+//! `.scratch/design-handoff/review-2026-09-19.md`.
 //!
 //! Two palettes ship:
 //!
@@ -145,6 +151,11 @@ pub const BORDER: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255,
 /// Named here so view code never constructs a flat color literal (ADR 0004).
 pub const TEXTURE_TINT: Color32 = Color32::WHITE;
 
+/// Fully transparent. The placeholder an icon glyph falls back to when
+/// rasterization fails; at alpha 0 the channel values are theme-independent,
+/// so this is the one color a view may want that no [`Palette`] slot supplies.
+pub const TRANSPARENT: Color32 = Color32::TRANSPARENT;
+
 /// `--riff-state-success` — `#22c55e`.
 pub const STATE_SUCCESS: Color32 = Color32::from_rgb(0x22, 0xc5, 0x5e);
 /// `--riff-state-warning` — aliases `--riff-brand-500`.
@@ -166,6 +177,25 @@ pub const RADIUS_LG: f32 = 12.0;
 pub const RADIUS_XL: f32 = 16.0;
 /// `--riff-radius-full` — 999 px: pills and circular elements.
 pub const RADIUS_FULL: f32 = 999.0;
+
+// --- Spacing scale ------------------------------------------------------------
+//
+// The gaps view code leaves between items. Every step is a value the app
+// already used before the scale was declared, so adopting it moved numbers
+// rather than changing them.
+
+/// 4 px — the tightest gap: a glyph beside its label inside one control.
+pub const SPACE_XS: f32 = 4.0;
+/// 6 px — a thumbnail beside its text in a list row.
+pub const SPACE_SM: f32 = 6.0;
+/// 8 px — the default gap between sibling controls in a row.
+pub const SPACE_MD: f32 = 8.0;
+/// 12 px — controls that read as one group: caption buttons, breadcrumbs.
+pub const SPACE_LG: f32 = 12.0;
+/// 16 px — a heading above the content it names.
+pub const SPACE_XL: f32 = 16.0;
+/// 24 px — the hero-scale gaps (the mockup's `mb-6`).
+pub const SPACE_XXL: f32 = 24.0;
 
 // --- Chrome dimensions (`--riff-titlebar-h`, `--riff-sidebar-w`,
 // `--riff-playerbar-h`) ---------------------------------------------------------
@@ -193,6 +223,345 @@ pub const LAST_COLUMN_MIN_W: f32 = 320.0;
 pub const INSPECTOR_WIDTH: f32 = 300.0;
 /// `--riff-playerbar-h` — 88 px bottom player bar.
 pub const PLAYERBAR_H: f32 = 88.0;
+
+// --- Component geometry ---------------------------------------------------------
+//
+// The dimensions the views paint with, grouped by the surface that owns them.
+// Grouped rather than flattened because two surfaces each calling a bar
+// `HEADER_H` — 28px in the browser column, 24px in Now Playing — is exactly how
+// duplicate, disagreeing tokens got written before; each keeps its own name
+// under its surface now. A shared module holds what two surfaces genuinely
+// paint with the same numbers: `glow` for the brand halo behind the hero disc
+// and the Now Playing cover, `seek` for the scrub track both bars draw.
+//
+// These are the views' own values moved, not a redesign: every number is what
+// the surface already painted with. Derived math belongs here beside the token
+// it derives from, and a value that only an algorithm could produce — scroll
+// and paging math, texture cache keys, how many entries a view asks its read
+// model for — belongs in the view that computes it.
+
+pub mod geometry {
+    /// The `ToggleSwitch` pill and knob.
+    pub mod toggle {
+        /// Pill width (`w-9`): exactly 36px.
+        pub const TOGGLE_W: f32 = 36.0;
+        /// Pill height (`h-5`): exactly 20px.
+        pub const TOGGLE_H: f32 = 20.0;
+        /// Knob diameter (`w-4 h-4`): exactly 16px.
+        pub const KNOB_SIZE: f32 = 16.0;
+        /// Knob inset from the pill edge (`top-0.5 left-0.5`): 2px.
+        pub const KNOB_INSET: f32 = 2.0;
+        /// Horizontal knob travel when checked (`peer-checked:translate-x-4`):
+        /// 16px.
+        pub const KNOB_TRAVEL: f32 = 16.0;
+    }
+
+    /// The brand halo that stands in for the design's `.riff-disc-glow`
+    /// box-shadow. Shared because the Library empty-state disc and the Now
+    /// Playing cover both paint the same three layers, one behind a circle and
+    /// one behind a rounded square.
+    pub mod glow {
+        /// One translucent layer: how far its radius reaches past the shape it
+        /// wraps, and how strong the brand tint burns there.
+        #[derive(Debug, Clone, Copy)]
+        pub struct GlowLayer {
+            /// Radius offset beyond the edge, in px.
+            pub spread: f32,
+            /// Brand-alpha fraction; the mocked box-shadow peaks at 15% brand.
+            pub alpha: f32,
+        }
+
+        /// The layered approximation of `0 0 60px -20px brand@15%`: egui cannot
+        /// blur, so three concentric fills declared largest-first stack into a
+        /// soft step gradient, their alphas falling off toward the outside
+        /// under the shadow's 15% peak. Each layer's tint is `theme::glow`
+        /// applied to its `alpha`.
+        pub const LAYERS: [GlowLayer; 3] = [
+            GlowLayer {
+                spread: 36.0,
+                alpha: 0.04,
+            },
+            GlowLayer {
+                spread: 24.0,
+                alpha: 0.07,
+            },
+            GlowLayer {
+                spread: 12.0,
+                alpha: 0.11,
+            },
+        ];
+    }
+
+    /// The Library stage's empty-state hero: the glowing disc, its glyph, and
+    /// the two lines of copy under it.
+    pub mod hero {
+        /// Disc-circle diameter (`w-40 h-40`): 160px.
+        pub const DISC_SIZE: f32 = 160.0;
+        /// Disc glyph size inside the circle (`w-20 h-20`): 80px.
+        pub const DISC_ICON_SIZE: f32 = 80.0;
+        /// Gap between the disc circle and the title (`mb-6`): 24px.
+        pub const TITLE_GAP: f32 = 24.0;
+        /// Gap between the title and the subtitle (`mb-1`): 4px.
+        pub const SUBTITLE_GAP: f32 = 4.0;
+        /// Stage inset around the hero group (`p-8`): 32px.
+        pub const STAGE_INSET: f32 = 32.0;
+    }
+
+    /// The custom titlebar's clusters: wordmark, nav, scan status, the search
+    /// band and the OS-convention caption buttons. The band's own height is
+    /// [`TITLEBAR_H`](crate::ui::theme::TITLEBAR_H).
+    pub mod titlebar {
+        /// Caption-button hit area width: Windows-convention caption buttons
+        /// are wide, full-height strips (not floating icon chips), so
+        /// minimize/maximize/close get real pointer targets.
+        pub const CAPTION_BTN_W: f32 = 44.0;
+        /// Caption-button hit area height, inside the 56px band.
+        pub const CAPTION_BTN_H: f32 = 36.0;
+        /// Gap between the nav-control cluster and the caption-button pair.
+        pub const CAPTION_GAP: f32 = 12.0;
+        /// Gap between the wordmark's equalizer glyph and its "riff" text (and
+        /// between the wordmark and the scan status line).
+        pub const WORDMARK_GAP: f32 = 16.0;
+        /// Gap between the titlebar search field and the clusters on either
+        /// side; the field shrinks before either cluster moves as the window
+        /// narrows.
+        pub const SEARCH_GAP: f32 = 16.0;
+        /// Upper bound on the titlebar search field's width so it stays a
+        /// field, not a second window; it shrinks with the window before the
+        /// clusters move.
+        pub const SEARCH_MAX_W: f32 = 520.0;
+        /// Left inset of the titlebar search field when the window is wide
+        /// enough to hit [`SEARCH_MAX_W`] — the same inset the content top bar
+        /// used.
+        pub const SEARCH_EDGE_INSET: f32 = 12.0;
+    }
+
+    /// The sidebar's tree row — the row height every list in the app lays out
+    /// with (the detail column, Now Playing's Up Next and the player bar's
+    /// queue panel all read [`ROW_H`] from here), plus what sits inside one.
+    pub mod sidebar {
+        /// Tree-row height (`h-10`): every sidebar row is exactly 40px tall.
+        pub const ROW_H: f32 = 40.0;
+        /// Track-row cover thumbnail on library track rows: a square cover-art
+        /// tile sized `ROW_H - 8` (32×32), so width and height always match
+        /// and the tile never exceeds the 40px row it sits in.
+        pub const ROW_COVER: f32 = ROW_H - 8.0;
+        /// Column width of a track row's favorite control: the heart's own cell
+        /// at the row's leading edge. The cell sits INSIDE the row (not beside
+        /// it), so the hover and selection washes cover it and the row reads as
+        /// one 40px band.
+        pub const FAVORITE_COL_W: f32 = 24.0;
+        /// Glyph size of the favorite control's heart.
+        pub const HEART_SIZE: f32 = 14.0;
+        /// Search-box height (`h-8`).
+        pub const SEARCH_H: f32 = 32.0;
+        /// First-level indent: content starts 12px into the row.
+        pub const INDENT_BASE: f32 = 12.0;
+        /// The mockup's three-level indent scale, verbatim: 12 / 44 / 80px.
+        pub const INDENT_SCALE: [f32; 3] = [12.0, 44.0, 80.0];
+        /// Indent step between tree levels past the mockup's third; deep levels
+        /// keep stepping so deep trees never fold into one edge.
+        pub const INDENT_STEP: f32 = 36.0;
+        /// Horizontal padding of the icon strip inside a row.
+        pub const ICON_GAP: f32 = 8.0;
+        /// Floor under the label's wrap width when a row carries a right-aligned
+        /// meta cluster: a pathologically narrow row keeps a readable title
+        /// instead of letting the text column collapse.
+        pub const MIN_LABEL_FREE_W: f32 = 24.0;
+        /// The equalizer-bars indicator: four bars, like the mockup's
+        /// now-playing glyph.
+        pub const EQ_BAR_COUNT: usize = 4;
+    }
+
+    /// The browser column's list mode: the 48px row that fits a cover
+    /// thumbnail beside two lines of text, and the header strip above it. Its
+    /// rows are taller than [`super::sidebar::ROW_H`] because they carry art.
+    pub mod browser {
+        /// Row height of the browser column's list mode: room for a 36px cover
+        /// thumbnail (the artist variant's "small cover thumbnail") with
+        /// breathing room.
+        pub const ROW_H: f32 = 48.0;
+        /// Edge size of a row's cover thumbnail.
+        pub const THUMB_SIZE: f32 = 36.0;
+        /// Left room before the thumbnail, thumbnail size, and gap to the text:
+        /// the text column starts 52px into the row.
+        pub const THUMB_TEXT_GAP: f32 = 6.0 + THUMB_SIZE + 10.0;
+        /// Right padding on the text column so wrapped lines don't touch the
+        /// pane edge.
+        pub const TEXT_RIGHT_PAD: f32 = 6.0;
+        /// Floor under the text column's wrap width: a pathologically narrow
+        /// pane keeps a usable (still wrapping) column instead of collapsing
+        /// it.
+        pub const MIN_TEXT_W: f32 = 60.0;
+        /// Gap between the row's label line and its muted detail line.
+        pub const TEXT_GAP: f32 = 4.0;
+        /// Vertical inset of a wrapped row's text block within its grown row.
+        pub const TEXT_INSET_Y: f32 = 8.0;
+        /// Height of the header strip above the rows (sort control, genre
+        /// chips).
+        pub const HEADER_H: f32 = 28.0;
+    }
+
+    /// The scrub bar, which two surfaces paint: the player bar's seek row and
+    /// Now Playing's larger one. Both reserve the same room at each end for
+    /// the monospace time readouts and draw the same hairline track, so those
+    /// two numbers are one token rather than two that have to agree by
+    /// accident.
+    pub mod seek {
+        /// Track height of the seek row (and the volume slider riding the same
+        /// row): 4px.
+        pub const TRACK_H: f32 = 4.0;
+        /// Horizontal room reserved at each end of the seek row for the
+        /// monospace time readouts ("62:03" fits with margin).
+        pub const TIME_LABEL_SPACE: f32 = 44.0;
+    }
+
+    /// The 88px bottom player bar: cover, transport, the seek and volume
+    /// rows, and the queue sheet it opens. Its height is
+    /// [`PLAYERBAR_H`](crate::ui::theme::PLAYERBAR_H); its scrub track comes
+    /// from [`seek`](super::seek).
+    pub mod playerbar {
+        /// Cover-art square (`size-14`): the now-playing cover is exactly
+        /// 56×56.
+        pub const COVER: f32 = 56.0;
+        /// The primary play/pause button diameter.
+        pub const PLAY_BTN: f32 = 40.0;
+        /// Circular ghost transport button diameter
+        /// (previous/next/stop/toggles).
+        pub const GHOST_BTN: f32 = 32.0;
+        /// Width of the volume slider track.
+        pub const VOLUME_W: f32 = 90.0;
+        /// Round thumb diameter on the volume slider.
+        pub const VOLUME_THUMB: f32 = 10.0;
+        /// Horizontal room reserved for the queue position label
+        /// ("999/999").
+        pub const QUEUE_LABEL_SPACE: f32 = 52.0;
+        /// Smallest useful inner height: a 16px seek-row hit area, an 8px gap,
+        /// and the 40px primary button. Below this the bar degrades gracefully
+        /// instead of overlapping its own rows.
+        pub const MIN_INNER_H: f32 = PLAY_BTN + 16.0 + 8.0;
+        /// Queue panel width (a compact side sheet, not a second stage).
+        pub const QUEUE_PANEL_W: f32 = 320.0;
+        /// Tallest the queue panel's row list grows before it scrolls.
+        pub const QUEUE_PANEL_MAX_LIST_H: f32 = 320.0;
+        /// Height of the panel's "Up Next" header line.
+        pub const QUEUE_PANEL_HEADER_H: f32 = 28.0;
+    }
+
+    /// The Now Playing stage: the 240px cover, its copy block, the seek row,
+    /// the Up Next list and the close affordance. [`HEADER_H`] is the Up Next
+    /// section's line, 24px — the same word as the browser column's 28px
+    /// [`HEADER_H`](super::browser::HEADER_H) because each names its own
+    /// surface's header, and neither is the other's.
+    pub mod now_playing {
+        /// Cover-art square (`w-60 h-60`): the Now Playing cover is exactly
+        /// 240px.
+        pub const COVER_SIZE: f32 = 240.0;
+        /// Stage inset above the cover: 40px, clearing the widest glow layer
+        /// (36px spread) so the halo never clips against the panel's top edge.
+        pub const STAGE_INSET: f32 = 40.0;
+        /// Gap between the cover and the title (`mb-6`, widened to 40px so the
+        /// title clears the widest glow layer's 36px spread): 40px.
+        pub const COPY_GAP: f32 = 40.0;
+        /// Gap between the title and the meta line (`mt-2`): 8px.
+        pub const TITLE_META_GAP: f32 = 8.0;
+        /// Gap between the meta line and the details line (`mt-1`): 4px.
+        pub const META_DETAILS_GAP: f32 = 4.0;
+        /// Gap between the copy block and the seek row.
+        pub const SEEK_GAP: f32 = 20.0;
+        /// Hit-area height of the seek row.
+        pub const SEEK_H: f32 = 24.0;
+        /// Gap between the seek row and the Up Next section.
+        pub const SECTION_GAP: f32 = 16.0;
+        /// Height of the Up Next section header line.
+        pub const HEADER_H: f32 = 24.0;
+        /// Close-affordance diameter.
+        pub const CLOSE_BTN: f32 = 28.0;
+        /// Inset of the close affordance from the stage corner.
+        pub const CLOSE_INSET: f32 = 12.0;
+    }
+
+    /// The inspector column (the former selection panel): the album readout
+    /// shown while a selection exists. Its width is
+    /// [`INSPECTOR_WIDTH`](crate::ui::theme::INSPECTOR_WIDTH); the rows inside
+    /// it are the sidebar's.
+    pub mod inspector {
+        /// Art block height (design: the 268×200 cover block under the
+        /// header).
+        pub const ART_H: f32 = 200.0;
+        /// Height of the Play album button (design: the 32px action row).
+        pub const PLAY_H: f32 = 32.0;
+    }
+
+    /// The shell's size policy: the fixed 56/280/88 chrome plus the least
+    /// main stage that stays usable beside it. Below [`MIN_WINDOW_SIZE`] the
+    /// panels would collapse, so the viewport refuses to shrink that far.
+    pub mod window {
+        /// Smallest main-stage area kept usable beside/between the fixed
+        /// chrome.
+        pub const MIN_STAGE_SIZE: egui::Vec2 = egui::vec2(520.0, 456.0);
+        /// Chrome-fitting minimum window size: sidebar + stage across, titlebar
+        /// + playerbar + stage down.
+        pub const MIN_WINDOW_SIZE: egui::Vec2 = egui::vec2(
+            crate::ui::theme::SIDEBAR_W + MIN_STAGE_SIZE.x,
+            crate::ui::theme::TITLEBAR_H + crate::ui::theme::PLAYERBAR_H + MIN_STAGE_SIZE.y,
+        );
+    }
+
+    /// The Settings modal: its card and left nav, the library pane's rows and
+    /// actions, the preference rows and their controls. [`SECTION_GAP`] is the
+    /// gap between Settings `<section>`s — the same word as Now Playing's
+    /// 16px [`SECTION_GAP`](super::now_playing::SECTION_GAP), a different
+    /// measurement.
+    pub mod settings {
+        /// Gap between a section header and its card (`mb-4`): 16px.
+        pub const HEADER_GAP: f32 = 16.0;
+        /// Gap between sections (`mb-8` on each `<section>`): 32px.
+        pub const SECTION_GAP: f32 = 32.0;
+        /// Height of one library row (`px-4 py-3` over ~24px of content).
+        pub const LIBRARY_ROW_H: f32 = 48.0;
+        /// Height of the Add Library / Scan All actions row (`px-4 py-4`).
+        pub const ACTIONS_ROW_H: f32 = 64.0;
+        /// Height of one preference row (`px-4 py-3` over title +
+        /// description).
+        pub const PREF_ROW_H: f32 = 60.0;
+        /// Height of the Clear Library note row (`mt-4`, single line).
+        pub const CLEAR_ROW_H: f32 = 28.0;
+        /// Status-dot diameter (`w-2 h-2`): 8px.
+        pub const DOT_SIZE: f32 = 8.0;
+        /// Secondary-button height (`px-3 py-1.5` at `text-xs`).
+        pub const SMALL_BTN_H: f32 = 27.0;
+        /// Primary/secondary action-button height (`px-4 py-2` at `text-sm`).
+        pub const ACTION_BTN_H: f32 = 34.0;
+        /// Trash affordance hit area (`w-7 h-7`): 28px square.
+        pub const TRASH_BTN: f32 = 28.0;
+        /// Watch checkbox square size (a native checkbox at xs text ≈ 14px).
+        pub const WATCH_BOX: f32 = 14.0;
+        /// Height of one format chip — literally the small secondary button,
+        /// named separately because it is a different control.
+        pub const CHIP_H: f32 = SMALL_BTN_H;
+        /// Horizontal padding inside a format chip around its label.
+        pub const CHIP_LABEL_PAD: f32 = 12.0;
+        /// Gap between adjacent format chips.
+        pub const CHIP_GAP: f32 = 8.0;
+        /// Height of the last-full-scan card.
+        pub const SCAN_CARD_H: f32 = 76.0;
+        /// Height of the pane footer's action row.
+        pub const FOOTER_H: f32 = 48.0;
+        /// Modal card width cap (`max-w-3xl`-ish).
+        pub const MODAL_MAX_W: f32 = 760.0;
+        /// Modal card height cap.
+        pub const MODAL_MAX_H: f32 = 600.0;
+        /// Backdrop margin around the card (`p-8`).
+        pub const MODAL_PAD: f32 = 32.0;
+        /// Header height (title row + close control).
+        pub const MODAL_HEADER_H: f32 = 56.0;
+        /// Left-nav column width.
+        pub const NAV_W: f32 = 180.0;
+        /// One left-nav row's height (`py-2` at text-sm).
+        pub const NAV_ITEM_H: f32 = 32.0;
+    }
+}
 
 // --- Semantic palette ---------------------------------------------------------
 
@@ -358,6 +727,33 @@ pub fn blend_over(bottom: egui::Color32, top: egui::Color32) -> egui::Color32 {
         channel(bottom.b(), top.b()),
         u8::MAX,
     )
+}
+
+/// The brand glow wash at `alpha`: the palette's primary scaled by a layer's
+/// alpha fraction. The only sanctioned way to dim a palette color — view code
+/// reads a tint from here instead of scaling one at a call site (ADR 0004),
+/// which is what the color sweep in `tests/ui_tests.rs` enforces.
+#[must_use]
+pub fn glow(palette: &Palette, alpha: f32) -> Color32 {
+    palette.brand_primary.gamma_multiply(alpha)
+}
+
+/// The tint a hero glyph is rasterized with: the palette's muted ink at the
+/// mockup's `muted-foreground/40` strength.
+#[must_use]
+pub fn hero_glyph(palette: &Palette) -> Color32 {
+    palette.ink_3.gamma_multiply(0.4)
+}
+
+/// The destructive ghost button's fill: transparent until hovered, then the
+/// error token at the mockup's 10% (`hover:bg-destructive/10`).
+#[must_use]
+pub fn destructive_fill(palette: &Palette, hovered: bool) -> Color32 {
+    if hovered {
+        palette.error.gamma_multiply(0.1)
+    } else {
+        TRANSPARENT
+    }
 }
 
 /// Convert a radius token (px) into an egui [`CornerRadius`], clamping the

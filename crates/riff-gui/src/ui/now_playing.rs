@@ -20,56 +20,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::icons::{Icon, IconCache};
-use super::library::{GLOW_LAYERS, glow_color};
 use super::playerbar;
 use super::sidebar::{self, TreeRow};
+use super::theme::geometry::glow;
+use super::theme::geometry::now_playing::{
+    CLOSE_BTN, CLOSE_INSET, COPY_GAP, COVER_SIZE, HEADER_H, META_DETAILS_GAP, SECTION_GAP,
+    SEEK_GAP, SEEK_H, STAGE_INSET, TITLE_META_GAP,
+};
+use super::theme::geometry::seek::{TIME_LABEL_SPACE, TRACK_H};
 use super::theme::{self, Palette};
 use riff_backend::domain::{Track, TrackId, TrackMetadata};
 
-// --- Mockup dimensions ---------------------------------------------------------
-
-/// Cover-art square (`w-60 h-60`): the Now Playing cover is exactly 240px.
-pub const COVER_SIZE: f32 = 240.0;
-
-/// How many Up Next rows the stage previews (pre-restyle behavior).
+/// How many Up Next rows the stage previews (pre-restyle behavior). A read
+/// model bound the view asks for, not a dimension it paints, so it stays here.
 pub const UP_NEXT_LIMIT: usize = 5;
-
-/// Stage inset above the cover: 40px, clearing the widest glow layer
-/// (36px spread) so the halo never clips against the panel's top edge.
-const STAGE_INSET: f32 = 40.0;
-
-/// Gap between the cover and the title (`mb-6`, widened to 40px so the
-/// title clears the widest glow layer's 36px spread): 40px.
-const COPY_GAP: f32 = 40.0;
-
-/// Gap between the title and the meta line (`mt-2`): 8px.
-const TITLE_META_GAP: f32 = 8.0;
-
-/// Gap between the meta line and the details line (`mt-1`): 4px.
-const META_DETAILS_GAP: f32 = 4.0;
-
-/// Gap between the copy block and the seek row.
-const SEEK_GAP: f32 = 20.0;
-
-/// Hit-area height of the seek row.
-const SEEK_H: f32 = 24.0;
-
-/// Track thickness of the seek bar (mockup: 4px, as the playerbar's).
-const TRACK_H: f32 = 4.0;
-
-/// Horizontal room reserved at each end of the seek bar for the monospace
-/// time readouts.
-const TIME_LABEL_SPACE: f32 = 44.0;
-
-/// Gap between the seek row and the Up Next section.
-const SECTION_GAP: f32 = 16.0;
-
-/// Height of the Up Next section header line.
-const HEADER_H: f32 = 24.0;
-
-/// Close-affordance diameter and its inset from the stage corner.
-const CLOSE_BTN: f32 = 28.0;
-const CLOSE_INSET: f32 = 12.0;
 
 /// Full-texture UV rect for [`egui::Painter::image`] (sidebar precedent).
 const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -289,15 +253,16 @@ fn paint_cover(
         egui::pos2(cx, top + COVER_SIZE / 2.0),
         egui::vec2(COVER_SIZE, COVER_SIZE),
     );
-    let painter = ui.painter_at(cover_rect.expand(GLOW_LAYERS[0].spread));
+    let painter = ui.painter_at(cover_rect.expand(glow::LAYERS[0].spread));
 
     // The glow stands in for the design's box-shadow blur: concentric
-    // translucent brand fills painted largest-first (library-hero precedent).
-    for layer in &GLOW_LAYERS {
+    // translucent brand fills painted largest-first (the Library hero's
+    // disc glow uses the same layers).
+    for layer in &glow::LAYERS {
         painter.rect_filled(
             cover_rect.expand(layer.spread),
             theme::RADIUS_XL + layer.spread,
-            glow_color(palette, *layer),
+            theme::glow(palette, layer.alpha),
         );
     }
 
@@ -463,7 +428,7 @@ fn up_next_section(
 
     if content.up_next.is_empty() {
         painter.text(
-            egui::pos2(cx, list_rect.top() + sidebar::ROW_H / 2.0),
+            egui::pos2(cx, list_rect.top() + theme::geometry::sidebar::ROW_H / 2.0),
             egui::Align2::CENTER_CENTER,
             "Queue is empty",
             body_font.clone(),
@@ -476,35 +441,40 @@ fn up_next_section(
         egui::ScrollArea::vertical()
             .id_salt("now_playing_up_next")
             .auto_shrink(false)
-            .show_rows(ui, sidebar::ROW_H, content.up_next.len(), |ui, range| {
-                for i in range {
-                    let Some(entry) = content.up_next.get(i) else {
-                        continue;
-                    };
-                    let row = sidebar::tree_row(
-                        ui,
-                        cache,
-                        palette,
-                        TreeRow {
-                            indent_level: 0,
-                            icon: None,
-                            cover: None,
-                            label: &entry.label,
-                            count: None,
-                            meta: None,
-                            favorite: None,
-                            selected: false,
-                            now_playing: false,
-                            playing: false,
-                            disclosure: None,
-                        },
-                    );
-                    if row.response.clicked() {
-                        actions.push(NowPlayingAction::PlayNext(entry.id.clone()));
+            .show_rows(
+                ui,
+                theme::geometry::sidebar::ROW_H,
+                content.up_next.len(),
+                |ui, range| {
+                    for i in range {
+                        let Some(entry) = content.up_next.get(i) else {
+                            continue;
+                        };
+                        let row = sidebar::tree_row(
+                            ui,
+                            cache,
+                            palette,
+                            TreeRow {
+                                indent_level: 0,
+                                icon: None,
+                                cover: None,
+                                label: &entry.label,
+                                count: None,
+                                meta: None,
+                                favorite: None,
+                                selected: false,
+                                now_playing: false,
+                                playing: false,
+                                disclosure: None,
+                            },
+                        );
+                        if row.response.clicked() {
+                            actions.push(NowPlayingAction::PlayNext(entry.id.clone()));
+                        }
+                        row.response.on_hover_text("Queue this track to play next");
                     }
-                    row.response.on_hover_text("Queue this track to play next");
-                }
-            });
+                },
+            );
     });
 }
 

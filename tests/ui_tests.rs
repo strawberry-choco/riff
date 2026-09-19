@@ -1631,18 +1631,29 @@ mod tests {
         assert_eq!(egui::ViewportInfo::default().visible(), None);
     }
 
-    // --- Hardcoded-color sweep (Issue 03) --------------------------------------
+    // --- Token-authority sweeps (Issue 03, ADR 0004) -----------------------------
     //
-    // ADR 0004: every color in view code must come from the active palette's
-    // tokens, never from a flat literal. The sweep is mechanical, so its
-    // "grep-verifiable" acceptance is encoded here as a permanent regression
-    // guard: the UI layer's source is scanned for hardcoded egui color
-    // constructors and named constants, keeping this ticket and every later
-    // restyle ticket (07–12) token-pure by construction.
+    // `theme.rs` is both the store and the read source for every design value,
+    // so the UI layer's source gets scanned for what a view must not do:
+    // construct or derive a color, declare a dimension of its own, or set a
+    // spacing gap by number. Each rule is mechanical, which is the point — the
+    // acceptance for the token-authority work is "grep-verifiable", and encoded
+    // here it stops being something a later restyle ticket can quietly drift
+    // out of.
 
-    /// True when a code line constructs an egui color from scratch: any
-    /// `Color32`/`Rgba` `from_*` constructor or associated constant. Values
-    /// already derived from tokens never appear in the `Type::` path form.
+    /// True when a code line derives an egui color instead of reading one: a
+    /// `Color32`/`Rgba` construction from scratch (any `from_*` constructor or
+    /// associated constant), or a palette color scaled into a new one at the
+    /// call site (`gamma_multiply`, `linear_multiply`, `to_opaque`, …).
+    ///
+    /// The constructor path alone was not enough: `palette.error
+    /// .gamma_multiply(0.1)` reads a token and passed clean while still
+    /// deciding a color outside the design system. Reading a color's channels
+    /// (`color.r()` for a texture name, `px.a() == 0` to skip a pixel) is not
+    /// a derivation and stays unflagged, and [`theme::blend_over`] stays
+    /// sanctioned too — it is the helper the token module exposes for
+    /// composing colors, and its one view caller composites rasterized
+    /// texture pixels rather than choosing a style.
     fn hardcoded_color_literal(line: &str) -> bool {
         for marker in ["Color32::", "Rgba::"] {
             let mut search = 0;
@@ -1659,15 +1670,24 @@ mod tests {
                 search = start;
             }
         }
-        false
+        [
+            ".gamma_multiply(",
+            ".gamma_multiply_u8(",
+            ".linear_multiply(",
+            ".to_opaque(",
+            ".to_normalized_rgba(",
+            ".to_normalized_gamma_f32(",
+        ]
+        .iter()
+        .any(|derives| line.contains(derives))
     }
 
-    /// Collect `path:line` pairs where UI-layer source hardcodes an egui
-    /// color. `theme.rs` is exempt: it is the sanctioned home of the token
-    /// literals themselves. Comment lines are skipped so prose may name the
-    /// APIs it bans.
-    fn hardcoded_color_violations() -> Vec<String> {
-        fn scan_dir(dir: &std::path::Path, violations: &mut Vec<String>) {
+    /// Every `(path, line number, trimmed source)` triple the token sweeps
+    /// judge: `.rs` files under `crates/riff-gui/src/ui`, minus `theme.rs` —
+    /// which is the store, so the literals are its job — and minus comment
+    /// lines, so prose may name the APIs a sweep bans.
+    fn ui_source_lines() -> Vec<(std::path::PathBuf, usize, String)> {
+        fn scan_dir(dir: &std::path::Path, lines: &mut Vec<(std::path::PathBuf, usize, String)>) {
             let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
                 .expect("the src/ui directory must be readable")
                 .map(|entry| entry.expect("directory entries must resolve").path())
@@ -1675,11 +1695,10 @@ mod tests {
             entries.sort();
             for path in entries {
                 if path.is_dir() {
-                    scan_dir(&path, violations);
-                } else if path.extension().is_some_and(|ext| ext == "rs") {
-                    if path.file_name().and_then(|name| name.to_str()) == Some("theme.rs") {
-                        continue;
-                    }
+                    scan_dir(&path, lines);
+                } else if path.extension().is_some_and(|ext| ext == "rs")
+                    && path.file_name().and_then(|name| name.to_str()) != Some("theme.rs")
+                {
                     let source =
                         std::fs::read_to_string(&path).expect("source files must be UTF-8");
                     for (idx, line) in source.lines().enumerate() {
@@ -1687,15 +1706,13 @@ mod tests {
                         if trimmed.starts_with("//") {
                             continue;
                         }
-                        if hardcoded_color_literal(trimmed) {
-                            violations.push(format!("{}:{}: {}", path.display(), idx + 1, trimmed));
-                        }
+                        lines.push((path.clone(), idx + 1, trimmed.to_owned()));
                     }
                 }
             }
         }
 
-        let mut violations = Vec::new();
+        let mut lines = Vec::new();
         scan_dir(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("..")
@@ -1703,9 +1720,84 @@ mod tests {
                 .join("riff-gui")
                 .join("src")
                 .join("ui"),
-            &mut violations,
+            &mut lines,
         );
-        violations
+        lines
+    }
+
+    /// `path:line: source` for every swept line a token sweep objects to.
+    fn violations<'a>(
+        mut offending: impl FnMut(&str) -> bool,
+        lines: impl IntoIterator<Item = &'a (std::path::PathBuf, usize, String)>,
+    ) -> Vec<String> {
+        lines
+            .into_iter()
+            .filter(|(_, _, line)| offending(line))
+            .map(|(path, num, line)| format!("{}:{num}: {line}", path.display()))
+            .collect()
+    }
+
+    /// Collect `path:line` pairs where UI-layer source derives an egui color.
+    fn hardcoded_color_violations() -> Vec<String> {
+        violations(hardcoded_color_literal, &ui_source_lines())
+    }
+
+    /// True when a line gives a view a dimension of its own: a `const` of a
+    /// measured type declared outside `theme.rs`.
+    ///
+    /// A derived declaration counts (`MIN_INNER_H = PLAY_BTN + 16.0 + 8.0`) —
+    /// the arithmetic belongs beside the tokens it reads, which is where the
+    /// surfaces that share a control disagree today. What a view may still own
+    /// is what no designer would retune and no second surface reads: a `usize`
+    /// count of rows to ask its read model for, a `[f32; 4]` of shape data for
+    /// one hand-painted glyph, a texture's raster resolution.
+    fn view_owned_dimension(line: &str) -> bool {
+        let Some(decl) = line
+            .strip_prefix("const ")
+            .or_else(|| line.strip_prefix("pub const "))
+        else {
+            return false;
+        };
+        decl.split_once(": ").is_some_and(|(_, typed)| {
+            ["f32 =", "egui::Vec2 ="]
+                .iter()
+                .any(|ty| typed.starts_with(ty))
+        })
+    }
+
+    /// True when `text` sets a non-zero number: a digit run that starts on a
+    /// word boundary, so the `2` in `vec2` contributes nothing and `0.0` reads
+    /// as the zero it is.
+    fn sets_a_nonzero_number(text: &str) -> bool {
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let starts_a_literal =
+                bytes[i].is_ascii_digit() && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric());
+            if !starts_a_literal {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < bytes.len() && matches!(bytes[i], b'0'..=b'9' | b'.') {
+                i += 1;
+            }
+            if text[start..i]
+                .parse::<f32>()
+                .is_ok_and(|value| value != 0.0)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// True when a line leaves a gap between items that the spacing scale does
+    /// not name. Zero stays allowed: setting `item_spacing` to nothing is how a
+    /// widget opts out of egui's layout so it can place its own sub-rectangles,
+    /// which is structure rather than design.
+    fn numeric_item_spacing(line: &str) -> bool {
+        line.contains("item_spacing") && sets_a_nonzero_number(line)
     }
 
     #[test]
@@ -1717,6 +1809,107 @@ mod tests {
              found hardcoded colors:\n{}",
             violations.join("\n")
         );
+    }
+
+    #[test]
+    fn test_the_color_sweep_flags_derivations_but_not_channel_reads() {
+        // The hole the widening closed: a palette color scaled at a call site
+        // decides a color outside the design system without naming a
+        // constructor, so it must fail the sweep — as must a literal.
+        for derives in [
+            "    let fill = palette.error.gamma_multiply(0.1);",
+            "    let wash = palette.ink_3.gamma_multiply(0.4);",
+            "    let ring = theme::INK.linear_multiply(0.5);",
+            "    let edge = palette.border.gamma_multiply_u8(200);",
+            "    let flat = Color32::from_rgb(0, 0, 0);",
+        ] {
+            assert!(hardcoded_color_literal(derives), "sweep misses {derives}");
+        }
+        // Reading a color's channels composes nothing, and `blend_over` is the
+        // helper the token module exposes for composing them: both stay clean,
+        // or the sweep would be arguing with the design system instead of
+        // protecting it.
+        for benign in [
+            "    let key = (icon, px, color.r(), color.g(), color.b());",
+            "    if px.a() == 0 { continue; }",
+            "    image.pixels[i] = theme::blend_over(image.pixels[i], *px);",
+            "    painter.galley(pos, galley, palette.ink);",
+        ] {
+            assert!(
+                !hardcoded_color_literal(benign),
+                "sweep false-positives {benign}"
+            );
+        }
+    }
+
+    /// The geometry half of the same claim as the color sweep: `theme.rs` is
+    /// the store, so a view that declares a measured constant has taken a
+    /// design value into its own hands. Before the views were cleaned up this
+    /// caught nothing, because every one of these constants was already gone;
+    /// it exists so the next one cannot land quietly.
+    #[test]
+    fn test_view_code_declares_no_dimensions_of_its_own() {
+        let violations = violations(view_owned_dimension, &ui_source_lines());
+        assert!(
+            violations.is_empty(),
+            "component geometry belongs in theme.rs's `geometry` section, next \
+             to the surface that paints it (ADR 0004); found view-owned \
+             dimensions:\n{}",
+            violations.join("\n")
+        );
+
+        for declares in [
+            "const ROW_H: f32 = 40.0;",
+            "pub const HEADER_H: f32 = 28.0;",
+            "const MIN_INNER_H: f32 = PLAY_BTN + 16.0 + 8.0;",
+            "pub const MIN_STAGE_SIZE: egui::Vec2 = egui::vec2(520.0, 456.0);",
+        ] {
+            assert!(view_owned_dimension(declares), "sweep misses {declares}");
+        }
+        for owns in [
+            // What the rule deliberately does not reach: a read-model bound,
+            // one glyph's shape data, a raster resolution, a token module's
+            // own `const fn`, and a plain local.
+            "pub const UP_NEXT_LIMIT: usize = 5;",
+            "const WORDMARK_BARS: [f32; 4] = [0.55, 0.95, 0.7, 0.4];",
+            "const TILE_PX: usize = 256;",
+            "pub const fn corner(radius: f32) -> CornerRadius {",
+            "    let row_h = theme::geometry::sidebar::ROW_H;",
+        ] {
+            assert!(!view_owned_dimension(owns), "sweep false-positives {owns}");
+        }
+    }
+
+    /// The spacing half: a gap between items is a scale step, so a numeric
+    /// `item_spacing` assignment in a view is a gap the design system has
+    /// never heard of.
+    #[test]
+    fn test_view_code_sets_no_spacing_of_its_own() {
+        let violations = violations(numeric_item_spacing, &ui_source_lines());
+        assert!(
+            violations.is_empty(),
+            "spacing between items comes from theme's SPACE_* scale (ADR 0004); \
+             found numeric item_spacing assignments:\n{}",
+            violations.join("\n")
+        );
+
+        for sets in [
+            "ui.spacing_mut().item_spacing.x = 6.0;",
+            "ui.spacing_mut().item_spacing.x = 10.0;",
+            "ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);",
+        ] {
+            assert!(numeric_item_spacing(sets), "sweep misses {sets}");
+        }
+        for reads in [
+            "ui.spacing_mut().item_spacing.x = 0.0;",
+            "strip_ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);",
+            "ui.spacing_mut().item_spacing.x = theme::SPACE_MD;",
+        ] {
+            assert!(
+                !numeric_item_spacing(reads),
+                "sweep false-positives {reads}"
+            );
+        }
     }
 
     #[test]
@@ -1747,13 +1940,14 @@ mod tests {
 
     #[test]
     fn test_min_window_size_fits_the_fixed_chrome() {
+        use theme::geometry::window;
         // The chrome-fitting minimum must leave room for the fixed panels
         // PLUS a usable main stage: sidebar + stage across, titlebar +
         // playerbar + stage down. A window below this would collapse the
         // fixed chrome.
-        let min = chrome::MIN_WINDOW_SIZE;
-        assert!(min.x >= theme::SIDEBAR_W + chrome::MIN_STAGE_SIZE.x);
-        assert!(min.y >= theme::TITLEBAR_H + theme::PLAYERBAR_H + chrome::MIN_STAGE_SIZE.y);
+        let min = window::MIN_WINDOW_SIZE;
+        assert!(min.x >= theme::SIDEBAR_W + window::MIN_STAGE_SIZE.x);
+        assert!(min.y >= theme::TITLEBAR_H + theme::PLAYERBAR_H + window::MIN_STAGE_SIZE.y);
 
         let builder = chrome::viewport_builder();
         assert_eq!(builder.min_inner_size, Some(min));
@@ -1996,7 +2190,7 @@ mod tests {
     #[test]
     fn test_sidebar_tree_rows_use_the_mockup_40px_height_and_indent_scale() {
         // Mockup: tree rows are exactly 40px tall...
-        assert!((sidebar::ROW_H - 40.0).abs() < f32::EPSILON);
+        assert!((theme::geometry::sidebar::ROW_H - 40.0).abs() < f32::EPSILON);
         // ...on the three-level indent scale 12/44/80px.
         assert!((sidebar::indent_px(0) - 12.0).abs() < f32::EPSILON);
         assert!((sidebar::indent_px(1) - 44.0).abs() < f32::EPSILON);
@@ -2573,23 +2767,25 @@ mod tests {
     // repeat toggles, and a queue position label. Every control still emits
     // its engine command.
     //
-    // Headless seams (`riff_gui::ui::playerbar`): the mockup dimension tokens,
-    // the monospace readout font, the seek-fraction math, and the
-    // control→action contract. The pixels are pinned by the `playerbar_dark`
-    // golden image; the action→command wiring is covered further below.
+    // Headless seams (`riff_gui::ui::playerbar`): the mockup dimensions it
+    // paints with (read from the token module), the monospace readout font,
+    // the seek-fraction math, and the control→action contract. The pixels are
+    // pinned by the `playerbar_dark` golden image; the action→command wiring is
+    // covered further below.
 
     use riff_gui::ui::playerbar;
 
     #[test]
     fn test_playerbar_dimensions_match_the_mockup() {
+        use theme::geometry::{playerbar as pb, seek};
         // Mockup: a 56×56 cover...
-        assert!((playerbar::COVER - 56.0).abs() < f32::EPSILON);
+        assert!((pb::COVER - 56.0).abs() < f32::EPSILON);
         // ...a 40px primary-filled play button among circular ghost
         // transport buttons...
-        assert!((playerbar::PLAY_BTN - 40.0).abs() < f32::EPSILON);
-        assert!((playerbar::GHOST_BTN - 32.0).abs() < f32::EPSILON);
+        assert!((pb::PLAY_BTN - 40.0).abs() < f32::EPSILON);
+        assert!((pb::GHOST_BTN - 32.0).abs() < f32::EPSILON);
         // ...and 4px tracks for both the seek row and the volume slider.
-        assert!((playerbar::TRACK_H - 4.0).abs() < f32::EPSILON);
+        assert!((seek::TRACK_H - 4.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -3508,13 +3704,14 @@ mod tests {
 
     #[test]
     fn test_library_hero_dimensions_match_the_mockup_stage() {
+        use theme::geometry::hero;
         // w-40 h-40 disc circle with an 80px (w-20 h-20) glyph.
-        assert!((library::HERO_DISC_SIZE - 160.0).abs() < f32::EPSILON);
-        assert!((library::HERO_DISC_ICON_SIZE - 80.0).abs() < f32::EPSILON);
+        assert!((hero::DISC_SIZE - 160.0).abs() < f32::EPSILON);
+        assert!((hero::DISC_ICON_SIZE - 80.0).abs() < f32::EPSILON);
         // mb-6 below the circle, mb-1 between title and subtitle, p-8 inset.
-        assert!((library::HERO_TITLE_GAP - 24.0).abs() < f32::EPSILON);
-        assert!((library::HERO_SUBTITLE_GAP - 4.0).abs() < f32::EPSILON);
-        assert!((library::HERO_STAGE_INSET - 32.0).abs() < f32::EPSILON);
+        assert!((hero::TITLE_GAP - 24.0).abs() < f32::EPSILON);
+        assert!((hero::SUBTITLE_GAP - 4.0).abs() < f32::EPSILON);
+        assert!((hero::STAGE_INSET - 32.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -3532,7 +3729,7 @@ mod tests {
         // approximation must stack several translucent fills, painted
         // largest-first, whose brand alphas fall off toward the outside and
         // never exceed the CSS shadow's 15% ceiling.
-        let layers = library::GLOW_LAYERS;
+        let layers = theme::geometry::glow::LAYERS;
         assert!(
             layers.len() >= 2,
             "a single flat fill cannot stand in for a blur"
@@ -3559,12 +3756,13 @@ mod tests {
     #[test]
     fn test_disc_glow_color_is_derived_from_the_brand_token() {
         // ADR 0004: no flat color literals in view code — every glow tint is
-        // the palette's brand primary scaled by the layer's alpha fraction.
-        let palette = riff_gui::ui::theme::Palette::dark();
-        for layer in &library::GLOW_LAYERS {
+        // the palette's brand primary scaled by the layer's alpha fraction,
+        // and the scaling is the token module's helper, not a call site.
+        let palette = theme::Palette::dark();
+        for layer in &theme::geometry::glow::LAYERS {
             assert_eq!(
-                library::glow_color(&palette, *layer),
-                riff_gui::ui::theme::BRAND_500.gamma_multiply(layer.alpha),
+                theme::glow(&palette, layer.alpha),
+                palette.brand_primary.gamma_multiply(layer.alpha),
                 "the glow tint derives from brand_primary"
             );
         }
@@ -3585,7 +3783,7 @@ mod tests {
     #[test]
     fn test_now_playing_cover_uses_the_mockup_dimension() {
         assert!(
-            (now_playing::COVER_SIZE - 240.0).abs() < f32::EPSILON,
+            (theme::geometry::now_playing::COVER_SIZE - 240.0).abs() < f32::EPSILON,
             "the mockup cover is exactly 240px"
         );
     }
@@ -3848,13 +4046,14 @@ mod tests {
 
     #[test]
     fn test_toggle_switch_dimensions_match_the_mockup_pill() {
+        use theme::geometry::toggle;
         // w-9 h-5 pill with a w-4 h-4 knob inset by 0.5 (2px).
-        assert!((toggle_switch::TOGGLE_W - 36.0).abs() < f32::EPSILON);
-        assert!((toggle_switch::TOGGLE_H - 20.0).abs() < f32::EPSILON);
-        assert!((toggle_switch::KNOB_SIZE - 16.0).abs() < f32::EPSILON);
-        assert!((toggle_switch::KNOB_INSET - 2.0).abs() < f32::EPSILON);
+        assert!((toggle::TOGGLE_W - 36.0).abs() < f32::EPSILON);
+        assert!((toggle::TOGGLE_H - 20.0).abs() < f32::EPSILON);
+        assert!((toggle::KNOB_SIZE - 16.0).abs() < f32::EPSILON);
+        assert!((toggle::KNOB_INSET - 2.0).abs() < f32::EPSILON);
         // peer-checked:translate-x-4 — the knob slides exactly 16px.
-        assert!((toggle_switch::KNOB_TRAVEL - 16.0).abs() < f32::EPSILON);
+        assert!((toggle::KNOB_TRAVEL - 16.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -4043,11 +4242,11 @@ mod tests {
         // Ghost styling: transparent until hover, then destructive @ 10%.
         let dark = theme::Palette::dark();
         assert_eq!(
-            settings::destructive_ghost_fill(&dark, false),
+            theme::destructive_fill(&dark, false),
             egui::Color32::TRANSPARENT
         );
         assert_eq!(
-            settings::destructive_ghost_fill(&dark, true),
+            theme::destructive_fill(&dark, true),
             dark.error.gamma_multiply(0.1)
         );
     }
@@ -4517,7 +4716,7 @@ mod tests {
         let mut cache = icons::IconCache::new();
         let labels = ["Alpha", "Beta", "Gamma"];
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(256.0, sidebar::ROW_H * 3.0))
+            .with_size(egui::vec2(256.0, theme::geometry::sidebar::ROW_H * 3.0))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 move |ui, moves: &mut Vec<(usize, usize)>| {
@@ -4575,7 +4774,7 @@ mod tests {
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(256.0, sidebar::ROW_H * 2.0))
+            .with_size(egui::vec2(256.0, theme::geometry::sidebar::ROW_H * 2.0))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 move |ui, events: &mut Vec<&'static str>| {
@@ -4707,7 +4906,7 @@ mod tests {
         let mut cache = icons::IconCache::new();
         let btn_id = egui::Id::new("tooltip_probe");
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(64.0, sidebar::ROW_H))
+            .with_size(egui::vec2(64.0, theme::geometry::sidebar::ROW_H))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 move |ui, opened: &mut Vec<bool>| {
@@ -4764,7 +4963,7 @@ mod tests {
         let ink = theme::Palette::dark().ink;
 
         #[expect(clippy::cast_precision_loss)]
-        let view_h = VIEW_ROWS as f32 * sidebar::ROW_H;
+        let view_h = VIEW_ROWS as f32 * theme::geometry::sidebar::ROW_H;
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(280.0, view_h))
             .with_pixels_per_point(1.0)
@@ -4774,29 +4973,37 @@ mod tests {
                     egui::ScrollArea::vertical()
                         .id_salt("virtualization_fixture")
                         .auto_shrink(false)
-                        .show_rows(ui, sidebar::ROW_H, TOTAL_ROWS, |ui, range| {
-                            for i in range {
-                                rendered_this_frame += 1;
-                                let (rect, response) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), sidebar::ROW_H),
-                                    egui::Sense::hover(),
-                                );
-                                ui.painter().text(
-                                    rect.left_center() + egui::vec2(8.0, 0.0),
-                                    egui::Align2::LEFT_CENTER,
-                                    format!("Track {i:05}"),
-                                    egui::FontId::proportional(theme::TEXT_SM),
-                                    ink,
-                                );
-                                response.widget_info(|| {
-                                    egui::WidgetInfo::labeled(
-                                        egui::WidgetType::SelectableLabel,
-                                        false,
+                        .show_rows(
+                            ui,
+                            theme::geometry::sidebar::ROW_H,
+                            TOTAL_ROWS,
+                            |ui, range| {
+                                for i in range {
+                                    rendered_this_frame += 1;
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        egui::vec2(
+                                            ui.available_width(),
+                                            theme::geometry::sidebar::ROW_H,
+                                        ),
+                                        egui::Sense::hover(),
+                                    );
+                                    ui.painter().text(
+                                        rect.left_center() + egui::vec2(8.0, 0.0),
+                                        egui::Align2::LEFT_CENTER,
                                         format!("Track {i:05}"),
-                                    )
-                                });
-                            }
-                        });
+                                        egui::FontId::proportional(theme::TEXT_SM),
+                                        ink,
+                                    );
+                                    response.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::WidgetType::SelectableLabel,
+                                            false,
+                                            format!("Track {i:05}"),
+                                        )
+                                    });
+                                }
+                            },
+                        );
                     frame_counter.set(frame_counter.get().max(rendered_this_frame));
                 },
                 Vec::new(),
@@ -6126,14 +6333,14 @@ mod browser_column_ui_tests {
             .query_by_label("A genre name far too long to fit the column's text width (12 tracks)")
             .unwrap_or_else(|| panic!("the long row renders"));
         assert!(
-            long.rect().height() > riff_gui::ui::browser::BROWSER_ROW_H,
+            long.rect().height() > riff_gui::ui::theme::geometry::browser::ROW_H,
             "a wrapped label grows its row past the classic slot: {:?}",
             long.rect()
         );
         let short = harness.get_by_label("Jazz (5 tracks)");
         assert_eq!(
             short.rect().height(),
-            riff_gui::ui::browser::BROWSER_ROW_H,
+            riff_gui::ui::theme::geometry::browser::ROW_H,
             "a single-line row keeps the classic 48px slot"
         );
     }

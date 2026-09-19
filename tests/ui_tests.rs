@@ -3558,13 +3558,14 @@ mod tests {
 
     #[test]
     fn test_library_hero_dimensions_match_the_mockup_stage() {
+        use theme::geometry::hero;
         // w-40 h-40 disc circle with an 80px (w-20 h-20) glyph.
-        assert!((library::HERO_DISC_SIZE - 160.0).abs() < f32::EPSILON);
-        assert!((library::HERO_DISC_ICON_SIZE - 80.0).abs() < f32::EPSILON);
+        assert!((hero::DISC_SIZE - 160.0).abs() < f32::EPSILON);
+        assert!((hero::DISC_ICON_SIZE - 80.0).abs() < f32::EPSILON);
         // mb-6 below the circle, mb-1 between title and subtitle, p-8 inset.
-        assert!((library::HERO_TITLE_GAP - 24.0).abs() < f32::EPSILON);
-        assert!((library::HERO_SUBTITLE_GAP - 4.0).abs() < f32::EPSILON);
-        assert!((library::HERO_STAGE_INSET - 32.0).abs() < f32::EPSILON);
+        assert!((hero::TITLE_GAP - 24.0).abs() < f32::EPSILON);
+        assert!((hero::SUBTITLE_GAP - 4.0).abs() < f32::EPSILON);
+        assert!((hero::STAGE_INSET - 32.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -3582,7 +3583,7 @@ mod tests {
         // approximation must stack several translucent fills, painted
         // largest-first, whose brand alphas fall off toward the outside and
         // never exceed the CSS shadow's 15% ceiling.
-        let layers = library::GLOW_LAYERS;
+        let layers = theme::geometry::glow::LAYERS;
         assert!(
             layers.len() >= 2,
             "a single flat fill cannot stand in for a blur"
@@ -3611,10 +3612,10 @@ mod tests {
         // ADR 0004: no flat color literals in view code — every glow tint is
         // the palette's brand primary scaled by the layer's alpha fraction,
         // and the scaling is the token module's helper, not a call site.
-        let palette = riff_gui::ui::theme::Palette::dark();
-        for layer in &library::GLOW_LAYERS {
+        let palette = theme::Palette::dark();
+        for layer in &theme::geometry::glow::LAYERS {
             assert_eq!(
-                riff_gui::ui::theme::glow(&palette, layer.alpha),
+                theme::glow(&palette, layer.alpha),
                 palette.brand_primary.gamma_multiply(layer.alpha),
                 "the glow tint derives from brand_primary"
             );

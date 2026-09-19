@@ -20,9 +20,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::icons::{Icon, IconCache};
-use super::library::GLOW_LAYERS;
 use super::playerbar;
 use super::sidebar::{self, TreeRow};
+use super::theme::geometry::glow;
 use super::theme::{self, Palette};
 use riff_backend::domain::{Track, TrackId, TrackMetadata};
 
@@ -289,11 +289,12 @@ fn paint_cover(
         egui::pos2(cx, top + COVER_SIZE / 2.0),
         egui::vec2(COVER_SIZE, COVER_SIZE),
     );
-    let painter = ui.painter_at(cover_rect.expand(GLOW_LAYERS[0].spread));
+    let painter = ui.painter_at(cover_rect.expand(glow::LAYERS[0].spread));
 
     // The glow stands in for the design's box-shadow blur: concentric
-    // translucent brand fills painted largest-first (library-hero precedent).
-    for layer in &GLOW_LAYERS {
+    // translucent brand fills painted largest-first (the Library hero's
+    // disc glow uses the same layers).
+    for layer in &glow::LAYERS {
         painter.rect_filled(
             cover_rect.expand(layer.spread),
             theme::RADIUS_XL + layer.spread,

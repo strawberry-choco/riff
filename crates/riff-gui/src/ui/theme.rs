@@ -172,6 +172,25 @@ pub const RADIUS_XL: f32 = 16.0;
 /// `--riff-radius-full` — 999 px: pills and circular elements.
 pub const RADIUS_FULL: f32 = 999.0;
 
+// --- Spacing scale ------------------------------------------------------------
+//
+// The gaps view code leaves between items. Every step is a value the app
+// already used before the scale was declared, so adopting it moved numbers
+// rather than changing them.
+
+/// 4 px — the tightest gap: a glyph beside its label inside one control.
+pub const SPACE_XS: f32 = 4.0;
+/// 6 px — a thumbnail beside its text in a list row.
+pub const SPACE_SM: f32 = 6.0;
+/// 8 px — the default gap between sibling controls in a row.
+pub const SPACE_MD: f32 = 8.0;
+/// 12 px — controls that read as one group: caption buttons, breadcrumbs.
+pub const SPACE_LG: f32 = 12.0;
+/// 16 px — a heading above the content it names.
+pub const SPACE_XL: f32 = 16.0;
+/// 24 px — the hero-scale gaps (the mockup's `mb-6`).
+pub const SPACE_XXL: f32 = 24.0;
+
 // --- Chrome dimensions (`--riff-titlebar-h`, `--riff-sidebar-w`,
 // `--riff-playerbar-h`) ---------------------------------------------------------
 

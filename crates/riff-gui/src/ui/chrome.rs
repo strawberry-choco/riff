@@ -476,7 +476,7 @@ fn show_titlebar_controls(
     content: &TitleBarContent<'_>,
     actions: &mut Vec<TitleBarAction>,
 ) {
-    ui.spacing_mut().item_spacing.x = 4.0;
+    ui.spacing_mut().item_spacing.x = theme::SPACE_XS;
     ui.visuals_mut().button_frame = false;
 
     let advanced_label = if content.advanced_mode {
@@ -618,7 +618,7 @@ fn show_search_field(
             .max_rect(inner)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
         |ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.spacing_mut().item_spacing.x = theme::SPACE_MD;
 
             let tex_id = cache.texture(ui.ctx(), Icon::Search, 16.0, palette.ink_3);
             let sized = egui::load::SizedTexture::new(tex_id, egui::vec2(16.0, 16.0));

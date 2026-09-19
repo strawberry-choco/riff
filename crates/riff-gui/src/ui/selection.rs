@@ -17,7 +17,7 @@ use riff_backend::domain::TrackId;
 use std::path::PathBuf;
 
 use super::icons::IconCache;
-use super::theme::Palette;
+use super::theme::{self, Palette};
 
 /// What the user did to the selection panel this frame; `app.rs` applies
 /// these to the sessions.
@@ -456,8 +456,8 @@ fn action_row(
 ) {
     let width = ui.available_width();
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        let half = (width - 8.0) / 2.0;
+        ui.spacing_mut().item_spacing.x = theme::SPACE_MD;
+        let half = (width - theme::SPACE_MD) / 2.0;
         action_button(ui, cache, palette, half, play_quick_action(single), actions);
         action_button(
             ui,

@@ -780,18 +780,29 @@ mod tests {
     }
 
     #[test]
-    fn test_status_color_tokens_match_the_mockup() {
-        // --riff-state-success/warning/error/info; warning aliases brand-500.
+    fn test_status_color_tokens_hold_their_own_hues() {
+        // --riff-state-success/error/info are the mockup's. --riff-state-warning
+        // was brand-500, which is how amber came to mean "primary action",
+        // "playback progress", "keyboard focus" and "this field differs" at the
+        // same time (review P2-17); it is now a yellow of its own.
         assert_eq!(
             theme::STATE_SUCCESS,
             egui::Color32::from_rgb(0x22, 0xc5, 0x5e)
         );
-        assert_eq!(theme::STATE_WARNING, theme::BRAND_500);
+        assert_eq!(
+            theme::STATE_WARNING,
+            egui::Color32::from_rgb(0xea, 0xb3, 0x08)
+        );
         assert_eq!(
             theme::STATE_ERROR,
             egui::Color32::from_rgb(0xef, 0x44, 0x44)
         );
         assert_eq!(theme::STATE_INFO, egui::Color32::from_rgb(0x3b, 0x82, 0xf6));
+        assert_ne!(theme::STATE_WARNING, theme::BRAND_500);
+        // ...and the ring has its own token, on its own hue.
+        assert_eq!(theme::FOCUS_RING, egui::Color32::from_rgb(0xa7, 0x8b, 0xfa));
+        assert_ne!(theme::FOCUS_RING, theme::BRAND_500);
+        assert_ne!(theme::FOCUS_RING, theme::STATE_WARNING);
     }
 
     #[test]
@@ -833,10 +844,12 @@ mod tests {
         assert_eq!(p.ink_3, theme::INK_3);
         assert_eq!(p.line, theme::LINE);
         assert_eq!(p.border, theme::BORDER);
-        // --riff-primary / --riff-ring alias brand-500; --riff-primary-foreground
-        // is the deep ink text painted on top of amber fills.
+        // --riff-primary is brand-500 and --riff-primary-foreground the deep ink
+        // text on it. The ring is its own token now: an amber ring read as a
+        // primary action everywhere else it appears (review P2-17).
         assert_eq!(p.brand_primary, theme::BRAND_500);
-        assert_eq!(p.focus_ring, theme::BRAND_500);
+        assert_eq!(p.focus_ring, theme::FOCUS_RING);
+        assert_ne!(p.focus_ring, p.brand_primary);
         assert_eq!(p.on_brand, egui::Color32::from_rgb(0x10, 0x10, 0x13));
         assert_eq!(p.success, theme::STATE_SUCCESS);
         assert_eq!(p.warning, theme::STATE_WARNING);
@@ -918,13 +931,20 @@ mod tests {
         assert_eq!(light.line.a(), dark.line.a());
         assert_eq!(light.border.a(), dark.border.a());
 
-        // Brand amber and status colors are identical across palettes.
+        // Brand amber is identical across palettes; the status colors mostly
+        // are too, except the two that paint text on a panel — warning is a
+        // bright yellow on dark and a deep amber on light, where a bright one
+        // reads at 1.25:1. The ring follows the same rule as a UI component:
+        // light needs the darker violet to clear 3:1 against its own surfaces.
         assert_eq!(light.brand_primary, dark.brand_primary);
         assert_eq!(light.brand_primary, theme::BRAND_500);
         assert_eq!(light.success, dark.success);
-        assert_eq!(light.warning, dark.warning);
+        assert_eq!(light.warning, egui::Color32::from_rgb(0x85, 0x4d, 0x0e));
+        assert_ne!(light.warning, dark.warning);
         assert_eq!(light.error, dark.error);
         assert_eq!(light.info, dark.info);
+        assert_eq!(light.focus_ring, egui::Color32::from_rgb(0x6d, 0x28, 0xd9));
+        assert_ne!(light.focus_ring, light.brand_primary);
         // Dark text stays correct on the unchanged amber fill.
         assert_eq!(light.on_brand, dark.on_brand);
     }
@@ -1869,7 +1889,7 @@ mod tests {
     }
 
     #[test]
-    fn test_text_tokens_clear_wcag_aa_on_every_fill_they_paint_on() {
+    fn test_tokens_clear_their_wcag_floor_on_every_fill_they_paint_on() {
         for (dark, high_contrast) in [(true, false), (false, false), (true, true), (false, true)] {
             let palette = theme::resolve(dark, high_contrast);
             let family = format!(
@@ -1898,6 +1918,27 @@ mod tests {
                 on_brand >= AA_NORMAL,
                 "{family}: on_brand on brand_primary reads {on_brand:.2}:1"
             );
+
+            // `warning` is a text color in three views — the Clear Library
+            // confirmation, a tag row's `(different)` state, an unindexed
+            // path's status dot — so it holds the same floor as the ink ladder.
+            let warning = contrast_ratio(palette.warning, palette.surface);
+            assert!(
+                warning >= AA_NORMAL,
+                "{family}: warning on surface reads {warning:.2}:1, but it is painted as text"
+            );
+
+            // The focus ring is non-text UI, which WCAG 1.4.11 puts at 3:1
+            // against the colors beside it — the floor that `HC_FOCUS_RING`
+            // clears on dark and its deep-gold twin has to clear on light.
+            for (fill_name, fill) in text_fills(&palette) {
+                let ring = contrast_ratio(palette.focus_ring, fill);
+                assert!(
+                    ring >= 3.0,
+                    "{family}: focus_ring against {fill_name} reads {ring:.2}:1, under the \
+                     3:1 floor for a non-text control indicator"
+                );
+            }
         }
     }
 

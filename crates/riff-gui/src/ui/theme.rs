@@ -246,6 +246,57 @@ pub mod geometry {
         /// 16px.
         pub const KNOB_TRAVEL: f32 = 16.0;
     }
+
+    /// The brand halo that stands in for the design's `.riff-disc-glow`
+    /// box-shadow. Shared because the Library empty-state disc and the Now
+    /// Playing cover both paint the same three layers, one behind a circle and
+    /// one behind a rounded square.
+    pub mod glow {
+        /// One translucent layer: how far its radius reaches past the shape it
+        /// wraps, and how strong the brand tint burns there.
+        #[derive(Debug, Clone, Copy)]
+        pub struct GlowLayer {
+            /// Radius offset beyond the edge, in px.
+            pub spread: f32,
+            /// Brand-alpha fraction; the mocked box-shadow peaks at 15% brand.
+            pub alpha: f32,
+        }
+
+        /// The layered approximation of `0 0 60px -20px brand@15%`: egui cannot
+        /// blur, so three concentric fills declared largest-first stack into a
+        /// soft step gradient, their alphas falling off toward the outside
+        /// under the shadow's 15% peak. Each layer's tint is `theme::glow`
+        /// applied to its `alpha`.
+        pub const LAYERS: [GlowLayer; 3] = [
+            GlowLayer {
+                spread: 36.0,
+                alpha: 0.04,
+            },
+            GlowLayer {
+                spread: 24.0,
+                alpha: 0.07,
+            },
+            GlowLayer {
+                spread: 12.0,
+                alpha: 0.11,
+            },
+        ];
+    }
+
+    /// The Library stage's empty-state hero: the glowing disc, its glyph, and
+    /// the two lines of copy under it.
+    pub mod hero {
+        /// Disc-circle diameter (`w-40 h-40`): 160px.
+        pub const DISC_SIZE: f32 = 160.0;
+        /// Disc glyph size inside the circle (`w-20 h-20`): 80px.
+        pub const DISC_ICON_SIZE: f32 = 80.0;
+        /// Gap between the disc circle and the title (`mb-6`): 24px.
+        pub const TITLE_GAP: f32 = 24.0;
+        /// Gap between the title and the subtitle (`mb-1`): 4px.
+        pub const SUBTITLE_GAP: f32 = 4.0;
+        /// Stage inset around the hero group (`p-8`): 32px.
+        pub const STAGE_INSET: f32 = 32.0;
+    }
 }
 
 // --- Semantic palette ---------------------------------------------------------

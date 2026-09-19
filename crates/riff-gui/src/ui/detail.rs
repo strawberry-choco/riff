@@ -13,7 +13,7 @@
 use eframe::egui;
 
 use super::icons::IconCache;
-use super::theme::Palette;
+use super::theme::{self, Palette};
 
 /// One segment of the breadcrumb trail: the path from the browser column's
 /// section down to the entity now in the detail column (e.g. `Artists /
@@ -180,7 +180,7 @@ fn album_header(
 ) {
     ui.allocate_ui(egui::vec2(ui.available_width(), 64.0), |ui| {
         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.spacing_mut().item_spacing.x = theme::SPACE_LG;
             ui.vertical(|ui| {
                 ui.heading(&header.title);
                 if let Some(subtitle) = &header.subtitle {
@@ -294,7 +294,7 @@ fn breadcrumb(
     actions: &mut Vec<DetailAction>,
 ) {
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().item_spacing.x = theme::SPACE_XS;
         let last = crumbs.len().saturating_sub(1);
         for (i, crumb) in crumbs.iter().enumerate() {
             if i > 0 {

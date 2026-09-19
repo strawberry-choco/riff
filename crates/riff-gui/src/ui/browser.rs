@@ -13,7 +13,7 @@
 use eframe::egui;
 
 use super::icons::IconCache;
-use super::theme::Palette;
+use super::theme::{self, Palette};
 
 /// One row/tile of the browser column.
 #[derive(Clone)]
@@ -203,7 +203,7 @@ fn sort_button(ui: &mut egui::Ui, palette: &Palette, sort_desc: bool) -> bool {
     };
     ui.allocate_ui(egui::vec2(ui.available_width(), HEADER_H), |ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
             let button = egui::Button::new(
                 egui::RichText::new(text)
                     .text_style(egui::TextStyle::Small)

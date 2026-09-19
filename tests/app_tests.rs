@@ -6899,8 +6899,6 @@ mod preferences_tests {
         let mut store = MockSettingsStore::default();
         store.state.scalars.volume = Some(0.4);
         store.state.scalars.advanced_mode = true;
-        store.state.scalars.browser_layout =
-            riff_backend::app::state::BrowserLayout::Grid.as_store_code();
 
         let playback = Arc::new(Mutex::new(PlaybackSession::default()));
         let library = Arc::new(Mutex::new(LibrarySession::default()));
@@ -6908,10 +6906,6 @@ mod preferences_tests {
 
         assert_eq!(playback.lock_or_recover().current_volume, 0.4);
         assert!(library.lock_or_recover().ui_flags.advanced_mode);
-        assert_eq!(
-            library.lock_or_recover().browser_layout,
-            riff_backend::app::state::BrowserLayout::Grid
-        );
     }
 
     #[test]
@@ -6961,22 +6955,19 @@ mod preferences_tests {
         let library = Arc::new(Mutex::new(LibrarySession::default()));
         let mut prefs = hydrate_from(&store, &playback, &library);
 
-        // One "frame": the volume drags to 0.3 and the browser layout flips
-        // to grid before the frame-end commit runs.
+        // One "frame": the volume drags to 0.3 and high-contrast flips on
+        // before the frame-end commit runs.
         let mut snapshot = playback.lock_or_recover().clone();
         snapshot.current_volume = 0.3;
         let mut library = library.lock_or_recover();
-        library.browser_layout = riff_backend::app::state::BrowserLayout::Grid;
+        library.ui_flags.high_contrast = true;
 
         let mut store = MockSettingsStore::default();
         prefs.commit_if_changed(&snapshot, &library, &mut store);
 
         assert_eq!(store.calls, vec![SettingsCall::Scalars]);
         assert_eq!(store.state.scalars.volume, Some(0.3));
-        assert_eq!(
-            store.state.scalars.browser_layout,
-            riff_backend::app::state::BrowserLayout::Grid.as_store_code()
-        );
+        assert!(store.state.scalars.high_contrast);
     }
 
     #[test]

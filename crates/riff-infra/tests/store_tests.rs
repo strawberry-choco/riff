@@ -33,10 +33,10 @@ fn test_store_fresh_start_creates_file_and_applies_initial_migration_once() {
     // + v3 (playlists) + v4 (library collection) + v5 (playback prefs)
     // + v6 (track favorites) + v7 (browser layout) + v8 (library scan prefs)
     // + v9 (smart lists collapsed) + v10 (drop the missing-artwork strategy)
-    // + v11 (lowercased entity search keys).
+    // + v11 (lowercased entity search keys) + v12 (retire the browser layout).
     assert_eq!(
         applied.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     );
 }
 
@@ -98,10 +98,10 @@ fn test_store_double_apply_is_idempotent() {
             mapped.collect()
         })
         .expect("reading schema_migrations must work");
-    assert_eq!(rows.len(), 11, "no duplicate migration rows allowed");
+    assert_eq!(rows.len(), 12, "no duplicate migration rows allowed");
     assert_eq!(
         rows.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     );
 
     let applied_at: i64 = store
@@ -135,8 +135,8 @@ fn test_store_migration_010_drops_the_missing_artwork_strategy_column() {
     let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     // Roll back to the 009-era state: forget migration 010 and restore the
-    // column exactly as migration 008 created it, plus some non-default
-    // scalars that 010's table rebuild must preserve.
+    // columns exactly as migrations 007/008 created them, plus some
+    // non-default scalars that 010's table rebuild must preserve.
     store
         .with_connection(|conn| {
             conn.execute_batch(
@@ -144,6 +144,9 @@ fn test_store_migration_010_drops_the_missing_artwork_strategy_column() {
                  ALTER TABLE app_settings
                    ADD COLUMN missing_artwork_strategy TEXT NOT NULL DEFAULT 'generated_colour'
                      CHECK (missing_artwork_strategy IN ('generated_colour'));
+                 ALTER TABLE app_settings
+                   ADD COLUMN browser_layout INTEGER NOT NULL DEFAULT 0
+                     CHECK (browser_layout IN (0, 1));
                  UPDATE app_settings
                    SET volume = 0.42, shuffle = 1, smart_lists_collapsed = 1;",
             )
@@ -316,7 +319,7 @@ fn test_store_checksum_tamper_is_fatal() {
         })
         .expect("reading schema_migrations must work");
     assert_eq!(
-        rows, 11,
+        rows, 12,
         "all shipped migration rows must exist, none re-applied"
     );
 }
@@ -553,7 +556,6 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
                 replaygain_enabled: true,
                 shuffle: true,
                 repeat_mode: 2,
-                browser_layout: 1,
                 smart_lists_collapsed: true,
                 ..riff_persistence::store::ScalarSettings::default()
             })
@@ -574,8 +576,97 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
     assert!(settings.scalars.replaygain_enabled);
     assert!(settings.scalars.shuffle);
     assert_eq!(settings.scalars.repeat_mode, 2);
-    assert_eq!(settings.scalars.browser_layout, 1);
     assert!(settings.scalars.smart_lists_collapsed);
+}
+
+/// Migration 012 retires the list/grid browser layout: the persisted scalar
+/// column is dropped with the concept. Simulate a store that predates the
+/// migration — un-apply 012 and re-add the column — then reopen through the
+/// full migration path: the column must drop, a store that previously had
+/// grid engaged opens on the now-permanent list, and every remaining scalar
+/// carries over exactly.
+#[test]
+fn test_store_migration_012_drops_the_browser_layout_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+
+    // A fully migrated fresh store is the base: every scalar at defaults.
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    // Roll back to the 011-era state: forget migration 012 and restore the
+    // column exactly as migration 007 created it, plus a non-default grid
+    // engagement and some non-default scalars that the rebuild must preserve.
+    store
+        .with_connection(|conn| {
+            conn.execute_batch(
+                "DELETE FROM schema_migrations WHERE version = 12;
+                 ALTER TABLE app_settings
+                   ADD COLUMN browser_layout INTEGER NOT NULL DEFAULT 0
+                     CHECK (browser_layout IN (0, 1));
+                 UPDATE app_settings
+                   SET browser_layout = 1, volume = 0.42, shuffle = 1,
+                       smart_lists_collapsed = 1;",
+            )
+        })
+        .expect("rolling back to the 011-era schema must work");
+    drop(store);
+
+    // Reopening applies only the pending migration 012: the table is rebuilt
+    // without the column and the remaining scalars ride along.
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let upgraded = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let columns: Vec<String> = upgraded
+        .with_connection(|conn| {
+            let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('app_settings')")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect()
+        })
+        .expect("reading the settings table's columns must work");
+    assert!(
+        !columns.iter().any(|column| column == "browser_layout"),
+        "migration 012 must drop the browser-layout column"
+    );
+
+    let scalars = upgraded
+        .load_settings()
+        .expect("loading settings from the upgraded store must work")
+        .scalars;
+    assert_eq!(
+        scalars.volume,
+        Some(0.42),
+        "the rebuild must preserve volume"
+    );
+    assert!(scalars.shuffle, "the rebuild must preserve shuffle");
+    assert!(
+        scalars.smart_lists_collapsed,
+        "the rebuild must preserve smart-lists collapsed"
+    );
+}
+
+/// A fresh store never contains the retired browser-layout column: the
+/// migration set's newest schema is what a new install gets.
+#[test]
+fn test_store_fresh_start_never_creates_the_browser_layout_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    let columns: Vec<String> = store
+        .with_connection(|conn| {
+            let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('app_settings')")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect()
+        })
+        .expect("reading the settings table's columns must work");
+    assert!(
+        !columns.iter().any(|column| column == "browser_layout"),
+        "a fresh store must never contain the retired browser-layout column"
+    );
 }
 
 #[test]

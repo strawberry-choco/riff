@@ -77,6 +77,10 @@ static MIGRATION_CHECKSUMS: &[(&str, &str)] = &[
         "011_entity_search_keys",
         "232d8e913877cee84852267eff8439eb997ce604532045002d97eb0346a275d0",
     ),
+    (
+        "012_retire_browser_layout",
+        "e16b4b364a79921478f3e5d05f8a08514b51f43a5f290e31c8161b4ac0788242",
+    ),
 ];
 
 /// Embedded, ordered, checksummed migrations. Append-only once shipped:
@@ -298,6 +302,42 @@ const MIGRATIONS: &[Migration] = &[
               UPDATE artists SET name_lower = lower(name); \
               UPDATE albums SET album_artist_lower = lower(album_artist); \
               UPDATE albums SET title_lower = lower(title);",
+    },
+    Migration {
+        version: 12,
+        name: "012_retire_browser_layout",
+        // The list/grid browser layout is retired end-to-end: the browser
+        // column renders as a list only, so the persisted choice is deleted
+        // with the concept. SQLite refuses to DROP a column used by a CHECK
+        // constraint, so the settings row is rebuilt without the column —
+        // the same precedent as migration 010. Every other scalar carries
+        // over untouched; a store that previously had grid engaged opens on
+        // the now-permanent list.
+        sql: "CREATE TABLE app_settings_new (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          volume REAL,
+          advanced_mode INTEGER NOT NULL DEFAULT 0 CHECK (advanced_mode IN (0, 1)),
+          high_contrast INTEGER NOT NULL DEFAULT 0 CHECK (high_contrast IN (0, 1)),
+          replaygain_enabled INTEGER NOT NULL DEFAULT 0 CHECK (replaygain_enabled IN (0, 1)),
+          shuffle INTEGER NOT NULL DEFAULT 0 CHECK (shuffle IN (0, 1)),
+          repeat_mode INTEGER NOT NULL DEFAULT 0 CHECK (repeat_mode IN (0, 1, 2)),
+          skip_hidden_files INTEGER NOT NULL DEFAULT 1 CHECK (skip_hidden_files IN (0, 1)),
+          scan_formats TEXT NOT NULL DEFAULT 'mp3,m4a,aac,opus,ogg,flac,wav',
+          read_embedded_artwork INTEGER NOT NULL DEFAULT 1 CHECK (read_embedded_artwork IN (0, 1)),
+          smart_lists_collapsed INTEGER NOT NULL DEFAULT 0 CHECK (smart_lists_collapsed IN (0, 1))
+        );
+        INSERT INTO app_settings_new (
+          id, volume, advanced_mode, high_contrast, replaygain_enabled,
+          shuffle, repeat_mode, skip_hidden_files, scan_formats,
+          read_embedded_artwork, smart_lists_collapsed
+        )
+        SELECT
+          id, volume, advanced_mode, high_contrast, replaygain_enabled,
+          shuffle, repeat_mode, skip_hidden_files, scan_formats,
+          read_embedded_artwork, smart_lists_collapsed
+        FROM app_settings;
+        DROP TABLE app_settings;
+        ALTER TABLE app_settings_new RENAME TO app_settings;",
     },
 ];
 
@@ -3289,13 +3329,13 @@ impl SettingsStore for SqliteStore {
             .with_connection(|conn| {
                 conn.query_row(
                     "SELECT volume, advanced_mode, high_contrast, replaygain_enabled,
-                            shuffle, repeat_mode, browser_layout,
+                            shuffle, repeat_mode,
                             skip_hidden_files, scan_formats, read_embedded_artwork,
                             smart_lists_collapsed
                      FROM app_settings WHERE id = 1",
                     [],
                     |row| {
-                        let scan_formats: String = row.get(8)?;
+                        let scan_formats: String = row.get(7)?;
                         Ok(ScalarSettings {
                             volume: row.get(0)?,
                             advanced_mode: row.get::<_, i64>(1)? != 0,
@@ -3303,15 +3343,14 @@ impl SettingsStore for SqliteStore {
                             replaygain_enabled: row.get::<_, i64>(3)? != 0,
                             shuffle: row.get::<_, i64>(4)? != 0,
                             repeat_mode: row.get(5)?,
-                            browser_layout: row.get(6)?,
-                            skip_hidden_files: row.get::<_, i64>(7)? != 0,
+                            skip_hidden_files: row.get::<_, i64>(6)? != 0,
                             scan_formats: scan_formats
                                 .split(',')
                                 .filter(|extension| !extension.is_empty())
                                 .map(str::to_string)
                                 .collect(),
-                            read_embedded_artwork: row.get::<_, i64>(9)? != 0,
-                            smart_lists_collapsed: row.get::<_, i64>(10)? != 0,
+                            read_embedded_artwork: row.get::<_, i64>(8)? != 0,
+                            smart_lists_collapsed: row.get::<_, i64>(9)? != 0,
                         })
                     },
                 )
@@ -3359,8 +3398,8 @@ impl SettingsStore for SqliteStore {
                 "UPDATE app_settings
                  SET volume = ?1, advanced_mode = ?2, high_contrast = ?3,
                      replaygain_enabled = ?4, shuffle = ?5, repeat_mode = ?6,
-                     browser_layout = ?7, skip_hidden_files = ?8, scan_formats = ?9,
-                     read_embedded_artwork = ?10, smart_lists_collapsed = ?11
+                     skip_hidden_files = ?7, scan_formats = ?8,
+                     read_embedded_artwork = ?9, smart_lists_collapsed = ?10
                  WHERE id = 1",
                 rusqlite::params![
                     scalars.volume,
@@ -3369,7 +3408,6 @@ impl SettingsStore for SqliteStore {
                     i64::from(scalars.replaygain_enabled),
                     i64::from(scalars.shuffle),
                     scalars.repeat_mode,
-                    scalars.browser_layout,
                     i64::from(scalars.skip_hidden_files),
                     scalars.scan_formats.join(","),
                     i64::from(scalars.read_embedded_artwork),

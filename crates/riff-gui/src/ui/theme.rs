@@ -172,10 +172,6 @@ pub const RADIUS_FULL: f32 = 999.0;
 
 /// `--riff-titlebar-h` — 56 px top bar.
 pub const TITLEBAR_H: f32 = 56.0;
-/// 48 px content top bar (design-handoff issue 06): the second content strip
-/// between the frameless titlebar and the library stage, carrying the
-/// wordmark, the global search field, and the list/grid view toggles.
-pub const TOPBAR_H: f32 = 48.0;
 /// `--riff-sidebar-w` — 280 px sidebar.
 pub const SIDEBAR_W: f32 = 280.0;
 

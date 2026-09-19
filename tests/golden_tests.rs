@@ -408,10 +408,14 @@ mod tests {
         let mut search_query = String::new();
 
         // Top chrome strip: merged frameless titlebar at TITLEBAR_H with the
-        // global search field in shared chrome.
+        // global search field in shared chrome. The `surface` fill is the
+        // design's top-bar panel token, named here exactly as `app.rs` names it
+        // on the live panel: without it the strip shows the backdrop below,
+        // which is why the design handoff measured the chrome darker than any
+        // token in the system.
         egui::Panel::top("titlebar")
             .exact_size(theme::TITLEBAR_H)
-            .frame(egui::Frame::NONE)
+            .frame(egui::Frame::NONE.fill(palette.surface))
             .show(ui, |ui| {
                 show_titlebar(
                     ui,

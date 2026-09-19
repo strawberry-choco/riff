@@ -53,7 +53,7 @@ What riff is, what it does, and how to use it.
 - [ADR 0001: SQLite is the authoritative Application Store](adr/0001-sqlite-is-the-authoritative-application-store.md) — supersedes decision 004.
 - [ADR 0002: The UI reads the store through Session Projections](adr/0002-ui-reads-the-store-through-session-projections.md).
 - [ADR 0003: Store query model](adr/0003-store-query-model.md).
-- [ADR 0004: Dual-theme tokens despite a dark-only design source](adr/0004-dual-theme-tokens.md).
+- [ADR 0004: Dual-theme tokens despite a dark-only design source](adr/0004-dual-theme-tokens.md) — two palettes with High Contrast as a variant over each, and `crates/riff-gui/src/ui/theme.rs` as the single store and read source for every design value.
 - [ADR 0005: Custom window chrome (frameless) on all platforms](adr/0005-frameless-window-chrome-on-all-platforms.md).
 - [ADR 0006: Background workers behind app-layer service seams](adr/0006-background-workers-behind-app-layer-service-seams.md) — Tag Edit and Cover services replace the worker threads spawned inline by `RiffApp`.
 - [ADR 0007: No write-side SessionStore facade](adr/0007-no-write-side-sessionstore-facade.md) — the three store-mutation ports stay separate; the store owns generation bumps, so a facade would be a pass-through.
@@ -65,6 +65,7 @@ What riff is, what it does, and how to use it.
 How riff is built and how it works at runtime.
 
 - [Architecture](technical/architecture.md) — the workspace crate split, the dependency chain, each crate's membership criterion, boundary rules, validation checklist, and anti-patterns.
+- [Design tokens](engineering/coding-standards.md#design-tokens) — where a design value lives (`theme.rs`), what view code may read and derive, and the three source sweeps that enforce it.
 - [Deepening plan](technical/deepening-plan.md) — the settled two-part refactor plan from the 2026-08-23 architecture review (One Library, playback engine seam) with per-step status tracking for resumability.
 - [Threading model](technical/threading-model.md) — the threads (all workers spawned by the Composition Root), the crossbeam channels between them, shared state, and real-time constraints.
 - [Data flow](technical/data-flow.md) — step-by-step sequences for the three primary flows: play a track, scan a library, resolve cover art.

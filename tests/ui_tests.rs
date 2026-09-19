@@ -2623,23 +2623,25 @@ mod tests {
     // repeat toggles, and a queue position label. Every control still emits
     // its engine command.
     //
-    // Headless seams (`riff_gui::ui::playerbar`): the mockup dimension tokens,
-    // the monospace readout font, the seek-fraction math, and the
-    // control→action contract. The pixels are pinned by the `playerbar_dark`
-    // golden image; the action→command wiring is covered further below.
+    // Headless seams (`riff_gui::ui::playerbar`): the mockup dimensions it
+    // paints with (read from the token module), the monospace readout font,
+    // the seek-fraction math, and the control→action contract. The pixels are
+    // pinned by the `playerbar_dark` golden image; the action→command wiring is
+    // covered further below.
 
     use riff_gui::ui::playerbar;
 
     #[test]
     fn test_playerbar_dimensions_match_the_mockup() {
+        use theme::geometry::{playerbar as pb, seek};
         // Mockup: a 56×56 cover...
-        assert!((playerbar::COVER - 56.0).abs() < f32::EPSILON);
+        assert!((pb::COVER - 56.0).abs() < f32::EPSILON);
         // ...a 40px primary-filled play button among circular ghost
         // transport buttons...
-        assert!((playerbar::PLAY_BTN - 40.0).abs() < f32::EPSILON);
-        assert!((playerbar::GHOST_BTN - 32.0).abs() < f32::EPSILON);
+        assert!((pb::PLAY_BTN - 40.0).abs() < f32::EPSILON);
+        assert!((pb::GHOST_BTN - 32.0).abs() < f32::EPSILON);
         // ...and 4px tracks for both the seek row and the volume slider.
-        assert!((playerbar::TRACK_H - 4.0).abs() < f32::EPSILON);
+        assert!((seek::TRACK_H - 4.0).abs() < f32::EPSILON);
     }
 
     #[test]

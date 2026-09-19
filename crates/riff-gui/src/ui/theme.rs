@@ -392,6 +392,52 @@ pub mod geometry {
         /// chips).
         pub const HEADER_H: f32 = 28.0;
     }
+
+    /// The scrub bar, which two surfaces paint: the player bar's seek row and
+    /// Now Playing's larger one. Both reserve the same room at each end for
+    /// the monospace time readouts and draw the same hairline track, so those
+    /// two numbers are one token rather than two that have to agree by
+    /// accident.
+    pub mod seek {
+        /// Track height of the seek row (and the volume slider riding the same
+        /// row): 4px.
+        pub const TRACK_H: f32 = 4.0;
+        /// Horizontal room reserved at each end of the seek row for the
+        /// monospace time readouts ("62:03" fits with margin).
+        pub const TIME_LABEL_SPACE: f32 = 44.0;
+    }
+
+    /// The 88px bottom player bar: cover, transport, the seek and volume
+    /// rows, and the queue sheet it opens. Its height is
+    /// [`PLAYERBAR_H`](crate::ui::theme::PLAYERBAR_H); its scrub track comes
+    /// from [`seek`](super::seek).
+    pub mod playerbar {
+        /// Cover-art square (`size-14`): the now-playing cover is exactly
+        /// 56×56.
+        pub const COVER: f32 = 56.0;
+        /// The primary play/pause button diameter.
+        pub const PLAY_BTN: f32 = 40.0;
+        /// Circular ghost transport button diameter
+        /// (previous/next/stop/toggles).
+        pub const GHOST_BTN: f32 = 32.0;
+        /// Width of the volume slider track.
+        pub const VOLUME_W: f32 = 90.0;
+        /// Round thumb diameter on the volume slider.
+        pub const VOLUME_THUMB: f32 = 10.0;
+        /// Horizontal room reserved for the queue position label
+        /// ("999/999").
+        pub const QUEUE_LABEL_SPACE: f32 = 52.0;
+        /// Smallest useful inner height: a 16px seek-row hit area, an 8px gap,
+        /// and the 40px primary button. Below this the bar degrades gracefully
+        /// instead of overlapping its own rows.
+        pub const MIN_INNER_H: f32 = PLAY_BTN + 16.0 + 8.0;
+        /// Queue panel width (a compact side sheet, not a second stage).
+        pub const QUEUE_PANEL_W: f32 = 320.0;
+        /// Tallest the queue panel's row list grows before it scrolls.
+        pub const QUEUE_PANEL_MAX_LIST_H: f32 = 320.0;
+        /// Height of the panel's "Up Next" header line.
+        pub const QUEUE_PANEL_HEADER_H: f32 = 28.0;
+    }
 }
 
 // --- Semantic palette ---------------------------------------------------------

@@ -259,19 +259,6 @@ pub const FOOTER_NOTE: &str = "Changes apply immediately";
 /// The Library pane footer's closing action.
 pub const DONE_LABEL: &str = "Done";
 
-/// The destructive ghost button's fill: transparent until hovered, then the
-/// error token at the mockup's 10% (`hover:bg-destructive/10`). The idle
-/// fill is derived from a token rather than a flat transparent constructor
-/// (ADR 0004).
-#[must_use]
-pub fn destructive_ghost_fill(palette: &Palette, hovered: bool) -> egui::Color32 {
-    if hovered {
-        palette.error.gamma_multiply(0.1)
-    } else {
-        palette.error.gamma_multiply(0.0)
-    }
-}
-
 // --- Stage content & actions -------------------------------------------------------
 
 /// One library-path row as the stage renders it: identity, scan status, the
@@ -1021,7 +1008,7 @@ fn clear_row(ui: &mut egui::Ui, palette: &Palette, actions: &mut Vec<SettingsAct
     painter.rect_filled(
         btn_rect,
         theme::RADIUS_MD,
-        destructive_ghost_fill(palette, response.hovered()),
+        theme::destructive_fill(palette, response.hovered()),
     );
     painter.galley(
         egui::pos2(

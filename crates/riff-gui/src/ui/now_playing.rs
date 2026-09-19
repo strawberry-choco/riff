@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::icons::{Icon, IconCache};
-use super::library::{GLOW_LAYERS, glow_color};
+use super::library::GLOW_LAYERS;
 use super::playerbar;
 use super::sidebar::{self, TreeRow};
 use super::theme::{self, Palette};
@@ -297,7 +297,7 @@ fn paint_cover(
         painter.rect_filled(
             cover_rect.expand(layer.spread),
             theme::RADIUS_XL + layer.spread,
-            glow_color(palette, *layer),
+            theme::glow(palette, layer.alpha),
         );
     }
 

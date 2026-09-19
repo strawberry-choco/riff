@@ -363,6 +363,35 @@ pub mod geometry {
         /// now-playing glyph.
         pub const EQ_BAR_COUNT: usize = 4;
     }
+
+    /// The browser column's list mode: the 48px row that fits a cover
+    /// thumbnail beside two lines of text, and the header strip above it. Its
+    /// rows are taller than [`super::sidebar::ROW_H`] because they carry art.
+    pub mod browser {
+        /// Row height of the browser column's list mode: room for a 36px cover
+        /// thumbnail (the artist variant's "small cover thumbnail") with
+        /// breathing room.
+        pub const ROW_H: f32 = 48.0;
+        /// Edge size of a row's cover thumbnail.
+        pub const THUMB_SIZE: f32 = 36.0;
+        /// Left room before the thumbnail, thumbnail size, and gap to the text:
+        /// the text column starts 52px into the row.
+        pub const THUMB_TEXT_GAP: f32 = 6.0 + THUMB_SIZE + 10.0;
+        /// Right padding on the text column so wrapped lines don't touch the
+        /// pane edge.
+        pub const TEXT_RIGHT_PAD: f32 = 6.0;
+        /// Floor under the text column's wrap width: a pathologically narrow
+        /// pane keeps a usable (still wrapping) column instead of collapsing
+        /// it.
+        pub const MIN_TEXT_W: f32 = 60.0;
+        /// Gap between the row's label line and its muted detail line.
+        pub const TEXT_GAP: f32 = 4.0;
+        /// Vertical inset of a wrapped row's text block within its grown row.
+        pub const TEXT_INSET_Y: f32 = 8.0;
+        /// Height of the header strip above the rows (sort control, genre
+        /// chips).
+        pub const HEADER_H: f32 = 28.0;
+    }
 }
 
 // --- Semantic palette ---------------------------------------------------------

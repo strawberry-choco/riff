@@ -9,6 +9,8 @@ use crate::ui::now_playing::{NowPlayingAction, UpNextEntry};
 use crate::ui::playerbar::PlayerBarAction;
 use crate::ui::settings::SettingsSection;
 use crate::ui::theme;
+#[cfg(not(target_os = "linux"))]
+use crate::ui::window_visibility::VisibilityMessage;
 use eframe::egui;
 use riff_backend::app::MutexExt;
 use riff_backend::app::Transport;
@@ -28,7 +30,6 @@ use riff_backend::domain::{
     PlaybackState, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
 };
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Theme selection state: the light/dark choice plus the (dark, high-contrast)
@@ -114,9 +115,12 @@ pub struct RiffApp {
     /// a fresh `Vec`.
     titlebar_actions: Vec<TitleBarAction>,
     playerbar_actions: Vec<PlayerBarAction>,
-    /// Caller-retained action buffer for the content top bar (issue 06).
-    topbar_actions: Vec<crate::ui::topbar::TopBarAction>,
     now_playing_actions: Vec<NowPlayingAction>,
+    /// The in-memory scroll record per Library Section (scroll-memory spec):
+    /// one slot per Section plus the drill reset bookkeeping. Pure GUI
+    /// presentation state — never crosses the session boundary, never
+    /// touches the Application Store.
+    pub(crate) scroll_memory: crate::ui::scroll_memory::ScrollMemory,
     /// Transient "New Playlist" name prompt (`Some` = open, holds the draft).
     playlist_create_name: Option<String>,
     /// Transient rename prompt: (playlist id, draft name).
@@ -125,7 +129,7 @@ pub struct RiffApp {
     /// Grouped with the other transient prompts on `RiffApp`.
     pub(crate) clear_library_confirm: bool,
     /// Ctrl+K request flag (issue 06): one-shot focus request for the global
-    /// search field in the content top bar, consumed on the frame it lands.
+    /// search field, consumed on the frame it lands.
     global_search_focus: bool,
     first_frame: bool,
     pub(crate) watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
@@ -179,6 +183,12 @@ pub struct RiffApp {
     /// on every logic tick — no backend state, no audio engine involvement.
     #[cfg(not(target_os = "linux"))]
     visibility_listener: crate::ui::window_visibility::VisibilityListener,
+    /// The custom titlebar X's own visibility sender (split-close-paths): the
+    /// X is the only hide gesture on macOS/Windows, and it enqueues
+    /// `VisibilityMessage(false)` over it so `logic()` applies the hide
+    /// through the same drain every other visibility request uses.
+    #[cfg(not(target_os = "linux"))]
+    visibility_tx: crate::ui::window_visibility::VisibilityTx,
     /// Whether the app has hidden the window to the tray. The app's own record,
     /// because egui never reports real visibility back to it (see `logic`).
     #[cfg(not(target_os = "linux"))]
@@ -187,7 +197,6 @@ pub struct RiffApp {
     /// wrapper and the tray thread record dispatched commands onto, and the
     /// inbox the UI drains at the start of every frame.
     backend_events: Arc<Mutex<BackendEvents>>,
-    quit_flag: Arc<AtomicBool>,
 }
 
 impl RiffApp {
@@ -201,7 +210,6 @@ impl RiffApp {
         scans: Box<dyn Scans>,
         watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
         #[cfg(not(target_os = "linux"))] tray_icon: Option<tray_icon::TrayIcon>,
-        quit_flag: Arc<AtomicBool>,
         settings_store: Box<dyn SettingsStore>,
         playlist_store: Box<dyn PlaylistStore>,
         library_mutations: Box<dyn LibraryMutationStore>,
@@ -211,6 +219,7 @@ impl RiffApp {
         backend_events: Arc<Mutex<BackendEvents>>,
         #[cfg(not(target_os = "linux"))]
         visibility_listener: crate::ui::window_visibility::VisibilityListener,
+        #[cfg(not(target_os = "linux"))] visibility_tx: crate::ui::window_visibility::VisibilityTx,
     ) -> Self {
         Self {
             playback,
@@ -229,8 +238,8 @@ impl RiffApp {
             stage_readouts: crate::ui::playerbar::SeekReadouts::new(),
             titlebar_actions: Vec::new(),
             playerbar_actions: Vec::new(),
-            topbar_actions: Vec::new(),
             now_playing_actions: Vec::new(),
+            scroll_memory: crate::ui::scroll_memory::ScrollMemory::default(),
             playlist_create_name: None,
             playlist_rename: None,
             clear_library_confirm: false,
@@ -262,8 +271,9 @@ impl RiffApp {
             #[cfg(not(target_os = "linux"))]
             visibility_listener,
             #[cfg(not(target_os = "linux"))]
+            visibility_tx,
+            #[cfg(not(target_os = "linux"))]
             window_hidden: false,
-            quit_flag,
             backend_events,
         }
     }
@@ -272,11 +282,11 @@ impl RiffApp {
     /// the platform supplies.
     ///
     /// It fills in what [`Self::new`] takes from the host — no tray icon, an
-    /// empty watcher-manager handle, a fresh quit flag, and a real visibility
-    /// channel pair — so a test can build the whole shell over mock ports with
-    /// no audio device, no tray, and no Application Store. The returned sender
-    /// lets a test push a Show/Hide request through the same path the tray
-    /// uses; on Linux there is nothing to drain it, so it is inert there.
+    /// empty watcher-manager handle, and a real visibility channel pair — so a
+    /// test can build the whole shell over mock ports with no audio device, no
+    /// tray, and no Application Store. The returned sender lets a test push a
+    /// Show/Hide request through the same path the tray uses; on Linux there
+    /// is nothing to drain it, so it is inert there.
     ///
     /// It delegates to [`Self::new`] rather than repeating the struct literal,
     /// so the two constructors cannot drift field-for-field. That is also why
@@ -309,7 +319,6 @@ impl RiffApp {
             Arc::new(Mutex::new(None)),
             #[cfg(not(target_os = "linux"))]
             None,
-            Arc::new(AtomicBool::new(false)),
             settings_store,
             playlist_store,
             library_mutations,
@@ -319,6 +328,8 @@ impl RiffApp {
             backend_events,
             #[cfg(not(target_os = "linux"))]
             visibility_listener,
+            #[cfg(not(target_os = "linux"))]
+            visibility_tx.clone(),
         );
         (app, visibility_tx)
     }
@@ -607,6 +618,26 @@ impl RiffApp {
         );
     }
 
+    /// Apply the frame's titlebar actions. Close is resolved here rather than
+    /// in [`apply_titlebar_action`], because this method owns `self`: on
+    /// macOS/Windows the custom X is the only hide gesture, so its Close sends
+    /// a frontend-local [`VisibilityMessage(false)`] over the visibility
+    /// channel (applied by `logic()` one frame later) and never a `Close` —
+    /// with the veto gone, every close that reaches eframe quits. On Linux
+    /// there is no tray, so the X really closes.
+    fn apply_titlebar_actions(&mut self, ctx: &egui::Context, library: &mut LibrarySession) {
+        for action in self.titlebar_actions.drain(..) {
+            if action == TitleBarAction::Close {
+                #[cfg(not(target_os = "linux"))]
+                let _ = self.visibility_tx.send(CUSTOM_TITLEBAR_CLOSE);
+                #[cfg(target_os = "linux")]
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                apply_titlebar_action(action, ctx, library, &mut self.theme);
+            }
+        }
+    }
+
     /// Drain every pending [`BackendEvents::events`] for this frame.
     ///
     /// Called at the start of the frame so any dispatch recorded by the tray
@@ -630,57 +661,32 @@ impl eframe::App for RiffApp {
     /// an invisible window). No UI may be shown here — only state checks and
     /// viewport commands.
     ///
-    /// Implements close-to-tray on macOS/Windows (REQ-SI-001): an OS close
-    /// (X / Alt+F4 / Cmd+Q) is vetoed and the window hides to the tray with
-    /// playback continuing. A real quit (the tray Quit sets `quit_flag`) is
-    /// always allowed through. On Linux there is no tray, so the default
-    /// no-op `logic` applies and closing quits normally.
+    /// There is no close-to-tray veto here (split-close-paths, owner decision
+    /// 2026-09-19): a close that reaches eframe is a quit, period — OS close
+    /// (Alt+F4 / taskbar Close / Cmd+Q) passes through, and the tray Quit now
+    /// enqueues the real close itself. The custom titlebar X never sends a
+    /// `Close`; it hides through the frontend-local visibility channel drained
+    /// below. On Linux there is no tray, so the default no-op `logic` applies
+    /// and closing quits normally.
     #[cfg(not(target_os = "linux"))]
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.quit_flag.load(Ordering::Relaxed) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
-        }
-
-        // A window that is off-screen renders nothing, so this slow repaint loop
-        // is what wakes the event loop for the next tray request at all.
-        // Off-screen comes from the app's own record plus the reported minimized
-        // state: egui derives `viewport().visible()` from minimized/occluded
-        // state that egui-winit never fills in, so a window hidden to the tray
-        // keeps reporting as visible — which is what made the tray's Show Window
-        // a no-op.
-        let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
-        if self.window_hidden || minimized {
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
-        }
-
         // Reconcile frontend-local visibility requests, drained from the tray's
         // own channel (Issue 03). Every request is carried out whether or not
         // this tick already believes it is in that state; no backend state is
-        // touched — visibility is ephemeral frontend state.
+        // touched — visibility is ephemeral frontend state. The minimized flag
+        // is read only here, where the show un-minimizes a window the user
+        // iconified: egui derives `viewport().visible()` from minimized/occluded
+        // state that egui-winit never fills in, so the app keeps its own record.
         if let Some(request) = self.visibility_listener.drain() {
             self.window_hidden = !request.0;
+            let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
             for command in crate::ui::window_visibility::viewport_commands_for(request, minimized) {
                 ctx.send_viewport_cmd(command);
             }
         }
-
-        // Close-to-tray: veto the OS close request and hide instead (frontend-
-        // local; no backend state touched). Only reached when not quitting — a
-        // quit-initiated close went through the check at the top.
-        if ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.window_hidden = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if self.quit_flag.load(Ordering::Relaxed) {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
-        }
-
         // Clone both Arcs BEFORE locking: the guards borrow `self`, and the
         // whole frame below calls `self.<method>(...)` — exactly how the
         // pre-split frame loop handled `self.state`.
@@ -713,10 +719,14 @@ impl eframe::App for RiffApp {
         // light/dark palette.
         self.apply_theme(ui.ctx(), library.ui_flags.high_contrast);
 
-        // Drain the backend event inbox and route playback-error typed
-        // notices to the status line (issue 01 seam fix) — the coordinator
-        // no longer writes the library session's status slot directly.
-        apply_backend_events(self.drain_backend_events(), &mut library.scan_status);
+        // Drain the backend event inbox: route playback-error typed notices
+        // to the status line (issue 01 seam fix) — the coordinator no longer
+        // writes the library session's status slot directly — and fold any
+        // Library-generation move into the Scroll Memory, so a committed
+        // rescan turns every Section slot's fingerprint stale.
+        let events = self.drain_backend_events();
+        self.scroll_memory.note_backend_events(&events);
+        apply_backend_events(events, &mut library.scan_status);
 
         self.poll_library_updates(&mut library);
         self.tag_editor.poll_outcomes(&mut library.scan_status);
@@ -757,16 +767,20 @@ impl eframe::App for RiffApp {
                     ),
                 };
                 self.titlebar_actions.clear();
-                crate::ui::chrome::show_titlebar(
+                let search_response = crate::ui::chrome::show_titlebar(
                     ui,
                     &mut self.icons,
                     &self.theme.active,
                     &content,
+                    &mut library.search_query,
                     &mut self.titlebar_actions,
                 );
-                for action in self.titlebar_actions.drain(..) {
-                    apply_titlebar_action(action, ui.ctx(), &mut library, &mut self.theme);
+                // Ctrl+K landed: focus the titlebar search field this frame.
+                if self.global_search_focus {
+                    search_response.request_focus();
+                    self.global_search_focus = false;
                 }
+                self.apply_titlebar_actions(ui.ctx(), &mut library);
             });
 
         // Left 280px column: the library browser (search, Library/Folders
@@ -780,14 +794,6 @@ impl eframe::App for RiffApp {
             .show(ui, |ui| {
                 self.render_library_sidebar(ui, &mut library);
             });
-
-        // Content top bar (handoff issue 06): the orange wordmark, the
-        // global "Search or jump to…" field, and the list/grid view toggles —
-        // a second content strip above the library stage (open decision 4
-        // keeps the frameless chrome above it).
-        if library.view_mode == ViewMode::Library {
-            self.render_top_bar(ui, &mut library);
-        }
 
         // Bottom 88px strip: transport + progress + volume.
         self.render_control_bar(ui, &mut library, &mut playback);
@@ -829,6 +835,19 @@ impl eframe::App for RiffApp {
             live.queue.set_shuffle(playback.queue.shuffle);
             live.queue.repeat = playback.queue.repeat;
         }
+        // The end-of-frame tick keeps visible frames responsive (seek
+        // readouts, the playing row). A window hidden to the tray schedules no
+        // repaints — the tray wakes the loop on demand — so gate it on
+        // `window_hidden`: without the gate, egui keeps re-requesting repaints
+        // forever on a window it still believes is visible (eframe 0.35 keeps
+        // calling `ui` for a hidden window). Linux has no hidden state, so it
+        // keeps the unconditional tick.
+        #[cfg(not(target_os = "linux"))]
+        if !self.window_hidden {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        #[cfg(target_os = "linux")]
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
     }
@@ -836,11 +855,22 @@ impl eframe::App for RiffApp {
 
 // --- Per-frame helpers -------------------------------------------------------
 
+/// The custom titlebar X's hide intent on macOS/Windows (split-close-paths;
+/// owner decision 2026-09-19). The custom X is the only hide gesture, so it
+/// enqueues a frontend-local `VisibilityMessage(false)` through the
+/// visibility channel and `logic()` applies the hide one frame later. The X
+/// must never send a `Close`: with the close-to-tray veto gone, any close
+/// that reaches eframe quits. On Linux there is no tray, so the titlebar
+/// drain sends a real `ViewportCommand::Close` instead.
+#[cfg(not(target_os = "linux"))]
+pub const CUSTOM_TITLEBAR_CLOSE: VisibilityMessage = VisibilityMessage(false);
+
 /// Apply one [`crate::ui::chrome::TitleBarAction`] to app state and viewport
-/// commands (Issue 06). Window controls route through the same vetoable
-/// viewport commands as their issue-04 counterparts, so close-to-tray
-/// (REQ-SI-001) keeps working from the custom chrome. Preference changes are
-/// session writes only — the frame-end `Preferences` commit persists them.
+/// commands (Issue 06). Minimize/maximize apply their viewport commands here;
+/// Close is handled by the caller (`ui()`), which owns the visibility channel
+/// the custom X's hide travels on (macOS/Windows) or sends the real close
+/// (Linux). Preference changes are session writes only — the frame-end
+/// `Preferences` commit persists them.
 fn apply_titlebar_action(
     action: crate::ui::chrome::TitleBarAction,
     ctx: &egui::Context,
@@ -869,7 +899,11 @@ fn apply_titlebar_action(
             let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
         }
-        Action::Close => ctx.send_viewport_cmd(WindowControl::Close.viewport_command()),
+        // Close is deliberately not handled here: the caller (`ui()`'s action
+        // drain) resolves it first — hide via the visibility channel on
+        // macOS/Windows, real close on Linux — so it can never reach this
+        // match. The arm exists to keep the match exhaustive.
+        Action::Close => {}
     }
 }
 
@@ -1622,18 +1656,6 @@ fn last_played_label(tracks: &[riff_backend::domain::Track]) -> String {
     )
 }
 
-/// Apply one [`crate::ui::topbar::TopBarAction`] (handoff issue 06): the
-/// layout lands on the library session — the browser column (issue 08) reads
-/// it, and the frame-end `Preferences` commit makes the choice survive
-/// restarts.
-pub fn apply_top_bar_action(action: crate::ui::topbar::TopBarAction, library: &mut LibrarySession) {
-    match action {
-        crate::ui::topbar::TopBarAction::SetLayout(layout) => {
-            library.browser_layout = layout;
-        }
-    }
-}
-
 /// Apply one [`crate::ui::now_playing::NowPlayingAction`] (Issue 10). Close
 /// ALWAYS lands on the Library View: Now Playing is a mode that replaces the
 /// active View (resolved navigation gaps), so there is no prior view to
@@ -1926,40 +1948,6 @@ impl RiffApp {
         #[cfg(target_os = "linux")]
         {
             let _ = tooltip;
-        }
-    }
-
-    /// Content top bar (handoff issue 06): the orange wordmark, the global
-    /// "Search or jump to…" field, and the list/grid view toggles, drawn by
-    /// the [`crate::ui::topbar`] widgets inside a 48px top panel. The search
-    /// field edits the session's `search_query` directly, so typing filters
-    /// the whole library; toggles land on the persisted browser layout via
-    /// [`apply_top_bar_action`], and a pending Ctrl+K request focuses the
-    /// field on the frame it lands.
-    fn render_top_bar(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
-        egui::Panel::top("top_bar")
-            .exact_size(theme::TOPBAR_H)
-            .show(ui, |ui| {
-                let content = crate::ui::topbar::TopBarContent {
-                    layout: library.browser_layout,
-                };
-                self.topbar_actions.clear();
-                let search_response = crate::ui::topbar::show_top_bar(
-                    ui,
-                    &mut self.icons,
-                    &self.theme.active,
-                    &mut library.search_query,
-                    content,
-                    &mut self.topbar_actions,
-                );
-                // Ctrl+K landed: focus the global search field this frame.
-                if self.global_search_focus {
-                    search_response.request_focus();
-                    self.global_search_focus = false;
-                }
-            });
-        for action in self.topbar_actions.drain(..) {
-            apply_top_bar_action(action, library);
         }
     }
 
@@ -2384,6 +2372,16 @@ impl RiffApp {
         // Anchor read: sizes the row range with the authoritative total.
         let first_page = self.views.track_list(query, 0);
 
+        // ---- Scroll Memory (scroll-memory spec, issue 01) ----
+        // The All Tracks flat list is the first Section slot: it applies its
+        // saved offset (or zero when the fingerprint is stale) before
+        // rendering and records the actual offset back after, keyed by the
+        // Section's stable salt instead of egui's positional widget identity.
+        let fingerprint = crate::ui::scroll_memory::ContentFingerprint::new(
+            query,
+            false,
+            self.scroll_memory.library_generation(),
+        );
         if first_page.total == 0 {
             // Query-aware empty copy: the flat list explains a filtered-to-
             // empty search, never the empty-library copy.
@@ -2399,19 +2397,26 @@ impl RiffApp {
                 )
             };
             crate::ui::browser::empty_state(ui, &self.theme.active, emp_title, &emp_hint);
+            self.scroll_memory.record_section(
+                riff_backend::app::state::LibrarySection::AllTracks,
+                0.0,
+                fingerprint,
+            );
             return;
         }
 
-        // Grid mode (handoff issue 08): the same paged tracks as cover
-        // tiles. The list mode below keeps the interactive rows —
-        // double-click play, context menus, per-column readouts — until the
-        // detail column provides its own actions.
-        if library.browser_layout == riff_backend::app::state::BrowserLayout::Grid {
-            self.render_flat_grid(ui, library, query, current_track.as_ref());
-            return;
-        }
-
-        egui::ScrollArea::vertical().show_rows(
+        let start = self.scroll_memory.section_start(
+            riff_backend::app::state::LibrarySection::AllTracks,
+            &fingerprint,
+        );
+        let salt = crate::ui::scroll_memory::section_salt(
+            riff_backend::app::state::LibrarySection::AllTracks,
+        );
+        let scroll_area = egui::ScrollArea::vertical()
+            .id_salt(salt)
+            .animated(false)
+            .vertical_scroll_offset(start);
+        let output = scroll_area.show_rows(
             ui,
             crate::ui::sidebar::ROW_H,
             first_page.total,
@@ -2436,6 +2441,11 @@ impl RiffApp {
                     }
                 }
             },
+        );
+        self.scroll_memory.record_section(
+            riff_backend::app::state::LibrarySection::AllTracks,
+            output.state.offset.y,
+            fingerprint,
         );
     }
 

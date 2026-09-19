@@ -52,37 +52,6 @@ pub enum BrowserSelection {
     Genre(String),
 }
 
-/// How the library browser column renders its entries (design-handoff issue
-/// 06): a flat list or a grid of cards. The top bar's list/grid toggle writes
-/// it; the browser column (issue 08) reads it. Persisted through
-/// [`crate::app::store::SettingsStore`] so the choice survives restarts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BrowserLayout {
-    #[default]
-    List,
-    Grid,
-}
-
-impl BrowserLayout {
-    /// The store encoding persisted in the scalar settings row
-    /// (`0` = list, `1` = grid — the same boolean-column convention as the
-    /// other `app_settings` toggles).
-    #[must_use]
-    pub fn as_store_code(self) -> i64 {
-        match self {
-            Self::List => 0,
-            Self::Grid => 1,
-        }
-    }
-
-    /// Decode a stored scalar code; unknown values fall back to the list
-    /// default so a hand-edited store can never break the session.
-    #[must_use]
-    pub fn from_store_code(code: i64) -> Self {
-        if code == 1 { Self::Grid } else { Self::List }
-    }
-}
-
 /// Re-exported from `riff_playback::domain`.
 pub use riff_playback::domain::{
     PlaybackCommand, PlaybackPosition, PlaybackQueue, PlaybackState, PlaybackUpdate, RepeatMode,
@@ -139,10 +108,6 @@ pub struct LibrarySession {
     /// [`LibrarySection`]) — the browser variant the sidebar rows open.
     pub library_section: LibrarySection,
     pub selected_folder: Option<PathBuf>,
-    /// How the browser column renders (list vs. grid, issue 06): the top
-    /// bar's toggle writes it, the browser column reads it, and it persists
-    /// through the settings store.
-    pub browser_layout: BrowserLayout,
     /// `true` when the browser column's A–Z sort is flipped to Z–A (issue
     /// 08). Session state, not persisted — the design pins no default past
     /// A–Z.
@@ -219,7 +184,6 @@ impl Default for LibrarySession {
             browse_mode: BrowseMode::default(),
             library_section: LibrarySection::default(),
             selected_folder: None,
-            browser_layout: BrowserLayout::default(),
             browser_sort_desc: false,
             browser_path: Vec::new(),
             queue_open: false,

@@ -2,7 +2,10 @@
 // owns every adapter, port wiring, and worker thread (backend-crate-split
 // issue 08), so the binary only opens the Application Store at its default
 // location, spawns the runtime, and hands the returned handles to the UI and
-// the tray before running the eframe event loop.
+// the tray. The tray and the app are composed inside eframe's creation
+// closure — the only place the egui context exists, and the tray needs a
+// clone of it on its own thread to wake a sleeping event loop — before the
+// first frame runs.
 use riff_backend::composition::AppRuntime;
 use riff_gui::ui::RiffApp;
 use riff_gui::ui::window_visibility::spawn_visibility_listener;
@@ -28,83 +31,84 @@ fn main() {
 
     // Frontend-local visibility channel (Issue 03): the tray pushes
     // `Show Window` requests here, the UI thread drains them between frames.
-    // The tray never constructs backend commands on this path.
+    // The tray never constructs backend commands on this path. Linux has no
+    // tray, so the channel exists only on macOS/Windows.
+    #[cfg(not(target_os = "linux"))]
     let (visibility_tx, visibility_listener) = spawn_visibility_listener();
 
-    #[cfg(not(target_os = "linux"))]
-    let tray_icon = match riff_gui::ui::tray::create_tray(
-        rt.tray_transport,
-        rt.playback.clone(),
-        rt.quit_flag.clone(),
-        visibility_tx,
-    ) {
-        Ok(tray) => {
-            tracing::info!("Tray icon created");
-            Some(tray)
-        }
-        Err(e) => {
-            tracing::warn!("Failed to create tray icon: {}", e);
-            None
-        }
-    };
-
-    #[cfg(not(target_os = "linux"))]
-    let app = RiffApp::new(
-        rt.playback,
-        rt.library,
-        rt.ui_transport,
-        Box::new(rt.scans.clone()),
-        rt.watcher_manager,
-        tray_icon,
-        rt.quit_flag,
-        rt.settings,
-        rt.playlists,
-        rt.library_mutations,
-        rt.session_views,
-        rt.tag_edits,
-        rt.covers,
-        rt.backend_events,
-        visibility_listener,
-    );
-
-    #[cfg(target_os = "linux")]
-    let app = RiffApp::new(
-        rt.playback,
-        rt.library,
-        rt.ui_transport,
-        Box::new(rt.scans.clone()),
-        rt.watcher_manager,
-        rt.quit_flag,
-        rt.settings,
-        rt.playlists,
-        rt.library_mutations,
-        rt.session_views,
-        rt.tag_edits,
-        rt.covers,
-        rt.backend_events,
-        visibility_listener,
-    );
-
-    run_native_app(app, options);
-
-    // The window closed and `app` has been dropped, so nothing renders with
-    // this runtime any more: stop the worker threads it spawned and wait for
-    // each one to return. Tray Quit is untouched by this — it still sets
-    // `quit_flag` and closes the viewport, and closing the viewport is what
-    // gets us here.
-    lifecycle.shutdown();
-}
-
-/// Hand the composed [`RiffApp`] to eframe: frameless native window with the
-/// app's font configuration installed before the first frame.
-fn run_native_app(app: RiffApp, options: eframe::NativeOptions) {
     eframe::run_native(
         "riff",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             riff_gui::ui::fonts::configure_fonts(&cc.egui_ctx);
+
+            // The egui context exists only inside this closure, and the tray
+            // needs a clone of it on its own thread to wake a sleeping event
+            // loop (`send_viewport_cmd` only queues — it is applied on the
+            // next frame), so tray creation — and therefore the app it feeds —
+            // happens here.
+            #[cfg(not(target_os = "linux"))]
+            let tray_icon = match riff_gui::ui::tray::create_tray(
+                cc.egui_ctx.clone(),
+                rt.tray_transport,
+                rt.playback.clone(),
+                rt.quit_flag.clone(),
+                visibility_tx.clone(),
+            ) {
+                Ok(tray) => {
+                    tracing::info!("Tray icon created");
+                    Some(tray)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to create tray icon: {}", e);
+                    None
+                }
+            };
+
+            #[cfg(not(target_os = "linux"))]
+            let app = RiffApp::new(
+                rt.playback,
+                rt.library,
+                rt.ui_transport,
+                Box::new(rt.scans.clone()),
+                rt.watcher_manager,
+                tray_icon,
+                rt.settings,
+                rt.playlists,
+                rt.library_mutations,
+                rt.session_views,
+                rt.tag_edits,
+                rt.covers,
+                rt.backend_events,
+                visibility_listener,
+                visibility_tx,
+            );
+
+            #[cfg(target_os = "linux")]
+            let app = RiffApp::new(
+                rt.playback,
+                rt.library,
+                rt.ui_transport,
+                Box::new(rt.scans.clone()),
+                rt.watcher_manager,
+                rt.settings,
+                rt.playlists,
+                rt.library_mutations,
+                rt.session_views,
+                rt.tag_edits,
+                rt.covers,
+                rt.backend_events,
+            );
+
             Ok(Box::new(app))
         }),
     )
     .expect("Failed to run eframe");
+
+    // The window closed and `app` has been dropped, so nothing renders with
+    // this runtime any more: stop the worker threads it spawned and wait for
+    // each one to return. Every close now reaches this point the same way —
+    // OS close, a Linux custom X, and the tray Quit (which enqueues the real
+    // close and wakes the loop) all exit through eframe.
+    lifecycle.shutdown();
 }

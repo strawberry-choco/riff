@@ -308,89 +308,6 @@ mod tests {
     }
 
     #[test]
-    fn test_browser_layout_roundtrips_and_defaults_to_list() {
-        let dir = tempfile::tempdir().unwrap();
-
-        // Fresh store: the browser column renders as a list (handoff issue 06).
-        assert_eq!(
-            boxed_store(&dir)
-                .load_settings()
-                .unwrap()
-                .scalars
-                .browser_layout,
-            riff_backend::app::state::BrowserLayout::List.as_store_code()
-        );
-
-        // Switching to grid survives a restart...
-        {
-            let mut store = boxed_store(&dir);
-            store
-                .save_scalars(&riff_backend::app::state::ScalarSettings {
-                    browser_layout: riff_backend::app::state::BrowserLayout::Grid.as_store_code(),
-                    ..Default::default()
-                })
-                .unwrap();
-        }
-        assert_eq!(
-            boxed_store(&dir)
-                .load_settings()
-                .unwrap()
-                .scalars
-                .browser_layout,
-            riff_backend::app::state::BrowserLayout::Grid.as_store_code()
-        );
-
-        // ...and switching back to list does too.
-        {
-            let mut store = boxed_store(&dir);
-            store
-                .save_scalars(&riff_backend::app::state::ScalarSettings {
-                    browser_layout: riff_backend::app::state::BrowserLayout::List.as_store_code(),
-                    ..Default::default()
-                })
-                .unwrap();
-        }
-        assert_eq!(
-            boxed_store(&dir)
-                .load_settings()
-                .unwrap()
-                .scalars
-                .browser_layout,
-            riff_backend::app::state::BrowserLayout::List.as_store_code()
-        );
-    }
-
-    #[test]
-    fn test_browser_layout_hydrates_into_the_library_session_on_restore() {
-        use riff_backend::app::state::BrowserLayout;
-
-        let dir = tempfile::tempdir().unwrap();
-        {
-            let mut store = boxed_store(&dir);
-            store
-                .save_scalars(&riff_backend::app::state::ScalarSettings {
-                    browser_layout: BrowserLayout::Grid.as_store_code(),
-                    ..Default::default()
-                })
-                .unwrap();
-        }
-
-        let (playback, library) = create_test_sessions();
-        riff_backend::app::preferences::Preferences::hydrate(
-            &playback,
-            &library,
-            boxed_store(&dir).as_ref(),
-            &crate::mocks::MockTransport::new(),
-        );
-
-        assert_eq!(
-            library.lock_or_recover().browser_layout,
-            BrowserLayout::Grid,
-            "first-frame restore must hydrate the browser layout into the session"
-        );
-    }
-
-    #[test]
     fn test_library_scan_prefs_hydrate_into_the_library_session_on_restore() {
         use riff_backend::app::state::ScanPrefs;
 
@@ -1533,7 +1450,7 @@ mod tests {
     }
 
     #[test]
-    fn test_window_controls_minimize_and_route_close_through_the_vetoable_path() {
+    fn test_window_controls_minimize_collapses_and_close_hides_or_quits_by_platform() {
         use riff_gui::ui::chrome::WindowControl;
 
         // Minimize collapses the window.
@@ -1541,13 +1458,26 @@ mod tests {
             WindowControl::Minimize.viewport_command(),
             egui::ViewportCommand::Minimized(true)
         );
-        // Close must go through ViewportCommand::Close — the same path as the
-        // OS close button — so close-to-tray (REQ-SI-001) keeps vetoing it on
-        // macOS/Windows. A hard exit here would silently kill playback.
+
+        // Split-close-paths (owner decision 2026-09-19): the close-to-tray
+        // veto is gone, so the custom close is no longer "a Close the veto
+        // turns into a hide". On Linux there is no tray, and the custom X
+        // really closes.
+        #[cfg(target_os = "linux")]
         assert_eq!(
             WindowControl::Close.viewport_command(),
             egui::ViewportCommand::Close
         );
+
+        // On macOS/Windows the custom X is the only hide gesture: it enqueues
+        // a frontend-local VisibilityMessage(false) that logic() applies one
+        // frame later — never a Close, which now always quits.
+        #[cfg(not(target_os = "linux"))]
+        {
+            use riff_gui::ui::app::CUSTOM_TITLEBAR_CLOSE;
+            use riff_gui::ui::window_visibility::VisibilityMessage;
+            assert_eq!(CUSTOM_TITLEBAR_CLOSE, VisibilityMessage(false));
+        }
     }
 
     #[test]
@@ -1608,7 +1538,8 @@ mod tests {
                 egui::ViewportCommand::Focus,
             ]
         );
-        // The hide request is the command the close-to-tray path issues itself.
+        // The hide request is what the custom titlebar X (or the tray) issues
+        // through the visibility channel.
         assert_eq!(
             viewport_commands_for(VisibilityMessage(false), false),
             vec![egui::ViewportCommand::Visible(false)]
@@ -1913,15 +1844,24 @@ mod tests {
                     // exactly one frame, and harness.run() settles over
                     // further no-op frames afterwards.
                     widget_actions.clear();
-                    show_titlebar(ui, &mut cache, &palette, &content, &mut widget_actions);
+                    let mut query = String::new();
+                    show_titlebar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut query,
+                        &mut widget_actions,
+                    );
                     actions.append(&mut widget_actions);
                 },
                 Vec::new(),
             );
         harness.run();
 
-        // Custom window controls keep their issue-04 contract, now surfaced
-        // as actions the app applies through the vetoable viewport commands.
+        // Custom window controls keep their issue-04 contract, now surfaced as
+        // TitleBarActions the app resolves: Close hides through the
+        // visibility channel on macOS/Windows and really closes on Linux.
         harness.get_by_label("Close").click();
         harness.run();
         assert!(harness.state().contains(&TitleBarAction::Close));
@@ -5592,91 +5532,34 @@ mod playback_notice_ui_tests {
 }
 
 #[cfg(test)]
-mod top_bar_ui_tests {
-    // --- Content top bar (design-handoff issue 06) ------------------------------
+mod titlebar_search_ui_tests {
+    // --- Titlebar search (shared chrome) -----------------------------------------
     //
-    // The library's content top bar carries the orange riff wordmark, the
-    // global "Search or jump to…" field, and the list/grid view toggles. The
-    // headless seams are the toggle action contract and the search field's
-    // query-buffer editing; the pixels are covered by the top_bar golden.
+    // The global "Search or jump to…" field lives in the titlebar — shared
+    // chrome present on every View (the content top bar was deleted). The
+    // headless seams are the search field's query-buffer editing, its Escape
+    // dismissal, and the Ctrl+K request-focus contract; the pixels are
+    // covered by the titlebar goldens.
 
-    use riff_backend::app::state::BrowserLayout;
-    use riff_gui::ui::topbar::{TopBarAction, TopBarContent, show_top_bar};
+    use riff_gui::ui::chrome::{TitleBarContent, show_titlebar};
 
-    #[test]
-    fn test_top_bar_reports_view_toggle_actions() {
-        // Harness label queries resolve through kittest's accessibility tree.
-        use egui_kittest::kittest::Queryable;
-
-        let content = TopBarContent {
-            layout: BrowserLayout::List,
-        };
-        let palette = riff_gui::ui::theme::Palette::dark();
-        let mut cache = riff_gui::ui::icons::IconCache::new();
-        let mut query = String::new();
-        let mut widget_actions = Vec::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, riff_gui::ui::theme::TOPBAR_H))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions| {
-                    // ACCUMULATE across frames: a click fires its action on
-                    // exactly one frame, and harness.run() settles over
-                    // further no-op frames afterwards.
-                    widget_actions.clear();
-                    show_top_bar(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        &mut query,
-                        content,
-                        &mut widget_actions,
-                    );
-                    actions.append(&mut widget_actions);
-                },
-                Vec::new(),
-            );
-        // The wordmark renders in the vendored Inter Bold family, so install
-        // the app's font definitions (golden-harness precedent).
-        harness
-            .ctx
-            .set_fonts(riff_gui::ui::fonts::font_definitions());
-        harness.run();
-
-        // The inactive toggle activates its layout; the app applies the
-        // action to the persisted session state.
-        harness.get_by_label("Grid view").click();
-        harness.run();
-        assert!(
-            harness
-                .state()
-                .contains(&TopBarAction::SetLayout(BrowserLayout::Grid))
-        );
-
-        harness.get_by_label("List view").click();
-        harness.run();
-        assert!(
-            harness
-                .state()
-                .contains(&TopBarAction::SetLayout(BrowserLayout::List))
-        );
+    /// A default titlebar content: no scan status, dark theme, no active nav.
+    fn content() -> TitleBarContent<'static> {
+        TitleBarContent::default()
     }
 
     #[test]
-    fn test_top_bar_search_field_edits_the_query_buffer() {
+    fn test_titlebar_search_field_edits_the_query_buffer() {
         use egui_kittest::kittest::Queryable;
 
-        let content = TopBarContent {
-            layout: BrowserLayout::List,
-        };
         let palette = riff_gui::ui::theme::Palette::dark();
         let mut cache = riff_gui::ui::icons::IconCache::new();
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, riff_gui::ui::theme::TOPBAR_H))
+            .with_size(egui::vec2(800.0, riff_gui::ui::theme::TITLEBAR_H))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, query| {
-                    show_top_bar(ui, &mut cache, &palette, query, content, &mut Vec::new());
+                    show_titlebar(ui, &mut cache, &palette, &content(), query, &mut Vec::new());
                 },
                 String::new(),
             );
@@ -5703,21 +5586,23 @@ mod top_bar_ui_tests {
     fn test_ctrl_k_focuses_global_search() {
         use riff_backend::app::state::PlaybackSession;
         use riff_gui::ui::app::handle_keyboard_shortcuts;
-        use riff_gui::ui::topbar::{TopBarContent, show_top_bar};
 
-        let content = TopBarContent {
-            layout: riff_backend::app::state::BrowserLayout::List,
-        };
         let palette = riff_gui::ui::theme::Palette::dark();
         let mut cache = riff_gui::ui::icons::IconCache::new();
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, riff_gui::ui::theme::TOPBAR_H))
+            .with_size(egui::vec2(800.0, riff_gui::ui::theme::TITLEBAR_H))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, state| {
-                    let mut actions = Vec::new();
                     let mut q = String::new();
-                    let _ = show_top_bar(ui, &mut cache, &palette, &mut q, content, &mut actions);
+                    let _ = show_titlebar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content(),
+                        &mut q,
+                        &mut Vec::new(),
+                    );
                     handle_keyboard_shortcuts(
                         ui.ctx(),
                         &PlaybackSession::default(),
@@ -5732,27 +5617,24 @@ mod top_bar_ui_tests {
             .set_fonts(riff_gui::ui::fonts::font_definitions());
         harness.run();
 
-        // Ctrl+K targets the global search field.
+        // Ctrl+K targets the titlebar search field.
         harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::K);
         harness.run();
         assert!(*harness.state());
     }
 
     #[test]
-    fn test_top_bar_search_dismisses_on_escape() {
+    fn test_titlebar_search_dismisses_on_escape() {
         use egui_kittest::kittest::Queryable;
 
-        let content = TopBarContent {
-            layout: BrowserLayout::List,
-        };
         let palette = riff_gui::ui::theme::Palette::dark();
         let mut cache = riff_gui::ui::icons::IconCache::new();
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, riff_gui::ui::theme::TOPBAR_H))
+            .with_size(egui::vec2(800.0, riff_gui::ui::theme::TITLEBAR_H))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, query| {
-                    show_top_bar(ui, &mut cache, &palette, query, content, &mut Vec::new());
+                    show_titlebar(ui, &mut cache, &palette, &content(), query, &mut Vec::new());
                 },
                 String::new(),
             );
@@ -5784,21 +5666,6 @@ mod top_bar_ui_tests {
             "Escape must give up the field's keyboard focus"
         );
     }
-
-    #[test]
-    fn test_top_bar_toggle_action_updates_the_session() {
-        let mut library = riff_backend::app::state::LibrarySession::default();
-
-        riff_gui::ui::app::apply_top_bar_action(
-            TopBarAction::SetLayout(BrowserLayout::Grid),
-            &mut library,
-        );
-
-        // The session reflects the choice immediately (the browser column
-        // reads it); the frame-end `Preferences` diff commit makes the
-        // choice survive restarts.
-        assert_eq!(library.browser_layout, BrowserLayout::Grid);
-    }
 }
 
 // --- Browser column (design-handoff issue 08) -----------------------------------
@@ -5806,15 +5673,15 @@ mod top_bar_ui_tests {
 // The first pane of the three-pane explorer: a generic list column that
 // renders every section's rows — artists with cover thumbnails, plus All
 // Tracks / Albums / Genres / Folders / smart-list / playlist rows — with an
-// A–Z sort control and genre filter chips on the artist variant, honoring
-// the top bar's list/grid toggle. The headless seam is the `browser` widget
-// module (the same pure-widget discipline as `sidebar`/`topbar`): widgets
-// paint from data and report `BrowserAction`s; app state stays in `app.rs`.
+// A–Z sort control and genre filter chips on the artist variant. The browser
+// is permanently list-only: the grid render path was retired end-to-end. The
+// headless seam is the `browser` widget module (the same pure-widget
+// discipline as `sidebar`/`topbar`): widgets paint from data and report
+// `BrowserAction`s; app state stays in `app.rs`.
 #[cfg(test)]
 mod browser_column_ui_tests {
     use super::*;
     use crate::ui_tests::tests::boxed_library_store;
-    use riff_backend::app::state::BrowserLayout;
     use riff_gui::ui::browser::{BrowserAction, BrowserColumn, BrowserItem};
     use riff_gui::ui::icons::IconCache;
     use riff_gui::ui::theme::Palette;
@@ -5873,7 +5740,6 @@ mod browser_column_ui_tests {
                     // exactly one frame; harness.run() settles afterwards.
                     let mut fixture_item = provider(&items);
                     let column = BrowserColumn {
-                        layout: BrowserLayout::List,
                         sort_desc: false,
                         show_sort: true,
                         total: items.len(),
@@ -5943,7 +5809,6 @@ mod browser_column_ui_tests {
                 |ui, actions: &mut Vec<BrowserAction>| {
                     let mut fixture_item = provider(&items);
                     let column = BrowserColumn {
-                        layout: BrowserLayout::List,
                         sort_desc: false,
                         show_sort: false,
                         total: items.len(),
@@ -6006,7 +5871,6 @@ mod browser_column_ui_tests {
                 |ui, actions: &mut Vec<BrowserAction>| {
                     let mut fixture_item = provider(&items);
                     let column = BrowserColumn {
-                        layout: BrowserLayout::List,
                         sort_desc: false,
                         show_sort: false,
                         total: items.len(),
@@ -6062,7 +5926,6 @@ mod browser_column_ui_tests {
                 |ui, actions: &mut Vec<BrowserAction>| {
                     let mut fixture_item = provider(&items);
                     let column = BrowserColumn {
-                        layout: BrowserLayout::Grid,
                         sort_desc: false,
                         show_sort: false,
                         total: items.len(),
@@ -6099,7 +5962,6 @@ mod browser_column_ui_tests {
                 |ui, actions: &mut Vec<BrowserAction>| {
                     let mut fixture_item = provider(&items);
                     let column = BrowserColumn {
-                        layout: BrowserLayout::List,
                         sort_desc: false,
                         show_sort: true,
                         total: 0,
@@ -6143,7 +6005,6 @@ mod browser_column_ui_tests {
                     move |ui, actions: &mut Vec<BrowserAction>| {
                         let mut fixture_item = provider(&items);
                         let column = BrowserColumn {
-                            layout: BrowserLayout::List,
                             sort_desc,
                             show_sort: true,
                             total: items.len(),
@@ -6198,7 +6059,6 @@ mod browser_column_ui_tests {
                 |ui, actions: &mut Vec<BrowserAction>| {
                     let mut fixture_item = provider(&items);
                     let column = BrowserColumn {
-                        layout: BrowserLayout::List,
                         sort_desc: false,
                         show_sort: false,
                         total: items.len(),
@@ -6219,67 +6079,6 @@ mod browser_column_ui_tests {
             harness.query_by_label("Sort Z to A").is_none(),
             "variants the sort cannot order (paged track listings, folders) \
              render no sort control"
-        );
-    }
-
-    #[test]
-    fn test_browser_column_grid_renders_the_same_items_and_reports_selection() {
-        use egui_kittest::kittest::Queryable;
-
-        let palette = Palette::dark();
-        let mut cache = IconCache::new();
-        let items = fixture_items();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(320.0, 300.0))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                move |ui, actions: &mut Vec<BrowserAction>| {
-                    let mut fixture_item = provider(&items);
-                    let column = BrowserColumn {
-                        layout: BrowserLayout::Grid,
-                        sort_desc: false,
-                        show_sort: true,
-                        total: items.len(),
-                        item: &mut fixture_item,
-                        virtualize: false,
-                        empty_title: "",
-                        empty_hint: "",
-                    };
-                    riff_gui::ui::browser::show_browser_column(
-                        ui, &mut cache, &palette, column, actions,
-                    );
-                },
-                Vec::new(),
-            );
-        harness.run();
-
-        // No data loss on toggle: every item the list showed renders as a
-        // tile too.
-        for label in ["Alpha", "Beta", "Gamma"] {
-            assert!(
-                harness.query_by_label(label).is_some(),
-                "tile '{label}' must render in grid mode"
-            );
-        }
-
-        // Grid SHAPE: tiles flow two per row — Alpha and Beta share a row,
-        // where the list layout gave each its own.
-        let alpha_y = harness.query_by_label("Alpha").unwrap().rect().top();
-        let beta_y = harness.query_by_label("Beta").unwrap().rect().top();
-        let gamma_y = harness.query_by_label("Gamma").unwrap().rect().top();
-        assert_eq!(alpha_y, beta_y, "grid tiles flow side by side, two per row");
-        assert!(
-            gamma_y > alpha_y,
-            "the third tile wraps to the next grid row"
-        );
-
-        harness.get_by_label("Beta").click();
-        harness.run();
-        assert!(
-            harness
-                .state()
-                .contains(&BrowserAction::Select("beta".to_string())),
-            "clicking a tile reports its selection by key"
         );
     }
 
@@ -6314,7 +6113,6 @@ mod browser_column_ui_tests {
                         })
                     };
                     let column = BrowserColumn {
-                        layout: BrowserLayout::List,
                         sort_desc: false,
                         show_sort: false,
                         total,
@@ -8851,7 +8649,6 @@ mod browser_column_ui_tests {
                 |ui, actions: &mut Vec<BrowserAction>| {
                     let mut fixture_item = provider(&items);
                     let column = BrowserColumn {
-                        layout: BrowserLayout::List,
                         sort_desc: false,
                         show_sort: true,
                         total: items.len(),
@@ -8997,22 +8794,41 @@ mod browser_column_ui_tests {
     // --- Pane order & focus walk (design-handoff issue 16) ------------------
     //
     // egui walks focus in widget-creation order, so the composite fixture
-    // below mirrors the app's creation order (top bar → browser column →
+    // below mirrors the app's creation order (titlebar → browser column →
     // selection panel → detail column; the selection panel is a right panel
-    // and the CentralPanel must render last). Tab lands on the top bar
-    // search first, then walks every control of all three panes in a stable
-    // order; Shift+Tab walks the reverse chain all the way home, and past
-    // the last widget Tab wraps back to the search — no pane ever holds
-    // focus hostage.
+    // and the CentralPanel must render last). Tab reaches the titlebar's
+    // global search first among the panes' controls, then walks every control
+    // of all three panes in a stable order; Shift+Tab walks the reverse chain
+    // all the way home, and past the last widget Tab wraps back around — no
+    // pane ever holds focus hostage.
 
-    /// One composite frame: the real top bar, browser column, selection
-    /// panel, and detail column seams, in the app's creation order.
+    /// Tab until the titlebar search field has focus (bounded): the drag
+    /// region and the titlebar controls precede it in creation order, so the
+    /// search is no longer the very first stop of the walk.
+    fn tab_until_search_focused(harness: &mut egui_kittest::Harness<'static, Vec<String>>) {
+        use egui_kittest::kittest::Queryable;
+        for _ in 0..32 {
+            harness.key_press(egui::Key::Tab);
+            harness.run();
+            if harness
+                .get_by_role(egui::accesskit::Role::TextInput)
+                .is_focused()
+            {
+                return;
+            }
+        }
+        panic!("Tab never reached the titlebar search field");
+    }
+
+    /// One composite frame: the real titlebar (search + chrome), browser
+    /// column, selection panel, and detail column seams, in the app's
+    /// creation order.
     fn walk_fixture() -> egui_kittest::Harness<'static, Vec<String>> {
         use riff_gui::ui::browser::BrowserColumn;
+        use riff_gui::ui::chrome::{TitleBarContent, show_titlebar};
         use riff_gui::ui::detail::{AlbumHeader, Crumb, DetailColumn, TrackRow};
         use riff_gui::ui::selection::SelectionPanel;
-        use riff_gui::ui::theme::TOPBAR_H;
-        use riff_gui::ui::topbar::{TopBarContent, show_top_bar};
+        use riff_gui::ui::theme::TITLEBAR_H;
         use std::time::Duration;
 
         let palette = Palette::dark();
@@ -9047,18 +8863,16 @@ mod browser_column_ui_tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 move |ui, _state: &mut Vec<String>| {
-                    // The content top bar (the real `show_top_bar` seam).
-                    let mut topbar_actions = Vec::new();
-                    ui.allocate_ui(egui::vec2(1400.0, TOPBAR_H), |ui| {
-                        show_top_bar(
+                    // The titlebar (the real `show_titlebar` seam): its
+                    // search field is the global search.
+                    ui.allocate_ui(egui::vec2(1400.0, TITLEBAR_H), |ui| {
+                        show_titlebar(
                             ui,
                             &mut cache,
                             &palette,
+                            &TitleBarContent::default(),
                             &mut query,
-                            TopBarContent {
-                                layout: BrowserLayout::List,
-                            },
-                            &mut topbar_actions,
+                            &mut Vec::new(),
                         );
                     });
 
@@ -9070,7 +8884,6 @@ mod browser_column_ui_tests {
                         ui.allocate_ui(egui::vec2(320.0, 480.0), |ui| {
                             let mut fixture_item = provider(&items);
                             let column = BrowserColumn {
-                                layout: BrowserLayout::List,
                                 sort_desc: false,
                                 show_sort: false,
                                 total: items.len(),
@@ -9132,22 +8945,16 @@ mod browser_column_ui_tests {
     }
 
     #[test]
-    fn test_tab_walks_the_top_bar_search_then_all_three_panes() {
+    fn test_tab_walks_the_titlebar_search_then_all_three_panes() {
         use egui_kittest::kittest::Queryable;
 
         let mut harness = walk_fixture();
         harness.run();
 
-        // The first Tab lands on the top bar search — the anchor the
-        // no-trap clause comes home to.
-        harness.key_press(egui::Key::Tab);
-        harness.run();
-        assert!(
-            harness
-                .get_by_role(egui::accesskit::Role::TextInput)
-                .is_focused(),
-            "the first Tab reaches the top bar search field"
-        );
+        // The titlebar search is reachable by Tab — the drag region and the
+        // titlebar controls precede it in creation order — and it is the
+        // anchor the no-trap clause comes home to.
+        tab_until_search_focused(&mut harness);
 
         // From there Tab walks every control of the three panes in the
         // app's creation order: the browser rows, then the selection
@@ -9155,8 +8962,6 @@ mod browser_column_ui_tests {
         // header actions, and track row.
         for label in [
             "Clear search",
-            "List view",
-            "Grid view",
             "Alpha",
             "Beta",
             "Gamma",
@@ -9183,12 +8988,25 @@ mod browser_column_ui_tests {
 
         let mut harness = walk_fixture();
         harness.run();
+        tab_until_search_focused(&mut harness);
 
-        // Walk to the last widget of the detail column: the top bar search,
-        // its clear affordance, the two view toggles, the three browser rows,
-        // the selection panel's chip and Play album, then the detail column's
-        // crumb, header actions, favorite, and the track row.
-        for _ in 0..14 {
+        // Walk to the last widget of the detail column: the search's clear
+        // affordance, the three browser rows, the selection panel's chip
+        // and Play album, then the detail column's crumb, header actions,
+        // favorite, and the track row.
+        for _ in [
+            "Clear search",
+            "Alpha",
+            "Beta",
+            "Gamma",
+            "Album",
+            "Play album",
+            "Artists",
+            "Shuffle",
+            "Play all",
+            "Add to Favorites",
+            "Magic Window",
+        ] {
             harness.key_press(egui::Key::Tab);
             harness.run();
         }
@@ -9199,7 +9017,8 @@ mod browser_column_ui_tests {
 
         // Shift+Tab reverses the chain one widget at a time — backwards
         // through the detail column, the selection panel, the browser
-        // rows, and the top bar toggles — and lands on the search.
+        // rows, and the search's clear affordance — and lands on the
+        // search.
         for label in [
             "Add to Favorites",
             "Play all",
@@ -9210,8 +9029,6 @@ mod browser_column_ui_tests {
             "Gamma",
             "Beta",
             "Alpha",
-            "Grid view",
-            "List view",
             "Clear search",
         ] {
             harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
@@ -9221,19 +9038,49 @@ mod browser_column_ui_tests {
                 "Shift+Tab must move focus back to '{label}'"
             );
         }
+        // One more Shift+Tab lands on the search itself; the one after that
+        // reaches the titlebar control preceding it — the keyboard is never
+        // trapped inside the panes.
         harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
         harness.run();
         assert!(
             harness
                 .get_by_role(egui::accesskit::Role::TextInput)
                 .is_focused(),
-            "Shift+Tab from the first control returns to the top bar search"
+            "Shift+Tab from the clear affordance returns to the search"
+        );
+        harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+        harness.run();
+        assert!(
+            harness.get_by_label("Theme").is_focused(),
+            "Shift+Tab from the search reaches the titlebar Theme control"
         );
 
-        // Forward past the last widget, Tab wraps back to the search —
-        // the keyboard is never trapped inside a pane. From the search,
-        // 13 Tabs reach the track row again; one more wraps to the search.
-        for _ in 0..13 {
+        // Forward past the last widget, Tab wraps back around — the
+        // keyboard is never trapped. From the titlebar control, Tab returns
+        // to the search, the forward walk reaches the end again, and Tab
+        // past it keeps cycling so a bounded walk lands back on the search.
+        harness.key_press(egui::Key::Tab);
+        harness.run();
+        assert!(
+            harness
+                .get_by_role(egui::accesskit::Role::TextInput)
+                .is_focused(),
+            "Tab from the titlebar control returns to the search"
+        );
+        for _ in [
+            "Clear search",
+            "Alpha",
+            "Beta",
+            "Gamma",
+            "Album",
+            "Play album",
+            "Artists",
+            "Shuffle",
+            "Play all",
+            "Add to Favorites",
+            "Magic Window",
+        ] {
             harness.key_press(egui::Key::Tab);
             harness.run();
         }
@@ -9241,14 +9088,7 @@ mod browser_column_ui_tests {
             harness.get_by_label("Magic Window").is_focused(),
             "the forward walk reaches the end again"
         );
-        harness.key_press(egui::Key::Tab);
-        harness.run();
-        assert!(
-            harness
-                .get_by_role(egui::accesskit::Role::TextInput)
-                .is_focused(),
-            "Tab past the last control wraps back to the top bar search"
-        );
+        tab_until_search_focused(&mut harness);
     }
 }
 
@@ -10825,6 +10665,771 @@ mod whole_frame_tests {
                 .query_by_label("Artist 060 (1 album)")
                 .is_some(),
             "the refetched window's rows render after scrolling"
+        );
+    }
+
+    // --- Scroll Memory (scroll-memory spec) --------------------------------
+    //
+    // The UI seam for per-Section scroll restore: scroll a Section's root
+    // list, switch Sections, and assert the same rows are visible on return
+    // (user story 22). Assertions observe visible rows and labels only —
+    // never egui scroll state or the Scroll Memory internals.
+
+    /// A mock library whose flat list holds `count` rows, so the All Tracks
+    /// list actually scrolls.
+    fn flat_mock(count: usize) -> MockLibraryQueryStore {
+        let flat: Vec<_> = (0..count)
+            .map(|i| {
+                create_test_track_with_metadata(
+                    &format!("path/{i:03}.mp3"),
+                    &format!("path/{i:03}.mp3"),
+                    "One",
+                    &format!("Track {i:03}"),
+                    "Album",
+                )
+            })
+            .collect();
+        MockLibraryQueryStore {
+            // The flat list serves from `flat`; a search query serves from
+            // `search` — keep them in step for the search-reset tests.
+            search: flat.clone(),
+            flat,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_all_tracks_restores_its_scroll_position_across_section_switches() {
+        use riff_backend::app::state::LibrarySection;
+
+        let mut mock = flat_mock(500);
+        // The sidebar's counts come from `library_counts` (a separate read
+        // from the flat list's own count), so seed them so the section rows
+        // speak honest labels: "All Tracks (500)" / "Artists (0)".
+        mock.library_counts = riff_backend::app::store::LibraryCounts {
+            tracks: 500,
+            artists: 0,
+            albums: 0,
+            genres: 0,
+        };
+        let (mut shell, _transport) = recording_transport_shell(mock);
+        shell.harness.step();
+
+        // A fresh run starts the All Tracks list at its first row.
+        assert!(
+            shell.harness.query_by_label("One - Track 000").is_some(),
+            "a fresh app starts every list at the top"
+        );
+
+        // Scroll until a deep row holds the viewport (AccessKit scroll steps
+        // of ~100px each; the anchor re-probes rows as earlier ones cull).
+        let mut guard = 0;
+        while shell.harness.query_by_label("One - Track 020").is_none() && guard < 40 {
+            let anchor = [
+                "One - Track 005",
+                "One - Track 010",
+                "One - Track 015",
+                "One - Track 020",
+                "One - Track 025",
+                "One - Track 030",
+            ]
+            .into_iter()
+            .find_map(|label| shell.harness.query_by_label(label))
+            .expect("a rendered row to scroll");
+            anchor.scroll_down();
+            shell.harness.step();
+            guard += 1;
+        }
+        assert!(
+            shell.harness.query_by_label("One - Track 020").is_some(),
+            "scrolling must reach a row deep in the list (guard {guard})"
+        );
+        assert!(
+            shell.harness.query_by_label("One - Track 000").is_none(),
+            "scrolling leaves the first row off-screen"
+        );
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+        let deep_y = y_of(&shell.harness, "One - Track 020");
+
+        // Switch to another Section — the Artists root (empty) renders while
+        // away — then return to All Tracks. (The sidebar rows carry their
+        // counts in the accessible label, e.g. "Artists (0)".)
+        shell.harness.get_by_label("Artists (0)").click();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("No artists yet").is_some(),
+            "the Artists root renders while away from All Tracks"
+        );
+        let library = shell.library.lock_or_recover();
+        assert_eq!(
+            library.library_section,
+            LibrarySection::Artists,
+            "the sidebar click lands on the Artists Section"
+        );
+        drop(library);
+        shell.harness.get_by_label("All Tracks (500)").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // The same rows are visible again, at the same place — exact, not an
+        // approximation (user story 18).
+        assert!(
+            shell.harness.query_by_label("One - Track 020").is_some(),
+            "the remembered rows are visible again on return"
+        );
+        assert!(
+            (y_of(&shell.harness, "One - Track 020") - deep_y).abs() < 1.0,
+            "the restored position is exact: the row sits where it was left \
+             (deep_y {deep_y:.1}, now {:.1})",
+            y_of(&shell.harness, "One - Track 020")
+        );
+        assert!(
+            shell.harness.query_by_label("One - Track 000").is_none(),
+            "returning restores the saved offset, not the top"
+        );
+
+        // The scrollbar still spans the full list after a restore: scrolling
+        // keeps moving until a row far below the restored window appears
+        // (user story 19) — culled rows prove the full content is intact.
+        let mut guard = 0;
+        while shell.harness.query_by_label("One - Track 120").is_none() && guard < 60 {
+            let anchor = [
+                "One - Track 020",
+                "One - Track 030",
+                "One - Track 040",
+                "One - Track 050",
+                "One - Track 060",
+                "One - Track 070",
+                "One - Track 080",
+                "One - Track 090",
+                "One - Track 100",
+                "One - Track 110",
+            ]
+            .into_iter()
+            .find_map(|label| shell.harness.query_by_label(label))
+            .expect("a rendered row to scroll");
+            anchor.scroll_down();
+            shell.harness.step();
+            guard += 1;
+        }
+        assert!(
+            shell.harness.query_by_label("One - Track 120").is_some(),
+            "the full list length is reachable after a restore (guard {guard})"
+        );
+    }
+
+    /// A mock library with populated Artists and Genres roots, so the three
+    /// browser root lists actually scroll and restore independently. Rows
+    /// serve in canonical order from the canned arrays, with honest sidebar
+    /// counts.
+    fn browse_mock() -> MockLibraryQueryStore {
+        use riff_backend::domain::GenreCount;
+        let mut mock = MockLibraryQueryStore::default();
+        mock.artists = (0..200)
+            .map(|i| riff_backend::domain::Artist {
+                name: format!("Artist {i:03}"),
+                albums: vec![format!("album-{i:03}")],
+            })
+            .collect();
+        mock.paged_genres = (0..200)
+            .map(|i| GenreCount {
+                genre: format!("Genre {i:03}"),
+                tracks: 1,
+            })
+            .collect();
+        mock.library_counts = riff_backend::app::store::LibraryCounts {
+            tracks: 0,
+            artists: 200,
+            albums: 0,
+            genres: 200,
+        };
+        mock
+    }
+
+    /// Scroll the harness's visible list downward until `target` renders or
+    /// the step budget runs out. The anchor re-probes rows every 10 slots,
+    /// so one is always in the ~15-row visible window (the concurrent
+    /// artists-root test precedent).
+    fn scroll_list_until(
+        harness: &mut egui_kittest::Harness<'static, RiffApp>,
+        labels: &[&str],
+        target: &str,
+        budget: usize,
+    ) {
+        let mut guard = 0;
+        while harness.query_by_label(target).is_none() && guard < budget {
+            let anchor = labels
+                .iter()
+                .find_map(|label| harness.query_by_label(label))
+                .expect("a rendered row to scroll");
+            anchor.scroll_down();
+            harness.step();
+            guard += 1;
+        }
+        assert!(
+            harness.query_by_label(target).is_some(),
+            "scrolling must reach {target} within the step budget (guard {guard})"
+        );
+    }
+
+    #[test]
+    fn test_browser_root_sections_restore_independently() {
+        use riff_backend::app::state::LibrarySection;
+
+        let (mut shell, _transport) = recording_transport_shell(browse_mock());
+        shell.harness.step();
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+
+        // Each Section's root keeps its own place: scroll the Artists root
+        // deep, then the Genres root deep, and flip back and forth asserting
+        // that each returns to exactly the rows it left.
+        shell.harness.get_by_label("Artists (200)").click();
+        shell.harness.step();
+        scroll_list_until(
+            &mut shell.harness,
+            &[
+                "Artist 010 (1 album)",
+                "Artist 020 (1 album)",
+                "Artist 030 (1 album)",
+                "Artist 040 (1 album)",
+                "Artist 050 (1 album)",
+                "Artist 060 (1 album)",
+            ],
+            "Artist 030 (1 album)",
+            40,
+        );
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+        let artist_y = y_of(&shell.harness, "Artist 030 (1 album)");
+        assert!(
+            shell
+                .harness
+                .query_by_label("Artist 000 (1 album)")
+                .is_none(),
+            "scrolling the Artists root culls its first row"
+        );
+
+        shell.harness.get_by_label("Genres (200)").click();
+        shell.harness.step();
+        scroll_list_until(
+            &mut shell.harness,
+            &[
+                "Genre 010 (1 tracks)",
+                "Genre 020 (1 tracks)",
+                "Genre 030 (1 tracks)",
+                "Genre 040 (1 tracks)",
+                "Genre 050 (1 tracks)",
+                "Genre 060 (1 tracks)",
+            ],
+            "Genre 030 (1 tracks)",
+            40,
+        );
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+        let genre_y = y_of(&shell.harness, "Genre 030 (1 tracks)");
+        assert!(
+            shell
+                .harness
+                .query_by_label("Genre 000 (1 tracks)")
+                .is_none(),
+            "scrolling the Genres root culls its first row"
+        );
+
+        // Back to Artists: its own rows return at the same place; the Genres
+        // rows are gone.
+        shell.harness.get_by_label("Artists (200)").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label("Artist 030 (1 album)")
+                .is_some(),
+            "the Artists root restores its remembered rows"
+        );
+        assert!(
+            (y_of(&shell.harness, "Artist 030 (1 album)") - artist_y).abs() < 1.0,
+            "the Artists root restores exactly the place it was left \
+             (artist_y {artist_y:.1}, now {:.1})",
+            y_of(&shell.harness, "Artist 030 (1 album)")
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("Artist 000 (1 album)")
+                .is_none(),
+            "the Artists restore keeps the first row culled"
+        );
+
+        // Back to Genres: its own rows return at their own place, and the
+        // Artists rows are gone — each Section's memory is independent.
+        shell.harness.get_by_label("Genres (200)").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label("Genre 030 (1 tracks)")
+                .is_some(),
+            "the Genres root restores its remembered rows"
+        );
+        assert!(
+            (y_of(&shell.harness, "Genre 030 (1 tracks)") - genre_y).abs() < 1.0,
+            "the Genres root restores exactly the place it was left"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("Genre 000 (1 tracks)")
+                .is_none(),
+            "the Genres restore keeps the first row culled"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("Artist 030 (1 album)")
+                .is_none(),
+            "switching Sections replaces the stage — the Artists rows do not linger"
+        );
+
+        // Returning from a drill (via a Section switch) lands on the Section's
+        // root list at its remembered place, not on the drill (user story 16).
+        shell.harness.get_by_label("Artists (200)").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label("Artist 030 (1 album)")
+                .is_some(),
+            "the Artists root is on stage before drilling"
+        );
+        shell.harness.get_by_label("Artist 030 (1 album)").click();
+        shell.harness.step();
+        // The stage's column plan was fixed before the click applied, so the
+        // drill column joins the stage on the NEXT frame.
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("No albums yet").is_some(),
+            "selecting an artist drills into its (empty) Albums column"
+        );
+        shell.harness.get_by_label("Genres (200)").click();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label("Genre 030 (1 tracks)")
+                .is_some(),
+            "switching away from the drill lands on the Genres root"
+        );
+        shell.harness.get_by_label("Artists (200)").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label("Artist 030 (1 album)")
+                .is_some(),
+            "returning after the Section switch lands on the Artists ROOT again"
+        );
+        assert_eq!(
+            shell.library.lock_or_recover().library_section,
+            LibrarySection::Artists,
+            "the section selection is Artists after the round trip"
+        );
+    }
+
+    /// A mock with 200 albums (kept for the artist we drill into) and 200
+    /// tracks inside each album, so the drill Albums and the Tracks column
+    /// actually scroll.
+    fn drill_mock() -> MockLibraryQueryStore {
+        let mut mock = browse_mock();
+        mock.albums = (0..200)
+            .map(|i| riff_backend::domain::Album {
+                artist: "Artist 040".to_string(),
+                title: format!("Album {i:03}"),
+                year: None,
+                genre: None,
+                tracks: vec![riff_backend::domain::TrackId(format!("t-{i:03}"))],
+            })
+            .collect();
+        mock.album_tracks = (0..200)
+            .map(|i| {
+                create_test_track_with_metadata(
+                    &format!("t-{i:03}"),
+                    &format!("t-{i:03}.mp3"),
+                    "Artist 040",
+                    &format!("T-{i:03}"),
+                    "Album",
+                )
+            })
+            .collect();
+        mock
+    }
+
+    #[test]
+    fn test_drill_columns_start_at_the_top_on_selection_change() {
+        let (mut shell, _transport) = recording_transport_shell(drill_mock());
+        shell.harness.step();
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+
+        // Drill into a row near the top of the root (no root scrolling, so
+        // the neighbouring rows stay comfortably on screen for re-selection).
+        shell.harness.get_by_label("Artists (200)").click();
+        shell.harness.step();
+        shell.harness.get_by_label("Artist 005 (1 album)").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label("Album 000 (Artist 040)")
+                .is_some(),
+            "a freshly drilled Albums column starts at its first album"
+        );
+
+        // Scroll the Albums drill deep, so a stale offset would be visible.
+        scroll_list_until(
+            &mut shell.harness,
+            &[
+                "Album 010 (Artist 040)",
+                "Album 020 (Artist 040)",
+                "Album 030 (Artist 040)",
+                "Album 040 (Artist 040)",
+                "Album 050 (Artist 040)",
+                "Album 060 (Artist 040)",
+            ],
+            "Album 030 (Artist 040)",
+            40,
+        );
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+        assert!(
+            shell
+                .harness
+                .query_by_label("Album 000 (Artist 040)")
+                .is_none(),
+            "scrolling the Albums drill culls its first album"
+        );
+
+        // Selecting a DIFFERENT artist starts that artist's Albums at its
+        // first album — the previous offset is gone.
+        shell.harness.get_by_label("Artist 010 (1 album)").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label("Album 000 (Artist 040)")
+                .is_some(),
+            "selecting a different artist starts the new Albums column at the top"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("Album 030 (Artist 040)")
+                .is_none(),
+            "the previous artist's offset never leaks into the new selection"
+        );
+
+        // Re-selecting the SAME artist also starts the drill at the top
+        // (user story 10) — there is no per-selection memory.
+        shell.harness.get_by_label("Artist 010 (1 album)").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label("Album 000 (Artist 040)")
+                .is_some(),
+            "re-selecting the same artist still starts its Albums column at the top"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("Album 030 (Artist 040)")
+                .is_none(),
+            "a re-selection never resumes an old drill offset"
+        );
+    }
+
+    #[test]
+    fn test_tracks_column_resets_on_selection_change() {
+        let (mut shell, _transport) = recording_transport_shell(drill_mock());
+        shell.harness.step();
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+
+        // Drill artist → album; the Tracks column starts at its first track.
+        shell.harness.get_by_label("Artists (200)").click();
+        shell.harness.step();
+        scroll_list_until(
+            &mut shell.harness,
+            &[
+                "Artist 005 (1 album)",
+                "Artist 015 (1 album)",
+                "Artist 025 (1 album)",
+                "Artist 035 (1 album)",
+                "Artist 045 (1 album)",
+                "Artist 055 (1 album)",
+                "Artist 065 (1 album)",
+            ],
+            "Artist 040 (1 album)",
+            40,
+        );
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+        shell.harness.get_by_label("Artist 040 (1 album)").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label("Album 000 (Artist 040)")
+                .is_some(),
+            "the artist's Albums column mounts before selecting an album"
+        );
+        shell.harness.get_by_label("Album 000 (Artist 040)").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("T-000").is_some(),
+            "the Tracks column starts at the selected album's first track"
+        );
+
+        // Scroll the Tracks column deep.
+        scroll_list_until(
+            &mut shell.harness,
+            &[
+                "T-010", "T-020", "T-030", "T-040", "T-050", "T-060", "T-070",
+            ],
+            "T-030",
+            40,
+        );
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+        assert!(
+            shell.harness.query_by_label("T-000").is_none(),
+            "scrolling the Tracks column culls its first track"
+        );
+
+        // Selecting a DIFFERENT album starts the Tracks column over at its
+        // first track (issue 05) instead of resuming the previous offset.
+        shell.harness.get_by_label("Album 005 (Artist 040)").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("T-000").is_some(),
+            "selecting a different album starts the Tracks column at the first track"
+        );
+        assert!(
+            shell.harness.query_by_label("T-030").is_none(),
+            "the previous selection's offset is never resumed"
+        );
+
+        // Re-selecting the same album also resets it.
+        shell.harness.get_by_label("Album 005 (Artist 040)").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("T-000").is_some(),
+            "re-selecting the same album starts the Tracks column at the first track"
+        );
+    }
+
+    #[test]
+    fn test_content_change_resets_the_affected_list_to_the_top() {
+        use riff_backend::app::store::StoreChanged;
+
+        // --- Typing a search query resets the flat list to the top ---
+        let mut mock = flat_mock(500);
+        mock.library_counts = riff_backend::app::store::LibraryCounts {
+            tracks: 500,
+            artists: 0,
+            albums: 0,
+            genres: 0,
+        };
+        let (mut shell, _transport) = recording_transport_shell(mock);
+        shell.harness.step();
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+        scroll_list_until(
+            &mut shell.harness,
+            &[
+                "One - Track 005",
+                "One - Track 010",
+                "One - Track 015",
+                "One - Track 020",
+                "One - Track 025",
+                "One - Track 030",
+            ],
+            "One - Track 020",
+            40,
+        );
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+
+        // Type into the titlebar search field (the shell's single text edit).
+        shell
+            .harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .focus();
+        shell.harness.step();
+        shell
+            .harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("One");
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("One - Track 000").is_some(),
+            "typing a search query resets the list to the top"
+        );
+        assert!(
+            shell.harness.query_by_label("One - Track 020").is_none(),
+            "a stale offset is never restored into the filtered content"
+        );
+
+        // --- Editing / clearing the query resets the list to the top again ---
+        scroll_list_until(
+            &mut shell.harness,
+            &[
+                "One - Track 005",
+                "One - Track 010",
+                "One - Track 015",
+                "One - Track 020",
+                "One - Track 025",
+                "One - Track 030",
+            ],
+            "One - Track 020",
+            40,
+        );
+        assert!(
+            shell.harness.query_by_label("One - Track 000").is_none(),
+            "the re-scrolled filtered list is past its first row again"
+        );
+        shell.harness.key_press(egui::Key::Escape); // clears + unfocuses
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("One - Track 000").is_some(),
+            "clearing the search query resets the list to the top again"
+        );
+
+        // --- Flipping the A–Z / Z–A sort resets the Artists root ---
+        let mock = browse_mock();
+        let (mut shell, _transport) = recording_transport_shell(mock);
+        shell.harness.step();
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+        shell.harness.get_by_label("Artists (200)").click();
+        shell.harness.step();
+        scroll_list_until(
+            &mut shell.harness,
+            &[
+                "Artist 005 (1 album)",
+                "Artist 015 (1 album)",
+                "Artist 025 (1 album)",
+                "Artist 035 (1 album)",
+                "Artist 045 (1 album)",
+                "Artist 055 (1 album)",
+                "Artist 065 (1 album)",
+            ],
+            "Artist 050 (1 album)",
+            40,
+        );
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+        assert!(
+            shell
+                .harness
+                .query_by_label("Artist 000 (1 album)")
+                .is_none()
+                && shell
+                    .harness
+                    .query_by_label("Artist 199 (1 album)")
+                    .is_none(),
+            "a mid-list Artists position shows neither end of the list"
+        );
+        shell.harness.get_by_label("Sort Z to A").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label("Artist 199 (1 album)")
+                .is_some(),
+            "flipping the sort resets the reordered list to its first entry"
+        );
+
+        // --- A library rescan (generation bump) resets the flat list ---
+        let mut mock = flat_mock(500);
+        mock.library_counts = riff_backend::app::store::LibraryCounts {
+            tracks: 500,
+            artists: 0,
+            albums: 0,
+            genres: 0,
+        };
+        let (mut shell, _transport) = recording_transport_shell(mock);
+        let (changes_tx, changes_rx) = crossbeam_channel::unbounded::<StoreChanged>();
+        shell
+            .backend_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .subscribe_to_backend_changes(changes_rx);
+        shell.harness.step();
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+        scroll_list_until(
+            &mut shell.harness,
+            &[
+                "One - Track 005",
+                "One - Track 010",
+                "One - Track 015",
+                "One - Track 020",
+                "One - Track 025",
+                "One - Track 030",
+            ],
+            "One - Track 020",
+            40,
+        );
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+        assert!(
+            shell.harness.query_by_label("One - Track 000").is_none(),
+            "the flat list is scrolled past its first row before the rescan"
+        );
+        // A committed scan bumps the Library generation through the store
+        // change relay; the app drains it next frame and every slot's
+        // fingerprint goes stale.
+        changes_tx
+            .send(StoreChanged::Library(1))
+            .expect("the store-change relay is wired");
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("One - Track 000").is_some(),
+            "a library rescan that changes the collection resets the list to the top"
+        );
+        assert!(
+            shell.harness.query_by_label("One - Track 020").is_none(),
+            "the pre-rescan offset is never restored into changed content"
         );
     }
 }

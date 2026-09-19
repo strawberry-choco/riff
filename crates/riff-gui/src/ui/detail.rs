@@ -121,12 +121,29 @@ impl<'a> DetailColumn<'a> {
     }
 }
 
-/// Render the detail column and append observed [`DetailAction`]s.
+/// Render the detail column and append observed [`DetailAction`]s. No
+/// scroll memory: the track list keeps its own positional state (the seam's
+/// plain rendering path — goldens and widget tests).
 pub fn show_detail_column(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
     column: DetailColumn<'_>,
+    actions: &mut Vec<DetailAction>,
+) {
+    show_detail_column_scrolled(ui, cache, palette, column, None, actions);
+}
+
+/// The app's render path: like [`show_detail_column`], but the track list's
+/// `ScrollArea` takes a [`ScrollControl`] so the Tracks column resets to the
+/// top on a selection change (the Scroll Memory holds no Tracks-column
+/// offset). See [`super::scroll_memory`].
+pub fn show_detail_column_scrolled(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    column: DetailColumn<'_>,
+    scroll: Option<super::scroll_memory::ScrollControl>,
     actions: &mut Vec<DetailAction>,
 ) {
     // Resolved before the fields move out of `column` below.
@@ -137,7 +154,7 @@ pub fn show_detail_column(
         album_header(ui, palette, header, actions);
     }
     if !column.tracks.is_empty() {
-        track_list(ui, cache, palette, column.tracks, actions);
+        track_list(ui, cache, palette, scroll, column.tracks, actions);
     }
     for row in column.rows {
         let response = super::browser::detail_entity_row(ui, cache, palette, row);
@@ -210,51 +227,61 @@ fn track_list(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    scroll: Option<super::scroll_memory::ScrollControl>,
     tracks: &[TrackRow],
     actions: &mut Vec<DetailAction>,
 ) {
     let total = tracks.len();
-    egui::ScrollArea::vertical()
-        .id_salt("tracks_column_list")
+    let mut scroll_area = egui::ScrollArea::vertical()
         .auto_shrink(false)
-        .show_rows(ui, super::sidebar::ROW_H, total, |ui, row_range| {
-            for i in row_range {
-                let Some(track) = tracks.get(i) else {
-                    continue;
-                };
-                let row = super::sidebar::tree_row(
-                    ui,
-                    cache,
-                    palette,
-                    super::sidebar::TreeRow {
-                        indent_level: 0,
-                        icon: None,
-                        cover: None,
-                        label: &track.title,
-                        count: None,
-                        meta: Some(track.meta()),
-                        favorite: Some(track.favorite),
-                        selected: track.selected,
-                        now_playing: track.now_playing,
-                        playing: false,
-                        disclosure: None,
-                    },
-                );
-                if row.response.clicked() {
-                    actions.push(DetailAction::SelectTrack(track.key.clone()));
-                }
-                if row.response.double_clicked() {
-                    actions.push(DetailAction::SelectTrack(track.key.clone()));
-                    actions.push(DetailAction::PlayTrack(track.key.clone()));
-                }
-                if let Some(favorite) = row.favorite_toggled {
-                    actions.push(DetailAction::SetFavorite {
-                        key: track.key.clone(),
-                        favorite,
-                    });
-                }
+        .animated(false);
+    match scroll {
+        Some(control) => {
+            scroll_area = scroll_area.id_salt(control.salt);
+            if let Some(offset) = control.start {
+                scroll_area = scroll_area.vertical_scroll_offset(offset);
             }
-        });
+        }
+        None => scroll_area = scroll_area.id_salt("tracks_column_list"),
+    }
+    scroll_area.show_rows(ui, super::sidebar::ROW_H, total, |ui, row_range| {
+        for i in row_range {
+            let Some(track) = tracks.get(i) else {
+                continue;
+            };
+            let row = super::sidebar::tree_row(
+                ui,
+                cache,
+                palette,
+                super::sidebar::TreeRow {
+                    indent_level: 0,
+                    icon: None,
+                    cover: None,
+                    label: &track.title,
+                    count: None,
+                    meta: Some(track.meta()),
+                    favorite: Some(track.favorite),
+                    selected: track.selected,
+                    now_playing: track.now_playing,
+                    playing: false,
+                    disclosure: None,
+                },
+            );
+            if row.response.clicked() {
+                actions.push(DetailAction::SelectTrack(track.key.clone()));
+            }
+            if row.response.double_clicked() {
+                actions.push(DetailAction::SelectTrack(track.key.clone()));
+                actions.push(DetailAction::PlayTrack(track.key.clone()));
+            }
+            if let Some(favorite) = row.favorite_toggled {
+                actions.push(DetailAction::SetFavorite {
+                    key: track.key.clone(),
+                    favorite,
+                });
+            }
+        }
+    });
 }
 
 /// The breadcrumb trail: one button per earlier level (clicking one reports

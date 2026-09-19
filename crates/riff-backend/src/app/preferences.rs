@@ -23,7 +23,7 @@ use riff_playback::app::state::PlaybackSession;
 use riff_playback::app::transport::Transport;
 
 use crate::app::MutexExt;
-use crate::app::state::{BrowserLayout, LibrarySession, LibraryStatus, ScanPrefs};
+use crate::app::state::{LibrarySession, LibraryStatus, ScanPrefs};
 use crate::app::store::{Settings, SettingsStore};
 use crate::domain::RepeatMode;
 
@@ -93,8 +93,6 @@ impl Preferences {
             session.ui_flags.advanced_mode = settings.scalars.advanced_mode;
             session.ui_flags.high_contrast = settings.scalars.high_contrast;
             session.ui_flags.smart_lists_collapsed = settings.scalars.smart_lists_collapsed;
-            session.browser_layout =
-                BrowserLayout::from_store_code(settings.scalars.browser_layout);
             session.scan_prefs = ScanPrefs {
                 skip_hidden_files: settings.scalars.skip_hidden_files,
                 scan_formats: settings.scalars.scan_formats.clone(),
@@ -145,7 +143,6 @@ fn scalar_settings(playback: &PlaybackSession, library: &LibrarySession) -> Scal
         replaygain_enabled: playback.replaygain_enabled,
         shuffle: playback.queue.shuffle,
         repeat_mode: repeat_mode_to_store_code(playback.queue.repeat),
-        browser_layout: library.browser_layout.as_store_code(),
         skip_hidden_files: library.scan_prefs.skip_hidden_files,
         scan_formats: library.scan_prefs.scan_formats.clone(),
         read_embedded_artwork: library.scan_prefs.read_embedded_artwork,

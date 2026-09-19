@@ -13,7 +13,7 @@ use riff_backend::domain::{Album, Artist, GenreCount, PlaylistId, SmartPlaylistK
 use std::path::PathBuf;
 
 use riff_backend::app::state::{
-    BrowseMode, BrowserLayout, BrowserSelection, LibrarySection, LibrarySession, PlaybackSession,
+    BrowseMode, BrowserSelection, LibrarySection, LibrarySession, PlaybackSession,
 };
 
 use super::super::browser;
@@ -292,7 +292,6 @@ impl RiffApp {
             })
         };
         let column = browser::BrowserColumn {
-            layout: BrowserLayout::List,
             sort_desc: false,
             show_sort: false,
             total,
@@ -301,10 +300,27 @@ impl RiffApp {
             empty_title,
             empty_hint,
         };
-        browser::show_browser_column(ui, &mut self.icons, &palette, column, &mut actions);
+        // A drill column resets to the top on every selection change — the
+        // Scroll Memory holds no drill offsets by design. Between changes its
+        // scroll is egui's natural state under the drill's own stable salt.
+        let control = crate::ui::scroll_memory::ScrollControl {
+            salt: crate::ui::scroll_memory::DrillSlot::ArtistAlbums.salt(),
+            start: self
+                .scroll_memory
+                .drill_start(crate::ui::scroll_memory::DrillSlot::ArtistAlbums),
+        };
+        let _actual = browser::show_browser_column_scrolled(
+            ui,
+            &mut self.icons,
+            &palette,
+            column,
+            Some(control),
+            &mut actions,
+        );
         for action in actions {
             match action {
                 browser::BrowserAction::Select(key) => {
+                    self.scroll_memory.note_selection_change();
                     apply_drill_action(section, level, key, library);
                 }
                 browser::BrowserAction::ToggleSort => {}
@@ -382,7 +398,6 @@ impl RiffApp {
             })
         };
         let column = browser::BrowserColumn {
-            layout: BrowserLayout::List,
             sort_desc: false,
             show_sort: false,
             total,
@@ -391,10 +406,26 @@ impl RiffApp {
             empty_title: "No artists in this genre",
             empty_hint: "This genre has no artists in your library.",
         };
-        browser::show_browser_column(ui, &mut self.icons, &palette, column, &mut actions);
+        // Drill column: reset to the top on every selection change (no
+        // per-selection memory); egui's natural state between changes.
+        let control = crate::ui::scroll_memory::ScrollControl {
+            salt: crate::ui::scroll_memory::DrillSlot::GenreArtists.salt(),
+            start: self
+                .scroll_memory
+                .drill_start(crate::ui::scroll_memory::DrillSlot::GenreArtists),
+        };
+        let _actual = browser::show_browser_column_scrolled(
+            ui,
+            &mut self.icons,
+            &palette,
+            column,
+            Some(control),
+            &mut actions,
+        );
         for action in actions {
             match action {
                 browser::BrowserAction::Select(key) => {
+                    self.scroll_memory.note_selection_change();
                     apply_drill_action(LibrarySection::Genres, 1, key, library);
                 }
                 browser::BrowserAction::ToggleSort => {}
@@ -476,7 +507,6 @@ impl RiffApp {
             })
         };
         let column = browser::BrowserColumn {
-            layout: BrowserLayout::List,
             sort_desc: false,
             show_sort: false,
             total,
@@ -485,10 +515,26 @@ impl RiffApp {
             empty_title: "No albums in this genre",
             empty_hint: "This artist has no albums carrying this genre.",
         };
-        browser::show_browser_column(ui, &mut self.icons, &palette, column, &mut actions);
+        // Drill column: reset to the top on every selection change (no
+        // per-selection memory); egui's natural state between changes.
+        let control = crate::ui::scroll_memory::ScrollControl {
+            salt: crate::ui::scroll_memory::DrillSlot::GenreArtistAlbums.salt(),
+            start: self
+                .scroll_memory
+                .drill_start(crate::ui::scroll_memory::DrillSlot::GenreArtistAlbums),
+        };
+        let _actual = browser::show_browser_column_scrolled(
+            ui,
+            &mut self.icons,
+            &palette,
+            column,
+            Some(control),
+            &mut actions,
+        );
         for action in actions {
             match action {
                 browser::BrowserAction::Select(key) => {
+                    self.scroll_memory.note_selection_change();
                     apply_drill_action(LibrarySection::Genres, 2, key, library);
                 }
                 browser::BrowserAction::ToggleSort => {}
@@ -529,7 +575,16 @@ impl RiffApp {
             )
         };
         let mut actions = Vec::new();
-        crate::ui::detail::show_detail_column(
+        // The Tracks column resets to the top whenever the selection feeding
+        // it changes (a new album or artist selected anywhere in the browser);
+        // it never remembers a position (issue 05).
+        let control = crate::ui::scroll_memory::ScrollControl {
+            salt: crate::ui::scroll_memory::DrillSlot::TracksColumn.salt(),
+            start: self
+                .scroll_memory
+                .drill_start(crate::ui::scroll_memory::DrillSlot::TracksColumn),
+        };
+        crate::ui::detail::show_detail_column_scrolled(
             ui,
             &mut self.icons,
             &self.theme.active,
@@ -541,6 +596,7 @@ impl RiffApp {
                 empty_title,
                 empty_hint: &empty_hint,
             },
+            Some(control),
             &mut actions,
         );
         for action in actions {
@@ -565,6 +621,7 @@ impl RiffApp {
     /// count. The genre chip filter is not part of this column (issue 04
     /// keeps search display-independent): no genre chips render, and the
     /// listing is never genre-filtered.
+    #[allow(clippy::too_many_lines, reason = "one paged artists-browser listing")]
     fn render_artists_browser(
         &mut self,
         ui: &mut egui::Ui,
@@ -664,7 +721,6 @@ impl RiffApp {
         };
         let (empty_title, empty_hint) = Self::artists_empty_state(query, hit);
         let column = browser::BrowserColumn {
-            layout: library.browser_layout,
             sort_desc,
             show_sort: !hit,
             total,
@@ -677,8 +733,41 @@ impl RiffApp {
             empty_title,
             empty_hint: &empty_hint,
         };
-        browser::show_browser_column(ui, &mut self.icons, &palette, column, &mut actions);
+        // Section root list: the per-Section Scroll Memory slot applies its
+        // saved offset when the fingerprint (query + sort + generation)
+        // matches, otherwise the list resets to the top (issue 02).
+        let fingerprint = crate::ui::scroll_memory::ContentFingerprint::new(
+            query,
+            sort_desc,
+            self.scroll_memory.library_generation(),
+        );
+        let start = self.scroll_memory.section_start(
+            riff_backend::app::state::LibrarySection::Artists,
+            &fingerprint,
+        );
+        let control = crate::ui::scroll_memory::ScrollControl {
+            salt: crate::ui::scroll_memory::section_salt(
+                riff_backend::app::state::LibrarySection::Artists,
+            ),
+            start: Some(start),
+        };
+        let actual = browser::show_browser_column_scrolled(
+            ui,
+            &mut self.icons,
+            &palette,
+            column,
+            Some(control),
+            &mut actions,
+        );
+        self.scroll_memory.record_section(
+            riff_backend::app::state::LibrarySection::Artists,
+            actual,
+            fingerprint,
+        );
         for action in actions {
+            if matches!(&action, browser::BrowserAction::Select(_)) {
+                self.scroll_memory.note_selection_change();
+            }
             apply_browser_action(action, library);
         }
     }
@@ -829,7 +918,6 @@ impl RiffApp {
             )
         };
         let column = browser::BrowserColumn {
-            layout: library.browser_layout,
             sort_desc,
             show_sort: !hit,
             total,
@@ -838,8 +926,40 @@ impl RiffApp {
             empty_title,
             empty_hint: &empty_hint,
         };
-        browser::show_browser_column(ui, &mut self.icons, &palette, column, &mut actions);
+        // Section root list: the per-Section Scroll Memory slot applies its
+        // saved offset when the fingerprint matches, else resets (issue 02).
+        let fingerprint = crate::ui::scroll_memory::ContentFingerprint::new(
+            query,
+            sort_desc,
+            self.scroll_memory.library_generation(),
+        );
+        let start = self.scroll_memory.section_start(
+            riff_backend::app::state::LibrarySection::Albums,
+            &fingerprint,
+        );
+        let control = crate::ui::scroll_memory::ScrollControl {
+            salt: crate::ui::scroll_memory::section_salt(
+                riff_backend::app::state::LibrarySection::Albums,
+            ),
+            start: Some(start),
+        };
+        let actual = browser::show_browser_column_scrolled(
+            ui,
+            &mut self.icons,
+            &palette,
+            column,
+            Some(control),
+            &mut actions,
+        );
+        self.scroll_memory.record_section(
+            riff_backend::app::state::LibrarySection::Albums,
+            actual,
+            fingerprint,
+        );
         for action in actions {
+            if matches!(&action, browser::BrowserAction::Select(_)) {
+                self.scroll_memory.note_selection_change();
+            }
             apply_browser_action(action, library);
         }
     }
@@ -857,7 +977,7 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         library: &mut LibrarySession,
-        _query: &str,
+        query: &str,
     ) {
         use riff_backend::app::state::BrowserSelection;
         use riff_backend::app::store::SortDirection;
@@ -902,7 +1022,6 @@ impl RiffApp {
             })
         };
         let column = browser::BrowserColumn {
-            layout: library.browser_layout,
             sort_desc,
             show_sort: true,
             total,
@@ -911,86 +1030,41 @@ impl RiffApp {
             empty_title: "No genres yet",
             empty_hint: "Genres come from your tracks' tags \u{2014} add music and rescan.",
         };
-        browser::show_browser_column(ui, &mut self.icons, &palette, column, &mut actions);
+        // Section root list: the per-Section Scroll Memory slot applies its
+        // saved offset when the fingerprint matches, else resets (issue 02).
+        let fingerprint = crate::ui::scroll_memory::ContentFingerprint::new(
+            query,
+            sort_desc,
+            self.scroll_memory.library_generation(),
+        );
+        let start = self.scroll_memory.section_start(
+            riff_backend::app::state::LibrarySection::Genres,
+            &fingerprint,
+        );
+        let control = crate::ui::scroll_memory::ScrollControl {
+            salt: crate::ui::scroll_memory::section_salt(
+                riff_backend::app::state::LibrarySection::Genres,
+            ),
+            start: Some(start),
+        };
+        let actual = browser::show_browser_column_scrolled(
+            ui,
+            &mut self.icons,
+            &palette,
+            column,
+            Some(control),
+            &mut actions,
+        );
+        self.scroll_memory.record_section(
+            riff_backend::app::state::LibrarySection::Genres,
+            actual,
+            fingerprint,
+        );
         for action in actions {
+            if matches!(&action, browser::BrowserAction::Select(_)) {
+                self.scroll_memory.note_selection_change();
+            }
             apply_browser_action(action, library);
-        }
-    }
-
-    /// The flat track listing's grid mode (handoff issue 08): the same
-    /// paged tracks the list shows, as cover tiles. Tiles select the track
-    /// (the double-click-to-play gesture stays a list-mode gesture until
-    /// the detail column provides the album header's Play all / Shuffle).
-    pub(super) fn render_flat_grid(
-        &mut self,
-        ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-        query: &str,
-        current_track: Option<&TrackId>,
-    ) {
-        let palette = self.theme.active;
-        let selected = library.selected_track.clone();
-
-        let mut actions: Vec<browser::BrowserAction> = Vec::new();
-        let views = &mut self.views;
-        let covers = &self.covers;
-        let textures = &mut self.cover_textures;
-        let lru_keys = &mut self.cover_lru_keys;
-        let ctx = ui.ctx().clone();
-        let first_page = views.track_list(query, 0);
-        let total = first_page.total;
-        let mut page: Option<riff_backend::app::views::TrackListPage> = Some(first_page);
-        let mut item = |i: usize| -> Option<browser::BrowserItem> {
-            // Refetch only when the row leaves the page in hand; the
-            // seam serves repeat windows from cache.
-            if page.as_ref().is_none_or(|p| p.start + p.rows.len() <= i) {
-                page = Some(views.track_list(query, i));
-            }
-            let p = page.as_ref()?;
-            let track = p.rows.get(i - p.start)?;
-            request_cover_intent(
-                textures.contains_key(&track.id.0),
-                covers.as_ref(),
-                track.id.clone(),
-                track.file_path.clone(),
-            );
-            // A full miss resolves the music-icon placeholder tile.
-            let thumbnail = Some(crate::ui::cover_placeholder::lookup_cover_texture(
-                textures,
-                lru_keys,
-                &ctx,
-                &palette,
-                &track.id.0,
-            ));
-            Some(browser::BrowserItem {
-                key: track.id.0.clone(),
-                label: track.metadata.display_title(&track.file_path),
-                detail: Some(track.metadata.display_artist()),
-                thumbnail,
-                selected: selected.as_ref() == Some(&track.id),
-                now_playing: current_track == Some(&track.id),
-            })
-        };
-        let column = browser::BrowserColumn {
-            layout: riff_backend::app::state::BrowserLayout::Grid,
-            sort_desc: false,
-            show_sort: false,
-            total,
-            item: &mut item,
-            virtualize: false,
-            empty_title: "No tracks yet",
-            empty_hint: "Add a folder from the sidebar to start scanning your library.",
-        };
-        browser::show_browser_column(ui, &mut self.icons, &palette, column, &mut actions);
-        for action in actions {
-            match action {
-                browser::BrowserAction::Select(key) => {
-                    library.selected_track = Some(TrackId(key));
-                }
-                toggle @ browser::BrowserAction::ToggleSort => {
-                    apply_browser_action(toggle, library);
-                }
-            }
         }
     }
 }

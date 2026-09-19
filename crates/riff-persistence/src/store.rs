@@ -82,8 +82,6 @@ pub struct FullScanSummary {
 ///
 /// `repeat_mode` encodes the playback repeat cycle as an integer so this
 /// crate stays dependency-free: 0 = off, 1 = repeat all, 2 = repeat one.
-/// `browser_layout` likewise encodes the library browser column's render
-/// mode: 0 = list, 1 = grid (design-handoff issue 06).
 ///
 /// The Library scan preferences (design-handoff issue 12): `skip_hidden_files`
 /// leaves dot-entries out of the scan walk, `scan_formats` lists the enabled
@@ -104,7 +102,6 @@ pub struct ScalarSettings {
     pub replaygain_enabled: bool,
     pub shuffle: bool,
     pub repeat_mode: i64,
-    pub browser_layout: i64,
     /// Skip hidden (dot-prefixed) files and directories during scans.
     pub skip_hidden_files: bool,
     /// The enabled audio extensions, lowercase without dots. Defaults to
@@ -126,7 +123,6 @@ impl Default for ScalarSettings {
             replaygain_enabled: false,
             shuffle: false,
             repeat_mode: 0,
-            browser_layout: 0,
             skip_hidden_files: true,
             scan_formats: AUDIO_EXTENSIONS
                 .iter()

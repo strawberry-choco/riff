@@ -8,8 +8,6 @@ riff is a player for local music collections. You point it at one or more folder
 
 Everything happens on your machine. The library, playlists, and settings live in one embedded SQLite database — the Application Store (iff.sqlite3) — in your local data directory. Nothing is uploaded, nothing is fetched, and nothing phones home. If you disconnect the network cable, riff behaves exactly the same as it did before.
 
-The project is a Rust workspace organized as a vertical capability split: a pure persistence contract crate, two independent capability slices (the library collection and playback) that define their own port traits, one adapter crate that implements those ports with real crates (symphonia for decoding, cpal for output, lofty for tags) and owns every native dependency, a backend crate that exposes the application API and whose composition root wires the ports and adapters together with channels and threads, and an egui-based frontend crate. See [../technical/architecture.md](../technical/architecture.md) for the full technical picture, and [./features.md](./features.md) for the complete feature catalog.
-
 ## Design Philosophy
 
 **Offline-first, by definition.** riff is not "cloud-capable but works offline" — it is offline, full stop. There is no streaming, no online metadata lookup, no telemetry, and no synchronization service. Your collection, your tags, and your cover art are the entire data model. This keeps the app simple, predictable, and private: there is no server to depend on, no API to break, and no account to leak.
@@ -38,36 +36,3 @@ Setting expectations is as important as listing features. riff deliberately does
 - **Play DRM-protected files, DSD/SACD, or legacy formats** such as WMA or MIDI. The supported set is MP3, AAC (M4A), Opus, FLAC, OGG Vorbis, and WAV.
 - **Replace a full studio player.** There is no equalizer, no crossfade, no output-device selection, and no visualization. See [./features.md](./features.md) for the complete deferred list.
 
-## Technology at a Glance
-
-riff is built from well-established Rust crates, chosen so that the core audio and library paths are pure Rust and the native dependencies are quarantined in one adapter crate:
-
-| Concern | Technology |
-|---|---|
-| Language | Rust (edition 2024, MSRV 1.95) |
-| UI | egui / eframe 0.35 (immediate-mode GUI, window persistence) |
-| Audio decoding | symphonia 0.6 (MP3, AAC, FLAC, OGG Vorbis, WAV) plus symphonia-adapter-libopus for Opus |
-| Audio output | cpal 0.18 (ALSA/PipeWire/PulseAudio on Linux, WASAPI on Windows, CoreAudio on macOS) |
-| Metadata | lofty 0.25 (pure-Rust tag and embedded-picture reading and writing) |
-| Cover art images | image 0.25 (JPEG and PNG decoding) |
-| Library scanning | walkdir 2, with notify 8 for folder watching |
-| Concurrency | std threads, crossbeam-channel |
-| System integration | tray-icon + muda (tray menu) and rfd (native folder picker) on macOS/Windows only |
-| Persistence | rusqlite 0.40 (embedded SQLite), directories 6 |
-
-The architecture keeps these crates out of the core entirely: the persistence contract has zero dependencies, the capability slices are pure Rust, and the UI talks to hardware only through port traits defined by the slices and implemented in the adapter crate. Details are in [../technical/architecture.md](../technical/architecture.md).
-
-## Status
-
-riff is at **v0.1.0** and is dual-licensed under **MIT OR Apache-2.0**.
-
-The core is in place: multi-format decoding, playback control, the playback queue, library scanning, metadata extraction, cover art resolution, search, multi-library management, library persistence in the Application Store, folder watching, the dual-view library explorer, and cross-platform audio all work today and meet their specifications.
-
-Several UI surfaces are functional but still marked **partial** against their full specifications. The known gaps are specific and modest:
-
-- **Player control bar** — transport, seeking, volume, shuffle, repeat, and the queue indicator all work; the specified Stop button is not yet present (stop semantics already exist in the engine).
-- **Now Playing view** — basic track info and the upcoming-queue list work; large cover art, the full metadata field set, clickable up-next rows, and an in-view progress bar remain to be built.
-- **System tray** — minimize/restore and the playback context menu work on macOS and Windows; some specified behaviors such as configurable close-to-tray are unfinished.
-- **Main window and cover art display** — working, with layout and window-management polish outstanding.
-
-These surfaces are the focus of ongoing work. See [./features.md](./features.md) for per-feature status and [./roadmap.md](./roadmap.md) for what comes next, including the engineering infrastructure — CI and broader test coverage — that should accompany it.

@@ -631,16 +631,23 @@ impl RiffApp {
 
     /// Apply the frame's titlebar actions. Close is resolved here rather than
     /// in [`apply_titlebar_action`], because this method owns `self`: on
-    /// macOS/Windows the custom X is the only hide gesture, so its Close sends
-    /// a frontend-local [`VisibilityMessage(false)`] over the visibility
-    /// channel (applied by `logic()` one frame later) and never a `Close` —
-    /// with the veto gone, every close that reaches eframe quits. On Linux
-    /// there is no tray, so the X really closes.
+    /// macOS/Windows the custom X follows the persisted "Quit on close"
+    /// preference — by default it hides through the frontend-local
+    /// [`VisibilityMessage(false)`] visibility channel (applied by `logic()`
+    /// one frame later), and only when the preference is on does it send a
+    /// real `Close`. OS-level close (Alt+F4 / Cmd+Q) is untouched and always
+    /// quits. On Linux there is no tray, so the X always really closes.
     fn apply_titlebar_actions(&mut self, ctx: &egui::Context, library: &mut LibrarySession) {
         for action in self.titlebar_actions.drain(..) {
             if action == TitleBarAction::Close {
                 #[cfg(not(target_os = "linux"))]
-                let _ = self.visibility_tx.send(CUSTOM_TITLEBAR_CLOSE);
+                {
+                    if library.ui_flags.close_quits_app {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    } else {
+                        let _ = self.visibility_tx.send(CUSTOM_TITLEBAR_CLOSE);
+                    }
+                }
                 #[cfg(target_os = "linux")]
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             } else {

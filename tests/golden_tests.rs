@@ -990,6 +990,7 @@ mod tests {
                 .map(|extension| (*extension).to_string())
                 .collect(),
             read_embedded_artwork: true,
+            close_quits_app: false,
             last_scan: Some(riff_backend::app::store::FullScanSummary {
                 // Rendered immediately, so the relative stamp reads "just
                 // now" deterministically.

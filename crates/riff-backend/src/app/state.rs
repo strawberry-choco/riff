@@ -151,6 +151,10 @@ pub struct UiFlags {
     /// `true` = the Smart Lists sidebar section is folded to its header
     /// (persisted display preference, restored on launch).
     pub smart_lists_collapsed: bool,
+    /// `true` = the custom title-bar close button quits the app instead of
+    /// minimizing it to the system tray (persisted; inert on Linux, which has
+    /// no tray). `false` (the default) keeps the minimize-to-tray behavior.
+    pub close_quits_app: bool,
     /// `true` = compact list density; `false` = comfortable density.
     pub compact_density: bool,
     /// `true` = show track numbers in the list.

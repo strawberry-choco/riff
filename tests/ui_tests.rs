@@ -4772,6 +4772,28 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn test_the_advanced_pane_offers_quit_on_close_where_a_tray_exists() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::SettingsSection;
+
+        // "Quit on close" defaults to minimize-to-tray (off); the row renders
+        // only where a tray exists, so clicking it must report opting into
+        // quitting. (On Linux the pane omits the row entirely — decision 002.)
+        let content = sample_content();
+        let mut harness = settings_modal_harness(&content, SettingsSection::Advanced);
+        harness.run();
+        harness.get_by_label("Quit on close").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SetCloseQuitsApp(true)),
+            "the Advanced pane's Quit-on-close toggle drives the preference"
+        );
+    }
+
+    #[test]
     fn test_back_button_and_library_actions_report_actions() {
         use egui_kittest::kittest::Queryable;
         use riff_gui::ui::settings::SettingsSection;

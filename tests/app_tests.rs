@@ -7017,6 +7017,7 @@ mod preferences_tests {
         let mut store = MockSettingsStore::default();
         store.state.scalars.volume = Some(0.4);
         store.state.scalars.advanced_mode = true;
+        store.state.scalars.close_quits_app = true;
 
         let playback = Arc::new(Mutex::new(PlaybackSession::default()));
         let library = Arc::new(Mutex::new(LibrarySession::default()));
@@ -7024,6 +7025,7 @@ mod preferences_tests {
 
         assert_eq!(playback.lock_or_recover().current_volume, 0.4);
         assert!(library.lock_or_recover().ui_flags.advanced_mode);
+        assert!(library.lock_or_recover().ui_flags.close_quits_app);
     }
 
     #[test]

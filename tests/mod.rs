@@ -8,6 +8,8 @@
 //! # Test Organization
 //!
 //! - `domain_tests.rs`: Tests for domain objects like Track, `TrackId`, `PlaybackState`, etc.
+//! - `docs_images_tests.rs`: Ignored-by-default generator that renders the real
+//!   shell headlessly into the `docs/images/` screenshots the README uses.
 //! - `app_tests.rs`: Tests for application logic like `PlaybackSession` /
 //!   `LibrarySession`, the Session Projections, and scan-side Track construction.
 //! - `infra_tests.rs`: Tests for infrastructure components like audio decoders, metadata readers, etc.
@@ -24,6 +26,7 @@
 //! ```
 
 pub mod app_tests;
+pub mod docs_images_tests;
 pub mod domain_tests;
 pub mod golden_tests;
 pub mod infra_tests;

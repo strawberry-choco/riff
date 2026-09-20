@@ -33,10 +33,11 @@ fn test_store_fresh_start_creates_file_and_applies_initial_migration_once() {
     // + v3 (playlists) + v4 (library collection) + v5 (playback prefs)
     // + v6 (track favorites) + v7 (browser layout) + v8 (library scan prefs)
     // + v9 (smart lists collapsed) + v10 (drop the missing-artwork strategy)
-    // + v11 (lowercased entity search keys) + v12 (retire the browser layout).
+    // + v11 (lowercased entity search keys) + v12 (retire the browser layout)
+    // + v13 (the quit-on-close preference).
     assert_eq!(
         applied.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     );
 }
 
@@ -98,10 +99,10 @@ fn test_store_double_apply_is_idempotent() {
             mapped.collect()
         })
         .expect("reading schema_migrations must work");
-    assert_eq!(rows.len(), 12, "no duplicate migration rows allowed");
+    assert_eq!(rows.len(), 13, "no duplicate migration rows allowed");
     assert_eq!(
         rows.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     );
 
     let applied_at: i64 = store
@@ -136,11 +137,14 @@ fn test_store_migration_010_drops_the_missing_artwork_strategy_column() {
 
     // Roll back to the 009-era state: forget migration 010 and restore the
     // columns exactly as migrations 007/008 created them, plus some
-    // non-default scalars that 010's table rebuild must preserve.
+    // non-default scalars that 010's table rebuild must preserve. Migration
+    // 013 is also un-applied because 010 rebuilds the settings row from a
+    // column snapshot that predates `close_quits_app`; re-applying it on the
+    // way back keeps the newest scalar present for reads.
     store
         .with_connection(|conn| {
             conn.execute_batch(
-                "DELETE FROM schema_migrations WHERE version = 10;
+                "DELETE FROM schema_migrations WHERE version IN (10, 13);
                  ALTER TABLE app_settings
                    ADD COLUMN missing_artwork_strategy TEXT NOT NULL DEFAULT 'generated_colour'
                      CHECK (missing_artwork_strategy IN ('generated_colour'));
@@ -319,7 +323,7 @@ fn test_store_checksum_tamper_is_fatal() {
         })
         .expect("reading schema_migrations must work");
     assert_eq!(
-        rows, 12,
+        rows, 13,
         "all shipped migration rows must exist, none re-applied"
     );
 }
@@ -540,6 +544,7 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
         assert!(!settings.scalars.high_contrast);
         assert!(!settings.scalars.replaygain_enabled);
         assert!(!settings.scalars.smart_lists_collapsed);
+        assert!(!settings.scalars.close_quits_app);
     }
 
     // Change every scalar and drop the connection (the "restart").
@@ -557,6 +562,7 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
                 shuffle: true,
                 repeat_mode: 2,
                 smart_lists_collapsed: true,
+                close_quits_app: true,
                 ..riff_persistence::store::ScalarSettings::default()
             })
             .expect("saving scalars must work");
@@ -577,6 +583,7 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
     assert!(settings.scalars.shuffle);
     assert_eq!(settings.scalars.repeat_mode, 2);
     assert!(settings.scalars.smart_lists_collapsed);
+    assert!(settings.scalars.close_quits_app);
 }
 
 /// Migration 012 retires the list/grid browser layout: the persisted scalar
@@ -598,10 +605,13 @@ fn test_store_migration_012_drops_the_browser_layout_column() {
     // Roll back to the 011-era state: forget migration 012 and restore the
     // column exactly as migration 007 created it, plus a non-default grid
     // engagement and some non-default scalars that the rebuild must preserve.
+    // Migration 013 is also un-applied because 012 rebuilds the settings row
+    // from a column snapshot predating `close_quits_app`; re-applying it keeps
+    // the newest scalar present for reads.
     store
         .with_connection(|conn| {
             conn.execute_batch(
-                "DELETE FROM schema_migrations WHERE version = 12;
+                "DELETE FROM schema_migrations WHERE version IN (12, 13);
                  ALTER TABLE app_settings
                    ADD COLUMN browser_layout INTEGER NOT NULL DEFAULT 0
                      CHECK (browser_layout IN (0, 1));

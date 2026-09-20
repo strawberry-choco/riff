@@ -258,6 +258,13 @@ pub const PREF_MISSING_ART: (&str, &str) = (
     "Missing artwork",
     "Generated colour — a deterministic colour stand-in per item.",
 );
+/// Advanced pane preference copy: the custom title-bar close button's
+/// behavior. Offered only where a tray exists (macOS/Windows); Linux has no
+/// tray, so closing always quits there.
+pub const PREF_CLOSE_QUITS: (&str, &str) = (
+    "Quit on close",
+    "Closing the window quits the app instead of minimizing it to the tray.",
+);
 
 /// The Library pane footer's note.
 pub const FOOTER_NOTE: &str = "Changes apply immediately";
@@ -319,6 +326,9 @@ pub struct SettingsContent {
     pub scan_formats: Vec<String>,
     /// Whether embedded artwork is read before filesystem fallbacks.
     pub read_embedded_artwork: bool,
+    /// Whether the title-bar close button quits the app instead of minimizing
+    /// to the tray (Advanced pane; rendered only where a tray exists).
+    pub close_quits_app: bool,
     /// The last completed full scan's summary, `None` when never scanned.
     pub last_scan: Option<FullScanSummary>,
 }
@@ -359,6 +369,9 @@ pub enum SettingsAction {
     SetFormat(String, bool),
     /// Set the "Read embedded artwork" preference.
     SetReadEmbeddedArtwork(bool),
+    /// Set whether the title-bar close button quits instead of minimizing to
+    /// the tray.
+    SetCloseQuitsApp(bool),
 }
 
 /// Full-texture UV rect for [`egui::Painter::image`] (sidebar precedent).
@@ -1245,6 +1258,7 @@ enum Preference {
     WatchChanges,
     SkipHidden,
     ReadEmbedded,
+    CloseQuitsApp,
 }
 
 impl Preference {
@@ -1257,6 +1271,7 @@ impl Preference {
             Self::WatchChanges => PREF_WATCH_CHANGES,
             Self::SkipHidden => PREF_SKIP_HIDDEN,
             Self::ReadEmbedded => PREF_READ_EMBEDDED,
+            Self::CloseQuitsApp => PREF_CLOSE_QUITS,
         }
     }
 
@@ -1269,6 +1284,7 @@ impl Preference {
             Self::WatchChanges => SettingsAction::SetWatchAll(value),
             Self::SkipHidden => SettingsAction::SetSkipHidden(value),
             Self::ReadEmbedded => SettingsAction::SetReadEmbeddedArtwork(value),
+            Self::CloseQuitsApp => SettingsAction::SetCloseQuitsApp(value),
         }
     }
 
@@ -1281,6 +1297,7 @@ impl Preference {
             Self::WatchChanges => "pref_watch_changes",
             Self::SkipHidden => "pref_skip_hidden",
             Self::ReadEmbedded => "pref_read_embedded",
+            Self::CloseQuitsApp => "pref_close_quits",
         }
     }
 
@@ -1293,6 +1310,7 @@ impl Preference {
             Self::WatchChanges => content.watch_any,
             Self::SkipHidden => content.skip_hidden_files,
             Self::ReadEmbedded => content.read_embedded_artwork,
+            Self::CloseQuitsApp => content.close_quits_app,
         }
     }
 }
@@ -1693,7 +1711,15 @@ fn section_pane(
                         library_footer(ui, cache, palette, actions);
                     }
                     SettingsSection::Advanced => {
-                        preferences_card(ui, palette, content, actions, &[Preference::Advanced]);
+                        // "Quit on close" is offered only where a tray exists:
+                        // on Linux there is no tray, so closing always quits
+                        // and the choice would be inert (decision 002).
+                        #[cfg(not(target_os = "linux"))]
+                        const ADVANCED_PREFS: &[Preference] =
+                            &[Preference::Advanced, Preference::CloseQuitsApp];
+                        #[cfg(target_os = "linux")]
+                        const ADVANCED_PREFS: &[Preference] = &[Preference::Advanced];
+                        preferences_card(ui, palette, content, actions, ADVANCED_PREFS);
                         ui.add_space(SECTION_GAP);
                         section_header(ui, palette, SECTION_ADVANCED_INFO);
                         ui.add_space(HEADER_GAP);
@@ -1825,6 +1851,7 @@ impl super::app::RiffApp {
             skip_hidden_files: library.scan_prefs.skip_hidden_files,
             scan_formats: library.scan_prefs.scan_formats.clone(),
             read_embedded_artwork: library.scan_prefs.read_embedded_artwork,
+            close_quits_app: library.ui_flags.close_quits_app,
             last_scan: self.views.last_full_scan_summary(),
         };
 
@@ -1922,6 +1949,9 @@ impl super::app::RiffApp {
                 // were resolved as artless under the old policy, and only a
                 // fresh request lets real art surface.
                 self.evict_generated_covers();
+            }
+            SettingsAction::SetCloseQuitsApp(value) => {
+                library.ui_flags.close_quits_app = value;
             }
         }
     }

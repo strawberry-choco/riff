@@ -81,6 +81,10 @@ static MIGRATION_CHECKSUMS: &[(&str, &str)] = &[
         "012_retire_browser_layout",
         "e16b4b364a79921478f3e5d05f8a08514b51f43a5f290e31c8161b4ac0788242",
     ),
+    (
+        "013_close_quits_app",
+        "f76b7e506cea0cf0dcc5fb0dcd398186792a05eae79b7591920584438d58bb89",
+    ),
 ];
 
 /// Embedded, ordered, checksummed migrations. Append-only once shipped:
@@ -338,6 +342,16 @@ const MIGRATIONS: &[Migration] = &[
         FROM app_settings;
         DROP TABLE app_settings;
         ALTER TABLE app_settings_new RENAME TO app_settings;",
+    },
+    Migration {
+        version: 13,
+        name: "013_close_quits_app",
+        // The custom title-bar close button's behavior becomes a persisted
+        // preference: `0` (default) keeps the historical minimize-to-tray, `1`
+        // makes the button quit the app. Same add-a-boolean precedent as
+        // migration 009; default 0 preserves existing stores' behavior.
+        sql: "ALTER TABLE app_settings
+          ADD COLUMN close_quits_app INTEGER NOT NULL DEFAULT 0 CHECK (close_quits_app IN (0, 1));",
     },
 ];
 
@@ -3331,7 +3345,7 @@ impl SettingsStore for SqliteStore {
                     "SELECT volume, advanced_mode, high_contrast, replaygain_enabled,
                             shuffle, repeat_mode,
                             skip_hidden_files, scan_formats, read_embedded_artwork,
-                            smart_lists_collapsed
+                            smart_lists_collapsed, close_quits_app
                      FROM app_settings WHERE id = 1",
                     [],
                     |row| {
@@ -3351,6 +3365,7 @@ impl SettingsStore for SqliteStore {
                                 .collect(),
                             read_embedded_artwork: row.get::<_, i64>(8)? != 0,
                             smart_lists_collapsed: row.get::<_, i64>(9)? != 0,
+                            close_quits_app: row.get::<_, i64>(10)? != 0,
                         })
                     },
                 )
@@ -3399,7 +3414,8 @@ impl SettingsStore for SqliteStore {
                  SET volume = ?1, advanced_mode = ?2, high_contrast = ?3,
                      replaygain_enabled = ?4, shuffle = ?5, repeat_mode = ?6,
                      skip_hidden_files = ?7, scan_formats = ?8,
-                     read_embedded_artwork = ?9, smart_lists_collapsed = ?10
+                     read_embedded_artwork = ?9, smart_lists_collapsed = ?10,
+                     close_quits_app = ?11
                  WHERE id = 1",
                 rusqlite::params![
                     scalars.volume,
@@ -3412,6 +3428,7 @@ impl SettingsStore for SqliteStore {
                     scalars.scan_formats.join(","),
                     i64::from(scalars.read_embedded_artwork),
                     i64::from(scalars.smart_lists_collapsed),
+                    i64::from(scalars.close_quits_app),
                 ],
             );
             match result {

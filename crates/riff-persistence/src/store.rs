@@ -109,11 +109,16 @@ pub struct ScalarSettings {
     pub scan_formats: Vec<String>,
     /// Read artwork embedded in track tags before filesystem fallbacks.
     pub read_embedded_artwork: bool,
+    /// Whether the custom title-bar close button quits the app instead of
+    /// minimizing it to the system tray. `false` (the default) preserves the
+    /// minimize-to-tray behavior; inert on Linux, which has no tray.
+    pub close_quits_app: bool,
 }
 
 impl Default for ScalarSettings {
     /// The scanner's historical behavior: hidden files skipped, every
-    /// supported format indexed, embedded artwork read.
+    /// supported format indexed, embedded artwork read. The title-bar close
+    /// button minimizes to the tray unless the user opts into quitting.
     fn default() -> Self {
         Self {
             volume: None,
@@ -129,6 +134,7 @@ impl Default for ScalarSettings {
                 .map(|extension| (*extension).to_string())
                 .collect(),
             read_embedded_artwork: true,
+            close_quits_app: false,
         }
     }
 }

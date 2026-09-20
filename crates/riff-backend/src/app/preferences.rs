@@ -93,6 +93,7 @@ impl Preferences {
             session.ui_flags.advanced_mode = settings.scalars.advanced_mode;
             session.ui_flags.high_contrast = settings.scalars.high_contrast;
             session.ui_flags.smart_lists_collapsed = settings.scalars.smart_lists_collapsed;
+            session.ui_flags.close_quits_app = settings.scalars.close_quits_app;
             session.scan_prefs = ScanPrefs {
                 skip_hidden_files: settings.scalars.skip_hidden_files,
                 scan_formats: settings.scalars.scan_formats.clone(),
@@ -146,6 +147,7 @@ fn scalar_settings(playback: &PlaybackSession, library: &LibrarySession) -> Scal
         skip_hidden_files: library.scan_prefs.skip_hidden_files,
         scan_formats: library.scan_prefs.scan_formats.clone(),
         read_embedded_artwork: library.scan_prefs.read_embedded_artwork,
+        close_quits_app: library.ui_flags.close_quits_app,
     }
 }
 

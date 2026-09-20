@@ -380,13 +380,17 @@ pub mod geometry {
         pub const HEART_SIZE: f32 = 14.0;
         /// Search-box height (`h-8`).
         pub const SEARCH_H: f32 = 32.0;
-        /// First-level indent: content starts 12px into the row.
+        /// First-level indent: content starts 12px into the row. Deeper levels
+        /// add [`INDENT_STEP`] each, so this is the whole indent at level 0.
         pub const INDENT_BASE: f32 = 12.0;
-        /// The mockup's three-level indent scale, verbatim: 12 / 44 / 80px.
-        pub const INDENT_SCALE: [f32; 3] = [12.0, 44.0, 80.0];
-        /// Indent step between tree levels past the mockup's third; deep levels
+        /// The three-level indent scale: 12 / 28 / 44px, one
+        /// [`super::super::SPACE_XL`] per level. The mockup's 12 / 44 / 80 was
+        /// twice as wide, which spent a third of a 280px column on nesting
+        /// alone.
+        pub const INDENT_SCALE: [f32; 3] = [12.0, 28.0, 44.0];
+        /// Indent step between tree levels past the pinned third; deep levels
         /// keep stepping so deep trees never fold into one edge.
-        pub const INDENT_STEP: f32 = 36.0;
+        pub const INDENT_STEP: f32 = 16.0;
         /// Horizontal padding of the icon strip inside a row.
         pub const ICON_GAP: f32 = 8.0;
         /// Floor under the label's wrap width when a row carries a right-aligned

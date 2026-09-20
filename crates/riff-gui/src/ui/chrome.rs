@@ -14,7 +14,9 @@
 //! Headless seams (tested in `tests/ui_tests.rs`): the launch viewport
 //! configuration, the control→action contract, the drag-region gesture
 //! decision, and the nav routing. The pixels are covered by the golden-image
-//! harness (`tests/golden_tests.rs`, `shell_chrome_dark`).
+//! harness (`tests/golden_tests.rs`, `shell_chrome_dark`). The equalizer mark
+//! this module paints is also the one rasterized for the tray and the OS window
+//! icon, so the three surfaces cannot disagree about what riff looks like.
 
 use super::icons::{Icon, IconCache, icon_button};
 use super::sidebar::{ghost_icon_button, search_ring_stroke};
@@ -35,15 +37,22 @@ const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui:
 /// fixed brand mark that moved into the titlebar from the content top bar.
 const WORDMARK_BARS: [f32; 4] = [0.55, 0.95, 0.7, 0.4];
 
+/// Raster resolution of the brand mark for the OS surfaces that consume it as
+/// pixels: larger than any tray slot, so the OS downsamples an anti-aliased
+/// glyph instead of upscaling a blocky one.
+pub const APP_ICON_PX: u32 = 64;
+
 /// Launch viewport configuration for the frameless window: the decorated
 /// window's launch size carries over unchanged, OS decorations are replaced
-/// by riff's custom titlebar, and the minimum size fits the fixed shell.
+/// by riff's custom titlebar, the minimum size fits the fixed shell, and the
+/// OS gets riff's own mark rather than eframe's default `e` icon.
 #[must_use]
 pub fn viewport_builder() -> egui::ViewportBuilder {
     egui::ViewportBuilder::default()
         .with_inner_size([1200.0, 800.0])
         .with_min_inner_size([window::MIN_WINDOW_SIZE.x, window::MIN_WINDOW_SIZE.y])
         .with_decorations(false)
+        .with_icon(window_icon())
 }
 
 /// Where a navigation action leads. Library and Folders are the two library
@@ -543,22 +552,86 @@ fn paint_wordmark_text(
 
 /// Paint the wordmark's static equalizer glyph: four rounded bars of fixed
 /// heights ([`WORDMARK_BARS`]) in one color.
-#[expect(clippy::cast_precision_loss)]
 fn paint_equalizer_mark(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
-    let n = WORDMARK_BARS.len() as f32;
-    let bar_w = rect.width() / (n * 1.6);
-    let gap = (rect.width() - bar_w * n) / (n - 1.0);
-    for (i, h) in WORDMARK_BARS.iter().enumerate() {
-        let x = rect.left() + i as f32 * (bar_w + gap);
-        let bar_h = rect.height() * h;
-        painter.rect_filled(
-            egui::Rect::from_min_size(
-                egui::pos2(x, rect.center().y - bar_h / 2.0),
-                egui::vec2(bar_w, bar_h),
-            ),
-            bar_w / 2.0,
-            color,
+    for bar in equalizer_bars() {
+        let scaled = egui::Rect::from_min_size(
+            rect.min + bar.min.to_vec2() * rect.size(),
+            bar.size() * rect.size(),
         );
+        painter.rect_filled(scaled, scaled.width() / 2.0, color);
+    }
+}
+
+/// The wordmark's bars as rects normalized into a unit box — each axis read as
+/// a fraction of the box's own extent. The titlebar scales them into its mark
+/// rect and [`mark_svg`] scales them into an SVG canvas, so the glyph the
+/// window paints and the glyph the tray shows cannot drift apart.
+#[must_use]
+#[expect(clippy::cast_precision_loss)]
+fn equalizer_bars() -> [egui::Rect; 4] {
+    let n = WORDMARK_BARS.len() as f32;
+    let bar_w = 1.0 / (n * 1.6);
+    let gap = (1.0 - bar_w * n) / (n - 1.0);
+    std::array::from_fn(|i| {
+        let h = WORDMARK_BARS[i];
+        egui::Rect::from_min_size(
+            egui::pos2(i as f32 * (bar_w + gap), (1.0 - h) / 2.0),
+            egui::vec2(bar_w, h),
+        )
+    })
+}
+
+/// The brand mark as a square SVG document tinted through the shell's
+/// `currentColor` convention, sized at [`APP_ICON_PX`].
+///
+/// Drawn with a margin: the tray shrinks the mark hard, and a glyph that
+/// fills its frame edge to edge reads as a blob at that size.
+#[expect(clippy::cast_precision_loss)]
+fn mark_svg() -> String {
+    let canvas = APP_ICON_PX as f32;
+    let inset = canvas * 0.1;
+    let side = canvas - inset * 2.0;
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{canvas:.0}\" \
+         height=\"{canvas:.0}\" viewBox=\"0 0 {canvas:.0} {canvas:.0}\">"
+    );
+    for bar in equalizer_bars() {
+        let x = inset + bar.min.x * side;
+        let y = inset + bar.min.y * side;
+        let w = bar.width() * side;
+        let h = bar.height() * side;
+        // `format_push_string` would rather `write!`, which hands back an
+        // infallible `fmt::Result` to discard on every bar.
+        #[expect(clippy::format_push_string)]
+        svg.push_str(&format!(
+            "<rect x=\"{x:.3}\" y=\"{y:.3}\" width=\"{w:.3}\" height=\"{h:.3}\" \
+             rx=\"{:.3}\" fill=\"currentColor\"/>",
+            w / 2.0
+        ));
+    }
+    svg.push_str("</svg>");
+    svg
+}
+
+/// The brand mark as straight-alpha RGBA8 at [`APP_ICON_PX`], for the OS
+/// surfaces that take bytes rather than egui textures — the system tray.
+#[must_use]
+pub fn icon_rgba() -> Option<Vec<u8>> {
+    super::icons::rasterize_rgba(&mark_svg(), APP_ICON_PX as usize, theme::BRAND_500)
+}
+
+/// The brand mark for the OS window and taskbar button.
+///
+/// `with_icon` wants decoded pixels, not an encoded image, so this is the same
+/// raster the tray takes — one rasterization, one source of truth, no asset to
+/// regenerate when the mark changes.
+#[must_use]
+pub fn window_icon() -> egui::IconData {
+    let rgba = icon_rgba().expect("the brand mark must rasterize");
+    egui::IconData {
+        rgba,
+        width: APP_ICON_PX,
+        height: APP_ICON_PX,
     }
 }
 

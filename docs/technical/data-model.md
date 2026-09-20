@@ -50,10 +50,15 @@ pub struct TrackMetadata {
     pub year: Option<u32>,
     pub composer: Option<String>,
     pub comment: Option<String>,
+    pub replaygain_track_gain: Option<f32>,
+    pub replaygain_track_peak: Option<f32>,
+    pub replaygain_album_gain: Option<f32>,
 }
 ```
 
 Tag data read from the file. Every field is optional. Helper methods provide display fallbacks: `display_title` falls back to the file stem (underscores replaced with spaces), `display_artist` to `"Unknown Artist"`, `display_album` to `"Unknown Album"`, and `display_album_artist` to the track artist. `search_text` lowercases title, artist, album, and album artist into a single searchable string.
+
+The three `ReplayGain` fields are read from the file's tags at scan time and are **not editable** — `TagEdit` carries no gain field, so the tag editor cannot write one. Track gain and track peak drive playback leveling when it is enabled; album gain is read for display only, and every track of an album carries the same value because the tag lives on each of the album's files.
 
 ### Album
 

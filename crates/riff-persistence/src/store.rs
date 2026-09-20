@@ -490,6 +490,13 @@ pub trait LibraryMutationStore {
     /// session Library generation like every Library mutation, so the read
     /// models refetch (design-handoff issues 05 and 12).
     fn record_full_scan_completed(&mut self, summary: FullScanSummary) -> Result<(), StoreError>;
+
+    /// Record that this store's metadata now matches `version`, as ONE
+    /// immediate durable transaction. The Library Scan calls it only after a
+    /// scan has run to completion: a cancelled or failed scan leaves the
+    /// store behind, so the next scan finishes the re-read rather than
+    /// believing a partial one.
+    fn stamp_metadata_version(&mut self, version: u32) -> Result<(), StoreError>;
 }
 
 /// The sidebar-count totals for the Library collection, answered by ONE
@@ -534,6 +541,12 @@ pub trait LibraryQueryStore {
     /// Resolve one `Track` by its `TrackId` (its full file path). Playback uses
     /// this instead of any in-memory copy. `None` when unknown.
     fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError>;
+
+    /// The [`METADATA_VERSION`](crate::track::METADATA_VERSION) this store's
+    /// metadata was last written under. A value below the running binary's
+    /// means the scan's freshness filter must treat every known path as stale
+    /// for one scan; the filter reads this ONCE per scan, never per path.
+    fn metadata_version(&self) -> Result<u32, StoreError>;
 
     /// One bounded window of the flat library list, path-ascending.
     fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, StoreError>;

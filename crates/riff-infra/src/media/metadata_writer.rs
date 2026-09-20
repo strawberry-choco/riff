@@ -91,15 +91,9 @@ impl MetadataWriter for LoftyMetadataWriter {
         if let Some(ref comment) = edit.comment {
             tag.insert_text(ItemKey::Comment, comment.clone());
         }
-        if let Some(gain) = edit.replaygain_track_gain {
-            // Mirror the reader's parsing contract (`parse_replaygain_gain`
-            // strips a case-insensitive `dB` suffix), so a written tag
-            // round-trips when the file is re-read.
-            tag.insert_text(ItemKey::ReplayGainTrackGain, format!("{gain} dB"));
-        }
-        if let Some(peak) = edit.replaygain_track_peak {
-            tag.insert_text(ItemKey::ReplayGainTrackPeak, format!("{peak}"));
-        }
+        // `ReplayGain` is deliberately absent: `TagEdit` has no gain field, so
+        // a save can neither set nor clear the file's own values. Whatever the
+        // tags carried before the edit is what the reader sees afterwards.
 
         tag.save_to_path(path, WriteOptions::default())
             .map_err(|e| LibraryError::MetadataWrite(e.to_string()))?;

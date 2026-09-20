@@ -752,6 +752,10 @@ pub mod mocks {
             Ok(0)
         }
 
+        fn stamp_metadata_version(&mut self, _version: u32) -> Result<(), StoreError> {
+            Ok(())
+        }
+
         fn record_track_played(
             &mut self,
             id: &TrackId,
@@ -1302,6 +1306,10 @@ pub mod mocks {
                 return Err(StoreError::InvalidOperation("store boom".to_string()));
             }
             Ok(self.library.get(id).cloned())
+        }
+
+        fn metadata_version(&self) -> Result<u32, StoreError> {
+            Ok(riff_persistence::track::METADATA_VERSION)
         }
 
         fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, StoreError> {
@@ -1949,6 +1957,12 @@ impl riff_library::app::cover_service::Covers for crate::mocks::MockCovers {
         &self,
         _track_id: riff_backend::domain::TrackId,
         _path: std::path::PathBuf,
+        _size: riff_library::app::traits::RequestedSize,
+    ) {
+    }
+    fn request_folder(
+        &self,
+        _folder: &std::path::Path,
         _size: riff_library::app::traits::RequestedSize,
     ) {
     }

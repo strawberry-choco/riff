@@ -29,7 +29,7 @@ use crate::app::scan::build_tracks;
 use crate::app::store::{FullScanSummary, LibraryMutationStore, LibraryQueryStore};
 use crate::app::traits::MetadataReader;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
-use riff_persistence::track::TrackId;
+use riff_persistence::track::{METADATA_VERSION, TrackId};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -287,6 +287,14 @@ impl ScanWorker {
                 if let Err(e) = self.mutations.record_full_scan_completed(summary) {
                     tracing::warn!("Failed to record the last-scan summary: {e}");
                 }
+                // Stamped only here, on the completed branch: a cancelled or
+                // failed scan leaves the store behind so the next scan
+                // finishes the re-read. Before `Complete` publishes, so an
+                // observer of the outcome never sees a lagging version for a
+                // scan that already earned the stamp.
+                if let Err(e) = self.mutations.stamp_metadata_version(METADATA_VERSION) {
+                    tracing::warn!("Failed to stamp the metadata version: {e}");
+                }
                 let _ = self.outcome_tx.send(ScanOutcome::Complete {
                     path: path.clone(),
                     total_files: files,
@@ -323,6 +331,24 @@ impl ScanWorker {
         let total = files.len();
         let mut errors = 0usize;
 
+        // Whether this store's metadata was written under the shape the binary
+        // reads. A store behind the binary re-reads every known path for one
+        // scan so a tag added since its last full scan (an album's ReplayGain,
+        // say) reaches a library indexed before that column existed; the
+        // completed scan stamps the version forward, which is what bounds the
+        // re-read. Read ONCE here, never per path — the filter already costs
+        // one indexed lookup per file, and a row fetch per batch would be a
+        // regression on a large library.
+        let metadata_is_current = match self.queries.metadata_version() {
+            Ok(version) => version >= METADATA_VERSION,
+            Err(e) => {
+                // Fail the same way the per-path check below does: re-read.
+                // An unanswerable version is not evidence the store is current.
+                tracing::warn!("Metadata version check failed: {e}");
+                false
+            }
+        };
+
         for (i, chunk) in files.chunks(SCAN_BATCH_SIZE).enumerate() {
             if self.cancel.load(Ordering::Relaxed) {
                 return ScanEnd::Cancelled;
@@ -333,21 +359,26 @@ impl ScanWorker {
             // Skip paths the store already knows so rescans don't re-read
             // unchanged metadata. One indexed primary-key lookup per path —
             // cheap next to the tag I/O it saves, and the worker stays off
-            // the Library Session entirely.
-            let mut fresh_paths: Vec<PathBuf> = Vec::with_capacity(chunk.len());
-            for p in chunk {
-                match self.queries.get_track(&TrackId::from_path(p)) {
-                    Ok(None) => fresh_paths.push(p.clone()),
-                    Ok(Some(_)) => {}
-                    Err(e) => {
-                        // Fail open: when the check fails, scan the path
-                        // anyway — the store upsert is idempotent and
-                        // preserves play history.
-                        tracing::warn!("Freshness check failed for {p:?}: {e}");
-                        fresh_paths.push(p.clone());
-                    }
-                }
-            }
+            // the Library Session entirely. That saving is only safe while the
+            // store is current; see `metadata_is_current` above.
+            let fresh_paths: Vec<PathBuf> = if metadata_is_current {
+                chunk
+                    .iter()
+                    .filter(|p| match self.queries.get_track(&TrackId::from_path(p)) {
+                        Ok(known) => known.is_none(),
+                        Err(e) => {
+                            // Fail open: when the check fails, scan the path
+                            // anyway — the store upsert is idempotent and
+                            // preserves play history.
+                            tracing::warn!("Freshness check failed for {p:?}: {e}");
+                            true
+                        }
+                    })
+                    .cloned()
+                    .collect()
+            } else {
+                chunk.to_vec()
+            };
 
             if !fresh_paths.is_empty() {
                 // Per-file read failures are skipped inside `build_tracks`,
@@ -442,6 +473,12 @@ mod tests {
                 .unwrap()
                 .contains(&PathBuf::from(&id.0))
                 .then(|| make_track(&id.0)))
+        }
+
+        // Current, so these tests keep exercising the skipping branch; the
+        // lagging branch has its own fixtures.
+        fn metadata_version(&self) -> Result<u32, StoreError> {
+            Ok(METADATA_VERSION)
         }
 
         fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, StoreError> {
@@ -704,6 +741,9 @@ mod tests {
     impl LibraryMutationStore for MockMutations {
         fn apply_scan_batch(&mut self, _tracks: &[Track]) -> Result<usize, StoreError> {
             Ok(0)
+        }
+        fn stamp_metadata_version(&mut self, _version: u32) -> Result<(), StoreError> {
+            Ok(())
         }
         fn record_track_played(
             &mut self,

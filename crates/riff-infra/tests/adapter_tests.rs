@@ -149,9 +149,11 @@ fn test_lofty_writer_partial_edit_preserves_untouched_tags_on_disk() {
 
 #[test]
 fn test_lofty_writer_extended_fields_round_trip() {
-    // The tag-edit DTO carries the full metadata surface (disc number,
-    // composer, comment, ReplayGain); every `Some` field must reach the
-    // file tags and read back through the real reader.
+    // The tag-edit DTO's non-textual fields (disc number, composer, comment)
+    // must every one reach the file tags and read back through the real
+    // reader. `ReplayGain` is absent from this list on purpose — it is not a
+    // `TagEdit` field; `test_writer_neither_writes_nor_clobbers_replaygain_tags`
+    // and the seeded-file reader tests cover it instead.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("song.wav");
     write_minimal_wav(&path);
@@ -161,8 +163,6 @@ fn test_lofty_writer_extended_fields_round_trip() {
         disc_number: Some(2),
         composer: Some("Bill Evans".to_string()),
         comment: Some("take 3".to_string()),
-        replaygain_track_gain: Some(-6.54),
-        replaygain_track_peak: Some(0.5),
         ..Default::default()
     };
     LoftyMetadataWriter::new()
@@ -173,14 +173,100 @@ fn test_lofty_writer_extended_fields_round_trip() {
     assert_eq!(metadata.disc_number, Some(2));
     assert_eq!(metadata.composer.as_deref(), Some("Bill Evans"));
     assert_eq!(metadata.comment.as_deref(), Some("take 3"));
-    let gain = metadata
-        .replaygain_track_gain
-        .expect("gain must round-trip");
-    assert!((gain - -6.54).abs() < 1e-4, "gain: {gain}");
-    let peak = metadata
-        .replaygain_track_peak
-        .expect("peak must round-trip");
-    assert!((peak - 0.5).abs() < 1e-4, "peak: {peak}");
+}
+
+// --- ReplayGain tag reading on real files -----------------------------------
+//
+// Album gain is not a `TagEdit` field and never will be, so it cannot be
+// proven through the writer: these tests seed a file with lofty directly and
+// assert the reader parses what some other tool left on disk.
+
+/// Write a scratch WAV carrying `items` on its primary tag, using lofty
+/// directly so the fixture does not depend on riff's own writer.
+fn seed_file_with_items(path: &std::path::Path, items: &[(lofty::tag::ItemKey, &str)]) {
+    use lofty::config::WriteOptions;
+    use lofty::file::TaggedFileExt;
+    use lofty::read_from_path;
+    use lofty::tag::{Tag, TagExt};
+
+    write_minimal_wav(path);
+    let tagged_file = read_from_path(path).expect("scratch WAV must be readable");
+    let mut tag = Tag::new(tagged_file.primary_tag_type());
+    for (key, value) in items {
+        tag.insert_text(*key, (*value).to_string());
+    }
+    tag.save_to_path(path, WriteOptions::default())
+        .expect("seeding the scratch WAV must succeed");
+}
+
+#[test]
+fn test_reader_parses_replaygain_album_gain_from_seeded_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tagged.wav");
+    seed_file_with_items(
+        &path,
+        &[
+            (lofty::tag::ItemKey::ReplayGainTrackGain, "-6.54 dB"),
+            (lofty::tag::ItemKey::ReplayGainAlbumGain, "-7.12 dB"),
+        ],
+    );
+
+    let metadata = LoftyMetadataReader::new()
+        .read_metadata(&path)
+        .expect("seeded file must read");
+    assert_eq!(metadata.replaygain_track_gain, Some(-6.54));
+    assert_eq!(
+        metadata.replaygain_album_gain,
+        Some(-7.12),
+        "album gain parses through the same ` dB`-stripping helper as track gain"
+    );
+}
+
+#[test]
+fn test_reader_leaves_replaygain_album_gain_none_when_the_file_carries_no_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("untagged.wav");
+    write_minimal_wav(&path);
+
+    let metadata = LoftyMetadataReader::new()
+        .read_metadata(&path)
+        .expect("bare file must read");
+    assert_eq!(metadata.replaygain_album_gain, None);
+}
+
+#[test]
+fn test_writer_neither_writes_nor_clobbers_replaygain_tags() {
+    // The contract Ticket 04 exists to make structural: a tag edit cannot
+    // express a `ReplayGain` value, and saving one must leave whatever the
+    // file already carries exactly as it found it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("keep_gain.wav");
+    seed_file_with_items(
+        &path,
+        &[
+            (lofty::tag::ItemKey::ReplayGainTrackGain, "-6.54 dB"),
+            (lofty::tag::ItemKey::ReplayGainTrackPeak, "0.98"),
+            (lofty::tag::ItemKey::ReplayGainAlbumGain, "-7.12 dB"),
+        ],
+    );
+
+    LoftyMetadataWriter::new()
+        .write_tags(
+            &path,
+            &TagEdit {
+                title: Some("Renamed".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("an edit that names no gain must still save");
+
+    let metadata = LoftyMetadataReader::new()
+        .read_metadata(&path)
+        .expect("the edited file must read");
+    assert_eq!(metadata.title.as_deref(), Some("Renamed"));
+    assert_eq!(metadata.replaygain_track_gain, Some(-6.54));
+    assert_eq!(metadata.replaygain_track_peak, Some(0.98));
+    assert_eq!(metadata.replaygain_album_gain, Some(-7.12));
 }
 
 #[test]

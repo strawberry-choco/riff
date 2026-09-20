@@ -64,6 +64,11 @@ User clicks "Scan" (or "Scan All") in the settings view (riff-gui/src/ui/setting
    -> The store freshness filter keeps paths whose metadata is already current
         (one indexed lookup per path through the LibraryQueryStore); if the
         check errors, the path is scanned anyway (fail-open)
+        It is gated by the store's metadata version, read ONCE per scan through
+        the same port and never per path: while the recorded version is behind
+        the binary's `METADATA_VERSION`, every path in the batch is treated as
+        fresh, so a tag added since the store was last written reaches a
+        library indexed before the column existed
         -> For each chunk of ~10 new/changed paths:
              -> build_tracks(chunk, &LoftyMetadataReader) from riff-library reads
                 tags, duration, cover source, and format; per-file failures are
@@ -74,13 +79,19 @@ User clicks "Scan" (or "Scan All") in the settings view (riff-gui/src/ui/setting
              -> On success the store bumps the session generation counters, so
                 Session Projections refetch on the next frame
              -> ScanOutcome progress is reported to the UI's outcome stream
-  -> When all chunks are processed, the terminal ScanOutcome reports the total
+  -> When all chunks are processed, the scan records its summary and stamps
+     the store's metadata version forward through the mutation port — only on
+     this completed branch, so a cancelled or failed scan leaves the store
+     behind and the next scan finishes the re-read — then the terminal
+     ScanOutcome reports the total
   -> UI sets the path status to Scanned(total) and renders the refreshed views
 ```
 
-A cancellation request sets the shared cancel flag, which the scanner checks between chunks; the service keeps every already-committed batch (an interrupted scan never rolls back committed work). If a commit fails, the outcome stream reports the failure and the path status is reset. The scan worker never touches the session structs: it reads the store through the query port and commits through the mutation port.
+A cancellation request sets the shared cancel flag, which the scanner checks between chunks; the service keeps every already-committed batch (an interrupted scan never rolls back committed work). If a commit fails, the outcome stream reports the failure and the path status is reset. Neither a cancellation nor a failure stamps the metadata version. The scan worker never touches the session structs: it reads the store through the query port and commits through the mutation port.
 
 Watched folders feed the same seam from the other side: the filesystem-event forwarder hands `notify` events to the `WatcherManager` (riff-backend), which debounces batches and requests rescans through the shared `ScanService` — a manual scan and a watch-triggered rescan are the same flow.
+
+Settings' **Clear Library** is the manual equivalent of a version-lag re-read: it drops the collection so the next scan indexes every file from scratch again. The version exists so a metadata-shape change does not require that — the user keeps their play history and favorites through the backfill.
 
 ## Flow 3: Resolve Cover Art
 

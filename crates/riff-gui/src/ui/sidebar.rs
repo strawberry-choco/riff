@@ -25,9 +25,9 @@ use super::theme::geometry::sidebar::{
 };
 use super::theme::{self, Palette};
 
-/// The three-level indent scale: 12/44/80px for levels 0/1/2. Levels beyond
-/// the mockup's three keep stepping (see [`INDENT_STEP`]) so deep trees never
-/// fold into one edge.
+/// The three-level indent scale: 12/28/44px for levels 0/1/2, one step per
+/// level. Levels beyond the pinned three keep stepping (see [`INDENT_STEP`])
+/// so deep trees never fold into one edge.
 #[must_use]
 #[expect(clippy::cast_precision_loss)]
 pub fn indent_px(level: usize) -> f32 {
@@ -151,6 +151,10 @@ pub struct RowMeta {
 /// ([`Palette::row_hover`], the design's amber wash), selected fill
 /// ([`Palette::surface_3`]), and — on the now-playing row — the animated
 /// equalizer-bars indicator in the brand tint.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "four independent two-state facts about one row"
+)]
 pub struct TreeRow<'a> {
     /// Nesting depth; 0 is a top-level row (see [`indent_px`]).
     pub indent_level: usize,
@@ -187,11 +191,11 @@ pub struct TreeRow<'a> {
     pub now_playing: bool,
     /// Whether playback is actually running (bars animate only then).
     pub playing: bool,
-    /// `Some(open)` paints a disclosure chevron before the label for
-    /// collapsible tree nodes (folder tree, artist/album tree). The chevron
-    /// is an affordance only — toggling stays with the caller's click
-    /// handling.
-    pub disclosure: Option<bool>,
+    /// Whether the leading glyph occupies the same 32px square a cover tile
+    /// does, so covered and uncovered rows of one tree start their label in
+    /// the same place. The folder tree sets it; every other row keeps the
+    /// compact 16px glyph strip.
+    pub art_slot: bool,
 }
 
 /// The row's right-aligned value cluster text: the present parts of
@@ -423,9 +427,8 @@ fn paint_favorite(
     heart_response.clone().on_hover_text(label);
 }
 
-/// The row's leading strip, painted left to right: the disclosure chevron, the
-/// cover tile, the leading glyph, and the equalizer indicator. Returns where
-/// the label starts.
+/// The row's leading strip, painted left to right: the cover tile, the leading
+/// glyph, and the equalizer indicator. Returns where the label starts.
 fn paint_row_leading(
     ui: &egui::Ui,
     cache: &mut IconCache,
@@ -435,18 +438,6 @@ fn paint_row_leading(
     painter: &egui::Painter,
 ) -> f32 {
     let mut x = cells.rect.left() + indent_px(row.indent_level);
-
-    if let Some(open) = row.disclosure {
-        let chevron = if open { "\u{25BE}" } else { "\u{25B8}" };
-        painter.text(
-            egui::pos2(x + 6.0, cells.rect.center().y),
-            egui::Align2::CENTER_CENTER,
-            chevron,
-            egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional),
-            palette.ink_3,
-        );
-        x += 12.0 + 4.0;
-    }
 
     if let Some(cover_id) = row.cover {
         // A square cover-art tile on the row's leading edge, centered in
@@ -471,13 +462,21 @@ fn paint_row_leading(
         } else {
             palette.ink_2
         };
-        let tex_id = cache.texture(ui.ctx(), icon, 16.0, tint);
+        // A tree row that CAN carry cover art owns that slot whatever it shows:
+        // an uncovered folder paints its glyph into the same 32px square, so
+        // covered and uncovered rows start their label in the same place.
+        let (inset, box_px) = if row.art_slot {
+            (4.0, ROW_COVER)
+        } else {
+            (0.0, 16.0)
+        };
+        let tex_id = cache.texture(ui.ctx(), icon, box_px, tint);
         let icon_rect = egui::Rect::from_center_size(
-            egui::pos2(x + 8.0, cells.rect.center().y),
-            egui::vec2(16.0, 16.0),
+            egui::pos2(x + inset + box_px / 2.0, cells.rect.center().y),
+            egui::vec2(box_px, box_px),
         );
         painter.image(tex_id, icon_rect, UV_FULL, tint);
-        x += 16.0 + ICON_GAP;
+        x += inset + box_px + ICON_GAP;
     }
 
     if row.now_playing {
@@ -711,7 +710,7 @@ pub fn sidebar_footer(
             selected: false,
             now_playing: false,
             playing: false,
-            disclosure: None,
+            art_slot: false,
         },
     )
     .response

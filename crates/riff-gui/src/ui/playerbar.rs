@@ -706,7 +706,7 @@ pub fn show_queue_panel(
                                                 selected: false,
                                                 now_playing: false,
                                                 playing: false,
-                                                disclosure: None,
+                                                art_slot: false,
                                             },
                                         );
                                         if row.response.clicked() {

@@ -85,6 +85,14 @@ static MIGRATION_CHECKSUMS: &[(&str, &str)] = &[
         "013_close_quits_app",
         "f76b7e506cea0cf0dcc5fb0dcd398186792a05eae79b7591920584438d58bb89",
     ),
+    (
+        "014_replaygain_album_gain",
+        "44703303f56d4be702069ab22c4d629eb3d078e95b1d4fbfe71bd8642c89df25",
+    ),
+    (
+        "015_metadata_version",
+        "e55453ab1b9032cb6d7890fcd6b204d5032976e29f9bd6100f3a4dae957b63de",
+    ),
 ];
 
 /// Embedded, ordered, checksummed migrations. Append-only once shipped:
@@ -352,6 +360,29 @@ const MIGRATIONS: &[Migration] = &[
         // migration 009; default 0 preserves existing stores' behavior.
         sql: "ALTER TABLE app_settings
           ADD COLUMN close_quits_app INTEGER NOT NULL DEFAULT 0 CHECK (close_quits_app IN (0, 1));",
+    },
+    Migration {
+        version: 14,
+        name: "014_replaygain_album_gain",
+        // The `REPLAYGAIN_ALBUM_GAIN` a file carries becomes a stored fact.
+        // Nullable `REAL` with no default and no table rebuild — the same
+        // add-a-column precedent as migration 004, so an existing store pays
+        // nothing and every pre-existing row reads back as `None` until the
+        // metadata-version backfill (migration 015) re-reads it.
+        sql: "ALTER TABLE tracks
+          ADD COLUMN replaygain_album_gain REAL;",
+    },
+    Migration {
+        version: 15,
+        name: "015_metadata_version",
+        // Which `METADATA_VERSION` this store's metadata was written under.
+        // `DEFAULT 0` is the point: every existing store — and every fresh
+        // one — opens behind the binary, so the next completed scan re-reads
+        // each known Track once (picking up columns like migration 014's) and
+        // stamps the version forward. Not a user preference, so it is read
+        // and written only through the Library store ports, never Settings.
+        sql: "ALTER TABLE app_settings
+          ADD COLUMN metadata_version INTEGER NOT NULL DEFAULT 0;",
     },
 ];
 
@@ -1227,6 +1258,22 @@ impl LibraryMutationStore for SqliteStore {
         self.bump_library_generation_on_commit(committed.is_ok());
         committed
     }
+
+    /// One durable write of the metadata version. Deliberately NOT a
+    /// generation bump: the column describes how the collection was read, not
+    /// any of its facts, so no Session Projection has to refetch for it.
+    fn stamp_metadata_version(&mut self, version: u32) -> Result<(), StoreError> {
+        self.with_connection(|conn| {
+            conn.execute(
+                "UPDATE app_settings SET metadata_version = ?1 WHERE id = 1",
+                [i64::from(version)],
+            )
+        })
+        .map_err(|e| {
+            StoreError::InvalidOperation(format!("failed to stamp the metadata version: {e}"))
+        })?;
+        Ok(())
+    }
 }
 
 /// UTC epoch-nanosecond integer encoding for a `Duration` (the store's
@@ -1291,14 +1338,16 @@ impl SqliteStore {
                     replaygain_track_gain, replaygain_track_peak,
                     duration_nanos, sample_rate, channels,
                     play_count, last_played_nanos, date_added_nanos,
-                    search_text, album_artist_key, album_title_key
+                    search_text, album_artist_key, album_title_key,
+                    replaygain_album_gain
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5,
                     ?6, ?7, ?8, ?9, ?10, ?11,
                     ?12, ?13,
                     ?14, ?15, ?16,
                     0, NULL, ?17,
-                    ?18, ?19, ?20
+                    ?18, ?19, ?20,
+                    ?21
                  )
                  ON CONFLICT(path) DO UPDATE SET
                     title = ?2, artist = ?3, album = ?4, album_artist = ?5,
@@ -1306,7 +1355,8 @@ impl SqliteStore {
                     composer = ?10, comment = ?11,
                     replaygain_track_gain = ?12, replaygain_track_peak = ?13,
                     duration_nanos = ?14, sample_rate = ?15, channels = ?16,
-                    search_text = ?18, album_artist_key = ?19, album_title_key = ?20",
+                    search_text = ?18, album_artist_key = ?19, album_title_key = ?20,
+                    replaygain_album_gain = ?21",
                 rusqlite::params![
                     track.id.0,
                     track.metadata.title,
@@ -1328,6 +1378,11 @@ impl SqliteStore {
                     search_text,
                     album_artist_key,
                     album_title_key,
+                    // `?21` and away from its `?12`/`?13` siblings on purpose:
+                    // every position above is bound by number, so reordering
+                    // to group the three would silently mis-file the columns
+                    // it shifts — a wrong index compiles and passes clippy.
+                    track.metadata.replaygain_album_gain.map(f64::from),
                 ],
             )?;
             written += 1;
@@ -1446,12 +1501,13 @@ const TRACK_COLUMNS: &str = "path, title, artist, album, album_artist,
             track_number, disc_number, genre, year, composer, comment,
             replaygain_track_gain, replaygain_track_peak,
             duration_nanos, sample_rate, channels,
-            play_count, last_played_nanos, date_added_nanos, search_text, favorite";
+            play_count, last_played_nanos, date_added_nanos, search_text, favorite,
+            replaygain_album_gain";
 
 /// How many columns [`TRACK_COLUMNS`] expands to; result rows that append
 /// extra columns after them (e.g. the playlist-entries LEFT JOIN) index
 /// past this.
-const TRACK_COLUMN_COUNT: usize = 21;
+const TRACK_COLUMN_COUNT: usize = 22;
 
 /// Escape SQL-LIKE wildcards and the escape character itself so a path
 /// component matches literally under `LIKE ... ESCAPE '#'`: `%` and `_`
@@ -1537,6 +1593,11 @@ fn track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
             comment: row.get(10)?,
             replaygain_track_gain: row.get::<_, Option<f64>>(11)?.map(narrow_f32),
             replaygain_track_peak: row.get::<_, Option<f64>>(12)?.map(narrow_f32),
+            // Index 21, appended after `favorite` rather than grouped with its
+            // siblings above, because [`TRACK_COLUMNS`] is read positionally:
+            // moving it would shift every index below the gap and mis-file
+            // those columns without failing to compile.
+            replaygain_album_gain: row.get::<_, Option<f64>>(21)?.map(narrow_f32),
         },
         duration: row.get::<_, Option<i64>>(13)?.map(duration_from_nanos),
         sample_rate: narrow_u32(row.get(14)?),
@@ -1561,6 +1622,23 @@ impl LibraryQueryStore for SqliteStore {
             rows.next().transpose()
         })
         .map_err(|e| StoreError::InvalidOperation(format!("failed to resolve track: {e}")))
+    }
+
+    /// One scalar read of the single settings row. The scan's freshness filter
+    /// calls this once per scan, never once per path.
+    fn metadata_version(&self) -> Result<u32, StoreError> {
+        let stored = self
+            .with_connection(|conn| {
+                conn.query_row(
+                    "SELECT metadata_version FROM app_settings WHERE id = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .map_err(|e| {
+                StoreError::InvalidOperation(format!("failed to read metadata version: {e}"))
+            })?;
+        Ok(u32::try_from(stored).unwrap_or(u32::MAX))
     }
 
     /// One bounded window of the flat library list, path-ascending.

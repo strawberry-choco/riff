@@ -34,10 +34,12 @@ fn test_store_fresh_start_creates_file_and_applies_initial_migration_once() {
     // + v6 (track favorites) + v7 (browser layout) + v8 (library scan prefs)
     // + v9 (smart lists collapsed) + v10 (drop the missing-artwork strategy)
     // + v11 (lowercased entity search keys) + v12 (retire the browser layout)
-    // + v13 (the quit-on-close preference).
+    // + v13 (the quit-on-close preference) + v14 (ReplayGain album gain)
+    // + v15 (the metadata version the freshness filter compares against
+    //   `METADATA_VERSION`).
     assert_eq!(
         applied.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     );
 }
 
@@ -99,10 +101,10 @@ fn test_store_double_apply_is_idempotent() {
             mapped.collect()
         })
         .expect("reading schema_migrations must work");
-    assert_eq!(rows.len(), 13, "no duplicate migration rows allowed");
+    assert_eq!(rows.len(), 15, "no duplicate migration rows allowed");
     assert_eq!(
         rows.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     );
 
     let applied_at: i64 = store
@@ -323,8 +325,48 @@ fn test_store_checksum_tamper_is_fatal() {
         })
         .expect("reading schema_migrations must work");
     assert_eq!(
-        rows, 13,
+        rows, 15,
         "all shipped migration rows must exist, none re-applied"
+    );
+}
+
+#[test]
+fn test_metadata_version_lags_a_freshly_migrated_store_and_stamps_durably() {
+    use riff_persistence::track::METADATA_VERSION;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    // A store that has never completed a scan under this build sits behind the
+    // binary — that gap is what makes the scan's freshness filter re-read
+    // every known path exactly once instead of forever.
+    let lagging = store.metadata_version().expect("version reads");
+    assert_eq!(lagging, 0);
+    assert_ne!(
+        lagging, METADATA_VERSION,
+        "a just-migrated store must sit behind the binary, or nothing ever backfills"
+    );
+
+    store
+        .stamp_metadata_version(METADATA_VERSION)
+        .expect("stamping forward is a plain write");
+    assert_eq!(
+        store.metadata_version().expect("version reads"),
+        METADATA_VERSION
+    );
+
+    // Durable: the stamp is the whole reason the re-read is paid once.
+    drop(store);
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let reopened = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    assert_eq!(
+        reopened.metadata_version().expect("version reads"),
+        METADATA_VERSION,
+        "the stamped version survives a reopen"
     );
 }
 
@@ -1751,6 +1793,7 @@ fn test_get_track_roundtrips_all_fields() {
             comment: Some("Comment".to_string()),
             replaygain_track_gain: Some(-6.54),
             replaygain_track_peak: Some(0.75),
+            replaygain_album_gain: Some(-7.12),
         },
         duration: Some(Duration::from_secs_f32(12.5)),
         sample_rate: Some(44_100),
@@ -1818,6 +1861,10 @@ fn test_get_track_roundtrips_all_fields() {
     assert_eq!(got_min.metadata.title, None);
     assert_eq!(got_min.metadata.artist, None);
     assert_eq!(got_min.metadata.album, None);
+    assert_eq!(
+        got_min.metadata.replaygain_album_gain, None,
+        "a track scanned without the tag stores NULL, not a default gain"
+    );
     assert_eq!(got_min.duration, None);
     assert_eq!(got_min.last_played, None);
 

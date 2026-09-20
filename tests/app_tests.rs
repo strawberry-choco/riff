@@ -824,6 +824,10 @@ mod tests {
             self.0.lock().unwrap().get_track(id)
         }
 
+        fn metadata_version(&self) -> Result<u32, StoreError> {
+            Ok(riff_persistence::track::METADATA_VERSION)
+        }
+
         fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, StoreError> {
             self.0.lock().unwrap().tracks_window(offset, limit)
         }
@@ -3498,6 +3502,10 @@ mod scan_service_tests {
             ))
         }
 
+        fn metadata_version(&self) -> Result<u32, StoreError> {
+            Ok(riff_persistence::track::METADATA_VERSION)
+        }
+
         fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
@@ -3760,6 +3768,10 @@ mod scan_service_tests {
             Err(StoreError::InvalidOperation(
                 "scan batch commit boom".to_string(),
             ))
+        }
+
+        fn stamp_metadata_version(&mut self, _version: u32) -> Result<(), StoreError> {
+            Ok(())
         }
 
         fn record_track_played(
@@ -4156,6 +4168,159 @@ mod scan_service_tests {
             "a cancelled scan never counts as the last full scan"
         );
     }
+
+    /// Album gain the backfill fixture reports, standing in for the
+    /// `REPLAYGAIN_ALBUM_GAIN` a file has carried all along.
+    const BACKFILL_ALBUM_GAIN: f32 = -7.12;
+
+    /// [`MetadataReader`] that answers every read with an album gain, so a
+    /// re-read of an already-known Track is visible in the stored row.
+    struct AlbumGainReader;
+
+    impl MetadataReader for AlbumGainReader {
+        fn read_all(
+            &self,
+            path: &Path,
+        ) -> Result<(TrackMetadata, Duration, CoverSource, AudioFormatInfo), LibraryError> {
+            let title = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Unknown")
+                .to_string();
+            Ok((
+                TrackMetadata {
+                    title: Some(title),
+                    artist: Some("Scan Artist".to_string()),
+                    album: Some("Scan Album".to_string()),
+                    replaygain_album_gain: Some(BACKFILL_ALBUM_GAIN),
+                    ..Default::default()
+                },
+                Duration::from_secs(90),
+                CoverSource::None,
+                AudioFormatInfo {
+                    sample_rate: 44_100,
+                    channels: 2,
+                },
+            ))
+        }
+
+        fn read_cover_source(&self, _path: &Path) -> Result<CoverSource, LibraryError> {
+            Ok(CoverSource::None)
+        }
+    }
+
+    #[test]
+    fn test_a_lagging_metadata_version_re_reads_known_tracks_exactly_once() {
+        use riff_persistence::track::METADATA_VERSION;
+
+        let mut scratch = ScratchStore::new();
+        let (_dir, root) = seed_audio_dir("backfill", 2);
+        let stored_gain = |scratch: &ScratchStore, name: &str| -> Option<f32> {
+            let id = TrackId::from_path(&root.join(name));
+            scratch
+                .queries
+                .get_track(&id)
+                .expect("the row resolves")
+                .expect("the row exists")
+                .metadata
+                .replaygain_album_gain
+        };
+        let wipe_gain = |scratch: &mut ScratchStore| {
+            scratch
+                .mutations
+                .with_connection(|conn| {
+                    conn.execute("UPDATE tracks SET replaygain_album_gain = NULL", [])
+                })
+                .expect("wiping the column must work")
+        };
+
+        // First scan: nothing is known yet, and completing it stamps the
+        // store current.
+        let service = spawn_service(FixtureReader::open(), &scratch);
+        service.request(root.clone());
+        poll_until_complete(&service, &root);
+        assert_eq!(
+            scratch.queries.metadata_version().unwrap(),
+            METADATA_VERSION,
+            "a completed scan stamps the version forward"
+        );
+
+        // The store falls behind the binary — what a library indexed before
+        // the column existed really is.
+        scratch
+            .mutations
+            .stamp_metadata_version(0)
+            .expect("falling behind is a plain write");
+        wipe_gain(&mut scratch);
+
+        // Lagging: the known paths are re-read and the album gain lands.
+        let service = spawn_service(AlbumGainReader, &scratch);
+        service.request(root.clone());
+        poll_until_complete(&service, &root);
+        assert_eq!(
+            stored_gain(&scratch, "song_000.mp3"),
+            Some(BACKFILL_ALBUM_GAIN),
+            "a lagging store re-reads a path it already knows"
+        );
+        assert_eq!(
+            scratch.queries.metadata_version().unwrap(),
+            METADATA_VERSION,
+            "the completed backfill scan stamps itself away"
+        );
+
+        // Current: the same files are skipped again, so the cost is paid once.
+        wipe_gain(&mut scratch);
+        let service = spawn_service(AlbumGainReader, &scratch);
+        service.request(root.clone());
+        poll_until_complete(&service, &root);
+        assert_eq!(
+            stored_gain(&scratch, "song_000.mp3"),
+            None,
+            "a current store goes back to skipping known paths — the re-read is not permanent"
+        );
+        assert_eq!(
+            stored_gain(&scratch, "song_001.mp3"),
+            None,
+            "every track of the lagging scan is skipped once the version is current"
+        );
+    }
+
+    #[test]
+    fn test_a_cancelled_scan_leaves_the_metadata_version_lagging() {
+        // The stamp is the promise that the work is finished. A scan that
+        // stops early must not make it, or the next scan would skip the
+        // tracks the interrupted one never reached.
+        let scratch = ScratchStore::new();
+        // Three batches, so the worker can be frozen inside the second and
+        // still have a batch boundary left to see the cancellation at.
+        let (_dir, root) = seed_audio_dir("cancelled_backfill", 25);
+        let (reader, gate) = FixtureReader::gated_after(10);
+        let service = spawn_service(reader, &scratch);
+        service.request(root.clone());
+        poll_until(&service, |outcomes| {
+            outcomes.iter().any(|o| {
+                matches!(
+                    o,
+                    ScanOutcome::Progress {
+                        files_found: 10,
+                        ..
+                    }
+                )
+            })
+        });
+        service.cancel();
+        gate.store(true, Ordering::SeqCst);
+        let start = Instant::now();
+        while service.is_scanning(&root) && start.elapsed() < TIMEOUT {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        assert_ne!(
+            scratch.queries.metadata_version().unwrap(),
+            riff_persistence::track::METADATA_VERSION,
+            "a cancelled scan must leave the store behind so the next scan finishes the job"
+        );
+    }
 }
 
 // --- Audio Engine loop tests -------------------------------------------------
@@ -4386,6 +4551,10 @@ mod audio_engine_tests {
     impl LibraryQueryStore for FakeLibraryStore {
         fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
             Ok(self.tracks.get(id).cloned())
+        }
+
+        fn metadata_version(&self) -> Result<u32, StoreError> {
+            Ok(riff_persistence::track::METADATA_VERSION)
         }
 
         fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, StoreError> {
@@ -5250,6 +5419,10 @@ mod tag_edit_service_tests {
             self.0.lock().unwrap().get_track(id)
         }
 
+        fn metadata_version(&self) -> Result<u32, StoreError> {
+            Ok(riff_persistence::track::METADATA_VERSION)
+        }
+
         fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, StoreError> {
             Ok(Vec::new())
         }
@@ -5510,6 +5683,10 @@ mod tag_edit_service_tests {
     impl riff_backend::app::store::LibraryMutationStore for SharedMutations {
         fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, StoreError> {
             self.0.lock().unwrap().apply_scan_batch(tracks)
+        }
+
+        fn stamp_metadata_version(&mut self, _version: u32) -> Result<(), StoreError> {
+            Ok(())
         }
 
         fn record_track_played(
@@ -6368,6 +6545,382 @@ mod cover_service_tests {
             "a suppressed request must not produce a result"
         );
     }
+
+    // --- Folder cover requests (folder-covers issue 02) ---------------------
+
+    #[test]
+    fn test_folder_cover_request_never_reads_audio_tags() {
+        // The "Read embedded artwork" setting is ON and the reader would hand
+        // back an embedded payload: a folder request must still open no tags,
+        // because the toggle governs tag reads and a directory's cover is a
+        // plain image file.
+        let dir = tempfile::tempdir().unwrap();
+        let h = spawn_service(
+            CoverSource::Embedded(vec![1, 2, 3].into()),
+            Ok(Some(test_image())),
+        );
+
+        h.service.request_folder(dir.path(), SMALL);
+
+        let results = poll_until(&h.service, 1);
+        assert_eq!(results.len(), 1, "the folder cover is delivered");
+        assert_eq!(
+            results[0].0,
+            TrackId::from_path(dir.path()),
+            "a folder reports back under its own directory path"
+        );
+        assert_eq!(results[0].1, SMALL);
+        assert!(results[0].2.is_some(), "the folder's art arrives");
+        assert_eq!(
+            h.reader_calls.load(Ordering::SeqCst),
+            0,
+            "a folder request must not open a track's tags"
+        );
+        assert_eq!(h.loader_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_artless_folder_is_negative_cached_by_its_own_directory() {
+        let h = spawn_service(CoverSource::None, Ok(None));
+        let covered = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+
+        h.service.request_folder(covered.path(), SMALL);
+        let results = poll_until(&h.service, 1);
+        assert_eq!(results.len(), 1, "the artless answer is still delivered");
+        assert!(results[0].2.is_none());
+        assert_eq!(h.loader_calls.load(Ordering::SeqCst), 1);
+
+        // The repeat is suppressed at intake: no second probe of the directory.
+        h.service.request_folder(covered.path(), SMALL);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            h.loader_calls.load(Ordering::SeqCst),
+            1,
+            "the negative cache did not suppress the repeat folder probe"
+        );
+        assert!(
+            h.service.poll().is_empty(),
+            "a suppressed folder request must not produce a second result"
+        );
+
+        // The entry belongs to THAT directory: a different folder is a
+        // different identity and resolves on its own.
+        h.service.request_folder(other.path(), SMALL);
+        assert_eq!(
+            poll_until(&h.service, 1).len(),
+            1,
+            "an unrelated folder is not suppressed by another folder's miss"
+        );
+        assert_eq!(h.loader_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_same_folder_at_a_different_size_is_a_separate_job() {
+        // Folders share the `(identity, size)` dedup key with tracks: the
+        // duplicate box is suppressed while the first is in flight, but another
+        // box of the same folder is its own job.
+        let (gate_tx, gate_rx) = crossbeam_channel::unbounded();
+        let h = spawn_with_gate(CoverSource::None, Ok(Some(test_image())), Some(gate_rx));
+        let dir = tempfile::tempdir().unwrap();
+
+        h.service.request_folder(dir.path(), SMALL);
+        let start = Instant::now();
+        while h.loader_calls.load(Ordering::SeqCst) < 1 && start.elapsed() < TIMEOUT {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(h.loader_calls.load(Ordering::SeqCst), 1);
+
+        h.service.request_folder(dir.path(), SMALL);
+        h.service.request_folder(dir.path(), LARGE);
+
+        let _ = gate_tx.send(());
+        let _ = gate_tx.send(());
+
+        let results = poll_until(&h.service, 2);
+        let mut sizes: Vec<RequestedSize> = results.iter().map(|(_, size, _)| *size).collect();
+        sizes.sort_by_key(|s| s.width);
+        assert_eq!(sizes, vec![SMALL, LARGE], "one result per distinct box");
+        assert_eq!(
+            h.loader_calls.load(Ordering::SeqCst),
+            2,
+            "the duplicate box was suppressed; the other box was its own job"
+        );
+    }
+}
+
+// The Cover Resolver's own resolution rules, exercised at its public seam
+// (`resolve`) over real tempdir fixtures. The filesystem fallback is one probe
+// over one ordered candidate list, and every part of that contract is pinned
+// here: the order, the case-insensitive match, the on-disk spelling a hit
+// carries, and both ways a directory yields no art. Together they are what
+// makes the shared-probe extraction (folder-covers issue 01) a refactor with a
+// safety net rather than a hope — the Cover Service tests all resolve paths
+// that do not exist on disk, so they never reach the walk.
+mod cover_resolver_tests {
+    use super::*;
+    use riff_backend::app::CoverResolver;
+    use riff_backend::domain::CoverSource;
+    use riff_library::app::errors::LibraryError;
+    use riff_library::app::traits::{
+        AudioFormatInfo, CoverLoader, DecodedCover, MetadataReader, RequestedSize,
+    };
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// Any box will do: the resolver only ever *names* the source, and the
+    /// size travels through to the loader untouched.
+    const BOX: RequestedSize = RequestedSize {
+        width: 56,
+        height: 56,
+    };
+
+    /// [`MetadataReader`] fake answering "no embedded art" for every track, so
+    /// each resolve under test continues on to the filesystem fallback.
+    struct NoEmbeddedArt {
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl MetadataReader for NoEmbeddedArt {
+        fn read_cover_source(&self, _path: &Path) -> Result<CoverSource, LibraryError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok(CoverSource::None)
+        }
+
+        fn read_all(
+            &self,
+            _path: &Path,
+        ) -> Result<(TrackMetadata, Duration, CoverSource, AudioFormatInfo), LibraryError> {
+            Err(LibraryError::Io(
+                "not exercised by CoverResolver".to_string(),
+            ))
+        }
+    }
+
+    /// [`CoverLoader`] fake recording every [`CoverSource`] it was handed. The
+    /// source is the resolver's entire output — decoding is the adapter's
+    /// business — so recording it is what pins *which* file the probe chose.
+    struct RecordingLoader {
+        seen: Arc<Mutex<Vec<CoverSource>>>,
+    }
+
+    impl CoverLoader for RecordingLoader {
+        fn load_cover(
+            &self,
+            source: &CoverSource,
+            _size: RequestedSize,
+        ) -> Result<Option<DecodedCover>, LibraryError> {
+            self.seen.lock().unwrap().push(source.clone());
+            Ok(None)
+        }
+    }
+
+    /// Resolve a track parked at `track_in` with embedded art allowed but
+    /// absent, returning the one source the loader was asked for.
+    fn fallback_source(track_in: &Path) -> CoverSource {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let resolver = CoverResolver::new(
+            Box::new(NoEmbeddedArt {
+                reads: Arc::new(AtomicUsize::new(0)),
+            }),
+            Box::new(RecordingLoader {
+                seen: Arc::clone(&seen),
+            }),
+        );
+        let resolved = resolver
+            .resolve(track_in, true, BOX)
+            .expect("a fallback probe must not fail the resolve");
+        assert!(resolved.is_none(), "no source here has pixels to decode");
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.len(),
+            1,
+            "one resolve hands the loader exactly one source"
+        );
+        seen[0].clone()
+    }
+
+    /// Create `<dir>/<name>` as an ordinary file and return its path.
+    fn touch(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, b"placeholder bytes").unwrap();
+        path
+    }
+
+    /// Assert the resolve landed on `name` in `dir`, and — just as load-bearing
+    /// — that the path it reports is the one actually on disk.
+    fn assert_picked(source: &CoverSource, dir: &Path, name: &str, why: &str) {
+        let expected = dir.join(name);
+        let actual = match source {
+            CoverSource::Filesystem(path) => path.clone(),
+            other => panic!("{why}, but the probe reported {other:?}"),
+        };
+        assert_eq!(
+            actual, expected,
+            "{why}, and a hit carries the on-disk entry's own path"
+        );
+    }
+
+    fn assert_no_art(source: &CoverSource, why: &str) {
+        assert!(
+            matches!(source, CoverSource::None),
+            "{why}, but got {source:?}"
+        );
+    }
+
+    #[test]
+    fn test_filesystem_fallback_reports_no_art_for_a_directory_without_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let track = touch(dir.path(), "01 - track.mp3");
+        touch(dir.path(), "notes.txt");
+        touch(dir.path(), "Cover.AVI");
+        assert_no_art(
+            &fallback_source(&track),
+            "a directory holding no candidate name ends in the no-art source",
+        );
+    }
+
+    #[test]
+    fn test_filesystem_fallback_reads_a_candidate_in_whatever_case_the_file_uses() {
+        let dir = tempfile::tempdir().unwrap();
+        let track = touch(dir.path(), "01 - track.mp3");
+        touch(dir.path(), "COVER.JPG");
+        // One assertion for the case-insensitive match and a second, from the
+        // same call, for the spelling reported back: returning the lowercased
+        // candidate instead would name a file that does not exist on a
+        // case-sensitive filesystem.
+        assert_picked(
+            &fallback_source(&track),
+            dir.path(),
+            "COVER.JPG",
+            "the probe matches case-insensitively",
+        );
+    }
+
+    #[test]
+    fn test_filesystem_fallback_picks_the_earliest_candidate_however_files_arrive() {
+        let dir = tempfile::tempdir().unwrap();
+        let track = touch(dir.path(), "01 - track.mp3");
+        // Created alphabetically-first `album.jpg` so an implementation that
+        // took the first file it *saw* would pick that; the candidate list puts
+        // `cover` first, and an album carrying both must still show its cover.
+        touch(dir.path(), "album.jpg");
+        touch(dir.path(), "front.jpg");
+        touch(dir.path(), "folder.jpg");
+        touch(dir.path(), "cover.jpg");
+        assert_picked(
+            &fallback_source(&track),
+            dir.path(),
+            "cover.jpg",
+            "candidate order beats directory order",
+        );
+    }
+
+    #[test]
+    fn test_filesystem_fallback_orders_the_rest_of_the_candidate_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let track = touch(dir.path(), "01 - track.mp3");
+        // The tail of the list, with the head absent: `folder` before `album`
+        // before `front`, none of which is the alphabetical winner.
+        touch(dir.path(), "front.jpg");
+        touch(dir.path(), "album.png");
+        touch(dir.path(), "folder.jpeg");
+        assert_picked(
+            &fallback_source(&track),
+            dir.path(),
+            "folder.jpeg",
+            "the second candidate wins once the first is missing",
+        );
+    }
+
+    #[test]
+    fn test_filesystem_fallback_ignores_a_directory_named_like_a_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let track = touch(dir.path(), "01 - track.mp3");
+        std::fs::create_dir(dir.path().join("cover.jpg")).unwrap();
+        assert_no_art(
+            &fallback_source(&track),
+            "only plain files are candidates; a subdirectory named cover.jpg is not art",
+        );
+    }
+
+    #[test]
+    fn test_filesystem_fallback_reports_no_art_when_the_directory_cannot_be_read() {
+        // The track sits under a directory that does not exist: `read_dir`
+        // fails, and the walk must go quiet rather than error — a track whose
+        // folder has vanished is an artless track, not a failed resolve.
+        let missing = std::env::temp_dir().join("riff-cover-resolver-absent-dir");
+        let track = missing.join("01 - track.mp3");
+        assert_no_art(
+            &fallback_source(&track),
+            "an unreadable directory is an artless track, not a failed resolve",
+        );
+    }
+
+    // --- Folder resolution (folder-covers issue 02) -------------------------
+
+    /// Resolve `dir` *as a folder*, returning the source the loader was handed
+    /// and how many times the tags were opened on the way.
+    fn folder_probe(dir: &Path) -> (CoverSource, usize) {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let resolver = CoverResolver::new(
+            Box::new(NoEmbeddedArt {
+                reads: Arc::clone(&reads),
+            }),
+            Box::new(RecordingLoader {
+                seen: Arc::clone(&seen),
+            }),
+        );
+        let resolved = resolver
+            .resolve_folder(dir, BOX)
+            .expect("a folder with no cover is an artless answer, not an error");
+        assert!(resolved.is_none(), "the fake loader has no pixels");
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "one folder probe, one load attempt");
+        (seen[0].clone(), reads.load(Ordering::SeqCst))
+    }
+
+    #[test]
+    fn test_folder_cover_is_the_directorys_own_cover_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // A track in the directory would fall back to `cover.jpg`; the folder
+        // row must read the directory it IS, not any track inside it.
+        touch(dir.path(), "01 - track.mp3");
+        let (source, _) = folder_probe(dir.path());
+        assert_no_art(&source, "a bare directory has no folder cover");
+
+        touch(dir.path(), "Cover.PNG");
+        let (source, reads) = folder_probe(dir.path());
+        assert_picked(
+            &source,
+            dir.path(),
+            "Cover.PNG",
+            "the folder probe matches its candidate case-insensitively",
+        );
+        assert_eq!(
+            reads, 0,
+            "a folder cover is a plain image file: no audio tags are ever opened"
+        );
+    }
+
+    #[test]
+    fn test_folder_cover_list_is_narrower_than_the_tracks() {
+        let dir = tempfile::tempdir().unwrap();
+        // Every name a track would accept, none a folder shows. The folder tile
+        // is the directory's own `cover.*`, so a `folder.jpg` sidecar — which
+        // IS that album's cover for every track inside — stays invisible here.
+        for name in ["folder.jpg", "album.jpg", "front.png", "cover.gif"] {
+            touch(dir.path(), name);
+        }
+        let (source, _) = folder_probe(dir.path());
+        assert_no_art(
+            &source,
+            "only cover.jpg / cover.jpeg / cover.png are folder covers",
+        );
+    }
 }
 
 /// The sixth Session Projection: user playlists read through the seam
@@ -6668,6 +7221,10 @@ mod playback_coordinator_tests {
     impl LibraryMutationStore for SharedMutations {
         fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, StoreError> {
             self.0.lock().unwrap().apply_scan_batch(tracks)
+        }
+
+        fn stamp_metadata_version(&mut self, _version: u32) -> Result<(), StoreError> {
+            Ok(())
         }
 
         fn record_track_played(
@@ -7176,6 +7733,10 @@ mod browse_page_seam_tests {
                 id: &riff_backend::domain::TrackId,
             ) -> Result<Option<Track>, StoreError> {
                 self.0.lock().unwrap().get_track(id)
+            }
+
+            fn metadata_version(&self) -> Result<u32, StoreError> {
+                Ok(riff_persistence::track::METADATA_VERSION)
             }
             fn tracks_window(&self, o: usize, l: usize) -> Result<Vec<Track>, StoreError> {
                 self.0.lock().unwrap().tracks_window(o, l)

@@ -268,7 +268,7 @@ fn track_list(
                         selected: track.selected,
                         now_playing: track.now_playing,
                         playing: false,
-                        disclosure: None,
+                        art_slot: false,
                     },
                 );
                 if row.response.clicked() {

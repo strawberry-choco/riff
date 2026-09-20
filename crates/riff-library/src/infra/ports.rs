@@ -30,6 +30,11 @@ pub trait MetadataReader: Send + Sync {
 ///
 /// Pure application-layer DTO: only `Some` fields are written, `None` fields
 /// leave the existing tag value untouched. Contains no infrastructure types.
+///
+/// The field list is the editable surface, and it is deliberately closed:
+/// `ReplayGain` has no place here because a gain is measured from the audio,
+/// not typed by a listener. riff reads those tags and never writes them, so
+/// the values the Detail Panel shows are always the file's own.
 #[derive(Debug, Clone, Default)]
 pub struct TagEdit {
     pub title: Option<String>,
@@ -42,8 +47,6 @@ pub struct TagEdit {
     pub year: Option<u32>,
     pub composer: Option<String>,
     pub comment: Option<String>,
-    pub replaygain_track_gain: Option<f32>,
-    pub replaygain_track_peak: Option<f32>,
 }
 
 impl TagEdit {
@@ -60,8 +63,6 @@ impl TagEdit {
             && self.year.is_none()
             && self.composer.is_none()
             && self.comment.is_none()
-            && self.replaygain_track_gain.is_none()
-            && self.replaygain_track_peak.is_none()
     }
 }
 
@@ -165,12 +166,6 @@ impl TagEdit {
         }
         if let Some(ref comment) = self.comment {
             metadata.comment = Some(comment.clone());
-        }
-        if let Some(gain) = self.replaygain_track_gain {
-            metadata.replaygain_track_gain = Some(gain);
-        }
-        if let Some(peak) = self.replaygain_track_peak {
-            metadata.replaygain_track_peak = Some(peak);
         }
     }
 }

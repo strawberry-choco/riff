@@ -6,7 +6,7 @@ use crate::infra::ports::{CoverLoader, DecodedCover, MetadataReader, RequestedSi
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use riff_persistence::track::TrackId;
 use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -42,10 +42,16 @@ pub fn lru_insert<K: PartialEq>(keys: &mut Vec<K>, key: K, cap: usize) -> Vec<K>
 ///
 /// A request names the display box it wants, and the result reports it back so
 /// the caller can file the pixels under the right key. The worker keeps no
-/// decoded cache between requests, so the same track at two sizes is two
+/// decoded cache between requests, so the same subject at two sizes is two
 /// independent jobs — a re-read and a re-decode each.
 pub trait Covers: Send {
     fn request(&self, track_id: TrackId, path: PathBuf, size: RequestedSize);
+    /// Ask for the cover art of a directory *itself* — the Folders tree's row
+    /// tile. The identity is the directory path, and the resolution never
+    /// opens an audio file, so the Settings "Read embedded artwork" toggle does
+    /// not gate this request: it governs tag reads, and a plain image file has
+    /// no tags.
+    fn request_folder(&self, folder: &Path, size: RequestedSize);
     fn poll(&self) -> Vec<(TrackId, RequestedSize, Option<DecodedCover>)>;
 }
 
@@ -55,11 +61,20 @@ pub trait Covers: Send {
 /// root binds the Application Store's scalar settings behind this closure.
 pub type CoverPolicy = Box<dyn Fn() -> bool + Send>;
 
-/// A request accepted by the worker: the track, where to read it, and the box
-/// it is wanted at.
-type Request = (TrackId, PathBuf, RequestedSize);
+/// What a request is for: a track's own file, or a directory's own cover file.
+/// The two are resolved by different rules — only a track can carry embedded
+/// art — but they share one worker, one in-flight set and one negative cache.
+enum CoverSubject {
+    Track(PathBuf),
+    Folder(PathBuf),
+}
 
-/// A delivered result: the track, the box it was asked for, and the pixels.
+/// A request accepted by the worker: what it is for, where to read it, and the
+/// box it is wanted at.
+type Request = (TrackId, CoverSubject, RequestedSize);
+
+/// A delivered result: the subject's identity, the box it was asked for, and
+/// the pixels.
 type Resolution = (TrackId, RequestedSize, Option<DecodedCover>);
 
 /// Front-end of the Cover Service.
@@ -99,7 +114,17 @@ impl CoverService {
 
 impl Covers for CoverService {
     fn request(&self, track_id: TrackId, path: PathBuf, size: RequestedSize) {
-        let _ = self.request_tx.send((track_id, path, size));
+        let _ = self
+            .request_tx
+            .send((track_id, CoverSubject::Track(path), size));
+    }
+
+    fn request_folder(&self, folder: &Path, size: RequestedSize) {
+        let folder = folder.to_path_buf();
+        let identity = TrackId::from_path(&folder);
+        let _ = self
+            .request_tx
+            .send((identity, CoverSubject::Folder(folder), size));
     }
 
     fn poll(&self) -> Vec<Resolution> {
@@ -119,11 +144,17 @@ pub struct CoverWorker {
     /// The read-embedded-artwork policy, evaluated fresh per resolution.
     policy: CoverPolicy,
     backlog: VecDeque<Request>,
-    /// In-flight jobs, keyed by track *and* size: the same track wanted at two
-    /// sizes is two jobs, because nothing decoded is retained between them.
+    /// In-flight jobs, keyed by identity *and* size: the same subject wanted at
+    /// two sizes is two jobs, because nothing decoded is retained between them.
     pending: HashSet<(TrackId, RequestedSize)>,
-    /// Tracks resolved as having no artwork. Keyed by track alone: an artless
-    /// track is artless at every size, so one entry suppresses all of them.
+    /// Subjects resolved as having no artwork. Keyed by identity alone: an
+    /// artless subject is artless at every size, so one entry suppresses all of
+    /// them.
+    ///
+    /// Tracks and folders share this set safely because their identities can
+    /// never be equal: a track identity is always a file's path and a folder
+    /// identity always a directory's, and one filesystem holds at most one of
+    /// those under any given name.
     negative: Vec<TrackId>,
     /// Cooperative stop request from the Composition Root; see
     /// [`Self::next_accepted`].
@@ -135,21 +166,34 @@ impl CoverWorker {
     /// Root asks the worker to stop. Spawns nothing; run this on the
     /// dedicated cover thread.
     pub fn run(mut self) {
-        while let Some((track_id, path, size)) = self.next_accepted() {
-            let read_embedded = (self.policy)();
-            let result = match self.resolver.resolve(&path, read_embedded, size) {
+        while let Some((identity, subject, size)) = self.next_accepted() {
+            // The embedded-art policy is consulted on the track arm only: a
+            // directory's cover is a plain image file, so there is no tag read
+            // for the toggle to gate.
+            let (result, path) = match subject {
+                CoverSubject::Track(path) => {
+                    let read_embedded = (self.policy)();
+                    let result = self.resolver.resolve(&path, read_embedded, size);
+                    (result, path)
+                }
+                CoverSubject::Folder(path) => {
+                    let result = self.resolver.resolve_folder(&path, size);
+                    (result, path)
+                }
+            };
+            let result = match result {
                 Ok(resolved) => resolved,
                 Err(e) => {
                     tracing::warn!("Cover resolution failed for {:?}: {}", path, e);
                     None
                 }
             };
-            self.pending.remove(&(track_id.clone(), size));
+            self.pending.remove(&(identity.clone(), size));
             if result.is_none() {
-                let _ = lru_insert(&mut self.negative, track_id.clone(), COVER_CACHE_CAP);
+                let _ = lru_insert(&mut self.negative, identity.clone(), COVER_CACHE_CAP);
             }
-            self.absorb_raced((&track_id, size));
-            let _ = self.result_tx.send((track_id, size, result));
+            self.absorb_raced((&identity, size));
+            let _ = self.result_tx.send((identity, size, result));
         }
     }
 
@@ -190,9 +234,9 @@ impl CoverWorker {
         }
     }
 
-    /// Drop requests the worker raced with the resolve that just completed:
-    /// an identical `(track, size)` duplicate was already served by it. A
-    /// different size for the same track is a separate job and stays queued.
+    /// Drop requests the worker raced with the resolve that just completed: an
+    /// identical `(identity, size)` duplicate was already served by it. A
+    /// different size for the same subject is a separate job and stays queued.
     fn absorb_raced(&mut self, just_resolved: (&TrackId, RequestedSize)) {
         while let Ok(request) = self.request_rx.try_recv() {
             if (&request.0, request.2) != just_resolved {

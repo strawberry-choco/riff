@@ -58,7 +58,7 @@ pub fn create_tray(
     menu.append(&sep2)?;
     menu.append(&quit)?;
 
-    let icon = build_default_icon()?;
+    let icon = build_riff_icon()?;
 
     let tray = TrayIconBuilder::new()
         .with_tooltip("riff")
@@ -135,20 +135,11 @@ pub fn update_tooltip(tray: &TrayIcon, text: &str) {
     let _ = tray.set_tooltip(Some(text));
 }
 
+/// The tray glyph: riff's brand mark — the same equalizer the titlebar paints,
+/// rasterized through the shell's icon pipeline by [`super::chrome::icon_rgba`].
 #[cfg(not(target_os = "linux"))]
-fn build_default_icon() -> Result<Icon, Box<dyn std::error::Error>> {
-    const SIZE: u32 = 32;
-    let side = SIZE as usize;
-    let mut rgba = vec![0u8; side * side * 4];
-    for y in 0..side {
-        for x in 0..side {
-            let idx = (y * side + x) * 4;
-            rgba[idx] = 64;
-            rgba[idx + 1] = 128;
-            rgba[idx + 2] = 192;
-            rgba[idx + 3] = 255;
-        }
-    }
-    let icon = Icon::from_rgba(rgba, SIZE, SIZE)?;
-    Ok(icon)
+fn build_riff_icon() -> Result<Icon, Box<dyn std::error::Error>> {
+    let rgba = crate::ui::chrome::icon_rgba().ok_or("the brand mark failed to rasterize")?;
+    let px = crate::ui::chrome::APP_ICON_PX;
+    Ok(Icon::from_rgba(rgba, px, px)?)
 }

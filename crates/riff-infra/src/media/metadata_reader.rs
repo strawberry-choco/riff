@@ -12,6 +12,10 @@ use std::time::Duration;
 /// bare `"3.21"` into dB. Strips a trailing `dB` (case-insensitive, without
 /// lowercasing the whole value), trims, and parses; malformed values yield
 /// `None`.
+///
+/// The suffixed form is written by the tooling that measures the gain — riff
+/// reads `ReplayGain` and never writes it, so this parser is the only place
+/// the ` dB` contract is exercised (see the seeded-file reader tests).
 pub fn parse_replaygain_gain(s: &str) -> Option<f32> {
     let trimmed = s.trim();
     let bytes = trimmed.as_bytes();
@@ -133,6 +137,11 @@ impl LoftyMetadataReader {
         metadata.replaygain_track_peak = tag
             .get_string(ItemKey::ReplayGainTrackPeak)
             .and_then(|s| s.trim().parse::<f32>().ok());
+        // Album gain goes through the gain helper too: it carries the same
+        // ` dB` suffix contract, unlike the bare-ratio peak.
+        metadata.replaygain_album_gain = tag
+            .get_string(ItemKey::ReplayGainAlbumGain)
+            .and_then(parse_replaygain_gain);
 
         metadata
     }

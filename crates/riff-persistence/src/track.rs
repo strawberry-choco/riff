@@ -85,6 +85,18 @@ impl SmartPlaylistKind {
     }
 }
 
+/// Metadata fields are read once and then skipped by the scan's freshness
+/// filter, so a tag added to [`TrackMetadata`] would never reach a library
+/// indexed before it existed. Bump this whenever the shape of stored
+/// metadata moves forward: an Application Store recording a lower version
+/// re-reads every known Track on its next completed scan, once, and the scan
+/// stamps the version back up.
+///
+/// The number describes the metadata shape and the columns that hold it, not
+/// any user preference, so it lives beside the struct it versions rather than
+/// with Settings.
+pub const METADATA_VERSION: u32 = 1;
+
 /// Metadata extracted from an audio file.
 ///
 /// Note: derives `PartialEq` but not `Eq` — the `ReplayGain` fields are
@@ -108,6 +120,14 @@ pub struct TrackMetadata {
     /// `REPLAYGAIN_TRACK_PEAK` tag. Used to cap applied gain so amplified
     /// samples cannot clip.
     pub replaygain_track_peak: Option<f32>,
+    /// `ReplayGain` album gain in dB (e.g. `-7.12`), from the
+    /// `REPLAYGAIN_ALBUM_GAIN` tag. `None` when the file carries no tag.
+    ///
+    /// Displayed, never applied — playback leveling uses the track pair
+    /// above, and album leveling does not ship. Every Track of an Album
+    /// carries the same value, because the tag lives on each of the Album's
+    /// files rather than on the Album itself.
+    pub replaygain_album_gain: Option<f32>,
 }
 
 impl TrackMetadata {

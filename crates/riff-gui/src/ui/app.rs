@@ -607,7 +607,7 @@ impl RiffApp {
                 selected: is_selected,
                 now_playing: is_current,
                 playing: is_current && playing,
-                disclosure: None,
+                art_slot: false,
             },
         );
         if row.response.clicked() {
@@ -1465,7 +1465,7 @@ fn tag_rows(tracks: &[Track]) -> Vec<crate::ui::selection::TagRow> {
 /// The compact track readout: title, artist, album, metadata, and the
 /// single-track batch the Play/Queue actions start.
 fn track_inspector(track: riff_backend::domain::Track) -> InspectorContent {
-    let details = vec![
+    let mut details = vec![
         crate::ui::selection::SelectionDetail {
             label: "Plays".to_string(),
             value: track.play_count.to_string(),
@@ -1485,6 +1485,25 @@ fn track_inspector(track: riff_backend::domain::Track) -> InspectorContent {
             value: track.file_path.to_string_lossy().to_string(),
         },
     ];
+    // ReplayGain is a read-only fact the file carries: the tag editor cannot
+    // express it, and the album value is never applied. A file without the
+    // tag grows no row — the DETAILS block has no `(none)` state (that
+    // convention belongs to `tag_rows`).
+    if let Some(gain) = track.metadata.replaygain_track_gain {
+        details.push(crate::ui::selection::SelectionDetail {
+            label: "ReplayGain (track)".to_string(),
+            // `.2` is load-bearing: the f32 widens into the store's REAL
+            // column and narrows back, so an unformatted print is
+            // `-6.540000057220459`.
+            value: format!("{gain:+.2} dB"),
+        });
+    }
+    if let Some(gain) = track.metadata.replaygain_album_gain {
+        details.push(crate::ui::selection::SelectionDetail {
+            label: "ReplayGain (album)".to_string(),
+            value: format!("{gain:+.2} dB"),
+        });
+    }
     InspectorContent {
         visible: true,
         kind: InspectorKind::Track,
@@ -1513,7 +1532,7 @@ fn album_inspector(views: &mut SessionViews, artist: &str, title: &str) -> Inspe
     // table (the same source the detail column's header uses).
     let albums = views.artist_albums(artist);
     let album = albums.iter().find(|album| album.title == title);
-    let details = vec![
+    let mut details = vec![
         crate::ui::selection::SelectionDetail {
             label: "Artist".to_string(),
             value: artist.to_string(),
@@ -1552,6 +1571,18 @@ fn album_inspector(views: &mut SessionViews, artist: &str, title: &str) -> Inspe
                 .unwrap_or_default(),
         },
     ];
+    // One album has one album gain, so the first Track that carries it is the
+    // honest read — there is no `(different)` state to reach for here. Absent
+    // on every Track, no row.
+    if let Some(gain) = tracks
+        .iter()
+        .find_map(|track| track.metadata.replaygain_album_gain)
+    {
+        details.push(crate::ui::selection::SelectionDetail {
+            label: "ReplayGain".to_string(),
+            value: format!("{gain:+.2} dB"),
+        });
+    }
     InspectorContent {
         visible: true,
         kind: InspectorKind::Album,
@@ -2177,7 +2208,7 @@ impl RiffApp {
                     selected: library_section_live && library.library_section == section,
                     now_playing: false,
                     playing: false,
-                    disclosure: None,
+                    art_slot: false,
                 },
             );
             if row.response.clicked() {
@@ -2209,7 +2240,7 @@ impl RiffApp {
                 selected: folder_section_live,
                 now_playing: false,
                 playing: false,
-                disclosure: None,
+                art_slot: false,
             },
         );
         if folders_row.response.clicked() {
@@ -2317,7 +2348,7 @@ impl RiffApp {
                     selected: self.smart_playlist_view == Some(kind),
                     now_playing: false,
                     playing: false,
-                    disclosure: None,
+                    art_slot: false,
                 },
             );
             if row.response.clicked() {
@@ -2860,7 +2891,7 @@ impl RiffApp {
                 selected: is_selected,
                 now_playing: is_current,
                 playing: is_current && playing,
-                disclosure: None,
+                art_slot: false,
             },
         );
         let favorite_toggled = outcome.favorite_toggled;
@@ -3063,6 +3094,21 @@ impl RiffApp {
         let id = egui::Id::new(("riff_sidebar_folder", path.as_os_str()));
         let mut collapsing =
             CollapsingState::load_with_default_open(ui.ctx(), id, contains_current || is_selected);
+        let glyph = if collapsing.is_open() {
+            Icon::FolderOpen
+        } else {
+            Icon::Folder
+        };
+
+        // The folder's own cover, if it has one, fills the row's leading art
+        // slot and the glyph goes away — art replaces it rather than sitting
+        // beside it, so an uncovered row keeps today's geometry exactly.
+        let cover = folder_cover_intent(
+            &self.cover_textures,
+            self.covers.as_ref(),
+            path,
+            COVER_THUMB,
+        );
 
         let row = sidebar::tree_row(
             ui,
@@ -3070,12 +3116,8 @@ impl RiffApp {
             &palette,
             TreeRow {
                 indent_level: level,
-                icon: Some(if collapsing.is_open() {
-                    Icon::FolderOpen
-                } else {
-                    Icon::Folder
-                }),
-                cover: None,
+                icon: cover.is_none().then_some(glyph),
+                cover,
                 label: &label,
                 count: None,
                 meta: None,
@@ -3083,7 +3125,7 @@ impl RiffApp {
                 selected: is_selected,
                 now_playing: false,
                 playing: false,
-                disclosure: Some(collapsing.is_open()),
+                art_slot: true,
             },
         );
 
@@ -3178,6 +3220,34 @@ pub fn request_cover_intent<S: std::hash::BuildHasher>(
     if !textures.contains_key(&cover_cache_key(&track_id.0, size)) {
         covers.request(track_id, path, size);
     }
+}
+
+/// The Folders tree's half of the same responsibility (ADR 0006): a folder row
+/// wants the cover art of the directory it *is*, and gets it in place of the
+/// folder glyph. Free function like [`request_cover_intent`] so tests drive the
+/// production path without a window.
+///
+/// A cache hit is the texture to paint; a miss sends the request and answers
+/// `None`, which is what keeps the row's glyph for this frame. The miss does
+/// **not** fall back to the generated music-note placeholder the artless track
+/// rows get — a folder with no cover of its own is an ordinary folder, not an
+/// artless album.
+///
+/// The identity is the directory path, and the service files the decoded result
+/// under exactly that key, so [`cache_polled_covers`] delivers folder art with
+/// no further plumbing.
+pub fn folder_cover_intent<S: std::hash::BuildHasher>(
+    textures: &std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
+    covers: &dyn Covers,
+    folder: &Path,
+    size: RequestedSize,
+) -> Option<egui::TextureId> {
+    let identity = folder.to_string_lossy().to_string();
+    if let Some(texture) = textures.get(&cover_cache_key(&identity, size)) {
+        return Some(texture.id());
+    }
+    covers.request_folder(folder, size);
+    None
 }
 
 /// Apply drained backend events to session state (issue 01 seam fix).

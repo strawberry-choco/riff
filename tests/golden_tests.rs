@@ -261,7 +261,7 @@ mod tests {
                         selected: false,
                         now_playing: false,
                         playing: false,
-                        disclosure: None,
+                        art_slot: false,
                     },
                 );
             });
@@ -520,7 +520,7 @@ mod tests {
                             selected,
                             now_playing: false,
                             playing: false,
-                            disclosure: None,
+                            art_slot: false,
                         },
                     );
                 }
@@ -551,7 +551,7 @@ mod tests {
                             selected: i == 1,
                             now_playing: false,
                             playing: false,
-                            disclosure: None,
+                            art_slot: false,
                         },
                     );
                 }
@@ -584,7 +584,7 @@ mod tests {
                         selected: false,
                         now_playing: true,
                         playing,
-                        disclosure: None,
+                        art_slot: false,
                     },
                 );
                 sidebar::tree_row(
@@ -602,7 +602,7 @@ mod tests {
                         selected: false,
                         now_playing: false,
                         playing: false,
-                        disclosure: None,
+                        art_slot: false,
                     },
                 );
 
@@ -835,7 +835,7 @@ mod tests {
                     selected,
                     now_playing,
                     playing: false,
-                    disclosure: None,
+                    art_slot: false,
                 },
             );
         }
@@ -1970,12 +1970,12 @@ mod tests {
         Track,
     }
 
-    /// One row of the folder-tree golden: the copy, its indent level, its
-    /// disclosure state (folders only), and its selection state.
+    /// One row of the folder-tree golden: the copy, its indent level, whether
+    /// it owns the 32px art slot (folders only), and its selection state.
     struct FolderNode {
         label: &'static str,
         level: usize,
-        disclosure: Option<bool>,
+        art_slot: bool,
         selected: bool,
         now_playing: bool,
         playing: bool,
@@ -2159,9 +2159,9 @@ mod tests {
 
     // --- P0-5: the Folders tree -----------------------------------------------
 
-    /// `BrowseMode::Folders` renders through `TreeRow::disclosure` on the
+    /// `BrowseMode::Folders` renders through `TreeRow::art_slot` on the
     /// `INDENT_STEP` indent scale — a code path no golden exercised. The rows
-    /// are the app's own folder-node shape: open/closed disclosure glyphs,
+    /// are the app's own folder-node shape: open/closed folder glyphs,
     /// three indent levels, one selected node, and one playing track.
     #[test]
     fn folder_tree_stage_dark_matches_golden_baseline() {
@@ -2187,7 +2187,7 @@ mod tests {
             FolderNode {
                 label: "Music",
                 level: 0,
-                disclosure: Some(true),
+                art_slot: true,
                 selected: false,
                 now_playing: false,
                 playing: false,
@@ -2196,7 +2196,7 @@ mod tests {
             FolderNode {
                 label: "Boards of Canada",
                 level: 1,
-                disclosure: Some(true),
+                art_slot: true,
                 selected: false,
                 now_playing: false,
                 playing: false,
@@ -2205,7 +2205,7 @@ mod tests {
             FolderNode {
                 label: "Geogaddi",
                 level: 2,
-                disclosure: Some(false),
+                art_slot: false,
                 selected: true,
                 now_playing: false,
                 playing: false,
@@ -2214,7 +2214,7 @@ mod tests {
             FolderNode {
                 label: "Autechre",
                 level: 1,
-                disclosure: Some(false),
+                art_slot: false,
                 selected: false,
                 now_playing: false,
                 playing: false,
@@ -2223,7 +2223,7 @@ mod tests {
             FolderNode {
                 label: "01. Ready Let's Go",
                 level: 2,
-                disclosure: None,
+                art_slot: false,
                 selected: false,
                 now_playing: true,
                 playing: true,
@@ -2232,7 +2232,7 @@ mod tests {
             FolderNode {
                 label: "02. Music Is Math",
                 level: 2,
-                disclosure: None,
+                art_slot: false,
                 selected: false,
                 now_playing: true,
                 playing: false,
@@ -2241,7 +2241,7 @@ mod tests {
             FolderNode {
                 label: "Tomorrow's Harvest",
                 level: 1,
-                disclosure: None,
+                art_slot: false,
                 selected: false,
                 now_playing: false,
                 playing: false,
@@ -2264,7 +2264,7 @@ mod tests {
                     selected: node.selected,
                     now_playing: node.now_playing,
                     playing: node.playing,
-                    disclosure: node.disclosure,
+                    art_slot: node.art_slot,
                 },
             );
         }
@@ -3655,7 +3655,7 @@ mod tests {
             FolderNode {
                 label: "Music",
                 level: 0,
-                disclosure: Some(true),
+                art_slot: true,
                 selected: false,
                 now_playing: false,
                 playing: false,
@@ -3664,7 +3664,7 @@ mod tests {
             FolderNode {
                 label: "Boards of Canada",
                 level: 1,
-                disclosure: Some(false),
+                art_slot: false,
                 selected: true,
                 now_playing: false,
                 playing: false,
@@ -3673,7 +3673,7 @@ mod tests {
             FolderNode {
                 label: "01. Ready Let's Go",
                 level: 2,
-                disclosure: None,
+                art_slot: false,
                 selected: false,
                 now_playing: true,
                 playing: true,
@@ -3696,7 +3696,7 @@ mod tests {
                     selected: node.selected,
                     now_playing: node.now_playing,
                     playing: node.playing,
-                    disclosure: node.disclosure,
+                    art_slot: node.art_slot,
                 },
             );
         }

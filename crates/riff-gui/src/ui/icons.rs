@@ -191,8 +191,27 @@ impl Icon {
 /// `None` when the size is out of range or the vendored source fails to
 /// parse — which would be a packaging bug, not a runtime condition.
 #[must_use]
-#[expect(clippy::cast_precision_loss)]
 pub fn rasterize(svg: &str, size_px: usize, color: egui::Color32) -> Option<egui::ColorImage> {
+    let rgba = rasterize_rgba(svg, size_px, color)?;
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        [size_px, size_px],
+        &rgba,
+    ))
+}
+
+/// The same rasterization as [`rasterize`], handed back as straight-alpha
+/// RGBA8 bytes for the consumers that take a buffer instead of an egui
+/// texture — the system tray.
+#[must_use]
+pub fn rasterize_rgba(svg: &str, size_px: usize, color: egui::Color32) -> Option<Vec<u8>> {
+    // tiny-skia stores premultiplied RGBA; the tray wants straight alpha.
+    Some(render(svg, size_px, color)?.take_demultiplied())
+}
+
+/// Parse, tint and rasterize an SVG into a square `size_px × size_px` pixmap.
+#[must_use]
+#[expect(clippy::cast_precision_loss)]
+fn render(svg: &str, size_px: usize, color: egui::Color32) -> Option<resvg::tiny_skia::Pixmap> {
     let px = u32::try_from(size_px).ok()?;
     if px == 0 {
         return None;
@@ -211,13 +230,7 @@ pub fn rasterize(svg: &str, size_px: usize, color: egui::Color32) -> Option<egui
         resvg::tiny_skia::Transform::from_scale(scale, scale),
         &mut pixmap.as_mut(),
     );
-
-    // tiny-skia stores premultiplied RGBA; egui wants straight alpha.
-    let rgba = pixmap.take_demultiplied();
-    Some(egui::ColorImage::from_rgba_unmultiplied(
-        [px as usize, px as usize],
-        &rgba,
-    ))
+    Some(pixmap)
 }
 
 /// Cache key: one texture per (glyph, pixel size, tint) triple.

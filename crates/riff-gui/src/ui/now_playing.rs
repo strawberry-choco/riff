@@ -465,7 +465,7 @@ fn up_next_section(
                                 selected: false,
                                 now_playing: false,
                                 playing: false,
-                                disclosure: None,
+                                art_slot: false,
                             },
                         );
                         if row.response.clicked() {

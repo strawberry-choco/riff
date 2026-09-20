@@ -1665,6 +1665,70 @@ mod tests {
         );
     }
 
+    // --- The tray icon's brand mark (REQ-SI-001) ---------------------------------
+    //
+    // The tray painted a flat blue rectangle for as long as it existed: nothing
+    // fed it a glyph. It now rasterizes the titlebar's equalizer mark from the
+    // same geometry, so what is worth asserting is the *shape* — four bars on a
+    // transparent field, in the brand's orange — because that is the difference
+    // between the mark and a block.
+
+    /// The mark as its inked column runs: `(center x, tallest column)` per bar.
+    fn brand_mark_runs(rgba: &[u8], side: usize) -> Vec<(usize, usize)> {
+        let inked = |x: usize, y: usize| rgba[(y * side + x) * 4 + 3] > 0;
+        let column = |x: usize| (0..side).filter(|&y| inked(x, y)).count();
+        let mut runs = Vec::new();
+        let mut x = 0;
+        while x < side {
+            if column(x) == 0 {
+                x += 1;
+                continue;
+            }
+            let start = x;
+            let mut tallest = 0;
+            while x < side && column(x) > 0 {
+                tallest = tallest.max(column(x));
+                x += 1;
+            }
+            runs.push(((start + x - 1) / 2, tallest));
+        }
+        runs
+    }
+
+    #[test]
+    fn test_the_tray_icon_rasterizes_the_equalizer_mark() {
+        let side = riff_gui::ui::chrome::APP_ICON_PX as usize;
+        let rgba = riff_gui::ui::chrome::icon_rgba().expect("the brand mark must rasterize");
+        assert_eq!(rgba.len(), side * side * 4);
+        assert_eq!(rgba[3], 0, "the icon's corner stays transparent");
+
+        let runs = brand_mark_runs(&rgba, side);
+        assert_eq!(runs.len(), 4, "four bars, not one block");
+
+        // The fixed profile [0.55, 0.95, 0.7, 0.4]: the second bar is the
+        // tallest and the last the shortest, and no two bars share a height.
+        let heights: Vec<usize> = runs.iter().map(|&(_, h)| h).collect();
+        assert_eq!(heights[1], *heights.iter().max().unwrap_or(&0));
+        assert_eq!(heights[3], *heights.iter().min().unwrap_or(&0));
+        assert_eq!(
+            heights
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            4,
+            "the bars keep distinct heights: {heights:?}"
+        );
+
+        // And it is the brand's own orange, not the placeholder's blue.
+        let brand = riff_gui::ui::theme::BRAND_500;
+        let (bar_x, _) = runs[0];
+        let ink = (side / 2 * side + bar_x) * 4;
+        assert_eq!(
+            (rgba[ink], rgba[ink + 1], rgba[ink + 2]),
+            (brand.r(), brand.g(), brand.b())
+        );
+    }
+
     #[test]
     fn test_egui_reports_no_visibility_so_the_app_keeps_its_own_record() {
         // Documents the trap the test above guards: `ViewportInfo::visible` is
@@ -2381,12 +2445,16 @@ mod tests {
     fn test_sidebar_tree_rows_use_the_mockup_40px_height_and_indent_scale() {
         // Mockup: tree rows are exactly 40px tall...
         assert!((theme::geometry::sidebar::ROW_H - 40.0).abs() < f32::EPSILON);
-        // ...on the three-level indent scale 12/44/80px.
+        // ...on the three-level indent scale 12/28/44px, one 16px step per
+        // level. Half the mockup's 12/44/80: at the wider scale a deep folder
+        // tree spent a third of the 280px column on nesting alone.
         assert!((sidebar::indent_px(0) - 12.0).abs() < f32::EPSILON);
-        assert!((sidebar::indent_px(1) - 44.0).abs() < f32::EPSILON);
-        assert!((sidebar::indent_px(2) - 80.0).abs() < f32::EPSILON);
-        // Deeper nesting keeps stepping so deep trees never fold into one edge.
-        assert!(sidebar::indent_px(3) > sidebar::indent_px(2));
+        assert!((sidebar::indent_px(1) - 28.0).abs() < f32::EPSILON);
+        assert!((sidebar::indent_px(2) - 44.0).abs() < f32::EPSILON);
+        // Deeper nesting keeps stepping at the same rate so deep trees never
+        // fold into one edge.
+        assert!((sidebar::indent_px(3) - 60.0).abs() < f32::EPSILON);
+        assert!((sidebar::indent_px(4) - 76.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -2457,7 +2525,7 @@ mod tests {
                             selected: false,
                             now_playing: false,
                             playing: false,
-                            disclosure: None,
+                            art_slot: false,
                         },
                     );
                     if row.response.clicked() {
@@ -2503,7 +2571,7 @@ mod tests {
                             selected: false,
                             now_playing: false,
                             playing: false,
-                            disclosure: None,
+                            art_slot: false,
                         },
                     );
                     if row.response.clicked() {
@@ -2571,7 +2639,7 @@ mod tests {
                             selected: false,
                             now_playing: false,
                             playing: false,
-                            disclosure: None,
+                            art_slot: false,
                         },
                     );
                     sidebar::tree_row(
@@ -2589,7 +2657,7 @@ mod tests {
                             selected: false,
                             now_playing: false,
                             playing: false,
-                            disclosure: None,
+                            art_slot: false,
                         },
                     );
                 },
@@ -4950,7 +5018,7 @@ mod tests {
                                 selected: false,
                                 now_playing: false,
                                 playing: false,
-                                disclosure: None,
+                                art_slot: false,
                             },
                         );
                         if let Some(from) = outcome.drop_from {
@@ -5007,7 +5075,7 @@ mod tests {
                             selected: false,
                             now_playing: false,
                             playing: false,
-                            disclosure: None,
+                            art_slot: false,
                         },
                     );
                     if outcome.response.clicked() {
@@ -5328,7 +5396,7 @@ mod background_service_ui_tests {
     use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
     use riff_gui::ui::app::{
         COVER_CACHE_CAP, InlineTagEditor, InspectorContent, InspectorKind, cache_polled_covers,
-        cover_cache_key, request_cover_intent,
+        cover_cache_key, folder_cover_intent, request_cover_intent,
     };
     use riff_gui::ui::selection::{TagField, TagRow, TagRowState};
     use riff_library::app::traits::{DecodedCover, RequestedSize};
@@ -5397,6 +5465,15 @@ mod background_service_ui_tests {
             self.requested.lock().unwrap().push((track_id, path, size));
         }
 
+        /// A folder request lands in the same recording: its identity is its
+        /// directory path, so the entries are told apart by what a caller puts
+        /// in the slot, not by which method arrived.
+        fn request_folder(&self, folder: &std::path::Path, size: RequestedSize) {
+            let folder = folder.to_path_buf();
+            let id = TrackId::from_path(&folder);
+            self.requested.lock().unwrap().push((id, folder, size));
+        }
+
         fn poll(&self) -> Vec<(TrackId, RequestedSize, Option<DecodedCover>)> {
             Vec::new()
         }
@@ -5407,6 +5484,8 @@ mod background_service_ui_tests {
 
     impl Covers for CannedCovers {
         fn request(&self, _track_id: TrackId, _path: PathBuf, _size: RequestedSize) {}
+
+        fn request_folder(&self, _folder: &std::path::Path, _size: RequestedSize) {}
 
         fn poll(&self) -> Vec<(TrackId, RequestedSize, Option<DecodedCover>)> {
             self.0.clone()
@@ -5954,6 +6033,51 @@ mod background_service_ui_tests {
             covers.requested().len(),
             2,
             "a texture already cached at exactly this box suppresses the request"
+        );
+    }
+
+    #[test]
+    fn test_folder_cover_intent_asks_once_then_paints_the_cached_texture() {
+        let dir = std::path::Path::new("/music/boards");
+        let thumb = RequestedSize {
+            width: 56,
+            height: 56,
+        };
+        let covers = RecordingCovers::new();
+        let mut textures: std::collections::HashMap<_, egui::TextureHandle> =
+            std::collections::HashMap::new();
+
+        // A cold folder has nothing to paint, so the row keeps its glyph and
+        // exactly one request goes out — for the directory itself.
+        assert_eq!(
+            folder_cover_intent(&textures, &covers, dir, thumb),
+            None,
+            "an uncached folder has no texture to paint"
+        );
+        assert_eq!(
+            covers.requested(),
+            vec![(TrackId::from_path(dir), dir.to_path_buf(), thumb,)],
+            "the folder row asks for its OWN directory, at the box it paints at"
+        );
+
+        // The decode landing in the cache is `cache_polled_covers`' work; here
+        // it is simply already filed, and the row must find it.
+        let texture = egui::Context::default().load_texture(
+            "folder",
+            egui::ColorImage::from_rgba_unmultiplied([2, 2], &[0; 16]),
+            egui::TextureOptions::default(),
+        );
+        let id = texture.id();
+        textures.insert(cover_cache_key(&dir.to_string_lossy(), thumb), texture);
+        assert_eq!(
+            folder_cover_intent(&textures, &covers, dir, thumb),
+            Some(id),
+            "the cached art is handed back for the row to paint"
+        );
+        assert_eq!(
+            covers.requested().len(),
+            1,
+            "a folder already cached at this box sends nothing"
         );
     }
 
@@ -9051,6 +9175,171 @@ mod browser_column_ui_tests {
         );
     }
 
+    /// One Track of the "Geogaddi" album, carrying exactly the `ReplayGain`
+    /// values the caller names.
+    fn seed_gain_track(
+        store: &mut riff_infra::store::SqliteStore,
+        path: &str,
+        title: &str,
+        track_gain: Option<f32>,
+        album_gain: Option<f32>,
+    ) -> riff_backend::domain::Track {
+        use riff_backend::app::store::LibraryMutationStore as _;
+        use riff_backend::domain::TrackMetadata;
+
+        let mut track = crate::test_utils::create_test_track(path, path);
+        track.metadata = TrackMetadata {
+            title: Some(title.to_string()),
+            artist: Some("Boards of Canada".to_string()),
+            album: Some("Geogaddi".to_string()),
+            album_artist: Some("Boards of Canada".to_string()),
+            track_number: Some(1),
+            replaygain_track_gain: track_gain,
+            replaygain_album_gain: album_gain,
+            ..TrackMetadata::default()
+        };
+        store
+            .apply_scan_batch(std::slice::from_ref(&track))
+            .expect("the fixture commits");
+        track
+    }
+
+    fn inspector_store(
+        dir: &tempfile::TempDir,
+    ) -> (
+        riff_infra::store::SqliteStore,
+        crossbeam_channel::Receiver<riff_backend::app::store::StoreChanged>,
+    ) {
+        let (changes_tx, changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let store = riff_infra::store::SqliteStore::open_and_migrate(
+            &dir.path().join("riff.sqlite3"),
+            changes_tx,
+        )
+        .expect("opening a fresh store must work");
+        (store, changes_rx)
+    }
+
+    #[test]
+    fn test_track_readout_reports_the_replaygain_rows_the_file_carries() {
+        use riff_backend::app::state::LibrarySession;
+        use riff_gui::ui::app::resolve_inspector;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, _rx) = inspector_store(&dir);
+        let tagged = seed_gain_track(
+            &mut store,
+            "music/tagged.flac",
+            "Tagged",
+            Some(-6.54),
+            Some(1.5),
+        );
+        let plain = seed_gain_track(&mut store, "music/plain.flac", "Plain", None, None);
+        let mut views = riff_backend::app::views::SessionViews::new(
+            Box::new(store.clone()),
+            Box::new(store.clone()),
+            store.library_generation(),
+            store.playlist_generation(),
+        );
+        let detail = |content: &riff_gui::ui::app::InspectorContent, label: &str| {
+            content
+                .details
+                .iter()
+                .find(|d| d.label == label)
+                .map(|d| d.value.clone())
+        };
+        let mut readout = |id: riff_backend::domain::TrackId| {
+            resolve_inspector(
+                &mut views,
+                &LibrarySession {
+                    selected_track: Some(id),
+                    ..LibrarySession::default()
+                },
+            )
+        };
+
+        let content = readout(tagged.id);
+        // The signed two-decimal form is the row: `.2` is load-bearing, since
+        // an f32 widened into the REAL column and narrowed back prints
+        // `-6.540000057220459`.
+        assert_eq!(
+            detail(&content, "ReplayGain (track)").as_deref(),
+            Some("-6.54 dB"),
+            "the track gain row carries the sign and two decimals"
+        );
+        assert_eq!(
+            detail(&content, "ReplayGain (album)").as_deref(),
+            Some("+1.50 dB"),
+            "a positive album gain reads with its `+`"
+        );
+
+        // A file with neither tag shows neither row: the DETAILS block is
+        // exactly what it was before this feature.
+        let content = readout(plain.id);
+        assert_eq!(
+            content
+                .details
+                .iter()
+                .map(|d| d.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Plays", "Last played", "Path"],
+            "an untagged track grows no row and prints no `(none)`"
+        );
+    }
+
+    #[test]
+    fn test_album_readout_reports_one_replaygain_row() {
+        use riff_backend::app::state::{BrowserSelection, LibrarySection, LibrarySession};
+        use riff_gui::ui::app::resolve_inspector;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, _rx) = inspector_store(&dir);
+        seed_gain_track(
+            &mut store,
+            "music/a/01.flac",
+            "One",
+            Some(-6.54),
+            Some(-7.12),
+        );
+        // A second track that carries the album value but no track value of
+        // its own: the album readout must find the gain regardless of order.
+        seed_gain_track(&mut store, "music/a/02.flac", "Two", None, Some(-7.12));
+        let mut views = riff_backend::app::views::SessionViews::new(
+            Box::new(store.clone()),
+            Box::new(store.clone()),
+            store.library_generation(),
+            store.playlist_generation(),
+        );
+        let mut detail = |label: &str| {
+            let content = resolve_inspector(
+                &mut views,
+                &LibrarySession {
+                    library_section: LibrarySection::Albums,
+                    browser_path: vec![BrowserSelection::Album {
+                        artist: "Boards of Canada".to_string(),
+                        title: "Geogaddi".to_string(),
+                    }],
+                    ..LibrarySession::default()
+                },
+            );
+            content
+                .details
+                .iter()
+                .find(|d| d.label == label)
+                .map(|d| d.value.clone())
+        };
+
+        assert_eq!(
+            detail("ReplayGain").as_deref(),
+            Some("-7.12 dB"),
+            "the album readout shows the album value the tracks carry"
+        );
+        assert!(
+            detail("ReplayGain (track)").is_none(),
+            "the album readout reports the album gain only, never a track gain"
+        );
+    }
+
     #[test]
     fn test_inspector_tag_section_aggregates_each_field_across_the_album() {
         use riff_backend::app::state::{BrowserSelection, LibrarySection};
@@ -9765,6 +10054,7 @@ mod browser_column_ui_tests {
 mod whole_frame_tests {
     use egui_kittest::kittest::Queryable;
     use riff_backend::app::MutexExt;
+    use riff_backend::app::cover_service::Covers;
     use riff_backend::app::events::BackendEvents;
     use riff_backend::app::scan_service::ScanOutcome;
     use riff_backend::app::state::{LibrarySession, LibraryStatus, PlaybackSession, ViewMode};
@@ -9775,14 +10065,40 @@ mod whole_frame_tests {
     use riff_backend::app::transport::Transport;
     use riff_backend::app::views::SessionViews;
     use riff_backend::domain::PlaylistId;
+    use riff_backend::domain::TrackId;
     use riff_gui::ui::RiffApp;
+    use riff_library::app::traits::{DecodedCover, RequestedSize};
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
     use crate::mocks::{
-        MockCovers, MockLibraryMutationStore, MockLibraryQueryStore, MockPlaylistStore, MockScans,
+        MockLibraryMutationStore, MockLibraryQueryStore, MockPlaylistStore, MockScans,
         MockSettingsStore, MockTagEdits, MockTransport, SettingsCall,
     };
     use crate::test_utils::{create_test_track_with_metadata, float_close};
+
+    /// The [`Covers`] seam every [`Shell`] is wired with. Track requests are
+    /// dropped exactly as `MockCovers` always did; folder requests are recorded
+    /// by identity — the directory they were asked for — and `poll` serves
+    /// nothing back. An empty poll means the app's texture cache never fills, so
+    /// a frame keeps asking for every visible folder just as it would on a cold
+    /// start, which is what a test of *what the row asks for* needs.
+    struct ShellCovers(Arc<Mutex<Vec<(TrackId, RequestedSize)>>>);
+
+    impl Covers for ShellCovers {
+        fn request(&self, _track_id: TrackId, _path: PathBuf, _size: RequestedSize) {}
+
+        fn request_folder(&self, folder: &Path, size: RequestedSize) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((TrackId::from_path(folder), size));
+        }
+
+        fn poll(&self) -> Vec<(TrackId, RequestedSize, Option<DecodedCover>)> {
+            Vec::new()
+        }
+    }
 
     /// The window size. Wide enough that the sidebar, the elastic stage, and the
     /// control bar all render without collapsing to zero.
@@ -9802,6 +10118,8 @@ mod whole_frame_tests {
         scans: MockScans,
         /// Every settings mutation the app committed at a frame end.
         settings_calls: Arc<Mutex<Vec<SettingsCall>>>,
+        /// Every folder cover request the app sent, in order.
+        folder_covers: Arc<Mutex<Vec<(TrackId, RequestedSize)>>>,
     }
 
     /// Build a shell from fully-specified ports.
@@ -9823,6 +10141,7 @@ mod whole_frame_tests {
         let playback = Arc::new(Mutex::new(PlaybackSession::default()));
         let library = Arc::new(Mutex::new(LibrarySession::default()));
         let backend_events = Arc::new(Mutex::new(BackendEvents::default()));
+        let folder_covers = Arc::new(Mutex::new(Vec::new()));
 
         let (app, _visibility_tx) = RiffApp::new_for_test(
             Arc::clone(&playback),
@@ -9834,7 +10153,7 @@ mod whole_frame_tests {
             library_mutations,
             views,
             Box::new(MockTagEdits),
-            Box::new(MockCovers),
+            Box::new(ShellCovers(Arc::clone(&folder_covers))),
             Arc::clone(&backend_events),
         );
 
@@ -9855,6 +10174,7 @@ mod whole_frame_tests {
             backend_events,
             scans,
             settings_calls,
+            folder_covers,
         }
     }
 
@@ -10832,7 +11152,7 @@ mod whole_frame_tests {
         shell.harness.step();
 
         // Open the root node: folder nodes collapse by default, so the
-        // child only renders after the root's disclosure toggles.
+        // child only renders after the root node opens.
         shell.harness.get_by_label("music").click();
         shell.harness.step();
 
@@ -10844,6 +11164,69 @@ mod whole_frame_tests {
         assert!(
             shell.harness.query_by_label("boards").is_some(),
             "a matching child folder stays pruned INTO the tree"
+        );
+    }
+
+    /// The folder rows' cover wiring: each visible node asks the cover seam for
+    /// its OWN directory at the shared thumbnail box, and nothing else asks on
+    /// its behalf.
+    #[test]
+    fn test_folder_rows_request_their_own_directory_cover() {
+        use riff_backend::app::state::BrowseMode;
+        use riff_gui::ui::app::COVER_THUMB;
+
+        let root = PathBuf::from("/music");
+        let child = root.join("boards");
+        let (mut shell, _transport) = recording_transport_shell(MockLibraryQueryStore {
+            folder_has_audio: true,
+            folder_children: vec![child.clone()],
+            folder_direct_tracks: vec![track("t1.mp3", "Ready Let's Go")],
+            ..Default::default()
+        });
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.browse_mode = BrowseMode::Folders;
+            library.library_paths = vec![root.clone()];
+        }
+
+        /// Drain the recording and return the distinct folder identities that
+        /// asked, in first-seen order. A click costs more than one frame, so
+        /// the asks-per-node is not the property — *which* nodes ask is. Every
+        /// ask is checked on the way through, including that the row never
+        /// invents a box of its own.
+        fn folder_nodes(shell: &Shell) -> Vec<String> {
+            let mut asks = shell.folder_covers.lock().unwrap();
+            let mut seen: Vec<String> = Vec::new();
+            for (id, size) in asks.drain(..) {
+                assert_eq!(
+                    size, COVER_THUMB,
+                    "a folder row asks at the existing thumbnail box, not a box of its own"
+                );
+                if !seen.contains(&id.0) {
+                    seen.push(id.0);
+                }
+            }
+            seen
+        }
+
+        shell.harness.step();
+        assert_eq!(
+            folder_nodes(&shell),
+            vec![root.to_string_lossy().to_string()],
+            "a collapsed tree asks for the root's own cover and nothing else"
+        );
+
+        // Opening the root makes its child a visible node, so the child joins
+        // the list while the root keeps asking.
+        shell.harness.get_by_label("music").click();
+        shell.harness.step();
+        assert_eq!(
+            folder_nodes(&shell),
+            vec![
+                root.to_string_lossy().to_string(),
+                child.to_string_lossy().to_string(),
+            ],
+            "one node per visible folder once the root opens"
         );
     }
 
@@ -10899,6 +11282,9 @@ mod whole_frame_tests {
             id: &riff_backend::domain::TrackId,
         ) -> Result<Option<Track>, StoreError> {
             self.0.lock().unwrap().get_track(id)
+        }
+        fn metadata_version(&self) -> Result<u32, StoreError> {
+            Ok(riff_persistence::track::METADATA_VERSION)
         }
         fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, StoreError> {
             self.0.lock().unwrap().tracks_window(offset, limit)

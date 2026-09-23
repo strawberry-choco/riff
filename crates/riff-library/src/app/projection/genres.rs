@@ -23,6 +23,9 @@ struct GenreLevels {
 /// every level at once so a frame never mixes rows from two generations.
 /// Loader errors propagate and leave the cache untouched — the next call
 /// retries.
+///
+/// Every level here declares itself on [`GenerationCache::level`], so this
+/// projection spells out no freshness rule of its own.
 pub struct GenreProjection {
     /// Generation-keyed slot over the whole level bundle: a moved epoch
     /// drops every level together, within a generation levels fill lazily.
@@ -62,18 +65,15 @@ impl GenreProjection {
         &mut self,
         loader: &mut dyn FnMut() -> Result<Vec<GenreCount>, StoreError>,
     ) -> Result<Arc<[GenreCount]>, StoreError> {
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache.peek().and_then(|levels| levels.counts.clone())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh: Arc<[GenreCount]> = loader()?.into();
-        self.cache.slot(epoch, &()).counts = Some(Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.counts.clone(),
+            || loader().map(Arc::from),
+            |levels, answer| {
+                levels.counts = Some(Arc::clone(&answer));
+                answer
+            },
+        )
     }
 
     /// Artists having at least one track with `genre`, cached per
@@ -86,23 +86,17 @@ impl GenreProjection {
         genre: &str,
         loader: &mut dyn FnMut(&str) -> Result<Vec<Artist>, StoreError>,
     ) -> Result<Arc<[Artist]>, StoreError> {
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|levels| levels.artists.get(genre).cloned())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh: Arc<[Artist]> = loader(genre)?.into();
-        self.cache
-            .slot(epoch, &())
-            .artists
-            .insert(genre.to_string(), Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.artists.get(genre).cloned(),
+            || loader(genre).map(Arc::from),
+            |levels, answer| {
+                levels
+                    .artists
+                    .insert(genre.to_string(), Arc::clone(&answer));
+                answer
+            },
+        )
     }
 
     /// One artist's albums holding a track with `genre`, cached per
@@ -117,23 +111,15 @@ impl GenreProjection {
         loader: GenreAlbumsLoader<'_>,
     ) -> Result<Arc<[Album]>, StoreError> {
         let key = (artist.to_string(), genre.to_string());
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|levels| levels.albums.get(&key).cloned())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh: Arc<[Album]> = loader(artist, genre)?.into();
-        self.cache
-            .slot(epoch, &())
-            .albums
-            .insert(key, Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.albums.get(&key).cloned(),
+            || loader(artist, genre).map(Arc::from),
+            |levels, answer| {
+                levels.albums.insert(key.clone(), Arc::clone(&answer));
+                answer
+            },
+        )
     }
 
     /// One album's tracks with `genre`, cached per generation. Fresh frames
@@ -153,22 +139,14 @@ impl GenreProjection {
             album_title.to_string(),
             genre.to_string(),
         );
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|levels| levels.tracks.get(&key).cloned())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh: Arc<[Track]> = loader(album_artist, album_title, genre)?.into();
-        self.cache
-            .slot(epoch, &())
-            .tracks
-            .insert(key, Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.tracks.get(&key).cloned(),
+            || loader(album_artist, album_title, genre).map(Arc::from),
+            |levels, answer| {
+                levels.tracks.insert(key.clone(), Arc::clone(&answer));
+                answer
+            },
+        )
     }
 }

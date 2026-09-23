@@ -10676,10 +10676,10 @@ mod whole_frame_tests {
 
     /// An artist fixture (one artist per row of the Artists root). `albums`
     /// carries the artist's album keys: in the hit listing these are the
-    /// hit-album keys (exactly as the store's `hit_artists` answers them);
-    /// in the full browsing listing they are all the artist's album keys
-    /// (the mock's `artist_albums` serves the same list for every artist,
-    /// so a clearing fixture names its albums through this count).
+    /// hit-album keys (exactly as the store's `hit_artists_page` answers
+    /// them); in the full browsing listing they are all the artist's album
+    /// keys (the mock's `artist_albums` serves the same list for every
+    /// artist, so a clearing fixture names its albums through this count).
     fn artist(name: &str, album_keys: &[&str]) -> riff_backend::domain::Artist {
         riff_backend::domain::Artist {
             name: name.to_string(),
@@ -11286,11 +11286,12 @@ mod whole_frame_tests {
         fn metadata_version(&self) -> Result<u32, StoreError> {
             Ok(riff_persistence::track::METADATA_VERSION)
         }
-        fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, StoreError> {
-            self.0.lock().unwrap().tracks_window(offset, limit)
-        }
-        fn track_count(&self) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().track_count()
+        fn tracks_page(
+            &self,
+            offset: usize,
+            limit: usize,
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            self.0.lock().unwrap().tracks_page(offset, limit)
         }
         fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
             self.0.lock().unwrap().library_counts()
@@ -11298,16 +11299,13 @@ mod whole_frame_tests {
         fn all_track_ids(&self) -> Result<Vec<riff_backend::domain::TrackId>, StoreError> {
             self.0.lock().unwrap().all_track_ids()
         }
-        fn search_window(
+        fn search_page(
             &self,
             query: &str,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0.lock().unwrap().search_window(query, offset, limit)
-        }
-        fn search_count(&self, query: &str) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().search_count(query)
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            self.0.lock().unwrap().search_page(query, offset, limit)
         }
         fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
             self.0.lock().unwrap().all_artists()
@@ -11395,27 +11393,24 @@ mod whole_frame_tests {
                 .unwrap()
                 .album_tracks_in_genre(album_artist, album_title, genre)
         }
-        fn hit_albums(
+        fn hit_albums_page(
             &self,
             query: &str,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            self.0.lock().unwrap().hit_albums(query, offset, limit)
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            self.0.lock().unwrap().hit_albums_page(query, offset, limit)
         }
-        fn hit_albums_count(&self, query: &str) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().hit_albums_count(query)
-        }
-        fn hit_artists(
+        fn hit_artists_page(
             &self,
             query: &str,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
-            self.0.lock().unwrap().hit_artists(query, offset, limit)
-        }
-        fn hit_artists_count(&self, query: &str) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().hit_artists_count(query)
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .hit_artists_page(query, offset, limit)
         }
         fn album_hit_tracks(
             &self,
@@ -11451,12 +11446,6 @@ mod whole_frame_tests {
                 .unwrap()
                 .hit_albums_in_genre(genre, query, offset, limit)
         }
-        fn hit_albums_in_genre_count(&self, genre: &str, query: &str) -> Result<usize, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .hit_albums_in_genre_count(genre, query)
-        }
         fn hit_artists_in_genre(
             &self,
             genre: &str,
@@ -11468,16 +11457,6 @@ mod whole_frame_tests {
                 .lock()
                 .unwrap()
                 .hit_artists_in_genre(genre, query, offset, limit)
-        }
-        fn hit_artists_in_genre_count(
-            &self,
-            genre: &str,
-            query: &str,
-        ) -> Result<usize, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .hit_artists_in_genre_count(genre, query)
         }
         fn album_hit_tracks_in_genre(
             &self,
@@ -11496,85 +11475,57 @@ mod whole_frame_tests {
         fn hit_genre_counts(&self, query: &str) -> Result<Vec<GenreCount>, StoreError> {
             self.0.lock().unwrap().hit_genre_counts(query)
         }
-        fn artists_window(
+        fn artists_page(
             &self,
             direction: SortDirection,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
             self.0
                 .lock()
                 .unwrap()
-                .artists_window(direction, offset, limit)
+                .artists_page(direction, offset, limit)
         }
-        fn artists_count(&self) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().artists_count()
-        }
-        fn albums_window(
+        fn albums_page(
             &self,
             direction: SortDirection,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .albums_window(direction, offset, limit)
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            self.0.lock().unwrap().albums_page(direction, offset, limit)
         }
-        fn albums_count(&self) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().albums_count()
-        }
-        fn genres_window(
+        fn genres_page(
             &self,
             direction: SortDirection,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<GenreCount>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .genres_window(direction, offset, limit)
+        ) -> Result<riff_persistence::store::Page<GenreCount>, StoreError> {
+            self.0.lock().unwrap().genres_page(direction, offset, limit)
         }
-        fn genres_count(&self) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().genres_count()
-        }
-        fn artists_in_genre_window(
+        fn artists_in_genre_page(
             &self,
             genre: &str,
             direction: SortDirection,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
             self.0
                 .lock()
                 .unwrap()
-                .artists_in_genre_window(genre, direction, offset, limit)
+                .artists_in_genre_page(genre, direction, offset, limit)
         }
-        fn artists_in_genre_count(&self, genre: &str) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().artists_in_genre_count(genre)
-        }
-        fn artist_albums_in_genre_window(
+        fn artist_albums_in_genre_page(
             &self,
             artist: &str,
             genre: &str,
             direction: SortDirection,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
             self.0
                 .lock()
                 .unwrap()
-                .artist_albums_in_genre_window(artist, genre, direction, offset, limit)
-        }
-        fn artist_albums_in_genre_count(
-            &self,
-            artist: &str,
-            genre: &str,
-        ) -> Result<usize, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .artist_albums_in_genre_count(artist, genre)
+                .artist_albums_in_genre_page(artist, genre, direction, offset, limit)
         }
     }
 

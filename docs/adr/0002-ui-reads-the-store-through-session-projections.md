@@ -40,3 +40,31 @@ describes; the decision itself stands.
   where a projection already holds them), and the UI never sees a `Result`. Each
   projection's staleness contract is proven through that façade by per-projection
   tests, independent of how the projections are laid out internally.
+
+## Amendment (2026-09-22)
+
+The decision above stands. One of its claims was factually wrong when it was written,
+and becomes true only now, so it is corrected here rather than left as a description of
+an intention.
+
+- **"A single audited implementation" is now actual.** The 2026-09-06 amendment said
+  the staleness contract had one implementation instead of one copy per crate. It did
+  not: the procedure — observe the generation, serve the cached value while it is
+  current, otherwise load and commit — was hand-copied at every cached level across the
+  projection modules in six different spellings, and the eight paged reads above the
+  projections stayed fresh by comparing two *separate* observations of the counter, a
+  guard that can report "unchanged" across a write that did land. Both duplications are
+  gone: `GenerationCache::level` (`riff-persistence`, `levels.rs`) is the one
+  implementation of that procedure for a cached level, and a paged listing reads one
+  **Listing Page** — its total and its visible window taken under a single connection
+  acquisition, stamped with the generation captured inside it — so there is no gap for a
+  torn count to fall through and no epoch value for a caller to mis-time.
+- **Freshness is no longer a caller-side check.** `GenerationCache::peek` remains the
+  epoch-agnostic read that the last-good error fallbacks use, but it is no longer
+  documented as the trap every caller must guard: guarding is what `level` does, and the
+  remaining direct `peek` reads are deliberate stale-but-present fallbacks, not
+  half-written freshness checks.
+- **Unchanged by this**: the generation counter stays session-local and in memory; the
+  per-projection module layout stays; `SessionViews` stays the UI's single read seam with
+  the same method signatures; and the two playback caches keep their hand-written bodies
+  — they were designed to adopt `level` and are not migrated in this change.

@@ -198,7 +198,7 @@ fn test_store_migration_010_drops_the_missing_artwork_strategy_column() {
 /// Migration 011 adds write-time-lowercased key columns to the entity
 /// tables (`artists.name_lower`, `albums.album_artist_lower` /
 /// `albums.title_lower`) so entity name matching can be case-insensitive —
-/// SQLite's `instr` is case-sensitive, and the tracks' derived `search_text`
+/// `SQLite`'s `instr` is case-sensitive, and the tracks' derived `search_text`
 /// is the same precedent. Simulate a store that predates the migration —
 /// un-apply 011 and drop the columns — then reopen through the full
 /// migration path: the columns must come back and existing rows must be
@@ -371,20 +371,26 @@ fn test_metadata_version_lags_a_freshly_migrated_store_and_stamps_durably() {
 }
 
 #[test]
-fn test_store_unopenable_path_is_a_clear_fatal_error() {
-    // A path whose parent does not exist cannot be opened; the store
-    // must report a clear error rather than panic or silently succeed.
+fn test_store_fresh_start_creates_its_own_parent_directories() {
+    // SQLite creates a missing database file but never the directory above it,
+    // and a first launch has no data directory yet, so opening a Store below
+    // missing parent directories must succeed rather than report the raw
+    // "unable to open database file" that a plain file open would give.
     let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("nope/should/fail.sqlite3");
+    let db_path = dir.path().join("nope/should/be/created/riff.sqlite3");
 
     let (changes_tx, _changes_rx) =
         crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let Err(err) = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx) else {
-        panic!("unopenable store must fail, but opened successfully");
-    };
+    let _store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+        .expect("a fresh store below missing parent directories must be created and opened");
+
     assert!(
-        err.to_string().contains("failed to open Application Store"),
-        "error must clearly name the open failure: {err}"
+        db_path.parent().expect("store path has a parent").is_dir(),
+        "every parent directory must have been created"
+    );
+    assert!(
+        db_path.is_file(),
+        "the store file must have been created in them"
     );
 }
 
@@ -543,11 +549,14 @@ fn test_store_corrupt_db_reopens_as_fresh_store_with_siblings_renamed_aside() {
 
 #[test]
 fn test_store_recovery_failure_is_a_fatal_startup_error() {
-    // A store path inside a missing directory cannot be renamed aside nor
-    // recreated; recovery itself must fail with a clear fatal error instead
-    // of crashing or silently continuing.
+    // A store path occupied by a directory cannot be opened, cannot be renamed
+    // aside as a corrupted file, and cannot be recreated in its place: recovery
+    // itself must fail with a clear fatal error instead of crashing or silently
+    // continuing. (A missing parent directory is NOT such a path — the Store
+    // creates those, so it can no longer stand in for an unrecoverable store.)
     let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("nope").join("riff.sqlite3");
+    let db_path = dir.path().join("riff.sqlite3");
+    std::fs::create_dir(&db_path).expect("a directory must occupy the store path");
 
     let (changes_tx, _changes_rx) =
         crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
@@ -556,8 +565,7 @@ fn test_store_recovery_failure_is_a_fatal_startup_error() {
     };
     let message = err.to_string();
     assert!(
-        message.contains("failed to open Application Store")
-            || message.contains("could not be recovered"),
+        message.contains("could not be recovered"),
         "error must clearly name the fatal recovery failure: {message}"
     );
 }
@@ -1346,6 +1354,196 @@ fn library_track(
     }
 }
 
+// --- Deleted window + count reads, in terms of Listing Pages ---------------
+//
+// The `LibraryQueryStore` port collapsed every windowed read and its count
+// read into one Listing Page: a `Page<T>` carries the window AND the total,
+// read under a single connection acquisition. These helpers express each
+// deleted read through the page that replaced it, so the tests below keep
+// asserting exactly the facts they asserted before. A `*_window` helper reads
+// the page's rows; a `*_count` helper reads the page's total, asking for a
+// one-row window since only the total is wanted. The browse listings' pages
+// take a `SortDirection` their count reads never had; a total is
+// direction-independent in the store, so the count helpers pass `Ascending`.
+
+/// The flat library listing's window, from its Listing Page.
+fn tracks_window(store: &SqliteStore, offset: usize, limit: usize) -> Vec<Track> {
+    store
+        .tracks_page(offset, limit)
+        .expect("tracks page reads")
+        .rows()
+        .to_vec()
+}
+
+/// The flat library listing's total, from its Listing Page.
+fn track_count(store: &SqliteStore) -> usize {
+    store.tracks_page(0, 1).expect("tracks page reads").total()
+}
+
+/// The search listing's window, from its Listing Page.
+fn search_window(store: &SqliteStore, query: &str, offset: usize, limit: usize) -> Vec<Track> {
+    store
+        .search_page(query, offset, limit)
+        .expect("search page reads")
+        .rows()
+        .to_vec()
+}
+
+/// The search listing's total, from its Listing Page.
+fn search_count(store: &SqliteStore, query: &str) -> usize {
+    store
+        .search_page(query, 0, 1)
+        .expect("search page reads")
+        .total()
+}
+
+/// The hit-album listing's window, from its Listing Page.
+fn hit_albums(store: &SqliteStore, query: &str, offset: usize, limit: usize) -> Vec<Album> {
+    store
+        .hit_albums_page(query, offset, limit)
+        .expect("hit albums page reads")
+        .rows()
+        .to_vec()
+}
+
+/// The hit-album listing's total, from its Listing Page.
+fn hit_albums_count(store: &SqliteStore, query: &str) -> usize {
+    store
+        .hit_albums_page(query, 0, 1)
+        .expect("hit albums page reads")
+        .total()
+}
+
+/// The hit-artist listing's window, from its Listing Page.
+fn hit_artists(store: &SqliteStore, query: &str, offset: usize, limit: usize) -> Vec<Artist> {
+    store
+        .hit_artists_page(query, offset, limit)
+        .expect("hit artists page reads")
+        .rows()
+        .to_vec()
+}
+
+/// The hit-artist listing's total, from its Listing Page.
+fn hit_artists_count(store: &SqliteStore, query: &str) -> usize {
+    store
+        .hit_artists_page(query, 0, 1)
+        .expect("hit artists page reads")
+        .total()
+}
+
+/// The Artists root's window, from its Listing Page.
+fn artists_window(
+    store: &SqliteStore,
+    direction: SortDirection,
+    offset: usize,
+    limit: usize,
+) -> Vec<Artist> {
+    store
+        .artists_page(direction, offset, limit)
+        .expect("artists page reads")
+        .rows()
+        .to_vec()
+}
+
+/// The Artists root's total, from its Listing Page.
+fn artists_count(store: &SqliteStore) -> usize {
+    store
+        .artists_page(SortDirection::Ascending, 0, 1)
+        .expect("artists page reads")
+        .total()
+}
+
+/// The Albums root's window, from its Listing Page.
+fn albums_window(
+    store: &SqliteStore,
+    direction: SortDirection,
+    offset: usize,
+    limit: usize,
+) -> Vec<Album> {
+    store
+        .albums_page(direction, offset, limit)
+        .expect("albums page reads")
+        .rows()
+        .to_vec()
+}
+
+/// The Albums root's total, from its Listing Page.
+fn albums_count(store: &SqliteStore) -> usize {
+    store
+        .albums_page(SortDirection::Ascending, 0, 1)
+        .expect("albums page reads")
+        .total()
+}
+
+/// The Genres root's window, from its Listing Page.
+fn genres_window(
+    store: &SqliteStore,
+    direction: SortDirection,
+    offset: usize,
+    limit: usize,
+) -> Vec<GenreCount> {
+    store
+        .genres_page(direction, offset, limit)
+        .expect("genres page reads")
+        .rows()
+        .to_vec()
+}
+
+/// The Genres root's total, from its Listing Page.
+fn genres_count(store: &SqliteStore) -> usize {
+    store
+        .genres_page(SortDirection::Ascending, 0, 1)
+        .expect("genres page reads")
+        .total()
+}
+
+/// The genre drill-down's artist window, from its Listing Page.
+fn artists_in_genre_window(
+    store: &SqliteStore,
+    genre: &str,
+    direction: SortDirection,
+    offset: usize,
+    limit: usize,
+) -> Vec<Artist> {
+    store
+        .artists_in_genre_page(genre, direction, offset, limit)
+        .expect("artists in genre page reads")
+        .rows()
+        .to_vec()
+}
+
+/// The genre drill-down's artist total, from its Listing Page.
+fn artists_in_genre_count(store: &SqliteStore, genre: &str) -> usize {
+    store
+        .artists_in_genre_page(genre, SortDirection::Ascending, 0, 1)
+        .expect("artists in genre page reads")
+        .total()
+}
+
+/// The artist-and-genre drill-down's album window, from its Listing Page.
+fn artist_albums_in_genre_window(
+    store: &SqliteStore,
+    artist: &str,
+    genre: &str,
+    direction: SortDirection,
+    offset: usize,
+    limit: usize,
+) -> Vec<Album> {
+    store
+        .artist_albums_in_genre_page(artist, genre, direction, offset, limit)
+        .expect("artist albums in genre page reads")
+        .rows()
+        .to_vec()
+}
+
+/// The artist-and-genre drill-down's album total, from its Listing Page.
+fn artist_albums_in_genre_count(store: &SqliteStore, artist: &str, genre: &str) -> usize {
+    store
+        .artist_albums_in_genre_page(artist, genre, SortDirection::Ascending, 0, 1)
+        .expect("artist albums in genre page reads")
+        .total()
+}
+
 #[test]
 fn test_store_library_migration_004_applies_and_reopens_idempotently() {
     let dir = tempfile::tempdir().unwrap();
@@ -1614,9 +1812,9 @@ fn test_flat_list_windows_are_path_ordered_and_bounded() {
     let mut expected: Vec<String> = paths.iter().map(std::string::ToString::to_string).collect();
     expected.sort(); // Rust byte-wise sort = SQLite BINARY collation
 
-    assert_eq!(store.track_count().expect("count works"), 5);
+    assert_eq!(track_count(&store), 5);
 
-    let first_page = store.tracks_window(0, 3).expect("window works");
+    let first_page = tracks_window(&store, 0, 3);
     assert_eq!(
         first_page
             .iter()
@@ -1625,17 +1823,14 @@ fn test_flat_list_windows_are_path_ordered_and_bounded() {
         expected[..3],
         "flat list must be deterministically path-ordered"
     );
-    let tail = store.tracks_window(3, 10).expect("window works");
+    let tail = tracks_window(&store, 3, 10);
     assert_eq!(
         tail.iter().map(|t| t.id.0.clone()).collect::<Vec<_>>(),
         expected[3..],
         "window past the page must return the remaining rows"
     );
     assert!(
-        store
-            .tracks_window(100, 5)
-            .expect("window works")
-            .is_empty(),
+        tracks_window(&store, 100, 5).is_empty(),
         "offset past the end yields an empty window"
     );
 }
@@ -1752,9 +1947,9 @@ fn test_search_parity_with_legacy_semantics() {
         "zzz-no-match",
     ] {
         let expected = expected_for(query);
-        let got_count = store.search_count(query).expect("search count works");
+        let got_count = search_count(&store, query);
         assert_eq!(got_count, expected.len(), "count parity for {query:?}");
-        let got = store.search_window(query, 0, 100).expect("search works");
+        let got = search_window(&store, query, 0, 100);
         assert_eq!(
             got.iter().map(|t| t.id.0.clone()).collect::<Vec<_>>(),
             expected,
@@ -1763,9 +1958,9 @@ fn test_search_parity_with_legacy_semantics() {
     }
 
     // Bounded windows slice the match set deterministically.
-    let all = store.search_window("", 0, 2).expect("search works");
+    let all = search_window(&store, "", 0, 2);
     assert_eq!(all.len(), 2, "limit bounds the window");
-    let rest = store.search_window("", 2, 50).expect("search works");
+    let rest = search_window(&store, "", 2, 50);
     assert_eq!(rest.len(), fixtures.len() - 2);
 }
 
@@ -2530,12 +2725,9 @@ fn test_artists_window_slices_name_order_both_directions_and_counts() {
     let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     // Fresh store: no artists.
-    assert_eq!(store.artists_count().expect("count works"), 0);
+    assert_eq!(artists_count(&store), 0);
     assert!(
-        store
-            .artists_window(SortDirection::Ascending, 0, 10)
-            .expect("empty window works")
-            .is_empty(),
+        artists_window(&store, SortDirection::Ascending, 0, 10).is_empty(),
         "a fresh store has no artist rows"
     );
 
@@ -2551,11 +2743,9 @@ fn test_artists_window_slices_name_order_both_directions_and_counts() {
         ])
         .expect("batch applies");
 
-    assert_eq!(store.artists_count().expect("count works"), 3);
+    assert_eq!(artists_count(&store), 3);
 
-    let asc_first = store
-        .artists_window(SortDirection::Ascending, 0, 2)
-        .expect("window works");
+    let asc_first = artists_window(&store, SortDirection::Ascending, 0, 2);
     assert_eq!(
         asc_first
             .iter()
@@ -2572,18 +2762,14 @@ fn test_artists_window_slices_name_order_both_directions_and_counts() {
         "an artist's embedded keys arrive canonical in a window too"
     );
 
-    let asc_tail = store
-        .artists_window(SortDirection::Ascending, 2, 10)
-        .expect("window works");
+    let asc_tail = artists_window(&store, SortDirection::Ascending, 2, 10);
     assert_eq!(
         asc_tail.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
         ["Zulu"],
         "the tail window returns the remaining rows"
     );
 
-    let desc_first = store
-        .artists_window(SortDirection::Descending, 0, 2)
-        .expect("window works");
+    let desc_first = artists_window(&store, SortDirection::Descending, 0, 2);
     assert_eq!(
         desc_first
             .iter()
@@ -2593,9 +2779,7 @@ fn test_artists_window_slices_name_order_both_directions_and_counts() {
         "descending is exact descending SQL order, not an in-memory reversal"
     );
 
-    let desc_tail = store
-        .artists_window(SortDirection::Descending, 2, 10)
-        .expect("window works");
+    let desc_tail = artists_window(&store, SortDirection::Descending, 2, 10);
     assert_eq!(
         desc_tail
             .iter()
@@ -2607,17 +2791,11 @@ fn test_artists_window_slices_name_order_both_directions_and_counts() {
 
     // Windows past the end yield empty slices in both directions.
     assert!(
-        store
-            .artists_window(SortDirection::Ascending, 100, 5)
-            .expect("past-end window works")
-            .is_empty(),
+        artists_window(&store, SortDirection::Ascending, 100, 5).is_empty(),
         "offset past the end yields an empty window"
     );
     assert!(
-        store
-            .artists_window(SortDirection::Descending, 100, 5)
-            .expect("past-end window works")
-            .is_empty(),
+        artists_window(&store, SortDirection::Descending, 100, 5).is_empty(),
         "descending past the end yields an empty window"
     );
 }
@@ -2639,13 +2817,11 @@ fn test_albums_window_flat_order_slices_and_counts_in_both_directions() {
         ])
         .expect("batch applies");
 
-    assert_eq!(store.albums_count().expect("count works"), 4);
+    assert_eq!(albums_count(&store), 4);
 
     // Canonical flat browsing order: album artist ascending, year descending
     // with missing years last, then title ascending.
-    let asc = store
-        .albums_window(SortDirection::Ascending, 0, 10)
-        .expect("window works");
+    let asc = albums_window(&store, SortDirection::Ascending, 0, 10);
     assert_eq!(
         asc.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
         ["New", "Old", "Debut", "Late"],
@@ -2657,9 +2833,7 @@ fn test_albums_window_flat_order_slices_and_counts_in_both_directions() {
     assert_eq!(new.tracks, vec![TrackId("f:\\a\\2.mp3".to_string())]);
     assert_eq!(new.artist, "Alpha");
 
-    let desc = store
-        .albums_window(SortDirection::Descending, 0, 10)
-        .expect("window works");
+    let desc = albums_window(&store, SortDirection::Descending, 0, 10);
     assert_eq!(
         desc.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
         ["Late", "Debut", "Old", "New"],
@@ -2667,9 +2841,7 @@ fn test_albums_window_flat_order_slices_and_counts_in_both_directions() {
     );
 
     // Slicing a window mid-list keeps the order alignment.
-    let asc_mid = store
-        .albums_window(SortDirection::Ascending, 1, 2)
-        .expect("window works");
+    let asc_mid = albums_window(&store, SortDirection::Ascending, 1, 2);
     assert_eq!(
         asc_mid.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
         ["Old", "Debut"],
@@ -2695,11 +2867,9 @@ fn test_genres_window_counts_and_orders_both_directions() {
         ])
         .expect("batch applies");
 
-    assert_eq!(store.genres_count().expect("count works"), 4);
+    assert_eq!(genres_count(&store), 4);
 
-    let asc = store
-        .genres_window(SortDirection::Ascending, 0, 10)
-        .expect("window works");
+    let asc = genres_window(&store, SortDirection::Ascending, 0, 10);
     assert_eq!(
         asc.iter().map(|g| g.genre.as_str()).collect::<Vec<_>>(),
         ["Ambient", "Jazz", "Rock", "rock"],
@@ -2710,9 +2880,7 @@ fn test_genres_window_counts_and_orders_both_directions() {
         "the case-sensitive Rock entry holds one track"
     );
 
-    let desc = store
-        .genres_window(SortDirection::Descending, 0, 10)
-        .expect("window works");
+    let desc = genres_window(&store, SortDirection::Descending, 0, 10);
     assert_eq!(
         desc.iter().map(|g| g.genre.as_str()).collect::<Vec<_>>(),
         ["rock", "Rock", "Jazz", "Ambient"],
@@ -2740,27 +2908,18 @@ fn test_artists_in_genre_window_and_count_are_scoped_and_ordered() {
         .expect("batch applies");
 
     assert_eq!(
-        store.artists_in_genre_count("Rock").expect("count works"),
+        artists_in_genre_count(&store, "Rock"),
         1,
         "the count is distinct artists — Rockers is one artist with two Rock albums"
     );
+    assert_eq!(artists_in_genre_count(&store, "Ambient"), 1);
     assert_eq!(
-        store
-            .artists_in_genre_count("Ambient")
-            .expect("count works"),
-        1
-    );
-    assert_eq!(
-        store
-            .artists_in_genre_count("Nothing")
-            .expect("count works"),
+        artists_in_genre_count(&store, "Nothing"),
         0,
         "unknown genres count zero"
     );
 
-    let asc = store
-        .artists_in_genre_window("Rock", SortDirection::Ascending, 0, 10)
-        .expect("window works");
+    let asc = artists_in_genre_window(&store, "Rock", SortDirection::Ascending, 0, 10);
     assert_eq!(
         asc.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
         ["Rockers"],
@@ -2772,9 +2931,7 @@ fn test_artists_in_genre_window_and_count_are_scoped_and_ordered() {
         "the artist carries its genre-scoped album keys in canonical order"
     );
 
-    let desc = store
-        .artists_in_genre_window("Rock", SortDirection::Descending, 0, 10)
-        .expect("window works");
+    let desc = artists_in_genre_window(&store, "Rock", SortDirection::Descending, 0, 10);
     assert_eq!(
         desc.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
         ["Rockers"],
@@ -2800,22 +2957,17 @@ fn test_artist_albums_in_genre_window_and_count_are_scoped_and_ordered() {
         .expect("batch applies");
 
     assert_eq!(
-        store
-            .artist_albums_in_genre_count("Rockers", "Rock")
-            .expect("count works"),
+        artist_albums_in_genre_count(&store, "Rockers", "Rock"),
         2,
         "only albums holding a Rock track count"
     );
     assert_eq!(
-        store
-            .artist_albums_in_genre_count("Rockers", "Nothing")
-            .expect("count works"),
+        artist_albums_in_genre_count(&store, "Rockers", "Nothing"),
         0
     );
 
-    let asc = store
-        .artist_albums_in_genre_window("Rockers", "Rock", SortDirection::Ascending, 0, 10)
-        .expect("window works");
+    let asc =
+        artist_albums_in_genre_window(&store, "Rockers", "Rock", SortDirection::Ascending, 0, 10);
     assert_eq!(
         asc.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
         ["New", "Old"],
@@ -2827,9 +2979,8 @@ fn test_artist_albums_in_genre_window_and_count_are_scoped_and_ordered() {
         "each album carries only its matching track ids"
     );
 
-    let desc = store
-        .artist_albums_in_genre_window("Rockers", "Rock", SortDirection::Descending, 0, 10)
-        .expect("window works");
+    let desc =
+        artist_albums_in_genre_window(&store, "Rockers", "Rock", SortDirection::Descending, 0, 10);
     assert_eq!(
         desc.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
         ["Old", "New"],
@@ -2853,9 +3004,7 @@ fn test_artist_albums_in_genre_window_slices_offset() {
         ])
         .expect("batch applies");
 
-    let mid = store
-        .artist_albums_in_genre_window("A", "Rock", SortDirection::Ascending, 1, 1)
-        .expect("window works");
+    let mid = artist_albums_in_genre_window(&store, "A", "Rock", SortDirection::Ascending, 1, 1);
     assert_eq!(
         mid.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
         ["Mid"],
@@ -2876,16 +3025,12 @@ fn test_artist_albums_in_genre_unknown_scopes_yield_empty() {
         .expect("batch applies");
 
     assert!(
-        store
-            .artist_albums_in_genre_window("Nobody", "Rock", SortDirection::Ascending, 0, 10)
-            .expect("unknown artist window")
+        artist_albums_in_genre_window(&store, "Nobody", "Rock", SortDirection::Ascending, 0, 10)
             .is_empty(),
         "unknown artists yield no albums"
     );
     assert!(
-        store
-            .artist_albums_in_genre_window("A", "Nothing", SortDirection::Ascending, 0, 10)
-            .expect("unknown genre window")
+        artist_albums_in_genre_window(&store, "A", "Nothing", SortDirection::Ascending, 0, 10)
             .is_empty(),
         "unknown genres yield no albums"
     );
@@ -3422,7 +3567,7 @@ fn test_hit_albums_list_name_hits_and_track_hits_in_canonical_order() {
     let (_dir, store) = seeded_entity_hit_store();
 
     // A name-hit album (its title matches) lists with ALL of its hit tracks.
-    let wave = store.hit_albums("wave", 0, 100).expect("hit albums query");
+    let wave = hit_albums(&store, "wave", 0, 100);
     assert_eq!(
         hit_album_keys(&wave),
         [("Zeta", "New Wave")],
@@ -3443,13 +3588,13 @@ fn test_hit_albums_list_name_hits_and_track_hits_in_canonical_order() {
          (missing numbers first, then number, then path)"
     );
     assert_eq!(
-        store.hit_albums_count("wave").expect("hit count"),
+        hit_albums_count(&store, "wave"),
         1,
         "count agrees with the listing"
     );
 
     // An artist name-hit surfaces every album of that artist.
-    let zeta = store.hit_albums("z", 0, 100).expect("hit albums query");
+    let zeta = hit_albums(&store, "z", 0, 100);
     assert_eq!(
         hit_album_keys(&zeta),
         [
@@ -3463,9 +3608,7 @@ fn test_hit_albums_list_name_hits_and_track_hits_in_canonical_order() {
 
     // A track-hit album — neither its artist nor its title matches — still
     // appears, carrying only the matching track.
-    let alpha_one = store
-        .hit_albums("alpha one", 0, 100)
-        .expect("hit albums query");
+    let alpha_one = hit_albums(&store, "alpha one", 0, 100);
     assert_eq!(
         hit_album_keys(&alpha_one),
         [("Alpha", "Only")],
@@ -3481,10 +3624,7 @@ fn test_hit_albums_list_name_hits_and_track_hits_in_canonical_order() {
         "only the matching track rides along"
     );
     assert!(
-        store
-            .hit_albums("zzz-no-match", 0, 100)
-            .expect("no-match query")
-            .is_empty(),
+        hit_albums(&store, "zzz-no-match", 0, 100).is_empty(),
         "an album whose track is the only match must not appear for other queries"
     );
 }
@@ -3496,7 +3636,7 @@ fn test_hit_albums_matching_is_literal_and_case_insensitive_including_non_latin(
     // Non-Latin name matching folds case like the tracks' search text.
     for query in ["чайковский", "ЧАЙКОВСКИЙ"] {
         assert_eq!(
-            hit_album_keys(&store.hit_albums(query, 0, 100).expect("hit albums query")),
+            hit_album_keys(&hit_albums(&store, query, 0, 100)),
             [("Чайковский", "Балеты")],
             "non-Latin album artist matching is case-insensitive for {query:?}"
         );
@@ -3504,11 +3644,7 @@ fn test_hit_albums_matching_is_literal_and_case_insensitive_including_non_latin(
 
     // Non-Latin track matching surfaces the album upward.
     assert_eq!(
-        hit_album_keys(
-            &store
-                .hit_albums("лебединое", 0, 100)
-                .expect("hit albums query")
-        ),
+        hit_album_keys(&hit_albums(&store, "лебединое", 0, 100)),
         [("Чайковский", "Балеты")],
         "a non-Latin track hit surfaces its album"
     );
@@ -3517,20 +3653,17 @@ fn test_hit_albums_matching_is_literal_and_case_insensitive_including_non_latin(
     // track that actually contains the character — it must NOT match every
     // album the way LIKE would.
     assert_eq!(
-        hit_album_keys(&store.hit_albums("100%", 0, 100).expect("hit albums query")),
+        hit_album_keys(&hit_albums(&store, "100%", 0, 100)),
         [("Idol", "Stage")],
         "a literal percent matches the track carrying it"
     );
     assert_eq!(
-        hit_album_keys(&store.hit_albums("%", 0, 100).expect("bare percent")),
+        hit_album_keys(&hit_albums(&store, "%", 0, 100)),
         [("Idol", "Stage")],
         "bare % matches exactly the row carrying the character (no LIKE semantics)"
     );
     assert!(
-        store
-            .hit_albums("_", 0, 100)
-            .expect("bare underscore")
-            .is_empty(),
+        hit_albums(&store, "_", 0, 100).is_empty(),
         "bare _ must not match every row (no LIKE semantics)"
     );
 }
@@ -3541,40 +3674,32 @@ fn test_hit_albums_windows_are_bounded_with_correct_totals() {
 
     // "z" hits three Zeta albums; windows slice that set deterministically.
     assert_eq!(
-        store.hit_albums_count("z").expect("hit count"),
+        hit_albums_count(&store, "z"),
         3,
         "the count is authoritative for the windowing"
     );
     assert_eq!(
-        hit_album_keys(&store.hit_albums("z", 0, 2).expect("window 0")),
+        hit_album_keys(&hit_albums(&store, "z", 0, 2)),
         [("Zeta", "New Wave"), ("Zeta", "A Sides")],
         "the first window takes the first two canonical rows"
     );
     assert_eq!(
-        hit_album_keys(&store.hit_albums("z", 2, 10).expect("window 2")),
+        hit_album_keys(&hit_albums(&store, "z", 2, 10)),
         [("Zeta", "Old Hits")],
         "the second window takes the remainder"
     );
     assert_eq!(
-        hit_album_keys(&store.hit_albums("z", 2, 1).expect("window 1")),
+        hit_album_keys(&hit_albums(&store, "z", 2, 1)),
         [("Zeta", "Old Hits")],
         "an offset mid-library serves exactly the requested row"
     );
     assert!(
-        store
-            .hit_albums("z", 99, 10)
-            .expect("past-the-end window")
-            .is_empty(),
+        hit_albums(&store, "z", 99, 10).is_empty(),
         "a window past the end serves nothing"
     );
 
     // Unknown-query windows degrade to empty, never an error.
-    assert!(
-        store
-            .hit_albums("no such album", 0, 100)
-            .expect("no-match window")
-            .is_empty()
-    );
+    assert!(hit_albums(&store, "no such album", 0, 100).is_empty());
 }
 
 /// The `(name, [album keys])` shape of a hit-artist listing, for assertion.
@@ -3592,11 +3717,7 @@ fn test_hit_artists_list_name_hits_and_album_hits_with_only_hit_album_keys() {
     // A name-hit artist carries every album (all are name-hits too), in
     // canonical per-artist order.
     assert_eq!(
-        hit_artist_keys(
-            &store
-                .hit_artists("zeta", 0, 100)
-                .expect("hit artists query")
-        ),
+        hit_artist_keys(&hit_artists(&store, "zeta", 0, 100)),
         [(
             "Zeta".to_string(),
             vec![
@@ -3611,11 +3732,7 @@ fn test_hit_artists_list_name_hits_and_album_hits_with_only_hit_album_keys() {
     // An artist reached only through a track hit appears with only the
     // hit-album key.
     assert_eq!(
-        hit_artist_keys(
-            &store
-                .hit_artists("alpha one", 0, 100)
-                .expect("hit artists query")
-        ),
+        hit_artist_keys(&hit_artists(&store, "alpha one", 0, 100)),
         [("Alpha".to_string(), vec!["Alpha - Only".to_string()])],
         "a track hit surfaces its artist upward with only its hit-album key"
     );
@@ -3623,7 +3740,7 @@ fn test_hit_artists_list_name_hits_and_album_hits_with_only_hit_album_keys() {
     // Multiple artists in name-ascending order; Zeta's two hit albums ride
     // in canonical order (year descending, missing year last).
     assert_eq!(
-        hit_artist_keys(&store.hit_artists("1", 0, 100).expect("hit artists query")),
+        hit_artist_keys(&hit_artists(&store, "1", 0, 100)),
         [
             ("Idol".to_string(), vec!["Idol - Stage".to_string()]),
             (
@@ -3636,11 +3753,7 @@ fn test_hit_artists_list_name_hits_and_album_hits_with_only_hit_album_keys() {
 
     // Non-Latin: a track hit surfaces its artist.
     assert_eq!(
-        hit_artist_keys(
-            &store
-                .hit_artists("лебединое", 0, 100)
-                .expect("hit artists query")
-        ),
+        hit_artist_keys(&hit_artists(&store, "лебединое", 0, 100)),
         [(
             "Чайковский".to_string(),
             vec!["Чайковский - Балеты".to_string()]
@@ -3649,22 +3762,14 @@ fn test_hit_artists_list_name_hits_and_album_hits_with_only_hit_album_keys() {
     );
 
     // No match: nobody, not an error.
-    assert!(
-        store
-            .hit_artists("zzz-no-match", 0, 100)
-            .expect("no-match query")
-            .is_empty()
-    );
+    assert!(hit_artists(&store, "zzz-no-match", 0, 100).is_empty());
     assert_eq!(
-        store
-            .hit_artists_count("zeta")
-            .expect("hit count")
-            .to_string(),
+        hit_artists_count(&store, "zeta").to_string(),
         "1",
         "count agrees with the listing"
     );
     assert_eq!(
-        store.hit_artists_count("1").expect("hit count"),
+        hit_artists_count(&store, "1"),
         2,
         "count agrees with the multi-artist listing"
     );
@@ -3675,17 +3780,17 @@ fn test_hit_artists_windows_are_bounded_with_correct_totals() {
     let (_dir, store) = seeded_entity_hit_store();
 
     assert_eq!(
-        store.hit_artists_count("1").expect("hit count"),
+        hit_artists_count(&store, "1"),
         2,
         "the count is authoritative for the windowing"
     );
     assert_eq!(
-        hit_artist_keys(&store.hit_artists("1", 0, 1).expect("window 0")),
+        hit_artist_keys(&hit_artists(&store, "1", 0, 1)),
         [("Idol".to_string(), vec!["Idol - Stage".to_string()])],
         "the first window takes the first canonical artist"
     );
     assert_eq!(
-        hit_artist_keys(&store.hit_artists("1", 1, 1).expect("window 1")),
+        hit_artist_keys(&hit_artists(&store, "1", 1, 1)),
         [(
             "Zeta".to_string(),
             vec!["Zeta - A Sides".to_string(), "Zeta - Old Hits".to_string(),],
@@ -3693,10 +3798,7 @@ fn test_hit_artists_windows_are_bounded_with_correct_totals() {
         "the second window takes the next artist with its hit-album keys intact"
     );
     assert!(
-        store
-            .hit_artists("1", 9, 10)
-            .expect("past-the-end window")
-            .is_empty(),
+        hit_artists(&store, "1", 9, 10).is_empty(),
         "a window past the end serves nothing"
     );
 }
@@ -3971,25 +4073,12 @@ fn test_hit_albums_in_genre_list_albums_that_hold_the_genre_and_hit() {
         ],
         "canonical browsing order inside the genre (title-ascending on year ties)"
     );
-    assert_eq!(
-        store
-            .hit_albums_in_genre_count("Rock", "r")
-            .expect("genre hit count"),
-        3,
-        "count agrees with the listing"
-    );
 }
 
 #[test]
 fn test_hit_albums_in_genre_windows_are_bounded_with_correct_totals() {
     let (_dir, store) = seeded_genre_hit_store();
 
-    assert_eq!(
-        store
-            .hit_albums_in_genre_count("Rock", "r")
-            .expect("genre hit count"),
-        3
-    );
     assert_eq!(
         hit_album_keys(
             &store
@@ -4057,13 +4146,6 @@ fn test_hit_artists_in_genre_list_artists_with_a_genre_scoped_hit_album() {
             .hit_artists_in_genre("Jazz", "riff", 0, 100)
             .expect("genre hit artists query")
             .is_empty()
-    );
-    assert_eq!(
-        store
-            .hit_artists_in_genre_count("Rock", "riff")
-            .expect("genre hit artist count"),
-        1,
-        "count agrees with the listing"
     );
 }
 
@@ -5313,9 +5395,9 @@ fn test_clear_library_wipes_collection_and_preserves_curation() {
     assert_eq!(removed, 3, "every track row is wiped in one action");
 
     // Collection tables are empty; queries see an empty library immediately.
-    assert_eq!(store.track_count().expect("count"), 0);
+    assert_eq!(track_count(&store), 0);
     assert!(
-        store.tracks_window(0, 50).expect("window").is_empty(),
+        tracks_window(&store, 0, 50).is_empty(),
         "flat list is empty without a restart"
     );
     assert!(
@@ -5384,7 +5466,7 @@ fn test_clear_library_survives_reopen() {
         crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
     let reopened = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
         .expect("reopening works");
-    assert_eq!(reopened.track_count().expect("count"), 0);
+    assert_eq!(track_count(&reopened), 0);
     assert_eq!(
         reopened.load_playlists().expect("playlists").len(),
         1,
@@ -5423,7 +5505,7 @@ fn test_clear_library_is_atomic_on_failure() {
 
     // The rollback restored every deleted row: nothing partially cleared.
     assert_eq!(
-        store.track_count().expect("count"),
+        track_count(&store),
         3,
         "tracks are fully restored after the failed wipe"
     );
@@ -5442,7 +5524,7 @@ fn test_clear_library_is_atomic_on_failure() {
         .with_connection(|conn| conn.execute_batch("DROP TRIGGER fail_clear;"))
         .expect("trigger removal works");
     assert_eq!(store.clear_library().expect("clear works"), 3);
-    assert_eq!(store.track_count().expect("count"), 0);
+    assert_eq!(track_count(&store), 0);
 }
 
 // --- Playlist adapter: session generation bumps only on committed mutations ---
@@ -6019,4 +6101,83 @@ fn committing_a_favorite_toggle_bumps_library_generation_and_emits_once() {
         "no-ops must not bump the generation"
     );
     assert!(changes_rx.is_empty(), "no-ops must not emit");
+}
+
+// --- Listing Page: one connection acquisition (listing-page-read 02) --------
+
+/// A Listing Page is one fact read at one generation: the store takes the
+/// connection once for both halves, so a writer on another thread can only
+/// land wholly before or wholly after the read. Asking for a window wide
+/// enough to hold the whole collection therefore always reports a total that
+/// equals the number of rows delivered. A read that took the connection
+/// twice would let a commit land in between and report a total counting a
+/// track its window never saw (or the reverse).
+#[test]
+fn a_page_read_never_mixes_generations_with_a_concurrent_writer() {
+    // Both threads must put in their minimum, so a fast reader cannot let the
+    // writer retire early and a slow one cannot starve the interleaving: the
+    // race window is guaranteed to be wide in both directions. The reader's
+    // own read count is never asserted, so no wall-clock timing can fail this
+    // test -- which is what a fixed read-count floor did under suite load.
+    const MIN_WRITES: usize = 400;
+    const MIN_FRAMES: usize = 400;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) = crossbeam_channel::unbounded::<StoreChanged>();
+    let store = SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    let frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let writing = Arc::new(AtomicBool::new(true));
+    let writing_in_writer = Arc::clone(&writing);
+    let frames_in_writer = Arc::clone(&frames);
+    let mut writer = store.clone();
+    let writer = std::thread::spawn(move || {
+        let mut written = 0usize;
+        loop {
+            writer
+                .apply_scan_batch(&[library_track(
+                    &format!("m:/music/{written:04}.mp3"),
+                    "Concurrent",
+                    Some("Ada"),
+                    "One",
+                    Some("Ada"),
+                )])
+                .expect("concurrent scan batch must commit");
+            written += 1;
+            if written >= MIN_WRITES
+                && frames_in_writer.load(std::sync::atomic::Ordering::Acquire) >= MIN_FRAMES
+            {
+                break;
+            }
+        }
+        writing_in_writer.store(false, std::sync::atomic::Ordering::Release);
+        written
+    });
+
+    let reader = store.clone();
+    let mut reads = 0usize;
+    while writing.load(std::sync::atomic::Ordering::Acquire) {
+        let page = reader
+            .tracks_page(0, MIN_WRITES * 4)
+            .expect("page read must succeed");
+        assert_eq!(
+            page.total(),
+            page.rows().len(),
+            "read {reads}: a page read taken while writes land must report a total that \
+             agrees with the number of rows it delivered"
+        );
+        reads += 1;
+        frames.store(reads, std::sync::atomic::Ordering::Release);
+    }
+    let written = writer.join().unwrap();
+
+    assert!(
+        written >= MIN_WRITES,
+        "the writer must have kept committing across the read window, made {written} commits"
+    );
+
+    let page = reader.tracks_page(0, MIN_WRITES * 4).unwrap();
+    assert_eq!(page.total(), written, "the writer's batches all committed");
+    assert_eq!(page.rows().len(), written, "and every one is listed");
 }

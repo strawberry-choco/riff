@@ -40,6 +40,16 @@ impl SmartPlaylistsProjection {
     /// Fresh frames hand out an `Arc` clone of the cached list — no
     /// per-frame copy.
     ///
+    /// This level deliberately keeps a hand-written body instead of declaring
+    /// itself on [`GenerationCache::level`]: its hit rule is not "is this
+    /// level loaded", but "is the cached list at least as long as the one
+    /// being asked for" — a cached `limit` of 50 answers a request for 10 with
+    /// all 50 rows, while a request for 100 refetches. That over-serving rule
+    /// is the level's whole policy, and folding it into a `level` `read`
+    /// closure would hide behind a generic-looking call the next reader has to
+    /// trust. The staleness mechanics it shares with every other level are
+    /// spelled out here on purpose, beside the rule that is not shared.
+    ///
     /// # Errors
     /// Propagates loader failures without touching the cache.
     pub fn list(

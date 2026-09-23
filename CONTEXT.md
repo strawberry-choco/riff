@@ -104,6 +104,10 @@ _Avoid_: cache, AppState snapshot
 The single read interface over all Session Projections; UI code asks it for ready-to-render data and never touches the generation counter, loader wiring, staleness handling, or store-error fallbacks itself.
 _Avoid_: projection manager, view cache
 
+**Listing Page**:
+A Section's or Drill Column's total and its visible window, read from the Application Store as one fact at one generation. Its total and its rows may never come from different generations.
+_Avoid_: page, query result, count row
+
 **Audio Engine**:
 The module that turns Playback Commands into decoded audio and Playback Updates, owning decode scheduling, output startup, and gapless handoff; it decides nothing about queue order beyond filling an empty Playback Queue.
 _Avoid_: playback thread, sound server

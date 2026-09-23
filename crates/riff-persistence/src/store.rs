@@ -529,6 +529,52 @@ pub enum SortDirection {
     Descending,
 }
 
+/// A Section's or Drill Column's total and its visible window, read as one
+/// fact at one generation.
+///
+/// `stamp` is the generation captured inside the single connection
+/// acquisition that produced `rows`. A writer bumps its generation only
+/// after its own closure returns, so a reader can only ever stamp fresh
+/// data with a same-or-older epoch: a contended write over-invalidates, and
+/// never serves stale rows as fresh. The stamp stays private with no
+/// accessor — no caller outside the store can observe an epoch, so a guard
+/// that compares two observations of the counter has no form left to be
+/// written in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Page<T> {
+    total: usize,
+    rows: Vec<T>,
+    stamp: u64,
+}
+
+impl<T> Page<T> {
+    /// A page whose total and rows were read together at `stamp`.
+    #[must_use]
+    pub fn new(total: usize, rows: Vec<T>, stamp: u64) -> Self {
+        Self { total, rows, stamp }
+    }
+
+    /// The listing's total at the generation that produced [`Self::rows`].
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.total
+    }
+
+    /// The visible window at the generation that produced [`Self::total`].
+    #[must_use]
+    pub fn rows(&self) -> &[T] {
+        &self.rows
+    }
+
+    /// Take the window out of the page, consuming it. A Session Projection
+    /// caches the rows it will keep showing; the total stays with the page
+    /// until then.
+    #[must_use]
+    pub fn into_rows(self) -> Vec<T> {
+        self.rows
+    }
+}
+
 /// Port for reading the Library collection section of the Application Store.
 ///
 /// Flat-list and search reads are bounded windows (ADR 0003): callers fetch
@@ -537,6 +583,27 @@ pub enum SortDirection {
 /// implementation is guaranteed by storing a derived Rust-lowercased
 /// search-text column at write time and lowercasing the query in Rust here;
 /// matching is literal substring (no wildcard semantics).
+///
+/// ## Listing Pages
+///
+/// A browse surface that shows a total above a window of rows reads both as
+/// one [`Page`] (`*_page` methods): the store takes its connection once for
+/// the whole read and stamps the page with the generation it observed inside
+/// that acquisition, so a committed mutation can never leave the total and
+/// the rows describing different moments. Each page read names which of the
+/// store's two counters stamps it, because which one applies is a fact about
+/// the listing, not something a caller infers.
+///
+/// Two obligations are part of this interface. A page read must compose
+/// private connection-level helpers and never call back through a public
+/// method on this trait — the connection lock is not reentrant, so a nested
+/// call deadlocks. And a page read takes an offset, never a window length it
+/// invents: how many rows a surface displays belongs to that surface's Scroll
+/// Memory, so the store must not guess at pagination.
+///
+/// [`Self::folder_track_count`] is deliberately not a page read. It counts an
+/// unbounded list that the listing already materialises, so it has no second
+/// moment to disagree with.
 pub trait LibraryQueryStore {
     /// Resolve one `Track` by its `TrackId` (its full file path). Playback uses
     /// this instead of any in-memory copy. `None` when unknown.
@@ -548,11 +615,11 @@ pub trait LibraryQueryStore {
     /// for one scan; the filter reads this ONCE per scan, never per path.
     fn metadata_version(&self) -> Result<u32, StoreError>;
 
-    /// One bounded window of the flat library list, path-ascending.
-    fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, StoreError>;
-
-    /// Total number of stored Tracks (for the flat list projection).
-    fn track_count(&self) -> Result<usize, StoreError>;
+    /// The flat library list's Listing Page at `offset`: the total number of
+    /// stored Tracks and one window of `limit` rows, path-ascending, read
+    /// under a single connection acquisition and stamped with the Library
+    /// generation captured inside it.
+    fn tracks_page(&self, offset: usize, limit: usize) -> Result<Page<Track>, StoreError>;
 
     /// The Library-count totals — tracks, artists, albums, genres — in ONE
     /// query (design-handoff issue 05), so the sidebar-counts read model
@@ -574,18 +641,16 @@ pub trait LibraryQueryStore {
     /// starts from an empty queue.
     fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError>;
 
-    /// One bounded window of case-insensitive substring matches over title,
-    /// artist, album, and album artist, path-ascending. The query is
-    /// lowercased in Rust before matching.
-    fn search_window(
+    /// The search listing's Listing Page for `query` at `offset`: the match
+    /// total and one window of `limit` rows, path-ascending, read under a
+    /// single connection acquisition and stamped with the Library generation
+    /// captured inside it.
+    fn search_page(
         &self,
         query: &str,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<Track>, StoreError>;
-
-    /// Total number of matches for [`Self::search_window`] semantics.
-    fn search_count(&self, query: &str) -> Result<usize, StoreError>;
+    ) -> Result<Page<Track>, StoreError>;
 
     /// Every artist in the collection, name-ascending (byte-wise, matching
     /// the former UI sort). Each artist's `albums` lists its composite keys
@@ -708,39 +773,27 @@ pub trait LibraryQueryStore {
 
     // --- Entity hit reads (search across Library sections) -----------------
 
-    /// One bounded window of hit albums for `query`, in the canonical
-    /// browsing order the Albums root renders (album artist ascending, then
-    /// year descending with missing years last, then title ascending). An
-    /// album hits when its album artist or title matches `query`
-    /// case-insensitively (a name hit) or any member track matches (a track
-    /// hit) — matching is literal substring over the write-time-lowercased
-    /// key columns and the tracks' derived `search_text`. Each returned
-    /// album carries only its hit track ids, in canonical album-track order.
-    fn hit_albums(
+    /// The hit-album Drill Column's Listing Page for `query` at `offset`:
+    /// the hit total and one window of `limit` albums in the canonical
+    /// browsing order, read under a single connection acquisition and
+    /// stamped with the Library generation captured inside it.
+    fn hit_albums_page(
         &self,
         query: &str,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<Album>, StoreError>;
+    ) -> Result<Page<Album>, StoreError>;
 
-    /// Total number of hit albums for [`Self::hit_albums`] semantics.
-    fn hit_albums_count(&self, query: &str) -> Result<usize, StoreError>;
-
-    /// One bounded window of hit artists for `query`, name-ascending. An
-    /// artist hits when its name matches `query` case-insensitively (literal
-    /// substring over the write-time-lowercased name column) or any of its
-    /// albums is a hit; each artist carries only its hit-album keys in
-    /// canonical browsing order (year descending with missing years last,
-    /// then title ascending).
-    fn hit_artists(
+    /// The hit-artist Drill Column's Listing Page for `query` at `offset`:
+    /// the hit total and one window of `limit` artists, name-ascending, read
+    /// under a single connection acquisition and stamped with the Library
+    /// generation captured inside it.
+    fn hit_artists_page(
         &self,
         query: &str,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<Artist>, StoreError>;
-
-    /// Total number of hit artists for [`Self::hit_artists`] semantics.
-    fn hit_artists_count(&self, query: &str) -> Result<usize, StoreError>;
+    ) -> Result<Page<Artist>, StoreError>;
 
     /// One album's tracks that match `query`, in canonical album-track
     /// order (track number ascending with missing numbers first, path
@@ -777,10 +830,6 @@ pub trait LibraryQueryStore {
         limit: usize,
     ) -> Result<Vec<Album>, StoreError>;
 
-    /// Total number of hit albums within `genre` for
-    /// [`Self::hit_albums_in_genre`] semantics.
-    fn hit_albums_in_genre_count(&self, genre: &str, query: &str) -> Result<usize, StoreError>;
-
     /// One bounded window of hit artists within `genre` for `query`,
     /// name-ascending. An artist appears when at least one of its albums is
     /// a genre-scoped hit (holds a `genre`-bearing track and is itself a
@@ -793,10 +842,6 @@ pub trait LibraryQueryStore {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<Artist>, StoreError>;
-
-    /// Total number of hit artists within `genre` for
-    /// [`Self::hit_artists_in_genre`] semantics.
-    fn hit_artists_in_genre_count(&self, genre: &str, query: &str) -> Result<usize, StoreError>;
 
     /// One album's tracks that match `query` among the tracks carrying
     /// `genre` (semicolon-separated entries), in canonical album-track
@@ -824,82 +869,63 @@ pub trait LibraryQueryStore {
     // `ORDER BY` — page offsets stay aligned when the sort reverses, and
     // descending is exact descending SQL order, not an in-memory reversal.
 
-    /// One bounded window of artists, name-ascending (byte-wise) or
-    /// name-descending per `direction`, each artist carrying its album keys
-    /// in canonical browsing order — year descending with missing years
-    /// last, then title ascending.
-    fn artists_window(
+    /// The Artists root's Listing Page at `offset` for `direction`: the
+    /// artist total and one window of `limit` artists, each carrying its
+    /// album keys, read under a single connection acquisition and stamped
+    /// with the Library generation captured inside it.
+    fn artists_page(
         &self,
         direction: SortDirection,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<Artist>, StoreError>;
+    ) -> Result<Page<Artist>, StoreError>;
 
-    /// Total number of artists (for the Artists root projection).
-    fn artists_count(&self) -> Result<usize, StoreError>;
-
-    /// One bounded window over every album in the flat browsing order
-    /// (album artist ascending, then year descending with missing years
-    /// last, then title ascending) — or its exact reversal per `direction` —
-    /// each album carrying its full track ids in album-track order.
-    fn albums_window(
+    /// The Albums root's Listing Page at `offset` for `direction`: the album
+    /// total and one window of `limit` albums in the flat browsing order or
+    /// its exact reversal, read under a single connection acquisition and
+    /// stamped with the Library generation captured inside it.
+    fn albums_page(
         &self,
         direction: SortDirection,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<Album>, StoreError>;
+    ) -> Result<Page<Album>, StoreError>;
 
-    /// Total number of albums (for the Albums root projection).
-    fn albums_count(&self) -> Result<usize, StoreError>;
-
-    /// One bounded window of genre entries, name-ascending or
-    /// name-descending per `direction`, each carrying its per-track count
-    /// aggregated exactly like [`Self::genre_counts`] (semicolon-separated
-    /// segments count once per entry).
-    fn genres_window(
+    /// The Genres root's Listing Page at `offset` for `direction`: the genre
+    /// total and one window of `limit` entries, read under a single
+    /// connection acquisition and stamped with the Library generation
+    /// captured inside it.
+    fn genres_page(
         &self,
         direction: SortDirection,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<GenreCount>, StoreError>;
+    ) -> Result<Page<GenreCount>, StoreError>;
 
-    /// Total number of genre entries (for the Genres root projection).
-    fn genres_count(&self) -> Result<usize, StoreError>;
-
-    /// One bounded window of artists having at least one Track with `genre`,
-    /// name-ascending or name-descending per `direction`, each with only the
-    /// album keys of albums holding at least one matching track, in
-    /// canonical browsing order. Matching follows [`Self::artists_in_genre`]
-    /// (semicolon-separated entries). Unknown genres yield an empty `Vec`.
-    fn artists_in_genre_window(
+    /// The genre drill-down's Listing Page of artists within `genre` at
+    /// `offset`: the total and one window of `limit` artists, read under a
+    /// single connection acquisition and stamped with the Library generation
+    /// captured inside it.
+    fn artists_in_genre_page(
         &self,
         genre: &str,
         direction: SortDirection,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<Artist>, StoreError>;
+    ) -> Result<Page<Artist>, StoreError>;
 
-    /// Total number of artists within `genre` for
-    /// [`Self::artists_in_genre_window`] semantics.
-    fn artists_in_genre_count(&self, genre: &str) -> Result<usize, StoreError>;
-
-    /// One bounded window of one artist's albums holding at least one Track
-    /// with `genre`, in canonical browsing order or its exact reversal per
-    /// `direction`, each carrying only its matching track ids in album-track
-    /// order. Matching follows [`Self::artists_in_genre`]. Unknown artists or
-    /// genres yield an empty `Vec`.
-    fn artist_albums_in_genre_window(
+    /// The artist-and-genre drill-down's Listing Page at `offset`: the album
+    /// total and one window of `limit` albums, read under a single connection
+    /// acquisition and stamped with the Library generation captured inside
+    /// it.
+    fn artist_albums_in_genre_page(
         &self,
         artist: &str,
         genre: &str,
         direction: SortDirection,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<Album>, StoreError>;
-
-    /// Total number of albums within `artist` and `genre` for
-    /// [`Self::artist_albums_in_genre_window`] semantics.
-    fn artist_albums_in_genre_count(&self, artist: &str, genre: &str) -> Result<usize, StoreError>;
+    ) -> Result<Page<Album>, StoreError>;
 }
 
 /// Notification the `Application Store` emits (best-effort) over a

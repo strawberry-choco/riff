@@ -35,6 +35,11 @@ enum ScanCache {
 /// Session Projection for the counts read models (ADR 0002): the
 /// sidebar-count totals and the per-smart-list sizes, cached per generation
 /// so fresh frames cost nothing.
+///
+/// Every level migrated here declares itself on [`GenerationCache::level`],
+/// so this projection spells out no freshness rule of its own for them.
+/// `last_scan` is the deliberate carve-out: it caches an absence through the
+/// tri-state `ScanCache`, which a plain option cannot express.
 pub struct CountsProjection {
     cache: GenerationCache<(), CountsBundle>,
 }
@@ -63,18 +68,15 @@ impl CountsProjection {
         &mut self,
         loader: &mut dyn FnMut() -> Result<LibraryCounts, StoreError>,
     ) -> Result<Arc<LibraryCounts>, StoreError> {
-        let epoch = self.cache.observe();
-        if let Some(cached) = self
-            .cache
-            .loaded_at(epoch)
-            .then(|| self.cache.peek().and_then(|bundle| bundle.library.clone()))
-            .flatten()
-        {
-            return Ok(cached);
-        }
-        let fresh: Arc<LibraryCounts> = Arc::new(loader()?);
-        self.cache.slot(epoch, &()).library = Some(Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |bundle| bundle.library.clone(),
+            || loader().map(Arc::new),
+            |bundle, answer| {
+                bundle.library = Some(Arc::clone(&answer));
+                answer
+            },
+        )
     }
 
     /// Every smart playlist's unbounded total, in `ALL` order, cached per
@@ -86,22 +88,15 @@ impl CountsProjection {
         &mut self,
         loader: &mut dyn FnMut() -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError>,
     ) -> Result<Arc<[(SmartPlaylistKind, usize)]>, StoreError> {
-        let epoch = self.cache.observe();
-        if let Some(cached) = self
-            .cache
-            .loaded_at(epoch)
-            .then(|| {
-                self.cache
-                    .peek()
-                    .and_then(|bundle| bundle.smart_lists.clone())
-            })
-            .flatten()
-        {
-            return Ok(cached);
-        }
-        let fresh: Arc<[(SmartPlaylistKind, usize)]> = loader()?.into();
-        self.cache.slot(epoch, &()).smart_lists = Some(Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |bundle| bundle.smart_lists.clone(),
+            || loader().map(Arc::from),
+            |bundle, answer| {
+                bundle.smart_lists = Some(Arc::clone(&answer));
+                answer
+            },
+        )
     }
 
     /// How many tracks live under `folder`, cached per (generation, folder)
@@ -114,27 +109,34 @@ impl CountsProjection {
         folder: &Path,
         loader: &mut dyn FnMut(&Path) -> Result<usize, StoreError>,
     ) -> Result<usize, StoreError> {
-        let epoch = self.cache.observe();
-        if self.cache.loaded_at(epoch)
-            && let Some(count) = self
-                .cache
-                .peek()
-                .and_then(|bundle| bundle.folder_counts.get(folder))
-        {
-            return Ok(*count);
-        }
-        let fresh = loader(folder)?;
-        self.cache
-            .slot(epoch, &())
-            .folder_counts
-            .insert(folder.to_path_buf(), fresh);
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |bundle| bundle.folder_counts.get(folder).copied(),
+            || loader(folder),
+            |bundle, answer| {
+                bundle.folder_counts.insert(folder.to_path_buf(), answer);
+                answer
+            },
+        )
     }
 
     /// The last completed full scan's summary (timestamp + file/error
     /// counts, design-handoff issue 12), cached per generation — including
     /// a cached absence ("never scanned"), so a cold store does not requery
     /// per frame.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    /// The last completed full scan, cached per generation -- and cached when
+    /// there never was one.
+    ///
+    /// This level deliberately keeps a hand-written body instead of declaring
+    /// itself on [`GenerationCache::level`]: it caches an absence. A fresh
+    /// frame must be able to answer `None` from the cache without re-reading,
+    /// which is a third state beside "loaded a scan" and "not loaded yet", and
+    /// `level`'s `read` reports only the latter two -- returning `None` there
+    /// means "load it", never "the store says there is nothing". The tri-state
+    /// [`ScanCache`] carries that distinction, and only this body does.
     ///
     /// # Errors
     /// Propagates loader failures without touching the cache.

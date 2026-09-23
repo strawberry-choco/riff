@@ -49,6 +49,9 @@ type GenreCountsLoader<'a> = &'a mut dyn FnMut(&str) -> Result<Vec<GenreCount>, 
 /// Levels are keyed by their full query signature (album + query, genre +
 /// query, …), so a keystroke refetches without waiting for the store. Loader
 /// errors propagate and leave the cache untouched — the next call retries.
+///
+/// Every level here declares itself on [`GenerationCache::level`], so this
+/// projection spells out no freshness rule of its own.
 pub struct HitProjection {
     /// Generation-keyed slot over the whole level bundle: a moved epoch
     /// drops every level together, within a generation levels fill lazily.
@@ -87,23 +90,15 @@ impl HitProjection {
             album_title.to_string(),
             query.to_string(),
         );
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|levels| levels.album_tracks.get(&key).cloned())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh: Arc<[Track]> = loader(album_artist, album_title, query)?.into();
-        self.cache
-            .slot(epoch, &())
-            .album_tracks
-            .insert(key, Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.album_tracks.get(&key).cloned(),
+            || loader(album_artist, album_title, query).map(Arc::from),
+            |levels, answer| {
+                levels.album_tracks.insert(key.clone(), Arc::clone(&answer));
+                answer
+            },
+        )
     }
 
     /// One album's tracks that match `query` among its `genre`-bearing
@@ -126,23 +121,17 @@ impl HitProjection {
             genre.to_string(),
             query.to_string(),
         );
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|levels| levels.genre_album_tracks.get(&key).cloned())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh: Arc<[Track]> = loader(album_artist, album_title, genre, query)?.into();
-        self.cache
-            .slot(epoch, &())
-            .genre_album_tracks
-            .insert(key, Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.genre_album_tracks.get(&key).cloned(),
+            || loader(album_artist, album_title, genre, query).map(Arc::from),
+            |levels, answer| {
+                levels
+                    .genre_album_tracks
+                    .insert(key.clone(), Arc::clone(&answer));
+                answer
+            },
+        )
     }
 
     /// Whether `album` is itself a name hit for `query`, cached per
@@ -162,23 +151,15 @@ impl HitProjection {
             album_title.to_string(),
             query.to_string(),
         );
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|levels| levels.album_name_hits.get(&key).copied())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh = loader(album_artist, album_title, query)?;
-        self.cache
-            .slot(epoch, &())
-            .album_name_hits
-            .insert(key, fresh);
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.album_name_hits.get(&key).copied(),
+            || loader(album_artist, album_title, query),
+            |levels, answer| {
+                levels.album_name_hits.insert(key.clone(), answer);
+                answer
+            },
+        )
     }
 
     /// The hit albums within `genre` for `query`, in canonical browsing
@@ -194,23 +175,15 @@ impl HitProjection {
         loader: GenreHitListLoader<'_, Album>,
     ) -> Result<Arc<[Album]>, StoreError> {
         let key = (genre.to_string(), query.to_string());
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|levels| levels.genre_albums.get(&key).cloned())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh: Arc<[Album]> = loader(genre, query)?.into();
-        self.cache
-            .slot(epoch, &())
-            .genre_albums
-            .insert(key, Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.genre_albums.get(&key).cloned(),
+            || loader(genre, query).map(Arc::from),
+            |levels, answer| {
+                levels.genre_albums.insert(key.clone(), Arc::clone(&answer));
+                answer
+            },
+        )
     }
 
     /// The hit artists within `genre` for `query`, name-ascending, cached
@@ -226,23 +199,17 @@ impl HitProjection {
         loader: GenreHitListLoader<'_, Artist>,
     ) -> Result<Arc<[Artist]>, StoreError> {
         let key = (genre.to_string(), query.to_string());
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|levels| levels.genre_artists.get(&key).cloned())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh: Arc<[Artist]> = loader(genre, query)?.into();
-        self.cache
-            .slot(epoch, &())
-            .genre_artists
-            .insert(key, Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.genre_artists.get(&key).cloned(),
+            || loader(genre, query).map(Arc::from),
+            |levels, answer| {
+                levels
+                    .genre_artists
+                    .insert(key.clone(), Arc::clone(&answer));
+                answer
+            },
+        )
     }
 
     /// Every genre containing at least one hit track, with its hit-track
@@ -256,22 +223,14 @@ impl HitProjection {
         loader: GenreCountsLoader<'_>,
     ) -> Result<Arc<[GenreCount]>, StoreError> {
         let key = query.to_string();
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|levels| levels.genre_counts.get(&key).cloned())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh: Arc<[GenreCount]> = loader(query)?.into();
-        self.cache
-            .slot(epoch, &())
-            .genre_counts
-            .insert(key, Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.genre_counts.get(&key).cloned(),
+            || loader(query).map(Arc::from),
+            |levels, answer| {
+                levels.genre_counts.insert(key.clone(), Arc::clone(&answer));
+                answer
+            },
+        )
     }
 }

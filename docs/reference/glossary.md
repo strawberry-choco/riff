@@ -20,6 +20,7 @@ This glossary defines the recurring terms used across riff's documentation and s
 | **crossbeam channel** | The `crossbeam-channel` crate, providing multi-producer, multi-consumer channels. riff uses unbounded channels for all cross-thread message passing. |
 | **eframe** | The official application framework around egui, providing windowing and the event loop. |
 | **Application Store** | The single authoritative persistent state of the application — Library, Playlists, and Settings — in one embedded SQLite database (`riff.sqlite3`). |
+| **Listing Page** | A Section's or Drill Column's total and its visible window, read from the Application Store as one fact at one generation (`Page<T>`, one `*_page` query port method per listing). Its total and its rows may never come from different generations. Not a View or a page of the UI. |
 | **Session Projection** | A bounded in-memory view of Application Store query results used while rendering; invalidated by a session-local generation counter after every committed mutation. |
 | **egui** | An immediate-mode GUI library written in pure Rust. It is the foundation of riff's user interface. |
 | **egui-elegance** | A theming crate for egui used by earlier versions of riff; retired — the interface is now styled from the project's own token constants in `riff-gui/src/ui/theme.rs`. |
@@ -43,7 +44,7 @@ The same terms grouped thematically, to help you find related concepts:
 - **Audio formats and decoding:** Codec, Container, Symphonia, symphonia-adapter-libopus, Metadata, Album Artist, Cover Art.
 - **Audio output backends:** cpal, WASAPI, ALSA, CoreAudio.
 - **UI framework:** egui, eframe, egui-elegance.
-- **Library and state:** Application Store, Session Projection, Library, Clear Library, Playback Queue, TrackId, AppState.
+- **Library and state:** Application Store, Session Projection, Listing Page, Library, Clear Library, Playback Queue, TrackId, AppState.
 - **Architecture roles:** Composition Root, App Runtime, Port / Trait.
 - **Concurrency and messaging:** Arc/Mutex, crossbeam channel.
 - **System integration and files:** notify, rfd.

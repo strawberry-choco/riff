@@ -481,11 +481,12 @@ mod tests {
             Ok(METADATA_VERSION)
         }
 
-        fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-        fn track_count(&self) -> Result<usize, StoreError> {
-            Ok(0)
+        fn tracks_page(
+            &self,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<crate::app::store::Page<Track>, StoreError> {
+            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
         }
         fn library_counts(&self) -> Result<LibraryCounts, StoreError> {
             Ok(LibraryCounts::default())
@@ -493,16 +494,13 @@ mod tests {
         fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
             Ok(Vec::new())
         }
-        fn search_window(
+        fn search_page(
             &self,
             _query: &str,
             _offset: usize,
             _limit: usize,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-        fn search_count(&self, _query: &str) -> Result<usize, StoreError> {
-            Ok(0)
+        ) -> Result<crate::app::store::Page<Track>, StoreError> {
+            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
         }
         fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
             Ok(Vec::new())
@@ -581,27 +579,21 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn hit_albums(
+        fn hit_albums_page(
             &self,
             _query: &str,
             _offset: usize,
             _limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
+        ) -> Result<crate::app::store::Page<Album>, StoreError> {
+            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
         }
-        fn hit_albums_count(&self, _query: &str) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-        fn hit_artists(
+        fn hit_artists_page(
             &self,
             _query: &str,
             _offset: usize,
             _limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
-        }
-        fn hit_artists_count(&self, _query: &str) -> Result<usize, StoreError> {
-            Ok(0)
+        ) -> Result<crate::app::store::Page<Artist>, StoreError> {
+            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
         }
         fn album_hit_tracks(
             &self,
@@ -628,13 +620,6 @@ mod tests {
         ) -> Result<Vec<Album>, StoreError> {
             Ok(Vec::new())
         }
-        fn hit_albums_in_genre_count(
-            &self,
-            _genre: &str,
-            _query: &str,
-        ) -> Result<usize, StoreError> {
-            Ok(0)
-        }
         fn hit_artists_in_genre(
             &self,
             _genre: &str,
@@ -643,13 +628,6 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<Artist>, StoreError> {
             Ok(Vec::new())
-        }
-        fn hit_artists_in_genre_count(
-            &self,
-            _genre: &str,
-            _query: &str,
-        ) -> Result<usize, StoreError> {
-            Ok(0)
         }
         fn album_hit_tracks_in_genre(
             &self,
@@ -664,76 +642,52 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn artists_window(
+        fn artists_page(
             &self,
             _direction: crate::app::store::SortDirection,
             _offset: usize,
             _limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
+        ) -> Result<crate::app::store::Page<Artist>, StoreError> {
+            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn artists_count(&self) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn albums_window(
+        fn albums_page(
             &self,
             _direction: crate::app::store::SortDirection,
             _offset: usize,
             _limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
+        ) -> Result<crate::app::store::Page<Album>, StoreError> {
+            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn albums_count(&self) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn genres_window(
+        fn genres_page(
             &self,
             _direction: crate::app::store::SortDirection,
             _offset: usize,
             _limit: usize,
-        ) -> Result<Vec<GenreCount>, StoreError> {
-            Ok(Vec::new())
+        ) -> Result<crate::app::store::Page<GenreCount>, StoreError> {
+            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn genres_count(&self) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn artists_in_genre_window(
+        fn artists_in_genre_page(
             &self,
             _genre: &str,
             _direction: crate::app::store::SortDirection,
             _offset: usize,
             _limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
+        ) -> Result<crate::app::store::Page<Artist>, StoreError> {
+            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn artists_in_genre_count(&self, _genre: &str) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn artist_albums_in_genre_window(
+        fn artist_albums_in_genre_page(
             &self,
             _artist: &str,
             _genre: &str,
             _direction: crate::app::store::SortDirection,
             _offset: usize,
             _limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artist_albums_in_genre_count(
-            &self,
-            _artist: &str,
-            _genre: &str,
-        ) -> Result<usize, StoreError> {
-            Ok(0)
+        ) -> Result<crate::app::store::Page<Album>, StoreError> {
+            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
         }
     }
 

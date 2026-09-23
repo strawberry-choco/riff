@@ -998,15 +998,16 @@ pub mod mocks {
 
     /// Which [`LibraryQueryStore`] query a [`MockLibraryQueryStore`]
     /// recorded. Arguments are kept so assertions can pin both call counts
-    /// and the exact query shapes the Session Views seam issues.
+    /// and the exact query shapes the Session Views seam issues. One
+    /// Listing Page read records exactly one entry: its total and its window
+    /// come from a single store read, so the recording names that read with
+    /// its own arguments (ADR 0002's 2026-09-22 amendment).
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum LibraryQueryCall {
         GetTrack(TrackId),
-        TracksWindow(usize, usize),
-        TrackCount,
+        TracksPage(usize, usize),
         AllTrackIds,
-        SearchWindow(usize, usize),
-        SearchCount,
+        SearchPage(String, usize, usize),
         AllArtists,
         ArtistAlbums(String),
         AlbumTracks(String, String),
@@ -1024,32 +1025,28 @@ pub mod mocks {
         ArtistsInGenre(String),
         ArtistAlbumsInGenre(String, String),
         AlbumTracksInGenre(String, String, String),
-        HitAlbums(usize, usize),
-        HitAlbumsCount,
-        HitArtists(usize, usize),
-        HitArtistsCount,
+        HitAlbumsPage(String, usize, usize),
+        HitArtistsPage(String, usize, usize),
         AlbumHitTracks(String, String),
         AlbumIsNameHit(String, String),
         HitAlbumsInGenre(String, usize, usize),
-        HitAlbumsInGenreCount(String),
         HitArtistsInGenre(String, usize, usize),
-        HitArtistsInGenreCount(String),
         AlbumHitTracksInGenre(String, String, String),
         HitGenreCounts,
-        ArtistsWindow(usize, usize),
-        ArtistsCount,
-        AlbumsWindow(usize, usize),
-        AlbumsCount,
-        GenresWindow(usize, usize),
-        GenresCount,
-        ArtistsInGenreWindow(usize, usize),
-        ArtistsInGenreCount,
-        ArtistAlbumsInGenreWindow(usize, usize),
-        ArtistAlbumsInGenreCount,
+        ArtistsPage(SortDirection, usize, usize),
+        AlbumsPage(SortDirection, usize, usize),
+        GenresPage(SortDirection, usize, usize),
+        ArtistsInGenrePage(String, SortDirection, usize, usize),
+        ArtistAlbumsInGenrePage(String, String, SortDirection, usize, usize),
     }
 
     /// Which [`LibraryQueryStore`] query fails while listed in
     /// [`MockLibraryQueryStore::failing`].
+    ///
+    /// A Listing Page read is one store read, but it still composes the two
+    /// halves it replaced (a total and a window), so a page read is gated by
+    /// the `*Count` and `*Window` switches it grew from: either one makes
+    /// that single page read return `Err`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum FailingQuery {
         GetTrack,
@@ -1097,15 +1094,15 @@ pub mod mocks {
         // --- canned answers -------------------------------------------------
         /// `get_track` answers keyed by id.
         pub library: std::collections::HashMap<TrackId, Track>,
-        /// Rows served by `tracks_window`, in canonical order.
+        /// Rows served by `tracks_page`, in canonical order.
         pub flat: Vec<Track>,
-        /// Rows served by `search_window`, in canonical order.
+        /// Rows served by `search_page`, in canonical order.
         pub search: Vec<Track>,
-        /// Queries that `search_count`/`search_window` treat as matching.
+        /// Queries that `search_page` treats as matching.
         /// An empty list matches every query (permissive default); once
         /// populated, only listed queries return the canned rows/count.
         pub matching_searches: Vec<String>,
-        /// Artists served by `all_artists`.
+        /// Artists served by `all_artists` and by `artists_page`.
         pub artists: Vec<Artist>,
         /// Albums served by `artist_albums`.
         pub albums: Vec<Album>,
@@ -1123,15 +1120,17 @@ pub mod mocks {
         pub last_full_scan: Option<std::time::SystemTime>,
         /// Rows served by `genre_counts`.
         pub genre_counts: Vec<GenreCount>,
-        /// Artists served by `artists_in_genre` for any genre.
+        /// Artists served by `artists_in_genre` and `artists_in_genre_page`
+        /// for any genre.
         pub genre_artists: Vec<Artist>,
-        /// Albums served by `artist_albums_in_genre` for any artist/genre.
+        /// Albums served by `artist_albums_in_genre` and
+        /// `artist_albums_in_genre_page` for any artist/genre.
         pub genre_albums: Vec<Album>,
         /// Tracks served by `album_tracks_in_genre` for any album/genre.
         pub genre_album_tracks: Vec<Track>,
-        /// Albums served by `hit_albums`, in canonical order.
+        /// Albums served by `hit_albums_page`, in canonical order.
         pub hit_albums: Vec<Album>,
-        /// Artists served by `hit_artists`, name-ascending.
+        /// Artists served by `hit_artists_page`, name-ascending.
         pub hit_artists: Vec<Artist>,
         /// Tracks served by `album_hit_tracks` for any album.
         pub album_hit_tracks: Vec<Track>,
@@ -1145,11 +1144,11 @@ pub mod mocks {
         pub album_hit_tracks_in_genre: Vec<Track>,
         /// Rows served by `hit_genre_counts`.
         pub hit_genre_counts: Vec<GenreCount>,
-        /// Albums served by `albums_window` (flat browsing order); the
-        /// windowed read slices this with the direction applied.
+        /// Albums served by `albums_page` (flat browsing order); the page
+        /// slices this with the direction applied.
         pub paged_albums: Vec<Album>,
-        /// Rows served by `genres_window`; the windowed read slices this with
-        /// the direction applied.
+        /// Rows served by `genres_page`; the page slices this with the
+        /// direction applied.
         pub paged_genres: Vec<GenreCount>,
         /// Answer served by `folder_has_audio`.
         pub folder_has_audio: bool,
@@ -1221,8 +1220,10 @@ pub mod mocks {
             self.calls.lock().unwrap().clone()
         }
 
-        /// Every bounded-window fetch as `(offset, limit)` pairs — flat,
-        /// search, and paged-browse windows alike — in call order.
+        /// Every bounded-window Listing Page read as its `(offset, limit)`
+        /// pair — flat, search, and paged-browse listings alike — in call
+        /// order. One entry per store read: the pair names the window that
+        /// single page fetch served.
         #[must_use]
         pub fn window_calls(&self) -> Vec<(usize, usize)> {
             self.calls
@@ -1230,13 +1231,13 @@ pub mod mocks {
                 .unwrap()
                 .iter()
                 .filter_map(|call| match call {
-                    LibraryQueryCall::TracksWindow(offset, limit)
-                    | LibraryQueryCall::SearchWindow(offset, limit)
-                    | LibraryQueryCall::ArtistsWindow(offset, limit)
-                    | LibraryQueryCall::AlbumsWindow(offset, limit)
-                    | LibraryQueryCall::GenresWindow(offset, limit)
-                    | LibraryQueryCall::ArtistsInGenreWindow(offset, limit)
-                    | LibraryQueryCall::ArtistAlbumsInGenreWindow(offset, limit) => {
+                    LibraryQueryCall::TracksPage(offset, limit)
+                    | LibraryQueryCall::SearchPage(_, offset, limit)
+                    | LibraryQueryCall::ArtistsPage(_, offset, limit)
+                    | LibraryQueryCall::AlbumsPage(_, offset, limit)
+                    | LibraryQueryCall::GenresPage(_, offset, limit)
+                    | LibraryQueryCall::ArtistsInGenrePage(_, _, offset, limit)
+                    | LibraryQueryCall::ArtistAlbumsInGenrePage(_, _, _, offset, limit) => {
                         Some((*offset, *limit))
                     }
                     _ => None,
@@ -1279,8 +1280,9 @@ pub mod mocks {
         }
 
         /// Slice `rows` into one bounded window with the direction applied —
-        /// the shared backing of the paged browse window reads (albums,
-        /// genres, and the genre drill-downs all serve their canned list).
+        /// the shared backing of the paged browse Listing Page reads
+        /// (artists, albums, genres, and the genre drill-downs all serve
+        /// their canned list).
         fn window_rows<T: Clone>(
             &self,
             rows: &[T],
@@ -1309,17 +1311,18 @@ pub mod mocks {
             Ok(riff_persistence::track::METADATA_VERSION)
         }
 
-        fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, StoreError> {
-            self.record(LibraryQueryCall::TracksWindow(offset, limit));
+        fn tracks_page(
+            &self,
+            offset: usize,
+            limit: usize,
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            self.record(LibraryQueryCall::TracksPage(offset, limit));
             if self.failing.contains(&FailingQuery::TracksWindow) {
                 return Err(StoreError::InvalidOperation("loader boom".to_string()));
             }
-            Ok(self.flat.iter().skip(offset).take(limit).cloned().collect())
-        }
-
-        fn track_count(&self) -> Result<usize, StoreError> {
-            self.record(LibraryQueryCall::TrackCount);
-            Ok(self.flat.len())
+            let total = self.flat.len();
+            let rows = self.flat.iter().skip(offset).take(limit).cloned().collect();
+            Ok(riff_persistence::store::Page::new(total, rows, 0))
         }
 
         fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
@@ -1335,31 +1338,29 @@ pub mod mocks {
             Ok(self.flat.iter().map(|t| t.id.clone()).collect())
         }
 
-        fn search_window(
+        fn search_page(
             &self,
             query: &str,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.record(LibraryQueryCall::SearchWindow(offset, limit));
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            self.record(LibraryQueryCall::SearchPage(
+                query.to_string(),
+                offset,
+                limit,
+            ));
             if !self.search_matches(query) {
-                return Ok(Vec::new());
+                return Ok(riff_persistence::store::Page::new(0, Vec::new(), 0));
             }
-            Ok(self
+            let total = self.search.len();
+            let rows = self
                 .search
                 .iter()
                 .skip(offset)
                 .take(limit)
                 .cloned()
-                .collect())
-        }
-
-        fn search_count(&self, query: &str) -> Result<usize, StoreError> {
-            self.record(LibraryQueryCall::SearchCount);
-            if !self.search_matches(query) {
-                return Ok(0);
-            }
-            Ok(self.search.len())
+                .collect();
+            Ok(riff_persistence::store::Page::new(total, rows, 0))
         }
 
         fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
@@ -1496,74 +1497,70 @@ pub mod mocks {
             Ok(self.genre_album_tracks.clone())
         }
 
-        fn hit_albums(
+        fn hit_albums_page(
             &self,
             query: &str,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            self.record(LibraryQueryCall::HitAlbums(offset, limit));
-            if self.failing.contains(&FailingQuery::HitAlbums) {
-                return Err(StoreError::InvalidOperation("hit albums boom".to_string()));
-            }
-            if !self.search_matches(query) {
-                return Ok(Vec::new());
-            }
-            Ok(self
-                .hit_albums
-                .iter()
-                .skip(offset)
-                .take(limit)
-                .cloned()
-                .collect())
-        }
-
-        fn hit_albums_count(&self, query: &str) -> Result<usize, StoreError> {
-            self.record(LibraryQueryCall::HitAlbumsCount);
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            self.record(LibraryQueryCall::HitAlbumsPage(
+                query.to_string(),
+                offset,
+                limit,
+            ));
             if self.failing.contains(&FailingQuery::HitAlbumsCount) {
                 return Err(StoreError::InvalidOperation(
                     "hit albums count boom".to_string(),
                 ));
             }
-            if !self.search_matches(query) {
-                return Ok(0);
-            }
-            Ok(self.hit_albums.len())
-        }
-
-        fn hit_artists(
-            &self,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
-            self.record(LibraryQueryCall::HitArtists(offset, limit));
-            if self.failing.contains(&FailingQuery::HitArtists) {
-                return Err(StoreError::InvalidOperation("hit artists boom".to_string()));
+            if self.failing.contains(&FailingQuery::HitAlbums) {
+                return Err(StoreError::InvalidOperation("hit albums boom".to_string()));
             }
             if !self.search_matches(query) {
-                return Ok(Vec::new());
+                return Ok(riff_persistence::store::Page::new(0, Vec::new(), 0));
             }
-            Ok(self
-                .hit_artists
+            let total = self.hit_albums.len();
+            let rows = self
+                .hit_albums
                 .iter()
                 .skip(offset)
                 .take(limit)
                 .cloned()
-                .collect())
+                .collect();
+            Ok(riff_persistence::store::Page::new(total, rows, 0))
         }
 
-        fn hit_artists_count(&self, query: &str) -> Result<usize, StoreError> {
-            self.record(LibraryQueryCall::HitArtistsCount);
+        fn hit_artists_page(
+            &self,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            self.record(LibraryQueryCall::HitArtistsPage(
+                query.to_string(),
+                offset,
+                limit,
+            ));
             if self.failing.contains(&FailingQuery::HitArtistsCount) {
                 return Err(StoreError::InvalidOperation(
                     "hit artists count boom".to_string(),
                 ));
             }
-            if !self.search_matches(query) {
-                return Ok(0);
+            if self.failing.contains(&FailingQuery::HitArtists) {
+                return Err(StoreError::InvalidOperation("hit artists boom".to_string()));
             }
-            Ok(self.hit_artists.len())
+            if !self.search_matches(query) {
+                return Ok(riff_persistence::store::Page::new(0, Vec::new(), 0));
+            }
+            let total = self.hit_artists.len();
+            let rows = self
+                .hit_artists
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect();
+            Ok(riff_persistence::store::Page::new(total, rows, 0))
         }
 
         fn album_hit_tracks(
@@ -1639,19 +1636,6 @@ pub mod mocks {
                 .collect())
         }
 
-        fn hit_albums_in_genre_count(&self, genre: &str, query: &str) -> Result<usize, StoreError> {
-            self.record(LibraryQueryCall::HitAlbumsInGenreCount(genre.to_string()));
-            if self.failing.contains(&FailingQuery::HitAlbumsInGenreCount) {
-                return Err(StoreError::InvalidOperation(
-                    "hit albums in genre count boom".to_string(),
-                ));
-            }
-            if !self.search_matches(query) {
-                return Ok(0);
-            }
-            Ok(self.hit_albums_in_genre.len())
-        }
-
         fn hit_artists_in_genre(
             &self,
             genre: &str,
@@ -1679,23 +1663,6 @@ pub mod mocks {
                 .take(limit)
                 .cloned()
                 .collect())
-        }
-
-        fn hit_artists_in_genre_count(
-            &self,
-            genre: &str,
-            query: &str,
-        ) -> Result<usize, StoreError> {
-            self.record(LibraryQueryCall::HitArtistsInGenreCount(genre.to_string()));
-            if self.failing.contains(&FailingQuery::HitArtistsInGenreCount) {
-                return Err(StoreError::InvalidOperation(
-                    "hit artists in genre count boom".to_string(),
-                ));
-            }
-            if !self.search_matches(query) {
-                return Ok(0);
-            }
-            Ok(self.hit_artists_in_genre.len())
         }
 
         fn album_hit_tracks_in_genre(
@@ -1734,137 +1701,115 @@ pub mod mocks {
             Ok(self.hit_genre_counts.clone())
         }
 
-        fn artists_window(
+        fn artists_page(
             &self,
             direction: SortDirection,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
-            self.record(LibraryQueryCall::ArtistsWindow(offset, limit));
-            if self.failing.contains(&FailingQuery::ArtistsWindow) {
-                return Err(StoreError::InvalidOperation(
-                    "artists window boom".to_string(),
-                ));
-            }
-            let mut rows: Vec<Artist> = self.artists.clone();
-            if direction == SortDirection::Descending {
-                rows.reverse();
-            }
-            Ok(rows.into_iter().skip(offset).take(limit).collect())
-        }
-
-        fn artists_count(&self) -> Result<usize, StoreError> {
-            self.record(LibraryQueryCall::ArtistsCount);
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            self.record(LibraryQueryCall::ArtistsPage(direction, offset, limit));
             if self.failing.contains(&FailingQuery::ArtistsCount) {
                 return Err(StoreError::InvalidOperation(
                     "artists count boom".to_string(),
                 ));
             }
-            Ok(self.artists.len())
+            if self.failing.contains(&FailingQuery::ArtistsWindow) {
+                return Err(StoreError::InvalidOperation(
+                    "artists window boom".to_string(),
+                ));
+            }
+            let total = self.artists.len();
+            let rows = self.window_rows(&self.artists, direction, offset, limit);
+            Ok(riff_persistence::store::Page::new(total, rows, 0))
         }
 
-        fn albums_window(
+        fn albums_page(
             &self,
             direction: SortDirection,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            self.record(LibraryQueryCall::AlbumsWindow(offset, limit));
-            if self.failing.contains(&FailingQuery::AlbumsWindow) {
-                return Err(StoreError::InvalidOperation(
-                    "albums window boom".to_string(),
-                ));
-            }
-            Ok(self.window_rows(&self.paged_albums, direction, offset, limit))
-        }
-
-        fn albums_count(&self) -> Result<usize, StoreError> {
-            self.record(LibraryQueryCall::AlbumsCount);
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            self.record(LibraryQueryCall::AlbumsPage(direction, offset, limit));
             if self.failing.contains(&FailingQuery::AlbumsCount) {
                 return Err(StoreError::InvalidOperation(
                     "albums count boom".to_string(),
                 ));
             }
-            Ok(self.paged_albums.len())
+            if self.failing.contains(&FailingQuery::AlbumsWindow) {
+                return Err(StoreError::InvalidOperation(
+                    "albums window boom".to_string(),
+                ));
+            }
+            let total = self.paged_albums.len();
+            let rows = self.window_rows(&self.paged_albums, direction, offset, limit);
+            Ok(riff_persistence::store::Page::new(total, rows, 0))
         }
 
-        fn genres_window(
+        fn genres_page(
             &self,
             direction: SortDirection,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<GenreCount>, StoreError> {
-            self.record(LibraryQueryCall::GenresWindow(offset, limit));
-            if self.failing.contains(&FailingQuery::GenresWindow) {
-                return Err(StoreError::InvalidOperation(
-                    "genres window boom".to_string(),
-                ));
-            }
-            Ok(self.window_rows(&self.paged_genres, direction, offset, limit))
-        }
-
-        fn genres_count(&self) -> Result<usize, StoreError> {
-            self.record(LibraryQueryCall::GenresCount);
+        ) -> Result<riff_persistence::store::Page<GenreCount>, StoreError> {
+            self.record(LibraryQueryCall::GenresPage(direction, offset, limit));
             if self.failing.contains(&FailingQuery::GenresCount) {
                 return Err(StoreError::InvalidOperation(
                     "genres count boom".to_string(),
                 ));
             }
-            Ok(self.paged_genres.len())
+            if self.failing.contains(&FailingQuery::GenresWindow) {
+                return Err(StoreError::InvalidOperation(
+                    "genres window boom".to_string(),
+                ));
+            }
+            let total = self.paged_genres.len();
+            let rows = self.window_rows(&self.paged_genres, direction, offset, limit);
+            Ok(riff_persistence::store::Page::new(total, rows, 0))
         }
 
-        fn artists_in_genre_window(
+        fn artists_in_genre_page(
             &self,
-            _genre: &str,
+            genre: &str,
             direction: SortDirection,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
-            self.record(LibraryQueryCall::ArtistsInGenreWindow(offset, limit));
-            if self.failing.contains(&FailingQuery::ArtistsInGenreWindow) {
-                return Err(StoreError::InvalidOperation(
-                    "genre artists window boom".to_string(),
-                ));
-            }
-            Ok(self.window_rows(&self.genre_artists, direction, offset, limit))
-        }
-
-        fn artists_in_genre_count(&self, _genre: &str) -> Result<usize, StoreError> {
-            self.record(LibraryQueryCall::ArtistsInGenreCount);
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            self.record(LibraryQueryCall::ArtistsInGenrePage(
+                genre.to_string(),
+                direction,
+                offset,
+                limit,
+            ));
             if self.failing.contains(&FailingQuery::ArtistsInGenreCount) {
                 return Err(StoreError::InvalidOperation(
                     "genre artists count boom".to_string(),
                 ));
             }
-            Ok(self.genre_artists.len())
+            if self.failing.contains(&FailingQuery::ArtistsInGenreWindow) {
+                return Err(StoreError::InvalidOperation(
+                    "genre artists window boom".to_string(),
+                ));
+            }
+            let total = self.genre_artists.len();
+            let rows = self.window_rows(&self.genre_artists, direction, offset, limit);
+            Ok(riff_persistence::store::Page::new(total, rows, 0))
         }
 
-        fn artist_albums_in_genre_window(
+        fn artist_albums_in_genre_page(
             &self,
-            _artist: &str,
-            _genre: &str,
+            artist: &str,
+            genre: &str,
             direction: SortDirection,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            self.record(LibraryQueryCall::ArtistAlbumsInGenreWindow(offset, limit));
-            if self
-                .failing
-                .contains(&FailingQuery::ArtistAlbumsInGenreWindow)
-            {
-                return Err(StoreError::InvalidOperation(
-                    "genre album window boom".to_string(),
-                ));
-            }
-            Ok(self.window_rows(&self.genre_albums, direction, offset, limit))
-        }
-
-        fn artist_albums_in_genre_count(
-            &self,
-            _artist: &str,
-            _genre: &str,
-        ) -> Result<usize, StoreError> {
-            self.record(LibraryQueryCall::ArtistAlbumsInGenreCount);
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            self.record(LibraryQueryCall::ArtistAlbumsInGenrePage(
+                artist.to_string(),
+                genre.to_string(),
+                direction,
+                offset,
+                limit,
+            ));
             if self
                 .failing
                 .contains(&FailingQuery::ArtistAlbumsInGenreCount)
@@ -1873,7 +1818,17 @@ pub mod mocks {
                     "genre album count boom".to_string(),
                 ));
             }
-            Ok(self.genre_albums.len())
+            if self
+                .failing
+                .contains(&FailingQuery::ArtistAlbumsInGenreWindow)
+            {
+                return Err(StoreError::InvalidOperation(
+                    "genre album window boom".to_string(),
+                ));
+            }
+            let total = self.genre_albums.len();
+            let rows = self.window_rows(&self.genre_albums, direction, offset, limit);
+            Ok(riff_persistence::store::Page::new(total, rows, 0))
         }
     }
 

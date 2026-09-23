@@ -63,6 +63,13 @@ impl PlaylistProjection {
     /// Every user playlist in creation order, cached per playlist
     /// generation. Fresh frames hand out an `Arc` clone of the cached list.
     ///
+    /// This level keeps a hand-written body rather than declaring itself on
+    /// [`GenerationCache::level`]: its cache holds the answer itself, not a
+    /// bundle of levels filled one at a time, and `level` fills through the
+    /// bundle slot its cache type can default-construct. The staleness
+    /// procedure it spells out here is the one `level` implements; it is a
+    /// single-stamp level, not a carve-out on policy grounds.
+    ///
     /// # Errors
     /// Propagates loader failures without touching the cache.
     pub fn playlists(
@@ -83,6 +90,13 @@ impl PlaylistProjection {
     /// One playlist's resolved view, cached per playlist generation plus
     /// the Library generation the rows were resolved against. Fresh frames
     /// hand out a clone of the cached view (`Arc` row bumps, no deep copy).
+    ///
+    /// This level keeps a hand-written body because its freshness depends on
+    /// two counters at once — the Library epoch stamps the cache while the
+    /// playlist epoch rides inside its key, so a move of either drops every
+    /// resolved row. [`GenerationCache::level`] is deliberately single-stamp:
+    /// one cache, one counter, one generation observed per call. Expressing
+    /// this level on it would mean making `level` own a rule it cannot see.
     ///
     /// # Errors
     /// Propagates loader failures without touching the cache.

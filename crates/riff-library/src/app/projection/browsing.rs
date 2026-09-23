@@ -25,6 +25,9 @@ struct BrowsingLevels {
 /// Unlike the windowed `TrackListProjection` this is not windowed: browsing
 /// is hierarchical, so each query returns one artist's or one album's worth
 /// of rows rather than one screen's.
+///
+/// Every level here declares itself on [`GenerationCache::level`], so this
+/// projection spells out no freshness rule of its own.
 pub struct BrowsingProjection {
     /// Generation-keyed slot over the whole level bundle: a moved epoch
     /// drops every level together, within a generation levels fill lazily.
@@ -57,18 +60,15 @@ impl BrowsingProjection {
         &mut self,
         loader: &mut dyn FnMut() -> Result<Vec<Artist>, StoreError>,
     ) -> Result<Arc<[Artist]>, StoreError> {
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache.peek().and_then(|levels| levels.artists.clone())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh: Arc<[Artist]> = loader()?.into();
-        self.cache.slot(epoch, &()).artists = Some(Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.artists.clone(),
+            || loader().map(Arc::from),
+            |levels, answer| {
+                levels.artists = Some(Arc::clone(&answer));
+                answer
+            },
+        )
     }
 
     /// One artist's albums in canonical order, cached per generation.
@@ -81,21 +81,17 @@ impl BrowsingProjection {
         artist: &str,
         loader: &mut dyn FnMut(&str) -> Result<Vec<Album>, StoreError>,
     ) -> Result<Arc<[Album]>, StoreError> {
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|levels| levels.albums.get(artist).cloned())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh: Arc<[Album]> = loader(artist)?.into();
-        let levels = self.cache.slot(epoch, &());
-        levels.albums.insert(artist.to_string(), Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.albums.get(artist).cloned(),
+            || loader(artist).map(Arc::from),
+            |levels, answer| {
+                levels
+                    .albums
+                    .insert(artist.to_string(), Arc::clone(&answer));
+                answer
+            },
+        )
     }
 
     /// One album's tracks in canonical order, cached per generation.
@@ -110,20 +106,14 @@ impl BrowsingProjection {
         loader: AlbumTracksLoader<'_>,
     ) -> Result<Arc<[Track]>, StoreError> {
         let key = (album_artist.to_string(), album_title.to_string());
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|levels| levels.tracks.get(&key).cloned())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh: Arc<[Track]> = loader(album_artist, album_title)?.into();
-        let levels = self.cache.slot(epoch, &());
-        levels.tracks.insert(key, Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.tracks.get(&key).cloned(),
+            || loader(album_artist, album_title).map(Arc::from),
+            |levels, answer| {
+                levels.tracks.insert(key.clone(), Arc::clone(&answer));
+                answer
+            },
+        )
     }
 }

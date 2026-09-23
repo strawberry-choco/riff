@@ -24,6 +24,9 @@ struct FolderLevels {
 /// generation. A generation bump drops every level at once so a frame never
 /// mixes rows from two generations; levels then refetch lazily as the tree
 /// renders again. Loader errors propagate and leave the cache untouched.
+///
+/// Every level here declares itself on [`GenerationCache::level`], so this
+/// projection spells out no freshness rule of its own.
 pub struct FolderProjection {
     /// Generation-keyed slot over the whole level bundle: a moved epoch
     /// drops every level together, within a generation levels fill lazily.
@@ -54,20 +57,15 @@ impl FolderProjection {
         loader: &mut dyn FnMut(&Path) -> Result<bool, StoreError>,
     ) -> Result<bool, StoreError> {
         let key = folder.to_string_lossy().into_owned();
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|levels| levels.has_audio.get(&key).copied())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh = loader(folder)?;
-        self.cache.slot(epoch, &()).has_audio.insert(key, fresh);
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.has_audio.get(&key).copied(),
+            || loader(folder),
+            |levels, answer| {
+                levels.has_audio.insert(key.clone(), answer);
+                answer
+            },
+        )
     }
 
     /// Whether any track under `folder` matches the search query, cached
@@ -82,23 +80,15 @@ impl FolderProjection {
         loader: &mut dyn FnMut(&Path, &str) -> Result<bool, StoreError>,
     ) -> Result<bool, StoreError> {
         let key = (folder.to_string_lossy().into_owned(), query.to_string());
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|levels| levels.search_matches.get(&key).copied())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh = loader(folder, query)?;
-        self.cache
-            .slot(epoch, &())
-            .search_matches
-            .insert(key, fresh);
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.search_matches.get(&key).copied(),
+            || loader(folder, query),
+            |levels, answer| {
+                levels.search_matches.insert(key.clone(), answer);
+                answer
+            },
+        )
     }
 
     /// Every track id under `folder`, path-ordered, cached per generation.
@@ -113,23 +103,15 @@ impl FolderProjection {
         loader: &mut dyn FnMut(&Path) -> Result<Vec<TrackId>, StoreError>,
     ) -> Result<Arc<[TrackId]>, StoreError> {
         let key = folder.to_string_lossy().into_owned();
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|levels| levels.subtree_ids.get(&key).cloned())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh: Arc<[TrackId]> = loader(folder)?.into();
-        self.cache
-            .slot(epoch, &())
-            .subtree_ids
-            .insert(key, Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.subtree_ids.get(&key).cloned(),
+            || loader(folder).map(Arc::from),
+            |levels, answer| {
+                levels.subtree_ids.insert(key.clone(), Arc::clone(&answer));
+                answer
+            },
+        )
     }
 
     /// The tracks directly inside `folder`, cached per generation. Fresh
@@ -143,23 +125,17 @@ impl FolderProjection {
         loader: &mut dyn FnMut(&Path) -> Result<Vec<Track>, StoreError>,
     ) -> Result<Arc<[Track]>, StoreError> {
         let key = folder.to_string_lossy().into_owned();
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|levels| levels.direct_tracks.get(&key).cloned())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh: Arc<[Track]> = loader(folder)?.into();
-        self.cache
-            .slot(epoch, &())
-            .direct_tracks
-            .insert(key, Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.direct_tracks.get(&key).cloned(),
+            || loader(folder).map(Arc::from),
+            |levels, answer| {
+                levels
+                    .direct_tracks
+                    .insert(key.clone(), Arc::clone(&answer));
+                answer
+            },
+        )
     }
 
     /// The child directories of `folder` holding audio, cached per
@@ -173,22 +149,14 @@ impl FolderProjection {
         loader: &mut dyn FnMut(&Path) -> Result<Vec<PathBuf>, StoreError>,
     ) -> Result<Arc<[PathBuf]>, StoreError> {
         let key = folder.to_string_lossy().into_owned();
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|levels| levels.children.get(&key).cloned())
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh: Arc<[PathBuf]> = loader(folder)?.into();
-        self.cache
-            .slot(epoch, &())
-            .children
-            .insert(key, Arc::clone(&fresh));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |levels| levels.children.get(&key).cloned(),
+            || loader(folder).map(Arc::from),
+            |levels, answer| {
+                levels.children.insert(key.clone(), Arc::clone(&answer));
+                answer
+            },
+        )
     }
 }

@@ -132,7 +132,7 @@ mod tests {
         );
         assert!(!scans.is_scanning(&root), "the scan ended");
         assert_eq!(
-            queries.track_count().unwrap(),
+            queries.tracks_page(0, 10).unwrap().total(),
             3,
             "every discovered file committed durably"
         );

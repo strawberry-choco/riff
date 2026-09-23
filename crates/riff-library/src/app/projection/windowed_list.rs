@@ -2,20 +2,25 @@
 //!
 //! Every paged list read — the flat All Tracks list, the query-keyed hit
 //! listings, and the browse columns — shares one generic
-//! [`WindowedListProjection`]: a generation-keyed cache slot, pending-window
-//! bookkeeping, the fetch-first-swap-later refresh algorithm (an error
-//! leaves the previous cache untouched), a FIFO window bound, and the shared
-//! [`WINDOW_SIZE`] / [`MAX_CACHED_WINDOWS`] constants. A bounded-window fix
-//! is applied here once and only here (deepen-three-modules issue 01).
+//! [`WindowedListProjection`]: a generation-keyed cache slot, the
+//! fetch-first-swap-later page algorithm (an error leaves the previous cache
+//! untouched), a FIFO window bound, and the shared [`WINDOW_SIZE`] /
+//! [`MAX_CACHED_WINDOWS`] constants. A bounded-window fix is applied here
+//! once and only here (deepen-three-modules issue 01).
+//!
+//! [`WindowedListProjection::show_window`] is where a bounded read stays
+//! fresh: it retargets the query signature, reads one Listing Page when the
+//! asked-for window is not already held, and caches that page's total beside
+//! its rows. The Session Views seam is left holding only which key and which
+//! window — it observes no generation, because the epoch never leaves a
+//! projection (listing-page-read 03).
 //!
 //! The concrete names the seam exposes — [`TrackListProjection`] and
 //! [`HitListProjection`] — are thin aliases over the generic, instantiated
 //! with their key and row types; their former duplicated module bodies are
-//! deleted. The two-phase count and torn-count guard that sit on top of
-//! these projections in the flat/search view path are per-view policy and
-//! live at the Session Views seam, not here.
+//! deleted.
 
-use crate::app::store::{GenerationCache, SortDirection, StoreError, StoreGeneration};
+use crate::app::store::{GenerationCache, Page, SortDirection, StoreError, StoreGeneration};
 use crate::domain::Track;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -109,12 +114,15 @@ impl<T> Default for WindowedListRows<T> {
 /// caller-shaped query signature `K` (e.g. the browse list plus sort
 /// direction, or the flat/search query) over rows `T`.
 ///
-/// Per frame the UI declares which window offsets are visible
-/// ([`Self::request_window`]) and calls [`Self::refresh`] with a loader
-/// bound to the store port. A key change ([`Self::set_key`]) drops cached
-/// rows even at an unchanged generation; a bumped generation refetches
-/// every declared window. Fresh windows serve from cache; invalidated
-/// frames refetch.
+/// Per frame a surface asks [`Self::show_window`] for the window it is
+/// displaying; the projection retargets its query signature, reads one
+/// Listing Page when that window is not already held fresh, and hands the
+/// rows back through [`Self::window`] with [`Self::total`] beside them. A
+/// key change drops cached rows even at an unchanged generation, and a
+/// bumped generation refetches.
+///
+/// Its one level declares itself on [`GenerationCache::level`], so this
+/// projection spells out no freshness rule of its own.
 pub struct WindowedListProjection<K, T> {
     /// The query signature this projection serves. A change invalidates
     /// cached rows even at an unchanged generation.
@@ -123,8 +131,6 @@ pub struct WindowedListProjection<K, T> {
     /// query signature so a retarget drops rows even at an unchanged
     /// generation.
     cache: GenerationCache<K, WindowedListRows<T>>,
-    /// Window offsets declared since the last successful refresh.
-    pending_requests: Vec<usize>,
 }
 
 impl<K, T> WindowedListProjection<K, T>
@@ -137,37 +143,21 @@ where
         Self {
             key,
             cache: GenerationCache::new(generation),
-            pending_requests: Vec::new(),
         }
     }
 
-    /// The query signature this projection serves.
-    #[must_use]
-    pub fn key(&self) -> &K {
-        &self.key
-    }
-
-    /// Retarget the projection to another query signature (e.g. the sort
-    /// direction flipped, a genre switch, or the search box changed).
-    /// Cached rows from the old signature are dropped even at an unchanged
+    /// Retarget the projection to another query signature (the sort
+    /// direction flipped, a genre switch, the search box changed). Cached
+    /// rows from the old signature are dropped even at an unchanged
     /// generation.
-    pub fn set_key(&mut self, key: K) {
+    fn set_key(&mut self, key: K) {
         if key != self.key {
             self.key = key;
             self.cache.invalidate();
         }
     }
 
-    /// Declare a visible window offset for the frame in progress. Call once
-    /// per visible offset before [`Self::refresh`]; declarations accumulate
-    /// until the next successful refresh consumes them.
-    pub fn request_window(&mut self, offset: usize) {
-        if !self.pending_requests.contains(&offset) {
-            self.pending_requests.push(offset);
-        }
-    }
-
-    /// Total row count as of the last successful refresh.
+    /// Total row count as of the last successful page read.
     #[must_use]
     pub fn total(&self) -> usize {
         self.cache.peek().map_or(0, |rows| rows.total)
@@ -184,70 +174,52 @@ where
             .cloned()
     }
 
-    /// Whether cached rows reflect the session counter's current epoch AND
-    /// the current query signature. Projections reload when this returns
-    /// `false`.
-    #[must_use]
-    pub fn is_fresh(&self) -> bool {
-        let epoch = self.cache.observe();
-        self.cache.holds(epoch, &self.key)
-    }
-
-    /// The session epoch the projection currently observes — read once per
-    /// frame so the torn-count guard compares two observations of the same
-    /// counter.
-    #[must_use]
-    pub fn observe(&self) -> u64 {
-        self.cache.observe()
-    }
-
-    /// Bring the projection up to date with `total`.
+    /// Bring `offset`'s window of `key`'s listing up to date.
     ///
-    /// * Invalidated (generation moved or key retargeted): every declared
-    ///   window refetches and all prior rows are replaced.
-    /// * Fresh: only declared-but-missing windows fetch.
+    /// This is the whole bounded-read procedure in one place: retarget the
+    /// query signature, then declare the window as a level on
+    /// [`GenerationCache::level`], so this projection spells out no
+    /// freshness rule of its own. Unless that window is already held fresh
+    /// it reads one [`Page`] and caches that page's total and its rows
+    /// together. Because both halves come from one store read, the total a
+    /// surface reports cannot disagree with the rows under it — there is no
+    /// gap for a mutation to land in, and no counter for a caller to
+    /// compare.
     ///
-    /// On a loader error the error propagates and the previous cache is left
-    /// untouched — stale-but-present beats blank while the UI retries.
-    pub fn refresh(
+    /// `read_page` is asked for [`WINDOW_SIZE`] rows: the visible window
+    /// length belongs to this seam, never to the store, which must not guess
+    /// at a surface's pagination.
+    ///
+    /// A failed page read leaves the previous cache completely untouched: a
+    /// listing keeps showing its last good total and rows, and retries on
+    /// the next frame because the loaded stamp only advances on success.
+    pub fn show_window(
         &mut self,
-        total: usize,
-        loader: &mut dyn FnMut(usize, usize) -> Result<Vec<T>, StoreError>,
+        key: K,
+        offset: usize,
+        read_page: &mut dyn FnMut(usize, usize) -> Result<Page<T>, StoreError>,
     ) -> Result<(), StoreError> {
-        let epoch = self.cache.observe();
-        let stale = !self.cache.holds(epoch, &self.key);
-        let mut targets = std::mem::take(&mut self.pending_requests);
-        if !stale {
-            targets.retain(|offset| {
-                !self
-                    .cache
-                    .peek()
-                    .is_some_and(|rows| rows.windows.contains_key(offset))
-            });
-        }
-
-        // Fetch first, swap later: a failure anywhere leaves the previous
-        // cache completely untouched.
-        let mut fetched: Vec<(usize, Vec<T>)> = Vec::with_capacity(targets.len());
-        for offset in targets {
-            let rows = loader(offset, WINDOW_SIZE)?;
-            fetched.push((offset, rows));
-        }
-
-        let mut rows = if stale {
-            WindowedListRows::default()
-        } else {
-            self.cache.take_value().expect("holds implied an entry")
-        };
-        for (offset, window) in fetched {
-            if !rows.windows.contains_key(&offset) {
-                rows.eviction_order.push_back(offset);
-            }
-            rows.windows.insert(offset, window.into());
-            Self::enforce_bound(&mut rows);
-        }
-        rows.total = total;
-        self.cache.store(epoch, self.key.clone(), rows);
+        self.set_key(key);
+        // The level owns the one-observation rule: the same epoch stamps both
+        // the freshness check and the commit, so a store commit racing this
+        // frame cannot split the read across two generations, and a failure
+        // anywhere leaves the previous cache untouched.
+        self.cache.level(
+            &self.key,
+            |rows| rows.windows.get(&offset).cloned(),
+            || read_page(offset, WINDOW_SIZE),
+            |rows, page| {
+                let total = page.total();
+                let window: Arc<[T]> = page.into_rows().into();
+                if !rows.windows.contains_key(&offset) {
+                    rows.eviction_order.push_back(offset);
+                }
+                rows.windows.insert(offset, Arc::clone(&window));
+                rows.total = total;
+                Self::enforce_bound(rows);
+                window
+            },
+        )?;
         Ok(())
     }
 

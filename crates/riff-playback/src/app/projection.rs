@@ -26,6 +26,15 @@ struct PlaybackSlots {
 
 /// Session Projection for the playback-side reads: the current Track, the
 /// Up Next window, and the track-details panel's selected Track.
+///
+/// Both caches below ride the same Library [`StoreGeneration`] as the
+/// collection capability's projections and spell out the same
+/// observe-serve-or-load procedure by hand. That duplication is known and
+/// deliberate: `GenerationCache::level` (in the persistence contract crate)
+/// was placed there rather than inside either capability precisely so
+/// playback could adopt it later without an edge crossing the sibling split.
+/// Adopting it here is a separate change, not an omission — see
+/// `docs/adr/0002-ui-reads-the-store-through-session-projections.md`.
 pub struct PlaybackProjection {
     /// Generation-keyed slot over the playback slots; the queue shape rides
     /// inside as part of the loaded state.

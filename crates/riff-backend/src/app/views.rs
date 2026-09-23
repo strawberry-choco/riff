@@ -1,13 +1,19 @@
 //! The Session Views seam: the UI's single read seam over the Application
 //! Store (ADR 0002).
 //!
-//! [`SessionViews`] owns the five bounded Session Projections, the Library
-//! query port, and the session-local [`StoreGeneration`] counter. Every view
+//! [`SessionViews`] owns the bounded Session Projections, the Library query
+//! port, and the session-local [`StoreGeneration`] counter. Every view
 //! shape the UI renders has one method here; callers pass only intent (a
 //! folder path, a search query, a queue) and receive ready-to-render data.
-//! Generation fetches, window bookkeeping, staleness handling, and
-//! store-error fallbacks all live inside this module — UI code never touches
-//! a loader closure, an `is_fresh` check, or a `Result`.
+//! Window bookkeeping, staleness handling, and store-error fallbacks all live
+//! inside this module — UI code never touches a loader closure, an `is_fresh`
+//! check, or a `Result`.
+//!
+//! The eight paged reads pass their projection a query signature and a window
+//! offset and nothing else: the projection retargets, reads one Listing Page,
+//! and caches that page's total beside its rows. A total therefore always
+//! describes the rows under it, and no generation value crosses this seam in
+//! either direction (listing-page-read 03).
 //!
 //! Error policy: on a store error every method logs a `tracing::warn!` with
 //! useful context and returns the default view (`false`, an empty list,
@@ -260,47 +266,23 @@ impl SessionViews {
     ///
     /// `offset` is any row index inside the wanted window; it is aligned down
     /// to the projection's window size internally. The first invalidated call
-    /// refetches the window and recounts; fresh calls serve everything from
-    /// cache. If a mutation commits between the count read and the refresh,
-    /// the count is redone so `total` agrees with the refreshed rows.
+    /// reads one Listing Page; fresh calls serve everything from cache. The
+    /// total and the rows come from that one read, so they can never describe
+    /// two different generations, and a failed read leaves the last good page
+    /// on screen.
     pub fn track_list(&mut self, query: &str, offset: usize) -> TrackListPage {
         let key = if query.is_empty() {
             ProjectionKey::Flat
         } else {
             ProjectionKey::Search(query.to_string())
         };
-        if self.tracks.key() != &key {
-            self.tracks.set_key(key);
-        }
-
-        // Outer count read: authoritative from the store whenever the
-        // projection is invalidated; fresh frames reuse the cached count.
-        let outer_generation = self.tracks.observe();
-        let total = if self.tracks.is_fresh() {
-            self.tracks.total()
-        } else {
-            self.count_rows(query)
-        };
-
         let window_start = offset - (offset % WINDOW_SIZE);
-        self.tracks.request_window(window_start);
 
-        // Torn-count guard: if a mutation committed between the outer count
-        // read and here, recount so the cached total agrees with the
-        // refreshed rows; otherwise reuse the outer read (one COUNT query
-        // per frame max).
-        let generation = self.tracks.observe();
-        let effective_total = if generation == outer_generation {
-            total
-        } else {
-            self.count_rows(query)
-        };
-
-        if let Err(e) = self.tracks.refresh(effective_total, &mut |o, l| {
+        if let Err(e) = self.tracks.show_window(key, window_start, &mut |o, l| {
             if query.is_empty() {
-                self.queries.tracks_window(o, l)
+                self.queries.tracks_page(o, l)
             } else {
-                self.queries.search_window(query, o, l)
+                self.queries.search_page(query, o, l)
             }
         }) {
             tracing::warn!(
@@ -309,34 +291,19 @@ impl SessionViews {
         }
 
         TrackListPage {
-            total: effective_total,
+            total: self.tracks.total(),
             start: window_start,
             rows: self.tracks.window(window_start).unwrap_or_default(),
         }
     }
 
-    /// The store's match count for `query`, defaulting to zero on error so
-    /// callers can gate rendering without handling errors.
-    fn count_rows(&self, query: &str) -> usize {
-        let count = if query.is_empty() {
-            self.queries.track_count()
-        } else {
-            self.queries.search_count(query)
-        };
-        match count {
-            Ok(count) => count,
-            Err(e) => {
-                tracing::warn!("Failed to count tracks for query {query:?} in the store: {e}");
-                0
-            }
-        }
-    }
-
     /// Whether the search box's current query matches anything in the store.
+    /// The smallest page read answers it: a page carries its own total, so
+    /// asking for one row still reports the listing's full count.
     pub fn search_has_matches(&self, query: &str) -> bool {
         self.queries
-            .search_count(query)
-            .is_ok_and(|count| count > 0)
+            .search_page(query, 0, 1)
+            .is_ok_and(|page| page.total() > 0)
     }
 
     // --- Entity hit views (search across Library sections) -------------------
@@ -348,122 +315,54 @@ impl SessionViews {
     /// The listing is a bounded-window projection keyed by the query text:
     /// a keystroke retarget drops stale rows even at an unchanged
     /// generation, cached windows are FIFO-capped, and a bumped generation
-    /// refetches. `offset` is any row index inside the wanted window; it is
-    /// aligned down to the projection's window size internally. On a store
-    /// error the page degrades to an empty window with a zero total (a
-    /// `tracing::warn!` carries the context) — the UI never sees a
+    /// refetches one Listing Page. `offset` is any row index inside the
+    /// wanted window; it is aligned down to the projection's window size
+    /// internally. On a store error the listing keeps showing its last good
+    /// page (a `tracing::warn!` carries the context) — the UI never sees a
     /// `Result`.
     pub fn hit_albums_page(&mut self, query: &str, offset: usize) -> HitPage<Album> {
-        let key = query.to_string();
-        if self.hit_albums.key() != &key {
-            self.hit_albums.set_key(key);
-        }
-
-        // Outer count read: authoritative from the store whenever the
-        // projection is invalidated; fresh frames reuse the cached count.
-        let outer_generation = self.hit_albums.observe();
-        let total = if self.hit_albums.is_fresh() {
-            self.hit_albums.total()
-        } else {
-            self.count_hit_albums(query)
-        };
-
         let window_start = offset - (offset % WINDOW_SIZE);
-        self.hit_albums.request_window(window_start);
 
-        // Torn-count guard: if a mutation committed between the outer count
-        // read and here, recount so the cached total agrees with the
-        // refreshed rows; otherwise reuse the outer read (one COUNT query
-        // per frame max).
-        let generation = self.hit_albums.observe();
-        let effective_total = if generation == outer_generation {
-            total
-        } else {
-            self.count_hit_albums(query)
-        };
-
-        if let Err(e) = self.hit_albums.refresh(effective_total, &mut |o, l| {
-            self.queries.hit_albums(query, o, l)
-        }) {
+        if let Err(e) = self
+            .hit_albums
+            .show_window(query.to_string(), window_start, &mut |o, l| {
+                self.queries.hit_albums_page(query, o, l)
+            })
+        {
             tracing::warn!(
                 "Failed to refresh the hit-albums list (query {query:?}) from the store: {e}"
             );
         }
 
         HitPage {
-            total: effective_total,
+            total: self.hit_albums.total(),
             start: window_start,
             rows: self.hit_albums.window(window_start).unwrap_or_default(),
-        }
-    }
-
-    /// The store's hit-album match count for `query`, defaulting to zero on
-    /// error so the paged read degrades without handling errors.
-    fn count_hit_albums(&self, query: &str) -> usize {
-        match self.queries.hit_albums_count(query) {
-            Ok(count) => count,
-            Err(e) => {
-                tracing::warn!("Failed to count hit albums for query {query:?} in the store: {e}");
-                0
-            }
         }
     }
 
     /// One visible window of the hit-artists listing for `query`, together
     /// with the authoritative total row count — what the Artists root
     /// renders under a query. Same query-keyed window projection as
-    /// [`Self::hit_albums_page`]; degrades to an empty page on store error.
+    /// [`Self::hit_albums_page`]; a store error leaves its last good page up.
     pub fn hit_artists_page(&mut self, query: &str, offset: usize) -> HitPage<Artist> {
-        let key = query.to_string();
-        if self.hit_artists.key() != &key {
-            self.hit_artists.set_key(key);
-        }
-
-        // Outer count read: authoritative from the store whenever the
-        // projection is invalidated; fresh frames reuse the cached count.
-        let outer_generation = self.hit_artists.observe();
-        let total = if self.hit_artists.is_fresh() {
-            self.hit_artists.total()
-        } else {
-            self.count_hit_artists(query)
-        };
-
         let window_start = offset - (offset % WINDOW_SIZE);
-        self.hit_artists.request_window(window_start);
 
-        // Torn-count guard: same recount-if-mutated-between-reads contract
-        // as the track list, so `total` agrees with the refreshed rows.
-        let generation = self.hit_artists.observe();
-        let effective_total = if generation == outer_generation {
-            total
-        } else {
-            self.count_hit_artists(query)
-        };
-
-        if let Err(e) = self.hit_artists.refresh(effective_total, &mut |o, l| {
-            self.queries.hit_artists(query, o, l)
-        }) {
+        if let Err(e) =
+            self.hit_artists
+                .show_window(query.to_string(), window_start, &mut |o, l| {
+                    self.queries.hit_artists_page(query, o, l)
+                })
+        {
             tracing::warn!(
                 "Failed to refresh the hit-artists list (query {query:?}) from the store: {e}"
             );
         }
 
         HitPage {
-            total: effective_total,
+            total: self.hit_artists.total(),
             start: window_start,
             rows: self.hit_artists.window(window_start).unwrap_or_default(),
-        }
-    }
-
-    /// The store's hit-artist match count for `query`, defaulting to zero on
-    /// error so the paged read degrades without handling errors.
-    fn count_hit_artists(&self, query: &str) -> usize {
-        match self.queries.hit_artists_count(query) {
-            Ok(count) => count,
-            Err(e) => {
-                tracing::warn!("Failed to count hit artists for query {query:?} in the store: {e}");
-                0
-            }
         }
     }
 
@@ -604,51 +503,23 @@ impl SessionViews {
             list: BrowseList::Artists,
             direction,
         };
-        if self.artists_pages.key() != &key {
-            self.artists_pages.set_key(key);
-        }
-
-        let outer_generation = self.artists_pages.observe();
-        let total = if self.artists_pages.is_fresh() {
-            self.artists_pages.total()
-        } else {
-            self.count_artists()
-        };
-
         let window_start = offset - (offset % WINDOW_SIZE);
-        self.artists_pages.request_window(window_start);
 
-        let generation = self.artists_pages.observe();
-        let effective_total = if generation == outer_generation {
-            total
-        } else {
-            self.count_artists()
-        };
-
-        if let Err(e) = self.artists_pages.refresh(effective_total, &mut |o, l| {
-            self.queries.artists_window(direction, o, l)
-        }) {
+        if let Err(e) = self
+            .artists_pages
+            .show_window(key, window_start, &mut |o, l| {
+                self.queries.artists_page(direction, o, l)
+            })
+        {
             tracing::warn!(
                 "Failed to refresh the artists list (direction {direction:?}) from the store: {e}"
             );
         }
 
         HitPage {
-            total: effective_total,
+            total: self.artists_pages.total(),
             start: window_start,
             rows: self.artists_pages.window(window_start).unwrap_or_default(),
-        }
-    }
-
-    /// The store's total artist count, defaulting to zero on error so the
-    /// paged read degrades without handling errors.
-    fn count_artists(&self) -> usize {
-        match self.queries.artists_count() {
-            Ok(count) => count,
-            Err(e) => {
-                tracing::warn!("Failed to count artists in the store: {e}");
-                0
-            }
         }
     }
 
@@ -661,51 +532,23 @@ impl SessionViews {
             list: BrowseList::Albums,
             direction,
         };
-        if self.albums_pages.key() != &key {
-            self.albums_pages.set_key(key);
-        }
-
-        let outer_generation = self.albums_pages.observe();
-        let total = if self.albums_pages.is_fresh() {
-            self.albums_pages.total()
-        } else {
-            self.count_albums()
-        };
-
         let window_start = offset - (offset % WINDOW_SIZE);
-        self.albums_pages.request_window(window_start);
 
-        let generation = self.albums_pages.observe();
-        let effective_total = if generation == outer_generation {
-            total
-        } else {
-            self.count_albums()
-        };
-
-        if let Err(e) = self.albums_pages.refresh(effective_total, &mut |o, l| {
-            self.queries.albums_window(direction, o, l)
-        }) {
+        if let Err(e) = self
+            .albums_pages
+            .show_window(key, window_start, &mut |o, l| {
+                self.queries.albums_page(direction, o, l)
+            })
+        {
             tracing::warn!(
                 "Failed to refresh the albums list (direction {direction:?}) from the store: {e}"
             );
         }
 
         HitPage {
-            total: effective_total,
+            total: self.albums_pages.total(),
             start: window_start,
             rows: self.albums_pages.window(window_start).unwrap_or_default(),
-        }
-    }
-
-    /// The store's total album count, defaulting to zero on error so the
-    /// paged read degrades without handling errors.
-    fn count_albums(&self) -> usize {
-        match self.queries.albums_count() {
-            Ok(count) => count,
-            Err(e) => {
-                tracing::warn!("Failed to count albums in the store: {e}");
-                0
-            }
         }
     }
 
@@ -717,51 +560,23 @@ impl SessionViews {
             list: BrowseList::Genres,
             direction,
         };
-        if self.genres_pages.key() != &key {
-            self.genres_pages.set_key(key);
-        }
-
-        let outer_generation = self.genres_pages.observe();
-        let total = if self.genres_pages.is_fresh() {
-            self.genres_pages.total()
-        } else {
-            self.count_genres()
-        };
-
         let window_start = offset - (offset % WINDOW_SIZE);
-        self.genres_pages.request_window(window_start);
 
-        let generation = self.genres_pages.observe();
-        let effective_total = if generation == outer_generation {
-            total
-        } else {
-            self.count_genres()
-        };
-
-        if let Err(e) = self.genres_pages.refresh(effective_total, &mut |o, l| {
-            self.queries.genres_window(direction, o, l)
-        }) {
+        if let Err(e) = self
+            .genres_pages
+            .show_window(key, window_start, &mut |o, l| {
+                self.queries.genres_page(direction, o, l)
+            })
+        {
             tracing::warn!(
                 "Failed to refresh the genres list (direction {direction:?}) from the store: {e}"
             );
         }
 
         HitPage {
-            total: effective_total,
+            total: self.genres_pages.total(),
             start: window_start,
             rows: self.genres_pages.window(window_start).unwrap_or_default(),
-        }
-    }
-
-    /// The store's total genre count, defaulting to zero on error so the
-    /// paged read degrades without handling errors.
-    fn count_genres(&self) -> usize {
-        match self.queries.genres_count() {
-            Ok(count) => count,
-            Err(e) => {
-                tracing::warn!("Failed to count genres in the store: {e}");
-                0
-            }
         }
     }
 
@@ -779,31 +594,12 @@ impl SessionViews {
             list: BrowseList::ArtistsInGenre(genre.to_string()),
             direction,
         };
-        if self.genre_artists_pages.key() != &key {
-            self.genre_artists_pages.set_key(key);
-        }
-
-        let outer_generation = self.genre_artists_pages.observe();
-        let total = if self.genre_artists_pages.is_fresh() {
-            self.genre_artists_pages.total()
-        } else {
-            self.count_artists_in_genre(genre)
-        };
-
         let window_start = offset - (offset % WINDOW_SIZE);
-        self.genre_artists_pages.request_window(window_start);
-
-        let generation = self.genre_artists_pages.observe();
-        let effective_total = if generation == outer_generation {
-            total
-        } else {
-            self.count_artists_in_genre(genre)
-        };
 
         if let Err(e) = self
             .genre_artists_pages
-            .refresh(effective_total, &mut |o, l| {
-                self.queries.artists_in_genre_window(genre, direction, o, l)
+            .show_window(key, window_start, &mut |o, l| {
+                self.queries.artists_in_genre_page(genre, direction, o, l)
             })
         {
             tracing::warn!(
@@ -813,24 +609,12 @@ impl SessionViews {
         }
 
         HitPage {
-            total: effective_total,
+            total: self.genre_artists_pages.total(),
             start: window_start,
             rows: self
                 .genre_artists_pages
                 .window(window_start)
                 .unwrap_or_default(),
-        }
-    }
-
-    /// The store's total artist count within `genre`, defaulting to zero on
-    /// error so the paged read degrades without handling errors.
-    fn count_artists_in_genre(&self, genre: &str) -> usize {
-        match self.queries.artists_in_genre_count(genre) {
-            Ok(count) => count,
-            Err(e) => {
-                tracing::warn!("Failed to count artists in genre {genre:?} in the store: {e}");
-                0
-            }
         }
     }
 
@@ -853,32 +637,13 @@ impl SessionViews {
             },
             direction,
         };
-        if self.genre_albums_pages.key() != &key {
-            self.genre_albums_pages.set_key(key);
-        }
-
-        let outer_generation = self.genre_albums_pages.observe();
-        let total = if self.genre_albums_pages.is_fresh() {
-            self.genre_albums_pages.total()
-        } else {
-            self.count_artist_albums_in_genre(artist, genre)
-        };
-
         let window_start = offset - (offset % WINDOW_SIZE);
-        self.genre_albums_pages.request_window(window_start);
-
-        let generation = self.genre_albums_pages.observe();
-        let effective_total = if generation == outer_generation {
-            total
-        } else {
-            self.count_artist_albums_in_genre(artist, genre)
-        };
 
         if let Err(e) = self
             .genre_albums_pages
-            .refresh(effective_total, &mut |o, l| {
+            .show_window(key, window_start, &mut |o, l| {
                 self.queries
-                    .artist_albums_in_genre_window(artist, genre, direction, o, l)
+                    .artist_albums_in_genre_page(artist, genre, direction, o, l)
             })
         {
             tracing::warn!(
@@ -888,26 +653,12 @@ impl SessionViews {
         }
 
         HitPage {
-            total: effective_total,
+            total: self.genre_albums_pages.total(),
             start: window_start,
             rows: self
                 .genre_albums_pages
                 .window(window_start)
                 .unwrap_or_default(),
-        }
-    }
-
-    /// The store's total album count within `artist` and `genre`, defaulting
-    /// to zero on error so the paged read degrades without handling errors.
-    fn count_artist_albums_in_genre(&self, artist: &str, genre: &str) -> usize {
-        match self.queries.artist_albums_in_genre_count(artist, genre) {
-            Ok(count) => count,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to count albums for {artist} in genre {genre:?} in the store: {e}"
-                );
-                0
-            }
         }
     }
 

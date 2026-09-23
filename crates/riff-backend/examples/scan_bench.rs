@@ -166,7 +166,7 @@ fn main() {
     // The pipeline really processed everything.
     assert_eq!(total_files, 20_000, "walker must discover every file");
     assert_eq!(
-        store.track_count().expect("track_count"),
+        store.tracks_page(0, 1).expect("tracks page reads").total(),
         20_000,
         "every discovered file must be committed"
     );

@@ -12,7 +12,7 @@ use riff_persistence::errors::StoreError;
 use riff_persistence::playlist::{Playlist, PlaylistId};
 use riff_persistence::store::{
     FullScanSummary, LOST_GEMS_THRESHOLD, LibraryCounts, LibraryMutationStore, LibraryQueryStore,
-    PlaylistEntry, PlaylistStore, ScalarSettings, Settings, SettingsStore, SortDirection,
+    Page, PlaylistEntry, PlaylistStore, ScalarSettings, Settings, SettingsStore, SortDirection,
     StoreChanged, StoreGeneration, StoreMigrations, WatchState,
 };
 use riff_persistence::track::{
@@ -467,6 +467,19 @@ impl SqliteStore {
         path: &std::path::Path,
         changes_tx: Sender<StoreChanged>,
     ) -> Result<Self, StoreError> {
+        // SQLite creates a missing database file but never its parent
+        // directory, and on a first launch — or after the data directory has
+        // been removed by hand — nothing else brings that directory into
+        // existence, so creation belongs here, beside the promise that a
+        // missing Store starts fresh.
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                StoreError::InvalidOperation(format!(
+                    "failed to create the Application Store directory at {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
         let conn = Connection::open(path).map_err(|e| {
             StoreError::InvalidOperation(format!(
                 "failed to open Application Store at {}: {e}",
@@ -1641,32 +1654,12 @@ impl LibraryQueryStore for SqliteStore {
         Ok(u32::try_from(stored).unwrap_or(u32::MAX))
     }
 
-    /// One bounded window of the flat library list, path-ascending.
-    fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, StoreError> {
-        self.with_connection(|conn| {
-            let mut stmt = conn.prepare_cached(&format!(
-                "SELECT {TRACK_COLUMNS} FROM tracks ORDER BY path ASC LIMIT ?1 OFFSET ?2"
-            ))?;
-            let rows = stmt.query_map(
-                rusqlite::params![
-                    i64::try_from(limit).unwrap_or(i64::MAX),
-                    i64::try_from(offset).unwrap_or(i64::MAX),
-                ],
-                track_from_row,
-            )?;
-            rows.collect()
+    fn tracks_page(&self, offset: usize, limit: usize) -> Result<Page<Track>, StoreError> {
+        self.read_page(&self.library_generation, |conn| {
+            let total = Self::track_count_on(conn)?;
+            let rows = Self::tracks_window_on(conn, offset, limit)?;
+            Ok((total, rows))
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to list tracks: {e}")))
-    }
-
-    fn track_count(&self) -> Result<usize, StoreError> {
-        self.with_connection(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
-        })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to count tracks: {e}")))
     }
 
     /// Every Track id, path-ascending — the canonical flat ordering
@@ -1680,49 +1673,17 @@ impl LibraryQueryStore for SqliteStore {
         .map_err(|e| StoreError::InvalidOperation(format!("failed to list track ids: {e}")))
     }
 
-    /// One bounded window of case-insensitive substring matches over title,
-    /// artist, album, and album artist, path-ascending. The query is
-    /// lowercased in Rust so `SQLite` never applies its own case folding
-    /// (non-Latin parity), and `instr()` keeps `%` and `_` literal — no LIKE
-    /// wildcard semantics, exactly matching the former `str::contains`.
-    fn search_window(
+    fn search_page(
         &self,
         query: &str,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<Track>, StoreError> {
-        self.with_connection(|conn| {
-            let needle = query.to_lowercase();
-            // Runs per keystroke — cached (allocation plan 4.1).
-            let mut stmt = conn.prepare_cached(&format!(
-                "SELECT {TRACK_COLUMNS} FROM tracks
-                 WHERE instr(search_text, ?1) > 0
-                 ORDER BY path ASC LIMIT ?2 OFFSET ?3"
-            ))?;
-            let rows = stmt.query_map(
-                rusqlite::params![
-                    needle,
-                    i64::try_from(limit).unwrap_or(i64::MAX),
-                    i64::try_from(offset).unwrap_or(i64::MAX),
-                ],
-                track_from_row,
-            )?;
-            rows.collect()
+    ) -> Result<Page<Track>, StoreError> {
+        self.read_page(&self.library_generation, |conn| {
+            let total = Self::search_count_on(conn, query)?;
+            let rows = Self::search_window_on(conn, query, offset, limit)?;
+            Ok((total, rows))
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to search tracks: {e}")))
-    }
-
-    fn search_count(&self, query: &str) -> Result<usize, StoreError> {
-        self.with_connection(|conn| {
-            let needle = query.to_lowercase();
-            conn.query_row(
-                "SELECT COUNT(*) FROM tracks WHERE instr(search_text, ?1) > 0",
-                [needle],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
-        })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to count matches: {e}")))
     }
 
     /// Every artist name-ascending (byte-wise, matching the former UI sort
@@ -2066,217 +2027,30 @@ impl LibraryQueryStore for SqliteStore {
     // Sliced implementations: each read lands here behind its failing
     // store test (search-across-library-entity-columns issue 01).
 
-    fn hit_albums(
+    fn hit_albums_page(
         &self,
         query: &str,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<Album>, StoreError> {
-        self.with_connection(|conn| {
-            let needle = query.to_lowercase();
-            // One CTE pass: the window of hit albums LEFT JOINed to their hit
-            // tracks, so membership arrives in canonical per-album track order
-            // and a name-hit album with no matching track still appears. The
-            // hit predicate is the union of the album's own name match and a
-            // member-track match, both literal `instr` over the
-            // write-time-lowercased columns.
-            let mut stmt = conn.prepare_cached(
-                "WITH window AS (
-                    SELECT a.album_artist, a.title, a.year, a.genre
-                    FROM albums a
-                    WHERE instr(a.album_artist_lower, ?1) > 0
-                       OR instr(a.title_lower, ?1) > 0
-                       OR EXISTS (
-                            SELECT 1 FROM tracks t
-                            WHERE t.album_artist_key = a.album_artist
-                              AND t.album_title_key = a.title
-                              AND instr(t.search_text, ?1) > 0
-                          )
-                    ORDER BY a.album_artist ASC, COALESCE(a.year, 0) DESC, a.title ASC
-                    LIMIT ?2 OFFSET ?3
-                 )
-                 SELECT w.album_artist, w.title, w.year, w.genre,
-                        t.album_title_key, t.path
-                 FROM window w
-                 LEFT JOIN tracks t
-                   ON t.album_artist_key = w.album_artist
-                  AND t.album_title_key = w.title
-                  AND instr(t.search_text, ?1) > 0
-                 ORDER BY w.album_artist ASC, COALESCE(w.year, 0) DESC, w.title ASC,
-                          COALESCE(t.track_number, 0) ASC, t.path ASC",
-            )?;
-            let rows = stmt.query_map(
-                rusqlite::params![
-                    needle,
-                    i64::try_from(limit).unwrap_or(i64::MAX),
-                    i64::try_from(offset).unwrap_or(i64::MAX),
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(5)?,
-                    ))
-                },
-            )?;
-            // The window is ordered canonically and the LEFT JOIN keeps one
-            // row per hit track, so consecutive album rows group naturally.
-            let mut albums: Vec<Album> = Vec::new();
-            for row in rows {
-                let (artist, title, year, genre, hit_path) = row?;
-                if albums
-                    .last()
-                    .is_some_and(|a: &Album| a.artist == artist && a.title == title)
-                {
-                    if let Some(path) = hit_path {
-                        albums
-                            .last_mut()
-                            .expect("just checked")
-                            .tracks
-                            .push(TrackId(path));
-                    }
-                } else {
-                    albums.push(Album {
-                        artist,
-                        title,
-                        year: narrow_u32(year),
-                        genre,
-                        tracks: hit_path.map(|path| vec![TrackId(path)]).unwrap_or_default(),
-                    });
-                }
-            }
-            Ok(albums)
+    ) -> Result<Page<Album>, StoreError> {
+        self.read_page(&self.library_generation, |conn| {
+            let total = Self::hit_albums_count_on(conn, query)?;
+            let rows = Self::hit_albums_window_on(conn, query, offset, limit)?;
+            Ok((total, rows))
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to list hit albums: {e}")))
     }
 
-    fn hit_albums_count(&self, query: &str) -> Result<usize, StoreError> {
-        self.with_connection(|conn| {
-            let needle = query.to_lowercase();
-            conn.query_row(
-                "SELECT COUNT(*) FROM albums a
-                 WHERE instr(a.album_artist_lower, ?1) > 0
-                    OR instr(a.title_lower, ?1) > 0
-                    OR EXISTS (
-                         SELECT 1 FROM tracks t
-                         WHERE t.album_artist_key = a.album_artist
-                           AND t.album_title_key = a.title
-                           AND instr(t.search_text, ?1) > 0
-                       )",
-                [needle],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
-        })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to count hit albums: {e}")))
-    }
-
-    fn hit_artists(
+    fn hit_artists_page(
         &self,
         query: &str,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<Artist>, StoreError> {
-        self.with_connection(|conn| {
-            let needle = query.to_lowercase();
-            // Window of hit artists (name match or any album hit) LEFT JOINed
-            // to their hit albums, so each artist's hit-album keys arrive in
-            // canonical browsing order and a name-hit artist whose albums are
-            // not themselves hits still appears with an empty key list.
-            let mut stmt = conn.prepare_cached(
-                "WITH window AS (
-                    SELECT ar.name
-                    FROM artists ar
-                    WHERE instr(ar.name_lower, ?1) > 0
-                       OR EXISTS (
-                            SELECT 1 FROM albums a
-                            WHERE a.album_artist = ar.name
-                              AND (instr(a.album_artist_lower, ?1) > 0
-                                   OR instr(a.title_lower, ?1) > 0
-                                   OR EXISTS (
-                                        SELECT 1 FROM tracks t
-                                        WHERE t.album_artist_key = a.album_artist
-                                          AND t.album_title_key = a.title
-                                          AND instr(t.search_text, ?1) > 0
-                                      ))
-                          )
-                    ORDER BY ar.name ASC
-                    LIMIT ?2 OFFSET ?3
-                 )
-                 SELECT w.name, a.title
-                 FROM window w
-                 LEFT JOIN albums a
-                   ON a.album_artist = w.name
-                  AND (instr(a.album_artist_lower, ?1) > 0
-                       OR instr(a.title_lower, ?1) > 0
-                       OR EXISTS (
-                            SELECT 1 FROM tracks t
-                            WHERE t.album_artist_key = a.album_artist
-                              AND t.album_title_key = a.title
-                              AND instr(t.search_text, ?1) > 0
-                          ))
-                 ORDER BY w.name ASC, COALESCE(a.year, 0) DESC, a.title ASC",
-            )?;
-            let rows = stmt.query_map(
-                rusqlite::params![
-                    needle,
-                    i64::try_from(limit).unwrap_or(i64::MAX),
-                    i64::try_from(offset).unwrap_or(i64::MAX),
-                ],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-            )?;
-            // The window is ordered by artist and the LEFT JOIN keeps one row
-            // per hit album, so consecutive rows group naturally.
-            let mut artists: Vec<Artist> = Vec::new();
-            for row in rows {
-                let (name, hit_title) = row?;
-                if artists.last().is_some_and(|a: &Artist| a.name == name) {
-                    if let Some(title) = hit_title {
-                        artists
-                            .last_mut()
-                            .expect("just checked")
-                            .albums
-                            .push(format!("{name} - {title}"));
-                    }
-                } else {
-                    let key = hit_title.map(|t| format!("{name} - {t}"));
-                    artists.push(Artist {
-                        name,
-                        albums: key.map(|k| vec![k]).unwrap_or_default(),
-                    });
-                }
-            }
-            Ok(artists)
+    ) -> Result<Page<Artist>, StoreError> {
+        self.read_page(&self.library_generation, |conn| {
+            let total = Self::hit_artists_count_on(conn, query)?;
+            let rows = Self::hit_artists_window_on(conn, query, offset, limit)?;
+            Ok((total, rows))
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to list hit artists: {e}")))
-    }
-
-    fn hit_artists_count(&self, query: &str) -> Result<usize, StoreError> {
-        self.with_connection(|conn| {
-            let needle = query.to_lowercase();
-            conn.query_row(
-                "SELECT COUNT(*) FROM artists ar
-                 WHERE instr(ar.name_lower, ?1) > 0
-                    OR EXISTS (
-                         SELECT 1 FROM albums a
-                         WHERE a.album_artist = ar.name
-                           AND (instr(a.album_artist_lower, ?1) > 0
-                                OR instr(a.title_lower, ?1) > 0
-                                OR EXISTS (
-                                     SELECT 1 FROM tracks t
-                                     WHERE t.album_artist_key = a.album_artist
-                                       AND t.album_title_key = a.title
-                                       AND instr(t.search_text, ?1) > 0
-                                   ))
-                       )",
-                [needle],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
-        })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to count hit artists: {e}")))
     }
 
     fn album_hit_tracks(
@@ -2347,16 +2121,6 @@ impl LibraryQueryStore for SqliteStore {
         })
     }
 
-    fn hit_albums_in_genre_count(&self, genre: &str, query: &str) -> Result<usize, StoreError> {
-        self.with_connection(|conn| {
-            let needle = query.to_lowercase();
-            Ok(Self::genre_scoped_hit_albums(conn, genre, &needle)?.len())
-        })
-        .map_err(|e| {
-            StoreError::InvalidOperation(format!("failed to count hit albums in genre: {e}"))
-        })
-    }
-
     fn hit_artists_in_genre(
         &self,
         genre: &str,
@@ -2390,22 +2154,6 @@ impl LibraryQueryStore for SqliteStore {
         })
         .map_err(|e| {
             StoreError::InvalidOperation(format!("failed to list hit artists in genre: {e}"))
-        })
-    }
-
-    fn hit_artists_in_genre_count(&self, genre: &str, query: &str) -> Result<usize, StoreError> {
-        self.with_connection(|conn| {
-            let needle = query.to_lowercase();
-            let mut names: Vec<String> = Vec::new();
-            for album in Self::genre_scoped_hit_albums(conn, genre, &needle)? {
-                if !names.contains(&album.artist) {
-                    names.push(album.artist);
-                }
-            }
-            Ok(names.len())
-        })
-        .map_err(|e| {
-            StoreError::InvalidOperation(format!("failed to count hit artists in genre: {e}"))
         })
     }
 
@@ -2479,410 +2227,73 @@ impl LibraryQueryStore for SqliteStore {
     // genre drill-downs, ordered purely in SQL. The `direction` lands in the
     // `ORDER BY` so page offsets stay aligned when the sort reverses.
 
-    /// One bounded window of artists, name-ascending or name-descending per
-    /// `direction`, each carrying its album keys in canonical browsing order.
-    /// Mirrors [`Self::all_artists`]' grouping over a windowed name list.
-    fn artists_window(
+    fn artists_page(
         &self,
         direction: SortDirection,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<Artist>, StoreError> {
-        self.with_connection(|conn| {
-            let name_order = match direction {
-                SortDirection::Ascending => "ASC",
-                SortDirection::Descending => "DESC",
-            };
-            let mut stmt = conn.prepare_cached(&format!(
-                "WITH window AS (
-                    SELECT name FROM artists
-                    ORDER BY name {name_order}
-                    LIMIT ?1 OFFSET ?2
-                 )
-                 SELECT w.name, a.title
-                 FROM window w
-                 LEFT JOIN albums a ON a.album_artist = w.name
-                 ORDER BY w.name {name_order}, COALESCE(a.year, 0) DESC, a.title ASC"
-            ))?;
-            let rows = stmt.query_map(
-                rusqlite::params![
-                    i64::try_from(limit).unwrap_or(i64::MAX),
-                    i64::try_from(offset).unwrap_or(i64::MAX),
-                ],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-            )?;
-            // The window is ordered by artist and the LEFT JOIN keeps one row
-            // per album, so consecutive rows group naturally into artists
-            // carrying their canonical album keys.
-            let mut artists: Vec<Artist> = Vec::new();
-            for row in rows {
-                let (name, title) = row?;
-                if artists.last().is_some_and(|a: &Artist| a.name == name) {
-                    if let Some(title) = title {
-                        artists
-                            .last_mut()
-                            .expect("just checked")
-                            .albums
-                            .push(format!("{name} - {title}"));
-                    }
-                } else {
-                    artists.push(Artist {
-                        name: name.clone(),
-                        albums: title
-                            .map(|t| vec![format!("{name} - {t}")])
-                            .unwrap_or_default(),
-                    });
-                }
-            }
-            Ok(artists)
+    ) -> Result<Page<Artist>, StoreError> {
+        self.read_page(&self.library_generation, |conn| {
+            let total = Self::artists_count_on(conn)?;
+            let rows = Self::artists_window_on(conn, direction, offset, limit)?;
+            Ok((total, rows))
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to list artist windows: {e}")))
     }
 
-    fn artists_count(&self) -> Result<usize, StoreError> {
-        self.with_connection(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM artists", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
-        })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to count artists: {e}")))
-    }
-
-    /// One bounded window over every album in the flat browsing order (album
-    /// artist ascending, year descending with missing years last, then title
-    /// ascending) or its exact reversal per `direction`, each carrying its
-    /// full track ids in album-track order.
-    fn albums_window(
+    fn albums_page(
         &self,
         direction: SortDirection,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<Album>, StoreError> {
-        self.with_connection(|conn| {
-            let (artist_order, year_order, title_order) = match direction {
-                SortDirection::Ascending => ("ASC", "DESC", "ASC"),
-                SortDirection::Descending => ("DESC", "ASC", "DESC"),
-            };
-            let mut stmt = conn.prepare_cached(&format!(
-                "WITH window AS (
-                    SELECT album_artist, title, year, genre
-                    FROM albums
-                    ORDER BY album_artist {artist_order}, COALESCE(year, 0) {year_order}, title {title_order}
-                    LIMIT ?1 OFFSET ?2
-                 )
-                 SELECT w.album_artist, w.title, w.year, w.genre,
-                        t.album_title_key, t.path
-                 FROM window w
-                 LEFT JOIN tracks t
-                   ON t.album_artist_key = w.album_artist
-                  AND t.album_title_key = w.title
-                 ORDER BY w.album_artist {artist_order}, COALESCE(w.year, 0) {year_order}, w.title {title_order},
-                          COALESCE(t.track_number, 0) ASC, t.path ASC"
-            ))?;
-            let rows = stmt.query_map(
-                rusqlite::params![
-                    i64::try_from(limit).unwrap_or(i64::MAX),
-                    i64::try_from(offset).unwrap_or(i64::MAX),
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(5)?,
-                    ))
-                },
-            )?;
-            // The window is ordered canonically and the LEFT JOIN keeps one
-            // row per track, so consecutive rows group naturally per album.
-            let mut albums: Vec<Album> = Vec::new();
-            for row in rows {
-                let (artist, title, year, genre, path) = row?;
-                if albums
-                    .last()
-                    .is_some_and(|a: &Album| a.artist == artist && a.title == title)
-                {
-                    if let Some(path) = path {
-                        albums.last_mut().expect("just checked").tracks.push(TrackId(path));
-                    }
-                } else {
-                    albums.push(Album {
-                        artist,
-                        title,
-                        year: narrow_u32(year),
-                        genre,
-                        tracks: path.map(|p| vec![TrackId(p)]).unwrap_or_default(),
-                    });
-                }
-            }
-            Ok(albums)
+    ) -> Result<Page<Album>, StoreError> {
+        self.read_page(&self.library_generation, |conn| {
+            let total = Self::albums_count_on(conn)?;
+            let rows = Self::albums_window_on(conn, direction, offset, limit)?;
+            Ok((total, rows))
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to list album windows: {e}")))
     }
 
-    fn albums_count(&self) -> Result<usize, StoreError> {
-        self.with_connection(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM albums", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
-        })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to count albums: {e}")))
-    }
-
-    /// One bounded window of genre entries, name-ascending or name-descending
-    /// per `direction`, each carrying its per-track count aggregated from the
-    /// tracks' own genre metadata exactly like [`Self::genre_counts`].
-    fn genres_window(
+    fn genres_page(
         &self,
         direction: SortDirection,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<GenreCount>, StoreError> {
-        self.with_connection(|conn| {
-            // The entries split in Rust (exactly like `genre_counts`); the
-            // window slices the sorted entries afterwards, so the direction
-            // reversal is a Rust reorder of the pre-window entries.
-            let mut stmt = conn.prepare(
-                "SELECT genre FROM tracks
-                 WHERE genre IS NOT NULL AND genre != ''",
-            )?;
-            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-            let mut counts: HashMap<String, usize> = HashMap::new();
-            for row in rows {
-                for segment in genre_segments(&row?) {
-                    *counts.entry(segment.to_string()).or_insert(0) += 1;
-                }
-            }
-            let mut entries: Vec<GenreCount> = counts
-                .into_iter()
-                .map(|(genre, tracks)| GenreCount { genre, tracks })
-                .collect();
-            entries.sort_by(|a, b| a.genre.cmp(&b.genre));
-            match direction {
-                SortDirection::Ascending => {}
-                SortDirection::Descending => entries.reverse(),
-            }
-            Ok(entries.into_iter().skip(offset).take(limit).collect())
-        })
-        .map_err(|e| {
-            StoreError::InvalidOperation(format!("failed to aggregate genre windows: {e}"))
+    ) -> Result<Page<GenreCount>, StoreError> {
+        self.read_page(&self.library_generation, |conn| {
+            let total = Self::genres_count_on(conn)?;
+            let rows = Self::genres_window_on(conn, direction, offset, limit)?;
+            Ok((total, rows))
         })
     }
 
-    fn genres_count(&self) -> Result<usize, StoreError> {
-        self.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT genre FROM tracks
-                 WHERE genre IS NOT NULL AND genre != ''",
-            )?;
-            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-            let mut genres = std::collections::HashSet::new();
-            for row in rows {
-                for segment in genre_segments(&row?) {
-                    genres.insert(segment.to_string());
-                }
-            }
-            Ok(genres.len())
-        })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to count genres: {e}")))
-    }
-
-    /// One bounded window of artists within `genre`, name-ascending or
-    /// name-descending per `direction`, each with its genre-scoped album keys
-    /// in canonical browsing order. Mirrors [`Self::artists_in_genre`] over a
-    /// windowed name list.
-    fn artists_in_genre_window(
+    fn artists_in_genre_page(
         &self,
         genre: &str,
         direction: SortDirection,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<Artist>, StoreError> {
-        self.with_connection(|conn| {
-            // The genre-scoped (artist, album) membership splits in Rust like
-            // `artists_in_genre`; the window slices the name-ascending artists
-            // afterwards, so the direction reversal is a Rust reorder.
-            let mut stmt = conn.prepare(
-                "SELECT album_artist_key, album_title_key, genre
-                 FROM tracks
-                 WHERE genre IS NOT NULL AND genre != ''",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?;
-            let mut keys_by_artist: HashMap<String, Vec<String>> = HashMap::new();
-            for row in rows {
-                let (artist, title, stored_genre) = row?;
-                if genre_contains(&stored_genre, genre) {
-                    keys_by_artist
-                        .entry(artist.clone())
-                        .or_default()
-                        .push(format!("{artist} - {title}"));
-                }
-            }
-            let mut names: Vec<String> = keys_by_artist.keys().cloned().collect();
-            names.sort();
-            match direction {
-                SortDirection::Ascending => {}
-                SortDirection::Descending => names.reverse(),
-            }
-            Ok(names
-                .into_iter()
-                .skip(offset)
-                .take(limit)
-                .map(|name| Artist {
-                    albums: keys_by_artist.remove(&name).unwrap_or_default(),
-                    name,
-                })
-                .collect())
-        })
-        .map_err(|e| {
-            StoreError::InvalidOperation(format!("failed to list genre artist windows: {e}"))
+    ) -> Result<Page<Artist>, StoreError> {
+        self.read_page(&self.library_generation, |conn| {
+            let total = Self::artists_in_genre_count_on(conn, genre)?;
+            let rows = Self::artists_in_genre_window_on(conn, genre, direction, offset, limit)?;
+            Ok((total, rows))
         })
     }
 
-    fn artists_in_genre_count(&self, genre: &str) -> Result<usize, StoreError> {
-        self.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT DISTINCT album_artist_key, genre FROM tracks
-                 WHERE genre IS NOT NULL AND genre != ''",
-            )?;
-            let pairs = stmt
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            let mut artists: Vec<String> = Vec::new();
-            for (artist, stored) in pairs {
-                if genre_contains(&stored, genre) && !artists.contains(&artist) {
-                    artists.push(artist);
-                }
-            }
-            Ok(artists.len())
-        })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to count genre artists: {e}")))
-    }
-
-    /// One bounded window of one artist's albums holding at least one Track
-    /// with `genre`, in canonical browsing order or its exact reversal per
-    /// `direction`, each carrying only its matching track ids. Mirrors
-    /// [`Self::artist_albums_in_genre`] over the artist's windowed albums.
-    fn artist_albums_in_genre_window(
+    fn artist_albums_in_genre_page(
         &self,
         artist: &str,
         genre: &str,
         direction: SortDirection,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<Album>, StoreError> {
-        self.with_connection(|conn| {
-            let (year_order, title_order) = match direction {
-                SortDirection::Ascending => ("DESC", "ASC"),
-                SortDirection::Descending => ("ASC", "DESC"),
-            };
-            let mut stmt = conn.prepare_cached(&format!(
-                "WITH window AS (
-                    SELECT title, year, genre FROM albums
-                    WHERE album_artist = ?1
-                    ORDER BY COALESCE(year, 0) {year_order}, title {title_order}
-                    LIMIT ?2 OFFSET ?3
-                 )
-                 SELECT w.title, w.year, w.genre, t.album_title_key, t.path, t.genre
-                 FROM window w
-                 LEFT JOIN tracks t
-                   ON t.album_artist_key = ?1
-                  AND t.album_title_key = w.title
-                 ORDER BY COALESCE(w.year, 0) {year_order}, w.title {title_order},
-                          COALESCE(t.track_number, 0) ASC, t.path ASC"
-            ))?;
-            let rows = stmt.query_map(
-                rusqlite::params![
-                    artist,
-                    i64::try_from(limit).unwrap_or(i64::MAX),
-                    i64::try_from(offset).unwrap_or(i64::MAX),
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<i64>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                    ))
-                },
+    ) -> Result<Page<Album>, StoreError> {
+        self.read_page(&self.library_generation, |conn| {
+            let total = Self::artist_albums_in_genre_count_on(conn, artist, genre)?;
+            let rows = Self::artist_albums_in_genre_window_on(
+                conn, artist, genre, direction, offset, limit,
             )?;
-            // The window is ordered canonically and the LEFT JOIN keeps one
-            // row per track, so consecutive rows group naturally per album.
-            // Only tracks whose own genre carries `genre` join an album's
-            // membership — a Metal track never lands in the Rock list.
-            let mut albums: Vec<Album> = Vec::new();
-            for row in rows {
-                let (title, year, album_genre, path, stored_genre) = row?;
-                if albums.last().is_some_and(|a: &Album| a.title == title) {
-                    if let (Some(path), Some(stored_genre)) = (path, stored_genre)
-                        && genre_contains(&stored_genre, genre)
-                    {
-                        albums
-                            .last_mut()
-                            .expect("just checked")
-                            .tracks
-                            .push(TrackId(path));
-                    }
-                } else {
-                    albums.push(Album {
-                        artist: artist.to_string(),
-                        title,
-                        year: narrow_u32(year),
-                        genre: album_genre,
-                        tracks: path
-                            .zip(stored_genre)
-                            .filter(|(_, stored)| genre_contains(stored, genre))
-                            .map(|(p, _)| vec![TrackId(p)])
-                            .unwrap_or_default(),
-                    });
-                }
-            }
-            // Drop albums holding no matching track (the genre filter): the
-            // LEFT JOIN kept them for ordering, but without a genre-bearing
-            // member they have no row in the scoped list.
-            albums.retain(|album| !album.tracks.is_empty());
-            Ok(albums)
-        })
-        .map_err(|e| {
-            StoreError::InvalidOperation(format!(
-                "failed to list artist album windows in genre: {e}"
-            ))
-        })
-    }
-
-    fn artist_albums_in_genre_count(&self, artist: &str, genre: &str) -> Result<usize, StoreError> {
-        self.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT album_title_key, genre FROM tracks
-                 WHERE album_artist_key = ?1 AND genre IS NOT NULL AND genre != ''
-                 ORDER BY COALESCE(track_number, 0) ASC, path ASC",
-            )?;
-            let members = stmt.query_map(rusqlite::params![artist], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            let mut titles: Vec<String> = Vec::new();
-            for member in members {
-                let (title, stored_genre) = member?;
-                if genre_contains(&stored_genre, genre) && !titles.contains(&title) {
-                    titles.push(title);
-                }
-            }
-            Ok(titles.len())
-        })
-        .map_err(|e| {
-            StoreError::InvalidOperation(format!("failed to count artist albums in genre: {e}"))
+            Ok((total, rows))
         })
     }
 
@@ -3220,6 +2631,36 @@ impl LibraryQueryStore for SqliteStore {
 }
 
 impl SqliteStore {
+    /// Total stored Tracks on an already-held connection. A Listing Page
+    /// calls this instead of [`LibraryQueryStore::track_count`], which would
+    /// take the non-reentrant connection lock a second time.
+    fn track_count_on(conn: &Connection) -> rusqlite::Result<usize> {
+        conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+    }
+
+    /// One path-ascending window on an already-held connection. A Listing
+    /// Page calls this instead of [`LibraryQueryStore::tracks_window`].
+    fn tracks_window_on(
+        conn: &Connection,
+        offset: usize,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<Track>> {
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks ORDER BY path ASC LIMIT ?1 OFFSET ?2"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                i64::try_from(offset).unwrap_or(i64::MAX),
+            ],
+            track_from_row,
+        )?;
+        rows.collect()
+    }
+
     /// Every stored track path under `folder` via [`FOLDER_PREFIX_SQL`] —
     /// including the folder's own exact path when one exists, mirroring
     /// `Path::starts_with`. Callers that must not see it skip it while
@@ -3237,6 +2678,59 @@ impl SqliteStore {
             rows.collect()
         })
         .map_err(|e| StoreError::InvalidOperation(format!("folder listing failed: {e}")))
+    }
+
+    /// One Listing Page stamped with `counter`, both halves read on the
+    /// connection this method holds for its whole duration. `read` must not
+    /// call back through [`LibraryQueryStore`]: the lock is non-reentrant.
+    /// The stamp is taken before the lock drops, so a writer that bumps
+    /// after its own closure returns can only stamp fresh rows with a
+    /// same-or-older epoch — over-invalidation, never stale-served-as-fresh.
+    fn read_page<T>(
+        &self,
+        counter: &StoreGeneration,
+        read: impl FnOnce(&Connection) -> rusqlite::Result<(usize, Vec<T>)>,
+    ) -> Result<Page<T>, StoreError> {
+        let conn = self.conn.lock_or_recover();
+        let (total, rows) = read(&conn).map_err(|e| {
+            StoreError::InvalidOperation(format!("failed to read a listing page: {e}"))
+        })?;
+        Ok(Page::new(total, rows, counter.current()))
+    }
+
+    /// Match count for [`Self::search_window_on`] on an already-held connection.
+    fn search_count_on(conn: &Connection, query: &str) -> rusqlite::Result<usize> {
+        let needle = query.to_lowercase();
+        conn.query_row(
+            "SELECT COUNT(*) FROM tracks WHERE instr(search_text, ?1) > 0",
+            [needle],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+    }
+
+    /// One path-ascending search window on an already-held connection.
+    fn search_window_on(
+        conn: &Connection,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<Track>> {
+        let needle = query.to_lowercase();
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks
+             WHERE instr(search_text, ?1) > 0
+             ORDER BY path ASC LIMIT ?2 OFFSET ?3"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                needle,
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                i64::try_from(offset).unwrap_or(i64::MAX),
+            ],
+            track_from_row,
+        )?;
+        rows.collect()
     }
 
     /// Albums that hold `genre` and are hits for `needle`, in canonical
@@ -3363,6 +2857,608 @@ impl SqliteStore {
             }
         }
         Ok(())
+    }
+
+    /// Total hit albums for [`Self::hit_albums_window_on`] semantics on an
+    /// already-held connection. A Listing Page calls this instead of
+    /// [`LibraryQueryStore::hit_albums_count`], which would take the
+    /// non-reentrant connection lock a second time.
+    fn hit_albums_count_on(conn: &Connection, query: &str) -> rusqlite::Result<usize> {
+        let needle = query.to_lowercase();
+        conn.query_row(
+            "SELECT COUNT(*) FROM albums a
+             WHERE instr(a.album_artist_lower, ?1) > 0
+                OR instr(a.title_lower, ?1) > 0
+                OR EXISTS (
+                     SELECT 1 FROM tracks t
+                     WHERE t.album_artist_key = a.album_artist
+                       AND t.album_title_key = a.title
+                       AND instr(t.search_text, ?1) > 0
+                   )",
+            [needle],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+    }
+
+    /// One bounded window of hit albums on an already-held connection. A
+    /// Listing Page calls this instead of [`LibraryQueryStore::hit_albums`].
+    fn hit_albums_window_on(
+        conn: &Connection,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<Album>> {
+        let needle = query.to_lowercase();
+        // One CTE pass: the window of hit albums LEFT JOINed to their hit
+        // tracks, so membership arrives in canonical per-album track order
+        // and a name-hit album with no matching track still appears. The
+        // hit predicate is the union of the album's own name match and a
+        // member-track match, both literal `instr` over the
+        // write-time-lowercased columns.
+        let mut stmt = conn.prepare_cached(
+            "WITH window AS (
+                SELECT a.album_artist, a.title, a.year, a.genre
+                FROM albums a
+                WHERE instr(a.album_artist_lower, ?1) > 0
+                   OR instr(a.title_lower, ?1) > 0
+                   OR EXISTS (
+                        SELECT 1 FROM tracks t
+                        WHERE t.album_artist_key = a.album_artist
+                          AND t.album_title_key = a.title
+                          AND instr(t.search_text, ?1) > 0
+                      )
+                ORDER BY a.album_artist ASC, COALESCE(a.year, 0) DESC, a.title ASC
+                LIMIT ?2 OFFSET ?3
+             )
+             SELECT w.album_artist, w.title, w.year, w.genre,
+                    t.album_title_key, t.path
+             FROM window w
+             LEFT JOIN tracks t
+               ON t.album_artist_key = w.album_artist
+              AND t.album_title_key = w.title
+              AND instr(t.search_text, ?1) > 0
+             ORDER BY w.album_artist ASC, COALESCE(w.year, 0) DESC, w.title ASC,
+                      COALESCE(t.track_number, 0) ASC, t.path ASC",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                needle,
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                i64::try_from(offset).unwrap_or(i64::MAX),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            },
+        )?;
+        // The window is ordered canonically and the LEFT JOIN keeps one
+        // row per hit track, so consecutive album rows group naturally.
+        let mut albums: Vec<Album> = Vec::new();
+        for row in rows {
+            let (artist, title, year, genre, hit_path) = row?;
+            if albums
+                .last()
+                .is_some_and(|a: &Album| a.artist == artist && a.title == title)
+            {
+                if let Some(path) = hit_path {
+                    albums
+                        .last_mut()
+                        .expect("just checked")
+                        .tracks
+                        .push(TrackId(path));
+                }
+            } else {
+                albums.push(Album {
+                    artist,
+                    title,
+                    year: narrow_u32(year),
+                    genre,
+                    tracks: hit_path.map(|path| vec![TrackId(path)]).unwrap_or_default(),
+                });
+            }
+        }
+        Ok(albums)
+    }
+
+    /// Total hit artists for [`Self::hit_artists_window_on`] semantics on an
+    /// already-held connection. A Listing Page calls this instead of
+    /// [`LibraryQueryStore::hit_artists_count`].
+    fn hit_artists_count_on(conn: &Connection, query: &str) -> rusqlite::Result<usize> {
+        let needle = query.to_lowercase();
+        conn.query_row(
+            "SELECT COUNT(*) FROM artists ar
+             WHERE instr(ar.name_lower, ?1) > 0
+                OR EXISTS (
+                     SELECT 1 FROM albums a
+                     WHERE a.album_artist = ar.name
+                       AND (instr(a.album_artist_lower, ?1) > 0
+                            OR instr(a.title_lower, ?1) > 0
+                            OR EXISTS (
+                                 SELECT 1 FROM tracks t
+                                 WHERE t.album_artist_key = a.album_artist
+                                   AND t.album_title_key = a.title
+                                   AND instr(t.search_text, ?1) > 0
+                               ))
+                   )",
+            [needle],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+    }
+
+    /// One bounded window of hit artists on an already-held connection. A
+    /// Listing Page calls this instead of [`LibraryQueryStore::hit_artists`].
+    fn hit_artists_window_on(
+        conn: &Connection,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<Artist>> {
+        let needle = query.to_lowercase();
+        // Window of hit artists (name match or any album hit) LEFT JOINed
+        // to their hit albums, so each artist's hit-album keys arrive in
+        // canonical browsing order and a name-hit artist whose albums are
+        // not themselves hits still appears with an empty key list.
+        let mut stmt = conn.prepare_cached(
+            "WITH window AS (
+                SELECT ar.name
+                FROM artists ar
+                WHERE instr(ar.name_lower, ?1) > 0
+                   OR EXISTS (
+                        SELECT 1 FROM albums a
+                        WHERE a.album_artist = ar.name
+                          AND (instr(a.album_artist_lower, ?1) > 0
+                               OR instr(a.title_lower, ?1) > 0
+                               OR EXISTS (
+                                    SELECT 1 FROM tracks t
+                                    WHERE t.album_artist_key = a.album_artist
+                                      AND t.album_title_key = a.title
+                                      AND instr(t.search_text, ?1) > 0
+                                  ))
+                      )
+                ORDER BY ar.name ASC
+                LIMIT ?2 OFFSET ?3
+             )
+             SELECT w.name, a.title
+             FROM window w
+             LEFT JOIN albums a
+               ON a.album_artist = w.name
+              AND (instr(a.album_artist_lower, ?1) > 0
+                   OR instr(a.title_lower, ?1) > 0
+                   OR EXISTS (
+                        SELECT 1 FROM tracks t
+                        WHERE t.album_artist_key = a.album_artist
+                          AND t.album_title_key = a.title
+                          AND instr(t.search_text, ?1) > 0
+                      ))
+             ORDER BY w.name ASC, COALESCE(a.year, 0) DESC, a.title ASC",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                needle,
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                i64::try_from(offset).unwrap_or(i64::MAX),
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )?;
+        // The window is ordered by artist and the LEFT JOIN keeps one row
+        // per hit album, so consecutive rows group naturally.
+        let mut artists: Vec<Artist> = Vec::new();
+        for row in rows {
+            let (name, hit_title) = row?;
+            if artists.last().is_some_and(|a: &Artist| a.name == name) {
+                if let Some(title) = hit_title {
+                    artists
+                        .last_mut()
+                        .expect("just checked")
+                        .albums
+                        .push(format!("{name} - {title}"));
+                }
+            } else {
+                let key = hit_title.map(|t| format!("{name} - {t}"));
+                artists.push(Artist {
+                    name,
+                    albums: key.map(|k| vec![k]).unwrap_or_default(),
+                });
+            }
+        }
+        Ok(artists)
+    }
+
+    /// Total artists for [`Self::artists_window_on`] semantics on an
+    /// already-held connection. A Listing Page calls this instead of
+    /// [`LibraryQueryStore::artists_count`], which would take the
+    /// non-reentrant connection lock a second time.
+    fn artists_count_on(conn: &Connection) -> rusqlite::Result<usize> {
+        conn.query_row("SELECT COUNT(*) FROM artists", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+    }
+
+    /// One bounded artist window on an already-held connection. A Listing
+    /// Page calls this instead of [`LibraryQueryStore::artists_window`].
+    fn artists_window_on(
+        conn: &Connection,
+        direction: SortDirection,
+        offset: usize,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<Artist>> {
+        let name_order = match direction {
+            SortDirection::Ascending => "ASC",
+            SortDirection::Descending => "DESC",
+        };
+        let mut stmt = conn.prepare_cached(&format!(
+            "WITH window AS (
+                SELECT name FROM artists
+                ORDER BY name {name_order}
+                LIMIT ?1 OFFSET ?2
+             )
+             SELECT w.name, a.title
+             FROM window w
+             LEFT JOIN albums a ON a.album_artist = w.name
+             ORDER BY w.name {name_order}, COALESCE(a.year, 0) DESC, a.title ASC"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                i64::try_from(offset).unwrap_or(i64::MAX),
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )?;
+        // The window is ordered by artist and the LEFT JOIN keeps one row
+        // per album, so consecutive rows group naturally into artists
+        // carrying their canonical album keys.
+        let mut artists: Vec<Artist> = Vec::new();
+        for row in rows {
+            let (name, title) = row?;
+            if artists.last().is_some_and(|a: &Artist| a.name == name) {
+                if let Some(title) = title {
+                    artists
+                        .last_mut()
+                        .expect("just checked")
+                        .albums
+                        .push(format!("{name} - {title}"));
+                }
+            } else {
+                artists.push(Artist {
+                    name: name.clone(),
+                    albums: title
+                        .map(|t| vec![format!("{name} - {t}")])
+                        .unwrap_or_default(),
+                });
+            }
+        }
+        Ok(artists)
+    }
+
+    /// Total albums for [`Self::albums_window_on`] semantics on an
+    /// already-held connection. A Listing Page calls this instead of
+    /// [`LibraryQueryStore::albums_count`], which would take the
+    /// non-reentrant connection lock a second time.
+    fn albums_count_on(conn: &Connection) -> rusqlite::Result<usize> {
+        conn.query_row("SELECT COUNT(*) FROM albums", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+    }
+
+    /// One bounded album window on an already-held connection. A Listing
+    /// Page calls this instead of [`LibraryQueryStore::albums_window`].
+    fn albums_window_on(
+        conn: &Connection,
+        direction: SortDirection,
+        offset: usize,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<Album>> {
+        let (artist_order, year_order, title_order) = match direction {
+            SortDirection::Ascending => ("ASC", "DESC", "ASC"),
+            SortDirection::Descending => ("DESC", "ASC", "DESC"),
+        };
+        let mut stmt = conn.prepare_cached(&format!(
+            "WITH window AS (
+                SELECT album_artist, title, year, genre
+                FROM albums
+                ORDER BY album_artist {artist_order}, COALESCE(year, 0) {year_order}, title {title_order}
+                LIMIT ?1 OFFSET ?2
+             )
+             SELECT w.album_artist, w.title, w.year, w.genre,
+                    t.album_title_key, t.path
+             FROM window w
+             LEFT JOIN tracks t
+               ON t.album_artist_key = w.album_artist
+              AND t.album_title_key = w.title
+             ORDER BY w.album_artist {artist_order}, COALESCE(w.year, 0) {year_order}, w.title {title_order},
+                      COALESCE(t.track_number, 0) ASC, t.path ASC"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                i64::try_from(offset).unwrap_or(i64::MAX),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            },
+        )?;
+        // The window is ordered canonically and the LEFT JOIN keeps one
+        // row per track, so consecutive rows group naturally per album.
+        let mut albums: Vec<Album> = Vec::new();
+        for row in rows {
+            let (artist, title, year, genre, path) = row?;
+            if albums
+                .last()
+                .is_some_and(|a: &Album| a.artist == artist && a.title == title)
+            {
+                if let Some(path) = path {
+                    albums
+                        .last_mut()
+                        .expect("just checked")
+                        .tracks
+                        .push(TrackId(path));
+                }
+            } else {
+                albums.push(Album {
+                    artist,
+                    title,
+                    year: narrow_u32(year),
+                    genre,
+                    tracks: path.map(|p| vec![TrackId(p)]).unwrap_or_default(),
+                });
+            }
+        }
+        Ok(albums)
+    }
+
+    /// Total genre entries for [`Self::genres_window_on`] semantics on an
+    /// already-held connection. A Listing Page calls this instead of
+    /// [`LibraryQueryStore::genres_count`], which would take the
+    /// non-reentrant connection lock a second time.
+    fn genres_count_on(conn: &Connection) -> rusqlite::Result<usize> {
+        let mut stmt = conn.prepare(
+            "SELECT genre FROM tracks
+             WHERE genre IS NOT NULL AND genre != ''",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut genres = std::collections::HashSet::new();
+        for row in rows {
+            for segment in genre_segments(&row?) {
+                genres.insert(segment.to_string());
+            }
+        }
+        Ok(genres.len())
+    }
+
+    /// One bounded genre window on an already-held connection. A Listing
+    /// Page calls this instead of [`LibraryQueryStore::genres_window`].
+    fn genres_window_on(
+        conn: &Connection,
+        direction: SortDirection,
+        offset: usize,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<GenreCount>> {
+        // The entries split in Rust (exactly like `genre_counts`); the
+        // window slices the sorted entries afterwards, so the direction
+        // reversal is a Rust reorder of the pre-window entries.
+        let mut stmt = conn.prepare(
+            "SELECT genre FROM tracks
+             WHERE genre IS NOT NULL AND genre != ''",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for row in rows {
+            for segment in genre_segments(&row?) {
+                *counts.entry(segment.to_string()).or_insert(0) += 1;
+            }
+        }
+        let mut entries: Vec<GenreCount> = counts
+            .into_iter()
+            .map(|(genre, tracks)| GenreCount { genre, tracks })
+            .collect();
+        entries.sort_by(|a, b| a.genre.cmp(&b.genre));
+        match direction {
+            SortDirection::Ascending => {}
+            SortDirection::Descending => entries.reverse(),
+        }
+        Ok(entries.into_iter().skip(offset).take(limit).collect())
+    }
+
+    /// Total artists within `genre` for [`Self::artists_in_genre_window_on`]
+    /// semantics on an already-held connection. A Listing Page calls this
+    /// instead of [`LibraryQueryStore::artists_in_genre_count`], which would
+    /// take the non-reentrant connection lock a second time.
+    fn artists_in_genre_count_on(conn: &Connection, genre: &str) -> rusqlite::Result<usize> {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT album_artist_key, genre FROM tracks
+             WHERE genre IS NOT NULL AND genre != ''",
+        )?;
+        let pairs = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut artists: Vec<String> = Vec::new();
+        for (artist, stored) in pairs {
+            if genre_contains(&stored, genre) && !artists.contains(&artist) {
+                artists.push(artist);
+            }
+        }
+        Ok(artists.len())
+    }
+
+    /// One bounded window of genre artists on an already-held connection. A
+    /// Listing Page calls this instead of
+    /// [`LibraryQueryStore::artists_in_genre_window`].
+    fn artists_in_genre_window_on(
+        conn: &Connection,
+        genre: &str,
+        direction: SortDirection,
+        offset: usize,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<Artist>> {
+        // The genre-scoped (artist, album) membership splits in Rust like
+        // `artists_in_genre`; the window slices the name-ascending artists
+        // afterwards, so the direction reversal is a Rust reorder.
+        let mut stmt = conn.prepare(
+            "SELECT album_artist_key, album_title_key, genre
+             FROM tracks
+             WHERE genre IS NOT NULL AND genre != ''",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut keys_by_artist: HashMap<String, Vec<String>> = HashMap::new();
+        for row in rows {
+            let (artist, title, stored_genre) = row?;
+            if genre_contains(&stored_genre, genre) {
+                keys_by_artist
+                    .entry(artist.clone())
+                    .or_default()
+                    .push(format!("{artist} - {title}"));
+            }
+        }
+        let mut names: Vec<String> = keys_by_artist.keys().cloned().collect();
+        names.sort();
+        match direction {
+            SortDirection::Ascending => {}
+            SortDirection::Descending => names.reverse(),
+        }
+        Ok(names
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|name| Artist {
+                albums: keys_by_artist.remove(&name).unwrap_or_default(),
+                name,
+            })
+            .collect())
+    }
+
+    /// Total albums within `artist` and `genre` for
+    /// [`Self::artist_albums_in_genre_window_on`] semantics on an
+    /// already-held connection. A Listing Page calls this instead of
+    /// [`LibraryQueryStore::artist_albums_in_genre_count`], which would take
+    /// the non-reentrant connection lock a second time.
+    fn artist_albums_in_genre_count_on(
+        conn: &Connection,
+        artist: &str,
+        genre: &str,
+    ) -> rusqlite::Result<usize> {
+        let mut stmt = conn.prepare(
+            "SELECT album_title_key, genre FROM tracks
+             WHERE album_artist_key = ?1 AND genre IS NOT NULL AND genre != ''
+             ORDER BY COALESCE(track_number, 0) ASC, path ASC",
+        )?;
+        let members = stmt.query_map(rusqlite::params![artist], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut titles: Vec<String> = Vec::new();
+        for member in members {
+            let (title, stored_genre) = member?;
+            if genre_contains(&stored_genre, genre) && !titles.contains(&title) {
+                titles.push(title);
+            }
+        }
+        Ok(titles.len())
+    }
+
+    /// One bounded window of genre albums on an already-held connection. A
+    /// Listing Page calls this instead of
+    /// [`LibraryQueryStore::artist_albums_in_genre_window`].
+    fn artist_albums_in_genre_window_on(
+        conn: &Connection,
+        artist: &str,
+        genre: &str,
+        direction: SortDirection,
+        offset: usize,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<Album>> {
+        let (year_order, title_order) = match direction {
+            SortDirection::Ascending => ("DESC", "ASC"),
+            SortDirection::Descending => ("ASC", "DESC"),
+        };
+        let mut stmt = conn.prepare_cached(&format!(
+            "WITH window AS (
+                SELECT title, year, genre FROM albums
+                WHERE album_artist = ?1
+                ORDER BY COALESCE(year, 0) {year_order}, title {title_order}
+                LIMIT ?2 OFFSET ?3
+             )
+             SELECT w.title, w.year, w.genre, t.album_title_key, t.path, t.genre
+             FROM window w
+             LEFT JOIN tracks t
+               ON t.album_artist_key = ?1
+              AND t.album_title_key = w.title
+             ORDER BY COALESCE(w.year, 0) {year_order}, w.title {title_order},
+                      COALESCE(t.track_number, 0) ASC, t.path ASC"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                artist,
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                i64::try_from(offset).unwrap_or(i64::MAX),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            },
+        )?;
+        // The window is ordered canonically and the LEFT JOIN keeps one
+        // row per track, so consecutive rows group naturally per album.
+        // Only tracks whose own genre carries `genre` join an album's
+        // membership — a Metal track never lands in the Rock list.
+        let mut albums: Vec<Album> = Vec::new();
+        for row in rows {
+            let (title, year, album_genre, path, stored_genre) = row?;
+            if albums.last().is_some_and(|a: &Album| a.title == title) {
+                if let (Some(path), Some(stored_genre)) = (path, stored_genre)
+                    && genre_contains(&stored_genre, genre)
+                {
+                    albums
+                        .last_mut()
+                        .expect("just checked")
+                        .tracks
+                        .push(TrackId(path));
+                }
+            } else {
+                albums.push(Album {
+                    artist: artist.to_string(),
+                    title,
+                    year: narrow_u32(year),
+                    genre: album_genre,
+                    tracks: path
+                        .zip(stored_genre)
+                        .filter(|(_, stored)| genre_contains(stored, genre))
+                        .map(|(p, _)| vec![TrackId(p)])
+                        .unwrap_or_default(),
+                });
+            }
+        }
+        // Drop albums holding no matching track (the genre filter): the
+        // LEFT JOIN kept them for ordering, but without a genre-bearing
+        // member they have no row in the scoped list.
+        albums.retain(|album| !album.tracks.is_empty());
+        Ok(albums)
     }
 }
 

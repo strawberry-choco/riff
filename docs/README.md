@@ -51,8 +51,8 @@ What riff is, what it does, and how to use it.
 **Architecture decisions (ADRs)**
 
 - [ADR 0001: SQLite is the authoritative Application Store](adr/0001-sqlite-is-the-authoritative-application-store.md) — supersedes decision 004.
-- [ADR 0002: The UI reads the store through Session Projections](adr/0002-ui-reads-the-store-through-session-projections.md).
-- [ADR 0003: Store query model](adr/0003-store-query-model.md).
+- [ADR 0002: The UI reads the store through Session Projections](adr/0002-ui-reads-the-store-through-session-projections.md) — amended 2026-09-22: the staleness contract now has the single implementation the record claimed (`GenerationCache::level`), and a paged listing reads one Listing Page instead of a window plus a count.
+- [ADR 0003: Store query model](adr/0003-store-query-model.md) — amended 2026-09-22: bounded reads are Listing Pages, and the genre-scoped hit reads are named as the unbounded exception still outside that shape.
 - [ADR 0004: Dual-theme tokens despite a dark-only design source](adr/0004-dual-theme-tokens.md) — two palettes with High Contrast as a variant over each, and `crates/riff-gui/src/ui/theme.rs` as the single store and read source for every design value.
 - [ADR 0005: Custom window chrome (frameless) on all platforms](adr/0005-frameless-window-chrome-on-all-platforms.md).
 - [ADR 0006: Background workers behind app-layer service seams](adr/0006-background-workers-behind-app-layer-service-seams.md) — Tag Edit and Cover services replace the worker threads spawned inline by `RiffApp`.

@@ -828,12 +828,12 @@ mod tests {
             Ok(riff_persistence::track::METADATA_VERSION)
         }
 
-        fn tracks_window(&self, offset: usize, limit: usize) -> Result<Vec<Track>, StoreError> {
-            self.0.lock().unwrap().tracks_window(offset, limit)
-        }
-
-        fn track_count(&self) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().track_count()
+        fn tracks_page(
+            &self,
+            offset: usize,
+            limit: usize,
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            self.0.lock().unwrap().tracks_page(offset, limit)
         }
 
         fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
@@ -844,17 +844,13 @@ mod tests {
             self.0.lock().unwrap().all_track_ids()
         }
 
-        fn search_window(
+        fn search_page(
             &self,
             query: &str,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0.lock().unwrap().search_window(query, offset, limit)
-        }
-
-        fn search_count(&self, query: &str) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().search_count(query)
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            self.0.lock().unwrap().search_page(query, offset, limit)
         }
 
         fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
@@ -956,30 +952,25 @@ mod tests {
                 .album_tracks_in_genre(album_artist, album_title, genre)
         }
 
-        fn hit_albums(
+        fn hit_albums_page(
             &self,
             query: &str,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            self.0.lock().unwrap().hit_albums(query, offset, limit)
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            self.0.lock().unwrap().hit_albums_page(query, offset, limit)
         }
 
-        fn hit_albums_count(&self, query: &str) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().hit_albums_count(query)
-        }
-
-        fn hit_artists(
+        fn hit_artists_page(
             &self,
             query: &str,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
-            self.0.lock().unwrap().hit_artists(query, offset, limit)
-        }
-
-        fn hit_artists_count(&self, query: &str) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().hit_artists_count(query)
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .hit_artists_page(query, offset, limit)
         }
 
         fn album_hit_tracks(
@@ -1019,13 +1010,6 @@ mod tests {
                 .hit_albums_in_genre(genre, query, offset, limit)
         }
 
-        fn hit_albums_in_genre_count(&self, genre: &str, query: &str) -> Result<usize, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .hit_albums_in_genre_count(genre, query)
-        }
-
         fn hit_artists_in_genre(
             &self,
             genre: &str,
@@ -1037,17 +1021,6 @@ mod tests {
                 .lock()
                 .unwrap()
                 .hit_artists_in_genre(genre, query, offset, limit)
-        }
-
-        fn hit_artists_in_genre_count(
-            &self,
-            genre: &str,
-            query: &str,
-        ) -> Result<usize, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .hit_artists_in_genre_count(genre, query)
         }
 
         fn album_hit_tracks_in_genre(
@@ -1069,94 +1042,61 @@ mod tests {
             self.0.lock().unwrap().hit_genre_counts(query)
         }
 
-        fn artists_window(
+        fn artists_page(
             &self,
             direction: SortDirection,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
             self.0
                 .lock()
                 .unwrap()
-                .artists_window(direction, offset, limit)
+                .artists_page(direction, offset, limit)
         }
 
-        fn artists_count(&self) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().artists_count()
-        }
-
-        fn albums_window(
+        fn albums_page(
             &self,
             direction: SortDirection,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .albums_window(direction, offset, limit)
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            self.0.lock().unwrap().albums_page(direction, offset, limit)
         }
 
-        fn albums_count(&self) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().albums_count()
-        }
-
-        fn genres_window(
+        fn genres_page(
             &self,
             direction: SortDirection,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<GenreCount>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .genres_window(direction, offset, limit)
+        ) -> Result<riff_persistence::store::Page<GenreCount>, StoreError> {
+            self.0.lock().unwrap().genres_page(direction, offset, limit)
         }
 
-        fn genres_count(&self) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().genres_count()
-        }
-
-        fn artists_in_genre_window(
+        fn artists_in_genre_page(
             &self,
             genre: &str,
             direction: SortDirection,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
             self.0
                 .lock()
                 .unwrap()
-                .artists_in_genre_window(genre, direction, offset, limit)
+                .artists_in_genre_page(genre, direction, offset, limit)
         }
 
-        fn artists_in_genre_count(&self, genre: &str) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().artists_in_genre_count(genre)
-        }
-
-        fn artist_albums_in_genre_window(
+        fn artist_albums_in_genre_page(
             &self,
             artist: &str,
             genre: &str,
             direction: SortDirection,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
             self.0
                 .lock()
                 .unwrap()
-                .artist_albums_in_genre_window(artist, genre, direction, offset, limit)
-        }
-
-        fn artist_albums_in_genre_count(
-            &self,
-            artist: &str,
-            genre: &str,
-        ) -> Result<usize, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .artist_albums_in_genre_count(artist, genre)
+                .artist_albums_in_genre_page(artist, genre, direction, offset, limit)
         }
     }
 
@@ -1311,9 +1251,11 @@ mod tests {
             page.rows[49].id.0, "49",
             "rows come back refreshed alongside the recounted total"
         );
-        assert!(
-            mock.count_of(&LibraryQueryCall::TrackCount) >= 2,
-            "the recount issued a fresh COUNT query"
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::TracksPage(0, 50)),
+            2,
+            "the invalidated frame ran a second page read, whose total the \
+             view just reported"
         );
     }
 
@@ -1331,9 +1273,14 @@ mod tests {
             "an empty result set gates rendering off"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::SearchCount),
-            2,
-            "one store count per gate check"
+            mock.count_of(&LibraryQueryCall::SearchPage("q".to_string(), 0, 1)),
+            1,
+            "one page read per gate check"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::SearchPage("nothing".to_string(), 0, 1)),
+            1,
+            "one page read per gate check"
         );
     }
 
@@ -1569,11 +1516,14 @@ mod tests {
         assert_eq!(page.rows[49].title, "Album 99");
 
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbums(0, 50)),
+            mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
             1,
-            "each requested window is fetched once at the projection's window size"
+            "each requested window is fetched by one page read at the projection's window size"
         );
-        assert_eq!(mock.count_of(&LibraryQueryCall::HitAlbums(50, 50)), 1);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 50, 50)),
+            1
+        );
     }
 
     #[test]
@@ -1592,9 +1542,16 @@ mod tests {
         // retarget — a fresh fetch, not a cache hit.
         views.hit_albums_page("q", 0);
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbums(0, 50)),
-            3,
-            "a keystroke retarget drops the stale query's cached rows even at an unchanged generation"
+            mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
+            2,
+            "returning to a dropped query is a fresh page read, not a cache hit: \
+             a keystroke retarget clears the stale query's rows even at an \
+             unchanged generation"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitAlbumsPage("qu".to_string(), 0, 50)),
+            1,
+            "the intervening query is its own listing, read once"
         );
     }
 
@@ -1609,7 +1566,7 @@ mod tests {
             views.hit_albums_page("q", offset);
         }
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbums(0, 50)),
+            mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
             1,
             "all requested windows load"
         );
@@ -1618,16 +1575,16 @@ mod tests {
         // evicted once the bound was exceeded.
         views.hit_albums_page("q", 0);
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbums(0, 50)),
+            mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
             2,
             "the oldest window was evicted once the bound was exceeded"
         );
 
         // The newest window remains cached.
-        let before = mock.count_of(&LibraryQueryCall::HitAlbums(400, 50));
+        let before = mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 400, 50));
         views.hit_albums_page("q", 400);
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbums(400, 50)),
+            mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 400, 50)),
             before,
             "the newest window remains cached"
         );
@@ -1643,18 +1600,18 @@ mod tests {
 
         // A committed mutation bumps the generation: the stale rows drop, the
         // next frame refetches and recounts.
+        mock.lock().hit_albums = hit_album_fixture(12);
         generation.bump();
-        assert_eq!(views.hit_albums_page("q", 0).total, 10);
+        assert_eq!(
+            views.hit_albums_page("q", 0).total,
+            12,
+            "an invalidated frame reports the total of the page it just read"
+        );
 
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbums(0, 50)),
+            mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
             2,
-            "a generation bump drops the cached hit windows"
-        );
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbumsCount),
-            2,
-            "an invalidated frame recounts"
+            "a generation bump drops the cached hit windows, one page read per frame"
         );
     }
 
@@ -1745,11 +1702,14 @@ mod tests {
         assert_eq!(page.rows[49].name, "Artist 99");
 
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitArtists(0, 50)),
+            mock.count_of(&LibraryQueryCall::HitArtistsPage("q".to_string(), 0, 50)),
             1,
-            "each requested window is fetched once at the projection's window size"
+            "each requested window is fetched by one page read at the projection's window size"
         );
-        assert_eq!(mock.count_of(&LibraryQueryCall::HitArtists(50, 50)), 1);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitArtistsPage("q".to_string(), 50, 50)),
+            1
+        );
     }
 
     #[test]
@@ -1765,9 +1725,16 @@ mod tests {
         views.hit_artists_page("qu", 0);
         views.hit_artists_page("q", 0);
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitArtists(0, 50)),
-            3,
-            "a keystroke retarget drops the stale query's cached rows even at an unchanged generation"
+            mock.count_of(&LibraryQueryCall::HitArtistsPage("q".to_string(), 0, 50)),
+            2,
+            "returning to a dropped query is a fresh page read, not a cache hit: \
+             a keystroke retarget clears the stale query's rows even at an \
+             unchanged generation"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::HitArtistsPage("qu".to_string(), 0, 50)),
+            1,
+            "the intervening query is its own listing, read once"
         );
     }
 
@@ -3429,7 +3396,10 @@ mod scan_service_tests {
         /// Rows currently committed in the Library collection, read through
         /// the query port.
         fn track_count(&self) -> usize {
-            self.queries.track_count().expect("count reads")
+            self.queries
+                .tracks_page(0, usize::MAX)
+                .expect("page reads")
+                .total()
         }
     }
 
@@ -3506,12 +3476,12 @@ mod scan_service_tests {
             Ok(riff_persistence::track::METADATA_VERSION)
         }
 
-        fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn track_count(&self) -> Result<usize, StoreError> {
-            Ok(0)
+        fn tracks_page(
+            &self,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
         fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
@@ -3522,17 +3492,13 @@ mod scan_service_tests {
             Ok(Vec::new())
         }
 
-        fn search_window(
+        fn search_page(
             &self,
             _query: &str,
             _offset: usize,
             _limit: usize,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn search_count(&self, _query: &str) -> Result<usize, StoreError> {
-            Ok(0)
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
         fn all_artists(&self) -> Result<Vec<crate::domain::Artist>, StoreError> {
@@ -3624,20 +3590,22 @@ mod scan_service_tests {
             Ok(Vec::new())
         }
 
-        fn hit_albums(&self, _q: &str, _o: usize, _l: usize) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
+        fn hit_albums_page(
+            &self,
+            _query: &str,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn hit_albums_count(&self, _q: &str) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn hit_artists(&self, _q: &str, _o: usize, _l: usize) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn hit_artists_count(&self, _q: &str) -> Result<usize, StoreError> {
-            Ok(0)
+        fn hit_artists_page(
+            &self,
+            _query: &str,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
         fn album_hit_tracks(&self, _a: &str, _t: &str, _q: &str) -> Result<Vec<Track>, StoreError> {
@@ -3658,10 +3626,6 @@ mod scan_service_tests {
             Ok(Vec::new())
         }
 
-        fn hit_albums_in_genre_count(&self, _g: &str, _q: &str) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
         fn hit_artists_in_genre(
             &self,
             _g: &str,
@@ -3670,10 +3634,6 @@ mod scan_service_tests {
             _l: usize,
         ) -> Result<Vec<Artist>, StoreError> {
             Ok(Vec::new())
-        }
-
-        fn hit_artists_in_genre_count(&self, _g: &str, _q: &str) -> Result<usize, StoreError> {
-            Ok(0)
         }
 
         fn album_hit_tracks_in_genre(
@@ -3690,72 +3650,52 @@ mod scan_service_tests {
             Ok(Vec::new())
         }
 
-        fn artists_window(
+        fn artists_page(
             &self,
-            _d: SortDirection,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<crate::domain::Artist>, StoreError> {
-            Ok(Vec::new())
+            _direction: SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn artists_count(&self) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn albums_window(
+        fn albums_page(
             &self,
-            _d: SortDirection,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<crate::domain::Album>, StoreError> {
-            Ok(Vec::new())
+            _direction: SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn albums_count(&self) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn genres_window(
+        fn genres_page(
             &self,
-            _d: SortDirection,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<crate::domain::GenreCount>, StoreError> {
-            Ok(Vec::new())
+            _direction: SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<crate::domain::GenreCount>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn genres_count(&self) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn artists_in_genre_window(
+        fn artists_in_genre_page(
             &self,
-            _g: &str,
-            _d: SortDirection,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<crate::domain::Artist>, StoreError> {
-            Ok(Vec::new())
+            _genre: &str,
+            _direction: SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn artists_in_genre_count(&self, _g: &str) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn artist_albums_in_genre_window(
+        fn artist_albums_in_genre_page(
             &self,
-            _a: &str,
-            _g: &str,
-            _d: SortDirection,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<crate::domain::Album>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artist_albums_in_genre_count(&self, _a: &str, _g: &str) -> Result<usize, StoreError> {
-            Ok(0)
+            _artist: &str,
+            _genre: &str,
+            _direction: SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
     }
 
@@ -4557,12 +4497,16 @@ mod audio_engine_tests {
             Ok(riff_persistence::track::METADATA_VERSION)
         }
 
-        fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn track_count(&self) -> Result<usize, StoreError> {
-            Ok(self.tracks.len())
+        fn tracks_page(
+            &self,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            Ok(riff_persistence::store::Page::new(
+                self.tracks.len(),
+                Vec::new(),
+                0,
+            ))
         }
 
         fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
@@ -4578,17 +4522,13 @@ mod audio_engine_tests {
             Ok(ids)
         }
 
-        fn search_window(
+        fn search_page(
             &self,
             _query: &str,
             _offset: usize,
             _limit: usize,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn search_count(&self, _query: &str) -> Result<usize, StoreError> {
-            Ok(0)
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
         fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
@@ -4678,20 +4618,22 @@ mod audio_engine_tests {
             Ok(Vec::new())
         }
 
-        fn hit_albums(&self, _q: &str, _o: usize, _l: usize) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
+        fn hit_albums_page(
+            &self,
+            _query: &str,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn hit_albums_count(&self, _q: &str) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn hit_artists(&self, _q: &str, _o: usize, _l: usize) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn hit_artists_count(&self, _q: &str) -> Result<usize, StoreError> {
-            Ok(0)
+        fn hit_artists_page(
+            &self,
+            _query: &str,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
         fn album_hit_tracks(&self, _a: &str, _t: &str, _q: &str) -> Result<Vec<Track>, StoreError> {
@@ -4712,10 +4654,6 @@ mod audio_engine_tests {
             Ok(Vec::new())
         }
 
-        fn hit_albums_in_genre_count(&self, _g: &str, _q: &str) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
         fn hit_artists_in_genre(
             &self,
             _g: &str,
@@ -4724,10 +4662,6 @@ mod audio_engine_tests {
             _l: usize,
         ) -> Result<Vec<Artist>, StoreError> {
             Ok(Vec::new())
-        }
-
-        fn hit_artists_in_genre_count(&self, _g: &str, _q: &str) -> Result<usize, StoreError> {
-            Ok(0)
         }
 
         fn album_hit_tracks_in_genre(
@@ -4744,72 +4678,52 @@ mod audio_engine_tests {
             Ok(Vec::new())
         }
 
-        fn artists_window(
+        fn artists_page(
             &self,
-            _d: SortDirection,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<crate::domain::Artist>, StoreError> {
-            Ok(Vec::new())
+            _direction: SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn artists_count(&self) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn albums_window(
+        fn albums_page(
             &self,
-            _d: SortDirection,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<crate::domain::Album>, StoreError> {
-            Ok(Vec::new())
+            _direction: SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn albums_count(&self) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn genres_window(
+        fn genres_page(
             &self,
-            _d: SortDirection,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<crate::domain::GenreCount>, StoreError> {
-            Ok(Vec::new())
+            _direction: SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<crate::domain::GenreCount>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn genres_count(&self) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn artists_in_genre_window(
+        fn artists_in_genre_page(
             &self,
-            _g: &str,
-            _d: SortDirection,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<crate::domain::Artist>, StoreError> {
-            Ok(Vec::new())
+            _genre: &str,
+            _direction: SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn artists_in_genre_count(&self, _g: &str) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn artist_albums_in_genre_window(
+        fn artist_albums_in_genre_page(
             &self,
-            _a: &str,
-            _g: &str,
-            _d: SortDirection,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<crate::domain::Album>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artist_albums_in_genre_count(&self, _a: &str, _g: &str) -> Result<usize, StoreError> {
-            Ok(0)
+            _artist: &str,
+            _genre: &str,
+            _direction: SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
     }
 
@@ -5423,12 +5337,12 @@ mod tag_edit_service_tests {
             Ok(riff_persistence::track::METADATA_VERSION)
         }
 
-        fn tracks_window(&self, _offset: usize, _limit: usize) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn track_count(&self) -> Result<usize, StoreError> {
-            Ok(0)
+        fn tracks_page(
+            &self,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
         fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
@@ -5439,17 +5353,13 @@ mod tag_edit_service_tests {
             Ok(Vec::new())
         }
 
-        fn search_window(
+        fn search_page(
             &self,
             _query: &str,
             _offset: usize,
             _limit: usize,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn search_count(&self, _query: &str) -> Result<usize, StoreError> {
-            Ok(0)
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
         fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
@@ -5539,20 +5449,22 @@ mod tag_edit_service_tests {
             Ok(Vec::new())
         }
 
-        fn hit_albums(&self, _q: &str, _o: usize, _l: usize) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
+        fn hit_albums_page(
+            &self,
+            _query: &str,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn hit_albums_count(&self, _q: &str) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn hit_artists(&self, _q: &str, _o: usize, _l: usize) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn hit_artists_count(&self, _q: &str) -> Result<usize, StoreError> {
-            Ok(0)
+        fn hit_artists_page(
+            &self,
+            _query: &str,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
         fn album_hit_tracks(&self, _a: &str, _t: &str, _q: &str) -> Result<Vec<Track>, StoreError> {
@@ -5573,10 +5485,6 @@ mod tag_edit_service_tests {
             Ok(Vec::new())
         }
 
-        fn hit_albums_in_genre_count(&self, _g: &str, _q: &str) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
         fn hit_artists_in_genre(
             &self,
             _g: &str,
@@ -5585,10 +5493,6 @@ mod tag_edit_service_tests {
             _l: usize,
         ) -> Result<Vec<Artist>, StoreError> {
             Ok(Vec::new())
-        }
-
-        fn hit_artists_in_genre_count(&self, _g: &str, _q: &str) -> Result<usize, StoreError> {
-            Ok(0)
         }
 
         fn album_hit_tracks_in_genre(
@@ -5605,72 +5509,52 @@ mod tag_edit_service_tests {
             Ok(Vec::new())
         }
 
-        fn artists_window(
+        fn artists_page(
             &self,
-            _d: SortDirection,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<crate::domain::Artist>, StoreError> {
-            Ok(Vec::new())
+            _direction: SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn artists_count(&self) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn albums_window(
+        fn albums_page(
             &self,
-            _d: SortDirection,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<crate::domain::Album>, StoreError> {
-            Ok(Vec::new())
+            _direction: SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn albums_count(&self) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn genres_window(
+        fn genres_page(
             &self,
-            _d: SortDirection,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<crate::domain::GenreCount>, StoreError> {
-            Ok(Vec::new())
+            _direction: SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<crate::domain::GenreCount>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn genres_count(&self) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn artists_in_genre_window(
+        fn artists_in_genre_page(
             &self,
-            _g: &str,
-            _d: SortDirection,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<crate::domain::Artist>, StoreError> {
-            Ok(Vec::new())
+            _genre: &str,
+            _direction: SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
 
-        fn artists_in_genre_count(&self, _g: &str) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn artist_albums_in_genre_window(
+        fn artist_albums_in_genre_page(
             &self,
-            _a: &str,
-            _g: &str,
-            _d: SortDirection,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<crate::domain::Album>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artist_albums_in_genre_count(&self, _a: &str, _g: &str) -> Result<usize, StoreError> {
-            Ok(0)
+            _artist: &str,
+            _genre: &str,
+            _direction: SortDirection,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
         }
     }
 
@@ -7738,11 +7622,12 @@ mod browse_page_seam_tests {
             fn metadata_version(&self) -> Result<u32, StoreError> {
                 Ok(riff_persistence::track::METADATA_VERSION)
             }
-            fn tracks_window(&self, o: usize, l: usize) -> Result<Vec<Track>, StoreError> {
-                self.0.lock().unwrap().tracks_window(o, l)
-            }
-            fn track_count(&self) -> Result<usize, StoreError> {
-                self.0.lock().unwrap().track_count()
+            fn tracks_page(
+                &self,
+                offset: usize,
+                limit: usize,
+            ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+                self.0.lock().unwrap().tracks_page(offset, limit)
             }
             fn library_counts(&self) -> Result<app::store::LibraryCounts, StoreError> {
                 self.0.lock().unwrap().library_counts()
@@ -7750,11 +7635,13 @@ mod browse_page_seam_tests {
             fn all_track_ids(&self) -> Result<Vec<riff_backend::domain::TrackId>, StoreError> {
                 self.0.lock().unwrap().all_track_ids()
             }
-            fn search_window(&self, q: &str, o: usize, l: usize) -> Result<Vec<Track>, StoreError> {
-                self.0.lock().unwrap().search_window(q, o, l)
-            }
-            fn search_count(&self, q: &str) -> Result<usize, StoreError> {
-                self.0.lock().unwrap().search_count(q)
+            fn search_page(
+                &self,
+                q: &str,
+                o: usize,
+                l: usize,
+            ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+                self.0.lock().unwrap().search_page(q, o, l)
             }
             fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
                 self.0.lock().unwrap().all_artists()
@@ -7823,17 +7710,21 @@ mod browse_page_seam_tests {
             ) -> Result<Vec<Track>, StoreError> {
                 self.0.lock().unwrap().album_tracks_in_genre(a, t, g)
             }
-            fn hit_albums(&self, q: &str, o: usize, l: usize) -> Result<Vec<Album>, StoreError> {
-                self.0.lock().unwrap().hit_albums(q, o, l)
+            fn hit_albums_page(
+                &self,
+                q: &str,
+                o: usize,
+                l: usize,
+            ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+                self.0.lock().unwrap().hit_albums_page(q, o, l)
             }
-            fn hit_albums_count(&self, q: &str) -> Result<usize, StoreError> {
-                self.0.lock().unwrap().hit_albums_count(q)
-            }
-            fn hit_artists(&self, q: &str, o: usize, l: usize) -> Result<Vec<Artist>, StoreError> {
-                self.0.lock().unwrap().hit_artists(q, o, l)
-            }
-            fn hit_artists_count(&self, q: &str) -> Result<usize, StoreError> {
-                self.0.lock().unwrap().hit_artists_count(q)
+            fn hit_artists_page(
+                &self,
+                q: &str,
+                o: usize,
+                l: usize,
+            ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+                self.0.lock().unwrap().hit_artists_page(q, o, l)
             }
             fn album_hit_tracks(
                 &self,
@@ -7855,9 +7746,6 @@ mod browse_page_seam_tests {
             ) -> Result<Vec<Album>, StoreError> {
                 self.0.lock().unwrap().hit_albums_in_genre(g, q, o, l)
             }
-            fn hit_albums_in_genre_count(&self, g: &str, q: &str) -> Result<usize, StoreError> {
-                self.0.lock().unwrap().hit_albums_in_genre_count(g, q)
-            }
             fn hit_artists_in_genre(
                 &self,
                 g: &str,
@@ -7866,9 +7754,6 @@ mod browse_page_seam_tests {
                 l: usize,
             ) -> Result<Vec<Artist>, StoreError> {
                 self.0.lock().unwrap().hit_artists_in_genre(g, q, o, l)
-            }
-            fn hit_artists_in_genre_count(&self, g: &str, q: &str) -> Result<usize, StoreError> {
-                self.0.lock().unwrap().hit_artists_in_genre_count(g, q)
             }
             fn album_hit_tracks_in_genre(
                 &self,
@@ -7882,66 +7767,51 @@ mod browse_page_seam_tests {
             fn hit_genre_counts(&self, q: &str) -> Result<Vec<GenreCount>, StoreError> {
                 self.0.lock().unwrap().hit_genre_counts(q)
             }
-            fn artists_window(
+            fn artists_page(
                 &self,
                 d: SortDirection,
                 o: usize,
                 l: usize,
-            ) -> Result<Vec<Artist>, StoreError> {
-                self.0.lock().unwrap().artists_window(d, o, l)
+            ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+                self.0.lock().unwrap().artists_page(d, o, l)
             }
-            fn artists_count(&self) -> Result<usize, StoreError> {
-                self.0.lock().unwrap().artists_count()
-            }
-            fn albums_window(
+            fn albums_page(
                 &self,
                 d: SortDirection,
                 o: usize,
                 l: usize,
-            ) -> Result<Vec<Album>, StoreError> {
-                self.0.lock().unwrap().albums_window(d, o, l)
+            ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+                self.0.lock().unwrap().albums_page(d, o, l)
             }
-            fn albums_count(&self) -> Result<usize, StoreError> {
-                self.0.lock().unwrap().albums_count()
-            }
-            fn genres_window(
+            fn genres_page(
                 &self,
                 d: SortDirection,
                 o: usize,
                 l: usize,
-            ) -> Result<Vec<GenreCount>, StoreError> {
-                self.0.lock().unwrap().genres_window(d, o, l)
+            ) -> Result<riff_persistence::store::Page<GenreCount>, StoreError> {
+                self.0.lock().unwrap().genres_page(d, o, l)
             }
-            fn genres_count(&self) -> Result<usize, StoreError> {
-                self.0.lock().unwrap().genres_count()
-            }
-            fn artists_in_genre_window(
+            fn artists_in_genre_page(
                 &self,
                 g: &str,
                 d: SortDirection,
                 o: usize,
                 l: usize,
-            ) -> Result<Vec<Artist>, StoreError> {
-                self.0.lock().unwrap().artists_in_genre_window(g, d, o, l)
+            ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+                self.0.lock().unwrap().artists_in_genre_page(g, d, o, l)
             }
-            fn artists_in_genre_count(&self, g: &str) -> Result<usize, StoreError> {
-                self.0.lock().unwrap().artists_in_genre_count(g)
-            }
-            fn artist_albums_in_genre_window(
+            fn artist_albums_in_genre_page(
                 &self,
                 a: &str,
                 g: &str,
                 d: SortDirection,
                 o: usize,
                 l: usize,
-            ) -> Result<Vec<Album>, StoreError> {
+            ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
                 self.0
                     .lock()
                     .unwrap()
-                    .artist_albums_in_genre_window(a, g, d, o, l)
-            }
-            fn artist_albums_in_genre_count(&self, a: &str, g: &str) -> Result<usize, StoreError> {
-                self.0.lock().unwrap().artist_albums_in_genre_count(a, g)
+                    .artist_albums_in_genre_page(a, g, d, o, l)
             }
         }
         let views = SessionViews::new(
@@ -7953,16 +7823,19 @@ mod browse_page_seam_tests {
         (views, mock, generation)
     }
 
-    /// The mock's recorded paged-browse window fetches as `(offset, limit)`.
+    /// The mock's recorded paged-browse Listing Page reads as their
+    /// `(offset, limit)` window — one entry per store read.
     fn browse_window_calls(mock: &MockLibraryQueryStore) -> Vec<(usize, usize)> {
         mock.calls()
             .into_iter()
             .filter_map(|call| match call {
-                crate::mocks::LibraryQueryCall::ArtistsWindow(o, l)
-                | crate::mocks::LibraryQueryCall::AlbumsWindow(o, l)
-                | crate::mocks::LibraryQueryCall::GenresWindow(o, l)
-                | crate::mocks::LibraryQueryCall::ArtistsInGenreWindow(o, l)
-                | crate::mocks::LibraryQueryCall::ArtistAlbumsInGenreWindow(o, l) => Some((o, l)),
+                crate::mocks::LibraryQueryCall::ArtistsPage(_, o, l)
+                | crate::mocks::LibraryQueryCall::AlbumsPage(_, o, l)
+                | crate::mocks::LibraryQueryCall::GenresPage(_, o, l)
+                | crate::mocks::LibraryQueryCall::ArtistsInGenrePage(_, _, o, l)
+                | crate::mocks::LibraryQueryCall::ArtistAlbumsInGenrePage(_, _, _, o, l) => {
+                    Some((o, l))
+                }
                 _ => None,
             })
             .collect()
@@ -8038,14 +7911,11 @@ mod browse_page_seam_tests {
             page.rows[0].name, "Artist 000",
             "the first window refetches the store's current rows"
         );
-        let calls = mock.lock().unwrap().calls();
-        assert!(
-            calls
-                .iter()
-                .filter(|c| matches!(c, crate::mocks::LibraryQueryCall::ArtistsCount))
-                .count()
-                >= 2,
-            "the count read re-runs after the bump (one per invalidated frame)"
+        assert_eq!(
+            browse_window_calls(&mock.lock().unwrap()),
+            vec![(0, 50), (0, 50)],
+            "each frame runs exactly one page read, and the invalidated \
+             frame ran a second one"
         );
     }
 
@@ -8227,19 +8097,26 @@ mod browse_page_seam_tests {
         // at an unchanged generation — and refetches for the new genre.
         let switched = views.artists_in_genre_page("Jazz", SortDirection::Ascending, 0);
         assert_eq!(switched.rows[0].name, "Artist 000");
-        let calls = mock.lock().unwrap().calls();
-        let fetch_count = calls
-            .iter()
-            .filter(|c| {
-                matches!(
-                    c,
-                    crate::mocks::LibraryQueryCall::ArtistsInGenreWindow(0, 50)
-                )
+        let fetches: Vec<String> = mock
+            .lock()
+            .unwrap()
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                crate::mocks::LibraryQueryCall::ArtistsInGenrePage(
+                    genre,
+                    SortDirection::Ascending,
+                    0,
+                    50,
+                ) => Some(genre),
+                _ => None,
             })
-            .count();
+            .collect();
         assert_eq!(
-            fetch_count, 2,
-            "each genre change refetches the declared window"
+            fetches,
+            ["Rock".to_string(), "Jazz".to_string()],
+            "each genre change refetches the declared window — one page read \
+             per listing, in the order the genres were asked for"
         );
 
         // The album drill serves windows with matching track ids.
@@ -8257,17 +8134,50 @@ mod browse_page_seam_tests {
         assert_eq!(page.total, 12);
         assert_eq!(page.rows[0].tracks, vec![TrackId("g0".to_string())]);
     }
+
+    /// A listing whose read fails must not report a total and rows from two
+    /// different moments: the total a header shows belongs to the rows
+    /// underneath it, and a failed Listing Page read leaves the last good
+    /// page — total and window together — in place.
+    #[test]
+    fn a_failed_count_read_never_leaves_a_total_disagreeing_with_its_rows() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            artists: artist_library(60),
+            ..Default::default()
+        });
+
+        let warm = views.artists_page(SortDirection::Ascending, 0);
+        assert_eq!((warm.total, warm.rows.len()), (60, 50));
+
+        // A mutation invalidates the listing, and this time the page read
+        // fails (injected at the `ArtistsCount` seam, the one that used to be
+        // the separate count query).
+        mock.lock().unwrap().failing = vec![FailingQuery::ArtistsCount];
+        generation.bump();
+
+        let page = views.artists_page(SortDirection::Ascending, 0);
+        assert!(
+            page.total >= page.rows.len(),
+            "a total of {} cannot describe the {} rows listed under it",
+            page.total,
+            page.rows.len()
+        );
+        assert_eq!(
+            page.total, 60,
+            "the failed reload keeps the last good total beside the last good rows"
+        );
+        assert_eq!(page.rows.len(), 50, "and the last good window");
+    }
 }
 
 // --- Shared bounded-window list projection (paginate-browse-columns 01) ----
 //
-// The generic windowed-list projection every paged browse read is built on:
-// bounded window map, FIFO window cap, stamped authoritative total,
-// generation-keyed staleness, and a per-list query-signature key that
-// includes the sort direction. These tests pin the projection's contract —
-// tiling, eviction, refetch-on-generation-bump, key-change drops, and
-// loader-error preservation — against a canonical full list, not cache
-// internals.
+// The generic windowed-list projection every paged browse read is built on.
+// Its contract is proven through the read seam -- tiling, refetch on a
+// generation bump, key-change drops, and loader-error preservation are all
+// asserted in `browse_page_seam_tests` and `listing_page_coherence_tests`.
+// What is left here is the one property the seam cannot show: the FIFO cap on
+// cached windows.
 
 #[cfg(test)]
 mod windowed_list_projection_tests {
@@ -8285,47 +8195,21 @@ mod windowed_list_projection_tests {
         }
     }
 
-    /// A loader that slices `rows` in window-size steps and counts every
-    /// fetch, so tests can tell "served from cache" from "hit the store".
-    fn slice_loader<'a>(
-        rows: &'a mut [usize],
+    /// A page reader that slices `rows` in window-size steps and counts every
+    /// read, so tests can tell "served from cache" from "hit the store".
+    fn slice_reader<'a>(
+        rows: &'a [usize],
         calls: &'a mut usize,
-    ) -> impl FnMut(usize, usize) -> Result<Vec<usize>, StoreError> + 'a {
+    ) -> impl FnMut(usize, usize) -> Result<riff_persistence::store::Page<usize>, StoreError> + 'a
+    {
         move |offset, limit| {
             *calls += 1;
-            Ok(rows.iter().skip(offset).take(limit).copied().collect())
+            Ok(riff_persistence::store::Page::new(
+                rows.len(),
+                rows.iter().skip(offset).take(limit).copied().collect(),
+                0,
+            ))
         }
-    }
-
-    #[test]
-    fn test_requested_windows_tile_the_canonical_full_list() {
-        let generation = StoreGeneration::new();
-        let mut projection =
-            WindowedListProjection::new(generation, artists_key(SortDirection::Ascending));
-        let mut rows: Vec<usize> = (0..250).collect();
-        for offset in [0, 50, 100, 150, 200] {
-            projection.request_window(offset);
-        }
-
-        let mut calls = 0;
-        projection
-            .refresh(rows.len(), &mut slice_loader(&mut rows, &mut calls))
-            .expect("a fresh projection refresh succeeds");
-        assert_eq!(
-            projection.total(),
-            250,
-            "the stamped total is authoritative"
-        );
-
-        let tiled: Vec<usize> = (0..250)
-            .step_by(50)
-            .flat_map(|o| projection.window(o).expect("window present").to_vec())
-            .collect();
-        assert_eq!(
-            tiled, rows,
-            "a sequence of requested windows tiles the canonical full list \
-             with no duplicate or missing rows"
-        );
     }
 
     #[test]
@@ -8334,15 +8218,28 @@ mod windowed_list_projection_tests {
         let mut projection =
             WindowedListProjection::new(generation, artists_key(SortDirection::Ascending));
         // One more distinct window than the cache's FIFO cap (8).
-        let mut rows: Vec<usize> = (0..450).collect();
-        for offset in (0..450).step_by(50) {
-            projection.request_window(offset);
-        }
-
+        let rows: Vec<usize> = (0..450).collect();
         let mut calls = 0;
-        projection
-            .refresh(rows.len(), &mut slice_loader(&mut rows, &mut calls))
-            .expect("refresh succeeds");
+        {
+            let mut read = slice_reader(&rows, &mut calls);
+            for offset in (0..450).step_by(50) {
+                projection
+                    .show_window(artists_key(SortDirection::Ascending), offset, &mut read)
+                    .expect("showing a window succeeds");
+            }
+        }
+        assert_eq!(calls, 9, "every distinct window was read once");
+
+        {
+            let mut read = slice_reader(&rows, &mut calls);
+            projection
+                .show_window(artists_key(SortDirection::Ascending), 100, &mut read)
+                .expect("a still-cached window is served");
+        }
+        assert_eq!(calls, 9, "a cached window costs no store read");
+
+        // FIFO eviction has no consequence the read seam can show: an evicted
+        // window is simply refetched, byte for byte, when asked for again.
         assert!(
             projection.window(0).is_none(),
             "the oldest window is evicted first when capacity is exceeded"
@@ -8357,121 +8254,249 @@ mod windowed_list_projection_tests {
             .count();
         assert_eq!(cached, 8, "the FIFO cap keeps at most 8 windows");
     }
+}
 
-    #[test]
-    fn test_generation_bump_refetches_instead_of_serving_stale_rows() {
-        let generation = StoreGeneration::new();
-        let mut projection =
-            WindowedListProjection::new(generation.clone(), artists_key(SortDirection::Ascending));
-        let mut rows: Vec<usize> = (0..50).collect();
-        let mut calls = 0;
-        projection.request_window(0);
-        projection
-            .refresh(rows.len(), &mut slice_loader(&mut rows, &mut calls))
-            .expect("the first refresh succeeds");
-        assert_eq!(calls, 1);
-        assert!(projection.is_fresh());
+// --- Listing Page coherence through the read seam over a real store ---------
+//
+// The paged browse and list reads the UI renders, driven by the Application
+// Store it will actually read: a listing's total and its rows are one fact
+// read at one generation, so they can never describe two different moments.
 
-        // A committed mutation moves the generation; the projection notices
-        // before the next refresh even runs.
-        generation.bump();
-        assert!(
-            !projection.is_fresh(),
-            "a moved generation marks the cached rows stale"
-        );
+#[cfg(test)]
+mod listing_page_coherence_tests {
+    use super::*;
+    use app::store::SortDirection;
+    use app::views::SessionViews;
+    use riff_infra::store::SqliteStore;
+    use riff_persistence::store::{LibraryMutationStore, StoreChanged};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-        // The canonical list changed; refresh must refetch the declared
-        // window instead of serving the stale rows from the old epoch.
-        let mut new_rows = vec![100usize, 101, 102];
-        projection.request_window(0);
-        projection
-            .refresh(new_rows.len(), &mut slice_loader(&mut new_rows, &mut calls))
-            .expect("the post-bump refresh succeeds");
-        assert_eq!(calls, 2, "a generation bump forces a refetch");
-        let served: Vec<usize> = projection.window(0).expect("window present").to_vec();
-        assert_eq!(
-            served, new_rows,
-            "refresh hands out the store's new rows, not the stale ones"
-        );
-        assert!(projection.is_fresh(), "the refetch stamps the new epoch");
+    /// Rows in one window, as the seam's shared window size serves them.
+    const WINDOW: usize = 50;
+
+    /// One scratch Application Store plus a `SessionViews` wired to it over
+    /// clones of the real handle, with one clone kept outside the seam so a
+    /// test can commit mutations while the seam reads.
+    struct Real {
+        _dir: tempfile::TempDir,
+        mutations: SqliteStore,
+        views: SessionViews,
     }
 
-    #[test]
-    fn test_key_change_drops_stale_rows_even_at_unchanged_generation() {
-        let generation = StoreGeneration::new();
-        let mut rows: Vec<usize> = (0..100).collect();
-        let mut calls = 0;
-        let mut projection =
-            WindowedListProjection::new(generation, artists_key(SortDirection::Ascending));
-        for offset in [0, 50] {
-            projection.request_window(offset);
+    impl Real {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("riff.sqlite3");
+            let (changes_tx, _changes_rx) = crossbeam_channel::unbounded::<StoreChanged>();
+            let store = SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .expect("scratch store opens and migrates");
+            let mutations = store.clone();
+            let views = SessionViews::new(
+                Box::new(store.clone()),
+                Box::new(store.clone()),
+                store.library_generation(),
+                store.playlist_generation(),
+            );
+            Self {
+                _dir: dir,
+                mutations,
+                views,
+            }
         }
-        projection
-            .refresh(rows.len(), &mut slice_loader(&mut rows, &mut calls))
-            .expect("refresh succeeds");
-        assert!(projection.window(50).is_some());
-        assert_eq!(calls, 2, "both declared windows fetched once");
 
-        // Reversing the sort is a query-signature change: the cached rows
-        // drop even though the store didn't mutate.
-        projection.set_key(artists_key(SortDirection::Descending));
+        /// Index one track into the Library, path-ordered by `name`.
+        fn seed(&mut self, name: &str, title: &str, album: &str, artist: &str) {
+            let path = format!("m:/music/{name}.mp3");
+            let track = crate::test_utils::create_test_track_with_metadata(
+                &path, &path, artist, title, album,
+            );
+            self.mutations
+                .apply_scan_batch(std::slice::from_ref(&track))
+                .expect("seeded track commits");
+        }
+
+        /// Index `count` tracks in one committed batch.
+        fn seed_batch(&mut self, first: usize, count: usize) {
+            let tracks: Vec<Track> = (0..count)
+                .map(|i| {
+                    let n = first + i;
+                    let path = format!("m:/music/{n:04}.mp3");
+                    crate::test_utils::create_test_track_with_metadata(
+                        &path,
+                        &path,
+                        "Ada",
+                        &format!("Track {n:04}"),
+                        "One",
+                    )
+                })
+                .collect();
+            self.mutations
+                .apply_scan_batch(&tracks)
+                .expect("scan batch commits");
+        }
+    }
+
+    /// A scan committing batch after batch must never leave a Section header
+    /// reporting a total that contradicts the rows under it: the window is
+    /// never fuller than the total claims, and a partially filled window
+    /// means the total counted exactly those rows.
+    #[test]
+    fn a_scan_committing_concurrently_never_leaves_a_total_disagreeing_with_its_rows() {
+        const BASE: usize = 30;
+        const TOGGLES: usize = 600;
+        const TOGGLED: &str = "m:/toggle";
+
+        let mut real = Real::new();
+        for n in 0..BASE {
+            real.seed(&format!("base{n:02}"), "Base", "One", "Ada");
+        }
+
+        let seeding = Arc::new(AtomicBool::new(true));
+        let seeding_in_seeder = Arc::clone(&seeding);
+        let mut seeder = real.mutations.clone();
+        let seeder = std::thread::spawn(move || {
+            let path = format!("{TOGGLED}/one.mp3");
+            let track = crate::test_utils::create_test_track_with_metadata(
+                &path, &path, "Ada", "Toggle", "One",
+            );
+            for _ in 0..TOGGLES {
+                seeder
+                    .apply_scan_batch(std::slice::from_ref(&track))
+                    .expect("concurrent scan batch commits");
+                seeder
+                    .remove_library_path(std::path::Path::new(TOGGLED))
+                    .expect("concurrent removal commits");
+            }
+            seeding_in_seeder.store(false, Ordering::Release);
+        });
+
+        let mut frames = 0usize;
+        while seeding.load(Ordering::Acquire) {
+            let page = real.views.track_list("", 0);
+            assert!(
+                page.total >= page.rows.len(),
+                "frame {frames}: a total of {} cannot describe fewer rows than the {} listed under it",
+                page.total,
+                page.rows.len()
+            );
+            if page.rows.len() < WINDOW {
+                assert_eq!(
+                    page.total,
+                    page.rows.len(),
+                    "frame {frames}: a partially filled window of {} rows must be counted by exactly that total",
+                    page.rows.len()
+                );
+            }
+            frames += 1;
+        }
+        seeder.join().unwrap();
         assert!(
-            !projection.is_fresh(),
-            "a key change marks the cache stale at an unchanged generation"
-        );
-        projection.request_window(0);
-        projection
-            .refresh(rows.len(), &mut slice_loader(&mut rows, &mut calls))
-            .expect("the retargeted refresh succeeds");
-        assert_eq!(calls, 3, "the key change forces a refetch");
-        assert!(
-            projection.window(0).is_some(),
-            "the new signature's window is served"
-        );
-        assert!(
-            projection.window(50).is_none(),
-            "rows from the old signature are dropped, not served"
+            frames > 20,
+            "the seam must actually be read while the scan commits, saw {frames} frames"
         );
 
-        // Re-setting the SAME key is a no-op: no invalidation, no refetch.
-        projection.set_key(artists_key(SortDirection::Descending));
-        assert!(
-            projection.is_fresh(),
-            "re-setting the current key leaves the cache fresh"
+        let page = real.views.track_list("", 0);
+        assert_eq!(page.total, BASE, "the toggled track is not left behind");
+        assert_eq!(
+            page.rows.len(),
+            BASE,
+            "and the window lists that same total"
         );
     }
 
+    /// A mutation that commits between two frames invalidates the listing
+    /// outright: the next frame reports the new total with the new rows,
+    /// never the old total over the new rows or the reverse.
     #[test]
-    fn test_loader_error_leaves_the_previous_cache_untouched() {
-        let generation = StoreGeneration::new();
-        let mut projection =
-            WindowedListProjection::new(generation, artists_key(SortDirection::Ascending));
-        let mut rows: Vec<usize> = (0..50).collect();
-        let mut calls = 0;
-        projection.request_window(0);
-        projection
-            .refresh(rows.len(), &mut slice_loader(&mut rows, &mut calls))
-            .expect("refresh succeeds");
-        let before: Vec<usize> = projection.window(0).expect("window present").to_vec();
+    fn a_mutation_between_frames_moves_the_total_and_the_rows_together() {
+        let mut real = Real::new();
+        for n in 0..3 {
+            real.seed(&format!("keep{n}"), &format!("keep{n}"), "One", "Ada");
+        }
 
-        // A failing loader propagates its error and leaves the previous
-        // cache completely untouched — stale-but-present beats blank.
-        projection.request_window(50);
-        let mut failing =
-            |_o: usize, _l: usize| Err(StoreError::InvalidOperation("loader boom".to_string()));
-        let err = projection
-            .refresh(rows.len(), &mut failing)
-            .expect_err("a loader error propagates");
-        assert!(matches!(err, StoreError::InvalidOperation(_)));
-        assert!(
-            projection.window(0).is_some(),
-            "the previous window survives the failed refresh"
-        );
+        let before = real.views.track_list("", 0);
+        assert_eq!((before.total, before.rows.len()), (3, 3));
+
+        real.seed_batch(100, 2);
+
+        let after = real.views.track_list("", 0);
+        assert_eq!(after.total, 5, "the total counts the committed batch");
+        assert_eq!(after.rows.len(), 5, "and the window lists it");
+        let titles: Vec<&str> = after
+            .rows
+            .iter()
+            .filter_map(|track| track.metadata.title.as_deref())
+            .collect();
         assert_eq!(
-            projection.window(0).expect("window present")[..],
-            before,
-            "the cached rows are byte-for-byte the previous load's"
+            titles,
+            ["Track 0100", "Track 0101", "keep0", "keep1", "keep2"],
+            "the refetched window is the new collection, not a mix of the two"
         );
-        assert_eq!(projection.total(), 50, "the stamped total survives too");
+    }
+
+    /// Retargeting the query signature drops the cached rows even when no
+    /// mutation committed: the listing a keystroke switches to is the new
+    /// listing's own rows and total.
+    #[test]
+    fn retargeting_a_query_signature_drops_rows_at_an_unchanged_generation() {
+        let mut real = Real::new();
+        real.seed("a_one", "Alpha Call", "One", "Ada");
+        real.seed("b_one", "Beta Call", "Two", "Ada");
+        real.seed("b_two", "Beta Again", "Two", "Ada");
+
+        let first = real.views.track_list("alpha", 0);
+        assert_eq!((first.total, first.rows.len()), (1, 1));
+        assert_eq!(first.rows[0].metadata.title.as_deref(), Some("Alpha Call"));
+
+        let second = real.views.track_list("beta", 0);
+        assert_eq!((second.total, second.rows.len()), (2, 2));
+        assert_eq!(
+            second
+                .rows
+                .iter()
+                .filter_map(|track| track.metadata.title.as_deref())
+                .collect::<Vec<_>>(),
+            ["Beta Call", "Beta Again"],
+            "the retargeted listing serves its own rows, not the previous query's"
+        );
+
+        // Switching back re-reads rather than serving the abandoned query's
+        // rows, and the flat listing is its own signature again.
+        let flat = real.views.track_list("", 0);
+        assert_eq!((flat.total, flat.rows.len()), (3, 3));
+    }
+
+    /// The sort direction is part of a browse column's query signature, so
+    /// reversing it at an unchanged generation serves the reversed listing
+    /// with the total that belongs to it.
+    #[test]
+    fn retargeting_a_browse_direction_drops_rows_at_an_unchanged_generation() {
+        let mut real = Real::new();
+        for name in ["Ada", "Bee", "Cid"] {
+            real.seed(&format!("x_{name}"), "One", "One", name);
+        }
+
+        let ascending = real.views.artists_page(SortDirection::Ascending, 0);
+        assert_eq!(ascending.total, 3);
+        assert_eq!(
+            ascending
+                .rows
+                .iter()
+                .map(|artist| artist.name.clone())
+                .collect::<Vec<_>>(),
+            ["Ada", "Bee", "Cid"]
+        );
+
+        let descending = real.views.artists_page(SortDirection::Descending, 0);
+        assert_eq!(descending.total, 3, "the same total still describes it");
+        assert_eq!(
+            descending
+                .rows
+                .iter()
+                .map(|artist| artist.name.clone())
+                .collect::<Vec<_>>(),
+            ["Cid", "Bee", "Ada"],
+            "and the rows are the reversed listing's own"
+        );
     }
 }

@@ -73,6 +73,7 @@ pub fn toggle_switch_at(
     checked: bool,
 ) -> bool {
     let response = ui.interact(pill, id, egui::Sense::click());
+    let focused = ui.memory(|m| m.has_focus(id));
     let painter = ui.painter_at(pill);
 
     painter.rect_filled(pill, theme::RADIUS_FULL, pill_color(palette, checked));
@@ -92,8 +93,80 @@ pub fn toggle_switch_at(
         knob_color(palette),
     );
 
+    // The shared keyboard-focus ring, on top and only while the switch holds
+    // focus — the same treatment the text buttons and rows draw.
+    if let Some(ring) = theme::focus_ring_stroke(palette, focused) {
+        painter.rect_stroke(pill, theme::RADIUS_FULL, ring, egui::StrokeKind::Inside);
+    }
+
     response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, checked, label)
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), checked, label)
     });
     response.clicked()
+}
+
+/// Paint one shared checkbox box into `rect`: brand fill + a two-stroke
+/// checkmark when `checked`, the input-well otherwise. The boolean-control
+/// counterpart to the toggle pill — the Watch control and any standalone
+/// checkbox render through here so their paint lives in one owner.
+pub fn paint_checkbox_box(
+    painter: &egui::Painter,
+    palette: &Palette,
+    rect: egui::Rect,
+    checked: bool,
+) {
+    let side = rect.width();
+    painter.rect_filled(
+        rect,
+        theme::RADIUS_SM,
+        if checked {
+            palette.brand_primary
+        } else {
+            palette.surface_2
+        },
+    );
+    painter.rect_stroke(
+        rect,
+        theme::RADIUS_SM,
+        egui::Stroke::new(1.0_f32, palette.border),
+        egui::StrokeKind::Inside,
+    );
+    if checked {
+        let a = egui::pos2(rect.left() + side * 0.25, rect.center().y + side * 0.05);
+        let b = egui::pos2(rect.left() + side * 0.42, rect.bottom() - side * 0.25);
+        let c = egui::pos2(rect.right() - side * 0.2, rect.top() + side * 0.25);
+        let check = egui::Stroke::new(1.5_f32, palette.on_brand);
+        painter.line_segment([a, b], check);
+        painter.line_segment([b, c], check);
+    }
+}
+
+/// Paint one shared checkbox box plus the keyboard-focus ring on top when
+/// `focused` — the treatment the Watch control (and any standalone checkbox)
+/// draws, so a focused box rings exactly like a focused toggle pill.
+pub fn paint_checkbox_with_focus(
+    painter: &egui::Painter,
+    palette: &Palette,
+    rect: egui::Rect,
+    checked: bool,
+    focused: bool,
+) {
+    paint_checkbox_box(painter, palette, rect, checked);
+    if let Some(ring) = theme::focus_ring_stroke(palette, focused) {
+        painter.rect_stroke(rect, theme::RADIUS_SM, ring, egui::StrokeKind::Inside);
+    }
+}
+
+/// Register a checkbox's accessible state on its interaction `response`: a
+/// [`egui::WidgetType::Checkbox`] carrying `checked` and whether the control is
+/// enabled, so assistive tech reads the same selected state the toggle does.
+pub fn register_checkbox_a11y(
+    response: &egui::Response,
+    enabled: bool,
+    checked: bool,
+    label: &str,
+) {
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, checked, label)
+    });
 }

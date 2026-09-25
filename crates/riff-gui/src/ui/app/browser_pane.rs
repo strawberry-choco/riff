@@ -17,10 +17,9 @@ use riff_backend::app::state::{
 };
 
 use super::super::browser;
-use super::super::theme;
 use super::{
     COVER_THUMB, ColumnKind, RiffApp, apply_browser_action, apply_detail_action,
-    apply_drill_action, column_plan, column_widths, request_cover_intent, resolve_detail_content,
+    apply_drill_action, column_plan, request_cover_intent, resolve_detail_content,
     resolve_inspector, smart_list_openable,
 };
 
@@ -46,10 +45,6 @@ impl RiffApp {
     /// thin hairline separator between — then the collapsible inspector as
     /// the rightmost column only while a selection exists. No horizontal
     /// scrolling: narrow windows shrink columns toward their floors.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a separator count is a small non-negative number"
-    )]
     pub(super) fn render_elastic_stage(
         &mut self,
         ui: &mut egui::Ui,
@@ -85,45 +80,28 @@ impl RiffApp {
         // the deepest path entity — and collapses away completely when
         // nothing is selected.
         let inspector = resolve_inspector(&mut self.views, library);
+        let inspector_visible = inspector.visible;
 
-        let available = ui.available_width();
-        // Each hairline separator between the columns consumes the style's
-        // separator spacing (6 px) in the horizontal layout: subtract one
-        // per gap so the sized columns end exactly at the stage's right
-        // edge — otherwise the last column / the inspector would over-
-        // allocate past it and be clipped by the panel's clip rect.
-        let gaps = plan.len().saturating_sub(1) + usize::from(inspector.visible);
-        let separator_w = ui
-            .style()
-            .separator_style(
-                &egui::widget_style::Classes::default(),
-                egui::widget_style::WidgetState::default(),
-            )
-            .spacing;
-        let list_widths = column_widths(
-            (available - separator_w * gaps as f32).max(0.0),
-            plan.len(),
-            inspector.visible,
-        );
-
-        // `horizontal_top` (not `horizontal`): the plain horizontal variant
-        // sizes its row to `interact_size.y` and only grows with content,
-        // which would collapse every stage column to one 18 px row.
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            for (i, kind) in plan.iter().enumerate() {
-                if i > 0 {
-                    ui.separator();
+        // The stage's width allocation, separator accounting, zero-gap
+        // composition, stable child identities, and inspector placement are all
+        // owned by the shared geometry seam — the golden harness calls the very
+        // same helper, so production and goldens cannot disagree on a column
+        // edge. This call site supplies only the column content.
+        super::super::stage::show_elastic_stage(ui, plan.len(), inspector_visible, |ui, slot| {
+            match slot {
+                super::super::stage::StageSlot::Column(i) => {
+                    self.render_stage_column(
+                        ui,
+                        library,
+                        playback,
+                        &query,
+                        single.as_ref(),
+                        plan[i],
+                    );
                 }
-                stage_column_scope(ui, list_widths[i], ("stage-column", i), |ui| {
-                    self.render_stage_column(ui, library, playback, &query, single.as_ref(), *kind);
-                });
-            }
-            if inspector.visible {
-                ui.separator();
-                stage_column_scope(ui, theme::INSPECTOR_WIDTH, "inspector", |ui| {
+                super::super::stage::StageSlot::Inspector => {
                     self.render_inspector(ui, library);
-                });
+                }
             }
         });
     }
@@ -270,7 +248,7 @@ impl RiffApp {
                     PathBuf::from(&tid.0),
                     COVER_THUMB,
                 );
-                crate::ui::cover_placeholder::lookup_cover_texture(
+                crate::ui::artwork::lookup_cover_texture(
                     textures,
                     lru_keys,
                     &ctx,
@@ -390,7 +368,7 @@ impl RiffApp {
                         PathBuf::from(&tid.0),
                         COVER_THUMB,
                     );
-                    crate::ui::cover_placeholder::lookup_cover_texture(
+                    crate::ui::artwork::lookup_cover_texture(
                         textures,
                         lru_keys,
                         &ctx,
@@ -501,7 +479,7 @@ impl RiffApp {
                     PathBuf::from(&tid.0),
                     COVER_THUMB,
                 );
-                crate::ui::cover_placeholder::lookup_cover_texture(
+                crate::ui::artwork::lookup_cover_texture(
                     textures,
                     lru_keys,
                     &ctx,
@@ -728,7 +706,7 @@ impl RiffApp {
                     PathBuf::from(&tid.0),
                     COVER_THUMB,
                 );
-                crate::ui::cover_placeholder::lookup_cover_texture(
+                crate::ui::artwork::lookup_cover_texture(
                     textures,
                     lru_keys,
                     &ctx,
@@ -902,7 +880,7 @@ impl RiffApp {
                         PathBuf::from(&tid.0),
                         COVER_THUMB,
                     );
-                    crate::ui::cover_placeholder::lookup_cover_texture(
+                    crate::ui::artwork::lookup_cover_texture(
                         textures,
                         lru_keys,
                         &ctx,
@@ -1069,32 +1047,6 @@ impl RiffApp {
             apply_browser_action(action, library);
         }
     }
-}
-
-/// Allocate a width-constrained child ui for one stage column. The explicit
-/// id salt gives every column a distinct *stable* id: sibling child uis made
-/// through [`egui::Ui::allocate_ui_with_layout`] all share the parent's
-/// `"child"` salt, so persistent-id widgets inside them — each column's
-/// `ScrollArea`, which ids itself via [`egui::Ui::make_persistent_id`] —
-/// would collide, sharing scroll state between columns and drawing egui's
-/// id-collision overlays.
-fn stage_column_scope(
-    ui: &mut egui::Ui,
-    width: f32,
-    salt: impl egui::AsIdSalt,
-    add_contents: impl FnOnce(&mut egui::Ui),
-) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(width, ui.available_height()),
-        egui::Sense::hover(),
-    );
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(egui::Layout::top_down(egui::Align::Min))
-            .id_salt(salt),
-        add_contents,
-    );
 }
 
 /// Whether `artist`'s name is itself a hit for `query` — the literal,

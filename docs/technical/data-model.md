@@ -202,7 +202,7 @@ pub struct LibrarySession {
 | `scan_status` | A human-readable status/error line for the most recent scan or playback error (playback errors arrive as typed notices through the event inbox). |
 | `browse_mode` | Whether the sidebar shows the metadata hierarchy (`Library`) or the folder tree (`Folders`). |
 | `selected_folder` | The selected folder in Folders browse mode. |
-| `ui_flags` | Four flags the UI reads: `advanced_mode`, `high_contrast`, `smart_lists_collapsed`, `close_quits_app`. `UiFlags` declares six more (`compact_density`, `show_track_numbers`, `show_artwork`, `show_duration`, `show_play_count`, `show_date_added`) that are never read and never persisted, despite a lint reason calling each a persisted preference; candidate 4 of `.scratch/deepen-owned-facts/` deletes them. There is no `show_artists_view` field. |
+| `ui_flags` | Exactly four flags, all of them read and persisted: `advanced_mode`, `high_contrast`, `smart_lists_collapsed`, `close_quits_app`. There is no `show_artists_view` field, and the six further display toggles an early mockup named (`compact_density`, `show_track_numbers`, `show_artwork`, `show_duration`, `show_play_count`, `show_date_added`) were never read or persisted and are gone from the struct. |
 | `watch_states` | The per-root Watch State inside `LibraryPaths` — written only by `set_watch`, `set_watching_for_all`, and `retire`, each persisting the whole map in one write. Not a session field. |
 
 ### Supporting enums

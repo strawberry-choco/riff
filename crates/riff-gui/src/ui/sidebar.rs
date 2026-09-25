@@ -117,10 +117,9 @@ pub fn ghost_icon_button(
     label: &str,
     hover_reveal: bool,
 ) -> bool {
-    let response = ui.interact(rect, id, egui::Sense::click());
-    let visible = !hover_reveal || response.hovered();
-    if visible {
-        let tint = if response.hovered() {
+    let button = super::button::begin_icon_button(ui, rect, id, false);
+    if !hover_reveal || button.hovered {
+        let tint = if button.hovered {
             palette.ink
         } else {
             palette.ink_3
@@ -129,8 +128,7 @@ pub fn ghost_icon_button(
         ui.painter_at(rect)
             .image(tex_id, rect.shrink(4.0), UV_FULL, tint);
     }
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-    response.on_hover_text(label).clicked()
+    super::button::finish_icon_button(ui, palette, &button, label)
 }
 
 // --- Tree rows --------------------------------------------------------------------
@@ -359,8 +357,10 @@ fn paint_row(
 }
 
 /// The row's background band: the selected fill, the hover wash, and the row's
-/// own focus ring. The favorite cell counts as hovered, so the wash never
-/// blinks off while the pointer crosses the heart.
+/// own focus ring — all delegated to the shared neutral row frame so a tree
+/// row and a browser row read their interaction states from one owner. The
+/// favorite cell counts as hovered, so the wash never blinks off while the
+/// pointer crosses the heart.
 fn paint_row_band(
     ui: &egui::Ui,
     palette: &Palette,
@@ -368,21 +368,15 @@ fn paint_row_band(
     cells: &RowCells,
     painter: &egui::Painter,
 ) {
-    if row.selected {
-        painter.rect_filled(cells.whole, theme::RADIUS_MD, palette.surface_3);
-    } else if cells.hovered() {
-        painter.rect_filled(cells.whole, theme::RADIUS_MD, palette.row_hover);
-    }
-    if let Some(ring) =
-        theme::focus_ring_stroke(palette, ui.memory(|m| m.has_focus(cells.response.id)))
-    {
-        painter.rect_stroke(
-            cells.whole,
-            theme::RADIUS_MD,
-            ring,
-            egui::StrokeKind::Inside,
-        );
-    }
+    let focused = ui.memory(|m| m.has_focus(cells.response.id));
+    super::row::paint_row_band(
+        painter,
+        palette,
+        cells.whole,
+        row.selected,
+        cells.hovered(),
+        focused,
+    );
 }
 
 /// The favorite control (track rows): a heart in the brand tint when the track
@@ -441,17 +435,24 @@ fn paint_row_leading(
 
     if let Some(cover_id) = row.cover {
         // A square cover-art tile on the row's leading edge, centered in
-        // the row and sized so it never exceeds the row height.
+        // the row and sized so it never exceeds the row height. The tile is
+        // already the shared placeholder texture when the item is artless, so
+        // this block never needs an idle well of its own.
         let cover_rect = egui::Rect::from_min_size(
             egui::pos2(x + 4.0, cells.rect.center().y - ROW_COVER / 2.0),
             egui::vec2(ROW_COVER, ROW_COVER),
         );
-        painter.image(cover_id, cover_rect, UV_FULL, theme::TEXTURE_TINT);
-        painter.rect_stroke(
-            cover_rect,
-            theme::RADIUS_SM,
-            egui::Stroke::new(1.0, palette.border),
-            egui::StrokeKind::Inside,
+        super::artwork::paint(
+            painter,
+            palette,
+            &super::artwork::Artwork {
+                rect: cover_rect,
+                texture: Some(cover_id),
+                fit: super::artwork::Fit::Fill,
+                tint: theme::TEXTURE_TINT,
+                placeholder: None,
+                border: Some(theme::RADIUS_SM),
+            },
         );
         x += 4.0 + ROW_COVER + ICON_GAP;
     }
@@ -541,14 +542,12 @@ fn paint_row_label(
 
     // The accessibility label folds the live count in so assistive tech and
     // the kittest harness read the same "Name (count)" shape the playlist
-    // rows paint.
+    // rows paint — registered through the shared neutral row frame.
     let labeled = match row.count {
         Some(count) => format!("{} ({count})", row.label),
         None => row.label.to_owned(),
     };
-    cells.response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::SelectableLabel, row.selected, &labeled)
-    });
+    super::row::register_row_a11y(&cells.response, row.selected, labeled);
 }
 
 /// Draw one tree row and return what it reported — clicks, double-clicks,
@@ -608,14 +607,15 @@ pub fn playlist_row(
     );
     let painter = ui.painter_at(rect);
 
-    if selected {
-        painter.rect_filled(rect, theme::RADIUS_MD, palette.surface_3);
-    } else if response.hovered() {
-        painter.rect_filled(rect, theme::RADIUS_MD, palette.row_hover);
-    }
-    if let Some(ring) = theme::focus_ring_stroke(palette, ui.memory(|m| m.has_focus(response.id))) {
-        painter.rect_stroke(rect, theme::RADIUS_MD, ring, egui::StrokeKind::Inside);
-    }
+    let focused = ui.memory(|m| m.has_focus(response.id));
+    super::row::paint_row_band(
+        &painter,
+        palette,
+        rect,
+        selected,
+        response.hovered(),
+        focused,
+    );
 
     let font = egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional);
     painter.text(
@@ -664,9 +664,7 @@ pub fn playlist_row(
         action = Some(PlaylistRowAction::Rename);
     }
 
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::SelectableLabel, selected, name)
-    });
+    super::row::register_row_a11y(&response, selected, name);
     if response.clicked() {
         action = Some(PlaylistRowAction::Open);
     }

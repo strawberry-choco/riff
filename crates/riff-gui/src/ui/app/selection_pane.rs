@@ -45,7 +45,7 @@ impl RiffApp {
                 PathBuf::from(&tid.0),
                 COVER_CARD,
             );
-            crate::ui::cover_placeholder::lookup_cover_texture(
+            crate::ui::artwork::lookup_cover_texture(
                 &mut self.cover_textures,
                 &mut self.cover_lru_keys,
                 ui.ctx(),

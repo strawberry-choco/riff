@@ -557,6 +557,36 @@ mod tests {
         });
     }
 
+    /// `~/Music` means the same thing to the input's suggestions, its Confirm,
+    /// and the session's stored root.
+    #[test]
+    fn test_a_tilde_candidate_registers_the_expanded_root() {
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let music = dir.path().join("home-music");
+        std::fs::create_dir(&music).expect("a scratch directory");
+        let mut library = riff_backend::app::state::LibrarySession::default();
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut store =
+            crate::mocks::MockSettingsStore::with_shared_calls(std::sync::Arc::clone(&calls));
+
+        with_home(
+            Some(dir.path().to_str().expect("a utf-8 scratch path")),
+            || {
+                riff_gui::ui::app::register_library_path("~/home-music", &mut library, &mut store)
+                    .expect("the tilde path resolves to a real directory");
+            },
+        );
+
+        assert_eq!(
+            library.library_paths.paths(),
+            &[music.canonicalize().expect("the canonical root")],
+            "the tilde candidate registered as its expanded, canonical root"
+        );
+    }
+
     #[test]
     fn test_expand_tilde_passes_through_when_home_unset() {
         let _guard = HOME_LOCK
@@ -1237,6 +1267,238 @@ mod tests {
             "real covers survive the eviction"
         );
         assert!(lru_keys.contains(&art_key));
+    }
+
+    // --- The artwork presentation primitive (component-layer issue 13) --------
+    //
+    // One primitive paints real art and the palette-aware placeholder for every
+    // surface that shows cover art, under a fit the CALLER selects. The artwork
+    // cache-key space and the shared placeholder tile live in that module
+    // rather than in `ui::app`, which is what removes the app ↔ artwork
+    // sibling-module cycle.
+
+    /// Paint one artwork block over a flat background and return the frame.
+    /// `build` supplies the block's props once the harness's own `Context` (and
+    /// therefore its textures) exist.
+    fn render_artwork_frame(
+        canvas: egui::Vec2,
+        palette: &theme::Palette,
+        build: impl Fn(&mut egui::Ui, &theme::Palette),
+    ) -> image::RgbaImage {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(canvas)
+            .with_pixels_per_point(1.0)
+            .build_ui(|ui| {
+                let background = ui.ctx().layer_painter(egui::LayerId::background());
+                background.rect_filled(ui.ctx().content_rect(), 0.0, palette.background);
+                build(ui, palette);
+            });
+        harness.run();
+        harness
+            .render()
+            .expect("the artwork block renders headlessly")
+    }
+
+    fn count_frame_pixels(image: &image::RgbaImage, color: egui::Color32) -> usize {
+        image
+            .pixels()
+            .filter(|p| {
+                p.0[0].abs_diff(color.r()) <= 4
+                    && p.0[1].abs_diff(color.g()) <= 4
+                    && p.0[2].abs_diff(color.b()) <= 4
+            })
+            .count()
+    }
+
+    /// A square texture stretched over a 200x50 block covers the whole block;
+    /// the same texture letterboxed covers only the 50x50 it can keep. The
+    /// expected counts are the block's own geometry, not a re-run of the
+    /// primitive's arithmetic.
+    #[test]
+    fn test_artwork_fit_policy_stretches_or_letterboxes_the_texture() {
+        use riff_gui::ui::artwork::{self, Artwork, Fit};
+        use riff_gui::ui::theme::Palette;
+
+        let palette = Palette::dark();
+        let red = egui::Color32::from_rgb(200, 30, 30);
+        let block = egui::vec2(200.0, 50.0);
+
+        let red_pixels_for = |fit: Fit| {
+            let frame = render_artwork_frame(egui::vec2(260.0, 90.0), &palette, |ui, pal| {
+                let texture = ui.ctx().load_texture(
+                    "riff artwork fit test",
+                    egui::ColorImage::new([2, 2], vec![red; 4]),
+                    egui::TextureOptions::default(),
+                );
+                artwork::paint(
+                    ui.painter(),
+                    pal,
+                    &Artwork {
+                        rect: egui::Rect::from_min_size(egui::pos2(30.0, 20.0), block),
+                        texture: Some(texture.id()),
+                        fit,
+                        tint: theme::TEXTURE_TINT,
+                        placeholder: None,
+                        border: None,
+                    },
+                );
+            });
+            count_frame_pixels(&frame, red)
+        };
+
+        let stretched = red_pixels_for(Fit::Fill);
+        let letterboxed = red_pixels_for(Fit::Contain { aspect: 1.0 });
+        assert!(
+            stretched > 9_500,
+            "Fit::Fill stretches the texture over the whole 200x50 block, saw {stretched}"
+        );
+        assert!(
+            (2_300..=2_700).contains(&letterboxed),
+            "Fit::Contain keeps a square texture inside the 50px-tall block, saw {letterboxed}"
+        );
+    }
+
+    /// A block with no texture is never a hole: the well fills it from the
+    /// active palette, the glyph variant carries the music mark, and a palette
+    /// change repaints it from the new tokens.
+    #[test]
+    fn test_artwork_placeholder_is_a_themed_well_not_a_hole() {
+        use riff_gui::ui::artwork::{self, Artwork, Fit, Placeholder};
+        use riff_gui::ui::icons::{Icon, IconCache};
+        use riff_gui::ui::theme::Palette;
+
+        let block = egui::vec2(80.0, 80.0);
+        let rect = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), block);
+
+        let well_pixels = |palette: &Palette| {
+            let frame = render_artwork_frame(egui::vec2(120.0, 120.0), palette, |ui, pal| {
+                artwork::paint(
+                    ui.painter(),
+                    pal,
+                    &Artwork {
+                        rect,
+                        texture: None,
+                        fit: Fit::Fill,
+                        tint: theme::TEXTURE_TINT,
+                        placeholder: Some(Placeholder::Well { radius: 4.0 }),
+                        border: None,
+                    },
+                );
+            });
+            count_frame_pixels(&frame, palette.surface_2)
+        };
+
+        // The block is 80x80 = 6,400 px on a 120x120 canvas, so well-colored
+        // pixels can only come from the block itself being filled.
+        let dark_well = well_pixels(&Palette::dark());
+        assert!(
+            (6_000..=6_600).contains(&dark_well),
+            "a block with no texture paints the palette's well, never a hole: {dark_well} of 6,400"
+        );
+
+        // The same block under the light palette answers to the light tokens.
+        let light_well = well_pixels(&Palette::light());
+        assert!(
+            (6_000..=6_600).contains(&light_well),
+            "the well re-derives from the active palette, saw {light_well} light pixels"
+        );
+
+        // The glyph variant carries a music mark OVER its well: the well's own
+        // color no longer fills the block.
+        let glyphed =
+            render_artwork_frame(egui::vec2(120.0, 120.0), &Palette::dark(), |ui, pal| {
+                let mut cache = IconCache::new();
+                let glyph = cache.texture(ui.ctx(), Icon::Music, 16.0, pal.ink_3);
+                artwork::paint(
+                    ui.painter(),
+                    pal,
+                    &Artwork {
+                        rect,
+                        texture: None,
+                        fit: Fit::Fill,
+                        tint: theme::TEXTURE_TINT,
+                        placeholder: Some(Placeholder::GlyphWell {
+                            radius: 4.0,
+                            glyph,
+                            inset: 6.0,
+                        }),
+                        border: None,
+                    },
+                );
+            });
+        let glyphed_well = count_frame_pixels(&glyphed, Palette::dark().surface_2);
+        assert!(
+            glyphed_well < dark_well - 200,
+            "the glyph well carries the music mark, not just a flat block: {glyphed_well} vs {dark_well}"
+        );
+    }
+
+    /// The cycle guard: `ui::cover_placeholder` used to `use crate::ui::app::…`
+    /// for the very cache-key space the app module imported the placeholder
+    /// back from. `ui::artwork` owns that key space now, so no sibling module
+    /// reaches into `ui::app` for it.
+    #[test]
+    fn test_no_ui_module_imports_the_artwork_key_space_from_the_app_module() {
+        const ARTWORK_KEY_SPACE: [&str; 5] = [
+            "CoverCacheKey",
+            "cover_cache_key",
+            "COVER_THUMB",
+            "COVER_CARD",
+            "COVER_HERO",
+        ];
+        let outside_app: Vec<_> = ui_source_lines()
+            .into_iter()
+            .filter(|(path, _, _)| !path.display().to_string().contains("/ui/app"))
+            .collect();
+        let offenders = violations(
+            |line| {
+                line.contains("ui::app::")
+                    && ARTWORK_KEY_SPACE.iter().any(|symbol| line.contains(symbol))
+            },
+            &outside_app,
+        );
+        assert!(
+            offenders.is_empty(),
+            "the artwork key space belongs to ui::artwork:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// The Clear Library confirmation presents its affirmative action the way
+    /// the design presents a destructive one — the error ink of the shared
+    /// button family, never the brand fill — and its copy says what survives.
+    #[test]
+    fn test_clear_library_confirmation_presents_its_action_as_destructive() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::prompts::{CLEAR_LIBRARY_CONFIRM_COPY, clear_library_confirm};
+        use riff_gui::ui::theme::Palette;
+
+        let palette = Palette::dark();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(420.0, 88.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(|ui| {
+                let background = ui.ctx().layer_painter(egui::LayerId::background());
+                background.rect_filled(ui.ctx().content_rect(), 0.0, palette.background);
+                let mut cache = riff_gui::ui::icons::IconCache::new();
+                let _ = clear_library_confirm(ui, &mut cache, &palette);
+            });
+        harness.run();
+
+        assert!(
+            harness.query_by_label(CLEAR_LIBRARY_CONFIRM_COPY).is_some(),
+            "the confirmation names what the wipe keeps"
+        );
+        let frame = harness.render().expect("the confirmation renders");
+        assert!(
+            count_frame_pixels(&frame, palette.error) > 0,
+            "the destructive action carries the error ink"
+        );
+        assert_eq!(
+            count_frame_pixels(&frame, palette.brand_primary),
+            0,
+            "a destructive confirmation is never brand-filled"
+        );
     }
 
     #[test]
@@ -4158,6 +4420,27 @@ mod tests {
         assert!(now_playing::up_next_entries(&[], 5).is_empty());
     }
 
+    /// The neutral `up_next` module is the single owner of the Up Next entry
+    /// model and label builder: `now_playing`'s historical path is a re-export
+    /// of it, not a second copy. This guards against the two surfaces
+    /// (Now Playing and the queue sheet) silently diverging back into owning
+    /// their own row data — the coupling ticket 05 removed.
+    #[test]
+    fn test_up_next_model_has_one_owner_shared_by_both_surfaces() {
+        use riff_gui::ui::up_next;
+        let window = up_next_window_fixture();
+
+        let neutral = up_next::up_next_entries(&window, 5);
+        let via_now_playing = now_playing::up_next_entries(&window, 5);
+        assert_eq!(
+            neutral, via_now_playing,
+            "the re-exported `now_playing::` path and the neutral `up_next::` \
+             path build identical rows — one owner, not two copies"
+        );
+        // The entry type is literally the same type across both paths.
+        let _: &up_next::UpNextEntry = &via_now_playing[0];
+    }
+
     #[test]
     fn test_metadata_details_line_hides_missing_fields() {
         use riff_backend::domain::TrackMetadata;
@@ -4836,6 +5119,83 @@ mod tests {
                 .state()
                 .contains(&SettingsAction::SetHighContrast(true)),
             "the same widget drives the High contrast preference"
+        );
+    }
+
+    /// Render one boolean control (the toggle pill, or the shared checkbox box
+    /// when `boxy`) and report whether it painted the keyboard focus ring, so a
+    /// test can prove the toggle and the checkbox share the focus treatment.
+    fn bool_control_painted_ring(checkbox: bool, focused: bool) -> bool {
+        use riff_gui::ui::theme;
+        use riff_gui::ui::toggle_switch;
+        let palette = theme::Palette::dark();
+        let id = egui::Id::new("bool_control");
+        let ring = theme::focus_ring_stroke(&palette, true)
+            .expect("a focused control has a ring")
+            .color;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(80.0, 40.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(|ui| {
+                let bg = ui.ctx().layer_painter(egui::LayerId::background());
+                bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.background);
+                if focused {
+                    ui.memory_mut(|m| m.request_focus(id));
+                }
+                if checkbox {
+                    let rect =
+                        egui::Rect::from_min_size(egui::pos2(30.0, 12.0), egui::vec2(16.0, 16.0));
+                    // The shared box paints onto a response the caller already
+                    // owns (the Watch slot); interact on `id` so it is a real,
+                    // focusable node like that control.
+                    ui.interact(rect, id, egui::Sense::click());
+                    let focused = ui.memory(|m| m.has_focus(id));
+                    let painter = ui.painter_at(rect);
+                    toggle_switch::paint_checkbox_box(&painter, &palette, rect, true);
+                    if let Some(stroke) = theme::focus_ring_stroke(&palette, focused) {
+                        painter.rect_stroke(
+                            rect,
+                            theme::RADIUS_SM,
+                            stroke,
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                } else {
+                    let pill =
+                        egui::Rect::from_min_size(egui::pos2(22.0, 10.0), egui::vec2(36.0, 20.0));
+                    toggle_switch::toggle_switch_at(ui, &palette, id, "pref", pill, true);
+                }
+            });
+        harness.run();
+        let image = harness.render().expect("boolean control must render");
+        image.pixels().any(|p| {
+            p.0[0].abs_diff(ring.r()) <= 2
+                && p.0[1].abs_diff(ring.g()) <= 2
+                && p.0[2].abs_diff(ring.b()) <= 2
+        })
+    }
+
+    /// The consolidated boolean controls share one focus treatment: the toggle
+    /// pill rings only while focused, and the shared checkbox box the Watch
+    /// control now paints through rings the same way — so checked, focus, and
+    /// keyboard state read identically across the two kinds.
+    #[test]
+    fn test_toggle_and_checkbox_share_focus_ring() {
+        assert!(
+            bool_control_painted_ring(false, true),
+            "a focused toggle switch paints the shared focus ring"
+        );
+        assert!(
+            !bool_control_painted_ring(false, false),
+            "an unfocused toggle switch paints no ring"
+        );
+        assert!(
+            bool_control_painted_ring(true, true),
+            "a focused checkbox paints the shared focus ring"
+        );
+        assert!(
+            !bool_control_painted_ring(true, false),
+            "an unfocused checkbox paints no ring"
         );
     }
 
@@ -5653,16 +6013,16 @@ mod background_service_ui_tests {
         let edits = FakeTagEdits::with_outcomes(vec![TagEditOutcome::Saved]);
         let mut editor = track_editor(&edits);
         editor.save();
-        let mut status = None;
+        let mut board = riff_gui::ui::feedback::FeedbackBoard::default();
 
-        editor.poll_outcomes(&mut status);
+        editor.poll_outcomes(&mut board);
 
         assert!(
             editor.draft().is_none(),
             "a saved edit closes the inline editor"
         );
         assert_eq!(
-            status.as_deref(),
+            board.display_message().as_deref(),
             Some("Tags saved for t1.mp3"),
             "the status line names the saved file"
         );
@@ -5675,15 +6035,19 @@ mod background_service_ui_tests {
         }]);
         let mut editor = track_editor(&edits);
         editor.save();
-        let mut status = Some("earlier message".to_string());
+        let mut board = riff_gui::ui::feedback::FeedbackBoard::default();
+        board.set_tag_edit(
+            "earlier message",
+            riff_backend::app::events::NoticeSeverity::Info,
+        );
 
-        editor.poll_outcomes(&mut status);
+        editor.poll_outcomes(&mut board);
 
         let draft = editor.draft().expect("a failed edit keeps the editor open");
         assert_eq!(draft.error.as_deref(), Some("permission denied"));
         assert!(!draft.saving, "the save spinner stops");
         assert_eq!(
-            status.as_deref(),
+            board.display_message().as_deref(),
             Some("earlier message"),
             "a failed inline save does not clear the status line"
         );
@@ -5705,12 +6069,12 @@ mod background_service_ui_tests {
             editor.draft().is_none(),
             "the moved selection discarded the draft"
         );
-        let mut status = None;
+        let mut board = riff_gui::ui::feedback::FeedbackBoard::default();
 
-        editor.poll_outcomes(&mut status);
+        editor.poll_outcomes(&mut board);
 
         assert_eq!(
-            status.as_deref(),
+            board.display_message().as_deref(),
             Some("Tags saved for t1.mp3"),
             "the outcome still reaches the status line after the selection moved"
         );
@@ -5862,13 +6226,17 @@ mod background_service_ui_tests {
         ]);
         let mut editor = album_editor(&edits);
         editor.save();
-        let mut status = Some("earlier message".to_string());
+        let mut board = riff_gui::ui::feedback::FeedbackBoard::default();
+        board.set_tag_edit(
+            "earlier message",
+            riff_backend::app::events::NoticeSeverity::Info,
+        );
 
         // Two saves, then one failure: the tallies land in order.
-        editor.poll_outcomes(&mut status);
+        editor.poll_outcomes(&mut board);
 
         assert_eq!(
-            status.as_deref(),
+            board.display_message().as_deref(),
             Some("permission denied"),
             "a failed request surfaces its reason on the status line"
         );
@@ -5928,12 +6296,12 @@ mod background_service_ui_tests {
             vec![TrackId("/music/a9.mp3".to_string())],
         ));
         assert!(editor.draft().is_none());
-        let mut status = None;
+        let mut board = riff_gui::ui::feedback::FeedbackBoard::default();
 
-        editor.poll_outcomes(&mut status);
+        editor.poll_outcomes(&mut board);
 
         assert_eq!(
-            status.as_deref(),
+            board.display_message().as_deref(),
             Some("Tags saved for a3.mp3"),
             "each outcome still reaches the status line after the selection moved"
         );
@@ -6249,63 +6617,104 @@ mod background_service_ui_tests {
     }
 }
 
-/// Issue 01 seam fix: playback errors no longer write the library session's
-/// scan-status slot from the coordinator. They arrive as typed notices with
-/// playback source, and the UI routes them to the titlebar status line via
-/// [`apply_backend_events`], preserving the exact visible string.
+/// Issue 11: typed notices keep their source and severity across the
+/// application→paint boundary by landing in a [`FeedbackBoard`] source slot.
+/// Playback errors, Library Scan progress, and Tag Edit outcomes each own a
+/// slot, so one stream can no longer overwrite another.
 #[cfg(test)]
 mod playback_notice_ui_tests {
     use riff_backend::app::events::{BackendEvent, NoticePayload, NoticeSeverity, NoticeSource};
     use riff_gui::ui::app::apply_backend_events;
+    use riff_gui::ui::feedback::FeedbackBoard;
 
-    fn playback_notice(message: &str) -> BackendEvent {
+    fn notice(source: NoticeSource, severity: NoticeSeverity, message: &str) -> BackendEvent {
         BackendEvent::TypedNotice(NoticePayload {
-            severity: NoticeSeverity::Error,
-            source: NoticeSource::Playback,
+            severity,
+            source,
             message: message.to_string(),
         })
     }
 
     #[test]
     fn test_playback_typed_notice_routes_message_to_status_line() {
-        let mut status: Option<String> = None;
+        let mut board = FeedbackBoard::default();
 
-        apply_backend_events(vec![playback_notice("Playback error: boom")], &mut status);
+        apply_backend_events(
+            vec![notice(
+                NoticeSource::Playback,
+                NoticeSeverity::Error,
+                "Playback error: boom",
+            )],
+            &mut board,
+        );
 
         assert_eq!(
-            status.as_deref(),
+            board.display_message().as_deref(),
             Some("Playback error: boom"),
             "the exact user-facing string reaches the status line"
         );
-    }
-
-    #[test]
-    fn test_non_playback_notice_leaves_status_line_untouched() {
-        let mut status: Option<String> = Some("existing".to_string());
-
-        apply_backend_events(
-            vec![BackendEvent::TypedNotice(NoticePayload {
-                severity: NoticeSeverity::Error,
-                source: NoticeSource::Scan,
-                message: "scan failed".to_string(),
-            })],
-            &mut status,
-        );
-
         assert_eq!(
-            status.as_deref(),
-            Some("existing"),
-            "only playback-sourced notices write the status line here"
+            board.display().map(|f| &f.source),
+            Some(&NoticeSource::Playback),
+            "the notice's playback source survives the boundary"
         );
     }
 
     #[test]
-    fn test_empty_event_batch_leaves_status_line_untouched() {
-        let mut status: Option<String> = Some("existing".to_string());
+    fn test_scan_notice_does_not_erase_a_live_playback_error() {
+        let mut board = FeedbackBoard::default();
+        // A playback error is already on the board.
+        apply_backend_events(
+            vec![notice(
+                NoticeSource::Playback,
+                NoticeSeverity::Error,
+                "Playback error: boom",
+            )],
+            &mut board,
+        );
+        // A lower-severity Library Scan update then arrives.
+        apply_backend_events(
+            vec![notice(
+                NoticeSource::Scan,
+                NoticeSeverity::Info,
+                "Scanning 12 files",
+            )],
+            &mut board,
+        );
 
-        apply_backend_events(Vec::new(), &mut status);
+        // The scan notice lives in its own slot and cannot clobber the playback
+        // error, which still outranks it on display.
+        assert_eq!(
+            board.display_message().as_deref(),
+            Some("Playback error: boom"),
+            "a Library Scan update must not erase unrelated playback feedback"
+        );
+        assert_eq!(
+            board
+                .display()
+                .map(|f| (f.source.clone(), f.severity.clone())),
+            Some((NoticeSource::Playback, NoticeSeverity::Error)),
+            "the surviving notice keeps its source and severity"
+        );
+    }
 
-        assert_eq!(status.as_deref(), Some("existing"));
+    #[test]
+    fn test_empty_notice_batch_and_clear_leave_the_line_empty() {
+        let mut board = FeedbackBoard::default();
+        board.set_scan("Scanning 12 files", NoticeSeverity::Info);
+        assert!(!board.is_empty());
+
+        // An empty drained batch changes nothing.
+        apply_backend_events(Vec::new(), &mut board);
+        assert_eq!(
+            board.display_message().as_deref(),
+            Some("Scanning 12 files")
+        );
+
+        // Clearing the source empties it; clearing all empties the board.
+        board.clear(&NoticeSource::Scan);
+        assert!(board.is_empty());
+        assert_eq!(board.display_message(), None);
     }
 }
 
@@ -7855,6 +8264,623 @@ mod browser_column_ui_tests {
         assert!(
             widths[2] >= 320.0 && widths[0] >= 200.0 && widths[1] >= 200.0,
             "all floors hold once the window can pay for them: {widths:?}"
+        );
+    }
+
+    /// Drive the shared elastic-stage geometry seam and record the rect each
+    /// slot is handed. `slots[i]` is `(column index, allocated child rect)`,
+    /// where the inspector reports as index `columns`.
+    fn record_stage_slots(
+        available: f32,
+        columns: usize,
+        inspector: bool,
+    ) -> Vec<(usize, egui::Rect)> {
+        use riff_gui::ui::stage::{StageSlot, show_elastic_stage};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let slots: Rc<RefCell<Vec<(usize, egui::Rect)>>> = Rc::new(RefCell::new(Vec::new()));
+        let capture = Rc::clone(&slots);
+        let harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(available, 600.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(move |ui| {
+                capture.borrow_mut().clear();
+                let capture = Rc::clone(&capture);
+                show_elastic_stage(ui, columns, inspector, move |ui, slot| {
+                    let index = match slot {
+                        StageSlot::Column(i) => i,
+                        StageSlot::Inspector => columns,
+                    };
+                    capture.borrow_mut().push((index, ui.max_rect()));
+                });
+            });
+        // Release the harness (and the closure it owns, which holds one `Rc`
+        // clone) before unwrapping the recorded slots.
+        drop(harness);
+        Rc::try_unwrap(slots)
+            .expect("harness dropped its capture")
+            .into_inner()
+    }
+
+    /// The elastic-stage geometry seam hands every slot a positive, correctly
+    /// sized child ui: one slot per column plus a distinct fixed-width
+    /// inspector, with the list columns together never asking for more than
+    /// the stage offers. Production and the golden harness drive this same
+    /// owner, so the two cannot disagree on a column's width. (The exact
+    /// left-to-right edges are pinned by the `elastic_*` goldens.)
+    #[test]
+    fn test_elastic_stage_geometry_fits_with_stable_child_identities() {
+        let inspector_w = riff_gui::ui::theme::INSPECTOR_WIDTH;
+
+        for available in [1000.0_f32, 520.0] {
+            for (columns, inspector) in [(1usize, false), (3, false), (2, true), (4, true)] {
+                let mut slots = record_stage_slots(available, columns, inspector);
+                let want = columns + usize::from(inspector);
+                assert_eq!(
+                    slots.len(),
+                    want,
+                    "stage @ {available}px, {columns} cols + inspector={inspector}"
+                );
+
+                // Every index 0..want appears exactly once — each slot keeps
+                // one stable, positionally ordered identity.
+                slots.sort_by_key(|(i, _)| *i);
+                let ids: Vec<usize> = slots.iter().map(|(i, _)| *i).collect();
+                assert_eq!(
+                    ids,
+                    (0..want).collect::<Vec<_>>(),
+                    "each slot keeps one stable, positionally ordered identity"
+                );
+
+                // Every slot is handed a positive width (no collapsed column).
+                for (i, rect) in &slots {
+                    assert!(
+                        rect.width() > 0.0,
+                        "slot {i} must receive a usable width: {rect:?}"
+                    );
+                }
+
+                // The list columns together never exceed the stage width, so
+                // the composition cannot overflow horizontally.
+                let list_sum: f32 = slots
+                    .iter()
+                    .filter(|(i, _)| *i < columns)
+                    .map(|(_, r)| r.width())
+                    .sum();
+                assert!(
+                    list_sum <= available + 0.5,
+                    "the {columns} list columns total {list_sum} which must fit \
+                     the {available}px stage (no overflow)"
+                );
+
+                // The inspector, when present, is the rightmost identity and
+                // keeps its fixed token width.
+                if inspector {
+                    let last = slots.last().expect("at least one slot");
+                    assert_eq!(last.0, columns, "the inspector is the last slot");
+                    assert!(
+                        (last.1.width() - inspector_w).abs() < 0.5,
+                        "the inspector column keeps its token width: {} vs {inspector_w}",
+                        last.1.width()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Paint one neutral row band in isolation and return the rendered frame,
+    /// so a test can count which design token actually filled the row.
+    fn render_row_band(selected: bool, hovered: bool, focused: bool) -> image::RgbaImage {
+        use riff_gui::ui::row::paint_row_band;
+        use riff_gui::ui::theme::Palette;
+        let palette = Palette::dark();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(240.0, 80.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(move |ui| {
+                let bg = ui.ctx().layer_painter(egui::LayerId::background());
+                bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.background);
+                let rect =
+                    egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(200.0, 40.0));
+                let painter = ui.painter();
+                paint_row_band(painter, &palette, rect, selected, hovered, focused);
+            });
+        harness.run();
+        harness
+            .render()
+            .expect("the row band must render headlessly")
+    }
+
+    /// Count frame pixels within a hair of `color` (rounded corners antialias,
+    /// so the interior is what matters).
+    fn count_band_color(image: &image::RgbaImage, color: egui::Color32) -> usize {
+        image
+            .pixels()
+            .filter(|p| {
+                p.0[0].abs_diff(color.r()) <= 2
+                    && p.0[1].abs_diff(color.g()) <= 2
+                    && p.0[2].abs_diff(color.b()) <= 2
+            })
+            .count()
+    }
+
+    /// The neutral row frame maps a row's interaction state to one set of
+    /// design tokens: selected wins the selected fill, otherwise hover paints
+    /// the wash, an idle row paints neither, and focus adds the ring —
+    /// independent of which variant (tree row or browser row) asked. Both
+    /// Sections and Drill Columns now read their band from this one owner, so
+    /// the states cannot drift between them.
+    #[test]
+    fn test_neutral_row_band_maps_state_to_tokens() {
+        use riff_gui::ui::theme::Palette;
+        let palette = Palette::dark();
+
+        let selected = render_row_band(true, false, false);
+        assert!(
+            count_band_color(&selected, palette.surface_3) > 1_000,
+            "a selected row paints the selected fill"
+        );
+        assert_eq!(
+            count_band_color(&selected, palette.row_hover),
+            0,
+            "a selected row never also paints the hover wash"
+        );
+
+        let hovered = render_row_band(false, true, false);
+        assert!(
+            count_band_color(&hovered, palette.row_hover) > 1_000,
+            "a hovered row paints the hover wash"
+        );
+        assert_eq!(
+            count_band_color(&hovered, palette.surface_3),
+            0,
+            "a hovered (not selected) row paints no selected fill"
+        );
+
+        let idle = render_row_band(false, false, false);
+        assert_eq!(count_band_color(&idle, palette.surface_3), 0);
+        assert_eq!(count_band_color(&idle, palette.row_hover), 0);
+
+        let ring = riff_gui::ui::theme::focus_ring_stroke(&palette, true)
+            .expect("a focused row has a ring stroke")
+            .color;
+        let focused = render_row_band(false, false, true);
+        assert!(
+            count_band_color(&focused, ring) > 0,
+            "a focused row paints its focus ring"
+        );
+        assert_eq!(
+            count_band_color(&idle, ring),
+            0,
+            "an unfocused row paints no ring"
+        );
+    }
+
+    /// Render one shared icon button and return the frame, so a test can see
+    /// whether the focus ring was painted and whether a disabled button took
+    /// focus.
+    fn render_icon_button(focused: bool, disabled: bool) -> image::RgbaImage {
+        use riff_gui::ui::button::{begin_icon_button, finish_icon_button};
+        use riff_gui::ui::theme::Palette;
+        let palette = Palette::dark();
+        let id = egui::Id::new("test_icon_button");
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(80.0, 80.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(move |ui| {
+                let bg = ui.ctx().layer_painter(egui::LayerId::background());
+                bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.background);
+                if focused {
+                    ui.memory_mut(|m| m.request_focus(id));
+                }
+                let rect =
+                    egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(40.0, 40.0));
+                let button = begin_icon_button(ui, rect, id, disabled);
+                finish_icon_button(ui, &palette, &button, "Test button");
+            });
+        harness.run();
+        harness
+            .render()
+            .expect("the icon button must render headlessly")
+    }
+
+    /// The shared icon-button foundation gives every adopted control the same
+    /// focus treatment: a focused button paints the one focus ring, an
+    /// unfocused one paints none, and a disabled button cannot take focus (so
+    /// it never rings). This is the focus/disabled parity the four previously
+    /// separate icon buttons lacked.
+    #[test]
+    fn test_icon_button_shares_focus_ring_and_disables_focus() {
+        use riff_gui::ui::theme::Palette;
+        let palette = Palette::dark();
+        let ring = riff_gui::ui::theme::focus_ring_stroke(&palette, true)
+            .expect("a focused button has a ring stroke")
+            .color;
+
+        let focused = render_icon_button(true, false);
+        assert!(
+            count_band_color(&focused, ring) > 0,
+            "a focused icon button paints the shared focus ring"
+        );
+
+        let unfocused = render_icon_button(false, false);
+        assert_eq!(
+            count_band_color(&unfocused, ring),
+            0,
+            "an unfocused icon button paints no ring"
+        );
+
+        let disabled_focused = render_icon_button(true, true);
+        assert_eq!(
+            count_band_color(&disabled_focused, ring),
+            0,
+            "a disabled icon button cannot take focus, so it never rings"
+        );
+    }
+
+    /// Render one shared semantic text button and return the frame, so a test
+    /// can see which tokens a variant paints and whether it took the focus
+    /// ring.
+    fn render_text_button(
+        variant: riff_gui::ui::button::Variant,
+        focused: bool,
+        disabled: bool,
+    ) -> image::RgbaImage {
+        use riff_gui::ui::button::{TextButton, text_button};
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::theme::Palette;
+        let palette = Palette::dark();
+        let id = egui::Id::new("test_text_button");
+        let mut cache = IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(160.0, 44.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(move |ui| {
+                let bg = ui.ctx().layer_painter(egui::LayerId::background());
+                bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.surface);
+                if focused {
+                    ui.memory_mut(|m| m.request_focus(id));
+                }
+                let rect =
+                    egui::Rect::from_min_size(egui::pos2(16.0, 10.0), egui::vec2(128.0, 24.0));
+                let spec = TextButton {
+                    id,
+                    rect,
+                    label: "Go",
+                    a11y: "Go",
+                    tooltip: None,
+                    icon: None,
+                    small: false,
+                    variant,
+                    enabled: !disabled,
+                };
+                text_button(ui, &mut cache, &palette, &spec);
+            });
+        harness.run();
+        harness
+            .render()
+            .expect("the text button must render headlessly")
+    }
+
+    /// The shared semantic-text-button foundation paints each variant from one
+    /// set of tokens and gives every variant the same focus/disabled parity:
+    /// Primary is brand-filled, Destructive carries the error ink, a focused
+    /// enabled button rings, and a disabled button can neither take focus (so
+    /// never rings) nor activate. This is the parity Settings' and the Detail
+    /// Panel's hand-built buttons previously lacked.
+    #[test]
+    fn test_text_button_variants_share_focus_ring_and_disable() {
+        use riff_gui::ui::button::Variant;
+        use riff_gui::ui::theme::Palette;
+        let palette = Palette::dark();
+        let ring = riff_gui::ui::theme::focus_ring_stroke(&palette, true)
+            .expect("a focused button has a ring stroke")
+            .color;
+
+        let primary = render_text_button(Variant::Primary, false, false);
+        assert!(
+            count_band_color(&primary, palette.brand_primary) > 1_000,
+            "Primary paints the brand fill"
+        );
+
+        let destructive = render_text_button(Variant::Destructive, false, false);
+        assert!(
+            count_band_color(&destructive, palette.error) > 0,
+            "Destructive paints the error ink"
+        );
+        assert_eq!(
+            count_band_color(&destructive, palette.brand_primary),
+            0,
+            "Destructive is never brand-filled"
+        );
+
+        let focused = render_text_button(Variant::Secondary, true, false);
+        assert!(
+            count_band_color(&focused, ring) > 0,
+            "a focused enabled button paints the shared focus ring"
+        );
+
+        let unfocused = render_text_button(Variant::Secondary, false, false);
+        assert_eq!(
+            count_band_color(&unfocused, ring),
+            0,
+            "an unfocused button paints no ring"
+        );
+
+        let disabled_focused = render_text_button(Variant::Primary, true, true);
+        assert_eq!(
+            count_band_color(&disabled_focused, ring),
+            0,
+            "a disabled button cannot take focus, so it never rings"
+        );
+    }
+
+    /// Render the shared text-field seam over an owned value buffer and return
+    /// the frame, so a test can see the focus ring the well paints.
+    fn run_text_field(focused: bool) -> image::RgbaImage {
+        use riff_gui::ui::icons::Icon;
+        use riff_gui::ui::text_field::{TextField, text_field};
+        use riff_gui::ui::theme::Palette;
+        let palette = Palette::dark();
+        let id = egui::Id::new("test_text_field");
+        let mut cache = IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(240.0, 40.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, value| {
+                    let bg = ui.ctx().layer_painter(egui::LayerId::background());
+                    bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.background);
+                    if focused {
+                        ui.memory_mut(|m| m.request_focus(id));
+                    }
+                    let rect =
+                        egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(200.0, 24.0));
+                    text_field(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        value,
+                        &TextField {
+                            id,
+                            rect,
+                            hint: "Search or jump to…",
+                            leading_icon: Some(Icon::Search),
+                            clear_label: Some("Clear search"),
+                            dismiss_on_escape: true,
+                        },
+                    );
+                },
+                String::new(),
+            );
+        harness.run();
+        harness
+            .render()
+            .expect("the text field must render headlessly")
+    }
+
+    /// The shared text-field contract gives every surface the same well, clear
+    /// affordance and focus treatment: the clear button appears only while the
+    /// value is non-empty and empties it when clicked, and a focused field
+    /// paints the search ring while an idle one paints the hairline instead.
+    /// Titlebar search drives the exact same primitive end to end.
+    #[test]
+    fn test_text_field_shares_clear_affordance_and_focus_ring() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::icons::Icon;
+        use riff_gui::ui::text_field::{TextField, text_field};
+        use riff_gui::ui::theme::Palette;
+        let palette = Palette::dark();
+        let id = egui::Id::new("tf_clear");
+
+        // A non-empty field exposes a clear affordance that empties the value.
+        let mut cache = IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(240.0, 40.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, value| {
+                    let rect =
+                        egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(200.0, 24.0));
+                    text_field(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        value,
+                        &TextField {
+                            id,
+                            rect,
+                            hint: "Search or jump to…",
+                            leading_icon: Some(Icon::Search),
+                            clear_label: Some("Clear search"),
+                            dismiss_on_escape: true,
+                        },
+                    );
+                },
+                "boards".to_string(),
+            );
+        harness.run();
+        harness.get_by_label("Clear search").click();
+        harness.run();
+        assert!(
+            harness.state().is_empty(),
+            "the clear affordance empties the value"
+        );
+
+        // An empty field offers no clear affordance.
+        let mut cache2 = IconCache::new();
+        let mut idle = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(240.0, 40.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, value| {
+                    let rect =
+                        egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(200.0, 24.0));
+                    text_field(
+                        ui,
+                        &mut cache2,
+                        &palette,
+                        value,
+                        &TextField {
+                            id,
+                            rect,
+                            hint: "Search or jump to…",
+                            leading_icon: Some(Icon::Search),
+                            clear_label: Some("Clear search"),
+                            dismiss_on_escape: true,
+                        },
+                    );
+                },
+                String::new(),
+            );
+        idle.run();
+        assert!(
+            idle.query_by_label("Clear search").is_none(),
+            "an empty field shows no clear affordance"
+        );
+
+        // Focus drives the well's ring, not a fixed stroke.
+        let ring_color = riff_gui::ui::sidebar::search_ring_stroke(&palette, true).color;
+        let focused_img = run_text_field(true);
+        assert!(
+            count_band_color(&focused_img, ring_color) > 0,
+            "a focused text field paints the search ring"
+        );
+        let idle_img = run_text_field(false);
+        assert_eq!(
+            count_band_color(&idle_img, ring_color),
+            0,
+            "an idle text field paints no focus ring"
+        );
+    }
+
+    /// Render the shared linear-control seam and report whether it exposed an
+    /// operable `Seek` slider node and how many brand-fill pixels it painted.
+    fn render_linear(value: f32, interactive: bool) -> (bool, usize) {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::linear::{LinearControl, linear_control};
+        use riff_gui::ui::theme::geometry::seek::TRACK_H;
+        let palette = riff_gui::ui::theme::Palette::dark();
+        let id = egui::Id::new("test_linear");
+        let track = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(160.0, TRACK_H));
+        let hit = track.expand2(egui::vec2(0.0, 12.0));
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(200.0, 48.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(|ui| {
+                linear_control(
+                    ui,
+                    &palette,
+                    &LinearControl {
+                        id,
+                        track,
+                        hit,
+                        value,
+                        thumb: None,
+                        interactive,
+                        label: "Seek",
+                    },
+                );
+            });
+        harness.run();
+        let has_node = harness.query_by_label("Seek").is_some();
+        let frame = harness.render().expect("linear control renders");
+        let fills = frame
+            .pixels()
+            .filter(|p| {
+                p.0[0].abs_diff(palette.brand_primary.r()) <= 2
+                    && p.0[1].abs_diff(palette.brand_primary.g()) <= 2
+                    && p.0[2].abs_diff(palette.brand_primary.b()) <= 2
+            })
+            .count();
+        (has_node, fills)
+    }
+
+    /// The shared linear-control contract: an interactive seek exposes an
+    /// operable slider node while a non-seekable (unknown / zero duration) one
+    /// exposes none, and a zero value paints zero brand fill (no thumb-less
+    /// stub) where a half value paints some. Both surfaces reach these through
+    /// the same `linear::linear_control`, so their pointer→intent mapping is
+    /// identical by construction (proven end to end by the Playerbar seek /
+    /// volume click tests above).
+    #[test]
+    fn test_linear_control_zero_fill_and_seekable_gate() {
+        let (live, _) = render_linear(0.5, true);
+        assert!(
+            live,
+            "an interactive control exposes an operable slider node"
+        );
+
+        let (gated, _) = render_linear(0.5, false);
+        assert!(
+            !gated,
+            "a non-seekable (non-interactive) control exposes no operable node"
+        );
+
+        let (_, zero_fill) = render_linear(0.0, true);
+        assert_eq!(zero_fill, 0, "a zero value paints zero brand fill");
+
+        let (_, half_fill) = render_linear(0.5, true);
+        assert!(half_fill > 0, "a non-zero value paints a brand fill");
+    }
+
+    /// The shared empty-state owner renders a labelled title+hint composition
+    /// through both layout models: the flowing `Ui` path (explorer columns)
+    /// exposes the title and hint as readable labels, and the painter/rect path
+    /// (hand-laid queue) paints non-blank ink into the given rect — never an
+    /// unexplained hole.
+    #[test]
+    fn test_empty_state_owner_composes_labelled_state_both_paths() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::empty_state::{empty_state, empty_state_in_rect};
+        use riff_gui::ui::theme::Palette;
+        let palette = Palette::dark();
+
+        // Flowing Ui path: title and hint are present as readable labels.
+        let mut ui_h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(300.0, 200.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(|ui| empty_state(ui, &palette, "No artists yet", "Add a folder."));
+        ui_h.run();
+        assert!(
+            ui_h.query_by_label("No artists yet").is_some(),
+            "the flowing empty state labels the title"
+        );
+        assert!(
+            ui_h.query_by_label("Add a folder.").is_some(),
+            "the flowing empty state labels the hint"
+        );
+
+        // Painter/rect path: it paints ink into the rect (distinct from blank).
+        let mut rect_h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(300.0, 200.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(|ui| {
+                let bg = ui.ctx().layer_painter(egui::LayerId::background());
+                bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.background);
+                let rect = ui.max_rect();
+                empty_state_in_rect(
+                    &ui.painter_at(rect),
+                    &palette,
+                    rect,
+                    "Queue is empty",
+                    "Play a track to start your queue.",
+                );
+            });
+        rect_h.run();
+        let frame = rect_h.render().expect("rect empty state renders");
+        let ink = frame
+            .pixels()
+            .filter(|p| {
+                p.0[0].abs_diff(palette.ink_2.r()) <= 4
+                    && p.0[1].abs_diff(palette.ink_2.g()) <= 4
+                    && p.0[2].abs_diff(palette.ink_2.b()) <= 4
+            })
+            .count();
+        assert!(
+            ink > 20,
+            "the painter empty state paints a title in ink, not a blank hole"
         );
     }
 
@@ -11999,5 +13025,1204 @@ mod whole_frame_tests {
                 .is_none(),
             "a re-selection never resumes an old drill offset"
         );
+    }
+
+    // --- One prompt and confirmation contract (component-layer issue 14) -----
+    //
+    // Playlist create/rename and the Clear Library confirmation share one
+    // interaction contract: the name field takes keyboard focus when the prompt
+    // opens, Enter confirms, and Cancel, Escape, or a click outside dismisses —
+    // with every dismissal route leaving the durable store untouched. Prompt
+    // state and the store write stay where they are: in `RiffApp`.
+
+    /// Open the inline "New Playlist" name prompt through a real frame.
+    fn open_playlist_create_prompt(shell: &mut Shell) {
+        shell.harness.get_by_label("New Playlist").click();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("Create").is_some(),
+            "the + control opens the inline name prompt"
+        );
+    }
+
+    /// Send characters to the prompt's name field and prove it is the widget
+    /// that holds the first focus: Tab from wherever the pointer left the
+    /// focus walks to the confirm control, so Shift+Tab returns to the field.
+    fn focus_and_type(shell: &mut Shell, text: &str) {
+        let harness = &mut shell.harness;
+        harness.key_press(egui::Key::Tab);
+        harness.step();
+        assert!(
+            harness.get_by_label("Create").is_focused(),
+            "Tab from the prompt's first focus lands on Create"
+        );
+        harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+        harness.step();
+        harness
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .find(|node| node.is_focused())
+            .expect("Shift+Tab returns to the prompt's name field, so the draft types there")
+            .type_text(text);
+        harness.step();
+    }
+
+    fn playlist_names(store: &riff_infra::store::SqliteStore) -> Vec<String> {
+        store
+            .load_playlists()
+            .expect("the playlist list reads")
+            .into_iter()
+            .map(|playlist| playlist.name)
+            .collect()
+    }
+
+    #[test]
+    fn test_playlist_create_prompt_takes_focus_and_enter_creates_through_a_real_frame() {
+        let (mut shell, _dir, _pid, store) = store_shell();
+        shell.harness.step();
+        open_playlist_create_prompt(&mut shell);
+
+        focus_and_type(&mut shell, "Roadwork");
+        shell.harness.key_press(egui::Key::Enter);
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            playlist_names(&store).contains(&"Roadwork".to_string()),
+            "the focused field took the typed name and Enter committed it, got {:?}",
+            playlist_names(&store)
+        );
+        assert!(
+            shell.harness.query_by_label("Create").is_none(),
+            "confirming closes the prompt"
+        );
+    }
+
+    #[test]
+    fn test_escape_dismisses_the_prompt_and_writes_nothing() {
+        let (mut shell, _dir, _pid, store) = store_shell();
+        shell.harness.step();
+        open_playlist_create_prompt(&mut shell);
+
+        focus_and_type(&mut shell, "Doomed");
+        shell.harness.key_press(egui::Key::Escape);
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            shell.harness.query_by_label("Create").is_none(),
+            "Escape dismisses the prompt"
+        );
+        assert_eq!(
+            playlist_names(&store),
+            vec!["Gym".to_string()],
+            "dismissal discards the draft: the store gained nothing"
+        );
+    }
+
+    #[test]
+    fn test_cancel_and_an_outside_click_dismiss_the_prompt_and_write_nothing() {
+        let (mut shell, _dir, _pid, store) = store_shell();
+        shell.harness.step();
+
+        open_playlist_create_prompt(&mut shell);
+        focus_and_type(&mut shell, "Doomed");
+        shell.harness.get_by_label("Cancel").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("Create").is_none(),
+            "Cancel dismisses the prompt"
+        );
+
+        open_playlist_create_prompt(&mut shell);
+        focus_and_type(&mut shell, "AlsoDoomed");
+        shell.harness.get_by_label("Gym").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("Create").is_none(),
+            "interacting outside the prompt dismisses it"
+        );
+
+        assert_eq!(
+            playlist_names(&store),
+            vec!["Gym".to_string()],
+            "neither dismissal route wrote to the Playlist Store"
+        );
+    }
+
+    #[test]
+    fn test_asking_to_clear_the_library_opens_the_confirmation_and_writes_nothing() {
+        use riff_gui::ui::prompts::CLEAR_LIBRARY_CONFIRM_COPY;
+
+        let (mut shell, _dir, _pid, store) = store_shell();
+        shell.harness.step();
+        shell.library.lock_or_recover().view_mode = ViewMode::Settings;
+        shell.harness.step();
+
+        shell.harness.get_by_label("Clear Library").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            shell
+                .harness
+                .query_by_label(CLEAR_LIBRARY_CONFIRM_COPY)
+                .is_some(),
+            "the destructive action asks first, and its copy says what the wipe keeps"
+        );
+        assert_eq!(
+            store.all_track_ids().expect("the listing reads").len(),
+            3,
+            "asking for confirmation commits nothing to the collection"
+        );
+        assert_eq!(
+            playlist_names(&store),
+            vec!["Gym".to_string()],
+            "and it touches no Playlist"
+        );
+    }
+
+    /// The confirmation reports both outcomes and applies neither: the host
+    /// owns the wipe. Its composed Confirm/Cancel path is the ticket-14
+    /// follow-up — at the shell's 800px height the confirmation's own row falls
+    /// outside the Settings panel's visible area.
+    #[test]
+    fn test_clear_library_confirmation_reports_confirm_and_cancel() {
+        use riff_gui::ui::prompts::{PromptOutcome, clear_library_confirm};
+
+        let palette = riff_gui::ui::theme::Palette::dark();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(420.0, 88.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, outcomes: &mut Vec<PromptOutcome>| {
+                    let mut cache = riff_gui::ui::icons::IconCache::new();
+                    outcomes.extend(clear_library_confirm(ui, &mut cache, &palette));
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        harness.get_by_label("Cancel").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![PromptOutcome::Cancel],
+            "Cancel is reported, not applied"
+        );
+
+        harness.state_mut().clear();
+        harness.get_by_label("Confirm").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![PromptOutcome::Confirm],
+            "the destructive Confirm is reported, not applied"
+        );
+    }
+
+    /// The Settings frame still composes the Library Path flow's entry point —
+    /// and reaching it is not itself an indexing request: the native dialog
+    /// (macOS/Windows) or the text row (Linux) only *offers* a root, and
+    /// registering one starts nothing.
+    #[test]
+    fn test_the_settings_frame_offers_the_library_picker_without_indexing() {
+        let mut shell = mock_shell();
+        shell.harness.step();
+        shell.library.lock_or_recover().view_mode = ViewMode::Settings;
+        shell.harness.step();
+
+        assert!(
+            shell.harness.query_by_label("Add Library").is_some(),
+            "the Library section still presents the picker's entry point"
+        );
+        assert!(
+            shell.scans.requested_paths().is_empty(),
+            "rendering the Settings frame requests no scan"
+        );
+        assert!(
+            shell
+                .library
+                .lock_or_recover()
+                .library_paths
+                .paths()
+                .is_empty(),
+            "and registers no root"
+        );
+    }
+
+    /// The Inline Tag Editor stays the host's: a draft opened through `RiffApp`'s
+    /// own entry renders the shared field and save-bar treatment inside the
+    /// composed inspector, and a changed selection discards it — the widget never
+    /// outlives the readout it was opened on (component-layer issue 17).
+    #[test]
+    fn test_the_host_owns_the_inline_editors_life_inside_the_composed_inspector() {
+        use riff_gui::ui::app::{InspectorContent, InspectorKind};
+        use riff_gui::ui::selection::{TagField, TagRow, TagRowState};
+
+        let (mut shell, _dir, _pid, store) = store_shell();
+        shell.harness.step();
+
+        let ids = store.all_track_ids().expect("the listing reads");
+        let (track_id, other_id) = (ids[0].clone(), ids[1].clone());
+        shell.library.lock().unwrap().selected_track = Some(track_id.clone());
+        shell.harness.step();
+
+        let content = InspectorContent {
+            visible: true,
+            kind: InspectorKind::Track,
+            title: Some("Alpha".to_string()),
+            subtitle: Some("Artist".to_string()),
+            art_track: Some(track_id.clone()),
+            track_ids: vec![track_id.clone()],
+            details: Vec::new(),
+            tags: vec![TagRow {
+                field: TagField::Title,
+                state: TagRowState::Value,
+                text: "Alpha".to_string(),
+                originals: vec![Some("Alpha".to_string())],
+            }],
+        };
+        shell.harness.state_mut().open_inline_draft(&content);
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("Save").is_some(),
+            "the host's draft renders the shared Save bar in the composed inspector"
+        );
+        assert!(
+            shell.harness.query_by_label("Cancel").is_some(),
+            "and the bar carries its neutral partner"
+        );
+
+        // A changed selection: the controller drops the draft this frame, so a
+        // half-typed edit can never leak onto the next Track's readout. The
+        // inspector itself stays — the editor going is the lifecycle, not the
+        // panel disappearing.
+        shell.library.lock().unwrap().selected_track = Some(other_id);
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("Save").is_none(),
+            "the draft died with the selection it was opened on"
+        );
+        assert!(
+            shell.harness.query_by_label("SELECTION").is_some(),
+            "while the inspector keeps rendering the new readout"
+        );
+    }
+}
+
+// --- Context menus: shared item conventions and typed intents (issue 15) -----
+//
+// The production Track and list menus render through `ui::menu` and report
+// typed intents; every Transport, Playlist Store, selection, and Inline Tag
+// Editor effect happens afterwards, in the host's own mapping.
+
+#[cfg(test)]
+mod context_menu_ui_tests {
+    use egui_kittest::kittest::Queryable;
+    use riff_backend::app::store::PlaylistStore;
+    use riff_backend::domain::{PlaylistId, TrackId};
+    use riff_gui::ui::app::{
+        InlineTagEditor, TrackMenuEffects, apply_list_menu_intent, apply_track_menu_intent,
+    };
+    use riff_gui::ui::menu::{self, Item, ItemState, ListMenuIntent, TrackMenu, TrackMenuIntent};
+    use riff_gui::ui::selection::DraftKind;
+    use riff_gui::ui::theme::Palette;
+
+    use crate::mocks::{MockTagEdits, MockTransport, TransportIntent};
+    use crate::test_utils::create_test_track_with_metadata;
+
+    fn track(file: &str) -> riff_backend::domain::Track {
+        create_test_track_with_metadata(file, file, "Artist", "Title", "Album")
+    }
+
+    /// Render the production track menu and click `labels` in order, returning
+    /// the intents it emitted.
+    fn track_menu_intents(props: &TrackMenu<'_>, clicks: &[&str]) -> Vec<TrackMenuIntent> {
+        let palette = Palette::dark();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(240.0, 240.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, intents: &mut Vec<TrackMenuIntent>| {
+                    menu::track_menu(ui, &palette, props, intents);
+                },
+                Vec::new(),
+            );
+        harness.run();
+        for label in clicks {
+            harness.get_by_label(label).click();
+            harness.run();
+        }
+        std::mem::take(harness.state_mut())
+    }
+
+    fn list_menu_intents(clicks: &[&str]) -> Vec<ListMenuIntent> {
+        let palette = Palette::dark();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(240.0, 120.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, intents: &mut Vec<ListMenuIntent>| {
+                    menu::list_menu(ui, &palette, intents);
+                },
+                Vec::new(),
+            );
+        harness.run();
+        for label in clicks {
+            harness.get_by_label(label).click();
+            harness.run();
+        }
+        std::mem::take(harness.state_mut())
+    }
+
+    #[test]
+    fn test_track_menu_reports_one_typed_intent_per_action() {
+        let pid = PlaylistId::new("pl-1");
+        let options = [(pid.clone(), "Gym".to_string())];
+        let props = TrackMenu {
+            playable: true,
+            editable: true,
+            playlists: &options,
+            remove_from_playlist: true,
+        };
+
+        assert_eq!(
+            track_menu_intents(&props, &["Play"]),
+            vec![TrackMenuIntent::Play],
+            "Play reports the choice and nothing else"
+        );
+        assert_eq!(
+            track_menu_intents(&props, &["Play Next"]),
+            vec![TrackMenuIntent::PlayNext]
+        );
+        assert_eq!(
+            track_menu_intents(&props, &["Add to Queue"]),
+            vec![TrackMenuIntent::AddToQueue]
+        );
+        assert_eq!(
+            track_menu_intents(&props, &["Remove from Playlist"]),
+            vec![TrackMenuIntent::RemoveFromPlaylist]
+        );
+        assert_eq!(
+            track_menu_intents(&props, &["Edit Tags"]),
+            vec![TrackMenuIntent::EditTags]
+        );
+        assert!(
+            track_menu_intents(&props, &[]).is_empty(),
+            "rendering a menu reports no intent at all"
+        );
+    }
+
+    /// The menu's content policy is unchanged by the extraction: a Track whose
+    /// file is gone offers neither playback actions nor the tag editor.
+    #[test]
+    fn test_unplayable_track_menu_keeps_only_the_playlist_actions() {
+        let pid = PlaylistId::new("pl-1");
+        let options = [(pid.clone(), "Gym".to_string())];
+        let props = TrackMenu {
+            playable: false,
+            editable: false,
+            playlists: &options,
+            remove_from_playlist: true,
+        };
+        let palette = Palette::dark();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(240.0, 120.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, intents: &mut Vec<TrackMenuIntent>| {
+                    menu::track_menu(ui, &palette, &props, intents);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        for absent in ["Play", "Play Next", "Add to Queue", "Edit Tags"] {
+            assert!(
+                harness.query_by_label(absent).is_none(),
+                "a Track with no file offers no {absent}"
+            );
+        }
+        assert!(
+            harness.query_by_label("Remove from Playlist").is_some(),
+            "the entry is still there to take out"
+        );
+    }
+
+    #[test]
+    fn test_list_menu_reports_its_three_intents() {
+        assert_eq!(list_menu_intents(&["Play"]), vec![ListMenuIntent::Play]);
+        assert_eq!(
+            list_menu_intents(&["Play Next"]),
+            vec![ListMenuIntent::PlayNext]
+        );
+        assert_eq!(
+            list_menu_intents(&["Append to Queue"]),
+            vec![ListMenuIntent::AppendToQueue]
+        );
+    }
+
+    /// Enabled, disabled, and destructive rows come from one owner: a disabled
+    /// row answers no click, and only the destructive row carries the error ink.
+    #[test]
+    fn test_menu_item_states_share_one_treatment() {
+        let palette = Palette::dark();
+        let render = |state: ItemState| {
+            egui_kittest::Harness::builder()
+                .with_size(egui::vec2(220.0, 64.0))
+                .with_pixels_per_point(1.0)
+                .build_ui_state(
+                    move |ui, activated: &mut bool| {
+                        *activated = menu::item(
+                            ui,
+                            &palette,
+                            &Item {
+                                label: "Remove from Playlist",
+                                state,
+                                tooltip: None,
+                            },
+                        );
+                    },
+                    false,
+                )
+        };
+
+        let count = |image: &image::RgbaImage, color: egui::Color32| {
+            image
+                .pixels()
+                .filter(|p| {
+                    p.0[0].abs_diff(color.r()) <= 4
+                        && p.0[1].abs_diff(color.g()) <= 4
+                        && p.0[2].abs_diff(color.b()) <= 4
+                })
+                .count()
+        };
+
+        let mut enabled = render(ItemState::Normal);
+        enabled.run();
+        let enabled_frame = enabled.render().expect("the row renders");
+        assert_eq!(
+            count(&enabled_frame, palette.error),
+            0,
+            "an ordinary row never borrows the destructive ink"
+        );
+
+        let mut destructive = render(ItemState::Destructive);
+        destructive.run();
+        let destructive_frame = destructive.render().expect("the row renders");
+        assert!(
+            count(&destructive_frame, palette.error) > 0,
+            "a destructive row carries the error ink"
+        );
+
+        let mut disabled = render(ItemState::Disabled);
+        disabled.run();
+        disabled.get_by_label("Remove from Playlist").click();
+        disabled.run();
+        assert!(
+            !*disabled.state(),
+            "a disabled row answers no click, so it cannot emit an intent"
+        );
+    }
+
+    /// The Playlist Store side of the menu: the submenu groups the playlists it
+    /// was handed under one heading, an empty list is an inert row rather than a
+    /// hole, and a chosen playlist rides back on the intent.
+    #[test]
+    fn test_playlist_rows_emit_the_chosen_playlist_or_nothing() {
+        let palette = Palette::dark();
+        let first = PlaylistId::new("pl-1");
+        let second = PlaylistId::new("pl-2");
+        let options = vec![
+            (first.clone(), "Gym".to_string()),
+            (second.clone(), "Focus".to_string()),
+        ];
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(220.0, 160.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, intents: &mut Vec<TrackMenuIntent>| {
+                    menu::playlist_items(ui, &palette, &options, intents);
+                },
+                Vec::new(),
+            );
+        harness.run();
+        assert!(
+            harness.query_by_label("Playlists").is_some(),
+            "the submenu groups its rows under one section heading"
+        );
+        harness.get_by_label("Focus").click();
+        harness.run();
+        assert_eq!(
+            *harness.state(),
+            vec![TrackMenuIntent::AddToPlaylist(second.clone())],
+            "the chosen playlist rides back on the intent"
+        );
+
+        let empty: Vec<(PlaylistId, String)> = Vec::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(220.0, 64.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, intents: &mut Vec<TrackMenuIntent>| {
+                    menu::playlist_items(ui, &palette, &empty, intents);
+                },
+                Vec::new(),
+            );
+        harness.run();
+        assert!(
+            harness.query_by_label("No playlists yet").is_some(),
+            "an empty list explains itself instead of leaving a hole"
+        );
+        harness.get_by_label("No playlists yet").click();
+        harness.run();
+        assert!(
+            harness.state().is_empty(),
+            "the explanation is inert: it emits no intent"
+        );
+    }
+
+    // --- The host's half: an effect happens only in answer to an intent -------
+
+    /// The app's store, plus one playlist seeded before any frame runs.
+    fn seeded_store() -> (
+        tempfile::TempDir,
+        riff_infra::store::SqliteStore,
+        PlaylistId,
+    ) {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(
+            &dir.path().join("riff.sqlite3"),
+            changes_tx,
+        )
+        .expect("opening a fresh store must work");
+        let pid = store
+            .create_playlist("Gym", &[])
+            .expect("the playlist commits");
+        (dir, store, pid)
+    }
+
+    /// Wire the host slots one menu intent answers to. A fresh call reborrows
+    /// everything, so a test can apply an intent, drop the host, and read the
+    /// store back.
+    fn host<'a>(
+        item: &'a riff_backend::domain::Track,
+        pid: Option<&'a PlaylistId>,
+        store: &'a mut riff_infra::store::SqliteStore,
+        transport: &'a MockTransport,
+        selected: &'a mut Option<TrackId>,
+        editor: &'a mut InlineTagEditor,
+    ) -> TrackMenuEffects<'a> {
+        let playlist_store: &'a mut dyn PlaylistStore = store;
+        TrackMenuEffects {
+            track_id: &item.id,
+            track: Some(item),
+            remove_from_playlist: pid,
+            transport,
+            playlist_store,
+            selected_track: selected,
+            tag_editor: editor,
+        }
+    }
+
+    #[test]
+    fn test_playlist_intents_commit_only_when_emitted() {
+        let (_dir, mut store, pid) = seeded_store();
+        let transport = MockTransport::new();
+        let mut selected = None;
+        let mut editor = InlineTagEditor::new(Box::new(MockTagEdits));
+        let item = track("/music/a.mp3");
+
+        let entries = |store: &riff_infra::store::SqliteStore| {
+            store
+                .load_playlist_entries(&pid)
+                .expect("the entries read")
+                .len()
+        };
+        assert_eq!(
+            entries(&store),
+            0,
+            "the menu a Track carries writes nothing until it is used"
+        );
+
+        {
+            let mut slots = host(
+                &item,
+                Some(&pid),
+                &mut store,
+                &transport,
+                &mut selected,
+                &mut editor,
+            );
+            apply_track_menu_intent(TrackMenuIntent::AddToPlaylist(pid.clone()), &mut slots);
+        }
+        assert_eq!(
+            entries(&store),
+            1,
+            "the emitted Add to Playlist committed through the store"
+        );
+
+        {
+            let mut slots = host(
+                &item,
+                Some(&pid),
+                &mut store,
+                &transport,
+                &mut selected,
+                &mut editor,
+            );
+            apply_track_menu_intent(TrackMenuIntent::RemoveFromPlaylist, &mut slots);
+        }
+        assert_eq!(entries(&store), 0, "the emitted Remove committed its half");
+        assert!(
+            transport.recorded().is_empty(),
+            "a playlist intent sends no transport command"
+        );
+    }
+
+    #[test]
+    fn test_edit_tags_intent_opens_the_detail_editor_and_nothing_else() {
+        let (_dir, mut store, pid) = seeded_store();
+        let transport = MockTransport::new();
+        let mut selected = None;
+        let mut editor = InlineTagEditor::new(Box::new(MockTagEdits));
+        let item = track("/music/a.mp3");
+
+        {
+            let mut slots = host(
+                &item,
+                Some(&pid),
+                &mut store,
+                &transport,
+                &mut selected,
+                &mut editor,
+            );
+            apply_track_menu_intent(TrackMenuIntent::EditTags, &mut slots);
+        }
+
+        assert_eq!(selected, Some(item.id.clone()));
+        let draft = editor.draft().expect("the editor opened");
+        assert_eq!(draft.track_id, item.id);
+        assert_eq!(draft.kind, DraftKind::Track);
+        assert!(
+            draft.focus_first,
+            "the entry point asks the editor to focus its first field"
+        );
+        assert!(
+            transport.recorded().is_empty(),
+            "opening the editor sends no transport command"
+        );
+        assert_eq!(
+            store
+                .load_playlist_entries(&pid)
+                .expect("the entries read")
+                .len(),
+            0,
+            "and it writes no playlist entry"
+        );
+    }
+
+    #[test]
+    fn test_playback_intents_reach_the_transport_only_when_emitted() {
+        let (_dir, mut store, _pid) = seeded_store();
+        let transport = MockTransport::new();
+        let mut selected = None;
+        let mut editor = InlineTagEditor::new(Box::new(MockTagEdits));
+        let item = track("/music/a.mp3");
+
+        {
+            let mut slots = host(
+                &item,
+                None,
+                &mut store,
+                &transport,
+                &mut selected,
+                &mut editor,
+            );
+            apply_track_menu_intent(TrackMenuIntent::Play, &mut slots);
+            apply_track_menu_intent(TrackMenuIntent::PlayNext, &mut slots);
+            apply_track_menu_intent(TrackMenuIntent::AddToQueue, &mut slots);
+        }
+
+        assert_eq!(
+            transport.recorded(),
+            vec![
+                TransportIntent::Play(item.id.clone()),
+                TransportIntent::PlayNext(item.id.clone()),
+                TransportIntent::AddToQueue(item.id.clone()),
+            ],
+            "each playback intent maps to exactly its own command"
+        );
+        assert!(
+            editor.draft().is_none() && selected.is_none(),
+            "playback intents neither open the editor nor move the selection"
+        );
+
+        let second = track("/music/b.mp3");
+        let ids = vec![item.id.clone(), second.id.clone()];
+        apply_list_menu_intent(ListMenuIntent::Play, &ids, &transport);
+        assert_eq!(
+            &transport.recorded()[3..],
+            &[
+                TransportIntent::Play(item.id.clone()),
+                TransportIntent::AddToQueue(second.id.clone()),
+            ],
+            "the list's Play keeps its current shape: the first Track, then the rest"
+        );
+
+        apply_list_menu_intent(ListMenuIntent::PlayNext, &ids, &transport);
+        assert_eq!(
+            &transport.recorded()[5..],
+            &[
+                TransportIntent::PlayNext(second.id.clone()),
+                TransportIntent::PlayNext(item.id.clone()),
+            ],
+            "Play Next preserves the current reverse-order sends so the list lands in order"
+        );
+
+        apply_list_menu_intent(ListMenuIntent::AppendToQueue, &ids, &transport);
+        assert_eq!(
+            &transport.recorded()[7..],
+            &[
+                TransportIntent::AddToQueue(item.id.clone()),
+                TransportIntent::AddToQueue(second.id.clone()),
+            ],
+            "Append to Queue adds the whole list at the end, in order"
+        );
+    }
+
+    /// The menu's accessible contract: every row is a real button, so the items
+    /// are reachable by keyboard once the menu is open, and hovering one emits
+    /// nothing.
+    #[test]
+    fn test_a_row_renders_as_a_real_button() {
+        let palette = Palette::dark();
+        let options: [(PlaylistId, String); 0] = [];
+        let props = TrackMenu {
+            playable: true,
+            editable: true,
+            playlists: &options,
+            remove_from_playlist: false,
+        };
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(240.0, 200.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, intents: &mut Vec<TrackMenuIntent>| {
+                    menu::track_menu(ui, &palette, &props, intents);
+                },
+                Vec::new(),
+            );
+        harness.run();
+        harness.get_by_label("Edit Tags").hover();
+        harness.run();
+        assert_eq!(
+            std::mem::take(harness.state_mut()).len(),
+            0,
+            "hovering an item emits nothing"
+        );
+
+        harness.get_by_label("Edit Tags").focus();
+        harness.run();
+        assert!(
+            harness.get_by_label("Edit Tags").is_focused(),
+            "every row is a real focusable button, so the menu works by keyboard"
+        );
+    }
+}
+
+// --- Library Path: pure Settings input + host-owned picker (issue 16) --------
+//
+// The Settings surface's Library Path input renders from data the host resolved
+// and reports typed actions; the filesystem check and the session registration
+// live in `RiffApp`'s Library Path adapter, which the Settings surface and the
+// sidebar's Add Library control share.
+
+#[cfg(test)]
+mod library_path_ui_tests {
+    use egui_kittest::kittest::Queryable;
+    use riff_backend::app::state::{LibrarySession, LibraryStatus};
+    use riff_gui::ui::app::register_library_path;
+    use riff_gui::ui::settings::{PathInput, PathInputAction, path_input};
+    use riff_gui::ui::theme::Palette;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    use crate::mocks::{MockSettingsStore, SettingsCall};
+
+    /// Render the input row over `error`/`suggestions` and click `labels`,
+    /// returning the actions it reported.
+    fn input_actions(
+        error: Option<&str>,
+        suggestions: &[PathBuf],
+        clicks: &[&str],
+    ) -> Vec<PathInputAction> {
+        let palette = Palette::dark();
+        let suggestions = suggestions.to_vec();
+        let error = error.map(str::to_owned);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(520.0, 160.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, actions: &mut Vec<PathInputAction>| {
+                    let mut text = String::from("/music");
+                    let mut input = PathInput {
+                        text: &mut text,
+                        error: error.as_deref(),
+                        suggestions: &suggestions,
+                    };
+                    actions.extend(path_input(ui, &palette, &mut input));
+                },
+                Vec::new(),
+            );
+        harness.run();
+        for label in clicks {
+            harness.get_by_label(label).click();
+            harness.run();
+        }
+        std::mem::take(harness.state_mut())
+    }
+
+    #[test]
+    fn test_path_input_reports_only_what_the_listener_chose() {
+        assert!(
+            input_actions(Some("Path does not exist: /music"), &[], &[]).is_empty(),
+            "rendering the input reports nothing"
+        );
+        assert_eq!(
+            input_actions(None, &[], &["Confirm"]),
+            vec![PathInputAction::Confirm],
+            "Confirm reports the choice; validating it is the host's job"
+        );
+        assert_eq!(
+            input_actions(None, &[], &["Cancel"]),
+            vec![PathInputAction::Cancel],
+            "Cancel reports the dismissal; clearing the draft is the host's"
+        );
+
+        let suggestion = PathBuf::from("/home/listener/Music");
+        let row = format!("\u{1F4C1} {}", suggestion.to_string_lossy());
+        assert_eq!(
+            input_actions(None, std::slice::from_ref(&suggestion), &[&row]),
+            vec![PathInputAction::Complete(suggestion)],
+            "a suggestion the host resolved comes back as the path it names"
+        );
+    }
+
+    /// The rejection the host produced is what the row shows — the input reads
+    /// its error, it never derives one.
+    #[test]
+    fn test_path_input_shows_the_hosts_resolved_error() {
+        let palette = Palette::dark();
+        let mut text = String::from("/music");
+        let suggestions: Vec<PathBuf> = Vec::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(520.0, 96.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(|ui| {
+                let mut input = PathInput {
+                    text: &mut text,
+                    error: Some("Not a directory: /music"),
+                    suggestions: &suggestions,
+                };
+                let _ = path_input(ui, &palette, &mut input);
+            });
+        harness.run();
+        assert!(
+            harness.query_by_label("Not a directory: /music").is_some(),
+            "the row carries the host's rejection verbatim"
+        );
+    }
+
+    fn scratch() -> (
+        LibrarySession,
+        MockSettingsStore,
+        Arc<Mutex<Vec<SettingsCall>>>,
+    ) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        (
+            LibrarySession::default(),
+            MockSettingsStore::with_shared_calls(Arc::clone(&calls)),
+            calls,
+        )
+    }
+
+    #[test]
+    fn test_a_valid_path_registers_once_writes_once_and_starts_nothing() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let root = dir.path().join("music");
+        std::fs::create_dir(&root).expect("a scratch library directory");
+        let canonical = root.canonicalize().expect("the canonical root");
+        let (mut library, mut store, calls) = scratch();
+
+        let registered =
+            register_library_path(root.to_str().expect("utf-8"), &mut library, &mut store)
+                .expect("a real directory is accepted");
+        assert_eq!(registered, canonical);
+        assert_eq!(
+            library.library_paths.paths(),
+            std::slice::from_ref(&canonical),
+            "the root becomes a fact of the session"
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![SettingsCall::LibraryPaths],
+            "the typed settings row is the only durable write"
+        );
+        assert!(
+            library.scan_status.is_none(),
+            "registering a root announces no scan"
+        );
+        assert_eq!(
+            library.library_paths.readiness(&canonical),
+            LibraryStatus::Idle,
+            "and the fresh root claims no readiness until the listener indexes it"
+        );
+
+        let again = register_library_path(root.to_str().expect("utf-8"), &mut library, &mut store)
+            .expect("a repeat selection is still a valid directory");
+        assert_eq!(again, canonical, "the duplicate answers with the same root");
+        assert_eq!(library.library_paths.paths().len(), 1, "and registers once");
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            1,
+            "a duplicate selection writes nothing twice"
+        );
+    }
+
+    #[test]
+    fn test_a_missing_path_or_a_plain_file_is_refused_without_writing() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let file = dir.path().join("song.mp3");
+        std::fs::write(&file, b"not a directory").expect("a scratch file");
+        let (mut library, mut store, calls) = scratch();
+
+        let missing = dir.path().join("nowhere");
+        let err = register_library_path(missing.to_str().expect("utf-8"), &mut library, &mut store)
+            .expect_err("a path that is not there is refused");
+        assert!(
+            err.starts_with("Path does not exist"),
+            "the refusal explains itself: {err}"
+        );
+
+        let err = register_library_path(file.to_str().expect("utf-8"), &mut library, &mut store)
+            .expect_err("a plain file is not a library root");
+        assert!(
+            err.starts_with("Not a directory"),
+            "the refusal names the real problem: {err}"
+        );
+
+        assert!(
+            library.library_paths.paths().is_empty(),
+            "nothing was registered"
+        );
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "a refused candidate writes no settings"
+        );
+    }
+}
+
+// --- The component boundary, as a standing gate (issue 18) --------------------
+//
+// The two-tier layer is only real if the rules stay enforced. These sweeps are
+// the enforcement: what a primitive may not own, that every component module is
+// inside the token sweeps' view, and that the historical frontend paths the
+// extraction promised to keep on resolving actually still resolve.
+
+#[cfg(test)]
+mod component_boundary_tests {
+    use eframe::egui;
+    use riff_backend::app::Transport;
+    use riff_backend::domain::TrackId;
+    use std::path::{Path, PathBuf};
+
+    /// Every module the component-layer tickets added or reshaped: primitives
+    /// and the neutral presentation owners. Feature composites (`app`,
+    /// `browser_pane`, `sidebar`, `settings`, `detail`, `playerbar`,
+    /// `now_playing`, `chrome`, `selection`) are deliberately absent — they are
+    /// allowed to hold application state, and the sweeps below would be wrong
+    /// to demand otherwise.
+    const PRIMITIVES: [&str; 13] = [
+        "artwork.rs",
+        "button.rs",
+        "empty_state.rs",
+        "feedback.rs",
+        "icons.rs",
+        "linear.rs",
+        "menu.rs",
+        "prompts.rs",
+        "row.rs",
+        "stage.rs",
+        "text_field.rs",
+        "toggle_switch.rs",
+        "up_next.rs",
+    ];
+
+    fn ui_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("crates")
+            .join("riff-gui")
+            .join("src")
+            .join("ui")
+    }
+
+    /// `(path, line)` for every code line of one primitive module, comments
+    /// dropped — prose is allowed to name the owners a primitive must not hold.
+    fn primitive_lines(name: &str) -> Vec<(PathBuf, String)> {
+        let path = ui_dir().join(name);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|_| panic!("{name} is part of the component layer"));
+        source
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| !line.starts_with("//"))
+            .map(|line| (path.clone(), line.to_owned()))
+            .collect()
+    }
+
+    /// A primitive receives presentation values and returns responses or typed
+    /// intents. It must not reach for the application: not `RiffApp`, the two
+    /// sessions, the read model, a port, a service front end, a generation, or a
+    /// native integration. Those are the host's, and the sweep is what stops a
+    /// future "just this one call" from putting them back.
+    #[test]
+    fn test_no_primitive_names_an_application_owner() {
+        const FORBIDDEN: [&str; 17] = [
+            "RiffApp",
+            "SessionViews",
+            "LibrarySession",
+            "PlaybackSession",
+            "dyn Transport",
+            "Transport::",
+            "PlaylistStore",
+            "SettingsStore",
+            "LibraryMutationStore",
+            "Scans",
+            "Covers",
+            "TagEdits",
+            "WatcherManager",
+            "rfd::",
+            // A primitive depends on the theme and its own props — never on the
+            // composite that hosts it. (Both arrows used to point the wrong
+            // way: ui::app <-> ui::cover_placeholder, ui::stage -> ui::app.)
+            "ui::app::",
+            "super::app::",
+            "crate::app::",
+        ];
+        let mut offenders = Vec::new();
+        for name in PRIMITIVES {
+            for (path, line) in primitive_lines(name) {
+                if FORBIDDEN.iter().any(|owner| line.contains(owner)) {
+                    offenders.push(format!("{}: {line}", path.display()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "the component layer must stay free of application ownership:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// A primitive may hold its own presentation state — the feedback board
+    /// folds notices into slots, an icon cache holds textures — but it never
+    /// reaches a *shared* handle: no `Arc<Mutex<…>>` session, no lock-recovery,
+    /// no clone of an application handle. The two sessions, the event inbox, and
+    /// the watcher live behind `Arc<Mutex<…>>` in the host, and that is where
+    /// they stay.
+    #[test]
+    fn test_no_primitive_reaches_a_shared_application_handle() {
+        const SHARED_HANDLES: [&str; 4] = ["Arc<Mutex", "Arc<", "lock_or_recover", "RiffApp"];
+        let mut offenders = Vec::new();
+        for name in PRIMITIVES {
+            for (path, line) in primitive_lines(name) {
+                if SHARED_HANDLES.iter().any(|handle| line.contains(handle)) {
+                    offenders.push(format!("{}: {line}", path.display()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a primitive takes caller-owned values, never a shared application handle:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// The token sweeps (ADR 0004) walk `src/ui` recursively, so a new component
+    /// module is covered the moment it lands — but only if it is really there.
+    /// Asserted against the same directory the sweeps scan, so a module renamed
+    /// out of the list is caught rather than silently unscanned.
+    #[test]
+    fn test_every_component_module_is_inside_the_token_sweeps() {
+        fn scan(dir: &Path, found: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("src/ui must be readable") {
+                let path = entry.expect("a readable entry").path();
+                if path.is_dir() {
+                    scan(&path, found);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    found.push(
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .expect("a utf-8 file name")
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+
+        // The sweeps exclude exactly one file — `theme.rs`, the token store
+        // itself — so any module that lives under `src/ui` is judged by them.
+        let mut found = Vec::new();
+        scan(&ui_dir(), &mut found);
+        let missing: Vec<&str> = PRIMITIVES
+            .iter()
+            .copied()
+            .filter(|name| !found.iter().any(|file| file == name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "component modules outside the swept tree would escape the token \
+             sweeps (ADR 0004): {missing:?}"
+        );
+    }
+    /// Story 40: the extraction is an internal ownership change, not an
+    /// application-wide migration. Every historical frontend path feature code
+    /// and the suite were already writing has to keep resolving — these are the
+    /// spellings the tickets promised to keep alive through re-exports, named
+    /// here so a cleanup that deletes one is a test failure, not a quiet break.
+    #[test]
+    fn test_historical_frontend_paths_still_resolve() {
+        // Moved out of `ui::app` in ticket 13; still callable from it.
+        let _boxes = [
+            riff_gui::ui::app::COVER_THUMB,
+            riff_gui::ui::app::COVER_CARD,
+            riff_gui::ui::app::COVER_HERO,
+        ];
+        let _key = riff_gui::ui::app::cover_cache_key("a.mp3", riff_gui::ui::app::COVER_THUMB);
+        let _: Option<riff_gui::ui::app::CoverCacheKey> = None;
+        let _cap = riff_gui::ui::app::COVER_CACHE_CAP;
+        let _evicted: Vec<String> = riff_gui::ui::app::lru_insert(&mut Vec::new(), "k".into(), 1);
+
+        // The artwork placeholder's old home.
+        let _tile = riff_gui::ui::cover_placeholder::placeholder_cache_key;
+
+        // Moved out of `ui::browser` (ticket 12) and `ui::now_playing` (ticket 05).
+        let _empty: fn(&mut egui::Ui, &riff_gui::ui::theme::Palette, &str, &str) =
+            riff_gui::ui::browser::empty_state;
+        let _entries = riff_gui::ui::now_playing::up_next_entries(&[], 5);
+        let _entry: Option<riff_gui::ui::now_playing::UpNextEntry> = None;
+
+        // The host-adapter paths the suite drives menus and prompts through.
+        let _intent: fn(riff_gui::ui::menu::ListMenuIntent, &[TrackId], &dyn Transport) =
+            riff_gui::ui::app::apply_list_menu_intent;
+        let _duration: fn(std::time::Duration) -> String = riff_gui::ui::app::format_duration;
+        let _expand: fn(&str) -> std::path::PathBuf = riff_gui::ui::settings::expand_tilde;
     }
 }

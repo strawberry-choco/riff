@@ -10,8 +10,10 @@ use riff_backend::app::MutexExt;
 use riff_backend::app::state::{
     LibrarySession, LibraryStatus, PlaybackSession, ViewMode, WatchState,
 };
-use riff_backend::app::store::{AUDIO_EXTENSIONS, FullScanSummary, SettingsStore};
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use riff_backend::app::store::SettingsStore;
+use riff_backend::app::store::{AUDIO_EXTENSIONS, FullScanSummary};
+use std::path::PathBuf;
 
 /// Expand a leading `~/` (or a bare `~`) in `input` against the `HOME`
 /// environment variable. Returns the path unchanged when there is no leading
@@ -84,24 +86,6 @@ pub fn suggest_directories(input: &str, max: usize) -> Vec<PathBuf> {
     matches.dedup();
     matches.truncate(max);
     matches
-}
-
-/// Register one library root: update the Library Session, then persist the path list
-/// to the Application Store. A store write failure is logged (the in-memory
-/// change stands so the session still works).
-fn add_library_path(path: PathBuf, library: &mut LibrarySession, store: &mut dyn SettingsStore) {
-    let canonical = std::fs::canonicalize(&path).unwrap_or(path);
-    if library.library_paths.contains(&canonical) {
-        return;
-    }
-    library.library_paths.push(canonical.clone());
-    library
-        .library_statuses
-        .entry(canonical.clone())
-        .or_default();
-    if let Err(e) = store.save_library_paths(&library.library_paths) {
-        tracing::warn!("Failed to save library paths: {e}");
-    }
 }
 
 // --- Readiness (CONTEXT.md): per-path health, independent of Watch State -------
@@ -1777,7 +1761,7 @@ fn pick_folder_ui(
                 } else if !path.is_dir() {
                     *path_error = Some(format!("Not a directory: {}", path.display()));
                 } else {
-                    add_library_path(path, library, store);
+                    library.library_paths.register(path, store);
                     *text_input = String::new();
                     *show_input = false;
                     *path_error = None;
@@ -1821,33 +1805,24 @@ impl super::app::RiffApp {
         playback: &mut PlaybackSession,
     ) {
         // Per-root indexed-track counts come from the store through the
-        // Session Views seam (component-wise subtree ids, invalidated by
+        // Session Views seam (one bounded count read per row, invalidated by
         // generation bumps) — never the former in-memory mirror.
         let content = SettingsContent {
             libraries: library
                 .library_paths
+                .paths()
                 .iter()
-                .map(|path| {
-                    let indexed_tracks = self.views.folder_subtree_ids(path).len();
-                    LibraryRow {
-                        path: path.clone(),
-                        status: library
-                            .library_statuses
-                            .get(path)
-                            .cloned()
-                            .unwrap_or_default(),
-                        watch: library.watch_states.get(path).cloned().unwrap_or_default(),
-                        indexed_tracks,
-                    }
+                .map(|path| LibraryRow {
+                    path: path.clone(),
+                    status: library.library_paths.readiness(path),
+                    watch: library.library_paths.watch_state(path),
+                    indexed_tracks: self.views.folder_track_count(path),
                 })
                 .collect(),
             advanced_mode: library.ui_flags.advanced_mode,
             high_contrast: library.ui_flags.high_contrast,
             replaygain_enabled: playback.replaygain_enabled,
-            watch_any: library
-                .library_paths
-                .iter()
-                .any(|path| library.watch_states.get(path) == Some(&WatchState::Enabled)),
+            watch_any: library.library_paths.watches_any(),
             skip_hidden_files: library.scan_prefs.skip_hidden_files,
             scan_formats: library.scan_prefs.scan_formats.clone(),
             read_embedded_artwork: library.scan_prefs.read_embedded_artwork,
@@ -1900,13 +1875,29 @@ impl super::app::RiffApp {
             // flow live behind it.
             SettingsAction::Scan(path) => self.scans.request(path),
             SettingsAction::ScanAll => {
-                for path in &library.library_paths {
+                for path in library.library_paths.paths() {
                     self.scans.request(path.clone());
                 }
             }
-            SettingsAction::Remove(path) => self.remove_library_path(&path, library),
+            SettingsAction::Remove(path) => {
+                // One call owns all five facts: the list entry, the Readiness
+                // slot, the Watch State, the live watcher, and the store rows.
+                let mut watcher = self.watcher_manager.lock_or_recover();
+                library.library_paths.retire(
+                    &path,
+                    &mut watcher,
+                    self.settings_store.as_mut(),
+                    self.library_mutations.as_mut(),
+                );
+            }
             SettingsAction::SetWatch(path, watching) => {
-                self.set_watch_state(&path, watching, library);
+                let mut watcher = self.watcher_manager.lock_or_recover();
+                library.library_paths.set_watch(
+                    &path,
+                    watching,
+                    &mut watcher,
+                    self.settings_store.as_mut(),
+                );
             }
             SettingsAction::ClearLibrary => self.clear_library_confirm = true,
             SettingsAction::SetAdvanced(value) => {
@@ -1919,10 +1910,13 @@ impl super::app::RiffApp {
                 playback.replaygain_enabled = value;
             }
             SettingsAction::SetWatchAll(watching) => {
-                let paths = library.library_paths.clone();
-                for path in paths {
-                    self.set_watch_state(&path, watching, library);
-                }
+                // Every root in one batch with one durable write.
+                let mut watcher = self.watcher_manager.lock_or_recover();
+                library.library_paths.set_watching_for_all(
+                    watching,
+                    &mut watcher,
+                    self.settings_store.as_mut(),
+                );
             }
             SettingsAction::SetSkipHidden(value) => {
                 library.scan_prefs.skip_hidden_files = value;
@@ -1967,7 +1961,9 @@ impl super::app::RiffApp {
                 .set_title("Add Music Library")
                 .pick_folder()
             {
-                add_library_path(path, library, self.settings_store.as_mut());
+                library
+                    .library_paths
+                    .register(path, self.settings_store.as_mut());
             }
         }
         #[cfg(target_os = "linux")]
@@ -1975,62 +1971,6 @@ impl super::app::RiffApp {
             self.settings_show_input = true;
             self.settings_path_error = None;
             let _ = library;
-        }
-    }
-
-    /// Remove one library root: one durable store transaction drops the
-    /// root's tracks, orphaned parents, and the path record (playlist entries
-    /// survive dangling so they recover when files return); the mutation
-    /// adapter bumps the session generation so projections refetch, then the
-    /// session state catches up.
-    fn remove_library_path(&mut self, path: &PathBuf, library: &mut LibrarySession) {
-        if let Err(e) = self.library_mutations.remove_library_path(path) {
-            tracing::error!("Failed to remove {path:?} from store: {e}");
-        }
-        library.library_paths.retain(|p| p != path);
-        library.library_statuses.remove(path);
-        if let Err(e) = self
-            .settings_store
-            .save_library_paths(&library.library_paths)
-        {
-            tracing::warn!("Failed to save library paths: {e}");
-        }
-    }
-
-    /// Start or stop the filesystem watcher for one root and persist the new
-    /// [`WatchState`]. A failed start degrades to a Warning carrying the
-    /// diagnostic, exactly as before the restyle.
-    fn set_watch_state(&mut self, path: &Path, watching: bool, library: &mut LibrarySession) {
-        if watching {
-            let result = {
-                let mut guard = self.watcher_manager.lock_or_recover();
-                guard.as_mut().map_or_else(
-                    || Err("Watcher not initialized".to_string()),
-                    |mgr| mgr.start_watching(path),
-                )
-            };
-            match result {
-                Ok(()) => {
-                    library
-                        .watch_states
-                        .insert(path.to_path_buf(), WatchState::Enabled);
-                }
-                Err(reason) => {
-                    library
-                        .watch_states
-                        .insert(path.to_path_buf(), WatchState::Warning(reason));
-                }
-            }
-        } else {
-            if let Some(ref mut mgr) = *self.watcher_manager.lock_or_recover() {
-                mgr.stop_watching(path);
-            }
-            library
-                .watch_states
-                .insert(path.to_path_buf(), WatchState::Disabled);
-        }
-        if let Err(e) = self.settings_store.save_watch_states(&library.watch_states) {
-            tracing::warn!("Failed to save watch states: {e}");
         }
     }
 
@@ -2047,7 +1987,10 @@ impl super::app::RiffApp {
                 match self.library_mutations.clear_library() {
                     Ok(removed) => {
                         // The mutation adapter bumps the session generation;
-                        // the mirror no longer tracks collection data.
+                        // the mirror no longer tracks collection data. The
+                        // fact-set is told too, so no root keeps claiming it
+                        // is indexed after the wipe.
+                        library.library_paths.clear_collection_data();
                         library.scan_status = Some(format!(
                             "Library cleared ({removed} tracks removed). Rescan to rebuild."
                         ));

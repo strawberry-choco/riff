@@ -383,12 +383,6 @@ impl<K, V> GenerationCache<K, V> {
         self.loaded.as_ref().map(|entry| &entry.value)
     }
 
-    /// Steal the cached value regardless of epoch (the fetch-then-swap
-    /// merge path reuses prior-generation rows only when they still hold).
-    pub fn take_value(&mut self) -> Option<V> {
-        self.loaded.take().map(|entry| entry.value)
-    }
-
     /// Drop the cached entry whatever it is stamped with.
     pub fn invalidate(&mut self) {
         self.loaded = None;
@@ -530,37 +524,36 @@ pub enum SortDirection {
 }
 
 /// A Section's or Drill Column's total and its visible window, read as one
-/// fact at one generation.
+/// fact.
 ///
-/// `stamp` is the generation captured inside the single connection
-/// acquisition that produced `rows`. A writer bumps its generation only
-/// after its own closure returns, so a reader can only ever stamp fresh
-/// data with a same-or-older epoch: a contended write over-invalidates, and
-/// never serves stale rows as fresh. The stamp stays private with no
-/// accessor — no caller outside the store can observe an epoch, so a guard
-/// that compares two observations of the counter has no form left to be
-/// written in.
+/// The guarantee is the **acquisition**: the store takes its connection once
+/// for the whole read, so no committed write can interleave the two halves and
+/// leave a total disagreeing with the rows beside it. Carrying the generation
+/// that was current at the read turned out to be inert data across the seam —
+/// the cache observes its own epoch before loading and commits at that — so
+/// which generation a level was filled at is the Session Projection's concern,
+/// not the page's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page<T> {
     total: usize,
     rows: Vec<T>,
-    stamp: u64,
 }
 
 impl<T> Page<T> {
-    /// A page whose total and rows were read together at `stamp`.
+    /// A page whose total and rows were taken under one connection
+    /// acquisition.
     #[must_use]
-    pub fn new(total: usize, rows: Vec<T>, stamp: u64) -> Self {
-        Self { total, rows, stamp }
+    pub fn new(total: usize, rows: Vec<T>) -> Self {
+        Self { total, rows }
     }
 
-    /// The listing's total at the generation that produced [`Self::rows`].
+    /// The listing's total, taken in the same acquisition as [`Self::rows`].
     #[must_use]
     pub fn total(&self) -> usize {
         self.total
     }
 
-    /// The visible window at the generation that produced [`Self::total`].
+    /// The visible window, taken in the same acquisition as [`Self::total`].
     #[must_use]
     pub fn rows(&self) -> &[T] {
         &self.rows
@@ -588,11 +581,9 @@ impl<T> Page<T> {
 ///
 /// A browse surface that shows a total above a window of rows reads both as
 /// one [`Page`] (`*_page` methods): the store takes its connection once for
-/// the whole read and stamps the page with the generation it observed inside
-/// that acquisition, so a committed mutation can never leave the total and
-/// the rows describing different moments. Each page read names which of the
-/// store's two counters stamps it, because which one applies is a fact about
-/// the listing, not something a caller infers.
+/// the whole read, so a committed mutation can never leave the total and the
+/// rows describing different moments. Which generation a listing was cached
+/// at is the Session Projection's question, not the page's.
 ///
 /// Two obligations are part of this interface. A page read must compose
 /// private connection-level helpers and never call back through a public
@@ -616,9 +607,8 @@ pub trait LibraryQueryStore {
     fn metadata_version(&self) -> Result<u32, StoreError>;
 
     /// The flat library list's Listing Page at `offset`: the total number of
-    /// stored Tracks and one window of `limit` rows, path-ascending, read
-    /// under a single connection acquisition and stamped with the Library
-    /// generation captured inside it.
+    /// stored Tracks and one window of `limit` rows, path-ascending, read as
+    /// one fact under a single connection acquisition.
     fn tracks_page(&self, offset: usize, limit: usize) -> Result<Page<Track>, StoreError>;
 
     /// The Library-count totals — tracks, artists, albums, genres — in ONE
@@ -642,9 +632,8 @@ pub trait LibraryQueryStore {
     fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError>;
 
     /// The search listing's Listing Page for `query` at `offset`: the match
-    /// total and one window of `limit` rows, path-ascending, read under a
-    /// single connection acquisition and stamped with the Library generation
-    /// captured inside it.
+    /// total and one window of `limit` rows, path-ascending, read as one fact
+    /// under a single connection acquisition.
     fn search_page(
         &self,
         query: &str,
@@ -775,8 +764,7 @@ pub trait LibraryQueryStore {
 
     /// The hit-album Drill Column's Listing Page for `query` at `offset`:
     /// the hit total and one window of `limit` albums in the canonical
-    /// browsing order, read under a single connection acquisition and
-    /// stamped with the Library generation captured inside it.
+    /// browsing order, read as one fact under a single connection acquisition.
     fn hit_albums_page(
         &self,
         query: &str,
@@ -786,8 +774,7 @@ pub trait LibraryQueryStore {
 
     /// The hit-artist Drill Column's Listing Page for `query` at `offset`:
     /// the hit total and one window of `limit` artists, name-ascending, read
-    /// under a single connection acquisition and stamped with the Library
-    /// generation captured inside it.
+    /// as one fact under a single connection acquisition.
     fn hit_artists_page(
         &self,
         query: &str,
@@ -871,8 +858,7 @@ pub trait LibraryQueryStore {
 
     /// The Artists root's Listing Page at `offset` for `direction`: the
     /// artist total and one window of `limit` artists, each carrying its
-    /// album keys, read under a single connection acquisition and stamped
-    /// with the Library generation captured inside it.
+    /// album keys, read as one fact under a single connection acquisition.
     fn artists_page(
         &self,
         direction: SortDirection,
@@ -882,8 +868,8 @@ pub trait LibraryQueryStore {
 
     /// The Albums root's Listing Page at `offset` for `direction`: the album
     /// total and one window of `limit` albums in the flat browsing order or
-    /// its exact reversal, read under a single connection acquisition and
-    /// stamped with the Library generation captured inside it.
+    /// its exact reversal, read as one fact under a single connection
+    /// acquisition.
     fn albums_page(
         &self,
         direction: SortDirection,
@@ -892,9 +878,8 @@ pub trait LibraryQueryStore {
     ) -> Result<Page<Album>, StoreError>;
 
     /// The Genres root's Listing Page at `offset` for `direction`: the genre
-    /// total and one window of `limit` entries, read under a single
-    /// connection acquisition and stamped with the Library generation
-    /// captured inside it.
+    /// total and one window of `limit` entries, read as one fact under a
+    /// single connection acquisition.
     fn genres_page(
         &self,
         direction: SortDirection,
@@ -903,9 +888,8 @@ pub trait LibraryQueryStore {
     ) -> Result<Page<GenreCount>, StoreError>;
 
     /// The genre drill-down's Listing Page of artists within `genre` at
-    /// `offset`: the total and one window of `limit` artists, read under a
-    /// single connection acquisition and stamped with the Library generation
-    /// captured inside it.
+    /// `offset`: the total and one window of `limit` artists, read as one
+    /// fact under a single connection acquisition.
     fn artists_in_genre_page(
         &self,
         genre: &str,
@@ -915,9 +899,8 @@ pub trait LibraryQueryStore {
     ) -> Result<Page<Artist>, StoreError>;
 
     /// The artist-and-genre drill-down's Listing Page at `offset`: the album
-    /// total and one window of `limit` albums, read under a single connection
-    /// acquisition and stamped with the Library generation captured inside
-    /// it.
+    /// total and one window of `limit` albums, read as one fact under a
+    /// single connection acquisition.
     fn artist_albums_in_genre_page(
         &self,
         artist: &str,
@@ -950,30 +933,4 @@ pub enum StoreChanged {
     /// These are infrequent user actions and are forwarded without
     /// coalescing.
     Playlists(u64),
-}
-
-/// The [`StoreChanged`] variant produced by the given `StoreChanged`.
-#[cfg(test)]
-mod issue04_store_events {
-    use super::{StoreChanged, StoreGeneration};
-
-    #[test]
-    fn store_generation_bumps_are_independent() {
-        let lib = StoreGeneration::new();
-        let pl = StoreGeneration::new();
-        lib.bump();
-        lib.bump();
-        pl.bump();
-        assert_eq!(lib.current(), 2);
-        assert_eq!(pl.current(), 1);
-    }
-
-    #[test]
-    fn store_changed_carries_generation_value() {
-        let generation = 5;
-        let e = StoreChanged::Library(generation);
-        assert_eq!(e, StoreChanged::Library(generation));
-        assert_ne!(e, StoreChanged::Library(generation + 1));
-        assert_ne!(e, StoreChanged::Playlists(generation));
-    }
 }

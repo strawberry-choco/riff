@@ -23,7 +23,7 @@ use riff_playback::app::state::PlaybackSession;
 use riff_playback::app::transport::Transport;
 
 use crate::app::MutexExt;
-use crate::app::state::{LibrarySession, LibraryStatus, ScanPrefs};
+use crate::app::state::{LibrarySession, ScanPrefs};
 use crate::app::store::{Settings, SettingsStore};
 use crate::domain::RepeatMode;
 
@@ -76,19 +76,7 @@ impl Preferences {
         }
         {
             let mut session = library.lock_or_recover();
-            if !settings.library_paths.is_empty() {
-                for path in &settings.library_paths {
-                    let status = if path.exists() {
-                        LibraryStatus::Idle
-                    } else {
-                        LibraryStatus::Unavailable
-                    };
-                    session.library_statuses.insert(path.clone(), status);
-                }
-                session.library_paths.clone_from(&settings.library_paths);
-            }
-
-            session.watch_states.clone_from(&settings.watch_states);
+            session.library_paths.hydrate(&settings);
 
             session.ui_flags.advanced_mode = settings.scalars.advanced_mode;
             session.ui_flags.high_contrast = settings.scalars.high_contrast;

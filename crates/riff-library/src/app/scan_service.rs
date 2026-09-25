@@ -24,11 +24,11 @@
 //! into the walk closure over the same cancel flag it hands to [`new`] — and
 //! runs [`ScanWorker::run`] on its own dedicated thread.
 
-use crate::app::MutexExt;
 use crate::app::scan::build_tracks;
 use crate::app::store::{FullScanSummary, LibraryMutationStore, LibraryQueryStore};
 use crate::app::traits::MetadataReader;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
+use riff_persistence::sync::MutexExt;
 use riff_persistence::track::{METADATA_VERSION, TrackId};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -486,7 +486,7 @@ mod tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<crate::app::store::Page<Track>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
+            Ok(crate::app::store::Page::new(0, Vec::new()))
         }
         fn library_counts(&self) -> Result<LibraryCounts, StoreError> {
             Ok(LibraryCounts::default())
@@ -500,7 +500,7 @@ mod tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<crate::app::store::Page<Track>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
+            Ok(crate::app::store::Page::new(0, Vec::new()))
         }
         fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
             Ok(Vec::new())
@@ -585,7 +585,7 @@ mod tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<crate::app::store::Page<Album>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
+            Ok(crate::app::store::Page::new(0, Vec::new()))
         }
         fn hit_artists_page(
             &self,
@@ -593,7 +593,7 @@ mod tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<crate::app::store::Page<Artist>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
+            Ok(crate::app::store::Page::new(0, Vec::new()))
         }
         fn album_hit_tracks(
             &self,
@@ -648,7 +648,7 @@ mod tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<crate::app::store::Page<Artist>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
+            Ok(crate::app::store::Page::new(0, Vec::new()))
         }
 
         fn albums_page(
@@ -657,7 +657,7 @@ mod tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<crate::app::store::Page<Album>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
+            Ok(crate::app::store::Page::new(0, Vec::new()))
         }
 
         fn genres_page(
@@ -666,7 +666,7 @@ mod tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<crate::app::store::Page<GenreCount>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
+            Ok(crate::app::store::Page::new(0, Vec::new()))
         }
 
         fn artists_in_genre_page(
@@ -676,7 +676,7 @@ mod tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<crate::app::store::Page<Artist>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
+            Ok(crate::app::store::Page::new(0, Vec::new()))
         }
 
         fn artist_albums_in_genre_page(
@@ -687,7 +687,7 @@ mod tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<crate::app::store::Page<Album>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new(), 0))
+            Ok(crate::app::store::Page::new(0, Vec::new()))
         }
     }
 

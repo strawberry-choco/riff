@@ -285,8 +285,9 @@ impl AppRuntime {
             );
         });
 
-        // Playback Coordinator: applies Playback Updates to session state
-        // and owns playback continuation, on its dedicated thread. It needs
+        // Playback Coordinator: applies Playback Updates to session state —
+        // play history first, then **Continuation**'s answer — on its
+        // dedicated thread. It needs
         // no stop flag — the engine thread's exit drops `update_tx` and
         // disconnects this loop.
         let coordinator = PlaybackCoordinator::spawn(

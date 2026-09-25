@@ -6,7 +6,6 @@
 //! set. Open or migrate failures are fatal startup errors surfaced as clear
 //! [`StoreError`]s rather than silent fallbacks.
 
-use crate::MutexExt;
 use crossbeam_channel::Sender;
 use riff_persistence::errors::StoreError;
 use riff_persistence::playlist::{Playlist, PlaylistId};
@@ -15,6 +14,7 @@ use riff_persistence::store::{
     Page, PlaylistEntry, PlaylistStore, ScalarSettings, Settings, SettingsStore, SortDirection,
     StoreChanged, StoreGeneration, StoreMigrations, WatchState,
 };
+use riff_persistence::sync::MutexExt;
 use riff_persistence::track::{
     Album, Artist, GenreCount, SmartPlaylistKind, Track, TrackId, TrackMetadata,
 };
@@ -1655,7 +1655,7 @@ impl LibraryQueryStore for SqliteStore {
     }
 
     fn tracks_page(&self, offset: usize, limit: usize) -> Result<Page<Track>, StoreError> {
-        self.read_page(&self.library_generation, |conn| {
+        self.read_page(|conn| {
             let total = Self::track_count_on(conn)?;
             let rows = Self::tracks_window_on(conn, offset, limit)?;
             Ok((total, rows))
@@ -1679,7 +1679,7 @@ impl LibraryQueryStore for SqliteStore {
         offset: usize,
         limit: usize,
     ) -> Result<Page<Track>, StoreError> {
-        self.read_page(&self.library_generation, |conn| {
+        self.read_page(|conn| {
             let total = Self::search_count_on(conn, query)?;
             let rows = Self::search_window_on(conn, query, offset, limit)?;
             Ok((total, rows))
@@ -2033,7 +2033,7 @@ impl LibraryQueryStore for SqliteStore {
         offset: usize,
         limit: usize,
     ) -> Result<Page<Album>, StoreError> {
-        self.read_page(&self.library_generation, |conn| {
+        self.read_page(|conn| {
             let total = Self::hit_albums_count_on(conn, query)?;
             let rows = Self::hit_albums_window_on(conn, query, offset, limit)?;
             Ok((total, rows))
@@ -2046,7 +2046,7 @@ impl LibraryQueryStore for SqliteStore {
         offset: usize,
         limit: usize,
     ) -> Result<Page<Artist>, StoreError> {
-        self.read_page(&self.library_generation, |conn| {
+        self.read_page(|conn| {
             let total = Self::hit_artists_count_on(conn, query)?;
             let rows = Self::hit_artists_window_on(conn, query, offset, limit)?;
             Ok((total, rows))
@@ -2233,7 +2233,7 @@ impl LibraryQueryStore for SqliteStore {
         offset: usize,
         limit: usize,
     ) -> Result<Page<Artist>, StoreError> {
-        self.read_page(&self.library_generation, |conn| {
+        self.read_page(|conn| {
             let total = Self::artists_count_on(conn)?;
             let rows = Self::artists_window_on(conn, direction, offset, limit)?;
             Ok((total, rows))
@@ -2246,7 +2246,7 @@ impl LibraryQueryStore for SqliteStore {
         offset: usize,
         limit: usize,
     ) -> Result<Page<Album>, StoreError> {
-        self.read_page(&self.library_generation, |conn| {
+        self.read_page(|conn| {
             let total = Self::albums_count_on(conn)?;
             let rows = Self::albums_window_on(conn, direction, offset, limit)?;
             Ok((total, rows))
@@ -2259,7 +2259,7 @@ impl LibraryQueryStore for SqliteStore {
         offset: usize,
         limit: usize,
     ) -> Result<Page<GenreCount>, StoreError> {
-        self.read_page(&self.library_generation, |conn| {
+        self.read_page(|conn| {
             let total = Self::genres_count_on(conn)?;
             let rows = Self::genres_window_on(conn, direction, offset, limit)?;
             Ok((total, rows))
@@ -2273,7 +2273,7 @@ impl LibraryQueryStore for SqliteStore {
         offset: usize,
         limit: usize,
     ) -> Result<Page<Artist>, StoreError> {
-        self.read_page(&self.library_generation, |conn| {
+        self.read_page(|conn| {
             let total = Self::artists_in_genre_count_on(conn, genre)?;
             let rows = Self::artists_in_genre_window_on(conn, genre, direction, offset, limit)?;
             Ok((total, rows))
@@ -2288,7 +2288,7 @@ impl LibraryQueryStore for SqliteStore {
         offset: usize,
         limit: usize,
     ) -> Result<Page<Album>, StoreError> {
-        self.read_page(&self.library_generation, |conn| {
+        self.read_page(|conn| {
             let total = Self::artist_albums_in_genre_count_on(conn, artist, genre)?;
             let rows = Self::artist_albums_in_genre_window_on(
                 conn, artist, genre, direction, offset, limit,
@@ -2680,22 +2680,20 @@ impl SqliteStore {
         .map_err(|e| StoreError::InvalidOperation(format!("folder listing failed: {e}")))
     }
 
-    /// One Listing Page stamped with `counter`, both halves read on the
-    /// connection this method holds for its whole duration. `read` must not
-    /// call back through [`LibraryQueryStore`]: the lock is non-reentrant.
-    /// The stamp is taken before the lock drops, so a writer that bumps
-    /// after its own closure returns can only stamp fresh rows with a
-    /// same-or-older epoch — over-invalidation, never stale-served-as-fresh.
+    /// One Listing Page, both halves read on the connection this method holds
+    /// for its whole duration — that single acquisition is what makes the total
+    /// and the window one fact. `read` must not call back through
+    /// [`LibraryQueryStore`]: the lock is non-reentrant. Which generation the
+    /// caller caches the page at is the Session Projection's business.
     fn read_page<T>(
         &self,
-        counter: &StoreGeneration,
         read: impl FnOnce(&Connection) -> rusqlite::Result<(usize, Vec<T>)>,
     ) -> Result<Page<T>, StoreError> {
         let conn = self.conn.lock_or_recover();
         let (total, rows) = read(&conn).map_err(|e| {
             StoreError::InvalidOperation(format!("failed to read a listing page: {e}"))
         })?;
-        Ok(Page::new(total, rows, counter.current()))
+        Ok(Page::new(total, rows))
     }
 
     /// Match count for [`Self::search_window_on`] on an already-held connection.

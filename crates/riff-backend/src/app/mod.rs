@@ -1,5 +1,6 @@
 pub mod errors;
 pub mod events;
+pub mod library_paths;
 pub mod preferences;
 pub mod state;
 pub mod store;
@@ -13,7 +14,6 @@ pub use riff_library::app::{
     cover_resolver::CoverResolver,
     cover_service::{COVER_CACHE_CAP, CoverService, CoverWorker, Covers, lru_insert},
     errors::LibraryError,
-    playlist_manager::{PlaylistManager, PlaylistManagerWorker, Playlists},
     projection::{
         BrowsingProjection, FolderProjection, GenreProjection, HitListProjection, HitProjection,
         PlaylistProjection, SmartPlaylistsProjection, TrackListProjection, WindowedListProjection,
@@ -44,22 +44,8 @@ pub use riff_playback::app::{
     transport::{ChannelTransport, Transport, clamp_seek},
 };
 
-use std::sync::{Mutex, MutexGuard};
-
-/// Extension trait for graceful `Mutex` access.
-///
-/// `std::sync::Mutex` *poisons* itself when a thread panics while holding the
-/// lock, causing every subsequent `lock().unwrap()` to panic and bring down the
-/// whole application. Real-time audio apps degrade more gracefully by recovering
-/// the (possibly inconsistent) inner data instead of crashing.
-pub trait MutexExt<T> {
-    /// Acquire the guard, recovering from a poisoned lock rather than panicking.
-    fn lock_or_recover(&self) -> MutexGuard<'_, T>;
-}
-
-impl<T> MutexExt<T> for Mutex<T> {
-    fn lock_or_recover(&self) -> MutexGuard<'_, T> {
-        self.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-}
+/// The single mutex-poison recovery policy, defined in `riff-persistence`
+/// beside the shared `std`-only utilities that crate owns. Re-exported at
+/// this historical path (`riff_backend::app::MutexExt`) for the frontend and
+/// the integration suite, which import the trait from here.
+pub use riff_persistence::sync::MutexExt;

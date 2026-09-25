@@ -17,12 +17,10 @@
 
 use crossbeam_channel::Receiver;
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::app::state::LibraryStatus;
 use crate::app::store::StoreChanged;
-use crate::domain::{PlaybackCommand, PlaybackPosition, PlaybackState, RepeatMode, TrackId};
+use crate::domain::PlaybackCommand;
 
 // ---------------------------------------------------------------------------
 // Event types (one enum the frontend drains)
@@ -56,96 +54,22 @@ pub struct NoticePayload {
 
 /// A typed change event the backend pushes to the frontend through the
 /// events inbox.
+///
+/// This is the surface the inbox actually fills. Library Scan progress and
+/// Tag Edit outcomes are not events here: they reach the frontend through the
+/// separate polls the frontend drives, and folding those into this inbox is a
+/// recorded follow-up of its own, not something this module does.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BackendEvent {
-    TrackChanged(TrackId),
-    StateChange(PlaybackState),
-    PositionChange(PlaybackPosition),
-    VolumeChange(f32),
-    QueueChanged {
-        len: usize,
-        shuffle: bool,
-        repeat: RepeatMode,
-    },
+    /// A playback command as dispatched through a transport.
     CommandApplied(PlaybackCommand),
-    /// Legacy catch-all. Prefer [`BackendEvent::TypedNotice`] for new call
-    /// sites; kept so existing tests and call paths still compile.
-    Notice(String),
-    /// Typed replacement for [`BackendEvent::Notice`].
+    /// A notice stamped with source and severity on drain.
     TypedNotice(NoticePayload),
-    /// Scan lifecycle events (issue 07).
-    ScanStarted {
-        path: String,
-    },
-    ScanProgress {
-        path: String,
-        files_found: usize,
-        total_estimated: Option<usize>,
-    },
-    ScanCompleted {
-        path: String,
-        total_files: usize,
-    },
-    ScanFailed {
-        path: String,
-        reason: String,
-    },
-    ScanCancelled {
-        path: String,
-    },
-    LibraryStatusChanged {
-        path: String,
-        status: LibraryStatus,
-    },
-    /// Library generation moved (issue 04, coalesced).
-    LibraryChanged {
-        generation: u64,
-    },
-    PlaylistsChanged {
-        generation: u64,
-    },
-    InitialSnapshot {
-        library_generation: u64,
-        playlists_generation: u64,
-    },
-    /// Upcoming queue entries after current (issue 05).
-    QueueUpcoming(Vec<TrackId>),
-    /// Full settings snapshot (issue 06).
-    SettingsChanged {
-        volume: f32,
-        muted: bool,
-        replaygain_enabled: bool,
-    },
-    /// Current track including None when stopped (issue 05).
-    CurrentTrack(Option<TrackId>),
-    /// Tag-edit correlation events (issue 09).
-    TagEditSubmitted {
-        correlation_id: CorrelationId,
-        track_id: TrackId,
-    },
-    TagEditCompleted {
-        correlation_id: CorrelationId,
-        track_id: TrackId,
-        file_path: PathBuf,
-    },
-    TagEditFailed {
-        correlation_id: CorrelationId,
-        track_id: TrackId,
-        reason: String,
-    },
-    /// Library management events (issue 08).
-    LibraryRootAdded {
-        path: String,
-    },
-    LibraryRootRemoved {
-        path: String,
-    },
-    LibraryCleared,
+    /// Library generation moved (coalesced to about four emissions/sec).
+    LibraryChanged { generation: u64 },
+    /// Playlist generation moved (forwarded one event per bump).
+    PlaylistsChanged { generation: u64 },
 }
-
-/// Correlation identifier tying a tag-edit submission to its outcome
-/// (issue 09).
-pub type CorrelationId = u64;
 
 // ---------------------------------------------------------------------------
 // BackendEvents
@@ -257,74 +181,6 @@ impl BackendEvents {
 // ===========================================================================
 
 #[cfg(test)]
-mod domain_match_tests {
-    use crate::domain::PlaybackCommand;
-
-    #[test]
-    fn backend_events_sees_every_playback_command_variant() {
-        let _ = handle_all;
-    }
-
-    fn handle_all(cmd: PlaybackCommand) {
-        match cmd {
-            PlaybackCommand::Play(_)
-            | PlaybackCommand::Pause
-            | PlaybackCommand::Resume
-            | PlaybackCommand::Stop
-            | PlaybackCommand::Seek(_)
-            | PlaybackCommand::SetVolume(_)
-            | PlaybackCommand::Next
-            | PlaybackCommand::Previous
-            | PlaybackCommand::PlayNext(_)
-            | PlaybackCommand::AddToQueue(_)
-            | PlaybackCommand::AddMany(_)
-            | PlaybackCommand::PlayPause => {}
-        }
-    }
-}
-
-#[cfg(test)]
-mod backend_event_match_tests {
-    use super::BackendEvent;
-
-    #[test]
-    fn every_backend_event_variant_is_handled() {
-        let _ = match_all;
-    }
-
-    fn match_all(ev: BackendEvent) {
-        match ev {
-            BackendEvent::TrackChanged(_)
-            | BackendEvent::StateChange(_)
-            | BackendEvent::PositionChange(_)
-            | BackendEvent::VolumeChange(_)
-            | BackendEvent::CommandApplied(_)
-            | BackendEvent::Notice(_)
-            | BackendEvent::TypedNotice(_)
-            | BackendEvent::QueueUpcoming(_)
-            | BackendEvent::CurrentTrack(_)
-            | BackendEvent::TagEditSubmitted { .. }
-            | BackendEvent::TagEditCompleted { .. }
-            | BackendEvent::TagEditFailed { .. }
-            | BackendEvent::QueueChanged { .. }
-            | BackendEvent::LibraryChanged { .. }
-            | BackendEvent::PlaylistsChanged { .. }
-            | BackendEvent::InitialSnapshot { .. }
-            | BackendEvent::ScanStarted { .. }
-            | BackendEvent::ScanProgress { .. }
-            | BackendEvent::ScanCompleted { .. }
-            | BackendEvent::ScanFailed { .. }
-            | BackendEvent::ScanCancelled { .. }
-            | BackendEvent::LibraryStatusChanged { .. }
-            | BackendEvent::SettingsChanged { .. }
-            | BackendEvent::LibraryRootAdded { .. }
-            | BackendEvent::LibraryRootRemoved { .. }
-            | BackendEvent::LibraryCleared => {}
-        }
-    }
-}
-
-#[cfg(test)]
 mod issue04_store_events {
     use crate::app::store::StoreGeneration;
 
@@ -426,26 +282,5 @@ mod issue01_playback_notices {
             }
             other => panic!("expected TypedNotice, got {other:?}"),
         }
-    }
-}
-
-#[cfg(test)]
-mod boundary {
-    use super::BackendEvents;
-
-    /// Compile-time proof that `BackendEvents` holds no session reference.
-    /// If this compiles, the inbox is free of `PlaybackSession` and
-    /// `LibrarySession` alike.
-    #[allow(dead_code)]
-    fn backend_events_compiles_without_sessions(_: &BackendEvents) {
-        // This function existing and compiling is the proof.
-        // Any reference to either session in BackendEvents would cause a
-        // compile error because neither is imported in this module scope.
-    }
-
-    #[test]
-    fn boundary_no_appstate_reference() {
-        // Trivial runtime assertion; the real check is the compile-time one above.
-        let _ = std::any::type_name::<BackendEvents>();
     }
 }

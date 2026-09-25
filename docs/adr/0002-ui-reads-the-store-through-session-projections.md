@@ -68,3 +68,41 @@ an intention.
   per-projection module layout stays; `SessionViews` stays the UI's single read seam with
   the same method signatures; and the two playback caches keep their hand-written bodies
   — they were designed to adopt `level` and are not migrated in this change.
+
+## Amendment (2026-09-23)
+
+The decision above stands. One mechanism the previous amendment asserted turned out to
+carry no weight, and one thing it claimed about the playback caches understated the case.
+Both are corrected here rather than left as descriptions of an intention.
+
+- **The page's generation stamp is deleted.** `Page<T>` carried a private, accessorless
+  `stamp` captured inside the store's connection acquisition. Nothing in the workspace
+  ever read it: `GenerationCache::level` observes the counter itself before loading and
+  commits at *that* epoch, so the store's stamp was inert data across the seam. What a
+  Listing Page actually guarantees, and what remains true, is that its total and its
+  visible window are taken under **one connection acquisition**, so no committed write can
+  interleave them. Which generation a cached level was filled at is the cache's business,
+  not the page's. `CONTEXT.md`'s Listing Page entry now says so.
+- **Freshness moves inside `GenerationCache` for every level that can declare one.**
+  Five hand-written observe-compare-load-commit bodies now declare themselves on
+  `level`: `smart.rs`'s list (its over-serving limit rule lives in the `read` closure, which
+  is where a rule about which cached answers count belongs), `counts.rs`'s `last_scan` (the
+  cached absence is a `Some(None)` from `read`, so the tri-state slot stays and the procedure
+  does not), `playlists.rs`'s list (its cache value became a one-slot bundle, because
+  "loaded, and there are none" must not read as a miss), and both `riff-playback` caches.
+  The claim that the playback caches were merely "designed to adopt" it was too cautious —
+  `refresh`'s second freshness dimension is queue shape, and `level`'s `read` closure receives
+  the cached bundle while capturing the caller's live queue, so a shape mismatch is expressed
+  as `read` returning `None`. What blocked that cache was only `V: Default`, not the interface.
+  Measured rather than rounded: nine epoch observations fell to **four** — the two below plus
+  two in the playback `current`/`up_next` reads, which have no loader to run and so are not
+  level-shaped; they guard a `peek` by hand, which is the primitive's documented fallback use.
+- **One exception is named rather than absorbed.** `playlists.rs`'s resolved-view cache
+  keys on two counters, because a Library change can invalidate a Playlist's resolved rows
+  while a Playlist change cannot. `level` is single-stamp by the decision above, and
+  growing it for one caller is the interface widening this record's whole read-path work
+  argues against. So `GenerationCache::observe()` and `slot()` stay public — for that caller,
+  and for the two playback reads that have no loader to run — and the honest description of
+  this change is a **use-site collapse — nine observations to four — not an interface
+  collapse**. If the two-counter case ever spreads, growing `level` is a decision to be
+  recorded, not a refactor to be performed.

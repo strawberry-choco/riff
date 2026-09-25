@@ -39,17 +39,11 @@ riff-library = { path = "../riff-library" }
 # named only by the Composition Root in src/composition.rs).
 riff-infra = { path = "../riff-infra" }
 
-# Error handling
-thiserror = "2"
-
 # Logging
 tracing = "0.1"
 
 # Threading / sync
 crossbeam-channel = "0.5"
-
-# Random for shuffle
-fastrand = "2"
 
 [dev-dependencies]
 # The scan_bench example builds a synthetic library fixture in a tempdir.

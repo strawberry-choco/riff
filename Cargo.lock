@@ -4095,13 +4095,11 @@ name = "riff-backend"
 version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
- "fastrand",
  "riff-infra",
  "riff-library",
  "riff-persistence",
  "riff-playback",
  "tempfile",
- "thiserror 2.0.20",
  "tracing",
 ]
 
@@ -4114,12 +4112,10 @@ dependencies = [
  "eframe",
  "egui",
  "egui_extras",
- "egui_kittest",
  "muda",
  "resvg",
  "rfd",
  "riff-backend",
- "tempfile",
  "tracing",
  "tracing-subscriber",
  "tray-icon",

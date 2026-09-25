@@ -14,4 +14,5 @@ pub mod errors;
 pub mod levels;
 pub mod playlist;
 pub mod store;
+pub mod sync;
 pub mod track;

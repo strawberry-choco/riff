@@ -5,6 +5,7 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{Continuation, Trigger};
     use crate::domain::{CoverSource, GenreCount};
     use riff_backend::app::errors::StoreError;
     use riff_backend::app::playlist_manager;
@@ -2574,9 +2575,10 @@ mod tests {
         views.sync_playback(&queue, 5);
         let calls_after_load = mock.get_track_calls().len();
 
-        // A TrackChanged advance moves the queue: same generation, but the
-        // stamp moved, so the slots reload.
-        queue.advance();
+        // A queue change moves the stamp while the generation stays put, so
+        // the slots reload: the same forward answer the arbiter gives a
+        // listener's Next.
+        Continuation::after(&mut queue, Trigger::ManualNext);
         views.sync_playback(&queue, 5);
 
         assert!(
@@ -3481,7 +3483,7 @@ mod scan_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
@@ -3498,7 +3500,7 @@ mod scan_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn all_artists(&self) -> Result<Vec<crate::domain::Artist>, StoreError> {
@@ -3596,7 +3598,7 @@ mod scan_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn hit_artists_page(
@@ -3605,7 +3607,7 @@ mod scan_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn album_hit_tracks(&self, _a: &str, _t: &str, _q: &str) -> Result<Vec<Track>, StoreError> {
@@ -3656,7 +3658,7 @@ mod scan_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn albums_page(
@@ -3665,7 +3667,7 @@ mod scan_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn genres_page(
@@ -3674,7 +3676,7 @@ mod scan_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<crate::domain::GenreCount>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn artists_in_genre_page(
@@ -3684,7 +3686,7 @@ mod scan_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn artist_albums_in_genre_page(
@@ -3695,7 +3697,7 @@ mod scan_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
     }
 
@@ -4280,21 +4282,20 @@ mod audio_engine_tests {
     use super::*;
     use crossbeam_channel::{Receiver, unbounded};
     use riff_backend::app::audio_engine::AudioEngine;
-    use riff_backend::app::errors::{PlaybackError, StoreError};
+    use riff_backend::app::errors::StoreError;
     use riff_backend::app::store::LibraryQueryStore;
-    use riff_backend::app::traits::{AudioDecoder, AudioFormatInfo, AudioOutput};
-    use riff_playback::app::errors::PlaybackError as EnginePlaybackError;
-    use riff_playback::infra::ports::AudioDecoder as EngineAudioDecoder;
-    use riff_playback::infra::ports::AudioFormatInfo as EngineAudioFormatInfo;
-    use riff_playback::infra::ports::AudioOutput as EngineAudioOutput;
-    use riff_playback::infra::ports::DecoderFactory;
+    use riff_playback::infra::ports::{AudioFormatInfo, DecoderFactory};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
-    // The shared mocks under test (crate-root mocks module).
+    // The shared mocks under test (crate-root mocks module), which implement
+    // the same audio ports the engine consumes in production.
     use crate::mocks::{MockAudioDecoder, MockAudioOutput};
+
+    // The one arbiter the harness stands in for when a track ends.
+    use crate::domain::{Continuation, Trigger};
 
     /// How long any single wait on the engine may take before the test
     /// declares it wedged.
@@ -4304,10 +4305,20 @@ mod audio_engine_tests {
     const RATE: u32 = 48_000;
     const CHANNELS: u16 = 2;
 
-    fn format_with_duration(duration: Option<Duration>) -> AudioFormatInfo {
-        AudioFormatInfo {
-            sample_rate: RATE,
-            channels: CHANNELS,
+    /// What the scripted sources report: the stream format plus the duration
+    /// the decoder's `duration()` answers with.
+    #[derive(Clone)]
+    struct ScriptedSource {
+        format: AudioFormatInfo,
+        duration: Option<Duration>,
+    }
+
+    fn source_with_duration(duration: Option<Duration>) -> ScriptedSource {
+        ScriptedSource {
+            format: AudioFormatInfo {
+                sample_rate: RATE,
+                channels: CHANNELS,
+            },
             duration,
         }
     }
@@ -4317,150 +4328,21 @@ mod audio_engine_tests {
         vec![0.0; frames * usize::from(CHANNELS)]
     }
 
-    // --- Shared-handle port adapters -----------------------------------------
-
-    /// [`AudioDecoder`] view over one scripted [`MockAudioDecoder`] owned by
-    /// the engine; the test keeps the other handle for counter checks.
-    struct SharedDecoder {
-        mock: Arc<Mutex<MockAudioDecoder>>,
-        path: PathBuf,
-    }
-
-    impl EngineAudioDecoder for SharedDecoder {
-        fn source_path(&self) -> &Path {
-            &self.path
-        }
-
-        fn init(&mut self, path: &Path) -> Result<EngineAudioFormatInfo, EnginePlaybackError> {
-            self.path = path.to_path_buf();
-            let info = AudioDecoder::open(&mut *self.mock.lock().unwrap(), path)
-                .map_err(|e| EnginePlaybackError::Decode(e.to_string()))?;
-            Ok(EngineAudioFormatInfo {
-                sample_rate: info.sample_rate,
-                channels: info.channels,
-            })
-        }
-
-        fn next_frames(&mut self, buf: &mut [f32]) -> Option<usize> {
-            match AudioDecoder::next_frames(&mut *self.mock.lock().unwrap(), buf) {
-                Ok(0) | Err(_) => None,
-                Ok(n) => Some(n),
-            }
-        }
-
-        fn seek(&mut self, position: Duration) -> Duration {
-            let _ = AudioDecoder::seek(&mut *self.mock.lock().unwrap(), position);
-            position
-        }
-
-        fn duration(&self) -> Option<Duration> {
-            AudioDecoder::duration(&*self.mock.lock().unwrap())
-        }
-    }
-
-    impl AudioDecoder for SharedDecoder {
-        fn open(&mut self, path: &Path) -> Result<AudioFormatInfo, PlaybackError> {
-            self.mock.lock().unwrap().open(path)
-        }
-
-        fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, PlaybackError> {
-            self.mock.lock().unwrap().next_frames(out)
-        }
-
-        fn seek(&mut self, position: Duration) -> Result<(), PlaybackError> {
-            self.mock.lock().unwrap().seek(position)
-        }
-
-        fn duration(&self) -> Option<Duration> {
-            self.mock.lock().unwrap().duration()
-        }
-
-        fn close(&mut self) {
-            self.mock.lock().unwrap().close();
-        }
-    }
-
-    /// [`AudioOutput`] view over one recording [`MockAudioOutput`] owned by
-    /// the engine; the test keeps the other handle for counter checks.
-    struct SharedOutput(Arc<Mutex<MockAudioOutput>>);
-
-    impl EngineAudioOutput for SharedOutput {
-        fn start(&mut self, format: EngineAudioFormatInfo) -> Result<(), EnginePlaybackError> {
-            AudioOutput::initialize(
-                &mut *self.0.lock().unwrap(),
-                format.sample_rate,
-                format.channels,
-            )
-            .map_err(|e| EnginePlaybackError::AudioOutput(e.to_string()))?;
-            AudioOutput::start(&mut *self.0.lock().unwrap())
-                .map_err(|e| EnginePlaybackError::AudioOutput(e.to_string()))
-        }
-
-        fn write(&mut self, samples: &[f32]) -> usize {
-            AudioOutput::write_samples(&mut *self.0.lock().unwrap(), samples).unwrap_or(0)
-        }
-
-        fn stop(&mut self) {
-            let _ = AudioOutput::stop(&mut *self.0.lock().unwrap());
-        }
-
-        fn set_volume(&mut self, volume: f32) {
-            AudioOutput::set_volume(&mut *self.0.lock().unwrap(), volume);
-        }
-
-        fn latency(&self) -> u32 {
-            0
-        }
-    }
-
-    impl AudioOutput for SharedOutput {
-        fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), PlaybackError> {
-            self.0.lock().unwrap().initialize(sample_rate, channels)
-        }
-
-        fn start(&mut self) -> Result<(), PlaybackError> {
-            self.0.lock().unwrap().start()
-        }
-
-        fn stop(&mut self) -> Result<(), PlaybackError> {
-            self.0.lock().unwrap().stop()
-        }
-
-        fn write_samples(&mut self, samples: &[f32]) -> Result<usize, PlaybackError> {
-            self.0.lock().unwrap().write_samples(samples)
-        }
-
-        fn set_volume(&mut self, volume: f32) {
-            self.0.lock().unwrap().set_volume(volume);
-        }
-
-        fn buffer_len(&self) -> usize {
-            self.0.lock().unwrap().buffer_len()
-        }
-
-        fn clear_buffer(&mut self) {
-            self.0.lock().unwrap().clear_buffer();
-        }
-
-        fn effective_sample_rate(&self) -> u32 {
-            self.0.lock().unwrap().effective_sample_rate()
-        }
-    }
-
     /// Every decoder the factory mints, in mint order (primary first,
-    /// gapless pre-decode second). Shared handles keep the mocks' counters
-    /// readable after the engine has taken ownership.
-    type DecoderLog = Arc<Mutex<Vec<Arc<Mutex<MockAudioDecoder>>>>>;
+    /// gapless pre-decode second). Each entry is a handle to a minted
+    /// decoder's recording state, so the counters stay readable after the
+    /// engine has taken ownership.
+    type DecoderLog = Arc<Mutex<Vec<MockAudioDecoder>>>;
 
     /// Scripted [`DecoderFactory`]: mints fresh [`MockAudioDecoder`]s that
-    /// report `format`, registering each in `log`. The first mint (the
+    /// report `source`, registering each in `log`. The first mint (the
     /// primary slot) replays `primary`; every later mint (the gapless
     /// pre-decode slot) replays `successor` — mirroring reality, where the
     /// successor is a different track.
     fn scripted_factory(
         primary: Vec<Vec<f32>>,
         successor: Vec<Vec<f32>>,
-        format: AudioFormatInfo,
+        source: ScriptedSource,
         log: DecoderLog,
     ) -> DecoderFactory {
         let call_index = AtomicUsize::new(0);
@@ -4470,14 +4352,11 @@ mod audio_engine_tests {
             } else {
                 successor.clone()
             };
-            let mock = Arc::new(Mutex::new(
-                MockAudioDecoder::new(format.clone()).with_batches(script),
-            ));
-            log.lock().unwrap().push(Arc::clone(&mock));
-            Box::new(SharedDecoder {
-                mock,
-                path: PathBuf::new(),
-            })
+            let decoder = MockAudioDecoder::new(source.format.clone())
+                .with_duration(source.duration)
+                .with_batches(script);
+            log.lock().unwrap().push(decoder.clone());
+            Box::new(decoder) as Box<_>
         })
     }
 
@@ -4505,7 +4384,6 @@ mod audio_engine_tests {
             Ok(riff_persistence::store::Page::new(
                 self.tracks.len(),
                 Vec::new(),
-                0,
             ))
         }
 
@@ -4517,6 +4395,12 @@ mod audio_engine_tests {
         }
 
         fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
+            // Mirrors the Application Store's contract: `SELECT path FROM
+            // tracks ORDER BY path ASC` (pinned against real SQLite by
+            // `test_all_track_ids_are_canonically_path_ordered`). A TrackId is
+            // that path, so sorting by it is the same order — the fill's
+            // ordering test in the domain suite is what pins that the arbiter
+            // takes this list verbatim.
             let mut ids: Vec<TrackId> = self.tracks.keys().cloned().collect();
             ids.sort_by(|a, b| a.0.cmp(&b.0));
             Ok(ids)
@@ -4528,7 +4412,7 @@ mod audio_engine_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
@@ -4624,7 +4508,7 @@ mod audio_engine_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn hit_artists_page(
@@ -4633,7 +4517,7 @@ mod audio_engine_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn album_hit_tracks(&self, _a: &str, _t: &str, _q: &str) -> Result<Vec<Track>, StoreError> {
@@ -4684,7 +4568,7 @@ mod audio_engine_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn albums_page(
@@ -4693,7 +4577,7 @@ mod audio_engine_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn genres_page(
@@ -4702,7 +4586,7 @@ mod audio_engine_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<crate::domain::GenreCount>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn artists_in_genre_page(
@@ -4712,7 +4596,7 @@ mod audio_engine_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn artist_albums_in_genre_page(
@@ -4723,7 +4607,7 @@ mod audio_engine_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
     }
 
@@ -4734,7 +4618,7 @@ mod audio_engine_tests {
         cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
         updates: Receiver<PlaybackUpdate>,
         state: Arc<Mutex<PlaybackSession>>,
-        output: Arc<Mutex<MockAudioOutput>>,
+        output: MockAudioOutput,
         decoders: DecoderLog,
     }
 
@@ -4745,28 +4629,27 @@ mod audio_engine_tests {
         library: FakeLibraryStore,
         primary_script: Vec<Vec<f32>>,
         successor_script: Vec<Vec<f32>>,
-        format: AudioFormatInfo,
+        source: ScriptedSource,
     ) -> Harness {
         let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
         let (update_tx, update_rx) = unbounded::<PlaybackUpdate>();
 
-        let output = Arc::new(Mutex::new(MockAudioOutput::new()));
-        output.lock().unwrap().set_effective_sample_rate(RATE);
+        let output = MockAudioOutput::new();
         let decoders: DecoderLog = Arc::new(Mutex::new(Vec::new()));
 
-        let out_handle = Arc::clone(&output);
+        let out_handle = output.clone();
         let dec_handle = Arc::clone(&decoders);
         let thread_state = Arc::clone(&state);
         let thread_cmd_tx = cmd_tx.clone();
         std::thread::spawn(move || {
-            let factory = scripted_factory(primary_script, successor_script, format, dec_handle);
+            let factory = scripted_factory(primary_script, successor_script, source, dec_handle);
             let engine = AudioEngine::new(
                 cmd_rx,
                 thread_cmd_tx,
                 update_tx,
                 Box::new(library),
                 factory,
-                Box::new(SharedOutput(out_handle)),
+                Box::new(out_handle),
                 thread_state,
                 inert_stop_flag(),
             );
@@ -4789,25 +4672,22 @@ mod audio_engine_tests {
     fn release(_h: Harness) {}
 
     /// Receive one update, mirroring main.rs's update processor along the
-    /// way: on `TrackEnded` it advances the queue and re-dispatches
-    /// `Play(new current)` — the exact duplicate the gapless dedup guard
-    /// must swallow — or marks playback stopped when nothing follows.
+    /// way: on `TrackEnded` it asks the same **Continuation** arbiter the
+    /// Playback Coordinator asks and re-dispatches `Play(new current)` — the
+    /// exact duplicate the gapless dedup guard must swallow — or marks
+    /// playback stopped when nothing follows.
     fn next_update(h: &Harness) -> PlaybackUpdate {
         let update = h.updates.recv_timeout(TIMEOUT).expect("update in time");
         if matches!(update, PlaybackUpdate::TrackEnded) {
             let next = {
                 let mut s = h.state.lock_or_recover();
-                if s.queue.repeat == RepeatMode::One {
-                    s.queue.current_track().cloned()
-                } else {
-                    s.queue.advance().cloned()
-                }
+                Continuation::after(&mut s.queue, Trigger::TrackEnded)
             };
             match next {
-                Some(track_id) => {
+                Continuation::Play(track_id) => {
                     let _ = h.cmd_tx.send(PlaybackCommand::Play(track_id));
                 }
-                None => {
+                Continuation::Stop => {
                     h.state.lock_or_recover().playback_state = PlaybackState::Stopped;
                 }
             }
@@ -4876,8 +4756,8 @@ mod audio_engine_tests {
         // decode loop writes both and then hits EOF. No successor is
         // scripted, so the pre-decode slot stays silent.
         let script = vec![batch(2_400), batch(2_400)];
-        let format = format_with_duration(Some(Duration::from_secs(1)));
-        let h = spawn_engine(state.clone(), library, script, Vec::new(), format);
+        let source = source_with_duration(Some(Duration::from_secs(1)));
+        let h = spawn_engine(state.clone(), library, script, Vec::new(), source);
 
         h.cmd_tx
             .send(PlaybackCommand::Play(TrackId("music/t1.wav".into())))
@@ -4912,24 +4792,21 @@ mod audio_engine_tests {
             1,
             "primary only - no successor to pre-decode"
         );
-        let d = decoders[0].lock().unwrap();
-        assert_eq!(d.opened, vec![PathBuf::from("music/t1.wav")]);
-        assert_eq!(d.seeks.len(), 0, "no seek without Resume/Seek commands");
-        drop(d);
+        let d = &decoders[0];
+        assert_eq!(d.opened(), vec![PathBuf::from("music/t1.wav")]);
+        assert_eq!(d.seeks().len(), 0, "no seek without Resume/Seek commands");
         drop(decoders);
-        let out = h.output.lock().unwrap();
-        assert_eq!(out.initialized, vec![(RATE, CHANNELS)]);
-        assert_eq!(out.start_count, 1, "the stream started exactly once");
+        let out = &h.output;
+        assert_eq!(out.started(), vec![(RATE, CHANNELS)]);
+        assert_eq!(out.start_count(), 1, "the stream started exactly once");
         // Each scripted batch holds 4800 samples, so both split across the
         // engine's 4096-sample decode chunk: four writes cover the two
         // batches (4096 + 704 remainder, twice).
-        assert_eq!(out.written.len(), 4, "both scripted batches were written");
+        assert_eq!(out.written().len(), 4, "both scripted batches were written");
 
-        // Release the gapped EOF drain (samples sit in the mock buffer): the
-        // drain loop swallows this Stop without dispatching it, which is the
-        // documented gapped-path behavior.
+        // End the session: the drain loop swallows this Stop without
+        // dispatching it, which is the documented gapped-path behavior.
         h.cmd_tx.send(PlaybackCommand::Stop).unwrap();
-        drop(out);
         release(h);
         assert_eq!(
             state.lock_or_recover().playback_state,
@@ -4954,8 +4831,8 @@ mod audio_engine_tests {
         let library = FakeLibraryStore { tracks };
 
         let script = vec![batch(2_400), batch(2_400)];
-        let format = format_with_duration(Some(Duration::from_secs(1)));
-        let h = spawn_engine(state.clone(), library, script, Vec::new(), format);
+        let source = source_with_duration(Some(Duration::from_secs(1)));
+        let h = spawn_engine(state.clone(), library, script, Vec::new(), source);
 
         h.cmd_tx
             .send(PlaybackCommand::Play(TrackId("music/b.wav".into())))
@@ -5007,13 +4884,13 @@ mod audio_engine_tests {
             queued_state_and_library(&["music/t1.wav", "music/t2.wav", "music/t3.wav"]);
         state.lock_or_recover().queue.current_index = Some(2);
         let script = vec![batch(2_400), batch(2_400)];
-        let format = format_with_duration(Some(Duration::from_secs(1)));
+        let source = source_with_duration(Some(Duration::from_secs(1)));
         let h = spawn_engine(
             state.clone(),
             library,
             script.clone(),
             Vec::new(),
-            format.clone(),
+            source.clone(),
         );
 
         h.cmd_tx.send(PlaybackCommand::Previous).unwrap();
@@ -5030,7 +4907,7 @@ mod audio_engine_tests {
         let (state, library) =
             queued_state_and_library(&["music/t1.wav", "music/t2.wav", "music/t3.wav"]);
         state.lock_or_recover().queue.current_index = Some(1);
-        let h = spawn_engine(state.clone(), library, script, Vec::new(), format.clone());
+        let h = spawn_engine(state.clone(), library, script, Vec::new(), source.clone());
 
         h.cmd_tx.send(PlaybackCommand::Next).unwrap();
         let updates = collect_until(&h, |u| is_track_changed(u, &TrackId("music/t3.wav".into())));
@@ -5050,8 +4927,8 @@ mod audio_engine_tests {
     fn engine_next_past_queue_end_stops() {
         let (state, library) = queued_state_and_library(&["music/t1.wav"]);
         let script: Vec<Vec<f32>> = (0..200).map(|_| batch(2_400)).collect();
-        let format = format_with_duration(Some(Duration::from_secs(1)));
-        let h = spawn_engine(state.clone(), library, script, Vec::new(), format);
+        let source = source_with_duration(Some(Duration::from_secs(1)));
+        let h = spawn_engine(state.clone(), library, script, Vec::new(), source);
 
         h.cmd_tx
             .send(PlaybackCommand::Play(TrackId("music/t1.wav".into())))
@@ -5084,8 +4961,8 @@ mod audio_engine_tests {
         // Successor script: 5 batches = 24k samples fully pre-buffered at
         // pre-encode time, then flushed at the handoff.
         let successor: Vec<Vec<f32>> = (0..5).map(|_| batch(2_400)).collect();
-        let format = format_with_duration(Some(Duration::from_secs(1)));
-        let h = spawn_engine(state.clone(), library, primary, successor, format);
+        let source = source_with_duration(Some(Duration::from_secs(1)));
+        let h = spawn_engine(state.clone(), library, primary, successor, source);
 
         h.cmd_tx
             .send(PlaybackCommand::Play(TrackId("music/t1.wav".into())))
@@ -5105,16 +4982,18 @@ mod audio_engine_tests {
         // pre-play stop every handle_play issues before opening. Any stop
         // across the handoff itself would push this to 2+.
         {
-            let out = h.output.lock().unwrap();
+            let out = &h.output;
             assert_eq!(
-                out.start_count, 1,
+                out.start_count(),
+                1,
                 "gapless handoff never restarts the stream"
             );
             assert_eq!(
-                out.stop_count, 1,
+                out.stop_count(),
+                1,
                 "only the pre-play stop; none across the handoff"
             );
-            let total_written: usize = out.written.iter().map(Vec::len).sum();
+            let total_written: usize = out.written().iter().map(Vec::len).sum();
             assert_eq!(
                 total_written,
                 30 * 4_800 + 5 * 4_800,
@@ -5150,12 +5029,9 @@ mod audio_engine_tests {
         // the open logs prove which decoder served which track.
         let decoders = h.decoders.lock().unwrap();
         assert_eq!(decoders.len(), 2, "no decoder is minted across the handoff");
+        assert_eq!(decoders[0].opened(), vec![PathBuf::from("music/t1.wav")]);
         assert_eq!(
-            decoders[0].lock().unwrap().opened,
-            vec![PathBuf::from("music/t1.wav")]
-        );
-        assert_eq!(
-            decoders[1].lock().unwrap().opened,
+            decoders[1].opened(),
             vec![PathBuf::from("music/t2.wav")],
             "the successor opened exactly once (during pre-decode)"
         );
@@ -5176,8 +5052,8 @@ mod audio_engine_tests {
         // session commands are consumed deterministically. No successor is
         // scripted.
         let script: Vec<Vec<f32>> = (0..4_000).map(|_| batch(480)).collect();
-        let format = format_with_duration(Some(Duration::from_secs(80)));
-        let h = spawn_engine(state.clone(), library, script, Vec::new(), format);
+        let source = source_with_duration(Some(Duration::from_secs(80)));
+        let h = spawn_engine(state.clone(), library, script, Vec::new(), source);
 
         h.cmd_tx
             .send(PlaybackCommand::Play(TrackId("music/t1.wav".into())))
@@ -5219,56 +5095,47 @@ mod audio_engine_tests {
         h.cmd_tx
             .send(PlaybackCommand::Seek(Duration::from_secs(2)))
             .unwrap();
-        wait_until(|| {
-            let out = h.output.lock().unwrap();
-            out.volumes.last() == Some(&0.25)
-        });
+        wait_until(|| h.output.volumes().last() == Some(&0.25));
         wait_until(|| {
             let decoders = h.decoders.lock().unwrap();
-            decoders[0]
-                .lock()
-                .unwrap()
-                .seeks
-                .contains(&Duration::from_secs(2))
+            decoders[0].seeks().contains(&Duration::from_secs(2))
         });
 
-        let out = h.output.lock().unwrap();
+        let out = &h.output;
         assert_eq!(
-            out.initialized,
+            out.started(),
             vec![(RATE, CHANNELS), (RATE, CHANNELS)],
             "initial start + resume restart"
         );
-        assert_eq!(out.start_count, 2);
+        assert_eq!(out.start_count(), 2);
         assert!(
-            out.volumes.contains(&0.5),
+            out.volumes().contains(&0.5),
             "mid-session SetVolume reached the output"
         );
         assert_eq!(
-            out.volumes.last(),
+            out.volumes().last(),
             Some(&0.25),
             "idle SetVolume reached the output"
         );
-        drop(out);
 
         let decoders = h.decoders.lock().unwrap();
         // Decoders are minted on demand: with no successor queued, only the
         // primary exists (the resume re-opens it rather than minting one).
         assert_eq!(decoders.len(), 1, "primary only");
-        let d = decoders[0].lock().unwrap();
-        assert_eq!(d.opened.len(), 2, "initial open + resume re-open");
+        let d = &decoders[0];
+        assert_eq!(d.opened().len(), 2, "initial open + resume re-open");
         assert!(
-            d.seeks.contains(&Duration::from_secs(1)),
+            d.seeks().contains(&Duration::from_secs(1)),
             "mid-session Seek reached the decoder"
         );
         assert!(
-            d.seeks.contains(&Duration::from_secs(2)),
+            d.seeks().contains(&Duration::from_secs(2)),
             "idle Seek reached the decoder"
         );
         assert!(
-            d.seeks.len() >= 3,
+            d.seeks().len() >= 3,
             "resume also re-seeked to the recorded pause position"
         );
-        drop(d);
         drop(decoders);
 
         release(h);
@@ -5342,7 +5209,7 @@ mod tag_edit_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
@@ -5359,7 +5226,7 @@ mod tag_edit_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
@@ -5455,7 +5322,7 @@ mod tag_edit_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn hit_artists_page(
@@ -5464,7 +5331,7 @@ mod tag_edit_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn album_hit_tracks(&self, _a: &str, _t: &str, _q: &str) -> Result<Vec<Track>, StoreError> {
@@ -5515,7 +5382,7 @@ mod tag_edit_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn albums_page(
@@ -5524,7 +5391,7 @@ mod tag_edit_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn genres_page(
@@ -5533,7 +5400,7 @@ mod tag_edit_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<crate::domain::GenreCount>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn artists_in_genre_page(
@@ -5543,7 +5410,7 @@ mod tag_edit_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn artist_albums_in_genre_page(
@@ -5554,7 +5421,7 @@ mod tag_edit_service_tests {
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new(), 0))
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
     }
 
@@ -6820,28 +6687,34 @@ mod playlist_projection_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Counting [`PlaylistStore`] decorator: delegates everything to the
-    /// real store handle while counting entry-list reads, so tests can tell
-    /// "served from cache" apart from "hit the store".
+    /// real store handle while counting playlist-list and entry-list reads, so
+    /// tests can tell "served from cache" apart from "hit the store" — and, for
+    /// an empty list, "answered once" apart from "requeried every call".
     struct CountingPlaylistStore {
         inner: SqliteStore,
         entry_loads: Arc<AtomicUsize>,
+        list_loads: Arc<AtomicUsize>,
     }
 
     impl CountingPlaylistStore {
-        fn new(inner: SqliteStore) -> (Self, Arc<AtomicUsize>) {
+        fn new(inner: SqliteStore) -> (Self, Arc<AtomicUsize>, Arc<AtomicUsize>) {
             let entry_loads = Arc::new(AtomicUsize::new(0));
+            let list_loads = Arc::new(AtomicUsize::new(0));
             (
                 Self {
                     inner,
                     entry_loads: Arc::clone(&entry_loads),
+                    list_loads: Arc::clone(&list_loads),
                 },
                 entry_loads,
+                list_loads,
             )
         }
     }
 
     impl PlaylistStore for CountingPlaylistStore {
         fn load_playlists(&self) -> Result<Vec<Playlist>, StoreError> {
+            self.list_loads.fetch_add(1, Ordering::SeqCst);
             self.inner.load_playlists()
         }
 
@@ -6902,6 +6775,7 @@ mod playlist_projection_tests {
         mutations: SqliteStore,
         views: riff_backend::app::views::SessionViews,
         entry_loads: Arc<AtomicUsize>,
+        list_loads: Arc<AtomicUsize>,
     }
 
     impl Scratch {
@@ -6913,7 +6787,8 @@ mod playlist_projection_tests {
             let store = SqliteStore::open_and_migrate(&db_path, changes_tx)
                 .expect("fresh store must open and migrate");
             let mutations = store.clone();
-            let (playlist_queries, entry_loads) = CountingPlaylistStore::new(mutations.clone());
+            let (playlist_queries, entry_loads, list_loads) =
+                CountingPlaylistStore::new(mutations.clone());
             let views = riff_backend::app::views::SessionViews::new(
                 Box::new(store.clone()),
                 Box::new(playlist_queries),
@@ -6926,12 +6801,18 @@ mod playlist_projection_tests {
                 mutations,
                 views,
                 entry_loads,
+                list_loads,
             }
         }
 
         /// How often the seam read playlist entries through the store.
         fn entry_loads(&self) -> usize {
             self.entry_loads.load(Ordering::SeqCst)
+        }
+
+        /// How often the seam read the playlist LIST through the store.
+        fn list_loads(&self) -> usize {
+            self.list_loads.load(Ordering::SeqCst)
         }
 
         /// Create a real audio file on disk and index it into the Library,
@@ -6991,6 +6872,39 @@ mod playlist_projection_tests {
             view.valid_ids.as_ref(),
             std::slice::from_ref(&t1.id),
             "only playable ids make valid_ids"
+        );
+    }
+
+    #[test]
+    fn an_empty_playlist_list_is_answered_once_and_not_requeried() {
+        // "Loaded, and there are none" is an answer, not a miss. If the cache
+        // reported the empty list as unloaded, the sidebar would requery the
+        // store on every call at the same generation.
+        let mut scratch = Scratch::new();
+
+        assert!(
+            scratch.views.playlists().is_empty(),
+            "a cold store has no playlists"
+        );
+        assert_eq!(scratch.list_loads(), 1, "the first call read once");
+
+        assert!(scratch.views.playlists().is_empty());
+        assert!(scratch.views.playlists().is_empty());
+        assert_eq!(
+            scratch.list_loads(),
+            1,
+            "an empty list is served from cache, not requeried per call"
+        );
+
+        // The cache still answers a real change on the next call.
+        scratch
+            .mutations
+            .create_playlist("Focus Mix", &[])
+            .expect("create commits");
+        assert_eq!(
+            scratch.views.playlists().len(),
+            1,
+            "a committed create shows up the next call, with zero caller action"
         );
     }
 
@@ -7407,18 +7321,13 @@ mod generation_cache_tests {
     }
 
     #[test]
-    fn test_invalidate_and_take_value_drop_whatever_is_cached() {
+    fn test_invalidate_drops_whatever_is_cached() {
         let counter = StoreGeneration::new();
         let mut cache = GenerationCache::<(), i32>::new(counter.clone());
         let epoch = counter.current();
-        cache.store(epoch, (), 5);
-
-        // take_value steals regardless of epoch (fetch-then-swap merges).
-        assert_eq!(cache.take_value(), Some(5));
-        assert_eq!(cache.peek(), None);
-
-        // invalidate clears unconditionally too.
         cache.store(epoch, (), 6);
+
+        // invalidate clears unconditionally.
         cache.invalidate();
         assert_eq!(cache.peek(), None);
         assert!(!cache.loaded_at(epoch));
@@ -7432,6 +7341,450 @@ mod generation_cache_tests {
 // the last-committed snapshot, and `commit_if_changed` at frame end saves
 // exactly when the sessions drifted from that snapshot. These tests pin the
 // diff semantics over the recording mock store.
+
+// --- Library Paths: one module owns the five facts -------------------------
+//
+// A Library Path is not a string: it is the path, its Readiness, its Watch
+// State, its running filesystem watcher, and its rows in the Application
+// Store. These tests drive the module's own interface over the recording
+// store mocks; the real-SQLite coherence test below is what proves a retired
+// root leaves no Watch State row behind.
+mod library_path_tests {
+    use super::*;
+    use crate::mocks::{
+        MockFilesystemWatch, MockLibraryMutationStore, MockLibraryQueryStore, MockMetadataReader,
+        MockSettingsStore, SettingsCall,
+    };
+    use riff_backend::app::library_paths::LibraryPaths;
+    use riff_backend::app::scan_service::ScanService;
+    use riff_backend::app::state::{LibraryStatus, WatchState};
+    use riff_backend::app::store::{LibraryMutationStore, Settings, SettingsStore};
+    use riff_backend::app::watcher_manager::WatcherManager;
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    /// A root that exists on disk, so the module's canonicalization is the
+    /// identity a real registration would see.
+    fn root(dir: &Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::canonicalize(path).unwrap()
+    }
+
+    /// A [`WatcherManager`] over the recording watch adapter. Its scan
+    /// service is never started: watching a root does not scan it, which is
+    /// one of the properties pinned here.
+    fn watching_through(watch: MockFilesystemWatch) -> WatcherManager {
+        let (scans, _worker) = ScanService::new(
+            Box::new(MockMetadataReader::default()),
+            Box::new(MockLibraryQueryStore::default()),
+            Box::new(MockLibraryMutationStore::new()),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            crate::inert_stop_flag(),
+            move |_path| Vec::new(),
+        );
+        WatcherManager::new(Some(Box::new(watch)), scans)
+    }
+
+    fn no_watcher() -> Option<WatcherManager> {
+        None
+    }
+
+    #[test]
+    fn registering_a_root_records_its_path_and_readiness_and_persists_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = root(dir.path(), "music");
+        let mut paths = LibraryPaths::default();
+        let mut store = MockSettingsStore::default();
+
+        paths.register(first.clone(), &mut store);
+
+        assert_eq!(paths.paths(), vec![first.clone()]);
+        assert_eq!(
+            paths.readiness(&first),
+            LibraryStatus::Idle,
+            "a new root has a readiness slot, empty until a scan reports into it"
+        );
+        assert_eq!(
+            store.state.library_paths,
+            vec![first.clone()],
+            "the path row is committed"
+        );
+        assert_eq!(
+            store.calls,
+            vec![SettingsCall::LibraryPaths],
+            "registering persists the path list and writes nothing else"
+        );
+    }
+
+    #[test]
+    fn registering_a_known_root_changes_nothing_and_saves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = root(dir.path(), "music");
+        let mut paths = LibraryPaths::default();
+        let mut store = MockSettingsStore::default();
+        paths.register(first.clone(), &mut store);
+        store.calls.clear();
+
+        // The same folder picked twice (the duplicate the UI guards today).
+        paths.register(first.clone(), &mut store);
+
+        assert_eq!(paths.paths(), vec![first]);
+        assert!(
+            store.calls.is_empty(),
+            "a no-op registration must not rewrite the store"
+        );
+    }
+
+    #[test]
+    fn registering_does_not_start_a_scan_or_a_watcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = root(dir.path(), "music");
+        let watch = MockFilesystemWatch::default();
+        let mut watcher = Some(watching_through(watch.clone()));
+        let mut paths = LibraryPaths::default();
+        let mut store = MockSettingsStore::default();
+
+        paths.register(first.clone(), &mut store);
+        if let Some(mgr) = watcher.as_mut() {
+            // Indexing waits for the user's rescan, and a new root is not
+            // watched until the listener asks.
+            let _ = mgr;
+        }
+
+        assert!(
+            watch.watched().is_empty(),
+            "registering a root does not start following it"
+        );
+    }
+
+    #[test]
+    fn retiring_a_root_removes_every_fact_and_stops_following_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let kept = root(dir.path(), "soundtrack");
+        let gone = root(dir.path(), "music");
+        let watch = MockFilesystemWatch::default();
+        let mut watcher = Some(watching_through(watch.clone()));
+        let mut paths = LibraryPaths::default();
+        let mut store = MockSettingsStore::default();
+        let mut mutations = MockLibraryMutationStore::new();
+        paths.register(kept.clone(), &mut store);
+        paths.register(gone.clone(), &mut store);
+        paths.set_watch(&gone, true, &mut watcher, &mut store);
+
+        paths.retire(&gone, &mut watcher, &mut store, &mut mutations);
+
+        assert_eq!(
+            paths.paths(),
+            vec![kept],
+            "the retired root is off the list"
+        );
+        assert_eq!(
+            paths.readiness(&gone),
+            LibraryStatus::Idle,
+            "and its readiness slot is gone with it"
+        );
+        assert_eq!(
+            paths.watch_state(&gone),
+            WatchState::Disabled,
+            "and its Watch State is retired too — the fact-set moves as one"
+        );
+        assert_eq!(
+            watch.unwatched(),
+            vec![gone.clone()],
+            "the live watcher stops following the deleted root"
+        );
+        assert_eq!(
+            mutations.removals(),
+            vec![gone],
+            "the root's tracks and path row go through the mutation store"
+        );
+    }
+
+    #[test]
+    fn retiring_writes_the_paths_row_before_the_watch_states_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = root(dir.path(), "music");
+        let watch = MockFilesystemWatch::default();
+        let mut watcher = Some(watching_through(watch.clone()));
+        let mut paths = LibraryPaths::default();
+        let mut store = MockSettingsStore::default();
+        let mut mutations = MockLibraryMutationStore::new();
+        paths.register(gone.clone(), &mut store);
+        paths.set_watch(&gone, true, &mut watcher, &mut store);
+        assert_eq!(paths.watch_state(&gone), WatchState::Enabled);
+        store.calls.clear();
+
+        paths.retire(&gone, &mut watcher, &mut store, &mut mutations);
+
+        assert_eq!(
+            store.calls,
+            vec![SettingsCall::LibraryPaths, SettingsCall::WatchStates],
+            "two writes in the named order: the surviving dangling case is a Watch State \
+             with no path, which the next save rewrites away"
+        );
+        assert!(
+            store.state.watch_states.is_empty(),
+            "the retired root's Watch State row is not re-persisted"
+        );
+    }
+
+    #[test]
+    fn retiring_a_root_without_a_watcher_still_drops_its_persisted_watch_state() {
+        // The live defect: the old removal site left the in-memory Watch
+        // State behind, and the store's delete-all-then-reinsert resurrected
+        // the orphan on the next toggle.
+        let dir = tempfile::tempdir().unwrap();
+        let gone = root(dir.path(), "music");
+        let mut paths = LibraryPaths::default();
+        let mut store = MockSettingsStore::default();
+        let mut mutations = MockLibraryMutationStore::new();
+        let mut watcher = no_watcher();
+        paths.register(gone.clone(), &mut store);
+        paths.set_watch(&gone, true, &mut watcher, &mut store);
+        assert!(
+            store.state.watch_states.contains_key(&gone),
+            "the state was persisted before the removal"
+        );
+
+        paths.retire(&gone, &mut watcher, &mut store, &mut mutations);
+
+        assert!(
+            !store.state.watch_states.contains_key(&gone),
+            "and is gone from the store afterwards"
+        );
+    }
+
+    #[test]
+    fn watching_one_root_persists_the_whole_map_in_one_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = root(dir.path(), "one");
+        let second = root(dir.path(), "two");
+        let watch = MockFilesystemWatch::default();
+        let mut watcher = Some(watching_through(watch.clone()));
+        let mut paths = LibraryPaths::default();
+        let mut store = MockSettingsStore::default();
+        paths.register(first.clone(), &mut store);
+        paths.register(second.clone(), &mut store);
+        store.calls.clear();
+
+        paths.set_watch(&first, true, &mut watcher, &mut store);
+
+        assert_eq!(paths.watch_state(&first), WatchState::Enabled);
+        assert_eq!(
+            paths.watch_state(&second),
+            WatchState::Disabled,
+            "the other root is untouched"
+        );
+        assert_eq!(
+            store.calls,
+            vec![SettingsCall::WatchStates],
+            "one mutation, one durable write"
+        );
+    }
+
+    #[test]
+    fn a_watch_start_that_fails_degrades_to_a_warning_and_still_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = root(dir.path(), "music");
+        let mut paths = LibraryPaths::default();
+        let mut store = MockSettingsStore::default();
+        let mut watcher = no_watcher();
+        paths.register(gone.clone(), &mut store);
+
+        paths.set_watch(&gone, true, &mut watcher, &mut store);
+
+        assert!(
+            matches!(paths.watch_state(&gone), WatchState::Warning(_)),
+            "no watcher in this process is a warning, not a crash"
+        );
+        assert!(
+            store.state.watch_states.contains_key(&gone),
+            "the warning is persisted like any other state"
+        );
+    }
+
+    #[test]
+    fn watching_every_root_is_one_batch_and_one_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots: Vec<_> = ["a", "b", "c"]
+            .iter()
+            .map(|name| root(dir.path(), name))
+            .collect();
+        let watch = MockFilesystemWatch::default();
+        let mut watcher = Some(watching_through(watch.clone()));
+        let mut paths = LibraryPaths::default();
+        let mut store = MockSettingsStore::default();
+        for path in &roots {
+            paths.register(path.clone(), &mut store);
+        }
+        store.calls.clear();
+
+        paths.set_watching_for_all(true, &mut watcher, &mut store);
+
+        assert_eq!(watch.watched().len(), 3, "every root is followed");
+        assert_eq!(
+            store.calls,
+            vec![SettingsCall::WatchStates],
+            "the batch is ONE durable write, not one per root"
+        );
+        assert!(
+            roots
+                .iter()
+                .all(|p| paths.watch_state(p) == WatchState::Enabled),
+            "and every state moved"
+        );
+
+        paths.set_watching_for_all(false, &mut watcher, &mut store);
+        assert_eq!(
+            store.calls.len(),
+            2,
+            "stopping every root is again one write"
+        );
+        assert!(
+            roots
+                .iter()
+                .all(|p| paths.watch_state(p) == WatchState::Disabled),
+            "and every state is Disabled"
+        );
+    }
+
+    #[test]
+    fn readiness_is_reported_through_the_slot_and_persists_nothing() {
+        // The scan worker writes Readiness through the module instead of
+        // reaching into the session; the status itself is session state.
+        let dir = tempfile::tempdir().unwrap();
+        let first = root(dir.path(), "music");
+        let mut paths = LibraryPaths::default();
+        let mut store = MockSettingsStore::default();
+        paths.register(first.clone(), &mut store);
+        store.calls.clear();
+
+        paths.report_readiness(&first, LibraryStatus::Scanning { files_found: 12 });
+        assert_eq!(
+            paths.readiness(&first),
+            LibraryStatus::Scanning { files_found: 12 }
+        );
+
+        paths.report_readiness(&first, LibraryStatus::Scanned(12));
+        assert_eq!(paths.readiness(&first), LibraryStatus::Scanned(12));
+        assert!(
+            store.calls.is_empty(),
+            "a readiness report is volatile session state"
+        );
+    }
+
+    #[test]
+    fn clearing_collection_data_resets_readiness_and_keeps_the_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = root(dir.path(), "music");
+        let watch = MockFilesystemWatch::default();
+        let mut watcher = Some(watching_through(watch.clone()));
+        let mut paths = LibraryPaths::default();
+        let mut store = MockSettingsStore::default();
+        paths.register(first.clone(), &mut store);
+        paths.report_readiness(&first, LibraryStatus::Scanned(120));
+        paths.set_watch(&first, true, &mut watcher, &mut store);
+        store.calls.clear();
+
+        paths.clear_collection_data();
+
+        assert_eq!(
+            paths.readiness(&first),
+            LibraryStatus::Idle,
+            "no root may claim to be indexed after the collection is wiped"
+        );
+        assert_eq!(paths.paths(), vec![first.clone()]);
+        assert_eq!(
+            paths.watch_state(&first),
+            WatchState::Enabled,
+            "Clear Library preserves Settings, so the registered roots and \
+             their watch choices stand"
+        );
+        assert!(
+            store.calls.is_empty(),
+            "the collection wipe itself is the mutation store's write"
+        );
+    }
+
+    #[test]
+    fn hydration_seeds_the_fact_set_from_loaded_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = root(dir.path(), "music");
+        let missing = dir.path().join("gone");
+        let loaded = Settings {
+            library_paths: vec![present.clone(), missing.clone()],
+            watch_states: HashMap::from([(present.clone(), WatchState::Enabled)]),
+            ..Default::default()
+        };
+
+        let mut paths = LibraryPaths::default();
+        paths.hydrate(&loaded);
+
+        assert_eq!(paths.paths(), vec![present.clone(), missing.clone()]);
+        assert_eq!(
+            paths.readiness(&present),
+            LibraryStatus::Idle,
+            "a root present on disk starts idle, ready to scan"
+        );
+        assert_eq!(
+            paths.readiness(&missing),
+            LibraryStatus::Unavailable,
+            "a root that left disk while the app was closed is reported, not dropped"
+        );
+        assert_eq!(paths.watch_state(&present), WatchState::Enabled);
+        assert_eq!(
+            paths.watch_state(&missing),
+            WatchState::Disabled,
+            "an unstored root defaults to not watched"
+        );
+    }
+
+    /// The coherence check the spec asks for against the real Application
+    /// Store: retire a root, reopen the database, and no Watch State row
+    /// survives for it.
+    #[test]
+    fn a_retired_root_leaves_no_watch_state_row_in_the_reopened_store() {
+        use riff_infra::store::SqliteStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let music = root(dir.path(), "music");
+        let kept = root(dir.path(), "soundtrack");
+
+        let (changes_tx, _changes_rx) = crossbeam_channel::unbounded();
+        let store = SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+        let mut settings: Box<dyn SettingsStore> = Box::new(store.clone());
+        let mut mutations: Box<dyn LibraryMutationStore> = Box::new(store.clone());
+        let mut watcher = Some(watching_through(MockFilesystemWatch::default()));
+
+        let mut paths = LibraryPaths::default();
+        paths.register(music.clone(), settings.as_mut());
+        paths.register(kept.clone(), settings.as_mut());
+        paths.set_watch(&music, true, &mut watcher, settings.as_mut());
+        paths.set_watch(&kept, true, &mut watcher, settings.as_mut());
+
+        paths.retire(&music, &mut watcher, settings.as_mut(), mutations.as_mut());
+        drop(settings);
+        drop(mutations);
+
+        // Reopen: the retired root's row must be gone, the kept root's intact.
+        let (reopen_tx, _reopen_rx) = crossbeam_channel::unbounded();
+        let reopened = SqliteStore::open_and_migrate(&db_path, reopen_tx).unwrap();
+        let loaded = reopened.load_settings().expect("settings must load");
+        assert!(
+            !loaded.watch_states.contains_key(&music),
+            "a retired Library Path leaves no Watch State row behind: {:?}",
+            loaded.watch_states
+        );
+        assert_eq!(
+            loaded.watch_states.get(&kept),
+            Some(&WatchState::Enabled),
+            "the untouched root keeps its row"
+        );
+        assert_eq!(loaded.library_paths, vec![kept], "and the path list agrees");
+    }
+}
 
 #[cfg(test)]
 mod preferences_tests {
@@ -8207,7 +8560,6 @@ mod windowed_list_projection_tests {
             Ok(riff_persistence::store::Page::new(
                 rows.len(),
                 rows.iter().skip(offset).take(limit).copied().collect(),
-                0,
             ))
         }
     }

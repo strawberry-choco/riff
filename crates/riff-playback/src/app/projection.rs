@@ -13,7 +13,11 @@ use riff_persistence::store::{GenerationCache, StoreGeneration};
 use riff_persistence::track::{Track, TrackId};
 
 /// The playback slots plus the queue shape they were loaded for.
-#[derive(Clone)]
+///
+/// `Default` is what lets [`GenerationCache::level`] fill the bundle: an
+/// all-empty value is never served, because `level` only asks `read` of a cache
+/// that already holds an entry at the generation it observed.
+#[derive(Clone, Default)]
 struct PlaybackSlots {
     /// Queue shape the slots were loaded for: the (current index, upcoming
     /// ids at the window limit) pair. Recomputing this cheap stamp detects
@@ -27,14 +31,16 @@ struct PlaybackSlots {
 /// Session Projection for the playback-side reads: the current Track, the
 /// Up Next window, and the track-details panel's selected Track.
 ///
-/// Both caches below ride the same Library [`StoreGeneration`] as the
-/// collection capability's projections and spell out the same
-/// observe-serve-or-load procedure by hand. That duplication is known and
-/// deliberate: `GenerationCache::level` (in the persistence contract crate)
-/// was placed there rather than inside either capability precisely so
-/// playback could adopt it later without an edge crossing the sibling split.
-/// Adopting it here is a separate change, not an omission — see
-/// `docs/adr/0002-ui-reads-the-store-through-session-projections.md`.
+/// Both caches declare themselves on [`GenerationCache::level`] — the same
+/// primitive the collection capability's projections use, placed in the
+/// persistence contract crate so this crate could adopt it without an edge
+/// crossing the sibling split (see
+/// `docs/adr/0002-ui-reads-the-store-through-session-projections.md`). What
+/// these levels declare on top of the shared procedure is queue *shape*: the
+/// slots' `read` answers only when the cached stamp still matches the live
+/// queue, so a `level` miss means "the queue moved", not "the generation
+/// moved". The two pure reads with no loader to run — [`Self::current`] and
+/// [`Self::up_next`] — still guard a [`GenerationCache::peek`] by hand.
 pub struct PlaybackProjection {
     /// Generation-keyed slot over the playback slots; the queue shape rides
     /// inside as part of the loaded state.
@@ -110,56 +116,53 @@ impl PlaybackProjection {
         limit: usize,
         loader: &mut dyn FnMut(&TrackId) -> Result<Option<Track>, StoreError>,
     ) -> Result<(), StoreError> {
-        let epoch = self.slots.observe();
-
-        // Fresh-frame fast path: compare the queue's shape lazily, by
-        // reference — the per-frame check materializes nothing (the stamp's
-        // `Vec` is only built below, when the inputs actually moved).
-        if let Some(slots) = self.slots.peek()
-            && self.slots.loaded_at(epoch)
-            && slots.stamp.0 == queue.current_index
-            && upcoming_matches(&slots.stamp.1, queue, limit)
-        {
-            return Ok(());
-        }
-
-        let stamp = (
-            queue.current_index,
-            queue
-                .upcoming(limit)
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>(),
-        );
-
-        // Fetch first, swap later: a failure anywhere leaves the previous
-        // cache completely untouched.
-        let fetched_current = match queue.current_track() {
-            Some(id) => loader(id)?,
-            None => None,
-        };
-        let mut fetched_up_next = Vec::with_capacity(stamp.1.len());
-        for id in &stamp.1 {
-            if let Some(track) = loader(id)? {
-                fetched_up_next.push(track);
-            }
-        }
-
-        self.slots.store(
-            epoch,
-            (),
-            PlaybackSlots {
-                stamp,
-                current: fetched_current,
-                up_next: fetched_up_next,
+        self.slots.level(
+            &(),
+            // Fresh-frame fast path: the bundle answers only for the queue
+            // shape it was loaded for. The comparison stays by reference, so
+            // the per-frame check materializes nothing — the stamp `Vec` is
+            // only built below, when the inputs actually moved.
+            |slots| {
+                (slots.stamp.0 == queue.current_index
+                    && upcoming_matches(&slots.stamp.1, queue, limit))
+                .then_some(())
             },
-        );
-        Ok(())
+            || {
+                let stamp = (
+                    queue.current_index,
+                    queue
+                        .upcoming(limit)
+                        .into_iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                );
+
+                // Fetch first, swap later: a failure anywhere leaves the
+                // previous cache completely untouched.
+                let fetched_current = match queue.current_track() {
+                    Some(id) => loader(id)?,
+                    None => None,
+                };
+                let mut fetched_up_next = Vec::with_capacity(stamp.1.len());
+                for id in &stamp.1 {
+                    if let Some(track) = loader(id)? {
+                        fetched_up_next.push(track);
+                    }
+                }
+                Ok::<_, StoreError>(PlaybackSlots {
+                    stamp,
+                    current: fetched_current,
+                    up_next: fetched_up_next,
+                })
+            },
+            |slots, fetched| *slots = fetched,
+        )
     }
 
     /// The track-details panel's selected Track, cached until the selection
     /// or the generation moves. A cached `None` means the id is known absent
-    /// from the store, so a dangling selection does not requery per frame.
+    /// from the store, so a dangling selection does not requery per frame —
+    /// the answer lives in the slot, and `read` hands it out as-is.
     ///
     /// # Errors
     /// Propagates loader failures without touching the cache.
@@ -168,21 +171,15 @@ impl PlaybackProjection {
         id: &TrackId,
         loader: &mut dyn FnMut(&TrackId) -> Result<Option<Track>, StoreError>,
     ) -> Result<Option<Track>, StoreError> {
-        let epoch = self.selected.observe();
-
-        // Caller-guarded freshness check: the canonical cache's `peek` is
-        // epoch-agnostic, so `holds` decides whether the entry is a hit.
-        if self.selected.holds(epoch, id) {
-            return Ok(self
-                .selected
-                .peek()
-                .expect("holds implies an entry")
-                .clone());
-        }
-
-        let fetched = loader(id)?;
-        self.selected.store(epoch, id.clone(), fetched.clone());
-        Ok(fetched)
+        self.selected.level(
+            id,
+            |cached| Some(cached.clone()),
+            || loader(id),
+            |slot, fetched| {
+                slot.clone_from(&fetched);
+                fetched
+            },
+        )
     }
 }
 

@@ -36,10 +36,10 @@ enum ScanCache {
 /// sidebar-count totals and the per-smart-list sizes, cached per generation
 /// so fresh frames cost nothing.
 ///
-/// Every level migrated here declares itself on [`GenerationCache::level`],
-/// so this projection spells out no freshness rule of its own for them.
-/// `last_scan` is the deliberate carve-out: it caches an absence through the
-/// tri-state `ScanCache`, which a plain option cannot express.
+/// Every level here declares itself on [`GenerationCache::level`], so this
+/// projection spells out no freshness rule of its own. `last_scan` keeps the
+/// tri-state [`ScanCache`] as its slot because it must also cache an absence --
+/// which `read` says, not the staleness procedure.
 pub struct CountsProjection {
     cache: GenerationCache<(), CountsBundle>,
 }
@@ -130,13 +130,11 @@ impl CountsProjection {
     /// The last completed full scan, cached per generation -- and cached when
     /// there never was one.
     ///
-    /// This level deliberately keeps a hand-written body instead of declaring
-    /// itself on [`GenerationCache::level`]: it caches an absence. A fresh
-    /// frame must be able to answer `None` from the cache without re-reading,
-    /// which is a third state beside "loaded a scan" and "not loaded yet", and
-    /// `level`'s `read` reports only the latter two -- returning `None` there
-    /// means "load it", never "the store says there is nothing". The tri-state
-    /// [`ScanCache`] carries that distinction, and only this body does.
+    /// The cached absence is why the slot is the tri-state [`ScanCache`] and
+    /// not a bare option: `read` answers `Some(None)` for "asked, and the
+    /// store has never scanned" and `None` only for "not asked yet this
+    /// generation", so a cold store does not requery per frame while the
+    /// level still declares itself on [`GenerationCache::level`].
     ///
     /// # Errors
     /// Propagates loader failures without touching the cache.
@@ -144,17 +142,17 @@ impl CountsProjection {
         &mut self,
         loader: &mut dyn FnMut() -> Result<Option<FullScanSummary>, StoreError>,
     ) -> Result<Option<FullScanSummary>, StoreError> {
-        let epoch = self.cache.observe();
-        if self.cache.loaded_at(epoch)
-            && let ScanCache::Loaded(scan) = self
-                .cache
-                .peek()
-                .map_or(ScanCache::NotLoaded, |bundle| bundle.scan.clone())
-        {
-            return Ok(scan);
-        }
-        let fresh = loader()?;
-        self.cache.slot(epoch, &()).scan = ScanCache::Loaded(fresh);
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |bundle| match &bundle.scan {
+                ScanCache::Loaded(scan) => Some(*scan),
+                ScanCache::NotLoaded => None,
+            },
+            loader,
+            |bundle, fresh| {
+                bundle.scan = ScanCache::Loaded(fresh);
+                fresh
+            },
+        )
     }
 }

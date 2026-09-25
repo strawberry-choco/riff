@@ -25,9 +25,8 @@ mod tests {
         let library = LibrarySession::default();
         assert_eq!(playback.playback_state, PlaybackState::Stopped);
         assert!(crate::test_utils::float_close(playback.current_volume, 1.0));
-        assert!(library.library_paths.is_empty());
-        assert!(library.library_statuses.is_empty());
-        assert!(library.watch_states.is_empty());
+        assert!(library.library_paths.paths().is_empty());
+        assert!(!library.library_paths.watches_any());
     }
 
     #[test]
@@ -38,8 +37,8 @@ mod tests {
 
         // Test initial state
         assert!(queue.current_track().is_none());
-        assert!(queue.advance().is_none());
-        assert!(queue.previous().is_none());
+        assert_eq!(step_forward(&mut queue), None);
+        assert_eq!(step_back(&mut queue), None);
 
         // Test adding tracks: the first append makes its track current.
         queue.append(track1.clone());
@@ -50,10 +49,10 @@ mod tests {
         assert_eq!(queue.current_track(), Some(&track1));
 
         // Test next track
-        assert_eq!(queue.advance(), Some(&track2));
+        assert_eq!(step_forward(&mut queue), Some(track2.clone()));
 
         // Test previous track
-        assert_eq!(queue.previous(), Some(&track1));
+        assert_eq!(step_back(&mut queue), Some(track1));
     }
 
     #[test]
@@ -96,12 +95,29 @@ mod tests {
 
     // --- PlaybackQueue: empty / single-track behavior -----------------------
 
+    /// The queue's own traversal is private to the domain layer: **Continuation**
+    /// is its public face. These tests probe it through the arbiter's forward
+    /// and back answers (a listener's skip, so repeat-one never loops).
+    fn step_forward(queue: &mut PlaybackQueue) -> Option<TrackId> {
+        match Continuation::after(queue, Trigger::ManualNext) {
+            Continuation::Play(id) => Some(id),
+            Continuation::Stop => None,
+        }
+    }
+
+    fn step_back(queue: &mut PlaybackQueue) -> Option<TrackId> {
+        match Continuation::after(queue, Trigger::ManualPrevious) {
+            Continuation::Play(id) => Some(id),
+            Continuation::Stop => None,
+        }
+    }
+
     #[test]
     fn test_empty_queue_returns_none_everywhere() {
         let mut queue = PlaybackQueue::default();
         assert!(queue.current_track().is_none());
-        assert!(queue.advance().is_none());
-        assert!(queue.previous().is_none());
+        assert_eq!(step_forward(&mut queue), None);
+        assert_eq!(step_back(&mut queue), None);
         assert!(queue.upcoming(5).is_empty());
     }
 
@@ -113,10 +129,10 @@ mod tests {
 
         assert_eq!(queue.current_track(), Some(&track));
         // Without repeat, there is nowhere to advance to.
-        assert!(queue.advance().is_none());
+        assert_eq!(step_forward(&mut queue), None);
         // `previous` at the first track has nowhere to go either; the
         // position stays.
-        assert!(queue.previous().is_none());
+        assert_eq!(step_back(&mut queue), None);
         assert_eq!(queue.current_index, Some(0));
         // Nothing follows the only track.
         assert!(queue.upcoming(3).is_empty());
@@ -228,7 +244,7 @@ mod tests {
         queue.current_index = Some(1); // at the end
         queue.repeat = RepeatMode::All;
 
-        assert_eq!(queue.advance(), Some(&a));
+        assert_eq!(step_forward(&mut queue), Some(a));
         assert_eq!(queue.current_index, Some(0));
     }
 
@@ -241,15 +257,16 @@ mod tests {
         queue.current_index = Some(1); // at the end
         assert_eq!(queue.repeat, RepeatMode::None);
 
-        assert!(queue.advance().is_none());
+        assert_eq!(step_forward(&mut queue), None);
         // Current position is left untouched.
         assert_eq!(queue.current_index, Some(1));
     }
 
     #[test]
     fn test_repeat_one_does_not_wrap_queue() {
-        // `RepeatMode::One` is honored by the playback engine, not by the
-        // queue: `next()` treats it like `None` and stops at the end.
+        // `RepeatMode::One` is honored by continuation, not by the queue's own
+        // traversal: a listener's skip takes the flat order and stops at the
+        // end.
         let mut queue = PlaybackQueue::new(vec![
             TrackId("a.mp3".to_string()),
             TrackId("b.mp3".to_string()),
@@ -257,7 +274,7 @@ mod tests {
         queue.current_index = Some(1);
         queue.repeat = RepeatMode::One;
 
-        assert!(queue.advance().is_none());
+        assert_eq!(step_forward(&mut queue), None);
         assert_eq!(queue.repeat, RepeatMode::One);
     }
 
@@ -270,26 +287,26 @@ mod tests {
         queue.current_index = Some(0);
         queue.repeat = RepeatMode::All;
 
-        assert_eq!(queue.advance(), Some(&a));
+        assert_eq!(step_forward(&mut queue), Some(a.clone()));
         assert_eq!(queue.current_index, Some(0));
         // Wrapping is repeatable, not a one-shot.
-        assert_eq!(queue.advance(), Some(&a));
+        assert_eq!(step_forward(&mut queue), Some(a));
         assert_eq!(queue.current_index, Some(0));
     }
 
     #[test]
     fn test_advance_walks_queue_in_order_until_end() {
-        // Without repeat, `advance` plays tracks strictly in queue order from
-        // the current position, then stops at the end.
+        // Without repeat, the forward answer is strictly queue order from the
+        // current position, then stop at the end.
         let a = TrackId("a.mp3".to_string());
         let b = TrackId("b.mp3".to_string());
         let c = TrackId("c.mp3".to_string());
         let mut queue = PlaybackQueue::new(vec![a.clone(), b.clone(), c.clone()]);
         queue.current_index = Some(0);
 
-        assert_eq!(queue.advance(), Some(&b));
-        assert_eq!(queue.advance(), Some(&c));
-        assert!(queue.advance().is_none());
+        assert_eq!(step_forward(&mut queue), Some(b));
+        assert_eq!(step_forward(&mut queue), Some(c.clone()));
+        assert_eq!(step_forward(&mut queue), None);
         // The position stays on the last track after the queue is exhausted.
         assert_eq!(queue.current_index, Some(2));
         assert_eq!(queue.current_track(), Some(&c));
@@ -301,9 +318,9 @@ mod tests {
         let mut queue = PlaybackQueue::new(vec![a.clone(), TrackId("b.mp3".to_string())]);
         queue.current_index = Some(0);
 
-        // `previous` at the first track has nowhere to go; the position
+        // The back answer at the first track is nowhere to go; the position
         // stays put.
-        assert!(queue.previous().is_none());
+        assert_eq!(step_back(&mut queue), None);
         assert_eq!(queue.current_index, Some(0));
     }
 
@@ -340,10 +357,10 @@ mod tests {
         queue.current_index = Some(0);
         queue.set_shuffle(true);
         assert!(queue.shuffle);
-        // Lazy regeneration: the order builds on the next advance, not on
-        // enabling shuffle.
+        // Lazy regeneration: the order builds on the next forward answer, not
+        // on enabling shuffle.
         assert!(queue.shuffled_indices.is_empty());
-        assert!(queue.advance().is_some());
+        assert!(step_forward(&mut queue).is_some());
         assert!(!queue.shuffled_indices.is_empty());
 
         queue.set_shuffle(false);
@@ -357,7 +374,7 @@ mod tests {
         let mut queue = PlaybackQueue::new((0..4).map(|i| TrackId(format!("t{i}.mp3"))).collect());
         queue.current_index = Some(2);
         queue.set_shuffle(true);
-        assert!(queue.advance().is_some()); // builds the order, consumes its head
+        assert!(step_forward(&mut queue).is_some()); // builds the order, consumes its head
 
         // Deterministic invariant (order itself is random): the current
         // index at build time (2) is never part of the order, and the
@@ -383,13 +400,13 @@ mod tests {
         queue.set_shuffle(true);
 
         let mut visited: Vec<TrackId> = Vec::new();
-        while let Some(t) = queue.advance() {
-            visited.push(t.clone());
+        while let Some(t) = step_forward(&mut queue) {
             // Safety valve: the loop must terminate after the 7 other tracks.
             assert!(
                 visited.len() <= ids.len(),
                 "shuffle produced more tracks than the queue contains"
             );
+            visited.push(t);
         }
 
         assert_eq!(visited.len(), ids.len() - 1);
@@ -411,19 +428,28 @@ mod tests {
         queue.shuffle = true;
         queue.shuffled_indices = std::collections::VecDeque::from(vec![3, 1, 2]);
 
-        assert_eq!(queue.advance(), Some(&TrackId("t4.mp3".to_string())));
-        assert_eq!(queue.advance(), Some(&TrackId("t2.mp3".to_string())));
-        assert_eq!(queue.advance(), Some(&TrackId("t3.mp3".to_string())));
-        // Exhausted with repeat off: no further advance.
-        assert_eq!(queue.advance(), None);
+        assert_eq!(
+            step_forward(&mut queue),
+            Some(TrackId("t4.mp3".to_string()))
+        );
+        assert_eq!(
+            step_forward(&mut queue),
+            Some(TrackId("t2.mp3".to_string()))
+        );
+        assert_eq!(
+            step_forward(&mut queue),
+            Some(TrackId("t3.mp3".to_string()))
+        );
+        // Exhausted with repeat off: nothing further follows.
+        assert_eq!(step_forward(&mut queue), None);
     }
 
     #[test]
     fn test_append_under_shuffle_defers_regeneration_until_advance() {
         // Lazy regeneration (allocation plan 4.4): a mutation marks the
-        // order dirty instead of reshuffling immediately; the next advance
-        // rebuilds it once. The rebuilt order must be a valid permutation
-        // of every non-current track — including the just-appended one.
+        // order dirty instead of reshuffling immediately; the next forward
+        // answer rebuilds it once. The rebuilt order must be a valid
+        // permutation of every non-current track — including the just-appended one.
         let mut queue = PlaybackQueue::new((0..3).map(|i| TrackId(format!("t{i}.mp3"))).collect());
         queue.current_index = Some(0);
         queue.set_shuffle(true);
@@ -435,9 +461,9 @@ mod tests {
         assert_eq!(queue.shuffled_indices.len(), stale_len);
 
         let mut visited: Vec<TrackId> = Vec::new();
-        while let Some(t) = queue.advance() {
-            visited.push(t.clone());
+        while let Some(t) = step_forward(&mut queue) {
             assert!(visited.len() <= 3, "shuffle yielded more tracks than exist");
+            visited.push(t);
         }
         visited.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
@@ -459,9 +485,9 @@ mod tests {
         queue.remove(1); // drop t1
 
         let mut visited: Vec<TrackId> = Vec::new();
-        while let Some(t) = queue.advance() {
-            visited.push(t.clone());
+        while let Some(t) = step_forward(&mut queue) {
             assert!(visited.len() <= 2, "removed track resurrected in shuffle");
+            visited.push(t);
         }
         visited.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
@@ -478,11 +504,11 @@ mod tests {
         queue.set_shuffle(true);
 
         for _ in 0..3 {
-            assert!(queue.advance().is_some());
+            assert!(step_forward(&mut queue).is_some());
         }
         // Exhausted with repeat-all: the order regenerates and playback
         // continues instead of stopping.
-        assert!(queue.advance().is_some());
+        assert!(step_forward(&mut queue).is_some());
     }
 
     #[test]
@@ -508,8 +534,8 @@ mod tests {
 
         let drain = |queue: &mut PlaybackQueue| {
             let mut visited: Vec<TrackId> = Vec::new();
-            while let Some(t) = queue.advance() {
-                visited.push(t.clone());
+            while let Some(t) = step_forward(queue) {
+                visited.push(t);
             }
             visited.sort_by(|a, b| a.0.cmp(&b.0));
             visited
@@ -679,5 +705,293 @@ mod tests {
 
         // Missing fields contribute empty segments.
         assert_eq!(TrackMetadata::default().search_text(), "   ");
+    }
+
+    // --- Continuation: one table of (event x queue state) -> what follows ------
+    //
+    // The arbiter is pure and store-free, so the whole policy — manual skip,
+    // auto-advance, repeat-one, repeat-one-with-shuffle, empty queue,
+    // past-the-end in both directions — is answerable with no thread and no
+    // fake. `Continuation::after` both decides and moves the queue.
+
+    use riff_playback::domain::continuation::{Continuation, Trigger};
+
+    fn ids(names: &[&str]) -> Vec<TrackId> {
+        names.iter().map(|n| TrackId(n.to_string())).collect()
+    }
+
+    /// A queue over `a b c`, current at index `at`, in flat order.
+    fn queue_at(names: &[&str], at: usize) -> PlaybackQueue {
+        let mut queue = PlaybackQueue::new(ids(names));
+        queue.current_index = Some(at);
+        queue
+    }
+
+    fn played(answer: &Continuation) -> Option<TrackId> {
+        match answer {
+            Continuation::Play(id) => Some(id.clone()),
+            Continuation::Stop => None,
+        }
+    }
+
+    #[test]
+    fn manual_next_and_auto_advance_answer_the_same_successor() {
+        let mut skipping = queue_at(&["a", "b", "c"], 0);
+        let mut ending = queue_at(&["a", "b", "c"], 0);
+
+        assert_eq!(
+            played(&Continuation::after(&mut skipping, Trigger::ManualNext)),
+            Some(TrackId("b".to_string())),
+            "a listener pressing Next gets the next track"
+        );
+        assert_eq!(
+            played(&Continuation::after(&mut ending, Trigger::TrackEnded)),
+            Some(TrackId("b".to_string())),
+            "a track ending gets the same next track"
+        );
+        assert_eq!(
+            skipping.current_index, ending.current_index,
+            "and the queue moved the same way"
+        );
+    }
+
+    #[test]
+    fn manual_previous_walks_back_one_track() {
+        let mut queue = queue_at(&["a", "b", "c"], 2);
+        assert_eq!(
+            played(&Continuation::after(&mut queue, Trigger::ManualPrevious)),
+            Some(TrackId("b".to_string()))
+        );
+        assert_eq!(queue.current_index, Some(1));
+    }
+
+    #[test]
+    fn repeat_one_loops_the_current_track_when_a_track_ends() {
+        let mut queue = queue_at(&["a", "b", "c"], 1);
+        queue.repeat = RepeatMode::One;
+
+        assert_eq!(
+            played(&Continuation::after(&mut queue, Trigger::TrackEnded)),
+            Some(TrackId("b".to_string())),
+            "repeat-one replays what was current"
+        );
+        assert_eq!(
+            queue.current_index,
+            Some(1),
+            "replaying is not a move: the index stays"
+        );
+    }
+
+    #[test]
+    fn repeat_one_yields_to_a_listeners_skip() {
+        // The one place a trigger changes the answer: pressing Next while
+        // repeat-one is on is the listener overriding the loop. Both callers
+        // used to spell this rule differently; now it is one row.
+        let mut queue = queue_at(&["a", "b", "c"], 1);
+        queue.repeat = RepeatMode::One;
+
+        assert_eq!(
+            played(&Continuation::after(&mut queue, Trigger::ManualNext)),
+            Some(TrackId("c".to_string())),
+            "a skip moves even under repeat-one"
+        );
+        assert_eq!(queue.current_index, Some(2));
+    }
+
+    #[test]
+    fn repeat_one_with_shuffle_advances_instead_of_looping() {
+        // This is the edge the two old copies disagreed on: the coordinator
+        // excluded shuffle, the harness copy did not, so the harness re-played
+        // the current track where production moved on.
+        let mut queue = queue_at(&["a", "b", "c"], 0);
+        queue.repeat = RepeatMode::One;
+        queue.shuffle = true;
+        queue.shuffled_indices = std::collections::VecDeque::from(vec![2, 1]);
+
+        let answer = Continuation::after(&mut queue, Trigger::TrackEnded);
+        assert_eq!(
+            played(&answer),
+            Some(TrackId("c".to_string())),
+            "shuffled repeat-one follows the shuffle order"
+        );
+        assert_ne!(
+            queue.current_index,
+            Some(0),
+            "and does not stay on the current track"
+        );
+    }
+
+    #[test]
+    fn an_empty_queue_answers_stop_for_every_trigger() {
+        for trigger in [
+            Trigger::TrackEnded,
+            Trigger::ManualNext,
+            Trigger::ManualPrevious,
+        ] {
+            let mut queue = PlaybackQueue::default();
+            assert_eq!(
+                Continuation::after(&mut queue, trigger),
+                Continuation::Stop,
+                "nothing to play is nothing follows ({trigger:?})"
+            );
+            assert_eq!(queue.current_index, None);
+        }
+    }
+
+    #[test]
+    fn past_the_end_in_either_direction_answers_stop_and_leaves_the_index() {
+        let mut forward = queue_at(&["a", "b"], 1);
+        assert_eq!(
+            Continuation::after(&mut forward, Trigger::ManualNext),
+            Continuation::Stop
+        );
+        assert_eq!(
+            forward.current_index,
+            Some(1),
+            "the arbiter answers; the caller's own stop bookkeeping moves the index"
+        );
+
+        let mut backward = queue_at(&["a", "b"], 0);
+        assert_eq!(
+            Continuation::after(&mut backward, Trigger::ManualPrevious),
+            Continuation::Stop
+        );
+        assert_eq!(backward.current_index, Some(0));
+    }
+
+    #[test]
+    fn repeat_all_wraps_past_both_ends() {
+        let mut forward = queue_at(&["a", "b", "c"], 2);
+        forward.repeat = RepeatMode::All;
+        assert_eq!(
+            played(&Continuation::after(&mut forward, Trigger::TrackEnded)),
+            Some(TrackId("a".to_string())),
+            "the end wraps to the first track"
+        );
+
+        let mut backward = queue_at(&["a", "b", "c"], 0);
+        backward.repeat = RepeatMode::All;
+        assert_eq!(
+            played(&Continuation::after(&mut backward, Trigger::ManualPrevious)),
+            Some(TrackId("c".to_string())),
+            "the start wraps to the last track"
+        );
+    }
+
+    #[test]
+    fn a_single_track_queue_without_repeat_stops_on_next() {
+        let mut queue = queue_at(&["only"], 0);
+        assert_eq!(
+            Continuation::after(&mut queue, Trigger::ManualNext),
+            Continuation::Stop,
+            "one track and no repeat has nowhere to go"
+        );
+    }
+
+    #[test]
+    fn shuffle_consumes_the_seeded_order_front_to_back() {
+        let mut queue = queue_at(&["t1", "t2", "t3", "t4"], 0);
+        queue.shuffle = true;
+        queue.shuffled_indices = std::collections::VecDeque::from(vec![3, 1, 2]);
+
+        assert_eq!(
+            played(&Continuation::after(&mut queue, Trigger::TrackEnded)),
+            Some(TrackId("t4".to_string()))
+        );
+        assert_eq!(
+            played(&Continuation::after(&mut queue, Trigger::TrackEnded)),
+            Some(TrackId("t2".to_string()))
+        );
+        assert_eq!(
+            played(&Continuation::after(&mut queue, Trigger::TrackEnded)),
+            Some(TrackId("t3".to_string()))
+        );
+        assert_eq!(
+            Continuation::after(&mut queue, Trigger::TrackEnded),
+            Continuation::Stop,
+            "the order is exhausted with repeat off"
+        );
+    }
+
+    #[test]
+    fn a_chosen_current_track_moves_the_index_and_leaves_the_order_alone() {
+        // The TrackChanged question — a caller has already picked what is
+        // current — is the same arbiter, not a third writer of the index.
+        let mut queue = queue_at(&["a", "b", "c"], 0);
+
+        assert_eq!(
+            Continuation::settled_on(&mut queue, &TrackId("c".to_string())),
+            Some(TrackId("c".to_string()))
+        );
+        assert_eq!(queue.current_index, Some(2));
+        assert_eq!(
+            queue.tracks,
+            vec![
+                TrackId("a".to_string()),
+                TrackId("b".to_string()),
+                TrackId("c".to_string())
+            ],
+            "settling changes nothing but which entry is current"
+        );
+    }
+
+    #[test]
+    fn a_chosen_current_track_outside_the_queue_moves_nothing() {
+        // The handoff's no-op, kept: an id the queue does not hold leaves the
+        // current index where it was.
+        let mut queue = queue_at(&["a", "b"], 1);
+        assert_eq!(
+            Continuation::settled_on(&mut queue, &TrackId("z".to_string())),
+            None
+        );
+        assert_eq!(queue.current_index, Some(1));
+    }
+
+    #[test]
+    fn queue_fill_takes_the_store_order_verbatim() {
+        // The fill's ordering invariant, pinned for the first time: the id
+        // list arrives in the Application Store's own order (`ORDER BY path`,
+        // pinned against real SQLite in the infra suite) and becomes the queue
+        // *unchanged* — nothing re-sorts it by track id or by play order. The
+        // fixture below is deliberately not in sorted order.
+        let library = vec![
+            TrackId("m/music/z.wav".to_string()),
+            TrackId("m/music/a.wav".to_string()),
+            TrackId("m/music/m.wav".to_string()),
+        ];
+        let mut queue = PlaybackQueue::default();
+
+        Continuation::fill(
+            &mut queue,
+            library.clone(),
+            &TrackId("m/music/a.wav".to_string()),
+        );
+
+        assert_eq!(
+            queue.tracks, library,
+            "the store's order is the queue's order"
+        );
+        assert_eq!(
+            queue.current_index,
+            Some(1),
+            "the played track is current at its position in that order"
+        );
+    }
+
+    #[test]
+    fn queue_fill_of_a_track_the_store_did_not_return_leaves_nothing_current() {
+        let library = vec![TrackId("a.wav".to_string()), TrackId("b.wav".to_string())];
+        let mut queue = PlaybackQueue::default();
+
+        Continuation::fill(&mut queue, library, &TrackId("gone.wav".to_string()));
+
+        assert!(
+            !queue.tracks.is_empty(),
+            "the Library still becomes the queue"
+        );
+        assert_eq!(
+            queue.current_index, None,
+            "and the wanted track has no slot to be current at"
+        );
     }
 }

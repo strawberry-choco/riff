@@ -1,8 +1,8 @@
 //! The Playback Coordinator: applies [`PlaybackUpdate`]s to session state and
-//! owns playback continuation — committing play history before advancing,
-//! repeat-one re-play, auto-advance, and stopping when nothing follows. It is
-//! the decider of queue continuation; the Audio Engine only reports what
-//! happened.
+//! owns the record-then-move sequence — committing play history for the track
+//! that just ended before asking [`Continuation`] what follows, and stopping
+//! when nothing does. What follows is **Continuation**'s answer, not a rule
+//! spelled here; the Audio Engine asks the same answer for a listener's skip.
 //!
 //! Threading follows the Audio Engine pattern: nothing here spawns threads in
 //! its decision logic. [`PlaybackCoordinator::spawn`] is the composition
@@ -12,12 +12,14 @@
 //! synchronous and callable without threads so tests can drive it directly.
 
 use crate::app::state::PlaybackSession;
-use crate::domain::{PlaybackCommand, PlaybackState, PlaybackUpdate, RepeatMode};
+use crate::domain::continuation::{Continuation, Trigger};
+use crate::domain::{PlaybackCommand, PlaybackState, PlaybackUpdate};
 use crossbeam_channel::{Receiver, Sender};
 use riff_persistence::store::LibraryMutationStore;
+use riff_persistence::sync::MutexExt;
 use std::sync::{Arc, Mutex};
-/// Applies [`PlaybackUpdate`]s to the shared session state and drives
-/// auto-advance when a track ends.
+/// Applies [`PlaybackUpdate`]s to the shared session state, continuing
+/// playback through [`Continuation`] when a track ends.
 pub struct PlaybackCoordinator {
     state: Arc<Mutex<PlaybackSession>>,
     update_rx: Receiver<PlaybackUpdate>,
@@ -78,19 +80,16 @@ impl PlaybackCoordinator {
     /// state, driving continuation when a track ends.
     pub fn apply_update(&mut self, update: PlaybackUpdate) {
         use PlaybackUpdate::{Error, PositionChanged, StateChanged, TrackChanged, TrackEnded};
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self.state.lock_or_recover();
 
         match update {
             StateChanged(s) => state.playback_state = s,
             PositionChanged(p) => state.current_position = p,
             TrackChanged(id) => {
-                // Find the index of the new track in the queue
-                if let Some(idx) = state.queue.tracks.iter().position(|t| t == &id) {
-                    state.queue.current_index = Some(idx);
-                }
+                // The engine has chosen what is current; the arbiter moves the
+                // queue's index onto it (and an id the queue does not hold
+                // changes nothing).
+                let _ = Continuation::settled_on(&mut state.queue, &id);
             }
             TrackEnded => {
                 // Drop the lock before calling handle_track_ended
@@ -113,20 +112,14 @@ impl PlaybackCoordinator {
     /// Projections refetch.
     fn handle_track_ended(&mut self) {
         let current_id = {
-            let state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = self.state.lock_or_recover();
             state.queue.current_track().cloned()
         };
 
         let Some(current_id) = current_id else {
             // No current track — nothing to record, just advance
             {
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut state = self.state.lock_or_recover();
                 Self::advance_queue(&self.cmd_tx, &mut state);
             }
             return;
@@ -142,39 +135,23 @@ impl PlaybackCoordinator {
 
         // Then advance the queue - drop the lock first
         {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = self.state.lock_or_recover();
             Self::advance_queue(&self.cmd_tx, &mut state);
         }
     }
     fn advance_queue(cmd_tx: &Sender<PlaybackCommand>, state: &mut PlaybackSession) {
-        if state.queue.tracks.is_empty() {
-            state.playback_state = PlaybackState::Stopped;
-            state.queue.current_index = None;
-            return;
-        }
-
-        // Check for repeat-one loop
-        let repeat_one = state.queue.repeat == RepeatMode::One
-            && !state.queue.shuffle
-            && state.queue.current_index.is_some();
-
-        let next_track = if repeat_one {
-            // Stay on the same track
-            state.queue.current_track().cloned()
-        } else {
-            state.queue.advance().cloned()
-        };
-
-        if let Some(id) = next_track {
-            // Send Play command for the next track
-            let _ = cmd_tx.send(PlaybackCommand::Play(id.clone()));
-        } else {
-            // Nothing follows — stop
-            state.playback_state = PlaybackState::Stopped;
-            state.queue.current_index = None;
+        // Play history for the track that just ended is committed by the
+        // caller before asking here: that ordering is Continuation's stated
+        // contract, and the queue has already moved by the time it answers.
+        match Continuation::after(&mut state.queue, Trigger::TrackEnded) {
+            Continuation::Play(id) => {
+                let _ = cmd_tx.send(PlaybackCommand::Play(id));
+            }
+            Continuation::Stop => {
+                // Nothing follows — stop, and drop the current index with it.
+                state.playback_state = PlaybackState::Stopped;
+                state.queue.current_index = None;
+            }
         }
     }
 }

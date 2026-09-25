@@ -377,31 +377,33 @@ impl RiffApp {
         );
     }
 
-    /// Drain polled Library Scan outcomes from the service and map them onto
-    /// session state exactly as before the extraction: per-root statuses
-    /// plus the titlebar scan-status line. The service NEVER touches
-    /// `LibrarySession` — this mapping is the UI's whole remaining scan
-    /// responsibility (ADR 0006). The watcher observes a scan's end itself
-    /// via `is_scanning`, so no relay fires here anymore.
+    /// Drain polled Library Scan outcomes from the service and report each
+    /// root's Readiness through the [`LibraryPaths`] slot, exactly as before
+    /// the extraction — the scan worker writes *through* the module instead of
+    /// reaching into the session — plus the titlebar scan-status line. The
+    /// service NEVER touches `LibrarySession` (ADR 0006). The watcher observes
+    /// a scan's end itself via `is_scanning`, so no relay fires here anymore.
     fn poll_library_updates(&self, library: &mut LibrarySession) {
         for outcome in self.scans.poll() {
             match outcome {
                 ScanOutcome::Progress { path, files_found } => {
                     library
-                        .library_statuses
-                        .insert(path, LibraryStatus::Scanning { files_found });
+                        .library_paths
+                        .report_readiness(&path, LibraryStatus::Scanning { files_found });
                     library.scan_status = Some(format!("{files_found} files"));
                 }
                 ScanOutcome::Complete { path, total_files } => {
                     library
-                        .library_statuses
-                        .insert(path, LibraryStatus::Scanned(total_files));
+                        .library_paths
+                        .report_readiness(&path, LibraryStatus::Scanned(total_files));
                     library.scan_status = Some(format!("Scan complete: {total_files} tracks"));
                     // Scan batches already committed through the store as
                     // they progressed; nothing whole-file remains to save.
                 }
                 ScanOutcome::Failed { path, reason } => {
-                    library.library_statuses.insert(path, LibraryStatus::Idle);
+                    library
+                        .library_paths
+                        .report_readiness(&path, LibraryStatus::Idle);
                     library.scan_status = Some(format!("Error: {reason}"));
                 }
             }
@@ -2109,7 +2111,9 @@ impl RiffApp {
         // One counts read per frame: every nav row's live count comes from
         // the counts read model (handoff issue 05), cached per store
         // generation so scans and playlist edits update it by the next frame.
-        let counts = self.views.sidebar_counts(library.library_paths.len());
+        let counts = self
+            .views
+            .sidebar_counts(library.library_paths.paths().len());
 
         // A row highlights only while its browser variant is actually on
         // screen (the Library view, no list opened over it).
@@ -2427,14 +2431,15 @@ impl RiffApp {
         let first_page = self.views.track_list(query, 0);
 
         // ---- Scroll Memory (scroll-memory spec, issue 01) ----
-        // The All Tracks flat list is the first Section slot: it applies its
-        // saved offset (or zero when the fingerprint is stale) before
-        // rendering and records the actual offset back after, keyed by the
-        // Section's stable salt instead of egui's positional widget identity.
-        let fingerprint = crate::ui::scroll_memory::ContentFingerprint::new(
+        // The All Tracks flat list is the first Section slot: it declares its
+        // slot to the Scroll Memory, which hands back the salt and the start
+        // offset (the saved one when the fingerprint matches, zero on a stale
+        // slot or none saved yet), and the visit token that records the actual
+        // offset back under the same content identity.
+        let (control, visit) = self.scroll_memory.begin_section(
+            riff_backend::app::state::LibrarySection::AllTracks,
             query,
             false,
-            self.scroll_memory.library_generation(),
         );
         if first_page.total == 0 {
             // Query-aware empty copy: the flat list explains a filtered-to-
@@ -2451,25 +2456,14 @@ impl RiffApp {
                 )
             };
             crate::ui::browser::empty_state(ui, &self.theme.active, emp_title, &emp_hint);
-            self.scroll_memory.record_section(
-                riff_backend::app::state::LibrarySection::AllTracks,
-                0.0,
-                fingerprint,
-            );
+            self.scroll_memory.end_section(visit, 0.0);
             return;
         }
 
-        let start = self.scroll_memory.section_start(
-            riff_backend::app::state::LibrarySection::AllTracks,
-            &fingerprint,
-        );
-        let salt = crate::ui::scroll_memory::section_salt(
-            riff_backend::app::state::LibrarySection::AllTracks,
-        );
         let scroll_area = egui::ScrollArea::vertical()
-            .id_salt(salt)
+            .id_salt(control.salt)
             .animated(false)
-            .vertical_scroll_offset(start);
+            .vertical_scroll_offset(control.start.unwrap_or(0.0));
         let output = scroll_area.show_rows(
             ui,
             theme::geometry::sidebar::ROW_H,
@@ -2496,11 +2490,7 @@ impl RiffApp {
                 }
             },
         );
-        self.scroll_memory.record_section(
-            riff_backend::app::state::LibrarySection::AllTracks,
-            output.state.offset.y,
-            fingerprint,
-        );
+        self.scroll_memory.end_section(visit, output.state.offset.y);
     }
 
     /// Render the tracks of a read-only smart playlist. The list reads
@@ -3020,7 +3010,7 @@ impl RiffApp {
         playback: &PlaybackSession,
         query: &str,
     ) {
-        if library.library_paths.is_empty() {
+        if library.library_paths.paths().is_empty() {
             crate::ui::browser::empty_state(
                 ui,
                 &self.theme.active,
@@ -3034,7 +3024,7 @@ impl RiffApp {
         // queries (ADR 0002/0003): escaped prefix matching over stored track
         // paths, cached until the next committed mutation bumps the
         // generation. No in-memory mirror involved.
-        let lib_paths = library.library_paths.clone();
+        let lib_paths = library.library_paths.paths().to_vec();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for lib_path in &lib_paths {
                 if !self.views.folder_has_audio(lib_path) {

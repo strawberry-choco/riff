@@ -85,8 +85,12 @@ Persisted user preferences that are not music-collection data, such as Library P
 _Avoid_: config, options
 
 **Preferences**:
-The module that owns the Settings round-trip — hydrating Settings into the sessions on launch, committing session changes back to the Application Store; a preference change is durable by construction, never by call-site discipline.
+The module that owns the Settings round-trip — hydrating Settings into the sessions on launch, committing session changes back to the Application Store; a preference change is durable by construction, never by call-site discipline. Structural preferences were the exception: Library Paths and Watch States were committed by call-site discipline at three separate sites, and the Library Path module closes it — every structural write now happens inside one of that module's operations, and `Preferences` only hydrates and diff-commits the scalars.
 _Avoid_: settings sync, persist helper
+
+**Library Path**:
+A root folder the Library is discovered from, registered by the user. It is one fact-set, not a string: the path, its Readiness, its Watch State, its running filesystem watcher, and its rows in the Application Store. Retiring a Library Path retires all five.
+_Avoid_: root, directory, watched folder
 
 **Watch State**:
 The persisted watcher choice for a Library Path: Disabled, Enabled, or Warning carrying a diagnostic message.
@@ -105,11 +109,11 @@ The single read interface over all Session Projections; UI code asks it for read
 _Avoid_: projection manager, view cache
 
 **Listing Page**:
-A Section's or Drill Column's total and its visible window, read from the Application Store as one fact at one generation. Its total and its rows may never come from different generations.
+A Section's or Drill Column's total and its visible window, read from the Application Store as one fact under one connection acquisition, so no committed write can interleave the two halves. Which generation a listing was read at is the Session Projection's concern, not the page's.
 _Avoid_: page, query result, count row
 
 **Audio Engine**:
-The module that turns Playback Commands into decoded audio and Playback Updates, owning decode scheduling, output startup, and gapless handoff; it decides nothing about queue order beyond filling an empty Playback Queue.
+The module that turns Playback Commands into decoded audio and Playback Updates, owning decode scheduling, output startup, and gapless handoff. It decides nothing about queue order: the Queue Fill and both skips are answered by **Continuation**, and the engine only performs the load.
 _Avoid_: playback thread, sound server
 
 **Transport**:
@@ -117,8 +121,12 @@ The module the UI uses to command playback: user intents (play, seek, volume, qu
 _Avoid_: command sender, playback API
 
 **PlaybackCoordinator**:
-The module that applies Playback Updates to session state and owns playback continuation: committing play history before advancing, repeat-one re-play, auto-advance, and stopping when nothing follows. It is the decider of queue continuation; the Audio Engine only reports what happened.
+The module that applies Playback Updates to session state: it commits play history for the track that just ended before asking **Continuation** what follows, and stops playback — clearing the current index with it — when nothing does. The answer itself is not its own; the Audio Engine asks the same answer for a listener's skip.
 _Avoid_: update processor, track-end handler
+
+**Continuation**:
+The answer to what plays next, given a playback event or a manual skip — which Track, or that nothing follows. It is the same question whether the trigger was a Track ending or a listener pressing Next, and one module in the Playback capability answers it, moving the Playback Queue to that answer. Which Tracks a **Queue Fill** puts in the queue and which is current, and what is current when a caller has already chosen the Track, are the same question asked of that module too.
+_Avoid_: auto-advance, next-track logic, skip handling
 
 **Library Scan**:
 The operation that discovers audio files under a Library Path and commits them into the Library in durable batches; progress and completion are reported to the session, and an interrupted scan keeps committed batches.

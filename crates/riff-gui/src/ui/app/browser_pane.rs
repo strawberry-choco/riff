@@ -307,14 +307,13 @@ impl RiffApp {
             empty_hint,
         };
         // A drill column resets to the top on every selection change — the
-        // Scroll Memory holds no drill offsets by design. Between changes its
-        // scroll is egui's natural state under the drill's own stable salt.
-        let control = crate::ui::scroll_memory::ScrollControl {
-            salt: crate::ui::scroll_memory::DrillSlot::ArtistAlbums.salt(),
-            start: self
-                .scroll_memory
-                .drill_start(crate::ui::scroll_memory::DrillSlot::ArtistAlbums),
-        };
+        // Scroll Memory holds no drill offsets by design, and it is the module
+        // that knows this slot's selections are drill bookkeeping. Between
+        // changes its scroll is egui's natural state under the drill's own
+        // stable salt.
+        let control = self
+            .scroll_memory
+            .begin_drill(crate::ui::scroll_memory::DrillSlot::ArtistAlbums);
         let _actual = browser::show_browser_column_scrolled(
             ui,
             &mut self.icons,
@@ -326,7 +325,11 @@ impl RiffApp {
         for action in actions {
             match action {
                 browser::BrowserAction::Select(key) => {
-                    self.scroll_memory.note_selection_change();
+                    self.scroll_memory.note_selection_in(
+                        crate::ui::scroll_memory::ListSlot::Drill(
+                            crate::ui::scroll_memory::DrillSlot::ArtistAlbums,
+                        ),
+                    );
                     apply_drill_action(section, level, key, library);
                 }
                 browser::BrowserAction::ToggleSort => {}
@@ -420,12 +423,9 @@ impl RiffApp {
         };
         // Drill column: reset to the top on every selection change (no
         // per-selection memory); egui's natural state between changes.
-        let control = crate::ui::scroll_memory::ScrollControl {
-            salt: crate::ui::scroll_memory::DrillSlot::GenreArtists.salt(),
-            start: self
-                .scroll_memory
-                .drill_start(crate::ui::scroll_memory::DrillSlot::GenreArtists),
-        };
+        let control = self
+            .scroll_memory
+            .begin_drill(crate::ui::scroll_memory::DrillSlot::GenreArtists);
         let _actual = browser::show_browser_column_scrolled(
             ui,
             &mut self.icons,
@@ -437,7 +437,11 @@ impl RiffApp {
         for action in actions {
             match action {
                 browser::BrowserAction::Select(key) => {
-                    self.scroll_memory.note_selection_change();
+                    self.scroll_memory.note_selection_in(
+                        crate::ui::scroll_memory::ListSlot::Drill(
+                            crate::ui::scroll_memory::DrillSlot::GenreArtists,
+                        ),
+                    );
                     apply_drill_action(LibrarySection::Genres, 1, key, library);
                 }
                 browser::BrowserAction::ToggleSort => {}
@@ -535,12 +539,9 @@ impl RiffApp {
         };
         // Drill column: reset to the top on every selection change (no
         // per-selection memory); egui's natural state between changes.
-        let control = crate::ui::scroll_memory::ScrollControl {
-            salt: crate::ui::scroll_memory::DrillSlot::GenreArtistAlbums.salt(),
-            start: self
-                .scroll_memory
-                .drill_start(crate::ui::scroll_memory::DrillSlot::GenreArtistAlbums),
-        };
+        let control = self
+            .scroll_memory
+            .begin_drill(crate::ui::scroll_memory::DrillSlot::GenreArtistAlbums);
         let _actual = browser::show_browser_column_scrolled(
             ui,
             &mut self.icons,
@@ -552,7 +553,11 @@ impl RiffApp {
         for action in actions {
             match action {
                 browser::BrowserAction::Select(key) => {
-                    self.scroll_memory.note_selection_change();
+                    self.scroll_memory.note_selection_in(
+                        crate::ui::scroll_memory::ListSlot::Drill(
+                            crate::ui::scroll_memory::DrillSlot::GenreArtistAlbums,
+                        ),
+                    );
                     apply_drill_action(LibrarySection::Genres, 2, key, library);
                 }
                 browser::BrowserAction::ToggleSort => {}
@@ -595,13 +600,11 @@ impl RiffApp {
         let mut actions = Vec::new();
         // The Tracks column resets to the top whenever the selection feeding
         // it changes (a new album or artist selected anywhere in the browser);
-        // it never remembers a position (issue 05).
-        let control = crate::ui::scroll_memory::ScrollControl {
-            salt: crate::ui::scroll_memory::DrillSlot::TracksColumn.salt(),
-            start: self
-                .scroll_memory
-                .drill_start(crate::ui::scroll_memory::DrillSlot::TracksColumn),
-        };
+        // it never remembers a position (issue 05). Its own rows select Tracks,
+        // which the module knows is not drill bookkeeping.
+        let control = self
+            .scroll_memory
+            .begin_drill(crate::ui::scroll_memory::DrillSlot::TracksColumn);
         crate::ui::detail::show_detail_column_scrolled(
             ui,
             &mut self.icons,
@@ -757,24 +760,14 @@ impl RiffApp {
             empty_title,
             empty_hint: &empty_hint,
         };
-        // Section root list: the per-Section Scroll Memory slot applies its
-        // saved offset when the fingerprint (query + sort + generation)
-        // matches, otherwise the list resets to the top (issue 02).
-        let fingerprint = crate::ui::scroll_memory::ContentFingerprint::new(
+        // Section root list: the site declares WHERE it renders and passes its
+        // content; the Scroll Memory composes the identity and picks the shape
+        // — saved offset when it matches, else a reset (issue 02).
+        let (control, visit) = self.scroll_memory.begin_section(
+            riff_backend::app::state::LibrarySection::Artists,
             query,
             sort_desc,
-            self.scroll_memory.library_generation(),
         );
-        let start = self.scroll_memory.section_start(
-            riff_backend::app::state::LibrarySection::Artists,
-            &fingerprint,
-        );
-        let control = crate::ui::scroll_memory::ScrollControl {
-            salt: crate::ui::scroll_memory::section_salt(
-                riff_backend::app::state::LibrarySection::Artists,
-            ),
-            start: Some(start),
-        };
         let actual = browser::show_browser_column_scrolled(
             ui,
             &mut self.icons,
@@ -783,14 +776,13 @@ impl RiffApp {
             Some(control),
             &mut actions,
         );
-        self.scroll_memory.record_section(
-            riff_backend::app::state::LibrarySection::Artists,
-            actual,
-            fingerprint,
-        );
+        self.scroll_memory.end_section(visit, actual);
         for action in actions {
             if matches!(&action, browser::BrowserAction::Select(_)) {
-                self.scroll_memory.note_selection_change();
+                self.scroll_memory
+                    .note_selection_in(crate::ui::scroll_memory::ListSlot::Section(
+                        riff_backend::app::state::LibrarySection::Artists,
+                    ));
             }
             apply_browser_action(action, library);
         }
@@ -956,23 +948,14 @@ impl RiffApp {
             empty_title,
             empty_hint: &empty_hint,
         };
-        // Section root list: the per-Section Scroll Memory slot applies its
-        // saved offset when the fingerprint matches, else resets (issue 02).
-        let fingerprint = crate::ui::scroll_memory::ContentFingerprint::new(
+        // Section root list: the site declares WHERE it renders and passes its
+        // content; the Scroll Memory composes the identity and picks the shape
+        // — saved offset when it matches, else a reset (issue 02).
+        let (control, visit) = self.scroll_memory.begin_section(
+            riff_backend::app::state::LibrarySection::Albums,
             query,
             sort_desc,
-            self.scroll_memory.library_generation(),
         );
-        let start = self.scroll_memory.section_start(
-            riff_backend::app::state::LibrarySection::Albums,
-            &fingerprint,
-        );
-        let control = crate::ui::scroll_memory::ScrollControl {
-            salt: crate::ui::scroll_memory::section_salt(
-                riff_backend::app::state::LibrarySection::Albums,
-            ),
-            start: Some(start),
-        };
         let actual = browser::show_browser_column_scrolled(
             ui,
             &mut self.icons,
@@ -981,14 +964,13 @@ impl RiffApp {
             Some(control),
             &mut actions,
         );
-        self.scroll_memory.record_section(
-            riff_backend::app::state::LibrarySection::Albums,
-            actual,
-            fingerprint,
-        );
+        self.scroll_memory.end_section(visit, actual);
         for action in actions {
             if matches!(&action, browser::BrowserAction::Select(_)) {
-                self.scroll_memory.note_selection_change();
+                self.scroll_memory
+                    .note_selection_in(crate::ui::scroll_memory::ListSlot::Section(
+                        riff_backend::app::state::LibrarySection::Albums,
+                    ));
             }
             apply_browser_action(action, library);
         }
@@ -1060,23 +1042,14 @@ impl RiffApp {
             empty_title: "No genres yet",
             empty_hint: "Genres come from your tracks' tags \u{2014} add music and rescan.",
         };
-        // Section root list: the per-Section Scroll Memory slot applies its
-        // saved offset when the fingerprint matches, else resets (issue 02).
-        let fingerprint = crate::ui::scroll_memory::ContentFingerprint::new(
+        // Section root list: the site declares WHERE it renders; the Scroll
+        // Memory picks the shape — saved offset when the fingerprint matches,
+        // else a reset (issue 02).
+        let (control, visit) = self.scroll_memory.begin_section(
+            riff_backend::app::state::LibrarySection::Genres,
             query,
             sort_desc,
-            self.scroll_memory.library_generation(),
         );
-        let start = self.scroll_memory.section_start(
-            riff_backend::app::state::LibrarySection::Genres,
-            &fingerprint,
-        );
-        let control = crate::ui::scroll_memory::ScrollControl {
-            salt: crate::ui::scroll_memory::section_salt(
-                riff_backend::app::state::LibrarySection::Genres,
-            ),
-            start: Some(start),
-        };
         let actual = browser::show_browser_column_scrolled(
             ui,
             &mut self.icons,
@@ -1085,14 +1058,13 @@ impl RiffApp {
             Some(control),
             &mut actions,
         );
-        self.scroll_memory.record_section(
-            riff_backend::app::state::LibrarySection::Genres,
-            actual,
-            fingerprint,
-        );
+        self.scroll_memory.end_section(visit, actual);
         for action in actions {
             if matches!(&action, browser::BrowserAction::Select(_)) {
-                self.scroll_memory.note_selection_change();
+                self.scroll_memory
+                    .note_selection_in(crate::ui::scroll_memory::ListSlot::Section(
+                        riff_backend::app::state::LibrarySection::Genres,
+                    ));
             }
             apply_browser_action(action, library);
         }

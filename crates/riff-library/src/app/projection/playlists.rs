@@ -27,22 +27,34 @@ pub struct PlaylistView {
 ///
 /// Caches the playlist list plus per-playlist resolved views as TWO
 /// [`GenerationCache`] instances keyed on different counters. The list is
-/// pure user data: keyed on the session's dedicated playlist generation
-/// alone. Resolved rows embed Track metadata resolved against the Library
-/// collection, so their cache is keyed on the Library generation with the
-/// playlist epoch baked into the key — a move of EITHER counter drops every
-/// row while the list stays. Within matching counters levels refetch lazily
-/// as their views render again.
+/// pure user data: a declared [`GenerationCache::level`] on the playlist
+/// generation alone. Resolved rows embed Track metadata resolved against the
+/// Library collection, so their cache is keyed on the Library generation with
+/// the playlist epoch baked into the key — a move of EITHER counter drops
+/// every row while the list stays. **This is the one named exception to
+/// `level` in the read seam**: the primitive is single-stamp by decision, and
+/// growing it for this one two-counter caller is the interface widening ADR
+/// 0002's 2026-09-23 amendment argues against, so `playlist_view` observes the
+/// two epochs by hand. Within matching counters levels refetch lazily as their
+/// views render again.
 ///
 /// Loader errors propagate and leave the cache untouched — the previous
 /// good rows stay readable through [`Self::cached_playlists`] /
 /// [`Self::cached_view`] while the next call retries.
 pub struct PlaylistProjection {
     /// The playlist list, keyed on the playlist generation alone.
-    playlists: GenerationCache<(), Arc<[Playlist]>>,
+    playlists: GenerationCache<(), PlaylistBundle>,
     /// The per-playlist resolved views: keyed on the Library generation,
     /// with the playlist generation the rows were built under as the key.
     views: GenerationCache<u64, HashMap<PlaylistId, PlaylistView>>,
+}
+
+/// The list's cache bundle. `level`'s `read` answers `None` for "load it", so
+/// a loaded-but-empty collection of playlists needs a slot that says it
+/// answered.
+#[derive(Default, Clone)]
+struct PlaylistBundle {
+    list: Option<Arc<[Playlist]>>,
 }
 
 impl Default for PlaylistProjection {
@@ -63,12 +75,10 @@ impl PlaylistProjection {
     /// Every user playlist in creation order, cached per playlist
     /// generation. Fresh frames hand out an `Arc` clone of the cached list.
     ///
-    /// This level keeps a hand-written body rather than declaring itself on
-    /// [`GenerationCache::level`]: its cache holds the answer itself, not a
-    /// bundle of levels filled one at a time, and `level` fills through the
-    /// bundle slot its cache type can default-construct. The staleness
-    /// procedure it spells out here is the one `level` implements; it is a
-    /// single-stamp level, not a carve-out on policy grounds.
+    /// A declared [`GenerationCache::level`]: the list rides in a one-slot
+    /// bundle so "loaded, and there are none" is an answer rather than a miss
+    /// — `read` returning `None` means "load it", which for a bare
+    /// `Arc<[Playlist]>` would requery an empty Library every frame.
     ///
     /// # Errors
     /// Propagates loader failures without touching the cache.
@@ -76,15 +86,16 @@ impl PlaylistProjection {
         &mut self,
         loader: &mut dyn FnMut() -> Result<Vec<Playlist>, StoreError>,
     ) -> Result<Arc<[Playlist]>, StoreError> {
-        let epoch = self.playlists.observe();
-        if self.playlists.loaded_at(epoch)
-            && let Some(cached) = self.playlists.peek()
-        {
-            return Ok(Arc::clone(cached));
-        }
-        let fresh: Arc<[Playlist]> = loader()?.into();
-        self.playlists.store(epoch, (), Arc::clone(&fresh));
-        Ok(fresh)
+        self.playlists.level(
+            &(),
+            |bundle| bundle.list.clone(),
+            loader,
+            |bundle, fresh| {
+                let answer: Arc<[Playlist]> = fresh.into();
+                bundle.list = Some(Arc::clone(&answer));
+                answer
+            },
+        )
     }
 
     /// One playlist's resolved view, cached per playlist generation plus
@@ -134,7 +145,7 @@ impl PlaylistProjection {
     /// keeps last good data instead of blanking the sidebar.
     #[must_use]
     pub fn cached_playlists(&self) -> Option<Arc<[Playlist]>> {
-        self.playlists.peek().cloned()
+        self.playlists.peek().and_then(|bundle| bundle.list.clone())
     }
 
     /// The stale-but-present view for `id`, if any — the error fallback

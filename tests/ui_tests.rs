@@ -10446,9 +10446,9 @@ mod whole_frame_tests {
             "the queued outcome is on the status line by frame end"
         );
         assert_eq!(
-            library.library_statuses.get(&root),
-            Some(&LibraryStatus::Scanned(3)),
-            "and the per-root status the panes read moves with it"
+            library.library_paths.readiness(&root),
+            LibraryStatus::Scanned(3),
+            "and the per-root readiness the panes read moves with it"
         );
     }
 
@@ -11146,7 +11146,12 @@ mod whole_frame_tests {
         {
             let mut library = shell.library.lock_or_recover();
             library.browse_mode = BrowseMode::Folders;
-            library.library_paths = vec![root.clone()];
+            library
+                .library_paths
+                .hydrate(&riff_backend::app::store::Settings {
+                    library_paths: vec![root.clone()],
+                    ..Default::default()
+                });
             library.search_query = "geo".to_string();
         }
         shell.harness.step();
@@ -11186,7 +11191,12 @@ mod whole_frame_tests {
         {
             let mut library = shell.library.lock_or_recover();
             library.browse_mode = BrowseMode::Folders;
-            library.library_paths = vec![root.clone()];
+            library
+                .library_paths
+                .hydrate(&riff_backend::app::store::Settings {
+                    library_paths: vec![root.clone()],
+                    ..Default::default()
+                });
         }
 
         /// Drain the recording and return the distinct folder identities that
@@ -11665,6 +11675,14 @@ mod whole_frame_tests {
     // list, switch Sections, and assert the same rows are visible on return
     // (user story 22). Assertions observe visible rows and labels only —
     // never egui scroll state or the Scroll Memory internals.
+    //
+    // Exactly two tests live here, one per protocol shape, because only a real
+    // frame proves egui APPLIED the offset the module handed out. The decisions
+    // themselves — per-slot independence, staleness, the drill reset epoch, and
+    // which slots carry selection bookkeeping — are asserted directly at the
+    // module's own interface in `crates/riff-gui/tests/scroll_memory_tests.rs`.
+    // The three further frame tests that used to live here restated those
+    // decisions through painted row positions and were replaced, not layered.
 
     /// A mock library whose flat list holds `count` rows, so the All Tracks
     /// list actually scrolls.
@@ -11866,177 +11884,6 @@ mod whole_frame_tests {
         );
     }
 
-    #[test]
-    fn test_browser_root_sections_restore_independently() {
-        use riff_backend::app::state::LibrarySection;
-
-        let (mut shell, _transport) = recording_transport_shell(browse_mock());
-        shell.harness.step();
-        for _ in 0..3 {
-            shell.harness.step();
-        }
-
-        // Each Section's root keeps its own place: scroll the Artists root
-        // deep, then the Genres root deep, and flip back and forth asserting
-        // that each returns to exactly the rows it left.
-        shell.harness.get_by_label("Artists (200)").click();
-        shell.harness.step();
-        scroll_list_until(
-            &mut shell.harness,
-            &[
-                "Artist 010 (1 album)",
-                "Artist 020 (1 album)",
-                "Artist 030 (1 album)",
-                "Artist 040 (1 album)",
-                "Artist 050 (1 album)",
-                "Artist 060 (1 album)",
-            ],
-            "Artist 030 (1 album)",
-            40,
-        );
-        for _ in 0..3 {
-            shell.harness.step();
-        }
-        let artist_y = y_of(&shell.harness, "Artist 030 (1 album)");
-        assert!(
-            shell
-                .harness
-                .query_by_label("Artist 000 (1 album)")
-                .is_none(),
-            "scrolling the Artists root culls its first row"
-        );
-
-        shell.harness.get_by_label("Genres (200)").click();
-        shell.harness.step();
-        scroll_list_until(
-            &mut shell.harness,
-            &[
-                "Genre 010 (1 tracks)",
-                "Genre 020 (1 tracks)",
-                "Genre 030 (1 tracks)",
-                "Genre 040 (1 tracks)",
-                "Genre 050 (1 tracks)",
-                "Genre 060 (1 tracks)",
-            ],
-            "Genre 030 (1 tracks)",
-            40,
-        );
-        for _ in 0..3 {
-            shell.harness.step();
-        }
-        let genre_y = y_of(&shell.harness, "Genre 030 (1 tracks)");
-        assert!(
-            shell
-                .harness
-                .query_by_label("Genre 000 (1 tracks)")
-                .is_none(),
-            "scrolling the Genres root culls its first row"
-        );
-
-        // Back to Artists: its own rows return at the same place; the Genres
-        // rows are gone.
-        shell.harness.get_by_label("Artists (200)").click();
-        shell.harness.step();
-        shell.harness.step();
-        assert!(
-            shell
-                .harness
-                .query_by_label("Artist 030 (1 album)")
-                .is_some(),
-            "the Artists root restores its remembered rows"
-        );
-        assert!(
-            (y_of(&shell.harness, "Artist 030 (1 album)") - artist_y).abs() < 1.0,
-            "the Artists root restores exactly the place it was left \
-             (artist_y {artist_y:.1}, now {:.1})",
-            y_of(&shell.harness, "Artist 030 (1 album)")
-        );
-        assert!(
-            shell
-                .harness
-                .query_by_label("Artist 000 (1 album)")
-                .is_none(),
-            "the Artists restore keeps the first row culled"
-        );
-
-        // Back to Genres: its own rows return at their own place, and the
-        // Artists rows are gone — each Section's memory is independent.
-        shell.harness.get_by_label("Genres (200)").click();
-        shell.harness.step();
-        shell.harness.step();
-        assert!(
-            shell
-                .harness
-                .query_by_label("Genre 030 (1 tracks)")
-                .is_some(),
-            "the Genres root restores its remembered rows"
-        );
-        assert!(
-            (y_of(&shell.harness, "Genre 030 (1 tracks)") - genre_y).abs() < 1.0,
-            "the Genres root restores exactly the place it was left"
-        );
-        assert!(
-            shell
-                .harness
-                .query_by_label("Genre 000 (1 tracks)")
-                .is_none(),
-            "the Genres restore keeps the first row culled"
-        );
-        assert!(
-            shell
-                .harness
-                .query_by_label("Artist 030 (1 album)")
-                .is_none(),
-            "switching Sections replaces the stage — the Artists rows do not linger"
-        );
-
-        // Returning from a drill (via a Section switch) lands on the Section's
-        // root list at its remembered place, not on the drill (user story 16).
-        shell.harness.get_by_label("Artists (200)").click();
-        shell.harness.step();
-        shell.harness.step();
-        assert!(
-            shell
-                .harness
-                .query_by_label("Artist 030 (1 album)")
-                .is_some(),
-            "the Artists root is on stage before drilling"
-        );
-        shell.harness.get_by_label("Artist 030 (1 album)").click();
-        shell.harness.step();
-        // The stage's column plan was fixed before the click applied, so the
-        // drill column joins the stage on the NEXT frame.
-        shell.harness.step();
-        assert!(
-            shell.harness.query_by_label("No albums yet").is_some(),
-            "selecting an artist drills into its (empty) Albums column"
-        );
-        shell.harness.get_by_label("Genres (200)").click();
-        shell.harness.step();
-        assert!(
-            shell
-                .harness
-                .query_by_label("Genre 030 (1 tracks)")
-                .is_some(),
-            "switching away from the drill lands on the Genres root"
-        );
-        shell.harness.get_by_label("Artists (200)").click();
-        shell.harness.step();
-        shell.harness.step();
-        assert!(
-            shell
-                .harness
-                .query_by_label("Artist 030 (1 album)")
-                .is_some(),
-            "returning after the Section switch lands on the Artists ROOT again"
-        );
-        assert_eq!(
-            shell.library.lock_or_recover().library_section,
-            LibrarySection::Artists,
-            "the section selection is Artists after the round trip"
-        );
-    }
-
     /// A mock with 200 albums (kept for the artist we drill into) and 200
     /// tracks inside each album, so the drill Albums and the Tracks column
     /// actually scroll.
@@ -12151,277 +11998,6 @@ mod whole_frame_tests {
                 .query_by_label("Album 030 (Artist 040)")
                 .is_none(),
             "a re-selection never resumes an old drill offset"
-        );
-    }
-
-    #[test]
-    fn test_tracks_column_resets_on_selection_change() {
-        let (mut shell, _transport) = recording_transport_shell(drill_mock());
-        shell.harness.step();
-        for _ in 0..3 {
-            shell.harness.step();
-        }
-
-        // Drill artist → album; the Tracks column starts at its first track.
-        shell.harness.get_by_label("Artists (200)").click();
-        shell.harness.step();
-        scroll_list_until(
-            &mut shell.harness,
-            &[
-                "Artist 005 (1 album)",
-                "Artist 015 (1 album)",
-                "Artist 025 (1 album)",
-                "Artist 035 (1 album)",
-                "Artist 045 (1 album)",
-                "Artist 055 (1 album)",
-                "Artist 065 (1 album)",
-            ],
-            "Artist 040 (1 album)",
-            40,
-        );
-        for _ in 0..3 {
-            shell.harness.step();
-        }
-        shell.harness.get_by_label("Artist 040 (1 album)").click();
-        shell.harness.step();
-        shell.harness.step();
-        assert!(
-            shell
-                .harness
-                .query_by_label("Album 000 (Artist 040)")
-                .is_some(),
-            "the artist's Albums column mounts before selecting an album"
-        );
-        shell.harness.get_by_label("Album 000 (Artist 040)").click();
-        shell.harness.step();
-        shell.harness.step();
-        assert!(
-            shell.harness.query_by_label("T-000").is_some(),
-            "the Tracks column starts at the selected album's first track"
-        );
-
-        // Scroll the Tracks column deep.
-        scroll_list_until(
-            &mut shell.harness,
-            &[
-                "T-010", "T-020", "T-030", "T-040", "T-050", "T-060", "T-070",
-            ],
-            "T-030",
-            40,
-        );
-        for _ in 0..3 {
-            shell.harness.step();
-        }
-        assert!(
-            shell.harness.query_by_label("T-000").is_none(),
-            "scrolling the Tracks column culls its first track"
-        );
-
-        // Selecting a DIFFERENT album starts the Tracks column over at its
-        // first track (issue 05) instead of resuming the previous offset.
-        shell.harness.get_by_label("Album 005 (Artist 040)").click();
-        shell.harness.step();
-        shell.harness.step();
-        assert!(
-            shell.harness.query_by_label("T-000").is_some(),
-            "selecting a different album starts the Tracks column at the first track"
-        );
-        assert!(
-            shell.harness.query_by_label("T-030").is_none(),
-            "the previous selection's offset is never resumed"
-        );
-
-        // Re-selecting the same album also resets it.
-        shell.harness.get_by_label("Album 005 (Artist 040)").click();
-        shell.harness.step();
-        shell.harness.step();
-        assert!(
-            shell.harness.query_by_label("T-000").is_some(),
-            "re-selecting the same album starts the Tracks column at the first track"
-        );
-    }
-
-    #[test]
-    fn test_content_change_resets_the_affected_list_to_the_top() {
-        use riff_backend::app::store::StoreChanged;
-
-        // --- Typing a search query resets the flat list to the top ---
-        let mut mock = flat_mock(500);
-        mock.library_counts = riff_backend::app::store::LibraryCounts {
-            tracks: 500,
-            artists: 0,
-            albums: 0,
-            genres: 0,
-        };
-        let (mut shell, _transport) = recording_transport_shell(mock);
-        shell.harness.step();
-        for _ in 0..3 {
-            shell.harness.step();
-        }
-        scroll_list_until(
-            &mut shell.harness,
-            &[
-                "One - Track 005",
-                "One - Track 010",
-                "One - Track 015",
-                "One - Track 020",
-                "One - Track 025",
-                "One - Track 030",
-            ],
-            "One - Track 020",
-            40,
-        );
-        for _ in 0..3 {
-            shell.harness.step();
-        }
-
-        // Type into the titlebar search field (the shell's single text edit).
-        shell
-            .harness
-            .get_by_role(egui::accesskit::Role::TextInput)
-            .focus();
-        shell.harness.step();
-        shell
-            .harness
-            .get_by_role(egui::accesskit::Role::TextInput)
-            .type_text("One");
-        shell.harness.step();
-        assert!(
-            shell.harness.query_by_label("One - Track 000").is_some(),
-            "typing a search query resets the list to the top"
-        );
-        assert!(
-            shell.harness.query_by_label("One - Track 020").is_none(),
-            "a stale offset is never restored into the filtered content"
-        );
-
-        // --- Editing / clearing the query resets the list to the top again ---
-        scroll_list_until(
-            &mut shell.harness,
-            &[
-                "One - Track 005",
-                "One - Track 010",
-                "One - Track 015",
-                "One - Track 020",
-                "One - Track 025",
-                "One - Track 030",
-            ],
-            "One - Track 020",
-            40,
-        );
-        assert!(
-            shell.harness.query_by_label("One - Track 000").is_none(),
-            "the re-scrolled filtered list is past its first row again"
-        );
-        shell.harness.key_press(egui::Key::Escape); // clears + unfocuses
-        shell.harness.step();
-        assert!(
-            shell.harness.query_by_label("One - Track 000").is_some(),
-            "clearing the search query resets the list to the top again"
-        );
-
-        // --- Flipping the A–Z / Z–A sort resets the Artists root ---
-        let mock = browse_mock();
-        let (mut shell, _transport) = recording_transport_shell(mock);
-        shell.harness.step();
-        for _ in 0..3 {
-            shell.harness.step();
-        }
-        shell.harness.get_by_label("Artists (200)").click();
-        shell.harness.step();
-        scroll_list_until(
-            &mut shell.harness,
-            &[
-                "Artist 005 (1 album)",
-                "Artist 015 (1 album)",
-                "Artist 025 (1 album)",
-                "Artist 035 (1 album)",
-                "Artist 045 (1 album)",
-                "Artist 055 (1 album)",
-                "Artist 065 (1 album)",
-            ],
-            "Artist 050 (1 album)",
-            40,
-        );
-        for _ in 0..3 {
-            shell.harness.step();
-        }
-        assert!(
-            shell
-                .harness
-                .query_by_label("Artist 000 (1 album)")
-                .is_none()
-                && shell
-                    .harness
-                    .query_by_label("Artist 199 (1 album)")
-                    .is_none(),
-            "a mid-list Artists position shows neither end of the list"
-        );
-        shell.harness.get_by_label("Sort Z to A").click();
-        shell.harness.step();
-        shell.harness.step();
-        assert!(
-            shell
-                .harness
-                .query_by_label("Artist 199 (1 album)")
-                .is_some(),
-            "flipping the sort resets the reordered list to its first entry"
-        );
-
-        // --- A library rescan (generation bump) resets the flat list ---
-        let mut mock = flat_mock(500);
-        mock.library_counts = riff_backend::app::store::LibraryCounts {
-            tracks: 500,
-            artists: 0,
-            albums: 0,
-            genres: 0,
-        };
-        let (mut shell, _transport) = recording_transport_shell(mock);
-        let (changes_tx, changes_rx) = crossbeam_channel::unbounded::<StoreChanged>();
-        shell
-            .backend_events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .subscribe_to_backend_changes(changes_rx);
-        shell.harness.step();
-        for _ in 0..3 {
-            shell.harness.step();
-        }
-        scroll_list_until(
-            &mut shell.harness,
-            &[
-                "One - Track 005",
-                "One - Track 010",
-                "One - Track 015",
-                "One - Track 020",
-                "One - Track 025",
-                "One - Track 030",
-            ],
-            "One - Track 020",
-            40,
-        );
-        for _ in 0..3 {
-            shell.harness.step();
-        }
-        assert!(
-            shell.harness.query_by_label("One - Track 000").is_none(),
-            "the flat list is scrolled past its first row before the rescan"
-        );
-        // A committed scan bumps the Library generation through the store
-        // change relay; the app drains it next frame and every slot's
-        // fingerprint goes stale.
-        changes_tx
-            .send(StoreChanged::Library(1))
-            .expect("the store-change relay is wired");
-        shell.harness.step();
-        shell.harness.step();
-        assert!(
-            shell.harness.query_by_label("One - Track 000").is_some(),
-            "a library rescan that changes the collection resets the list to the top"
-        );
-        assert!(
-            shell.harness.query_by_label("One - Track 020").is_none(),
-            "the pre-rescan offset is never restored into changed content"
         );
     }
 }

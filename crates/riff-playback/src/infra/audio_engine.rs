@@ -6,8 +6,8 @@
 //! decode scheduling with backpressure, output startup, `ReplayGain`
 //! resolution, Queue Fill, command re-dispatch, and the gapless
 //! pre-decode/handoff machinery — everything else is private implementation.
-//! It decides nothing about queue order beyond filling an empty Playback
-//! Queue.
+//! It decides nothing about queue order: **Continuation** answers both the
+//! Queue Fill and the skip, and the engine performs the load.
 //!
 //! Threading: the module exposes only the blocking [`AudioEngine::run`];
 //! the Composition Root is the sole thread spawner and runs it on the
@@ -18,10 +18,12 @@
 //! implementations live in `riff-infra`.
 
 use crate::app::state::{PlaybackSession, replaygain_factor};
-use crate::domain::{PlaybackCommand, PlaybackPosition, PlaybackState, PlaybackUpdate, RepeatMode};
+use crate::domain::continuation::{Continuation, Trigger};
+use crate::domain::{PlaybackCommand, PlaybackPosition, PlaybackState, PlaybackUpdate};
 use crate::infra::ports::{AudioDecoder, AudioFormatInfo, AudioOutput, DecoderFactory};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use riff_persistence::store::LibraryQueryStore;
+use riff_persistence::sync::MutexExt;
 use riff_persistence::track::TrackId;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -140,26 +142,19 @@ impl AudioEngine {
             if let Some(cmd) = cmd {
                 match cmd {
                     PlaybackCommand::Play(id) => {
-                        // Queue Fill: playing into an empty queue loads the
-                        // whole Library in canonical flat ordering (path
-                        // ascending) so Next/Previous and auto-advance work;
-                        // the requested track becomes current and shuffle
-                        // resets with the replaced queue.
+                        // **Queue Fill**: playing into an empty queue loads the
+                        // whole Library from the store, and *Continuation*
+                        // decides which track is current and in what order —
+                        // the store's own order (`ORDER BY path`) is the
+                        // contract. Shuffle is queue *mode*, not order, and
+                        // stays a caller-side reset.
                         {
-                            let mut session = self
-                                .session
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let mut session = self.session.lock_or_recover();
                             if session.queue.tracks.is_empty()
                                 && let Ok(all_ids) = self.query.all_track_ids()
                                 && !all_ids.is_empty()
                             {
-                                session.queue.tracks = all_ids;
-                                session.queue.current_index = session
-                                    .queue
-                                    .tracks
-                                    .iter()
-                                    .position(|queue_id| queue_id == &id);
+                                Continuation::fill(&mut session.queue, all_ids, &id);
                                 session.queue.set_shuffle(false);
                             }
                         }
@@ -222,10 +217,7 @@ impl AudioEngine {
                         // multiplies every sample in the callback, so the
                         // write loop below no longer scales samples.
                         {
-                            let session = self
-                                .session
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let session = self.session.lock_or_recover();
                             let factor = replaygain_factor(
                                 session.replaygain_enabled,
                                 track.metadata.replaygain_track_gain,
@@ -337,10 +329,7 @@ impl AudioEngine {
                         // session queue is the one traversal state, and the
                         // coordinator only hears about what happened.
                         let idle = {
-                            let mut session = self
-                                .session
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let mut session = self.session.lock_or_recover();
                             session.queue.insert_next(id.clone());
                             current_track_id.is_none()
                         };
@@ -351,10 +340,7 @@ impl AudioEngine {
 
                     PlaybackCommand::AddToQueue(id) => {
                         let idle = {
-                            let mut session = self
-                                .session
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let mut session = self.session.lock_or_recover();
                             session.queue.append(id.clone());
                             current_track_id.is_none()
                         };
@@ -371,10 +357,7 @@ impl AudioEngine {
                         // playback when idle.
                         let first = ids.first().cloned();
                         let idle = {
-                            let mut session = self
-                                .session
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let mut session = self.session.lock_or_recover();
                             session.queue.append_many(ids);
                             current_track_id.is_none()
                         };
@@ -384,11 +367,7 @@ impl AudioEngine {
                     }
 
                     PlaybackCommand::PlayPause => {
-                        let state = self
-                            .session
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .playback_state;
+                        let state = self.session.lock_or_recover().playback_state;
                         match state {
                             PlaybackState::Playing => {
                                 if output_started {
@@ -471,10 +450,7 @@ impl AudioEngine {
                             && total.saturating_sub(position).as_secs_f32() <= PRE_ENCODE_SECONDS
                         {
                             let successor_id = {
-                                let session = self
-                                    .session
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                let session = self.session.lock_or_recover();
                                 session.queue.upcoming(1).first().map(|id| (*id).clone())
                             };
                             if let Some(next_id) = successor_id
@@ -539,18 +515,15 @@ impl AudioEngine {
         current_track_id: &mut Option<TrackId>,
         position: &mut Duration,
     ) {
-        let session = self
-            .session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = self.session.lock_or_recover();
         let gapless_conditions = crate::app::gapless::GaplessConditions {
             shuffle: session.queue.shuffle,
-            repeat_one: session.queue.repeat == RepeatMode::One && !session.queue.shuffle,
+            repeat_one: session.queue.repeats_one(),
             format_compatible: pre_decode_state.format_compatible,
             has_successor: pre_decode_state.has_successor,
         };
 
-        let can_gapless = if session.queue.repeat == RepeatMode::One && !session.queue.shuffle {
+        let can_gapless = if session.queue.repeats_one() {
             crate::app::gapless::repeat_one_handoff_eligible(
                 session.queue.shuffle,
                 true,
@@ -613,13 +586,14 @@ impl AudioEngine {
         current_track_id: &mut Option<TrackId>,
     ) {
         let next_id = {
-            let mut session = self
-                .session
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match direction {
-                SkipDirection::Forward => session.queue.advance().cloned(),
-                SkipDirection::Backward => session.queue.previous().cloned(),
+            let mut session = self.session.lock_or_recover();
+            let trigger = match direction {
+                SkipDirection::Forward => Trigger::ManualNext,
+                SkipDirection::Backward => Trigger::ManualPrevious,
+            };
+            match Continuation::after(&mut session.queue, trigger) {
+                Continuation::Play(id) => Some(id),
+                Continuation::Stop => None,
             }
         };
         if let Some(id) = next_id {

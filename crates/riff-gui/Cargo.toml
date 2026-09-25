@@ -9,9 +9,10 @@
 # issue 08): every adapter dependency lives in `riff-infra`, and this crate
 # depends on riff-backend only (plus UI/platform dependencies).
 #
-# The integration test suite and golden snapshots live at the workspace root
-# in `./tests/` (see its own Cargo.toml) and declare this crate as a
-# dev-dependency.
+# The crate's own suite lives in `./tests/` (`scroll_memory_tests.rs`, the
+# Scroll Memory's protocol at its own interface); the cross-crate integration
+# suite and the golden snapshots live at the workspace root in the root
+# `./tests/` crate, which declares this crate as a dev-dependency.
 
 [package]
 name = "riff-gui"
@@ -52,8 +53,6 @@ rfd = "0.17"
 
 [dev-dependencies]
 egui = "0.35"
-egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
-tempfile = "3.8"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

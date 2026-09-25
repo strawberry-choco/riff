@@ -20,8 +20,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::icons::{Icon, IconCache};
+use super::linear;
 use super::playerbar;
-use super::sidebar::{self, TreeRow};
+use super::sidebar;
 use super::theme::geometry::glow;
 use super::theme::geometry::now_playing::{
     CLOSE_BTN, CLOSE_INSET, COPY_GAP, COVER_SIZE, HEADER_H, META_DETAILS_GAP, SECTION_GAP,
@@ -29,25 +30,19 @@ use super::theme::geometry::now_playing::{
 };
 use super::theme::geometry::seek::{TIME_LABEL_SPACE, TRACK_H};
 use super::theme::{self, Palette};
-use riff_backend::domain::{Track, TrackId, TrackMetadata};
+use riff_backend::domain::{TrackId, TrackMetadata};
 
 /// How many Up Next rows the stage previews (pre-restyle behavior). A read
 /// model bound the view asks for, not a dimension it paints, so it stays here.
 pub const UP_NEXT_LIMIT: usize = 5;
 
-/// Full-texture UV rect for [`egui::Painter::image`] (sidebar precedent).
-const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-
 // --- Content & actions ------------------------------------------------------------
 
-/// One clickable Up Next row: the queued track plus its display label.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UpNextEntry {
-    /// The queued track; rides back on [`NowPlayingAction::PlayNext`].
-    pub id: TrackId,
-    /// Preformatted row label, `"Artist - Title"`.
-    pub label: String,
-}
+/// The Up Next entry model and its label builder now live in the neutral
+/// [`super::up_next`] module (shared with the player bar's queue sheet). They
+/// are re-exported here so the app's historical `now_playing::` paths keep
+/// resolving.
+pub use super::up_next::{UpNextEntry, up_next_entries};
 
 /// What the user did to the Now Playing stage this frame. The app applies
 /// these through its state/command paths so every effect stays testable
@@ -87,28 +82,6 @@ pub struct NowPlayingContent {
 }
 
 // --- Pure helpers -------------------------------------------------------------------
-
-/// Build the Up Next rows from the playback projection's resolved window:
-/// the tracks after the current one, in the QUEUE's own order (shuffle
-/// included), capped at `limit`. The queue-to-window mapping and the skip of
-/// entries whose files have left the library live in
-/// [`crate::app::views::SessionViews`]; this is the pure label formatting
-/// over its result.
-#[must_use]
-pub fn up_next_entries(up_next: &[Track], limit: usize) -> Vec<UpNextEntry> {
-    up_next
-        .iter()
-        .take(limit)
-        .map(|t| UpNextEntry {
-            id: t.id.clone(),
-            label: format!(
-                "{} - {}",
-                t.metadata.display_artist(),
-                t.metadata.display_title(&t.file_path)
-            ),
-        })
-        .collect()
-}
 
 /// The optional secondary details line under the meta line: year, genre, and
 /// track/disc joined with middle dots. Missing fields are hidden, never shown
@@ -266,23 +239,20 @@ fn paint_cover(
         );
     }
 
-    if let Some(texture) = texture {
-        painter.image(texture.id(), cover_rect, UV_FULL, theme::TEXTURE_TINT);
-    } else {
-        painter.rect_filled(cover_rect, theme::RADIUS_XL, palette.surface_2);
-        painter.text(
-            cover_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "\u{1F3B5}",
-            egui::FontId::proportional(COVER_SIZE * 0.25),
-            palette.ink_3,
-        );
-    }
-    painter.rect_stroke(
-        cover_rect,
-        theme::RADIUS_XL,
-        egui::Stroke::new(1.0_f32, palette.border),
-        egui::StrokeKind::Inside,
+    super::artwork::paint(
+        &painter,
+        palette,
+        &super::artwork::Artwork {
+            rect: cover_rect,
+            texture: texture.map(egui::TextureHandle::id),
+            fit: super::artwork::Fit::Fill,
+            tint: theme::TEXTURE_TINT,
+            placeholder: Some(super::artwork::Placeholder::EmojiWell {
+                radius: theme::RADIUS_XL,
+                size_px: COVER_SIZE * 0.25,
+            }),
+            border: Some(theme::RADIUS_XL),
+        },
     );
 }
 
@@ -362,35 +332,27 @@ fn seek_row(
         palette.ink_2,
     );
 
-    let radius = TRACK_H / 2.0;
-    painter.rect_filled(bar_rect, radius, palette.surface_3);
     let frac = playerbar::seek_fraction(content.position, content.total);
-    let fill_w = bar_rect.width() * frac;
-    if fill_w > 0.0 {
-        painter.rect_filled(
-            egui::Rect::from_min_size(bar_rect.min, egui::vec2(fill_w, TRACK_H)),
-            radius,
-            palette.brand_primary,
-        );
-    }
-
-    let total = content.total?;
     let hit = bar_rect.expand2(egui::vec2(0.0, (SEEK_H - TRACK_H) / 2.0));
-    let response = ui.interact(
-        hit,
-        egui::Id::new("now_playing_seek"),
-        egui::Sense::click_and_drag(),
+    let new_frac = linear::linear_control(
+        ui,
+        palette,
+        &linear::LinearControl {
+            id: egui::Id::new("now_playing_seek"),
+            track: bar_rect,
+            hit,
+            value: frac,
+            thumb: None,
+            interactive: content.total.is_some(),
+            label: "Seek",
+        },
     );
-    let action = if response.clicked() || response.dragged() {
-        response.interact_pointer_pos().map(|pos| {
-            let fraction = ((pos.x - hit.left()) / hit.width()).clamp(0.0, 1.0);
-            NowPlayingAction::Seek(Duration::from_secs_f32(fraction * total.as_secs_f32()))
-        })
-    } else {
-        None
-    };
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, "Seek"));
-    action
+    match (new_frac, content.total) {
+        (Some(f), Some(total)) => Some(NowPlayingAction::Seek(Duration::from_secs_f32(
+            f * total.as_secs_f32(),
+        ))),
+        _ => None,
+    }
 }
 
 /// The Up Next section: a small header plus the queue rows — bounded to a
@@ -410,7 +372,7 @@ fn up_next_section(
     fonts: (&egui::FontId, &egui::FontId),
     top: f32,
 ) {
-    let (body_font, xs_font) = fonts;
+    let (_body_font, xs_font) = fonts;
     let painter = ui.painter_at(stage);
     painter.text(
         egui::pos2(cx, top + HEADER_H / 2.0),
@@ -427,12 +389,12 @@ fn up_next_section(
     );
 
     if content.up_next.is_empty() {
-        painter.text(
-            egui::pos2(cx, list_rect.top() + theme::geometry::sidebar::ROW_H / 2.0),
-            egui::Align2::CENTER_CENTER,
+        super::empty_state::empty_state_in_rect(
+            &painter,
+            palette,
+            list_rect,
             "Queue is empty",
-            body_font.clone(),
-            palette.ink_3,
+            "Play a track to start your queue.",
         );
         return;
     }
@@ -450,28 +412,11 @@ fn up_next_section(
                         let Some(entry) = content.up_next.get(i) else {
                             continue;
                         };
-                        let row = sidebar::tree_row(
-                            ui,
-                            cache,
-                            palette,
-                            TreeRow {
-                                indent_level: 0,
-                                icon: None,
-                                cover: None,
-                                label: &entry.label,
-                                count: None,
-                                meta: None,
-                                favorite: None,
-                                selected: false,
-                                now_playing: false,
-                                playing: false,
-                                art_slot: false,
-                            },
-                        );
-                        if row.response.clicked() {
+                        let response = super::up_next::up_next_row(ui, cache, palette, entry);
+                        if response.clicked() {
                             actions.push(NowPlayingAction::PlayNext(entry.id.clone()));
                         }
-                        row.response.on_hover_text("Queue this track to play next");
+                        response.on_hover_text("Queue this track to play next");
                     }
                 },
             );

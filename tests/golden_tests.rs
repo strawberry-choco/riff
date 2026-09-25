@@ -1420,79 +1420,31 @@ mod tests {
     // `width`-constrained child ui, and the sizing policy fed the width the
     // separators leave.
 
-    /// The stage's column sizing arithmetic, mirrored from
-    /// `render_elastic_stage`: `column_widths` over the width the hairline
-    /// separators between the columns leave (each consumes the style's
-    /// separator spacing in the horizontal layout).
-    fn stage_column_widths(ui: &egui::Ui, columns: usize, inspector: bool) -> Vec<f32> {
-        let gaps = columns.saturating_sub(1) + usize::from(inspector);
-        let separator_w = ui
-            .style()
-            .separator_style(
-                &egui::widget_style::Classes::default(),
-                egui::widget_style::WidgetState::default(),
-            )
-            .spacing;
-        riff_gui::ui::app::column_widths(
-            (ui.available_width() - separator_w * gaps as f32).max(0.0),
-            columns,
-            inspector,
-        )
-    }
-
-    /// The stage's horizontal composition, mirrored from
-    /// `render_elastic_stage`: a row of zero item spacing with a hairline
-    /// separator between columns, each column drawn inside a
-    /// `width`-constrained child ui. `column(index)` draws one list column;
-    /// when `inspector_width` is `Some`, a final separator and the inspector
-    /// column follow the list columns. The stage runs inside a `height`-tall
-    /// rect: the kittest root ui sizes itself to its content, which would
-    /// collapse the columns to stub heights — pin the composition at a real
-    /// window size instead, like the app's CentralPanel.
+    /// The stage's horizontal composition. The width allocation, separator
+    /// accounting, zero-gap layout, and stable child identities all come from
+    /// the production geometry seam ([`riff_gui::ui::stage::show_elastic_stage`])
+    /// — the SAME helper `render_elastic_stage` drives — so a golden can never
+    /// pin a stage layout production no longer produces. The only thing added
+    /// here is the fixed-height rect the kittest root needs: its root ui sizes
+    /// itself to content, which would collapse the columns to stub heights.
+    /// `column(index)` draws one list column; the inspector reports as index
+    /// `columns`.
     fn horizontal_stage(
         ui: &mut egui::Ui,
-        widths: &[f32],
-        inspector_width: Option<f32>,
+        columns: usize,
+        inspector: bool,
         height: f32,
         mut column: impl FnMut(&mut egui::Ui, usize),
     ) {
+        use riff_gui::ui::stage::{StageSlot, show_elastic_stage};
         let (rect, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), height),
             egui::Sense::hover(),
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-            // Mirror `render_elastic_stage`'s column scoping exactly: every
-            // column child ui gets a distinct id salt, because sibling
-            // `allocate_ui_with_layout` children share one stable id and their
-            // persistent-id widgets (each column's ScrollArea) would collide.
-            let mut scope = |ui: &mut egui::Ui, width: f32, i: usize| {
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(width, ui.available_height()),
-                    egui::Sense::hover(),
-                );
-                ui.scope_builder(
-                    egui::UiBuilder::new()
-                        .max_rect(rect)
-                        .layout(egui::Layout::top_down(egui::Align::Min))
-                        .id_salt(("column", i)),
-                    |ui| column(ui, i),
-                );
-            };
-            // `horizontal_top`, like the stage: plain `horizontal` sizes the
-            // row to `interact_size.y` and only grows with content, which
-            // would collapse the columns to stub heights.
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                for (i, width) in widths.iter().copied().enumerate() {
-                    if i > 0 {
-                        ui.separator();
-                    }
-                    scope(ui, width, i);
-                }
-                if let Some(width) = inspector_width {
-                    ui.separator();
-                    scope(ui, width, widths.len());
-                }
+            show_elastic_stage(ui, columns, inspector, |ui, slot| match slot {
+                StageSlot::Column(i) => column(ui, i),
+                StageSlot::Inspector => column(ui, columns),
             });
         });
     }
@@ -1523,9 +1475,7 @@ mod tests {
         background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
 
         let mut cache = IconCache::new();
-        let widths = stage_column_widths(ui, 3, false);
-
-        horizontal_stage(ui, &widths, None, 420.0, |ui, column| {
+        horizontal_stage(ui, 3, false, 420.0, |ui, column| {
             // Column 1 — the Artists root: sort control, genre chips, rows
             // keyed by artist name (the same dummy rows the browser-column
             // golden uses).
@@ -1653,9 +1603,7 @@ mod tests {
         background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
 
         let mut cache = IconCache::new();
-        let widths = stage_column_widths(ui, 4, false);
-
-        horizontal_stage(ui, &widths, None, 420.0, |ui, column| {
+        horizontal_stage(ui, 4, false, 420.0, |ui, column| {
             // Column 1 — the Genres root: A–Z sort and genre rows keyed by
             // genre name.
             if column == 0 {
@@ -1844,105 +1792,97 @@ mod tests {
         background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
 
         let mut cache = IconCache::new();
-        let widths = stage_column_widths(ui, 1, true);
-
         // The inspector's tag section adds seven rows, so the stage grows to a
         // thousand pixels of height.
         let stage_height = 1000.0;
 
-        horizontal_stage(
-            ui,
-            &widths,
-            Some(riff_gui::ui::theme::INSPECTOR_WIDTH),
-            stage_height,
-            |ui, column| {
-                // Column 1 — the flat Tracks listing: track rows keyed by
-                // `TrackId`, one selected and one now-playing (idle).
-                if column == 0 {
-                    let rows = [
-                        ("Daft Punk - One More Time", false, false),
-                        ("Radiohead - Weird Fishes", false, true), // now-playing, idle
-                        ("Miles Davis - So What", true, false),    // selected
-                        ("Portishead - Roads", false, false),
-                        ("Burial - Archangel", false, false),
-                        ("Nils Frahm - Says", false, false),
-                        ("Aphex Twin - Xtal", false, false),
-                        ("Brian Eno - An Ending", false, false),
-                        ("Massive Attack - Teardrop", false, false),
-                        ("Tycho - Awake", false, false),
-                        ("Jon Hopkins - Open Eye Signal", false, false),
-                        ("Four Tet - She Moves She", false, false),
-                    ];
-                    let keys = [
-                        "a.flac", "b.flac", "c.flac", "d.flac", "e.flac", "f.flac", "g.flac",
-                        "h.flac", "i.flac", "j.flac", "k.flac", "l.flac",
-                    ];
-                    let items: Vec<BrowserItem> = rows
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, (label, selected, now_playing))| BrowserItem {
-                            key: keys[i].to_string(),
-                            label: label.to_string(),
-                            detail: None,
-                            thumbnail: None,
-                            selected,
-                            now_playing,
-                        })
-                        .collect();
-                    let mut provider = |i: usize| items.get(i).cloned();
-                    let column = BrowserColumn {
-                        sort_desc: false,
-                        show_sort: false,
-                        total: items.len(),
-                        item: &mut provider,
-                        virtualize: false,
-                        empty_title: "",
-                        empty_hint: "",
-                    };
-                    browser::show_browser_column(ui, &mut cache, palette, column, &mut Vec::new());
-                    return;
-                }
-                // Column 2 — the inspector: the selection panel's Play / Add
-                // to Queue variant inside the same 16px inset the app's
-                // `render_inspector` gives it, no art (no texture load).
-                let details = [
-                    SelectionDetail {
-                        label: "Artist".to_string(),
-                        value: "Boards of Canada".to_string(),
-                    },
-                    SelectionDetail {
-                        label: "Released".to_string(),
-                        value: "2013".to_string(),
-                    },
-                    SelectionDetail {
-                        label: "Tracks".to_string(),
-                        value: "8 \u{b7} 27:16".to_string(),
-                    },
+        horizontal_stage(ui, 1, true, stage_height, |ui, column| {
+            // Column 1 — the flat Tracks listing: track rows keyed by
+            // `TrackId`, one selected and one now-playing (idle).
+            if column == 0 {
+                let rows = [
+                    ("Daft Punk - One More Time", false, false),
+                    ("Radiohead - Weird Fishes", false, true), // now-playing, idle
+                    ("Miles Davis - So What", true, false),    // selected
+                    ("Portishead - Roads", false, false),
+                    ("Burial - Archangel", false, false),
+                    ("Nils Frahm - Says", false, false),
+                    ("Aphex Twin - Xtal", false, false),
+                    ("Brian Eno - An Ending", false, false),
+                    ("Massive Attack - Teardrop", false, false),
+                    ("Tycho - Awake", false, false),
+                    ("Jon Hopkins - Open Eye Signal", false, false),
+                    ("Four Tet - She Moves She", false, false),
                 ];
-                let tags = golden_tag_rows(false);
-                egui::Frame::new()
-                    .inner_margin(egui::Margin::same(16))
-                    .show(ui, |ui| {
-                        let panel = SelectionPanel {
-                            art: None,
-                            title: Some("Tomorrow's Harvest"),
-                            subtitle: Some("Boards of Canada \u{b7} 2013"),
-                            details: &details,
-                            tags: &tags,
-                            editor: None,
-                            single: false,
-                            queue: true,
-                        };
-                        selection::show_selection_panel(
-                            ui,
-                            &mut cache,
-                            palette,
-                            panel,
-                            &mut Vec::new(),
-                        );
-                    });
-            },
-        );
+                let keys = [
+                    "a.flac", "b.flac", "c.flac", "d.flac", "e.flac", "f.flac", "g.flac", "h.flac",
+                    "i.flac", "j.flac", "k.flac", "l.flac",
+                ];
+                let items: Vec<BrowserItem> = rows
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (label, selected, now_playing))| BrowserItem {
+                        key: keys[i].to_string(),
+                        label: label.to_string(),
+                        detail: None,
+                        thumbnail: None,
+                        selected,
+                        now_playing,
+                    })
+                    .collect();
+                let mut provider = |i: usize| items.get(i).cloned();
+                let column = BrowserColumn {
+                    sort_desc: false,
+                    show_sort: false,
+                    total: items.len(),
+                    item: &mut provider,
+                    virtualize: false,
+                    empty_title: "",
+                    empty_hint: "",
+                };
+                browser::show_browser_column(ui, &mut cache, palette, column, &mut Vec::new());
+                return;
+            }
+            // Column 2 — the inspector: the selection panel's Play / Add
+            // to Queue variant inside the same 16px inset the app's
+            // `render_inspector` gives it, no art (no texture load).
+            let details = [
+                SelectionDetail {
+                    label: "Artist".to_string(),
+                    value: "Boards of Canada".to_string(),
+                },
+                SelectionDetail {
+                    label: "Released".to_string(),
+                    value: "2013".to_string(),
+                },
+                SelectionDetail {
+                    label: "Tracks".to_string(),
+                    value: "8 \u{b7} 27:16".to_string(),
+                },
+            ];
+            let tags = golden_tag_rows(false);
+            egui::Frame::new()
+                .inner_margin(egui::Margin::same(16))
+                .show(ui, |ui| {
+                    let panel = SelectionPanel {
+                        art: None,
+                        title: Some("Tomorrow's Harvest"),
+                        subtitle: Some("Boards of Canada \u{b7} 2013"),
+                        details: &details,
+                        tags: &tags,
+                        editor: None,
+                        single: false,
+                        queue: true,
+                    };
+                    selection::show_selection_panel(
+                        ui,
+                        &mut cache,
+                        palette,
+                        panel,
+                        &mut Vec::new(),
+                    );
+                });
+        });
     }
     // =========================================================================
     // Gap-audit goldens (docs/engineering/golden-image-gaps.md)
@@ -2350,7 +2290,8 @@ mod tests {
         let background = ui.ctx().layer_painter(egui::LayerId::background());
         background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
 
-        let _ = riff_gui::ui::prompts::clear_library_confirm(ui, palette);
+        let mut cache = riff_gui::ui::icons::IconCache::new();
+        let _ = riff_gui::ui::prompts::clear_library_confirm(ui, &mut cache, palette);
     }
 
     #[test]
@@ -2512,9 +2453,7 @@ mod tests {
         background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
 
         let mut cache = IconCache::new();
-        let widths = stage_column_widths(ui, 2, false);
-
-        horizontal_stage(ui, &widths, None, 420.0, |ui, column| {
+        horizontal_stage(ui, 2, false, 420.0, |ui, column| {
             if column == 0 {
                 let albums = [
                     ("Geogaddi", "Boards of Canada · 2002", true),
@@ -2595,9 +2534,7 @@ mod tests {
         background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
 
         let mut cache = IconCache::new();
-        let widths = stage_column_widths(ui, 3, false);
-
-        horizontal_stage(ui, &widths, None, 420.0, |ui, column| {
+        horizontal_stage(ui, 3, false, 420.0, |ui, column| {
             if column < 2 {
                 let rows = if column == 0 {
                     vec![
@@ -2737,8 +2674,6 @@ mod tests {
         background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
 
         let mut cache = IconCache::new();
-        let widths = stage_column_widths(ui, 1, true);
-
         // The Track readout carries the seven-row tag section, so the stage
         // gets a thousand pixels of height; the short Artist/Genre entity
         // readouts stay at the panel's original six-forty (their goldens
@@ -2749,127 +2684,121 @@ mod tests {
             640.0
         };
 
-        horizontal_stage(
-            ui,
-            &widths,
-            Some(riff_gui::ui::theme::INSPECTOR_WIDTH),
-            stage_height,
-            |ui, column| {
-                if column == 0 {
-                    let rows = [
-                        ("Daft Punk - One More Time", false, false),
-                        ("Radiohead - Weird Fishes", false, true),
-                        ("Miles Davis - So What", true, false),
-                        ("Portishead - Roads", false, false),
-                        ("Burial - Archangel", false, false),
-                        ("Nils Frahm - Says", false, false),
-                        ("Aphex Twin - Xtal", false, false),
-                        ("Brian Eno - An Ending", false, false),
-                    ];
-                    let items: Vec<BrowserItem> = rows
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, (label, selected, now_playing))| BrowserItem {
-                            key: format!("track-{i}"),
-                            label: label.to_string(),
-                            detail: None,
-                            thumbnail: None,
-                            selected,
-                            now_playing,
-                        })
-                        .collect();
-                    let mut provider = |i: usize| items.get(i).cloned();
-                    let column = BrowserColumn {
-                        sort_desc: false,
-                        show_sort: false,
-                        total: items.len(),
-                        item: &mut provider,
-                        virtualize: false,
-                        empty_title: "",
-                        empty_hint: "",
+        horizontal_stage(ui, 1, true, stage_height, |ui, column| {
+            if column == 0 {
+                let rows = [
+                    ("Daft Punk - One More Time", false, false),
+                    ("Radiohead - Weird Fishes", false, true),
+                    ("Miles Davis - So What", true, false),
+                    ("Portishead - Roads", false, false),
+                    ("Burial - Archangel", false, false),
+                    ("Nils Frahm - Says", false, false),
+                    ("Aphex Twin - Xtal", false, false),
+                    ("Brian Eno - An Ending", false, false),
+                ];
+                let items: Vec<BrowserItem> = rows
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (label, selected, now_playing))| BrowserItem {
+                        key: format!("track-{i}"),
+                        label: label.to_string(),
+                        detail: None,
+                        thumbnail: None,
+                        selected,
+                        now_playing,
+                    })
+                    .collect();
+                let mut provider = |i: usize| items.get(i).cloned();
+                let column = BrowserColumn {
+                    sort_desc: false,
+                    show_sort: false,
+                    total: items.len(),
+                    item: &mut provider,
+                    virtualize: false,
+                    empty_title: "",
+                    empty_hint: "",
+                };
+                browser::show_browser_column(ui, &mut cache, palette, column, &mut Vec::new());
+                return;
+            }
+            let (title, subtitle, details, single) = match kind {
+                InspectorVariant::Artist => (
+                    "Boards of Canada",
+                    "Artist",
+                    vec![
+                        SelectionDetail {
+                            label: "Albums".to_string(),
+                            value: "4".to_string(),
+                        },
+                        SelectionDetail {
+                            label: "Tracks".to_string(),
+                            value: "47".to_string(),
+                        },
+                        SelectionDetail {
+                            label: "Genres".to_string(),
+                            value: "Electronic, IDM".to_string(),
+                        },
+                    ],
+                    false,
+                ),
+                InspectorVariant::Genre => (
+                    "Electronic",
+                    "Genre",
+                    vec![
+                        SelectionDetail {
+                            label: "Tracks".to_string(),
+                            value: "42".to_string(),
+                        },
+                        SelectionDetail {
+                            label: "Artists".to_string(),
+                            value: "9".to_string(),
+                        },
+                    ],
+                    false,
+                ),
+                InspectorVariant::Track => (
+                    "Beware the Friendly Stranger",
+                    "Boards of Canada · Geogaddi",
+                    vec![
+                        SelectionDetail {
+                            label: "Duration".to_string(),
+                            value: "0:27".to_string(),
+                        },
+                        SelectionDetail {
+                            label: "Plays".to_string(),
+                            value: "5".to_string(),
+                        },
+                    ],
+                    true,
+                ),
+            };
+            // Artist and Genre entity readouts carry no tag section.
+            let tags = match kind {
+                InspectorVariant::Artist | InspectorVariant::Genre => Vec::new(),
+                _ => golden_tag_rows(single),
+            };
+            egui::Frame::new()
+                .inner_margin(egui::Margin::same(16))
+                .show(ui, |ui| {
+                    let panel = SelectionPanel {
+                        art: None,
+                        title: Some(title),
+                        subtitle: Some(subtitle),
+                        details: &details,
+                        tags: &tags,
+                        editor: None,
+                        single,
+                        queue: true,
                     };
-                    browser::show_browser_column(ui, &mut cache, palette, column, &mut Vec::new());
-                    return;
-                }
-                let (title, subtitle, details, single) = match kind {
-                    InspectorVariant::Artist => (
-                        "Boards of Canada",
-                        "Artist",
-                        vec![
-                            SelectionDetail {
-                                label: "Albums".to_string(),
-                                value: "4".to_string(),
-                            },
-                            SelectionDetail {
-                                label: "Tracks".to_string(),
-                                value: "47".to_string(),
-                            },
-                            SelectionDetail {
-                                label: "Genres".to_string(),
-                                value: "Electronic, IDM".to_string(),
-                            },
-                        ],
-                        false,
-                    ),
-                    InspectorVariant::Genre => (
-                        "Electronic",
-                        "Genre",
-                        vec![
-                            SelectionDetail {
-                                label: "Tracks".to_string(),
-                                value: "42".to_string(),
-                            },
-                            SelectionDetail {
-                                label: "Artists".to_string(),
-                                value: "9".to_string(),
-                            },
-                        ],
-                        false,
-                    ),
-                    InspectorVariant::Track => (
-                        "Beware the Friendly Stranger",
-                        "Boards of Canada · Geogaddi",
-                        vec![
-                            SelectionDetail {
-                                label: "Duration".to_string(),
-                                value: "0:27".to_string(),
-                            },
-                            SelectionDetail {
-                                label: "Plays".to_string(),
-                                value: "5".to_string(),
-                            },
-                        ],
-                        true,
-                    ),
-                };
-                // Artist and Genre entity readouts carry no tag section.
-                let tags = match kind {
-                    InspectorVariant::Artist | InspectorVariant::Genre => Vec::new(),
-                    _ => golden_tag_rows(single),
-                };
-                egui::Frame::new()
-                    .inner_margin(egui::Margin::same(16))
-                    .show(ui, |ui| {
-                        let panel = SelectionPanel {
-                            art: None,
-                            title: Some(title),
-                            subtitle: Some(subtitle),
-                            details: &details,
-                            tags: &tags,
-                            editor: None,
-                            single,
-                            queue: true,
-                        };
-                        selection::show_selection_panel(
-                            ui,
-                            &mut cache,
-                            palette,
-                            panel,
-                            &mut Vec::new(),
-                        );
-                    });
-            },
-        );
+                    selection::show_selection_panel(
+                        ui,
+                        &mut cache,
+                        palette,
+                        panel,
+                        &mut Vec::new(),
+                    );
+                });
+        });
     }
 
     // --- P1-10: the narrow-window shrink branch --------------------------------
@@ -3700,5 +3629,129 @@ mod tests {
                 },
             );
         }
+    }
+
+    // --- Real composed shell coverage (UI component layer, ticket 01) ----------
+    //
+    // The `shell_chrome_*` goldens above paint a *stand-in* stage, sidebar, and
+    // playerbar. These goldens render the REAL production composition — the
+    // actual `RiffApp` frame with its Titlebar, Sidebar, active Library Section
+    // stage, and Playerbar — driven through the same fakes the composed UI suite
+    // (`ui_tests`) already uses. They are the visual safety net the later
+    // extraction tickets depend on: a chrome, sidebar, or playerbar change that
+    // only reaches the live composition now moves a picture.
+    //
+    // Determinism: the real render path names the vendored Inter families
+    // (`riff-inter-semibold`, …), so the harness must install those before the
+    // first frame. Unlike `with_golden_style` (which gates a `build_ui` closure),
+    // `build_eframe` draws inside its own constructor, so the font install runs
+    // in the closure. `configure_fonts` is deliberately NOT used — it appends a
+    // machine-dependent system CJK fallback; the Inter-only set keeps the
+    // baseline portable, exactly as every other golden here.
+
+    /// Count the distinct 8-bit RGBA colors in a rendered frame. A composed
+    /// shell that actually painted chrome, text, and separators has many; a
+    /// blank, clipped-to-nothing, or unpainted render collapses to a handful.
+    fn distinct_colors(image: &image::RgbaImage) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        for pixel in image.pixels() {
+            seen.insert(pixel.0);
+        }
+        seen.len()
+    }
+
+    /// Build a real `RiffApp` frame at `size` from the composed UI suite's
+    /// no-op fakes: no Application Store, no audio device, no tray, no cover
+    /// worker. The default sessions leave it on the Library Section in the
+    /// dark palette, which is what every golden in this file pins.
+    fn composed_shell(size: egui::Vec2) -> egui_kittest::Harness<'static, riff_gui::ui::RiffApp> {
+        use crate::mocks::{
+            MockCovers, MockLibraryMutationStore, MockLibraryQueryStore, MockPlaylistStore,
+            MockScans, MockSettingsStore, MockTagEdits, MockTransport,
+        };
+        use riff_backend::app::events::BackendEvents;
+        use riff_backend::app::state::{LibrarySession, PlaybackSession};
+        use riff_backend::app::store::StoreGeneration;
+        use riff_backend::app::views::SessionViews;
+        use riff_gui::ui::RiffApp;
+        use std::sync::{Arc, Mutex};
+
+        let harness = egui_kittest::Harness::builder()
+            .with_size(size)
+            .with_pixels_per_point(1.0)
+            .build_eframe(|cc| {
+                cc.egui_ctx.set_fonts(inter_only_font_definitions());
+                let (app, _visibility_tx) = RiffApp::new_for_test(
+                    Arc::new(Mutex::new(PlaybackSession::default())),
+                    Arc::new(Mutex::new(LibrarySession::default())),
+                    Box::new(MockTransport::new()),
+                    Box::new(MockScans::default()),
+                    Box::new(MockSettingsStore::default()),
+                    Box::new(MockPlaylistStore::default()),
+                    Box::new(MockLibraryMutationStore::new()),
+                    SessionViews::new(
+                        Box::new(MockLibraryQueryStore::default()),
+                        Box::new(MockPlaylistStore::default()),
+                        StoreGeneration::new(),
+                        StoreGeneration::new(),
+                    ),
+                    Box::new(MockTagEdits),
+                    Box::new(MockCovers),
+                    Arc::new(Mutex::new(BackendEvents::default())),
+                );
+                app
+            });
+
+        // The app installs its own (dark) palette on the first `update`. Force
+        // the vendored Inter set once more after construction so a warm-up
+        // frame cannot have cached a system-fallback metric into a galley that
+        // survives into the snapshot frame.
+        harness.ctx.set_fonts(inter_only_font_definitions());
+        harness
+    }
+
+    /// Render `shell` to a stable frame and assert it actually painted a
+    /// composed UI surface at `expected` before pinning it as a baseline.
+    fn snapshot_composed_shell(
+        shell: &mut egui_kittest::Harness<'static, riff_gui::ui::RiffApp>,
+        expected: egui::Vec2,
+        name: &str,
+    ) {
+        // The app schedules a periodic repaint tick every frame (the end-of-
+        // frame responsiveness heartbeat), so `run()` would spin past its step
+        // budget. The harness never advances `input.time`, so a fixed two
+        // frames is deterministic — the same contract `snapshot_animating`
+        // relies on.
+        shell.run_steps(2);
+        let frame = shell
+            .render()
+            .expect("the composed shell must render headlessly");
+        assert_eq!(
+            (frame.width(), frame.height()),
+            (expected.x as u32, expected.y as u32),
+            "the rendered frame must fill the requested shell size"
+        );
+        assert!(
+            distinct_colors(&frame) > 40,
+            "the real Titlebar/Sidebar/Stage/Playerbar composition must paint \
+             many distinct colors, not a blank or single-fill frame"
+        );
+        shell.snapshot(name);
+    }
+
+    #[test]
+    fn composed_shell_normal_matches_golden_baseline() {
+        let _slot = harness_slot();
+        let size = egui::vec2(1280.0, 800.0);
+        let mut shell = composed_shell(size);
+        snapshot_composed_shell(&mut shell, size, "composed_shell_normal_dark");
+    }
+
+    #[test]
+    fn composed_shell_minimum_matches_golden_baseline() {
+        let _slot = harness_slot();
+        let size = riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE;
+        let mut shell = composed_shell(size);
+        snapshot_composed_shell(&mut shell, size, "composed_shell_minimum_dark");
     }
 }

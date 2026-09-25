@@ -120,16 +120,16 @@ impl InlineTagEditor {
     /// open draft closes (or the album batch tallies), and the status line
     /// reports the saved file; on `Failed` the draft keeps its inline reason
     /// — there is no silent-success path.
-    pub fn poll_outcomes(&mut self, scan_status: &mut Option<String>) {
+    pub fn poll_outcomes(&mut self, feedback: &mut crate::ui::feedback::FeedbackBoard) {
         while let Some(outcome) = self.tag_edits.poll() {
             // Outcomes carry no identity; the outstanding record captured at
             // submit time routes the outcome to its flow. Only one edit is
             // outstanding at a time: the album batch's record first, then the
             // single-track inline record.
             if self.batch.is_some() {
-                self.apply_batch_outcome(outcome, scan_status);
+                self.apply_batch_outcome(outcome, feedback);
             } else if self.in_flight.is_some() {
-                self.apply_track_outcome(outcome, scan_status);
+                self.apply_track_outcome(outcome, feedback);
             }
         }
     }
@@ -270,7 +270,11 @@ impl InlineTagEditor {
     /// the editor open with the reason inline. A draft that has already been
     /// discarded (the selection moved) never comes back: the status line
     /// still reports the outcome, the editor simply stays gone.
-    fn apply_track_outcome(&mut self, outcome: TagEditOutcome, scan_status: &mut Option<String>) {
+    fn apply_track_outcome(
+        &mut self,
+        outcome: TagEditOutcome,
+        feedback: &mut crate::ui::feedback::FeedbackBoard,
+    ) {
         let Some((track_id, path)) = self.in_flight.take() else {
             return;
         };
@@ -280,13 +284,18 @@ impl InlineTagEditor {
                     || path.to_string_lossy().to_string(),
                     |n| n.to_string_lossy().to_string(),
                 );
-                *scan_status = Some(format!("Tags saved for {name}"));
+                feedback.set_tag_edit(
+                    format!("Tags saved for {name}"),
+                    riff_backend::app::events::NoticeSeverity::Info,
+                );
                 tracing::info!("Tags written for {:?}", path);
                 if self.draft.as_ref().is_some_and(|d| d.track_id == track_id) {
                     self.draft = None;
                 }
             }
             TagEditOutcome::Failed { reason } => {
+                // A single failed save surfaces inline (the draft keeps its
+                // reason) and leaves the status line untouched.
                 tracing::warn!("Tag edit failed for {:?}: {}", path, reason);
                 if let Some(d) = self.draft.as_mut()
                     && d.track_id == track_id
@@ -308,7 +317,11 @@ impl InlineTagEditor {
     /// shows the "Saved N of M tracks" summary (orange when any failed). A
     /// draft that has already been discarded (the selection moved) never
     /// comes back; the status line still reports each outcome.
-    fn apply_batch_outcome(&mut self, outcome: TagEditOutcome, scan_status: &mut Option<String>) {
+    fn apply_batch_outcome(
+        &mut self,
+        outcome: TagEditOutcome,
+        feedback: &mut crate::ui::feedback::FeedbackBoard,
+    ) {
         let Some(in_flight) = self.batch.as_mut() else {
             return;
         };
@@ -322,12 +335,17 @@ impl InlineTagEditor {
                     || path.to_string_lossy().to_string(),
                     |n| n.to_string_lossy().to_string(),
                 );
-                *scan_status = Some(format!("Tags saved for {name}"));
+                feedback.set_tag_edit(
+                    format!("Tags saved for {name}"),
+                    riff_backend::app::events::NoticeSeverity::Info,
+                );
             }
             TagEditOutcome::Failed { reason } => {
                 in_flight.failed += 1;
                 in_flight.first_failure.get_or_insert(reason.clone());
-                *scan_status = Some(reason);
+                // A partial batch failure is a distinct Warning notice (unlike
+                // a single failed save, which stays inline).
+                feedback.set_tag_edit(reason, riff_backend::app::events::NoticeSeverity::Warning);
             }
         }
         if let Some(d) = self.draft.as_mut() {

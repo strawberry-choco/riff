@@ -12,6 +12,7 @@
 
 use eframe::egui;
 
+use super::button::{self, TextButton, Variant};
 use super::icons::IconCache;
 use super::theme::{self, Palette};
 
@@ -151,7 +152,7 @@ pub fn show_detail_column_scrolled(
         column.header.is_some() || !column.tracks.is_empty() || !column.rows.is_empty();
     breadcrumb(ui, palette, column.breadcrumb, actions);
     if let Some(header) = column.header {
-        album_header(ui, palette, header, actions);
+        album_header(ui, cache, palette, header, actions);
     }
     if !column.tracks.is_empty() {
         track_list(ui, cache, palette, scroll, column.tracks, actions);
@@ -174,6 +175,7 @@ pub fn show_detail_column_scrolled(
 /// **Shuffle** at the right edge.
 fn album_header(
     ui: &mut egui::Ui,
+    cache: &mut IconCache,
     palette: &Palette,
     header: &AlbumHeader,
     actions: &mut Vec<DetailAction>,
@@ -192,10 +194,10 @@ fn album_header(
                 }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if action_button(ui, palette, "Shuffle", "Shuffle this album") {
+                if action_button(ui, cache, palette, "Shuffle", "Shuffle this album") {
                     actions.push(DetailAction::Shuffle);
                 }
-                if action_button(ui, palette, "Play all", "Play the whole album") {
+                if action_button(ui, cache, palette, "Play all", "Play the whole album") {
                     actions.push(DetailAction::PlayAll);
                 }
             });
@@ -203,17 +205,44 @@ fn album_header(
     });
 }
 
-/// One of the header's playback action buttons: the visible text doubles as
-/// the accessibility label. Returns whether it was clicked.
-fn action_button(ui: &mut egui::Ui, palette: &Palette, text: &str, label: &str) -> bool {
-    let button = egui::Button::new(
-        egui::RichText::new(text)
-            .text_style(egui::TextStyle::Small)
-            .color(palette.ink),
+/// One of the header's playback action buttons, painted through the shared
+/// [`Variant::Secondary`] primitive. The visible text doubles as the
+/// accessibility label. Returns whether it was clicked.
+fn action_button(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    text: &str,
+    label: &str,
+) -> bool {
+    let font = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Button)
+        .cloned()
+        .unwrap_or_else(|| egui::FontId::proportional(theme::TEXT_XS));
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font, palette.ink)
+        .size()
+        .x;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(text_w + 24.0, 28.0), egui::Sense::hover());
+    button::text_button(
+        ui,
+        cache,
+        palette,
+        &TextButton {
+            id: ui.id().with(label),
+            rect,
+            label: text,
+            a11y: text,
+            tooltip: Some(label),
+            icon: None,
+            small: true,
+            variant: Variant::Secondary,
+            enabled: true,
+        },
     )
-    .fill(palette.surface_2)
-    .corner_radius(super::theme::RADIUS_SM);
-    ui.add(button).on_hover_text(label).clicked()
 }
 
 /// The album's track list: one shared 40px track row per track, the same

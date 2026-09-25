@@ -443,6 +443,9 @@ pub mod geometry {
         /// Horizontal room reserved at each end of the seek row for the
         /// monospace time readouts ("62:03" fits with margin).
         pub const TIME_LABEL_SPACE: f32 = 44.0;
+        /// The fraction a focused linear control moves per keyboard arrow
+        /// press (a seek or volume nudge).
+        pub const KEY_STEP: f32 = 0.05;
     }
 
     /// The 88px bottom player bar: cover, transport, the seek and volume

@@ -1,3 +1,4 @@
+use crate::ui::button::{self as button, TextButton, Variant};
 use crate::ui::icons::{Icon, IconCache};
 use crate::ui::theme::geometry::settings::{
     ACTION_BTN_H, ACTIONS_ROW_H, CHIP_GAP, CHIP_H, CHIP_LABEL_PAD, CLEAR_ROW_H, DOT_SIZE, FOOTER_H,
@@ -407,72 +408,15 @@ fn section_header(ui: &mut egui::Ui, palette: &Palette, text: &str) {
     );
 }
 
-/// A hand-painted filled button (primary brand or secondary surface) with an
-/// optional leading glyph. Returns `true` on click when enabled. `label` is
-/// the painted text; `a11y` feeds the accessibility tree (per-path controls
-/// suffix their root so labels stay unique).
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::fn_params_excessive_bools)] // 2×2 independent axes: brand vs surface × label size
-fn paint_filled_button(
-    ui: &egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    rect: egui::Rect,
-    label: &str,
-    icon: Option<Icon>,
-    primary: bool,
-    small_text: bool,
-    enabled: bool,
-    hovered: bool,
-) {
-    let painter = ui.painter_at(rect);
-    let (fill, ink, ring) = match (enabled, primary, hovered) {
-        (false, _, _) => (palette.surface, palette.ink_3, false),
-        (true, true, _) => (palette.brand_primary, palette.on_brand, false),
-        (true, false, false) => (palette.surface_2, palette.ink, false),
-        (true, false, true) => (palette.surface_3, palette.ink, true),
-    };
-    painter.rect_filled(rect, theme::RADIUS_MD, fill);
-    if ring {
-        painter.rect_stroke(
-            rect,
-            theme::RADIUS_MD,
-            egui::Stroke::new(1.0_f32, palette.focus_ring),
-            egui::StrokeKind::Inside,
-        );
-    }
-
-    let size = if small_text {
-        theme::TEXT_XS
-    } else {
-        theme::TEXT_SM
-    };
-    let font = styled_font(ui, egui::TextStyle::Button, size);
-    let galley = painter.layout_no_wrap(label.to_owned(), font, ink);
-    let icon_w: f32 = if icon.is_some() { 16.0 + 8.0 } else { 0.0 };
-    let mut x = rect.center().x - icon_w.midpoint(galley.size().x);
-    if let Some(icon) = icon {
-        let tex_id = cache.texture(ui.ctx(), icon, 16.0, ink);
-        let icon_rect = egui::Rect::from_center_size(
-            egui::pos2(x + 8.0, rect.center().y),
-            egui::vec2(16.0, 16.0),
-        );
-        painter.image(tex_id, icon_rect, UV_FULL, ink);
-        x += icon_w;
-    }
-    painter.galley(
-        egui::pos2(x, rect.center().y - galley.size().y / 2.0),
-        galley,
-        ink,
-    );
-}
-
-/// Interact at `rect` and paint a filled button. `a11y` feeds the
+/// A shared semantic text button, painted through [`button::text_button`]. The
+/// `primary` flag selects the brand `Primary` variant against the neutral
+/// `Secondary`; `small_text` picks the `text-xs` scale. `a11y` feeds the
 /// accessibility tree (per-path controls suffix their root so labels stay
 /// unique). Returns whether the button was clicked AND enabled.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::fn_params_excessive_bools)] // 2×2 independent axes: brand vs surface × label size
 fn filled_button(
-    ui: &mut egui::Ui,
+    ui: &egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
     rect: egui::Rect,
@@ -484,21 +428,26 @@ fn filled_button(
     small_text: bool,
     enabled: bool,
 ) -> bool {
-    let response = ui.interact(rect, id, egui::Sense::click());
-    paint_filled_button(
+    button::text_button(
         ui,
         cache,
         palette,
-        rect,
-        label,
-        icon,
-        primary,
-        small_text,
-        enabled,
-        response.hovered(),
-    );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, a11y));
-    enabled && response.clicked()
+        &TextButton {
+            id,
+            rect,
+            label,
+            a11y,
+            tooltip: None,
+            icon,
+            small: small_text,
+            variant: if primary {
+                Variant::Primary
+            } else {
+                Variant::Secondary
+            },
+            enabled,
+        },
+    )
 }
 
 /// A hairline separator across the card width (the mockup's
@@ -736,36 +685,14 @@ fn library_row_controls(
         strip_ui.add_space(16.0);
 
         // --- Watch (label + checkbox) ---
-        // Slot height spans the full row so the hit area matches the
-        // original `expand2(0, (LIBRARY_ROW_H - WATCH_BOX) / 2)`.
-        let watch_label_w = 38.0;
-        let watch_w = watch_label_w + 6.0 + WATCH_BOX;
-        let (watch_rect, watch_response) =
-            strip_ui.allocate_exact_size(egui::vec2(watch_w, LIBRARY_ROW_H), egui::Sense::click());
-        let watch_warning = matches!(row.watch, WatchState::Warning(_));
-        let can_watch = !watch_warning && !is_unavailable;
-        let watching = row.watch == WatchState::Enabled;
-        let box_rect = egui::Rect::from_center_size(
-            egui::pos2(watch_rect.right() - WATCH_BOX / 2.0, watch_rect.center().y),
-            egui::vec2(WATCH_BOX, WATCH_BOX),
+        watch_control(
+            &mut strip_ui,
+            palette,
+            row,
+            is_unavailable,
+            watch_label,
+            actions,
         );
-        strip_ui.painter().text(
-            egui::pos2(watch_rect.left(), watch_rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            "Watch",
-            styled_font(&strip_ui, egui::TextStyle::Small, theme::TEXT_XS),
-            palette.ink_3,
-        );
-        paint_watch_box(strip_ui.painter(), palette, box_rect, watching && can_watch);
-        watch_response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, can_watch, watching, watch_label)
-        });
-        if can_watch && watch_response.clicked() {
-            actions.push(SettingsAction::SetWatch(row.path.clone(), !watching));
-        }
-        if let WatchState::Warning(ref reason) = row.watch {
-            watch_response.on_hover_text(reason.clone());
-        }
         strip_ui.add_space(16.0);
 
         // --- Scan (leftmost in the strip) ---
@@ -776,26 +703,26 @@ fn library_row_controls(
             .size()
             .x;
         let scan_w = 24.0 + scan_label_w;
-        let (scan_rect, scan_response) =
-            strip_ui.allocate_exact_size(egui::vec2(scan_w, SMALL_BTN_H), egui::Sense::click());
+        let (scan_rect, _) =
+            strip_ui.allocate_exact_size(egui::vec2(scan_w, SMALL_BTN_H), egui::Sense::hover());
         scan_left = scan_rect.left();
         let scan_enabled = !is_scanning && !is_unavailable;
-        paint_filled_button(
+        if button::text_button(
             &strip_ui,
             cache,
             palette,
-            scan_rect,
-            "Scan",
-            None,
-            false,
-            true,
-            scan_enabled,
-            scan_response.hovered(),
-        );
-        scan_response.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, scan_enabled, scan_label)
-        });
-        if scan_enabled && scan_response.clicked() {
+            &TextButton {
+                id: egui::Id::new("settings_scan"),
+                rect: scan_rect,
+                label: "Scan",
+                a11y: scan_label,
+                tooltip: None,
+                icon: None,
+                small: true,
+                variant: Variant::Secondary,
+                enabled: scan_enabled,
+            },
+        ) {
             actions.push(SettingsAction::Scan(row.path.clone()));
         }
     });
@@ -805,45 +732,56 @@ fn library_row_controls(
     }
 }
 
-/// The small painted Watch checkbox: brand fill + two-stroke checkmark when
-/// checked-and-enabled, input-well otherwise.
-fn paint_watch_box(
-    painter: &egui::Painter,
+/// The per-root Watch control: a "Watch" label beside the shared checkbox box
+/// (painted through [`super::toggle_switch`] with the same focus ring the
+/// toggle pill draws), over the whole-slot hit area so clicking the label
+/// toggles too. A [`WatchState::Warning`] or an unavailable root disables the
+/// box — no focus ring, no click — and the warning's reason shows as a tooltip.
+/// It stays a checkbox (not a preference toggle) precisely because that
+/// per-Library-Path disabling is what distinguishes Watch State from a
+/// plain boolean preference.
+fn watch_control(
+    ui: &mut egui::Ui,
     palette: &Palette,
-    box_rect: egui::Rect,
-    checked: bool,
+    row: &LibraryRow,
+    is_unavailable: bool,
+    watch_label: &str,
+    actions: &mut Vec<SettingsAction>,
 ) {
-    painter.rect_filled(
-        box_rect,
-        theme::RADIUS_SM,
-        if checked {
-            palette.brand_primary
-        } else {
-            palette.surface_2
-        },
+    // Slot height spans the full row so the hit area matches the
+    // original `expand2(0, (LIBRARY_ROW_H - WATCH_BOX) / 2)`.
+    let watch_label_w = 38.0;
+    let watch_w = watch_label_w + 6.0 + WATCH_BOX;
+    let (watch_rect, watch_response) =
+        ui.allocate_exact_size(egui::vec2(watch_w, LIBRARY_ROW_H), egui::Sense::click());
+    let watch_warning = matches!(row.watch, WatchState::Warning(_));
+    let can_watch = !watch_warning && !is_unavailable;
+    let watching = row.watch == WatchState::Enabled;
+    let box_rect = egui::Rect::from_center_size(
+        egui::pos2(watch_rect.right() - WATCH_BOX / 2.0, watch_rect.center().y),
+        egui::vec2(WATCH_BOX, WATCH_BOX),
     );
-    painter.rect_stroke(
-        box_rect,
-        theme::RADIUS_SM,
-        egui::Stroke::new(1.0_f32, palette.border),
-        egui::StrokeKind::Inside,
+    ui.painter().text(
+        egui::pos2(watch_rect.left(), watch_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "Watch",
+        styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS),
+        palette.ink_3,
     );
-    if checked {
-        let a = egui::pos2(
-            box_rect.left() + WATCH_BOX * 0.25,
-            box_rect.center().y + WATCH_BOX * 0.05,
-        );
-        let b = egui::pos2(
-            box_rect.left() + WATCH_BOX * 0.42,
-            box_rect.bottom() - WATCH_BOX * 0.25,
-        );
-        let c = egui::pos2(
-            box_rect.right() - WATCH_BOX * 0.2,
-            box_rect.top() + WATCH_BOX * 0.25,
-        );
-        let check = egui::Stroke::new(1.5_f32, palette.on_brand);
-        painter.line_segment([a, b], check);
-        painter.line_segment([b, c], check);
+    let watch_focused = can_watch && ui.memory(|m| m.has_focus(watch_response.id));
+    super::toggle_switch::paint_checkbox_with_focus(
+        ui.painter(),
+        palette,
+        box_rect,
+        watching && can_watch,
+        watch_focused,
+    );
+    super::toggle_switch::register_checkbox_a11y(&watch_response, can_watch, watching, watch_label);
+    if can_watch && watch_response.clicked() {
+        actions.push(SettingsAction::SetWatch(row.path.clone(), !watching));
+    }
+    if let WatchState::Warning(ref reason) = row.watch {
+        watch_response.on_hover_text(reason.clone());
     }
 }
 
@@ -943,8 +881,14 @@ fn actions_row(
 }
 
 /// The destructive ghost action under the libraries card: muted note on the
-/// left, error-tinted ghost button on the right.
-fn clear_row(ui: &mut egui::Ui, palette: &Palette, actions: &mut Vec<SettingsAction>) {
+/// left, error-tinted destructive button on the right (rendered through the
+/// shared [`Variant::Destructive`] primitive).
+fn clear_row(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    actions: &mut Vec<SettingsAction>,
+) {
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), CLEAR_ROW_H),
         egui::Sense::hover(),
@@ -967,28 +911,22 @@ fn clear_row(ui: &mut egui::Ui, palette: &Palette, actions: &mut Vec<SettingsAct
         egui::pos2(rect.right() - btn_w - 4.0, cy - SMALL_BTN_H / 2.0),
         egui::vec2(btn_w, SMALL_BTN_H),
     );
-    let response = ui.interact(
-        btn_rect,
-        egui::Id::new("settings_clear_library"),
-        egui::Sense::click(),
-    );
-    painter.rect_filled(
-        btn_rect,
-        theme::RADIUS_MD,
-        theme::destructive_fill(palette, response.hovered()),
-    );
-    painter.galley(
-        egui::pos2(
-            btn_rect.center().x - galley.size().x / 2.0,
-            cy - galley.size().y / 2.0,
-        ),
-        galley,
-        palette.error,
-    );
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, CLEAR_LIBRARY_LABEL)
-    });
-    if response.clicked() {
+    if button::text_button(
+        ui,
+        cache,
+        palette,
+        &TextButton {
+            id: egui::Id::new("settings_clear_library"),
+            rect: btn_rect,
+            label: CLEAR_LIBRARY_LABEL,
+            a11y: CLEAR_LIBRARY_LABEL,
+            tooltip: None,
+            icon: None,
+            small: true,
+            variant: Variant::Destructive,
+            enabled: true,
+        },
+    ) {
         actions.push(SettingsAction::ClearLibrary);
     }
 }
@@ -1515,7 +1453,8 @@ fn modal_header(
         palette.ink,
     );
 
-    // Close control at the header's right edge, hugging its content.
+    // Close control at the header's right edge, hugging its content, painted
+    // through the shared [`Variant::Caption`] primitive.
     let body_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM);
     let label_galley = painter.layout_no_wrap("Back".to_owned(), body_font, palette.ink_2);
     let btn_w = 12.0 + 16.0 + 8.0 + label_galley.size().x + 12.0;
@@ -1523,49 +1462,22 @@ fn modal_header(
         egui::pos2(rect.right() - btn_w - 12.0, rect.center().y - 16.0),
         egui::vec2(btn_w, 32.0),
     );
-    let response = ui.interact(
-        btn_rect,
-        egui::Id::new("settings_back"),
-        egui::Sense::click(),
-    );
-    painter.rect_filled(
-        btn_rect,
-        theme::RADIUS_MD,
-        if response.hovered() {
-            palette.surface_2
-        } else {
-            palette.surface
+    if button::text_button(
+        ui,
+        cache,
+        palette,
+        &TextButton {
+            id: egui::Id::new("settings_back"),
+            rect: btn_rect,
+            label: "Back",
+            a11y: "Back to Library",
+            tooltip: None,
+            icon: Some(Icon::ArrowLeft),
+            small: false,
+            variant: Variant::Caption,
+            enabled: true,
         },
-    );
-    painter.rect_stroke(
-        btn_rect,
-        theme::RADIUS_MD,
-        egui::Stroke::new(1.0_f32, palette.border),
-        egui::StrokeKind::Inside,
-    );
-    let tint = if response.hovered() {
-        palette.ink
-    } else {
-        palette.ink_2
-    };
-    let tex_id = cache.texture(ui.ctx(), Icon::ArrowLeft, 16.0, tint);
-    let icon_rect = egui::Rect::from_center_size(
-        egui::pos2(btn_rect.left() + 12.0 + 8.0, btn_rect.center().y),
-        egui::vec2(16.0, 16.0),
-    );
-    painter.image(tex_id, icon_rect, UV_FULL, tint);
-    painter.galley(
-        egui::pos2(
-            icon_rect.right() + 8.0,
-            btn_rect.center().y - label_galley.size().y / 2.0,
-        ),
-        label_galley,
-        tint,
-    );
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Back to Library")
-    });
-    if response.clicked() {
+    ) {
         actions.push(SettingsAction::Back);
     }
 }
@@ -1650,7 +1562,7 @@ fn section_pane(
                         ui.add_space(HEADER_GAP);
                         libraries_card(ui, cache, palette, content, actions);
                         ui.add_space(HEADER_GAP);
-                        clear_row(ui, palette, actions);
+                        clear_row(ui, cache, palette, actions);
 
                         ui.add_space(SECTION_GAP);
                         preferences_card(
@@ -1734,60 +1646,65 @@ fn section_pane(
         });
 }
 
-// --- Linux-only folder picker -------------------------------------------------------
+// --- Library Path input (Linux text flow) -----------------------------------------
+//
+// What the input draws and what the listener chose; the filesystem probe, the
+// session registration, and the durable write are the host's Library Path
+// adapter (`ui::app::library_picker`).
 
-/// Text-based folder picker with directory autocomplete (no native dialog on
-/// Linux). Rendered under the stage when the Add Library flow is open.
-#[cfg(target_os = "linux")]
-fn pick_folder_ui(
+/// What the Library Path input shows, all of it resolved by the host: the draft
+/// being typed, the rejection the last attempt earned, and the directory
+/// suggestions for what is typed so far.
+pub struct PathInput<'a> {
+    pub text: &'a mut String,
+    pub error: Option<&'a str>,
+    pub suggestions: &'a [PathBuf],
+}
+
+/// What the listener did to the input. The host decides what each one means
+/// for the Library Path facts and the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathInputAction {
+    /// The typed path should become a Library Path.
+    Confirm,
+    /// The flow is abandoned; the draft is the host's to clear.
+    Cancel,
+    /// A suggestion was taken into the field to keep drilling with.
+    Complete(PathBuf),
+}
+
+/// Render the text-based folder picker (no native dialog on Linux), reported as
+/// typed actions. Pure presentation: no filesystem read, no session, no store —
+/// whether a candidate is a root is the host's decision.
+pub fn path_input(
     ui: &mut egui::Ui,
-    library: &mut LibrarySession,
-    store: &mut dyn SettingsStore,
-    text_input: &mut String,
-    show_input: &mut bool,
-    path_error: &mut Option<String>,
-) {
-    if *show_input {
-        if let Some(ref err) = *path_error {
-            ui.colored_label(ui.visuals().error_fg_color, err);
+    palette: &Palette,
+    input: &mut PathInput<'_>,
+) -> Vec<PathInputAction> {
+    let mut actions = Vec::new();
+    if let Some(error) = input.error {
+        ui.colored_label(palette.error, error);
+    }
+    ui.horizontal(|ui| {
+        ui.label("Path:");
+        ui.text_edit_singleline(input.text);
+        if ui.button("Confirm").clicked() {
+            actions.push(PathInputAction::Confirm);
         }
-        ui.horizontal(|ui| {
-            ui.label("Path:");
-            ui.text_edit_singleline(text_input);
-            if ui.button("Confirm").clicked() {
-                let path = expand_tilde(text_input);
-                if !path.exists() {
-                    *path_error = Some(format!("Path does not exist: {}", path.display()));
-                } else if !path.is_dir() {
-                    *path_error = Some(format!("Not a directory: {}", path.display()));
-                } else {
-                    library.library_paths.register(path, store);
-                    *text_input = String::new();
-                    *show_input = false;
-                    *path_error = None;
-                }
-            }
-            if ui.button("Cancel").clicked() {
-                *text_input = String::new();
-                *show_input = false;
-                *path_error = None;
-            }
-        });
-
-        // Directory autocomplete: clickable suggestions that fill the input so
-        // the user can drill down without a native dialog. Clicking appends a
-        // separator, which lists that directory's children on the next frame.
-        for suggestion in suggest_directories(text_input.as_str(), 8) {
-            let label = suggestion.to_string_lossy().to_string();
-            if ui
-                .selectable_label(false, format!("\u{1F4C1} {label}"))
-                .clicked()
-            {
-                *text_input = format!("{label}/");
-                *path_error = None;
-            }
+        if ui.button("Cancel").clicked() {
+            actions.push(PathInputAction::Cancel);
+        }
+    });
+    for suggestion in input.suggestions {
+        let label = suggestion.to_string_lossy().to_string();
+        if ui
+            .selectable_label(false, format!("\u{1F4C1} {label}"))
+            .clicked()
+        {
+            actions.push(PathInputAction::Complete(suggestion.clone()));
         }
     }
+    actions
 }
 
 // --- App adapter --------------------------------------------------------------------
@@ -1843,16 +1760,7 @@ impl super::app::RiffApp {
 
         // Transient rows beneath the stage column.
         #[cfg(target_os = "linux")]
-        if self.settings_show_input {
-            pick_folder_ui(
-                ui,
-                library,
-                self.settings_store.as_mut(),
-                &mut self.settings_text_input,
-                &mut self.settings_show_input,
-                &mut self.settings_path_error,
-            );
-        }
+        self.render_library_path_input(ui, library);
         if self.clear_library_confirm {
             self.render_clear_library_confirm(ui, library);
         }
@@ -1950,37 +1858,13 @@ impl super::app::RiffApp {
         }
     }
 
-    /// Register a new library root through the platform picker: the native
-    /// folder dialog everywhere except Linux, which opens the text-input row
-    /// rendered beneath the stage. Also called from the sidebar footer
-    /// (design-handoff issue 07).
-    pub(crate) fn add_library_via_platform_picker(&mut self, library: &mut LibrarySession) {
-        #[cfg(not(target_os = "linux"))]
-        {
-            if let Some(path) = rfd::FileDialog::new()
-                .set_title("Add Music Library")
-                .pick_folder()
-            {
-                library
-                    .library_paths
-                    .register(path, self.settings_store.as_mut());
-            }
-        }
-        #[cfg(target_os = "linux")]
-        {
-            self.settings_show_input = true;
-            self.settings_path_error = None;
-            let _ = library;
-        }
-    }
-
     /// The inline confirmation for the destructive Clear Library action,
     /// rendered beneath the stage until confirmed or cancelled.
     fn render_clear_library_confirm(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
         // The composition is the pure widget seam in [`crate::ui::prompts`]
         // (golden-image gap audit P1-7): the same pixels the golden pins.
         let palette = self.theme.active;
-        let outcome = crate::ui::prompts::clear_library_confirm(ui, &palette);
+        let outcome = crate::ui::prompts::clear_library_confirm(ui, &mut self.icons, &palette);
         match outcome {
             Some(crate::ui::prompts::PromptOutcome::Confirm) => {
                 self.clear_library_confirm = false;
@@ -1991,15 +1875,21 @@ impl super::app::RiffApp {
                         // fact-set is told too, so no root keeps claiming it
                         // is indexed after the wipe.
                         library.library_paths.clear_collection_data();
-                        library.scan_status = Some(format!(
-                            "Library cleared ({removed} tracks removed). Rescan to rebuild."
-                        ));
+                        self.feedback.set_library(
+                            format!(
+                                "Library cleared ({removed} tracks removed). Rescan to rebuild."
+                            ),
+                            riff_backend::app::events::NoticeSeverity::Info,
+                        );
+                        library.scan_status = self.feedback.display_message();
                     }
                     Err(e) => {
                         tracing::error!("Failed to clear the library: {e}");
-                        library.scan_status = Some(
+                        self.feedback.set_library(
                             "Failed to clear the library \u{2014} nothing was changed.".to_string(),
+                            riff_backend::app::events::NoticeSeverity::Error,
                         );
+                        library.scan_status = self.feedback.display_message();
                     }
                 }
             }

@@ -90,6 +90,16 @@ It owns the Backend Events inbox (`events.rs` — the `BackendEvent` enum, notic
 
 It owns egui widget code, the main window and its views, fonts and icon rasterization, the system tray (non-Linux), native dialogs, and the `riff` binary — a thin composition over `riff_backend::composition::AppRuntime::spawn` that opens the store at its default location and hands the returned `AppRuntime` handles to the UI and tray. The cover-texture LRU lives here because it is an egui-specific concern (`egui::TextureHandle`).
 
+### Inside `riff-gui`: the internal component layer
+
+`riff-gui` has one frontend consumer, so the shared widgetry is an **internal two-tier layer, not a crate** — the workspace dependency graph is unchanged, and a separate crate stays a decision for when a second consumer, a publication need, or a measured independent-build need appears. New UI work starts by asking which tier it belongs to:
+
+- **Primitives** — `theme`, `icons`, `fonts`, `row`, `button`, `text_field`, `toggle_switch`, `linear`, `artwork`, `empty_state`, `feedback`, `menu`, `prompts`, `stage`, `up_next`. They own reusable presentation and interaction behavior. The contract is props in, responses or typed intents out: they receive the `egui` context, the active `Palette`, an icon/cache dependency where needed, presentation values, and **caller-owned** buffers. They never name `RiffApp`, a session, `SessionViews`, a service front end, a store port, `Transport`, an application generation, or a native integration, and they never hold a shared handle to one. `component_boundary_tests` sweeps these files for exactly those names, alongside ADR 0004's token sweeps.
+- **Feature composites** — `app` and its pane modules, `chrome`, `sidebar`, `browser`, `detail`, `selection`, `playerbar`, `now_playing`, `settings`. Recognizably riff-specific: they combine primitives with content, and they are where application state is legitimately held.
+- **Host adapters** — the `impl RiffApp` blocks (including `app/library_picker.rs` and `app/tag_editor.rs`) plus `tray` and `window_visibility`. They resolve the props, map emitted intents onto `Transport` / store / session / native effects, and keep platform behavior (the folder picker, Linux's text-path flow, the no-tray policy) explicit rather than hidden inside a generic widget.
+
+The theme, fonts, and icons stay the single design authority through all three tiers: every component module reads its values from `theme.rs`, so a future crate moves them together rather than leaving a second token store behind.
+
 ## Dependency Rules
 
 The core rule is that **dependencies follow the chain above and nothing bypasses it**. Specific rules:

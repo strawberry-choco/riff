@@ -6107,11 +6107,17 @@ fn committing_a_favorite_toggle_bumps_library_generation_and_emits_once() {
 
 /// A Listing Page is one fact read at one generation: the store takes the
 /// connection once for both halves, so a writer on another thread can only
-/// land wholly before or wholly after the read. Asking for a window wide
-/// enough to hold the whole collection therefore always reports a total that
-/// equals the number of rows delivered. A read that took the connection
-/// twice would let a commit land in between and report a total counting a
-/// track its window never saw (or the reverse).
+/// land wholly before or wholly after the read. A read that took the
+/// connection twice would let a commit land in between and report a total
+/// counting a track its window never saw (or the reverse).
+///
+/// The invariant is therefore that the window is exactly as full as the total
+/// permits — `rows == min(total, window)` — not that `total == rows`. The
+/// strong form is what the capped one says while the collection still fits the
+/// window (which is where a torn read shows up), but the writer is only
+/// released once the reader has taken its minimum frames, so under suite load
+/// it overshoots the window and the strong form fails on a read that mixed
+/// nothing.
 #[test]
 fn a_page_read_never_mixes_generations_with_a_concurrent_writer() {
     // Both threads must put in their minimum, so a fast reader cannot let the
@@ -6121,6 +6127,7 @@ fn a_page_read_never_mixes_generations_with_a_concurrent_writer() {
     // test -- which is what a fixed read-count floor did under suite load.
     const MIN_WRITES: usize = 400;
     const MIN_FRAMES: usize = 400;
+    const WINDOW: usize = MIN_WRITES * 4;
 
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
@@ -6159,13 +6166,13 @@ fn a_page_read_never_mixes_generations_with_a_concurrent_writer() {
     let mut reads = 0usize;
     while writing.load(std::sync::atomic::Ordering::Acquire) {
         let page = reader
-            .tracks_page(0, MIN_WRITES * 4)
+            .tracks_page(0, WINDOW)
             .expect("page read must succeed");
         assert_eq!(
-            page.total(),
             page.rows().len(),
-            "read {reads}: a page read taken while writes land must report a total that \
-             agrees with the number of rows it delivered"
+            page.total().min(WINDOW),
+            "read {reads}: a page read taken while writes land must deliver exactly as \
+             many rows as its total and its window allow"
         );
         reads += 1;
         frames.store(reads, std::sync::atomic::Ordering::Release);
@@ -6177,7 +6184,9 @@ fn a_page_read_never_mixes_generations_with_a_concurrent_writer() {
         "the writer must have kept committing across the read window, made {written} commits"
     );
 
-    let page = reader.tracks_page(0, MIN_WRITES * 4).unwrap();
+    // Settled: with the writer joined its count is known, so the window is
+    // asked wide enough that the capped form above is the strong one.
+    let page = reader.tracks_page(0, written + 1).unwrap();
     assert_eq!(page.total(), written, "the writer's batches all committed");
     assert_eq!(page.rows().len(), written, "and every one is listed");
 }

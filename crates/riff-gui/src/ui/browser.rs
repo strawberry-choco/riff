@@ -145,25 +145,11 @@ pub fn flat_slot(counts: &[usize], index: usize, desc: bool) -> Option<(usize, u
     Some((bucket, flat - counts[bucket]))
 }
 
-/// The friendly empty state: what the section is plus the one hint that
-/// moves the listener forward — never a raw error. Public so the app-level
-/// variants that render outside [`show_browser_column`] (the paged flat
-/// list, the folder tree, search misses) reuse the same shape.
-pub fn empty_state(ui: &mut egui::Ui, palette: &Palette, title: &str, hint: &str) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(40.0);
-        ui.label(
-            egui::RichText::new(title)
-                .text_style(egui::TextStyle::Heading)
-                .color(palette.ink_2),
-        );
-        ui.label(
-            egui::RichText::new(hint)
-                .text_style(egui::TextStyle::Small)
-                .color(palette.ink_3),
-        );
-    });
-}
+/// The friendly empty state — the shared composition now owned by
+/// [`super::empty_state`] and re-exported here so the explorer's call sites and
+/// the historical `browser::empty_state` path keep resolving. See
+/// [`super::empty_state::empty_state`].
+pub use super::empty_state::empty_state;
 
 /// The A–Z sort control: a small ghost button at the column's top-right.
 /// Ascending offers the Z–A flip and vice versa — the label names what the
@@ -397,47 +383,42 @@ fn browser_row(
     );
     let painter = ui.painter_at(rect);
 
-    if item.selected {
-        painter.rect_filled(rect, super::theme::RADIUS_MD, palette.surface_3);
-    } else if response.hovered() {
-        painter.rect_filled(rect, super::theme::RADIUS_MD, palette.row_hover);
-    }
-    if let Some(ring) =
-        super::theme::focus_ring_stroke(palette, ui.memory(|m| m.has_focus(response.id)))
-    {
-        painter.rect_stroke(
-            rect,
-            super::theme::RADIUS_MD,
-            ring,
-            egui::StrokeKind::Inside,
-        );
-    }
+    let focused = ui.memory(|m| m.has_focus(response.id));
+    super::row::paint_row_band(
+        &painter,
+        palette,
+        rect,
+        item.selected,
+        response.hovered(),
+        focused,
+    );
 
-    // Thumbnail slot: the cover texture when one resolved, otherwise the
-    // muted placeholder well (the generated-colour block, issue 14,
-    // replaces the placeholder look without touching this seam).
+    // Thumbnail slot, through the shared artwork primitive: the cover texture
+    // when one resolved, otherwise the palette-aware glyph well. The glyph is
+    // rasterized only for the frame that actually shows it.
     let thumb_rect = egui::Rect::from_center_size(
         egui::pos2(rect.left() + 6.0 + THUMB_SIZE / 2.0, rect.center().y),
         egui::vec2(THUMB_SIZE, THUMB_SIZE),
     );
-    if let Some(texture) = &item.thumbnail {
-        let sized = egui::load::SizedTexture::new(texture.id(), thumb_rect.size());
-        painter.image(
-            sized.id,
-            thumb_rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            super::theme::TEXTURE_TINT,
-        );
-    } else {
-        painter.rect_filled(thumb_rect, super::theme::RADIUS_SM, palette.surface_2);
-        let tex_id = cache.texture(ui.ctx(), super::icons::Icon::Music, 16.0, palette.ink_3);
-        painter.image(
-            tex_id,
-            thumb_rect.shrink(10.0),
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            palette.ink_3,
-        );
-    }
+    super::artwork::paint(
+        &painter,
+        palette,
+        &super::artwork::Artwork {
+            rect: thumb_rect,
+            texture: item.thumbnail.as_ref().map(egui::TextureHandle::id),
+            fit: super::artwork::Fit::Fill,
+            tint: super::theme::TEXTURE_TINT,
+            placeholder: item
+                .thumbnail
+                .is_none()
+                .then(|| super::artwork::Placeholder::GlyphWell {
+                    radius: super::theme::RADIUS_SM,
+                    glyph: cache.texture(ui.ctx(), super::icons::Icon::Music, 16.0, palette.ink_3),
+                    inset: 10.0,
+                }),
+            border: None,
+        },
+    );
 
     // Label (and its muted detail line) to the right of the thumbnail.
     let text_x = thumb_rect.right() + 10.0;
@@ -448,13 +429,7 @@ fn browser_row(
     };
     paint_row_text(painter, palette, item, &text, rect, text_x, ink, wraps);
 
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(
-            egui::WidgetType::SelectableLabel,
-            item.selected,
-            accessible_label(item),
-        )
-    });
+    super::row::register_row_a11y(&response, item.selected, accessible_label(item));
     response
 }
 

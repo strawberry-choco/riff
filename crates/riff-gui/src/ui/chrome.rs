@@ -19,7 +19,6 @@
 //! icon, so the three surfaces cannot disagree about what riff looks like.
 
 use super::icons::{Icon, IconCache, icon_button};
-use super::sidebar::{ghost_icon_button, search_ring_stroke};
 use super::theme::geometry::sidebar::SEARCH_H;
 use super::theme::geometry::titlebar::{
     CAPTION_BTN_H, CAPTION_BTN_W, CAPTION_GAP, SEARCH_EDGE_INSET, SEARCH_GAP, SEARCH_MAX_W,
@@ -324,17 +323,25 @@ pub fn show_titlebar(
         egui::vec2(search_w, SEARCH_H),
     );
 
-    // Read focus BEFORE painting so the ring lands on the same frame the
-    // field gains focus (sidebar precedent).
+    // The shared single-line text field: it reads focus and paints its own
+    // ring, edits `search_query` in place, offers the clear affordance, and
+    // dismisses on Escape. Returns the field's response so this caller can keep
+    // driving the Ctrl+K request-focus shortcut.
     let id = egui::Id::new("riff_global_search");
-    let focused = ui.memory(|m| m.has_focus(id));
-    paint_search_well(ui, palette, search_rect, focused);
-
-    let response = show_search_field(ui, cache, palette, search_query, search_rect, id);
-
-    handle_search_dismiss(ui, id, focused, search_query);
-
-    response
+    super::text_field::text_field(
+        ui,
+        cache,
+        palette,
+        search_query,
+        &super::text_field::TextField {
+            id,
+            rect: search_rect,
+            hint: "Search or jump to…",
+            leading_icon: Some(Icon::Search),
+            clear_label: Some("Clear search"),
+            dismiss_on_escape: true,
+        },
+    )
 }
 
 /// The minimize | maximize | close caption strips: three caption-style hit
@@ -421,10 +428,10 @@ fn window_control_button(
     label: &str,
     danger: bool,
 ) -> bool {
-    let response = ui.interact(rect, id, egui::Sense::click());
+    let button = super::button::begin_icon_button(ui, rect, id, false);
     let painter = ui.painter_at(rect);
 
-    if response.hovered() {
+    if button.hovered {
         let fill = if danger {
             palette.error
         } else {
@@ -434,9 +441,9 @@ fn window_control_button(
     }
     // On the close hover fill the glyph flips to the on-brand ink so it
     // stays readable over the error red.
-    let tint = if response.hovered() && danger {
+    let tint = if button.hovered && danger {
         palette.on_brand
-    } else if response.hovered() {
+    } else if button.hovered {
         palette.ink
     } else {
         palette.ink_2
@@ -445,8 +452,7 @@ fn window_control_button(
     let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
     painter.image(tex_id, icon_rect, UV_FULL, tint);
 
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-    response.on_hover_text(label).clicked()
+    super::button::finish_icon_button(ui, palette, &button, label)
 }
 
 /// The right-edge nav-control cluster: theme / Now Playing / Settings /
@@ -632,93 +638,5 @@ pub fn window_icon() -> egui::IconData {
         rgba,
         width: APP_ICON_PX,
         height: APP_ICON_PX,
-    }
-}
-
-/// The rounded input well behind the titlebar search field: surface-2 fill
-/// with the sidebar search's ring border — hairline when idle, focus ring
-/// when the field has keyboard focus. Moved here with the search field from
-/// the deleted content top bar.
-fn paint_search_well(ui: &egui::Ui, palette: &Palette, rect: egui::Rect, focused: bool) {
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, theme::RADIUS_MD, palette.surface_2);
-    painter.rect_stroke(
-        rect,
-        theme::RADIUS_MD,
-        search_ring_stroke(palette, focused),
-        egui::StrokeKind::Inside,
-    );
-}
-
-/// The field inside the search well: search glyph, frameless text edit with
-/// the "Search or jump to…" hint, and a clear affordance while the query is
-/// non-empty. Returns the text edit's response for the caller's focus logic.
-fn show_search_field(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    query: &mut String,
-    search_rect: egui::Rect,
-    id: egui::Id,
-) -> egui::Response {
-    let inner = search_rect.shrink2(egui::vec2(10.0_f32, 4.0_f32));
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(inner)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        |ui| {
-            ui.spacing_mut().item_spacing.x = theme::SPACE_MD;
-
-            let tex_id = cache.texture(ui.ctx(), Icon::Search, 16.0, palette.ink_3);
-            let sized = egui::load::SizedTexture::new(tex_id, egui::vec2(16.0, 16.0));
-            ui.add(egui::Image::from_texture(sized));
-
-            let response = ui.add(
-                egui::TextEdit::singleline(query)
-                    .id(id)
-                    .frame(egui::Frame::NONE)
-                    .hint_text("Search or jump to…")
-                    .desired_width(ui.available_width() - 20.0),
-            );
-
-            if !query.is_empty() {
-                let clear_rect = egui::Rect::from_center_size(
-                    egui::pos2(inner.right() - 10.0, search_rect.center().y),
-                    egui::vec2(20.0, SEARCH_H - 8.0),
-                );
-                if ghost_icon_button(
-                    ui,
-                    cache,
-                    palette,
-                    clear_rect,
-                    id.with("clear"),
-                    Icon::Close,
-                    "Clear search",
-                    false,
-                ) {
-                    query.clear();
-                }
-            }
-
-            response
-        },
-    )
-    .inner
-}
-
-/// Keyboard dismissal (REQ-UI-007 parity): while the field has focus,
-/// Escape clears the query and gives the focus back, so a keyboard user can
-/// operate — and dismiss — the search entirely from the keyboard.
-///
-/// The gate is *last frame's* focus, not this frame's: egui itself clears
-/// keyboard focus during pass begin when Escape is pressed, so by the time
-/// widget code runs on the Escape frame the field no longer reports focus.
-fn handle_search_dismiss(ui: &egui::Ui, id: egui::Id, focused: bool, query: &mut String) {
-    let focus_key = id.with("had_focus");
-    let had_focus = focused || ui.memory(|m| m.data.get_temp::<bool>(focus_key).unwrap_or(false));
-    ui.memory_mut(|m| m.data.insert_temp(focus_key, focused));
-    if had_focus && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-        query.clear();
-        ui.memory_mut(|m| m.surrender_focus(id));
     }
 }

@@ -359,7 +359,7 @@ fn readout(
         }
         ui.add_space(12.0);
         if let Some(editor) = panel.editor.as_deref_mut() {
-            editor_section(ui, palette, editor, actions);
+            editor_section(ui, cache, palette, editor, actions);
         } else if !panel.tags.is_empty() {
             tag_section(ui, palette, panel.tags, actions);
         }
@@ -407,13 +407,20 @@ fn header(ui: &mut egui::Ui, palette: &Palette, with_chip: bool) {
 fn album_art(ui: &mut egui::Ui, palette: &Palette, art: Option<&egui::TextureHandle>) {
     let size = egui::vec2(ui.available_width(), ART_H);
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-    if let Some(texture) = art {
-        let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
-        ui.painter().image(texture.id(), rect, uv, palette.ink);
-    } else {
-        ui.painter()
-            .rect_filled(rect, super::theme::RADIUS_MD, palette.surface_2);
-    }
+    super::artwork::paint(
+        ui.painter(),
+        palette,
+        &super::artwork::Artwork {
+            rect,
+            texture: art.map(egui::TextureHandle::id),
+            fit: super::artwork::Fit::Fill,
+            tint: palette.ink,
+            placeholder: Some(super::artwork::Placeholder::Well {
+                radius: super::theme::RADIUS_MD,
+            }),
+            border: None,
+        },
+    );
 }
 
 /// The primary play action: a full-width orange button — the brand fill with
@@ -544,6 +551,7 @@ fn action_button(
 /// between fields through egui's default focus traversal.
 fn editor_section(
     ui: &mut egui::Ui,
+    cache: &mut IconCache,
     palette: &Palette,
     draft: &mut TagDraft,
     actions: &mut Vec<SelectionAction>,
@@ -560,9 +568,28 @@ fn editor_section(
                 .text_style(egui::TextStyle::Small)
                 .color(palette.ink_3),
         );
-        let response = ui.add(
-            egui::TextEdit::singleline(&mut draft.fields[field.index()])
-                .desired_width(ui.available_width()),
+        // One shared field owner for every typed value in the shell: the same
+        // well, the same focus ring, the same truncation. A tag row carries no
+        // leading glyph and no clear affordance, and Escape belongs to the
+        // editor below (it discards the whole draft) rather than emptying the
+        // row the cursor happens to sit on.
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+            egui::Sense::hover(),
+        );
+        let response = super::text_field::text_field(
+            ui,
+            cache,
+            palette,
+            &mut draft.fields[field.index()],
+            &super::text_field::TextField {
+                id: egui::Id::new(("tag_editor_field", field.index())),
+                rect,
+                hint: "",
+                leading_icon: None,
+                clear_label: None,
+                dismiss_on_escape: false,
+            },
         );
         // The entry point (Issue 04) focuses the editor's first tag field;
         // the request lands on the next frame, so this one-shot flag is
@@ -586,20 +613,7 @@ fn editor_section(
     let save_enabled =
         !(draft.saving || batch_in_flight || draft.kind == DraftKind::Album && !draft.any_dirty());
 
-    ui.horizontal(|ui| {
-        if ui
-            .add_enabled(save_enabled, egui::Button::new("Save"))
-            .clicked()
-        {
-            actions.push(SelectionAction::SaveTagEdit);
-        }
-        if ui.button("Cancel").clicked() {
-            actions.push(SelectionAction::CancelTagEdit);
-        }
-        if draft.saving || batch_in_flight {
-            ui.spinner();
-        }
-    });
+    save_bar(ui, cache, palette, draft, save_enabled, actions);
 
     // The batch's outcome line lands under the bar once every request has:
     // "Saved N of M tracks", or "... — k failed: <reason>" in the warning
@@ -697,4 +711,70 @@ fn details_list(ui: &mut egui::Ui, palette: &Palette, details: &[SelectionDetail
         );
         ui.add_space(theme::SPACE_MD);
     }
+}
+
+/// The editor's Save bar: the affirmative Primary save — disabled while a write
+/// is in flight, and for an Album draft while nothing is dirty, so a
+/// double-submit is impossible — the neutral Cancel, and the spinner while a
+/// batch is outstanding. The bar reports actions; submitting is the host's.
+fn save_bar(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    draft: &TagDraft,
+    save_enabled: bool,
+    actions: &mut Vec<SelectionAction>,
+) {
+    let batch_in_flight = draft.batch.as_ref().is_some_and(|batch| !batch.done());
+    ui.horizontal(|ui| {
+        // One button owner: an affirmative Primary save that a disabled state
+        // strips of both click and focus, and a neutral Cancel.
+        let (rect, _) = ui.allocate_exact_size(
+            super::button::text_button_size(ui, palette, "Save", false),
+            egui::Sense::hover(),
+        );
+        if super::button::text_button(
+            ui,
+            cache,
+            palette,
+            &super::button::TextButton {
+                id: egui::Id::new("tag_editor_save"),
+                rect,
+                label: "Save",
+                a11y: "Save",
+                tooltip: None,
+                icon: None,
+                small: false,
+                variant: super::button::Variant::Primary,
+                enabled: save_enabled,
+            },
+        ) {
+            actions.push(SelectionAction::SaveTagEdit);
+        }
+        let (rect, _) = ui.allocate_exact_size(
+            super::button::text_button_size(ui, palette, "Cancel", false),
+            egui::Sense::hover(),
+        );
+        if super::button::text_button(
+            ui,
+            cache,
+            palette,
+            &super::button::TextButton {
+                id: egui::Id::new("tag_editor_cancel"),
+                rect,
+                label: "Cancel",
+                a11y: "Cancel",
+                tooltip: None,
+                icon: None,
+                small: false,
+                variant: super::button::Variant::Caption,
+                enabled: true,
+            },
+        ) {
+            actions.push(SelectionAction::CancelTagEdit);
+        }
+        if draft.saving || batch_in_flight {
+            ui.spinner();
+        }
+    });
 }

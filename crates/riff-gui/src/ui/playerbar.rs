@@ -19,7 +19,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use super::icons::{Icon, IconCache};
-use super::sidebar;
+use super::linear;
 use super::theme::geometry::playerbar::{
     COVER, GHOST_BTN, MIN_INNER_H, PLAY_BTN, QUEUE_LABEL_SPACE, QUEUE_PANEL_HEADER_H,
     QUEUE_PANEL_MAX_LIST_H, QUEUE_PANEL_W, VOLUME_THUMB, VOLUME_W,
@@ -109,16 +109,6 @@ pub fn seek_fraction(current: Duration, total: Option<Duration>) -> f32 {
         }
         _ => 0.0,
     }
-}
-
-/// Pointer position along a horizontal bar as a clamped `0..=1` fraction —
-/// the shared click/drag math behind the seek row and the volume slider.
-#[must_use]
-fn fraction_at(rect: egui::Rect, pos: egui::Pos2) -> f32 {
-    if rect.width() <= 0.0 {
-        return 0.0;
-    }
-    ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0)
 }
 
 // --- Content & actions ------------------------------------------------------------
@@ -328,24 +318,8 @@ fn show_right_cluster(
     }
     x -= GHOST_BTN + 16.0;
 
-    // Volume slider: 4px track + round thumb, click/drag to set.
-    let vol_track = egui::Rect::from_min_size(
-        egui::pos2(x - VOLUME_W, cy - TRACK_H / 2.0),
-        egui::vec2(VOLUME_W, TRACK_H),
-    );
-    let vol_hit = egui::Rect::from_center_size(
-        egui::pos2(x - VOLUME_W / 2.0, cy),
-        egui::vec2(VOLUME_W, GHOST_BTN),
-    );
-    paint_slider(
-        ui,
-        palette,
-        vol_track,
-        vol_hit,
-        content.volume,
-        "Volume",
-        actions,
-    );
+    // Volume slider: 4px track + round thumb, click/drag/keyboard to set.
+    draw_volume_slider(ui, palette, x, cy, content.volume, actions);
     x -= VOLUME_W + 8.0;
 
     // Mute toggle: icon flips between speaker and crossed-out speaker.
@@ -496,30 +470,68 @@ fn show_seek_row(
         egui::pos2(center.left() + TIME_LABEL_SPACE, seek_cy - TRACK_H / 2.0),
         egui::vec2((center.width() - TIME_LABEL_SPACE * 2.0).max(40.0), TRACK_H),
     );
-    let frac = seek_fraction(content.position, content.total);
-    paint_seek_bar(ui, palette, seek_track, frac);
-
-    if content.total.is_none() {
-        return;
-    }
     let seek_hit = egui::Rect::from_min_max(
         egui::pos2(seek_track.left(), center.top()),
         egui::pos2(seek_track.right(), center.top() + GHOST_BTN),
     );
-    let seek_response = ui.interact(
-        seek_hit,
-        egui::Id::new("Seek"),
-        egui::Sense::click_and_drag(),
+    let frac = seek_fraction(content.position, content.total);
+    // A track with an unknown or zero duration is not seekable: the control
+    // paints but takes no pointer/keyboard input.
+    let new_frac = linear::linear_control(
+        ui,
+        palette,
+        &linear::LinearControl {
+            id: egui::Id::new("Seek"),
+            track: seek_track,
+            hit: seek_hit,
+            value: frac,
+            thumb: None,
+            interactive: content.total.is_some(),
+            label: "Seek",
+        },
     );
-    if (seek_response.clicked() || seek_response.dragged())
-        && let Some(pos) = seek_response.interact_pointer_pos()
-        && let Some(total) = content.total
-    {
+    if let (Some(f), Some(total)) = (new_frac, content.total) {
         actions.push(PlayerBarAction::Seek(Duration::from_secs_f32(
-            fraction_at(seek_hit, pos) * total.as_secs_f32(),
+            f * total.as_secs_f32(),
         )));
     }
-    seek_response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, "Seek"));
+}
+
+/// The volume slider: a round-thumb [`linear::LinearControl`] at `x`'s left.
+/// The thumb rides the stored `volume` even while muted, so mute never
+/// discards the level; a pointer/keyboard change reports [`PlayerBarAction::
+/// SetVolume`] at the new fraction.
+fn draw_volume_slider(
+    ui: &egui::Ui,
+    palette: &Palette,
+    x: f32,
+    cy: f32,
+    volume: f32,
+    actions: &mut Vec<PlayerBarAction>,
+) {
+    let vol_track = egui::Rect::from_min_size(
+        egui::pos2(x - VOLUME_W, cy - TRACK_H / 2.0),
+        egui::vec2(VOLUME_W, TRACK_H),
+    );
+    let vol_hit = egui::Rect::from_center_size(
+        egui::pos2(x - VOLUME_W / 2.0, cy),
+        egui::vec2(VOLUME_W, GHOST_BTN),
+    );
+    if let Some(v) = linear::linear_control(
+        ui,
+        palette,
+        &linear::LinearControl {
+            id: egui::Id::new("Volume"),
+            track: vol_track,
+            hit: vol_hit,
+            value: volume,
+            thumb: Some(VOLUME_THUMB),
+            interactive: true,
+            label: "Volume",
+        },
+    ) {
+        actions.push(PlayerBarAction::SetVolume(v));
+    }
 }
 
 /// The transport row centered in the column's lower half: circular ghost
@@ -637,7 +649,7 @@ pub fn show_queue_panel(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
-    entries: &[super::now_playing::UpNextEntry],
+    entries: &[super::up_next::UpNextEntry],
     actions: &mut Vec<PlayerBarAction>,
 ) {
     let list_h = (entries.len() as f32 * ROW_H).min(QUEUE_PANEL_MAX_LIST_H);
@@ -691,29 +703,13 @@ pub fn show_queue_panel(
                                         let Some(entry) = entries.get(i) else {
                                             continue;
                                         };
-                                        let row = sidebar::tree_row(
-                                            ui,
-                                            cache,
-                                            palette,
-                                            sidebar::TreeRow {
-                                                indent_level: 0,
-                                                icon: None,
-                                                cover: None,
-                                                label: &entry.label,
-                                                count: None,
-                                                meta: None,
-                                                favorite: None,
-                                                selected: false,
-                                                now_playing: false,
-                                                playing: false,
-                                                art_slot: false,
-                                            },
-                                        );
-                                        if row.response.clicked() {
+                                        let response =
+                                            super::up_next::up_next_row(ui, cache, palette, entry);
+                                        if response.clicked() {
                                             actions
                                                 .push(PlayerBarAction::PlayNext(entry.id.clone()));
                                         }
-                                        row.response.on_hover_text("Queue this track to play next");
+                                        response.on_hover_text("Queue this track to play next");
                                     }
                                 });
                         },
@@ -722,23 +718,26 @@ pub fn show_queue_panel(
         });
 }
 
-/// The queue panel's empty state: the centered "Queue is empty" line,
-/// registered as a labeled widget so assistive tech (and the harness) can read
-/// it.
+/// The queue panel's empty state: the shared labelled
+/// [`super::empty_state::empty_state_in_rect`] composition over the panel body,
+/// plus a hover widget so assistive tech (and the harness) can read it.
 fn show_queue_panel_empty(ui: &egui::Ui, palette: &Palette) {
-    let empty_center = egui::pos2(
-        ui.max_rect().center().x,
-        ui.max_rect().top() + QUEUE_PANEL_HEADER_H + ROW_H / 2.0,
+    let body = egui::Rect::from_min_max(
+        egui::pos2(
+            ui.max_rect().left(),
+            ui.max_rect().top() + QUEUE_PANEL_HEADER_H,
+        ),
+        ui.max_rect().max,
     );
-    ui.painter().text(
-        empty_center,
-        egui::Align2::CENTER_CENTER,
+    super::empty_state::empty_state_in_rect(
+        ui.painter(),
+        palette,
+        body,
         "Queue is empty",
-        egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional),
-        palette.ink_3,
+        "Play a track to start your queue.",
     );
     ui.interact(
-        egui::Rect::from_center_size(empty_center, egui::vec2(QUEUE_PANEL_W - 16.0, ROW_H)),
+        body,
         egui::Id::new("playerbar_queue_panel_empty"),
         egui::Sense::hover(),
     )
@@ -748,91 +747,25 @@ fn show_queue_panel_empty(ui: &egui::Ui, palette: &Palette) {
 // --- Painters & controls ---------------------------------------------------------
 
 /// The 56×56 now-playing cover: the real texture when the LRU cache has one,
-/// otherwise a Mesh strip gradient from surface-2 down to surface-3 framed by
-/// a hairline border.
+/// otherwise the palette's gradient well, framed by a hairline border.
 fn paint_cover(
     ui: &mut egui::Ui,
     palette: &Palette,
     texture: Option<egui::TextureId>,
     rect: egui::Rect,
 ) {
-    let painter = ui.painter_at(rect);
-    if let Some(id) = texture {
-        painter.image(id, rect, UV_FULL, theme::TEXTURE_TINT);
-    } else {
-        // Mesh strip: two triangles whose vertex colors interpolate from
-        // surface-2 (top) to surface-3 (bottom).
-        let mut mesh = egui::Mesh::default();
-        mesh.colored_vertex(rect.left_top(), palette.surface_2);
-        mesh.colored_vertex(rect.right_top(), palette.surface_2);
-        mesh.colored_vertex(rect.right_bottom(), palette.surface_3);
-        mesh.colored_vertex(rect.left_bottom(), palette.surface_3);
-        mesh.add_triangle(0, 1, 2);
-        mesh.add_triangle(0, 2, 3);
-        painter.add(mesh);
-    }
-    painter.rect_stroke(
-        rect,
-        theme::RADIUS_MD,
-        egui::Stroke::new(1.0_f32, palette.border),
-        egui::StrokeKind::Inside,
+    super::artwork::paint(
+        &ui.painter_at(rect),
+        palette,
+        &super::artwork::Artwork {
+            rect,
+            texture,
+            fit: super::artwork::Fit::Fill,
+            tint: theme::TEXTURE_TINT,
+            placeholder: Some(super::artwork::Placeholder::Gradient),
+            border: Some(theme::RADIUS_MD),
+        },
     );
-}
-
-/// One styled bar control (seek row / volume slider): a 4px rounded track on
-/// surface-3 with a brand-tinted fill up to `value`; the volume variant adds
-/// the mockup's round thumb. Clicking or dragging reports the action at the
-/// clicked fraction.
-fn paint_slider(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    track: egui::Rect,
-    hit: egui::Rect,
-    value: f32,
-    label: &str,
-    actions: &mut Vec<PlayerBarAction>,
-) {
-    let response = ui.interact(hit, egui::Id::new(label), egui::Sense::click_and_drag());
-    if (response.clicked() || response.dragged())
-        && let Some(pos) = response.interact_pointer_pos()
-    {
-        actions.push(PlayerBarAction::SetVolume(fraction_at(hit, pos)));
-    }
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, label));
-
-    let painter = ui.painter_at(hit);
-    let radius = TRACK_H / 2.0;
-    painter.rect_filled(track, radius, palette.surface_3);
-    let fill_w = (track.width() * value.clamp(0.0, 1.0)).max(radius * 2.0);
-    painter.rect_filled(
-        egui::Rect::from_min_size(track.min, egui::vec2(fill_w, TRACK_H)),
-        radius,
-        palette.brand_primary,
-    );
-    // Round thumb at the current value.
-    let thumb_x = track.left() + track.width() * value.clamp(0.0, 1.0);
-    painter.circle_filled(
-        egui::pos2(thumb_x, track.center().y),
-        VOLUME_THUMB / 2.0,
-        palette.ink,
-    );
-}
-
-/// The seek row's 4px bar: brand fill over a surface-3 track. Pure painting —
-/// the interaction lives in [`show_player_bar`] where the track total is at
-/// hand.
-fn paint_seek_bar(ui: &mut egui::Ui, palette: &Palette, track: egui::Rect, frac: f32) {
-    let painter = ui.painter_at(track);
-    let radius = TRACK_H / 2.0;
-    painter.rect_filled(track, radius, palette.surface_3);
-    let fill_w = track.width() * frac.clamp(0.0, 1.0);
-    if fill_w > 0.0 {
-        painter.rect_filled(
-            egui::Rect::from_min_size(track.min, egui::vec2(fill_w, TRACK_H)),
-            radius,
-            palette.brand_primary,
-        );
-    }
 }
 
 /// A circular ghost transport button: invisible until hovered (then a
@@ -850,15 +783,15 @@ fn ghost_circle_button(
     label: &str,
     active: bool,
 ) -> bool {
-    let response = ui.interact(rect, id, egui::Sense::click());
+    let button = super::button::begin_icon_button(ui, rect, id, false);
     let painter = ui.painter_at(rect);
 
-    if response.hovered() {
+    if button.hovered {
         painter.circle_filled(rect.center(), rect.width() / 2.0, palette.surface_2);
     }
     let tint = if active {
         palette.brand_primary
-    } else if response.hovered() {
+    } else if button.hovered {
         palette.ink
     } else {
         palette.ink_2
@@ -867,8 +800,7 @@ fn ghost_circle_button(
     let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
     painter.image(tex_id, icon_rect, UV_FULL, tint);
 
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-    response.on_hover_text(label).clicked()
+    super::button::finish_icon_button(ui, palette, &button, label)
 }
 
 /// The 40px primary-filled play/pause circle: brand fill, on-brand glyph.
@@ -881,11 +813,11 @@ fn primary_play_button(
     icon: Icon,
     label: &str,
 ) -> bool {
-    let response = ui.interact(rect, egui::Id::new("playerbar_play"), egui::Sense::click());
+    let button = super::button::begin_icon_button(ui, rect, egui::Id::new("playerbar_play"), false);
     let painter = ui.painter_at(rect);
 
     painter.circle_filled(rect.center(), rect.width() / 2.0, palette.brand_primary);
-    if response.hovered() {
+    if button.hovered {
         painter.circle_stroke(
             rect.center(),
             rect.width() / 2.0,
@@ -896,6 +828,5 @@ fn primary_play_button(
     let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(18.0, 18.0));
     painter.image(tex_id, icon_rect, UV_FULL, palette.on_brand);
 
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-    response.on_hover_text(label).clicked()
+    super::button::finish_icon_button(ui, palette, &button, label)
 }

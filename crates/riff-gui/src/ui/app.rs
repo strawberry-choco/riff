@@ -1,20 +1,28 @@
 mod browser_pane;
+mod library_picker;
 mod selection_pane;
 mod tag_editor;
 
+pub use library_picker::register_library_path;
 pub use tag_editor::InlineTagEditor;
 
 use crate::ui::chrome::TitleBarAction;
 use crate::ui::now_playing::{NowPlayingAction, UpNextEntry};
 use crate::ui::playerbar::PlayerBarAction;
 use crate::ui::settings::SettingsSection;
-use crate::ui::theme;
+use crate::ui::theme::{self, Palette};
 #[cfg(not(target_os = "linux"))]
 use crate::ui::window_visibility::VisibilityMessage;
 use eframe::egui;
 use riff_backend::app::MutexExt;
 use riff_backend::app::Transport;
 pub use riff_backend::app::cover_service::{COVER_CACHE_CAP, Covers, lru_insert};
+// The artwork cache-key space moved to `ui::artwork` with the artwork primitive
+// (issue 13); these keep the historical `ui::app::` paths resolving.
+pub use crate::ui::artwork::{COVER_CARD, COVER_HERO, COVER_THUMB, CoverCacheKey, cover_cache_key};
+// The elastic stage's sizing policy moved in with the stage geometry itself;
+// this keeps the historical `ui::app::column_widths` path resolving.
+pub use crate::ui::stage::column_widths;
 use riff_backend::app::events::BackendEvents;
 use riff_backend::app::preferences::Preferences;
 use riff_backend::app::scan_service::{ScanOutcome, Scans};
@@ -27,9 +35,7 @@ use riff_backend::app::tag_edit_service::TagEdits;
 use riff_backend::app::traits::RequestedSize;
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
-use riff_backend::domain::{
-    PlaybackState, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
-};
+use riff_backend::domain::{PlaybackState, PlaylistId, SmartPlaylistKind, Track, TrackId};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -165,6 +171,12 @@ pub struct RiffApp {
     /// The section the Settings modal's left nav currently shows (Issue 11).
     /// Opens on Library, the pane the Library settings rewire builds on.
     pub(crate) settings_section: SettingsSection,
+    /// The structured feedback board the titlebar paints from (issue 11):
+    /// independent persistent slots per source so a scan line cannot erase a
+    /// playback error or a Tag Edit outcome, carrying severity, source, and any
+    /// recovery intent to the paint boundary. Its `display_message` feeds the
+    /// existing `scan_status` line unchanged.
+    pub(crate) feedback: crate::ui::feedback::FeedbackBoard,
     /// Linux-only folder-picker input state (no native file dialog there).
     /// Grouped so the rest of the struct keeps its cross-platform shape.
     #[cfg(target_os = "linux")]
@@ -259,6 +271,7 @@ impl RiffApp {
             },
             icons: crate::ui::icons::IconCache::new(),
             settings_section: SettingsSection::Library,
+            feedback: crate::ui::feedback::FeedbackBoard::default(),
             #[cfg(target_os = "linux")]
             settings_text_input: String::new(),
             #[cfg(target_os = "linux")]
@@ -354,10 +367,7 @@ impl RiffApp {
         // and glyph colours were derived for the old family's tokens, so it
         // re-renders under the new one on its next lookup.
         if self.theme.active.dark != palette.dark {
-            crate::ui::cover_placeholder::evict_generated(
-                &mut self.cover_textures,
-                &mut self.cover_lru_keys,
-            );
+            crate::ui::artwork::evict_generated(&mut self.cover_textures, &mut self.cover_lru_keys);
         }
         self.theme.active = palette;
         self.theme.last_applied = Some((dark, high_contrast));
@@ -383,20 +393,25 @@ impl RiffApp {
     /// reaching into the session — plus the titlebar scan-status line. The
     /// service NEVER touches `LibrarySession` (ADR 0006). The watcher observes
     /// a scan's end itself via `is_scanning`, so no relay fires here anymore.
-    fn poll_library_updates(&self, library: &mut LibrarySession) {
+    fn poll_library_updates(&mut self, library: &mut LibrarySession) {
+        use riff_backend::app::events::NoticeSeverity;
         for outcome in self.scans.poll() {
             match outcome {
                 ScanOutcome::Progress { path, files_found } => {
                     library
                         .library_paths
                         .report_readiness(&path, LibraryStatus::Scanning { files_found });
-                    library.scan_status = Some(format!("{files_found} files"));
+                    self.feedback
+                        .set_scan(format!("{files_found} files"), NoticeSeverity::Info);
                 }
                 ScanOutcome::Complete { path, total_files } => {
                     library
                         .library_paths
                         .report_readiness(&path, LibraryStatus::Scanned(total_files));
-                    library.scan_status = Some(format!("Scan complete: {total_files} tracks"));
+                    self.feedback.set_scan(
+                        format!("Scan complete: {total_files} tracks"),
+                        NoticeSeverity::Info,
+                    );
                     // Scan batches already committed through the store as
                     // they progressed; nothing whole-file remains to save.
                 }
@@ -404,7 +419,14 @@ impl RiffApp {
                     library
                         .library_paths
                         .report_readiness(&path, LibraryStatus::Idle);
-                    library.scan_status = Some(format!("Error: {reason}"));
+                    // A failed scan carries an Error severity and a Rescan
+                    // recovery intent through to the paint boundary.
+                    self.feedback.put(crate::ui::feedback::Feedback {
+                        severity: NoticeSeverity::Error,
+                        source: riff_backend::app::events::NoticeSource::Scan,
+                        message: format!("Error: {reason}"),
+                        recovery: Some(crate::ui::feedback::Recovery::Rescan),
+                    });
                 }
             }
         }
@@ -420,10 +442,7 @@ impl RiffApp {
     /// sibling modules (`ui::settings`): the artwork-policy toggle uses it
     /// so tracks resolved as artless under the old policy re-resolve.
     pub(crate) fn evict_generated_covers(&mut self) {
-        crate::ui::cover_placeholder::evict_generated(
-            &mut self.cover_textures,
-            &mut self.cover_lru_keys,
-        );
+        crate::ui::artwork::evict_generated(&mut self.cover_textures, &mut self.cover_lru_keys);
     }
 
     /// Consume polled cover results into the UI texture cache: rgba→texture
@@ -442,7 +461,7 @@ impl RiffApp {
     /// for a track readout, an album batch draft for an album readout —
     /// targets resolved through the Session Views seam (the same source every
     /// readout reads); the draft itself lives in the editor controller.
-    fn open_inline_draft(&mut self, content: &InspectorContent) {
+    pub fn open_inline_draft(&mut self, content: &InspectorContent) {
         let tags = content.tags.clone();
         match content.kind {
             InspectorKind::Track => {
@@ -483,7 +502,7 @@ impl RiffApp {
         size: RequestedSize,
     ) -> egui::TextureHandle {
         let palette = self.theme.active;
-        crate::ui::cover_placeholder::lookup_cover_texture(
+        crate::ui::artwork::lookup_cover_texture(
             &mut self.cover_textures,
             &mut self.cover_lru_keys,
             ctx,
@@ -506,22 +525,21 @@ impl RiffApp {
         // Arc clone out of the seam first: no `&self.views` borrow may live
         // across widget rendering.
         let playlists = self.views.playlists();
-        let tag_editor = &mut self.tag_editor;
-        let selected_slot = &mut library.selected_track;
-        let playlist_store_slot = self.playlist_store.as_mut();
-        show_track_context_menu(
-            response,
-            TrackMenuArgs {
-                transport: self.transport.as_ref(),
-                track_id,
-                track,
-                selected_track: selected_slot,
-                tag_editor,
-                playlists,
-                playlist_store: playlist_store_slot,
-                remove_from_playlist,
-            },
-        );
+        let options: Vec<(PlaylistId, String)> = playlists
+            .iter()
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect();
+        let palette = self.theme.active;
+        let mut effects = TrackMenuEffects {
+            track_id,
+            track,
+            selected_track: &mut library.selected_track,
+            tag_editor: &mut self.tag_editor,
+            transport: self.transport.as_ref(),
+            playlist_store: self.playlist_store.as_mut(),
+            remove_from_playlist,
+        };
+        show_track_context_menu(response, &palette, &options, &mut effects);
     }
 
     /// Commit one track's favorite flag: the heart every track row carries.
@@ -746,10 +764,15 @@ impl eframe::App for RiffApp {
         // rescan turns every Section slot's fingerprint stale.
         let events = self.drain_backend_events();
         self.scroll_memory.note_backend_events(&events);
-        apply_backend_events(events, &mut library.scan_status);
+        apply_backend_events(events, &mut self.feedback);
 
         self.poll_library_updates(&mut library);
-        self.tag_editor.poll_outcomes(&mut library.scan_status);
+        self.tag_editor.poll_outcomes(&mut self.feedback);
+        // Compose the titlebar status line from the independent source slots,
+        // so a Library Scan update cannot erase a live playback error or a Tag
+        // Edit outcome (issue 11). The composed message feeds the existing
+        // `scan_status` line — same placement, same copy.
+        library.scan_status = self.feedback.display_message();
         self.update_cover_cache(ui.ctx());
         self.poll_watchers();
 
@@ -1177,69 +1200,6 @@ pub fn column_plan(section: LibrarySection, path: &[BrowserSelection]) -> Vec<Co
             columns
         }
     }
-}
-
-/// The elastic stage's column sizing policy (elastic-column spec): non-last
-/// list columns keep their preferred [`theme::COLUMN_WIDTH`], the last list
-/// column absorbs the remaining width, and the inspector (when visible)
-/// takes [`theme::INSPECTOR_WIDTH`] off the top. When the width left for
-/// the list columns cannot satisfy the minimum floors ([`theme::COLUMN_MIN_W`]
-/// per entity column, [`theme::LAST_COLUMN_MIN_W`] for the last), every
-/// column shrinks proportionally to its floor — the stage never introduces
-/// horizontal scrolling, accepting below-floor widths only in extreme narrow
-/// windows. Returns one width per list column (the inspector is separate).
-#[must_use]
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "a column count is a small non-negative number"
-)]
-pub fn column_widths(available: f32, list_columns: usize, inspector: bool) -> Vec<f32> {
-    let inspector_w = if inspector {
-        theme::INSPECTOR_WIDTH
-    } else {
-        0.0
-    };
-    let available_lists = (available - inspector_w).max(0.0);
-    if list_columns == 0 {
-        return Vec::new();
-    }
-    // Preferred widths: non-last columns at COLUMN_WIDTH, the last column
-    // absorbing the remainder.
-    let mut widths = vec![theme::COLUMN_WIDTH; list_columns - 1];
-    widths.push(available_lists - theme::COLUMN_WIDTH * (list_columns - 1) as f32);
-    if list_columns == 1 {
-        // A single column fills the stage; floors do not apply.
-        return widths;
-    }
-    let floors = theme::COLUMN_MIN_W * (list_columns - 1) as f32 + theme::LAST_COLUMN_MIN_W;
-    if available_lists < floors {
-        // Narrow window: shrink every column proportionally to its floor.
-        let scale = available_lists / floors;
-        for (i, width) in widths.iter_mut().enumerate() {
-            let floor = if i + 1 == list_columns {
-                theme::LAST_COLUMN_MIN_W
-            } else {
-                theme::COLUMN_MIN_W
-            };
-            *width = floor * scale;
-        }
-    } else if let Some(last) = widths.last_mut()
-        && *last < theme::LAST_COLUMN_MIN_W
-    {
-        // The remainder is enough for the floors, but the last column's
-        // remainder would land below its floor: the non-last columns (which
-        // have headroom above their own floors) yield width toward the last
-        // column's floor first, then the last column absorbs the rest.
-        let non_last_total = theme::COLUMN_WIDTH * (list_columns - 1) as f32;
-        let headroom = non_last_total - theme::COLUMN_MIN_W * (list_columns - 1) as f32;
-        let give = (theme::LAST_COLUMN_MIN_W - *last).min(headroom);
-        *last += give;
-        let scale = (available_lists - *last) / non_last_total;
-        for width in widths.iter_mut().take(list_columns - 1) {
-            *width *= scale;
-        }
-    }
-    widths
 }
 
 /// Resolve what the Tracks column renders for the current drill-down path:
@@ -2524,7 +2484,12 @@ impl RiffApp {
         });
         if !tracks.is_empty() {
             let tids: Vec<TrackId> = tracks.iter().map(|t| t.id.clone()).collect();
-            show_list_context_menu(&header.response, self.transport.as_ref(), &tids);
+            show_list_context_menu(
+                &header.response,
+                &self.theme.active,
+                self.transport.as_ref(),
+                &tids,
+            );
         }
         ui.separator();
 
@@ -2600,6 +2565,16 @@ impl RiffApp {
         // id/name clones. Each row's painted label is formatted from the
         // snapshot row; ids are only cloned on a click frame.
         let playlists = self.views.playlists();
+        if playlists.is_empty() {
+            // A labelled empty composition, not a bare hole under the header —
+            // the shared empty-state owner every other listing surface uses.
+            crate::ui::browser::empty_state(
+                ui,
+                &palette,
+                "No playlists yet",
+                "Select + to create one.",
+            );
+        }
         for index in 0..playlists.len() {
             let action = {
                 let playlist = &playlists[index];
@@ -2746,7 +2721,12 @@ impl RiffApp {
             ui.weak(format!("({track_count} tracks)"));
         });
         if !valid_ids.is_empty() {
-            show_list_context_menu(&header.response, self.transport.as_ref(), &valid_ids);
+            show_list_context_menu(
+                &header.response,
+                &self.theme.active,
+                self.transport.as_ref(),
+                &valid_ids,
+            );
         }
         ui.separator();
 
@@ -3130,7 +3110,12 @@ impl RiffApp {
             play_folder(&folder_track_ids, self.transport.as_ref());
         }
         if !folder_track_ids.is_empty() {
-            show_list_context_menu(&row.response, self.transport.as_ref(), &folder_track_ids);
+            show_list_context_menu(
+                &row.response,
+                &self.theme.active,
+                self.transport.as_ref(),
+                &folder_track_ids,
+            );
         }
         collapsing.store(ui.ctx());
 
@@ -3159,38 +3144,6 @@ impl RiffApp {
         });
     }
 }
-
-/// Key of the UI's texture cache: one artwork identity at one requested box.
-///
-/// The identity is a track path — albums and artists resolve through their
-/// first track — so it is a `String` rather than a [`TrackId`]. The size is
-/// part of the key because a hero upload and a thumbnail upload of the same
-/// track are different pixels, and neither may stand in for the other.
-pub type CoverCacheKey = (String, u32, u32);
-
-/// The cache key for one artwork identity at one requested box.
-#[must_use]
-pub fn cover_cache_key(identity: &str, size: RequestedSize) -> CoverCacheKey {
-    (identity.to_string(), size.width, size.height)
-}
-
-/// The canonical display boxes, one per kind of surface.
-///
-/// Surfaces ask for the nearest of these rather than their own exact pixel
-/// size: every distinct `(identity, size)` pair is a separate worker job and a
-/// separate texture, so an unbounded set of boxes would multiply both.
-pub const COVER_THUMB: RequestedSize = RequestedSize {
-    width: 56,
-    height: 56,
-};
-pub const COVER_CARD: RequestedSize = RequestedSize {
-    width: 200,
-    height: 200,
-};
-pub const COVER_HERO: RequestedSize = RequestedSize {
-    width: 512,
-    height: 512,
-};
 
 /// The UI's whole remaining cover responsibility (ADR 0006): ask the Cover
 /// Service for art unless that track at that exact box is already in the
@@ -3240,21 +3193,20 @@ pub fn folder_cover_intent<S: std::hash::BuildHasher>(
     None
 }
 
-/// Apply drained backend events to session state (issue 01 seam fix).
-/// Playback errors arrive as typed notices with playback source — the
-/// coordinator no longer writes the library session's status slot directly —
-/// so the UI routes them to the titlebar status line here, preserving the
-/// exact visible string. Other event kinds carry no UI state change yet.
+/// Apply drained backend events to the structured feedback board (issue 11).
+/// Playback errors arrive as typed notices stamped with playback source and
+/// error severity; each is folded into its source's persistent slot so it
+/// survives alongside — not overwritten by — Library Scan progress. Other event
+/// kinds carry no UI feedback yet.
 pub fn apply_backend_events(
     events: Vec<riff_backend::app::events::BackendEvent>,
-    scan_status: &mut Option<String>,
+    feedback: &mut crate::ui::feedback::FeedbackBoard,
 ) {
-    use riff_backend::app::events::{BackendEvent, NoticeSource};
+    use crate::ui::feedback::Feedback;
+    use riff_backend::app::events::BackendEvent;
     for event in events {
-        if let BackendEvent::TypedNotice(payload) = event
-            && payload.source == NoticeSource::Playback
-        {
-            *scan_status = Some(payload.message);
+        if let BackendEvent::TypedNotice(payload) = event {
+            feedback.put(Feedback::from_notice(&payload, None));
         }
     }
 }
@@ -3319,166 +3271,160 @@ fn folder_tracks_filtered<'a>(tracks: &'a [Track], query: &str) -> Vec<&'a Track
     }
 }
 
-/// Arguments for the shared track context menu, grouped into one value to
-/// keep the call sites readable.
-struct TrackMenuArgs<'a> {
-    transport: &'a dyn Transport,
-    track_id: &'a TrackId,
+/// The host slots one Track menu's intents answer to: everything an emitted
+/// intent may act on, and nothing the menu may reach while it renders
+/// (component-layer issue 15).
+pub struct TrackMenuEffects<'a> {
+    /// The Track the menu was attached to — the subject of every intent.
+    pub track_id: &'a TrackId,
     /// The track itself; `None` (e.g. a playlist entry whose file is missing)
     /// suppresses playback actions and "Edit Tags".
-    track: Option<&'a Track>,
-    /// The selection slot: the "Edit Tags" item selects the Track before the
+    pub track: Option<&'a Track>,
+    /// The selection slot: the "Edit Tags" intent selects the Track before the
     /// inline editor opens, so the readout follows the entry point.
-    selected_track: &'a mut Option<TrackId>,
+    pub selected_track: &'a mut Option<TrackId>,
     /// The inline editor's controller: "Edit Tags" opens the per-selection
     /// draft for that track through it (the retired modal's entry point, now
     /// un-gated).
-    tag_editor: &'a mut InlineTagEditor,
-    /// The seam's `Arc`'d playlist snapshot, cloned out before rendering —
-    /// it only names the "Add to Playlist" targets; mutations commit through
-    /// the store and the projection invalidates itself.
-    playlists: Arc<[Playlist]>,
+    pub tag_editor: &'a mut InlineTagEditor,
+    /// The playback command port the queue intents go through.
+    pub transport: &'a dyn Transport,
     /// The Application Store's playlists section: entry mutations commit
     /// through it as one immediate durable transaction.
-    playlist_store: &'a mut dyn PlaylistStore,
-    /// When `Some`, adds a "Remove from Playlist" action for that playlist.
-    remove_from_playlist: Option<&'a PlaylistId>,
+    pub playlist_store: &'a mut dyn PlaylistStore,
+    /// When `Some`, the row belongs to that Playlist, so the menu offers the
+    /// removal and this is the playlist it removes from.
+    pub remove_from_playlist: Option<&'a PlaylistId>,
 }
 
-/// Shared track context menu: play / play next / add to queue, "Add to
-/// Playlist", optional "Remove from Playlist", and "Edit Tags" — the inline
-/// editor's entry point, available for every Track (REQ-UI-006 revoked).
-/// Queue actions are suppressed when the file is missing (`track` is
-/// `None`).
-fn show_track_context_menu(response: &egui::Response, args: TrackMenuArgs<'_>) {
-    let TrackMenuArgs {
-        transport,
-        track_id,
-        track,
-        selected_track,
-        tag_editor,
+/// Shared track context menu. The rows and their meanings belong to
+/// [`crate::ui::menu`]; this only decides which rows exist, renders them inside
+/// egui's popup, and hands each emitted intent to
+/// [`apply_track_menu_intent`] — so no Transport command, store write, or
+/// editor draft can happen while the menu is being painted.
+fn show_track_context_menu(
+    response: &egui::Response,
+    palette: &Palette,
+    playlists: &[(PlaylistId, String)],
+    effects: &mut TrackMenuEffects<'_>,
+) {
+    let menu = crate::ui::menu::TrackMenu {
+        playable: effects.track.is_some(),
+        editable: effects.track.is_some(),
         playlists,
-        playlist_store,
-        remove_from_playlist,
-    } = args;
-    let tid = track_id.clone();
-    let playable = track.is_some();
-    // The inline editor opens for any track, gated or not (Issue 04).
-    let edit_track = track.cloned();
-    let remove_pid = remove_from_playlist.cloned();
-    let playlist_options: Vec<(PlaylistId, String)> = playlists
-        .iter()
-        .map(|p| (p.id.clone(), p.name.clone()))
-        .collect();
-    response.context_menu(move |ui| {
-        if playable {
-            if ui.button("Play").clicked() {
-                transport.play(tid.clone());
-                ui.close();
-            }
-            if ui.button("Play Next").clicked() {
-                transport.play_next(tid.clone());
-                ui.close();
-            }
-            if ui.button("Add to Queue").clicked() {
-                transport.add_to_queue(tid.clone());
-                ui.close();
-            }
-            add_to_playlist_menu(ui, &playlist_options, playlist_store, &tid);
-        }
-        if let Some(ref pid) = remove_pid
-            && ui.button("Remove from Playlist").clicked() {
-                // One immediate durable transaction; the committed mutation
-                // bumps the playlist generation, so the seam's next read
-                // reflects the removal with zero caller action (ADR 0002).
-                if let Err(e) = playlist_store.remove_playlist_entries(pid, &tid) {
-                    tracing::warn!("Failed to remove playlist entry: {e}");
-                }
-                ui.close();
-            }
-        // "Edit Tags" is the inline editor's entry point: it selects the
-        // Track (so the Detail Panel shows its readout) and opens the
-        // per-selection draft focused on the first tag field (Issue 04).
-        if let Some(ref t) = edit_track
-            && ui
-                .button("Edit Tags")
-                .on_hover_text(
-                    "Edit this track's tags (title, artist, album, and more). Changes are written to the file on Save.",
-                )
-                .clicked()
-            {
-                *selected_track = Some(tid.clone());
-                let rows = tag_rows(std::slice::from_ref(t));
-                tag_editor.open_track(t.id.clone(), t.file_path.clone(), &rows);
-                // The "Edit Tags" entry point focuses the first tag field
-                // (Issue 04): the one-shot flag is consumed the frame it lands.
-                if let Some(draft) = tag_editor.draft_mut() {
-                    draft.focus_first = true;
-                }
-                ui.close();
-            }
+        remove_from_playlist: effects.remove_from_playlist.is_some(),
+    };
+    let mut intents = Vec::new();
+    response.context_menu(|ui| {
+        crate::ui::menu::track_menu(ui, palette, &menu, &mut intents);
     });
+    for intent in intents {
+        apply_track_menu_intent(intent, effects);
+    }
 }
 
-/// Shared whole-list context menu (playlist/folder headers): Play (first
-/// track, then queue the rest), Play Next, and Append to Queue.
+/// Apply one emitted Track-menu intent. Every effect in the app's track menus
+/// starts here, in answer to a row the listener actually activated.
+pub fn apply_track_menu_intent(
+    intent: crate::ui::menu::TrackMenuIntent,
+    effects: &mut TrackMenuEffects<'_>,
+) {
+    use crate::ui::menu::TrackMenuIntent;
+    let track_id = effects.track_id.clone();
+    match intent {
+        TrackMenuIntent::Play => effects.transport.play(track_id),
+        TrackMenuIntent::PlayNext => effects.transport.play_next(track_id),
+        TrackMenuIntent::AddToQueue => effects.transport.add_to_queue(track_id),
+        TrackMenuIntent::AddToPlaylist(playlist) => {
+            // One immediate durable transaction; the committed mutation bumps
+            // the playlist generation, so the seam's next read reflects it with
+            // zero caller action (ADR 0002).
+            if let Err(e) = effects
+                .playlist_store
+                .add_playlist_entry(&playlist, &track_id)
+            {
+                tracing::warn!("Failed to add playlist entry: {e}");
+            }
+        }
+        TrackMenuIntent::RemoveFromPlaylist => {
+            let Some(playlist) = effects.remove_from_playlist else {
+                return;
+            };
+            if let Err(e) = effects
+                .playlist_store
+                .remove_playlist_entries(playlist, &track_id)
+            {
+                tracing::warn!("Failed to remove playlist entry: {e}");
+            }
+        }
+        // "Edit Tags" is the inline editor's entry point: it selects the Track
+        // (so the Detail Panel shows its readout) and opens the per-selection
+        // draft focused on the first tag field (Issue 04).
+        TrackMenuIntent::EditTags => {
+            let Some(track) = effects.track else {
+                return;
+            };
+            *effects.selected_track = Some(track_id);
+            let rows = tag_rows(std::slice::from_ref(track));
+            effects
+                .tag_editor
+                .open_track(track.id.clone(), track.file_path.clone(), &rows);
+            // The entry point focuses the first tag field (Issue 04): the
+            // one-shot flag is consumed the frame it lands.
+            if let Some(draft) = effects.tag_editor.draft_mut() {
+                draft.focus_first = true;
+            }
+        }
+    }
+}
+
+/// Shared whole-list context menu (playlist/folder headers). Like the track
+/// menu it reports intents and lets the host act on them afterwards.
 fn show_list_context_menu(
     response: &egui::Response,
+    palette: &Palette,
     transport: &dyn Transport,
     track_ids: &[TrackId],
 ) {
-    let tids = track_ids.to_vec();
-    response.context_menu(move |ui| {
-        if ui.button("Play").clicked() {
-            if let Some(first) = tids.first() {
-                transport.play(first.clone());
-                for tid in &tids[1..] {
-                    transport.add_to_queue(tid.clone());
-                }
-            }
-            ui.close();
-        }
-        if ui.button("Play Next").clicked() {
-            for tid in tids.iter().rev() {
-                transport.play_next(tid.clone());
-            }
-            ui.close();
-        }
-        if ui.button("Append to Queue").clicked() {
-            for tid in &tids {
-                transport.add_to_queue(tid.clone());
-            }
-            ui.close();
-        }
+    let mut intents = Vec::new();
+    response.context_menu(|ui| {
+        crate::ui::menu::list_menu(ui, palette, &mut intents);
     });
+    for intent in intents {
+        apply_list_menu_intent(intent, track_ids, transport);
+    }
 }
 
-/// "Add to Playlist" submenu shared by the track context menus (Task 4.2).
-/// Clicking a playlist appends the track (exact duplicates ignored) as one
-/// immediate durable transaction, so the change survives a restart. Takes
-/// only the precomputed options and the store: the committed append bumps
-/// the playlist generation, so the seam's next read reflects it with zero
-/// caller action — nothing to patch or clear here.
-fn add_to_playlist_menu(
-    ui: &mut egui::Ui,
-    playlist_options: &[(PlaylistId, String)],
-    store: &mut dyn PlaylistStore,
-    track_id: &TrackId,
+/// Apply one emitted whole-list intent, preserving the list's current shape:
+/// **Play** starts the first Track and queues the rest behind it, **Play Next**
+/// inserts the whole list in order, **Append to Queue** adds it at the end.
+pub fn apply_list_menu_intent(
+    intent: crate::ui::menu::ListMenuIntent,
+    track_ids: &[TrackId],
+    transport: &dyn Transport,
 ) {
-    ui.menu_button("Add to Playlist", |ui| {
-        if playlist_options.is_empty() {
-            ui.label("No playlists yet");
-            return;
-        }
-        for (pid, pname) in playlist_options {
-            if ui.button(pname).clicked() {
-                if let Err(e) = store.add_playlist_entry(pid, track_id) {
-                    tracing::warn!("Failed to add playlist entry: {e}");
-                }
-                ui.close();
+    use crate::ui::menu::ListMenuIntent;
+    match intent {
+        ListMenuIntent::Play => {
+            let Some(first) = track_ids.first() else {
+                return;
+            };
+            transport.play(first.clone());
+            for tid in &track_ids[1..] {
+                transport.add_to_queue(tid.clone());
             }
         }
-    });
+        ListMenuIntent::PlayNext => {
+            for tid in track_ids.iter().rev() {
+                transport.play_next(tid.clone());
+            }
+        }
+        ListMenuIntent::AppendToQueue => {
+            for tid in track_ids {
+                transport.add_to_queue(tid.clone());
+            }
+        }
+    }
 }
 
 /// The shared `mm:ss` time-readout format now lives with the playerbar

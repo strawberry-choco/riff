@@ -40,15 +40,13 @@ impl SmartPlaylistsProjection {
     /// Fresh frames hand out an `Arc` clone of the cached list — no
     /// per-frame copy.
     ///
-    /// This level deliberately keeps a hand-written body instead of declaring
-    /// itself on [`GenerationCache::level`]: its hit rule is not "is this
-    /// level loaded", but "is the cached list at least as long as the one
-    /// being asked for" — a cached `limit` of 50 answers a request for 10 with
-    /// all 50 rows, while a request for 100 refetches. That over-serving rule
-    /// is the level's whole policy, and folding it into a `level` `read`
-    /// closure would hide behind a generic-looking call the next reader has to
-    /// trust. The staleness mechanics it shares with every other level are
-    /// spelled out here on purpose, beside the rule that is not shared.
+    /// The over-serving rule is the level's whole policy and it lives where
+    /// the level declares itself: `read` answers from the cache only when the
+    /// cached list is AT LEAST as long as the one being asked for, so a cached
+    /// `limit` of 50 answers a request for 10 with all 50 rows while a request
+    /// for 100 falls through to a refetch. `level` asks nothing more of `read`
+    /// than "is this level's answer here", which is exactly where a rule about
+    /// which answers count belongs.
     ///
     /// # Errors
     /// Propagates loader failures without touching the cache.
@@ -58,23 +56,20 @@ impl SmartPlaylistsProjection {
         limit: usize,
         loader: &mut dyn FnMut(SmartPlaylistKind, usize) -> Result<Vec<Track>, StoreError>,
     ) -> Result<Arc<[Track]>, StoreError> {
-        let epoch = self.cache.observe();
-        let cached = if self.cache.loaded_at(epoch) {
-            self.cache
-                .peek()
-                .and_then(|lists| lists.get(&kind))
-                .filter(|(cached_limit, _)| *cached_limit >= limit)
-                .map(|(_, list)| Arc::clone(list))
-        } else {
-            None
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
-        let fresh: Arc<[Track]> = loader(kind, limit)?.into();
-        self.cache
-            .slot(epoch, &())
-            .insert(kind, (limit, Arc::clone(&fresh)));
-        Ok(fresh)
+        self.cache.level(
+            &(),
+            |lists| {
+                lists
+                    .get(&kind)
+                    .filter(|(cached_limit, _)| *cached_limit >= limit)
+                    .map(|(_, list)| Arc::clone(list))
+            },
+            || loader(kind, limit),
+            |lists, fresh| {
+                let answer: Arc<[Track]> = fresh.into();
+                lists.insert(kind, (limit, Arc::clone(&answer)));
+                answer
+            },
+        )
     }
 }

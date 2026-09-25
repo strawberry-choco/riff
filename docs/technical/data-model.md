@@ -183,13 +183,12 @@ pub struct LibrarySession {
     pub selected_track: Option<TrackId>,
     pub view_mode: ViewMode,
     pub search_query: String,
-    pub library_paths: Vec<PathBuf>,
-    pub library_statuses: HashMap<PathBuf, LibraryStatus>,
+    pub library_paths: LibraryPaths,   // the fact-set module: path, Readiness,
+                                       // Watch State, watcher, store rows
     pub scan_status: Option<String>,
     pub browse_mode: BrowseMode,
     pub selected_folder: Option<PathBuf>,
     pub ui_flags: UiFlags,
-    pub watch_states: HashMap<PathBuf, WatchState>,
 }
 ```
 
@@ -198,13 +197,13 @@ pub struct LibrarySession {
 | `selected_track` | The track selected in the UI details panel (view-independent). |
 | `view_mode` | Which top-level View is showing: `Library`, `NowPlaying`, or `Settings`. |
 | `search_query` | The current search bar text. |
-| `library_paths` | Registered library root folders. Persisted in the Application Store's typed settings tables. |
-| `library_statuses` | Per-path scan status. |
+| `library_paths` | The registered `LibraryPaths` value — one fact-set per root: the path, its Readiness, its Watch State, its live watcher, and its rows in the Application Store. The three collections are its private fields; the module's operations are the only way in. |
+| `library_statuses` | The per-root Readiness inside `LibraryPaths` — written through `report_readiness`, read through `readiness`. Not a session field. |
 | `scan_status` | A human-readable status/error line for the most recent scan or playback error (playback errors arrive as typed notices through the event inbox). |
 | `browse_mode` | Whether the sidebar shows the metadata hierarchy (`Library`) or the folder tree (`Folders`). |
 | `selected_folder` | The selected folder in Folders browse mode. |
-| `ui_flags` | Library-browser and display flags: `show_artists_view`, `advanced_mode`, `high_contrast`, `compact_density`, and per-column toggles (track numbers, artwork, duration, play count, date added). |
-| `watch_states` | Per-path folder-watch state. |
+| `ui_flags` | Four flags the UI reads: `advanced_mode`, `high_contrast`, `smart_lists_collapsed`, `close_quits_app`. `UiFlags` declares six more (`compact_density`, `show_track_numbers`, `show_artwork`, `show_duration`, `show_play_count`, `show_date_added`) that are never read and never persisted, despite a lint reason calling each a persisted preference; candidate 4 of `.scratch/deepen-owned-facts/` deletes them. There is no `show_artists_view` field. |
+| `watch_states` | The per-root Watch State inside `LibraryPaths` — written only by `set_watch`, `set_watching_for_all`, and `retire`, each persisting the whole map in one write. Not a session field. |
 
 ### Supporting enums
 

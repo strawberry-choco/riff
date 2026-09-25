@@ -1,31 +1,9 @@
-use thiserror::Error;
+//! Re-export of the persistence boundary error at the backend's historical
+//! `riff_backend::app::errors::StoreError` path.
+//!
+//! The capability errors are not re-exported here: `LibraryError` and
+//! `PlaybackError` each have exactly one definition, in the capability that
+//! raises it (`riff_library::app::errors` and `riff_playback::app::errors`).
 
 /// Re-export of the persistence boundary error.
 pub use riff_persistence::errors::StoreError;
-
-/// Failures raised by the music collection: metadata read and write, cover
-/// loading, filesystem IO, library scanning, and track lookup.
-#[derive(Error, Debug, Clone)]
-pub enum LibraryError {
-    #[error("Metadata read error: {0}")]
-    MetadataRead(String),
-    #[error("Failed to write tags: {0}")]
-    MetadataWrite(String),
-    #[error("Cover load error: {0}")]
-    CoverLoad(String),
-    #[error("Library scan error: {0}")]
-    LibraryScan(String),
-    #[error("IO error: {0}")]
-    Io(String),
-    #[error("Track not found: {0}")]
-    TrackNotFound(String),
-}
-
-/// Failures raised by playback: decoding and audio output.
-#[derive(Error, Debug, Clone)]
-pub enum PlaybackError {
-    #[error("Decode error: {0}")]
-    Decode(String),
-    #[error("Audio output error: {0}")]
-    AudioOutput(String),
-}

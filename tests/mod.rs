@@ -10,7 +10,6 @@
 //! - `domain_tests.rs`: Tests for domain objects like Track, `TrackId`, `PlaybackState`, etc.
 //! - `app_tests.rs`: Tests for application logic like `PlaybackSession` /
 //!   `LibrarySession`, the Session Projections, and scan-side Track construction.
-//! - `infra_tests.rs`: Tests for infrastructure components like audio decoders, metadata readers, etc.
 //! - `ui_tests.rs`: Tests for UI-related functionality like settings storage, etc.
 //! - `golden_tests.rs`: Golden-image snapshot tests rendering real egui frames headlessly.
 //! - `integration_tests.rs`: End-to-end integration tests that test multiple components together.
@@ -26,7 +25,6 @@
 pub mod app_tests;
 pub mod domain_tests;
 pub mod golden_tests;
-pub mod infra_tests;
 pub mod integration_tests;
 pub mod ui_tests;
 
@@ -143,160 +141,197 @@ pub mod test_utils {
     }
 }
 
-/// Shared trait-based mocks for exercising the port boundaries
-/// (`src/app/traits.rs`) without real audio hardware or files on disk.
-/// These are intentionally reusable: later suites (e.g. gapless-playback
-/// tests) build on the same scripted decoder/output behavior.
+/// Shared fakes for exercising the port boundaries without real audio
+/// hardware or files on disk. Each fake implements the ONE port trait the
+/// production code consumes — the playback capability's audio ports and the
+/// library capability's media ports — so a test's substitute and the real
+/// adapter answer to the same interface.
+///
+/// The audio fakes record through an `Arc<Mutex<..>>` they hand out clones
+/// of: the engine takes ownership of one clone and the test keeps another, so
+/// the counters stay readable while and after it runs.
 pub mod mocks {
-    use riff_backend::app::errors::{LibraryError, PlaybackError, StoreError};
-
     use riff_backend::app::state::PlaybackSession;
     use riff_backend::app::store::{
         LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings, SettingsStore,
         SortDirection,
     };
     use riff_backend::app::traits::{
-        AudioDecoder, AudioFormatInfo, AudioOutput, CoverLoader, DecodedCover, MetadataReader,
-        MetadataWriter, RequestedSize, TagEdit,
+        CoverLoader, DecodedCover, MetadataReader, MetadataWriter, RequestedSize, TagEdit,
     };
     use riff_backend::app::transport::clamp_seek;
     use riff_backend::domain::{
         Album, Artist, CoverSource, GenreCount, Playlist, PlaylistId, RepeatMode,
         SmartPlaylistKind, Track, TrackId, TrackMetadata,
     };
-    /// The library slice's copy of the error enum, used by the library
-    /// slice's [`MetadataWriter`] port that the real lofty writer serves.
-    use riff_library::app::errors::LibraryError as LibraryErrorL;
+    use riff_library::app::errors::LibraryError;
+    use riff_persistence::errors::StoreError;
+    use riff_playback::app::errors::PlaybackError;
+    use riff_playback::infra::ports::{AudioDecoder, AudioFormatInfo, AudioOutput};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    /// Scripted [`AudioDecoder`]: `open` returns a configured format (or an
-    /// injected error), `next_frames` drains a queue of sample batches and
-    /// then reports EOF (`Ok(0)`), and every `seek` is recorded and resets the
-    /// stream to the start of the script.
+    /// Scripted [`AudioDecoder`]: `init` returns the configured format,
+    /// `next_frames` drains a queue of sample batches and then reports EOF,
+    /// and every `seek` is recorded and resets the stream to the start of the
+    /// script. Cloning hands out another handle to the same recording state.
+    #[derive(Clone)]
     pub struct MockAudioDecoder {
-        pub open_error: Option<String>,
-        pub decode_error: Option<String>,
-        pub format: AudioFormatInfo,
-        pub duration: Option<Duration>,
-        /// Full sample script; `queue` is refilled from this on `open` and
+        /// The path this decoder instance last opened, as the engine sees it.
+        source: PathBuf,
+        state: Arc<Mutex<DecoderState>>,
+    }
+
+    struct DecoderState {
+        format: AudioFormatInfo,
+        duration: Option<Duration>,
+        /// Full sample script; `queue` is refilled from this on `init` and
         /// reset on `seek`.
         scripted: Vec<Vec<f32>>,
         queue: Vec<Vec<f32>>,
-        pub seeks: Vec<Duration>,
-        pub opened: Vec<PathBuf>,
-        pub closed: bool,
+        seeks: Vec<Duration>,
+        opened: Vec<PathBuf>,
     }
 
     impl MockAudioDecoder {
         pub fn new(format: AudioFormatInfo) -> Self {
             Self {
-                open_error: None,
-                decode_error: None,
-                duration: format.duration,
-                format,
-                scripted: Vec::new(),
-                queue: Vec::new(),
-                seeks: Vec::new(),
-                opened: Vec::new(),
-                closed: false,
+                source: PathBuf::new(),
+                state: Arc::new(Mutex::new(DecoderState {
+                    format,
+                    duration: None,
+                    scripted: Vec::new(),
+                    queue: Vec::new(),
+                    seeks: Vec::new(),
+                    opened: Vec::new(),
+                })),
             }
         }
 
         /// Script the sample batches that `next_frames` will yield, in order.
         #[must_use]
-        pub fn with_batches(mut self, batches: Vec<Vec<f32>>) -> Self {
-            self.scripted = batches;
+        pub fn with_batches(self, batches: Vec<Vec<f32>>) -> Self {
+            self.state.lock().unwrap().scripted = batches;
             self
+        }
+
+        /// Set what the port's `duration` answers with.
+        #[must_use]
+        pub fn with_duration(self, duration: Option<Duration>) -> Self {
+            self.state.lock().unwrap().duration = duration;
+            self
+        }
+
+        /// Every path this decoder has opened, in order.
+        #[must_use]
+        pub fn opened(&self) -> Vec<PathBuf> {
+            self.state.lock().unwrap().opened.clone()
+        }
+
+        /// Every position this decoder has been seeked to, in order.
+        #[must_use]
+        pub fn seeks(&self) -> Vec<Duration> {
+            self.state.lock().unwrap().seeks.clone()
         }
     }
 
     impl AudioDecoder for MockAudioDecoder {
-        fn open(&mut self, path: &std::path::Path) -> Result<AudioFormatInfo, PlaybackError> {
-            if let Some(ref msg) = self.open_error {
-                return Err(PlaybackError::Decode(msg.clone()));
-            }
-            self.opened.push(path.to_path_buf());
-            self.closed = false;
-            self.queue = self.scripted.clone();
-            Ok(self.format.clone())
+        fn source_path(&self) -> &Path {
+            &self.source
         }
 
-        fn next_frames(&mut self, out: &mut [f32]) -> Result<usize, PlaybackError> {
-            if let Some(ref msg) = self.decode_error {
-                return Err(PlaybackError::Decode(msg.clone()));
-            }
-            let Some(batch) = self.queue.first_mut() else {
-                return Ok(0);
-            };
-            // Fill as much of `out` as the current scripted batch holds; a
-            // batch larger than `out` keeps its remainder queued for the next
+        fn init(&mut self, path: &Path) -> Result<AudioFormatInfo, PlaybackError> {
+            self.source = path.to_path_buf();
+            let mut state = self.state.lock().unwrap();
+            state.opened.push(path.to_path_buf());
+            state.queue = state.scripted.clone();
+            Ok(state.format.clone())
+        }
+
+        fn next_frames(&mut self, buf: &mut [f32]) -> Option<usize> {
+            let mut state = self.state.lock().unwrap();
+            // `None` here is the scripted EOF.
+            let batch = state.queue.first_mut()?;
+            // Fill as much of `buf` as the current scripted batch holds; a
+            // batch larger than `buf` keeps its remainder queued for the next
             // call, mirroring how the real decoder spills oversized packets
             // into `pending_samples` (nothing is ever dropped).
-            let n = out.len().min(batch.len());
-            out[..n].copy_from_slice(&batch[..n]);
+            let n = buf.len().min(batch.len());
+            buf[..n].copy_from_slice(&batch[..n]);
             batch.drain(..n);
             if batch.is_empty() {
-                self.queue.remove(0);
+                state.queue.remove(0);
             }
-            Ok(n)
+            Some(n)
         }
 
-        fn seek(&mut self, position: Duration) -> Result<(), PlaybackError> {
-            self.seeks.push(position);
-            self.queue = self.scripted.clone();
-            Ok(())
+        fn seek(&mut self, position: Duration) -> Duration {
+            let mut state = self.state.lock().unwrap();
+            state.seeks.push(position);
+            state.queue = state.scripted.clone();
+            position
         }
 
         fn duration(&self) -> Option<Duration> {
-            self.duration
-        }
-
-        fn close(&mut self) {
-            self.closed = true;
+            self.state.lock().unwrap().duration
         }
     }
 
-    /// Recording [`AudioOutput`]: tracks every invocation and maintains an
-    /// internal buffer so `buffer_len` is meaningful. Errors are injectable
-    /// per method.
+    /// Recording [`AudioOutput`]: tracks every invocation the engine makes on
+    /// the port. Cloning hands out another handle to the same recording state.
+    #[derive(Clone)]
     pub struct MockAudioOutput {
-        pub initialize_error: Option<String>,
-        pub write_error: Option<String>,
-        pub initialized: Vec<(u32, u16)>,
-        pub start_count: usize,
-        pub stop_count: usize,
-        pub written: Vec<Vec<f32>>,
-        pub volumes: Vec<f32>,
-        pub clear_count: usize,
-        /// The rate reported by the `AudioOutput::effective_sample_rate`
-        /// trait method — what a real output's stream was actually built
-        /// with. Defaults to 44.1 kHz like `CpalAudioOutput::new`.
-        effective_sample_rate: u32,
-        buffer: Vec<f32>,
+        state: Arc<Mutex<OutputState>>,
+    }
+
+    struct OutputState {
+        /// The `(sample rate, channels)` of each stream the engine started.
+        started: Vec<(u32, u16)>,
+        stop_count: usize,
+        written: Vec<Vec<f32>>,
+        volumes: Vec<f32>,
     }
 
     impl MockAudioOutput {
         pub fn new() -> Self {
             Self {
-                initialize_error: None,
-                write_error: None,
-                initialized: Vec::new(),
-                start_count: 0,
-                stop_count: 0,
-                written: Vec::new(),
-                volumes: Vec::new(),
-                clear_count: 0,
-                effective_sample_rate: 44_100,
-                buffer: Vec::new(),
+                state: Arc::new(Mutex::new(OutputState {
+                    started: Vec::new(),
+                    stop_count: 0,
+                    written: Vec::new(),
+                    volumes: Vec::new(),
+                })),
             }
         }
 
-        /// Set the value reported by
-        /// [`effective_sample_rate`](riff_backend::app::traits::AudioOutput::effective_sample_rate).
-        pub fn set_effective_sample_rate(&mut self, rate: u32) {
-            self.effective_sample_rate = rate;
+        /// The format each started stream was built with, in order.
+        #[must_use]
+        pub fn started(&self) -> Vec<(u32, u16)> {
+            self.state.lock().unwrap().started.clone()
+        }
+
+        /// How many streams were started in total.
+        #[must_use]
+        pub fn start_count(&self) -> usize {
+            self.state.lock().unwrap().started.len()
+        }
+
+        #[must_use]
+        pub fn stop_count(&self) -> usize {
+            self.state.lock().unwrap().stop_count
+        }
+
+        /// Every sample batch written, in order.
+        #[must_use]
+        pub fn written(&self) -> Vec<Vec<f32>> {
+            self.state.lock().unwrap().written.clone()
+        }
+
+        /// Every volume set, in order.
+        #[must_use]
+        pub fn volumes(&self) -> Vec<f32> {
+            self.state.lock().unwrap().volumes.clone()
         }
     }
 
@@ -307,59 +342,43 @@ pub mod mocks {
     }
 
     impl AudioOutput for MockAudioOutput {
-        fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), PlaybackError> {
-            if let Some(ref msg) = self.initialize_error {
-                return Err(PlaybackError::AudioOutput(msg.clone()));
-            }
-            self.initialized.push((sample_rate, channels));
+        fn start(&mut self, format: AudioFormatInfo) -> Result<(), PlaybackError> {
+            self.state
+                .lock()
+                .unwrap()
+                .started
+                .push((format.sample_rate, format.channels));
             Ok(())
         }
 
-        fn start(&mut self) -> Result<(), PlaybackError> {
-            self.start_count += 1;
-            Ok(())
+        fn write(&mut self, samples: &[f32]) -> usize {
+            let mut state = self.state.lock().unwrap();
+            state.written.push(samples.to_vec());
+            samples.len()
         }
 
-        fn stop(&mut self) -> Result<(), PlaybackError> {
-            self.stop_count += 1;
-            Ok(())
-        }
-
-        fn write_samples(&mut self, samples: &[f32]) -> Result<usize, PlaybackError> {
-            if let Some(ref msg) = self.write_error {
-                return Err(PlaybackError::AudioOutput(msg.clone()));
-            }
-            self.buffer.extend_from_slice(samples);
-            self.written.push(samples.to_vec());
-            Ok(samples.len())
+        fn stop(&mut self) {
+            self.state.lock().unwrap().stop_count += 1;
         }
 
         fn set_volume(&mut self, volume: f32) {
-            self.volumes.push(volume);
+            self.state.lock().unwrap().volumes.push(volume);
         }
 
-        fn effective_sample_rate(&self) -> u32 {
-            self.effective_sample_rate
-        }
-
-        fn buffer_len(&self) -> usize {
-            self.buffer.len()
-        }
-
-        fn clear_buffer(&mut self) {
-            self.clear_count += 1;
-            self.buffer.clear();
+        fn latency(&self) -> u32 {
+            0
         }
     }
 
-    /// Canned [`MetadataReader`]: returns configured values, or an injected
-    /// `LibraryError::MetadataRead` from every method when `fail` is set.
+    /// Canned [`MetadataReader`] over the library capability's reader port:
+    /// returns configured values, or an injected `LibraryError::MetadataRead`
+    /// when `fail` is set.
     pub struct MockMetadataReader {
         pub fail: bool,
         pub metadata: TrackMetadata,
         pub duration: Option<Duration>,
         pub cover_source: CoverSource,
-        pub audio_format: AudioFormatInfo,
+        pub audio_format: riff_library::app::traits::AudioFormatInfo,
     }
 
     impl Default for MockMetadataReader {
@@ -369,56 +388,31 @@ pub mod mocks {
                 metadata: TrackMetadata::default(),
                 duration: Some(Duration::from_secs(90)),
                 cover_source: CoverSource::None,
-                audio_format: AudioFormatInfo {
+                audio_format: riff_library::app::traits::AudioFormatInfo {
                     sample_rate: 44_100,
                     channels: 2,
-                    duration: Some(Duration::from_secs(90)),
                 },
             }
         }
     }
 
     impl MetadataReader for MockMetadataReader {
-        fn read_metadata(&self, _path: &std::path::Path) -> Result<TrackMetadata, LibraryError> {
-            if self.fail {
-                return Err(LibraryError::MetadataRead("mock failure".to_string()));
-            }
-            Ok(self.metadata.clone())
-        }
-
-        fn read_duration(&self, _path: &std::path::Path) -> Result<Option<Duration>, LibraryError> {
-            if self.fail {
-                return Err(LibraryError::MetadataRead("mock failure".to_string()));
-            }
-            Ok(self.duration)
-        }
-
-        fn read_cover_source(&self, _path: &std::path::Path) -> Result<CoverSource, LibraryError> {
+        fn read_cover_source(&self, _path: &Path) -> Result<CoverSource, LibraryError> {
             if self.fail {
                 return Err(LibraryError::MetadataRead("mock failure".to_string()));
             }
             Ok(self.cover_source.clone())
         }
 
-        fn read_audio_format(
-            &self,
-            _path: &std::path::Path,
-        ) -> Result<AudioFormatInfo, LibraryError> {
-            if self.fail {
-                return Err(LibraryError::MetadataRead("mock failure".to_string()));
-            }
-            Ok(self.audio_format.clone())
-        }
-
         fn read_all(
             &self,
-            _path: &std::path::Path,
+            _path: &Path,
         ) -> Result<
             (
                 TrackMetadata,
-                Option<Duration>,
+                Duration,
                 CoverSource,
-                AudioFormatInfo,
+                riff_library::app::traits::AudioFormatInfo,
             ),
             LibraryError,
         > {
@@ -427,60 +421,76 @@ pub mod mocks {
             }
             Ok((
                 self.metadata.clone(),
-                self.duration,
+                self.duration.unwrap_or_default(),
                 self.cover_source.clone(),
                 self.audio_format.clone(),
             ))
         }
     }
 
-    /// The library capability's reader port over the same canned data, so
-    /// the store-backed scan service can consume the mock.
-    impl riff_library::app::traits::MetadataReader for MockMetadataReader {
-        fn read_cover_source(
-            &self,
-            _path: &std::path::Path,
-        ) -> Result<CoverSource, riff_library::app::errors::LibraryError> {
-            if self.fail {
-                return Err(riff_library::app::errors::LibraryError::MetadataRead(
-                    "mock failure".to_string(),
-                ));
-            }
-            Ok(self.cover_source.clone())
+    /// Recording [`FilesystemWatch`](riff_backend::app::traits::FilesystemWatch)
+    /// — the second adapter at the watch seam that ADR 0006 anticipates. It
+    /// answers which roots the watcher was asked to follow and which it was
+    /// asked to drop, so a test can prove a retired Library Path stops being
+    /// watched without touching a platform event stream.
+    #[derive(Clone, Default)]
+    pub struct MockFilesystemWatch {
+        calls: Arc<Mutex<Vec<(WatchAction, PathBuf)>>>,
+    }
+
+    /// What the watch port was asked to do with a path.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum WatchAction {
+        Watch,
+        Unwatch,
+    }
+
+    impl MockFilesystemWatch {
+        /// The roots asked to be followed, in order.
+        #[must_use]
+        pub fn watched(&self) -> Vec<PathBuf> {
+            self.paths_for(WatchAction::Watch)
         }
 
-        fn read_all(
-            &self,
-            _path: &std::path::Path,
-        ) -> Result<
-            (
-                TrackMetadata,
-                std::time::Duration,
-                CoverSource,
-                riff_library::app::traits::AudioFormatInfo,
-            ),
-            riff_library::app::errors::LibraryError,
-        > {
-            if self.fail {
-                return Err(riff_library::app::errors::LibraryError::MetadataRead(
-                    "mock failure".to_string(),
-                ));
-            }
-            Ok((
-                self.metadata.clone(),
-                self.duration.unwrap_or_default(),
-                self.cover_source.clone(),
-                riff_library::app::traits::AudioFormatInfo {
-                    sample_rate: self.audio_format.sample_rate,
-                    channels: self.audio_format.channels,
-                },
-            ))
+        /// The roots asked to be dropped, in order.
+        #[must_use]
+        pub fn unwatched(&self) -> Vec<PathBuf> {
+            self.paths_for(WatchAction::Unwatch)
+        }
+
+        fn paths_for(&self, action: WatchAction) -> Vec<PathBuf> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(recorded, _)| *recorded == action)
+                .map(|(_, path)| path.clone())
+                .collect()
+        }
+
+        fn record(&self, action: WatchAction, path: &Path) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((action, path.to_path_buf()));
+        }
+    }
+
+    impl riff_backend::app::traits::FilesystemWatch for MockFilesystemWatch {
+        fn watch(&mut self, path: &Path) -> Result<(), LibraryError> {
+            self.record(WatchAction::Watch, path);
+            Ok(())
+        }
+
+        fn unwatch(&mut self, path: &Path) -> Result<(), LibraryError> {
+            self.record(WatchAction::Unwatch, path);
+            Ok(())
         }
     }
 
     /// Canned [`CoverLoader`]: returns a configured decoded cover, `None`, or
     /// an injected `LibraryError::CoverLoad`. The port belongs to the library
-    /// slice, so it answers in that slice's error copy (`LibraryErrorL`).
+    /// slice, so it answers in that slice's error type.
     pub struct MockCoverLoader {
         pub result: Result<Option<DecodedCover>, String>,
     }
@@ -490,8 +500,8 @@ pub mod mocks {
             &self,
             _source: &CoverSource,
             _size: RequestedSize,
-        ) -> Result<Option<DecodedCover>, LibraryErrorL> {
-            self.result.clone().map_err(LibraryErrorL::CoverLoad)
+        ) -> Result<Option<DecodedCover>, LibraryError> {
+            self.result.clone().map_err(LibraryError::CoverLoad)
         }
     }
 
@@ -554,10 +564,10 @@ pub mod mocks {
     }
 
     impl MetadataWriter for MockMetadataWriter {
-        fn write_tags(&self, path: &Path, edit: &TagEdit) -> Result<(), LibraryErrorL> {
+        fn write_tags(&self, path: &Path, edit: &TagEdit) -> Result<(), LibraryError> {
             let spent = self.writes.lock().unwrap().len();
             if self.fail || self.fail_after_writes.is_some_and(|n| spent >= n) {
-                return Err(LibraryErrorL::MetadataWrite(format!(
+                return Err(LibraryError::MetadataWrite(format!(
                     "permission denied: {}",
                     path.display()
                 )));
@@ -689,6 +699,10 @@ pub mod mocks {
         refreshed: Mutex<Vec<Track>>,
         played: Mutex<Vec<(TrackId, std::time::SystemTime)>>,
         favorites: Mutex<Vec<(TrackId, bool)>>,
+        /// Every root passed to `remove_library_path`, in call order.
+        removed: Mutex<Vec<PathBuf>>,
+        /// How many `clear_library` calls landed.
+        clears: Mutex<usize>,
     }
 
     impl Default for MockLibraryMutationStore {
@@ -706,6 +720,8 @@ pub mod mocks {
                 refreshed: Mutex::new(Vec::new()),
                 played: Mutex::new(Vec::new()),
                 favorites: Mutex::new(Vec::new()),
+                removed: Mutex::new(Vec::new()),
+                clears: Mutex::new(0),
             }
         }
 
@@ -719,6 +735,8 @@ pub mod mocks {
                 refreshed: Mutex::new(Vec::new()),
                 played: Mutex::new(Vec::new()),
                 favorites: Mutex::new(Vec::new()),
+                removed: Mutex::new(Vec::new()),
+                clears: Mutex::new(0),
             }
         }
 
@@ -727,6 +745,19 @@ pub mod mocks {
         #[must_use]
         pub fn refreshed(&self) -> Vec<Track> {
             self.refreshed.lock().unwrap().clone()
+        }
+
+        /// Snapshot of every root passed to `remove_library_path`, in call
+        /// order.
+        #[must_use]
+        pub fn removals(&self) -> Vec<PathBuf> {
+            self.removed.lock().unwrap().clone()
+        }
+
+        /// How many `clear_library` calls landed.
+        #[must_use]
+        pub fn clear_count(&self) -> usize {
+            *self.clears.lock().unwrap()
         }
 
         /// Snapshot of every `(id, played_at)` passed to
@@ -777,11 +808,13 @@ pub mod mocks {
             Ok(())
         }
 
-        fn remove_library_path(&mut self, _root: &Path) -> Result<usize, StoreError> {
+        fn remove_library_path(&mut self, root: &Path) -> Result<usize, StoreError> {
+            self.removed.lock().unwrap().push(root.to_path_buf());
             Ok(0)
         }
 
         fn clear_library(&mut self) -> Result<usize, StoreError> {
+            *self.clears.lock().unwrap() += 1;
             Ok(0)
         }
 
@@ -1322,7 +1355,7 @@ pub mod mocks {
             }
             let total = self.flat.len();
             let rows = self.flat.iter().skip(offset).take(limit).cloned().collect();
-            Ok(riff_persistence::store::Page::new(total, rows, 0))
+            Ok(riff_persistence::store::Page::new(total, rows))
         }
 
         fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
@@ -1350,7 +1383,7 @@ pub mod mocks {
                 limit,
             ));
             if !self.search_matches(query) {
-                return Ok(riff_persistence::store::Page::new(0, Vec::new(), 0));
+                return Ok(riff_persistence::store::Page::new(0, Vec::new()));
             }
             let total = self.search.len();
             let rows = self
@@ -1360,7 +1393,7 @@ pub mod mocks {
                 .take(limit)
                 .cloned()
                 .collect();
-            Ok(riff_persistence::store::Page::new(total, rows, 0))
+            Ok(riff_persistence::store::Page::new(total, rows))
         }
 
         fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
@@ -1517,7 +1550,7 @@ pub mod mocks {
                 return Err(StoreError::InvalidOperation("hit albums boom".to_string()));
             }
             if !self.search_matches(query) {
-                return Ok(riff_persistence::store::Page::new(0, Vec::new(), 0));
+                return Ok(riff_persistence::store::Page::new(0, Vec::new()));
             }
             let total = self.hit_albums.len();
             let rows = self
@@ -1527,7 +1560,7 @@ pub mod mocks {
                 .take(limit)
                 .cloned()
                 .collect();
-            Ok(riff_persistence::store::Page::new(total, rows, 0))
+            Ok(riff_persistence::store::Page::new(total, rows))
         }
 
         fn hit_artists_page(
@@ -1550,7 +1583,7 @@ pub mod mocks {
                 return Err(StoreError::InvalidOperation("hit artists boom".to_string()));
             }
             if !self.search_matches(query) {
-                return Ok(riff_persistence::store::Page::new(0, Vec::new(), 0));
+                return Ok(riff_persistence::store::Page::new(0, Vec::new()));
             }
             let total = self.hit_artists.len();
             let rows = self
@@ -1560,7 +1593,7 @@ pub mod mocks {
                 .take(limit)
                 .cloned()
                 .collect();
-            Ok(riff_persistence::store::Page::new(total, rows, 0))
+            Ok(riff_persistence::store::Page::new(total, rows))
         }
 
         fn album_hit_tracks(
@@ -1720,7 +1753,7 @@ pub mod mocks {
             }
             let total = self.artists.len();
             let rows = self.window_rows(&self.artists, direction, offset, limit);
-            Ok(riff_persistence::store::Page::new(total, rows, 0))
+            Ok(riff_persistence::store::Page::new(total, rows))
         }
 
         fn albums_page(
@@ -1742,7 +1775,7 @@ pub mod mocks {
             }
             let total = self.paged_albums.len();
             let rows = self.window_rows(&self.paged_albums, direction, offset, limit);
-            Ok(riff_persistence::store::Page::new(total, rows, 0))
+            Ok(riff_persistence::store::Page::new(total, rows))
         }
 
         fn genres_page(
@@ -1764,7 +1797,7 @@ pub mod mocks {
             }
             let total = self.paged_genres.len();
             let rows = self.window_rows(&self.paged_genres, direction, offset, limit);
-            Ok(riff_persistence::store::Page::new(total, rows, 0))
+            Ok(riff_persistence::store::Page::new(total, rows))
         }
 
         fn artists_in_genre_page(
@@ -1792,7 +1825,7 @@ pub mod mocks {
             }
             let total = self.genre_artists.len();
             let rows = self.window_rows(&self.genre_artists, direction, offset, limit);
-            Ok(riff_persistence::store::Page::new(total, rows, 0))
+            Ok(riff_persistence::store::Page::new(total, rows))
         }
 
         fn artist_albums_in_genre_page(
@@ -1828,7 +1861,7 @@ pub mod mocks {
             }
             let total = self.genre_albums.len();
             let rows = self.window_rows(&self.genre_albums, direction, offset, limit);
-            Ok(riff_persistence::store::Page::new(total, rows, 0))
+            Ok(riff_persistence::store::Page::new(total, rows))
         }
     }
 

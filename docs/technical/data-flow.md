@@ -140,7 +140,7 @@ The shared buffer is not cleared on a natural stop — it drains on its own thro
 
 ### Continuation ownership
 
-The Audio Engine only reports what happened; the Playback Coordinator decides what happens next. History-before-advance, repeat-one replay, auto-advance, and the stop-at-end rule all live in one place, and playback failures surface as typed notices instead of state writes.
+**Continuation** — `riff-playback/src/domain/continuation.rs` — decides what plays next. The Playback Coordinator commits play history for the finished track and then asks it, and the Audio Engine asks the same arbiter for a listener's Next or Previous, so repeat-one replay, the shuffle order, the stop-at-end rule and the Queue Fill's ordering live in one pure module rather than in the two callers. The callers keep only their own aftermath: the coordinator marks the session stopped and drops the current index, the engine tears down its decoder and output. Playback failures surface as typed notices instead of state writes.
 
 ### Cover priority
 

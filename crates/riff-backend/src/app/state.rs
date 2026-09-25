@@ -1,5 +1,5 @@
+use crate::app::library_paths::LibraryPaths;
 use crate::domain::TrackId;
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -94,14 +94,16 @@ impl Default for ScanPrefs {
 pub use riff_playback::app::state::{PlaybackSession, replaygain_factor};
 
 /// The Library Session: everything that is not playback — selection, views,
-/// search, library roots and their statuses, scan status, browse mode, UI
-/// flags, and per-root watch states. Lives behind its own `Arc<Mutex<>>`.
+/// search, the registered [`LibraryPaths`] and their readiness and watch
+/// states, scan status, browse mode, and UI flags. Lives behind its own
+/// `Arc<Mutex<>>`.
 pub struct LibrarySession {
     pub selected_track: Option<TrackId>,
     pub view_mode: ViewMode,
     pub search_query: String,
-    pub library_paths: Vec<PathBuf>,
-    pub library_statuses: HashMap<PathBuf, LibraryStatus>,
+    /// The registered roots with their Readiness and Watch States — one value,
+    /// because one fact-set moves together (see [`crate::app::library_paths`]).
+    pub library_paths: LibraryPaths,
     pub scan_status: Option<String>,
     pub browse_mode: BrowseMode,
     /// Which LIBRARY section the sidebar has selected (see
@@ -128,7 +130,6 @@ pub struct LibrarySession {
     /// The Library Scan preferences (see [`ScanPrefs`]) the Settings Library
     /// pane drives and the scan/cover workers honor.
     pub scan_prefs: ScanPrefs,
-    pub watch_states: HashMap<PathBuf, WatchState>,
 }
 
 /// UI display flags grouped out of [`LibrarySession`] so the top-level state
@@ -155,18 +156,6 @@ pub struct UiFlags {
     /// minimizing it to the system tray (persisted; inert on Linux, which has
     /// no tray). `false` (the default) keeps the minimize-to-tray behavior.
     pub close_quits_app: bool,
-    /// `true` = compact list density; `false` = comfortable density.
-    pub compact_density: bool,
-    /// `true` = show track numbers in the list.
-    pub show_track_numbers: bool,
-    /// `true` = show album art thumbnails in the list.
-    pub show_artwork: bool,
-    /// `true` = show duration column.
-    pub show_duration: bool,
-    /// `true` = show play count column.
-    pub show_play_count: bool,
-    /// `true` = show date added column.
-    pub show_date_added: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,8 +171,7 @@ impl Default for LibrarySession {
             selected_track: None,
             view_mode: ViewMode::Library,
             search_query: String::new(),
-            library_paths: Vec::new(),
-            library_statuses: HashMap::new(),
+            library_paths: LibraryPaths::default(),
             scan_status: None,
             browse_mode: BrowseMode::default(),
             library_section: LibrarySection::default(),
@@ -193,20 +181,11 @@ impl Default for LibrarySession {
             queue_open: false,
             ui_flags: UiFlags::default(),
             scan_prefs: ScanPrefs::default(),
-            watch_states: HashMap::new(),
         }
     }
 }
 
 impl LibrarySession {
-    /// Watch state for a given root, defaulting to `Disabled`.
-    pub fn watch_state(&self, root: &PathBuf) -> WatchState {
-        self.watch_states
-            .get(root)
-            .cloned()
-            .unwrap_or(WatchState::Disabled)
-    }
-
     /// Select an entity at drill-down level `level`: truncates the path to
     /// its first `level` entries (dropping any deeper ones) and appends
     /// `selection`, so the path ends at `level + 1` entries with the new

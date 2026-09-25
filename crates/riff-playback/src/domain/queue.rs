@@ -106,6 +106,14 @@ impl PlaybackQueue {
         }
     }
 
+    /// Whether Repeat-One is actually looping: shuffling takes the shuffle
+    /// order instead. The one spelling of that rule — asked by
+    /// [`crate::domain::continuation`] and by the Audio Engine's gapless gate.
+    #[must_use]
+    pub fn repeats_one(&self) -> bool {
+        self.repeat == RepeatMode::One && !self.shuffle
+    }
+
     /// Enable or disable shuffle, regenerating the order lazily.
     pub fn set_shuffle(&mut self, enabled: bool) {
         if enabled == self.shuffle {
@@ -135,9 +143,11 @@ impl PlaybackQueue {
     /// with `std::iter::Iterator::next`.
     ///
     /// In shuffle mode this is where a dirty order regenerates (lazy
-    /// regeneration, allocation plan 4.4); consuming the order pops its
-    /// front in O(1).
-    pub fn advance(&mut self) -> Option<&TrackId> {
+    /// regeneration, allocation plan 4.4); consuming the order pops its front
+    /// in O(1). Visible only inside the domain layer: **Continuation**
+    /// ([`crate::domain::continuation`]) is the sole caller, so every answer
+    /// to "what plays next" moves the queue through one door.
+    pub(super) fn advance(&mut self) -> Option<&TrackId> {
         if self.tracks.is_empty() {
             return None;
         }
@@ -182,8 +192,9 @@ impl PlaybackQueue {
         }
     }
 
-    /// Go to the previous track (respecting shuffle/repeat state).
-    pub fn previous(&mut self) -> Option<&TrackId> {
+    /// Go to the previous track (respecting shuffle/repeat state). Owned by
+    /// **Continuation** like [`Self::advance`].
+    pub(super) fn previous(&mut self) -> Option<&TrackId> {
         if self.tracks.is_empty() {
             return None;
         }

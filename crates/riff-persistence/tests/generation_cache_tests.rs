@@ -77,20 +77,3 @@ fn slot_hands_out_a_fresh_default_when_the_epoch_or_key_moved() {
     );
     assert!(cache.loaded_at(moved));
 }
-
-#[test]
-fn take_value_and_peek_work_regardless_of_epoch() {
-    let generation = StoreGeneration::new();
-    let mut cache = GenerationCache::<(), String>::new(generation.clone());
-    cache.store(generation.current(), (), "good".to_string());
-    generation.bump();
-
-    // take_value steals the cached value whatever it is stamped with (the
-    // fetch-then-swap merge path reuses prior-generation rows).
-    assert_eq!(
-        cache.take_value(),
-        Some("good".to_string()),
-        "stale-but-present value is handed out"
-    );
-    assert_eq!(cache.peek(), None, "take leaves the cache empty");
-}

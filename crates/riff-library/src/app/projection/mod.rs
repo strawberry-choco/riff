@@ -20,7 +20,6 @@ mod folders;
 mod genres;
 mod hits;
 mod playlists;
-mod queue;
 mod smart;
 mod windowed_list;
 
@@ -30,7 +29,6 @@ pub use folders::FolderProjection;
 pub use genres::GenreProjection;
 pub use hits::HitProjection;
 pub use playlists::{PlaylistEntryRow, PlaylistProjection, PlaylistView};
-pub use queue::PlaybackQueue;
 pub use smart::SmartPlaylistsProjection;
 pub use windowed_list::{
     BrowseList, BrowseProjectionKey, HitListProjection, ProjectionKey, TrackListProjection,

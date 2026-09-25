@@ -27,14 +27,28 @@ recorded here rather than edited out of the record:
 - **Some dark tokens are no longer the mockup's hexes.** `ink_2`/`ink_3` were
   lifted until muted text clears WCAG 2.1 AA on every fill it paints on (it read
   3.40:1 on a panel while carrying required text), `warning` stopped aliasing
-  `brand_primary`, and the focus ring became its own token instead of the brand's
+  `brand_primary`, `error` was lifted a step up its own red ramp (3.99:1 on a
+  raised fill), and the focus ring became its own token instead of the brand's
   (design-handoff review P1-9 and P2-17). "Dark tokens straight from the sheet"
-  now means: the sheet, minus the four values a contrast floor overrode.
+  now means: the sheet, minus the five values a contrast floor overrode.
 - **The light mirror does not hold for text.** Light's muted ink rungs and its
-  `warning`/`focus_ring` are chosen against the light surfaces, not channel-wise
-  flipped from dark — a flip of an AA-compliant dark gray lands at 3.48:1 on a
-  light panel, and its gold High-Contrast ring landed at 1.01:1. This narrows the
-  "derived by rule" claim to surfaces, lines and `ink`.
+  `warning`/`error`/`focus_ring` are chosen against the light surfaces, not
+  channel-wise flipped from dark — a flip of an AA-compliant dark gray lands at
+  3.48:1 on a light panel, and its gold High-Contrast ring landed at 1.01:1.
+  This narrows the "derived by rule" claim to surfaces, lines and `ink`.
+- **`error` is the one token that had to be re-picked in both families, because
+  no single red serves both.** Every other overridden value needed one family
+  lifted; this one needed two, pulled opposite ways. The shared mockup red
+  reads 4.75:1 on a dark panel and 3.06:1 on a light one, and the lighter red
+  that fixes the dark side reads 2.60:1 on light, so dark wears the bright end
+  of the red ramp and light the deep end — the same two-ended arrangement
+  `warning` already makes for amber, arrived at from the other direction. The
+  destructive ghost button's hover wash is that same token at the mockup's 10%,
+  so it moved with it: 4.30:1 → 4.99:1 on dark, 2.71:1 → 5.68:1 on light. The
+  light palette's own doc comment, which claimed status colors were untouched,
+  now says what is true instead: the two status slots that carry text are
+  chosen per family, and the two that are only ever an 8 px readiness dot
+  (`success`, `info`) still inherit unchanged.
 - **Contrast is now checked, not assumed.** A computed WCAG 2.1 contrast test in
   `tests/ui_tests.rs` holds every text token at 4.5:1 on the fills it paints on
   and every ring at 3:1, for all four palette combinations.

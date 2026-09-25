@@ -177,8 +177,21 @@ pub const STATE_SUCCESS: Color32 = Color32::from_rgb(0x22, 0xc5, 0x5e);
 /// the yellow it reads as everywhere else — and it is yellow, not the brand
 /// orange, at every call site that paints warning *text* with it.
 pub const STATE_WARNING: Color32 = Color32::from_rgb(0xea, 0xb3, 0x08);
-/// `--riff-state-error` — `#ef4444`.
-pub const STATE_ERROR: Color32 = Color32::from_rgb(0xef, 0x44, 0x44);
+/// `--riff-state-error` — lifted from the mockup's `#ef4444` for the same
+/// reason [`INK_3`] was: this slot paints text (a destructive label, a failed
+/// scan's error line, an unreadable path), and the extracted red read 4.41:1 on
+/// a hover fill and 3.99:1 on a raised one. It is the red ramp's bright accent
+/// rather than a new hue — the same red a step up the same scale, which is why
+/// a lift this small does not read as a restyle.
+pub const STATE_ERROR: Color32 = Color32::from_rgb(0xff, 0x52, 0x52);
+
+/// [`STATE_ERROR`]'s deep end — `#991b1b`, the same red pushed the way a light
+/// panel needs. One shared value cannot serve both families: this bright accent
+/// reads 2.15:1 on a light panel, so the two wear opposite ends of one hue,
+/// which is the arrangement [`STATE_WARNING`] already makes for amber. Dark
+/// takes the light end, light the deep one, and both stay unmistakably red.
+pub const STATE_ERROR_LIGHT: Color32 = Color32::from_rgb(0x99, 0x1b, 0x1b);
+
 /// `--riff-state-info` — `#3b82f6`.
 pub const STATE_INFO: Color32 = Color32::from_rgb(0x3b, 0x82, 0xf6);
 
@@ -545,11 +558,27 @@ pub mod geometry {
     /// gap between Settings `<section>`s — the same word as Now Playing's
     /// 16px [`SECTION_GAP`](super::now_playing::SECTION_GAP), a different
     /// measurement.
+    ///
+    /// Every token in here is consumed by the Settings view alone. They are
+    /// distinct from the now-playing rhythm, which deliberately carries its own
+    /// same-named gap token — [`SECTION_GAP`](super::now_playing::SECTION_GAP)
+    /// above is 32px where Now Playing's is 16px — so a reader must not assume
+    /// one shared value behind a shared name.
     pub mod settings {
         /// Gap between a section header and its card (`mb-4`): 16px.
         pub const HEADER_GAP: f32 = 16.0;
         /// Gap between sections (`mb-8` on each `<section>`): 32px.
         pub const SECTION_GAP: f32 = 32.0;
+        /// Stage inset around the full-stage Settings page.
+        pub const PAGE_PAD: f32 = 26.0;
+        /// Gap between the left nav column and the content pane.
+        pub const NAV_GAP: f32 = 20.0;
+        /// Gap between the two Library-pane columns.
+        pub const COLUMN_GAP: f32 = 24.0;
+        /// Width at which the Library pane is allowed to split into two columns.
+        pub const MIN_TWO_COL_W: f32 = 620.0;
+        /// Pane inset around its content.
+        pub const PANE_PAD: f32 = 24.0;
         /// Height of one library row (`px-4 py-3` over ~24px of content).
         pub const LIBRARY_ROW_H: f32 = 48.0;
         /// Height of the Add Library / Scan All actions row (`px-4 py-4`).
@@ -649,7 +678,8 @@ pub struct Palette {
     /// Warning status — [`STATE_WARNING`] on dark, its deep-amber end on light,
     /// because this slot paints text.
     pub warning: Color32,
-    /// Error/destructive status (`--riff-state-error`).
+    /// Error/destructive status — [`STATE_ERROR`] on dark, its deep end
+    /// ([`STATE_ERROR_LIGHT`]) on light, because this slot paints text.
     pub error: Color32,
     /// Info status (`--riff-state-info`).
     pub info: Color32,
@@ -661,9 +691,9 @@ pub struct Palette {
 
 impl Palette {
     /// The dark palette: the mockup's surfaces, brand and `ink`, with the
-    /// muted ink rungs, `warning` and `focus_ring` lifted off their extracted
-    /// values — the first two for AA contrast, the third to stop the focus ring
-    /// wearing the brand's hue.
+    /// muted ink rungs, `warning`, `error` and `focus_ring` lifted off their
+    /// extracted values — the first three for AA contrast, the last to stop the
+    /// focus ring wearing the brand's hue.
     #[must_use]
     pub const fn dark() -> Self {
         Self {
@@ -692,9 +722,14 @@ impl Palette {
     /// The light palette derived by rule per ADR 0004: surfaces invert
     /// (channel-wise mirror of the dark ramp), ink flips its faintness order,
     /// lines flip their base white→black at unchanged alphas, and brand amber
-    /// plus status colors are untouched. The muted ink rungs are the exception
-    /// to the mirror, chosen for AA contrast on light instead; the rest stays
-    /// consciously approximate until a proper light design exists.
+    /// is untouched. The muted ink rungs, `warning` and `error` are the
+    /// exceptions, chosen against the light surfaces directly because each of
+    /// them carries text there and a light surface needs *darker* text, not
+    /// merely inverted text. `success` and `info` do inherit unchanged, which
+    /// is the rule holding rather than an oversight: those two are only ever an
+    /// 8 px readiness dot, never a glyph, so the text floor does not reach
+    /// them. The rest stays consciously approximate until a proper light design
+    /// exists.
     #[must_use]
     pub const fn light() -> Self {
         Self {
@@ -735,7 +770,12 @@ impl Palette {
             // the deep amber end of the same hue instead: the same job, legible
             // on its own surfaces.
             warning: Color32::from_rgb(0x85, 0x4d, 0x0e),
-            error: STATE_ERROR,
+            // Error carries text for the same reason warning does — the
+            // destructive label, a failed scan's error line, an unreadable
+            // path — and the shared bright red reads 3.06:1 on a light panel,
+            // so light wears the deep end of the same red instead: the same
+            // job, legible on its own surfaces.
+            error: STATE_ERROR_LIGHT,
             info: STATE_INFO,
             // Violet again rather than the dark family's lavender: the ring is
             // a UI component and needs 3:1 against the surfaces it sits on,

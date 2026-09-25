@@ -11,7 +11,7 @@ later visual-parity ticket builds on it.
   wgpu — no window, no display server. Tests live in `tests/golden_tests.rs`
   inside the single integration crate (`tests/mod.rs`) and run under plain
   `cargo test` on a normal Windows dev box.
-- **Baselines**: committed PNGs under `tests/snapshots/<name>.png` — 71 of
+- **Baselines**: committed PNGs under `tests/snapshots/<name>.png` — 73 of
   them, all produced through the `snapshot` / `snapshot_animating` helpers.
 - **Palettes**: the base set is **dark** ([ADR 0004](../adr/0004-dual-theme-tokens.md));
   eight structural components are mirrored in **light**, and two pin the
@@ -86,17 +86,34 @@ $env:UPDATE_SNAPSHOTS = "force"; cargo test; Remove-Item Env:UPDATE_SNAPSHOTS
 ```
 
 `true`/`1` means "update the failing ones", so a change **smaller than
-`failed_pixel_count_threshold`** (8 000 pixels) leaves the test green and the
-stale baseline in place: the suite reports success while the committed PNG no
-longer matches what the widget renders. After landing a change in an
-already-pinned component — or when a golden's own composition changed — use
-`force`, then confirm with a plain `cargo test golden_tests` run that the set
-is genuinely green.
+`failed_pixel_count_threshold`** leaves the test green and the stale baseline in
+place: the suite reports success while the committed PNG no longer matches what
+the widget renders. After landing a change in an already-pinned component — or
+when a golden's own composition changed — use `force`.
+
+**Then prove byte-identity with `git diff`, not with a green test run.** A plain
+`cargo test golden_tests` is *not* confirmation of anything: at a non-zero
+threshold the suite reports "75 passed; 0 failed" for a deliberately
+recoloured label exactly as it does for an unchanged tree. Force the render and
+ask git instead:
+
+```bash
+UPDATE_SNAPSHOTS=force cargo test --test integration golden_tests
+git diff --exit-code tests/snapshots/    # no output == byte-identical
+```
+
+On macOS `[mac] failed_pixel_count_threshold` is `0` and repeated renders are
+bit-exact (two consecutive forced runs of all 73 baselines compared equal,
+73/73), so this check is exact and total there. This is the evidence a ticket
+should cite when it claims a golden is byte-identical or visually neutral.
 
 Commit the regenerated `tests/snapshots/*.png` together with the change that
 caused them, so reviewers see the code diff and image diff in one place.
 Never re-baseline to make an unexplained failure go away — a golden diff is a
-review signal, not noise.
+review signal, not noise. In particular, **classify every changed PNG before
+accepting it**: a re-baseline mixes an intentional change with machine drift
+and with any stale baseline the previous author forgot to rewrite, and only a
+per-file classification tells those three apart.
 
 ## Reviewing image diffs
 
@@ -145,7 +162,7 @@ run. The harness enforces several rules; keep them when adding goldens:
   in the doc as well as in the test.
 - **Harness concurrency is capped.** `tests/golden_tests.rs` runs at most
   `MAX_CONCURRENT_HARNESSES` (4) golden harnesses at a time, because every
-  harness brings up its own wgpu device: with all seventy-one arriving
+  harness brings up its own wgpu device: with all seventy-three arriving
   together, `cargo test --all-targets` twice died with
   `STATUS_ACCESS_VIOLATION` (0xc0000005) part-way through the golden block —
   no failing test, no image diff, green on the next run. The cap costs a few
@@ -156,8 +173,28 @@ run. The harness enforces several rules; keep them when adding goldens:
   the harness block and not application teardown). See
   [./access-violation-flake.md](./access-violation-flake.md) for the run matrix
   and the open questions; lowering the cap is the next thing to try.
-- **Baselines are machine-local.** wgpu picks different adapters/backends on
-  different machines, and tiny driver-level differences can exceed the
-  default per-pixel tolerance. Treat committed baselines as authored *on your
-  machine*: if goldens fail everywhere after switching hardware, re-baseline
-  once with `UPDATE_SNAPSHOTS=true` rather than chasing individual pixels.
+- **Baselines are machine-local, and macOS owns them.** wgpu picks different
+  adapters/backends per machine, and driver-level differences can exceed the
+  default per-pixel tolerance. Note the asymmetry: `egui` rasterizes **glyphs on
+  the CPU** into a font atlas, so text is backend-independent and every
+  text-only golden is byte-identical across machines. **Shapes are not** — 1px
+  strokes, rounded-rect edges, dividers and image sampling are rasterized by
+  the GPU, and those are what drift.
+
+  The committed set is authored on, and exact for, **macOS**
+  (`[mac] failed_pixel_count_threshold = 0`). CI runs only
+  `ubuntu-latest` and `windows-latest` (`.github/workflows/ci.yml`), so
+  `[windows] = 8 000` and `[linux] = 20 000` absorb genuine cross-rasterizer
+  drift and are **smoke-only**: they catch layout shifts and large colour
+  changes, and they cannot catch a sub-threshold regression. That is a
+  deliberate, accepted tradeoff, not an oversight.
+
+  Consequences to keep in mind:
+  - Any ticket claiming byte-identity must demonstrate it on macOS with the
+    `git diff --exit-code tests/snapshots/` check above. A green CI run is not
+    evidence.
+  - If this machine's adapter or GPU changes, every golden fails at 0. That
+    wall of failures is a feature: it is one environmental change, easy to
+    diagnose, and far better than a suite that quietly stopped checking.
+  - On any other machine, expect to re-baseline once before the suite is
+    meaningful.

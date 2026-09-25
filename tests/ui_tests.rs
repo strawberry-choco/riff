@@ -823,12 +823,33 @@ mod tests {
             theme::STATE_WARNING,
             egui::Color32::from_rgb(0xea, 0xb3, 0x08)
         );
-        assert_eq!(
-            theme::STATE_ERROR,
-            egui::Color32::from_rgb(0xef, 0x44, 0x44)
-        );
         assert_eq!(theme::STATE_INFO, egui::Color32::from_rgb(0x3b, 0x82, 0xf6));
         assert_ne!(theme::STATE_WARNING, theme::BRAND_500);
+        // `error` is deliberately no longer the mockup's `#ef4444`: the slot
+        // paints text, and that value read 3.99:1 on the raised fill, so each
+        // family now wears its own end of the red ramp. What the test still
+        // holds both ends to is the claim its name makes — the red stays the
+        // red, and stays its own hue instead of borrowing amber or blue —
+        // because a value that keeps missing a contrast floor will be re-picked
+        // again, and the hue is the part that has to survive that.
+        assert_eq!(
+            theme::STATE_ERROR,
+            egui::Color32::from_rgb(0xff, 0x52, 0x52)
+        );
+        assert_eq!(
+            theme::STATE_ERROR_LIGHT,
+            egui::Color32::from_rgb(0x99, 0x1b, 0x1b)
+        );
+        for error in [theme::STATE_ERROR, theme::STATE_ERROR_LIGHT] {
+            // Hue 0 exactly: red is the largest channel and green equals blue.
+            // That is what puts both ends of the ramp on one hue, so the light
+            // and dark values differ in lightness — the same colour, legibly
+            // — rather than in hue, which is what "one semantic role" means.
+            assert!(
+                error.r() > error.g() && error.g() == error.b(),
+                "{error:?} is off the pure-red hue the error role is held to"
+            );
+        }
         // ...and the ring has its own token, on its own hue.
         assert_eq!(theme::FOCUS_RING, egui::Color32::from_rgb(0xa7, 0x8b, 0xfa));
         assert_ne!(theme::FOCUS_RING, theme::BRAND_500);
@@ -975,17 +996,23 @@ mod tests {
         assert_eq!(light.line.a(), dark.line.a());
         assert_eq!(light.border.a(), dark.border.a());
 
-        // Brand amber is identical across palettes; the status colors mostly
+        // Brand amber is identical across palettes. The status colors mostly
         // are too, except the two that paint text on a panel — warning is a
         // bright yellow on dark and a deep amber on light, where a bright one
-        // reads at 1.25:1. The ring follows the same rule as a UI component:
-        // light needs the darker violet to clear 3:1 against its own surfaces.
+        // reads at 1.25:1; error is a bright red on dark and the deep end of the
+        // same red on light, where the bright one reads at 3.06:1. `success` and
+        // `info` still inherit unchanged, which is the rule holding rather than
+        // an oversight: both are only ever an 8 px readiness dot, never a glyph,
+        // so the text floor does not reach them. The ring follows the same rule
+        // as a UI component: light needs the darker violet to clear 3:1 against
+        // its own surfaces.
         assert_eq!(light.brand_primary, dark.brand_primary);
         assert_eq!(light.brand_primary, theme::BRAND_500);
         assert_eq!(light.success, dark.success);
         assert_eq!(light.warning, egui::Color32::from_rgb(0x85, 0x4d, 0x0e));
         assert_ne!(light.warning, dark.warning);
-        assert_eq!(light.error, dark.error);
+        assert_eq!(light.error, theme::STATE_ERROR_LIGHT);
+        assert_ne!(light.error, dark.error);
         assert_eq!(light.info, dark.info);
         assert_eq!(light.focus_ring, egui::Color32::from_rgb(0x6d, 0x28, 0xd9));
         assert_ne!(light.focus_ring, light.brand_primary);
@@ -2267,6 +2294,22 @@ mod tests {
                 warning >= AA_NORMAL,
                 "{family}: warning on surface reads {warning:.2}:1, but it is painted as text"
             );
+
+            // The error role paints text in three places — the destructive
+            // button's label, a failed scan's error line, an unreadable path —
+            // and its fill is never the panel alone: the button's hover wash is
+            // the error token itself composited over the surface. So it holds
+            // the same floor on every fill a text token can land on, which is
+            // also what forces the per-family re-pick: no single red clears
+            // 4.5:1 on both a light panel and a raised dark one.
+            for (fill_name, fill) in text_fills(&palette) {
+                let error = contrast_ratio(palette.error, fill);
+                assert!(
+                    error >= AA_NORMAL,
+                    "{family}: error on {fill_name} reads {error:.2}:1, but it is painted as \
+                     text — retune the token in theme.rs, not the call site"
+                );
+            }
 
             // The focus ring is non-text UI, which WCAG 1.4.11 puts at 3:1
             // against the colors beside it — the floor that `HC_FOCUS_RING`

@@ -3,7 +3,7 @@ use crate::ui::icons::{Icon, IconCache};
 use crate::ui::theme::geometry::settings::{
     ACTION_BTN_H, ACTIONS_ROW_H, CHIP_GAP, CHIP_H, CHIP_LABEL_PAD, CLEAR_ROW_H, DOT_SIZE, FOOTER_H,
     HEADER_GAP, LIBRARY_ROW_H, MODAL_HEADER_H, MODAL_MAX_H, MODAL_MAX_W, MODAL_PAD, NAV_ITEM_H,
-    NAV_W, PREF_ROW_H, SCAN_CARD_H, SECTION_GAP, SMALL_BTN_H, TRASH_BTN, WATCH_BOX,
+    NAV_W, PANE_PAD, PREF_ROW_H, SCAN_CARD_H, SECTION_GAP, SMALL_BTN_H, TRASH_BTN, WATCH_BOX,
 };
 use crate::ui::theme::{self, Palette};
 use eframe::egui;
@@ -1536,9 +1536,6 @@ fn nav_item(
     }
 }
 
-/// Pane inset around its content.
-const PANE_PAD: i8 = 24;
-
 /// The right pane's content for the current section. Sections with existing
 /// content show it; the rest show a clear placeholder (full implementations
 /// are later tickets).
@@ -1555,7 +1552,7 @@ fn section_pane(
         .auto_shrink(false)
         .show(ui, |ui| {
             egui::Frame::new()
-                .inner_margin(egui::Margin::same(PANE_PAD))
+                .inner_margin(egui::Margin::from(PANE_PAD))
                 .show(ui, |ui| match current {
                     SettingsSection::Library => {
                         section_header(ui, palette, SECTION_LIBRARIES);

@@ -9,13 +9,57 @@ output_path = "snapshots"
 # egui_kittest golden-image comparison config (loaded automatically from
 # the directory containing Cargo.lock).
 #
-# Baselines are pixel-exact on the authoring machine, but rasterization
-# differs slightly across GPUs/drivers (anti-aliasing at text and curve
-# edges), so CI runners legitimately produce small per-pixel diffs.
-# `failed_pixel_count_threshold` allows that noise while still failing any
-# real regression (layout shifts and color changes move far more pixels).
-# Values are calibrated against observed CI diff counts with headroom;
-# tighten them if whole goldens start passing with visible regressions.
+# ## Why the per-OS values differ
+#
+# `failed_pixel_count_threshold` is the number of differing pixels a comparison
+# may contain and still report success. egui rasterizes glyphs on the CPU into
+# a font atlas, so TEXT is backend-independent and renders byte-identically
+# everywhere. Shapes are not: 1px strokes, rounded-rect edges, dividers and
+# image sampling are rasterized by the GPU, and wgpu picks a different
+# adapter/backend per machine. That difference is small per pixel but adds up:
+# measured against these baselines, a macOS Metal render differs from a
+# Windows-authored baseline by 13-3711 pixels per golden, concentrated on
+# edges. The per-OS thresholds exist to absorb exactly that, so a CI runner is
+# not failed by someone else's GPU.
+#
+# The cost of that absorption is that a real regression smaller than the
+# threshold is invisible. At 8000 a deliberate recolour of one label (measured:
+# 303-448 pixels across seven goldens) leaves the suite reporting
+# "75 passed; 0 failed". That is not a hypothetical: a stale baseline sat in
+# the tree for six days at 1562 pixels, green, because of it.
+#
+# ## Why [mac] is 0
+#
+# macOS is NOT a CI leg — `.github/workflows/ci.yml` runs
+# `os: [ubuntu-latest, windows-latest]`. So the committed baselines are
+# compared against a rasterizer that CI never uses, while CI compares them
+# against two more that are not the authoring machine.
+#
+# On this machine, run-to-run drift is EXACTLY 0 pixels: two consecutive
+# `UPDATE_SNAPSHOTS=force` renders of all 73 baselines were byte-identical
+# (73/73, `cmp` clean). Re-verify with:
+#
+#     UPDATE_SNAPSHOTS=force cargo test --test integration golden_tests
+#     git diff --exit-code tests/snapshots/     # no output == bit-exact
+#
+# Because repeated renders agree exactly, any non-zero macOS threshold buys
+# nothing at all — it can only conceal a change. Hence 0: the macOS leg gets
+# exact, byte-for-byte comparison against the baselines it owns.
+#
+# ## The tradeoff, stated plainly
+#
+# The committed baseline set is now canonical for macOS. `[windows]` (8000) and
+# `[linux]` (20000) remain smoke-only: they can still catch a layout shift or
+# a large colour change, but they CANNOT catch a sub-threshold regression, and
+# that is a deliberate, accepted limitation rather than an oversight. A ticket
+# that needs byte-identity evidence must establish it on macOS via the
+# `git diff --exit-code` check above, not by reading a green test run.
+#
+# Known blind spot: if this machine's adapter or GPU ever changes — a hardware
+# swap, a reboot onto a different device, a driver update — every golden will
+# fail at 0. That is intended: a wall of failures that all trace to one
+# environmental change is far easier to diagnose than a suite that quietly
+# stopped checking.
 
 failed_pixel_count_threshold = 8_000
 
@@ -28,4 +72,8 @@ failed_pixel_count_threshold = 8_000
 failed_pixel_count_threshold = 20_000
 
 [mac]
-failed_pixel_count_threshold = 8_000
+# Exact comparison: see "Why [mac] is 0" above. Run-to-run drift on the
+# baseline-authoring machine measures 0 px, so any slack here is pure
+# blindness. Windows and Linux stay at 8000/20000 to absorb genuine
+# cross-rasterizer drift on the CI legs.
+failed_pixel_count_threshold = 0

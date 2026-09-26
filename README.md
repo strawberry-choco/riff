@@ -45,7 +45,7 @@ It is built for people who treat their music as a collection: the ones who tag t
 
 **Playlists that hold their own.** Name one, add tracks from any listing, reorder it, rename it. A track whose file has gone missing stays visible, struck through, and is skipped on playback rather than breaking the list.
 
-**Six lists that build themselves.** Favorites, Recently Added, Recently Played, and Most Played sit in the sidebar from the first launch; Never Played and **Lost Gems** — the records you haven't opened in ninety days — appear when you switch on Advanced mode in Settings. Every one is computed on your machine from what you have actually listened to.
+**Lists that build themselves.** The sidebar's discovery lists are computed on your machine from what you have actually listened to. [docs/product/features.md](docs/product/features.md) is the canonical feature catalog for them.
 
 **Made for continuous listening.** Gapless playback across an album, and opt-in `ReplayGain` so a quiet folk pressing and a hot master sit at the same level inside the same playlist.
 
@@ -73,7 +73,7 @@ Saying this plainly saves everyone a conversation:
 - **No artwork or metadata lookup.** Tags and covers come from your files, the way you wrote them.
 - **No DRM files, no CDs, no conversion.** riff decodes; it does not encode, rip, or burn.
 
-And what a curator will miss on day one, because it is genuinely not built yet: **crossfade**, **your own smart-playlist rules** (the six lists above are fixed), **playlist export to M3U**, **1–5 star ratings** (favorites are a single flag today), an **equalizer**, and **lyrics**. The full catalog of what ships and what is deliberately deferred lives in [docs/product/features.md](docs/product/features.md), and [docs/product/roadmap.md](docs/product/roadmap.md) says what comes next.
+And what a curator will miss on day one, because it is genuinely not built yet: the full catalog of what ships and what is deliberately deferred lives in [docs/product/features.md](docs/product/features.md), § Deferred / Future.
 
 ## Your listening stays yours
 
@@ -98,7 +98,7 @@ cargo run -p riff-gui
 
 ## Contributing
 
-Bug reports and feature requests go to [the issue tracker](https://github.com/strawberry-choco/riff/issues). Before you write code, [docs/README.md](docs/README.md) indexes the product specs, the architecture reference, and the engineering conventions the project holds itself to — including how its UI is tested against pixel baselines.
+Bug reports and feature requests go to [the issue tracker](https://github.com/strawberry-choco/riff/issues). Before you write code, [docs/README.md](docs/README.md) indexes the product specs, the architecture reference, and the engineering conventions the project holds itself to.
 
 The design has a hard boundary worth knowing about: riff stays offline. Features that would need a server, an account, or a network call are out of scope, and [docs/product/decisions/001-offline-first.md](docs/product/decisions/001-offline-first.md) records why.
 

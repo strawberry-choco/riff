@@ -1,6 +1,6 @@
 # riff — Music Player (Rust + egui)
 
-A lightweight, offline-first desktop music player. A Cargo workspace: five backend capability crates, the frontend crate, and the integration-test crate.
+A lightweight, offline-first desktop music player. A Cargo workspace: backend capability crates, a frontend crate, and an integration-test crate. See `docs/technical/architecture.md` for the split.
 
 ## Quick Start
 
@@ -14,7 +14,7 @@ No special features or feature flags. No codegen step, no migrations to run by h
 
 ## Architecture
 
-Six source crates in a vertical capability split with a strict, compiler-enforced dependency chain (full reference in `docs/technical/architecture.md`, decision record in `docs/adr/0009-vertical-crate-split-of-the-backend.md`):
+A vertical capability split with a strict, compiler-enforced dependency chain (full reference in `docs/technical/architecture.md`, decision record in `docs/adr/0009-vertical-crate-split-of-the-backend.md`):
 
 ```
 riff-gui (frontend, `riff` binary)
@@ -23,12 +23,14 @@ riff-gui (frontend, `riff` binary)
             -> riff-library / riff-playback -> riff-persistence
 ```
 
-- **`riff-persistence`** — the stored entities (`Track`, `TrackId`, `TrackMetadata`, `Album`, `Artist`, `Playlist`) and the Application Store contract (store ports, DTOs, `StoreError`). Zero dependencies: `std` only. Membership criterion: types that cross the persistence boundary, and — by a 2026-09-23 amendment — shared `std`-only utilities that belong to no single capability, which are otherwise duplicated per crate. The standing case is `MutexExt` (poison recovery), defined once in `riff-persistence/src/sync.rs`; the four per-crate copies it replaced were identical, and `riff_backend::app::MutexExt` survives as the re-export that keeps the frontend and the suite importing one path. The alternative to widening this criterion was a fifth rule exception in `riff-infra`, the crate already designated for native-dependency and port-adapter placement.
-- **`riff-library`** — the collection capability: scan-side Track construction, the Library Scan Service, Library Session Projections, playlist management, cover resolution and service, its port traits (`MetadataReader`, `MetadataWriter`, `CoverLoader`, `FilesystemWatch`), and `LibraryError`. Sibling of `riff-playback` — no edge between them.
-- **`riff-playback`** — the playback capability: the Playback Queue, **Continuation** (the pure, store-free arbiter of what plays next — its `advance`/`previous` are private to the domain layer, so a track ending and a listener's skip cannot grow different rules), playback command/update types, the audio engine (pure Rust over its ports), gapless math, the Playback Coordinator, the `Transport` trait + `ChannelTransport` (with its optional dispatch-recorder hook), its port traits (`AudioDecoder`, `DecoderFactory`, `AudioOutput`), `PlaybackError`, the `PlaybackSession`, and the Up Next read model.
-- **`riff-infra`** — every port implementation and every native/external dependency (`rusqlite` bundled, `cpal`, `symphonia`, `lofty`, `image`, `walkdir`, `notify`), with internal seams store / audio / media / filesystem. Membership rule: an item belongs here iff it implements a port defined in another crate or wraps a native/external dependency.
-- **`riff-backend`** — the application API: the Backend Events inbox (record + drain + two subscriptions + typed-notice stamping), the app-layer services (Session Views, Tag Edit service, Watcher Manager), the `LibrarySession` — whose registered roots live in one `LibraryPaths` value (the **Library Path** fact-set module: path, Readiness, Watch State, live watcher, and the two store rows, moved together or not at all) — the re-export surface that keeps historical `riff_backend::` paths resolving, and the Composition Root (`composition.rs` — the only place that names both ports and concrete adapters, and the owner of the worker threads' whole lifecycle).
-- **`riff-gui`** — the frontend: egui UI, tray icon, native dialogs, fonts, and the `riff` binary, which is a thin composition over `riff_backend::composition::AppRuntime::spawn`. `crates/riff-gui/src/ui/theme.rs` is the design system's single store: every design value is written there and read from there, enforced by source sweeps (ADR 0004; rules in `docs/engineering/coding-standards.md#design-tokens`).
+Each crate's contents and membership criterion, one line each; `docs/technical/architecture.md#crate-definitions-and-membership-criteria` is the full reference.
+
+- **`riff-persistence`** — types that cross the persistence boundary, and shared `std`-only utilities that belong to no single capability; the standing case is `MutexExt` (poison recovery), defined once in `riff-persistence/src/sync.rs` and re-exported as `riff_backend::app::MutexExt`.
+- **`riff-library`** — the collection capability: collection use cases and the ports they consume. Sibling of `riff-playback` — no edge between them.
+- **`riff-playback`** — the playback capability: playback use cases and the ports they consume.
+- **`riff-infra`** — an item belongs here iff it implements a port defined in another crate or wraps a native/external dependency — nothing else.
+- **`riff-backend`** — the frontend-facing event surface, the app-layer application services, and the one place that knows both ports and adapters (the Composition Root).
+- **`riff-gui`** — the frontend: rendering, input, and platform integration, plus the `riff` binary, which is a thin composition over `riff_backend::composition::AppRuntime::spawn`. `crates/riff-gui/src/ui/theme.rs` is the design system's single store: every design value is written there and read from there, enforced by source sweeps (ADR 0004; rules in `docs/engineering/coding-standards.md#design-tokens`).
 
 Domain types (`Track`, `TrackId`, `PlaybackQueue`, …) live in `riff-persistence` and `riff-playback` and import nothing from app, infra, or UI code. Each slice codes against its own port traits; `riff-infra` implements them; dependency arrows point adapters → slices.
 
@@ -36,15 +38,7 @@ Inside the slices, the layering is preserved as module convention: `domain/` (pu
 
 ## Threading Model
 
-Worker threads are spawned and joined by the Composition Root (`crates/riff-backend/src/composition.rs`): `AppRuntime::spawn` returns `(AppRuntime, RuntimeLifecycle)` — the handles the frontend renders with, and the worker threads plus the flags that end them. `RuntimeLifecycle::shutdown` is explicit and idempotent, and joins in dependency order (audio engine first, since its exit disconnects the coordinator).
-
-- **Main thread** — egui event loop (`riff-gui`). Must not block.
-- **Audio engine thread** — `AudioEngine::run` (`crates/riff-playback/src/infra/audio_engine.rs`). Reads `PlaybackCommand` from a channel, sends `PlaybackUpdate` back.
-- **Playback Coordinator thread** — `PlaybackCoordinator::spawn` (`riff-playback`). Applies `PlaybackUpdate`s to the playback session, commits play history, and owns auto-advance; playback failures surface as typed notices through the event inbox.
-- **Library scan worker thread** — runs the `ScanService` worker (`riff-library`); the scan flow never touches the sessions directly.
-- **Filesystem-event forwarder thread** — forwards `notify` events to the `WatcherManager` (`riff-backend`), which debounces and triggers rescans through the scan service.
-- **Tag-edit worker thread** — `TagEditWorker` writes tag edits via lofty and commits store facts as one durable change.
-- **Cover worker thread** — `CoverService` worker resolves and decodes cover art in the background.
+Worker threads are spawned and joined by the Composition Root (`crates/riff-backend/src/composition.rs`): `AppRuntime::spawn` returns `(AppRuntime, RuntimeLifecycle)` — the handles the frontend renders with, and the worker threads plus the flags that end them. `RuntimeLifecycle::shutdown` is explicit and idempotent, and joins in dependency order (audio engine first, since its exit disconnects the coordinator). The thread inventory — one entry per worker, with the channels between them — lives in `docs/technical/threading-model.md`.
 
 Cross-thread communication: `crossbeam_channel::unbounded()` for all message passing. Shared state: `Arc<Mutex<PlaybackSession>>` and `Arc<Mutex<LibrarySession>>` (one mutex per session — never nested), `Arc<Mutex<BackendEvents>>`, an `Arc<AtomicBool>` cancel flag for library scans, one `Arc<AtomicBool>` stop flag per request-channel worker (engine, scan, tag-edit, cover), and a quit flag. The audio ring buffer between decode loop and cpal callback lives inside `riff-infra`'s output adapter.
 
@@ -64,7 +58,7 @@ cargo run -p riff-gui                      # run in dev mode
 cargo build --release -p riff-gui          # release build (LTO, stripped)
 ```
 
-**Test suite**: per-crate suites where the code they cover lives — `riff-infra` (the real-SQLite store tests and the adapter tests), `riff-persistence` (the generation-cache primitive), and `riff-gui` (`tests/scroll_memory_tests.rs`, the Scroll Memory's protocol; a deliberate exception, argued in `docs/engineering/testing-strategy.md`) — plus a single integration crate at the workspace root (`tests/`, package `riff-tests`, `autotests = false`, one `[[test]]` target named `integration`) organized into `domain_tests`, `app_tests`, `ui_tests`, `golden_tests`, `integration_tests` with shared `test_utils`/`mocks`. Run with `cargo test`. Inline `#[cfg(test)]` modules are **allowed** where a module's contract is purely internal — `docs/engineering/testing-strategy.md` is authoritative on placement (its P1 note actively encourages moving such contracts into the owning crate's suite), and `riff-backend`, `riff-library`, and `riff-playback` use inline suites today. The earlier blanket ban on inline tests in `src/` was this file's own stale claim, not the project's rule. See `docs/engineering/testing-strategy.md`; golden-image snapshot workflow in `docs/engineering/golden-image-testing.md`.
+**Test suite**: Per-crate suites sit with the code they cover; cross-crate integration, UI and golden suites sit in the single workspace-root `riff-tests` crate. `docs/engineering/testing-strategy.md` is authoritative on placement, and the golden-image snapshot workflow is in `docs/engineering/golden-image-testing.md`.
 
 **CI**: `.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy --all-targets`, `cargo test --all-targets` on push/PR to `main` (Linux + Windows matrix). No pre-commit hooks.
 
@@ -79,9 +73,8 @@ cargo build --release -p riff-gui          # release build (LTO, stripped)
 
 - **msrv**: `rust-version = "1.95"` in every crate manifest (edition 2024). CI uses the stable toolchain.
 - **egui pinned to 0.35**: egui 0.36 regressed headless texture rendering — kittest golden snapshots lose all user-loaded textures (`ctx.load_texture` + painter/image widgets paint nothing; text/shapes still render). The app itself renders fine windowed, but goldens would bake in icon-less UI. Revisit when upgrading past 0.35 (check upstream fix status first). See the note in `crates/riff-gui/Cargo.toml`.
-- **Release profile**: workspace-level LTO, codegen-units=1, strip=true. `cargo build --release` takes longer but produces smaller binaries.
-- **Audio device**: The output stream always opens at the **device default** sample rate. `build_stream_config` (`crates/riff-infra/src/audio/audio_output.rs:430`) takes the track's requested rate as `_requested_rate` and never reads it, so the "falls back when the track's rate is unsupported" behaviour (common on Windows WASAPI shared mode at 48 kHz) is really "always the default" — the requested rate is not consulted. The rate actually achieved is readable only as a concrete `pub fn CpalAudioOutput::effective_sample_rate` (`:388`), which **no production code calls**; it is *not* a method on the `AudioOutput` port, so the Audio Engine cannot see it through its interface. Corrected 2026-09-23; wiring the fact through the port belongs in the same change as the consumer that reads it, never on its own.
-- **Tests live in `crates/riff-infra/tests/` and `tests/`** — the adapter/store tests live with `riff-infra`; cross-crate integration, UI, and golden tests live in the single workspace-root crate (`tests/mod.rs`, per-suite files are modules of it). App-layer tests drive the port traits via the shared mocks module; store tests run against real SQLite in `tempfile` scratch dirs at the infra seam.
+- **Release profile**: workspace-level LTO, codegen-units=1, strip=true. Profiles and the release process live in `docs/engineering/release-and-packaging.md`.
+- **Audio device**: The output stream always opens at the **device default** sample rate. `build_stream_config` (in `riff-infra`'s `audio_output.rs`) takes the track's requested rate as `_requested_rate` and never reads it, so the "falls back when the track's rate is unsupported" behaviour (common on Windows WASAPI shared mode at 48 kHz) is really "always the default" — the requested rate is not consulted. The rate actually achieved is readable only as a concrete `pub fn CpalAudioOutput::effective_sample_rate`, which **no production code calls**; it is *not* a method on the `AudioOutput` port, so the Audio Engine cannot see it through its interface. Wiring the fact through the port belongs in the same change as the consumer that reads it, never on its own.
 - **Session state is two structs**: `PlaybackSession` (`riff-playback`) and `LibrarySession` (`riff-backend`), each behind its own `Arc<Mutex<>>`. Plan lock ordering carefully; never hold one session's lock while acquiring the other's. The one cross-slice interaction (a playback failure setting a scan-status message) is a typed notice through the event inbox, not a state write.
 - **Cover caches**: the decoded-cover LRU (cap 50) lives in the `CoverService` (`riff-library`); the egui texture LRU (max 50 `TextureHandle`s in `cover_textures` with manual LRU eviction in `cover_lru_keys`) lives in `crates/riff-gui/src/ui/app.rs`.
 - **No DI framework** — manual constructor injection in `crates/riff-backend/src/composition.rs` only.
@@ -89,7 +82,7 @@ cargo build --release -p riff-gui          # release build (LTO, stripped)
 
 ## Config Files
 
-`clippy.toml` configures Clippy (msrv, tool-level options). Lint levels are set in the root `Cargo.toml` under `[workspace.lints.clippy]` (pedantic with selected allowances) and inherited by every crate via `[lints] workspace = true`. CI config is `.github/workflows/ci.yml`; no `rustfmt.toml` (defaults apply). Architecture rules live in `docs/technical/architecture.md`. Feature requirements live in `docs/product/requirements.md`, statuses in `docs/product/features.md`, per-surface specs in `docs/product/specs/`. The full documentation index is in `docs/README.md`.
+`clippy.toml` configures Clippy (msrv, tool-level options). Lint levels are set in the root `Cargo.toml` under `[workspace.lints.clippy]` (pedantic with selected allowances) and inherited by every crate via `[lints] workspace = true`. CI config is `.github/workflows/ci.yml`; no `rustfmt.toml` (defaults apply). Architecture rules live in `docs/technical/architecture.md`. Feature statuses live in `docs/product/features.md`. The full documentation index is in `docs/README.md`.
 
 ## Agent skills
 
@@ -99,7 +92,7 @@ Issues and specs are local markdown under `.scratch/<feature-slug>/`. See `docs/
 
 ### Triage labels
 
-The five canonical triage roles, each labelled with its default string. See `docs/agents/triage-labels.md`.
+See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 

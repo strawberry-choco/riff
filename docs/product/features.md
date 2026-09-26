@@ -1,20 +1,18 @@
 # Feature Catalog
 
-This is the canonical reference for everything riff does today and everything it deliberately defers. Features are grouped into four epics — Audio Engine, Music Library, User Interface, and System Integration. Each table records the feature's implementation status (implemented, partial, or deferred), its priority (P0 is essential, P2 is polish), and its dependencies within the product. For the product framing behind these capabilities, see [./overview.md](./overview.md); for how they are built, see [../technical/architecture.md](../technical/architecture.md); for what is planned, see [./roadmap.md](./roadmap.md).
-
-Status meanings: **implemented** means the feature meets its specification; **partial** means it works but has known gaps against the spec (noted in prose below).
+This is the canonical reference for everything riff does today and everything it deliberately defers. Features are grouped into four epics — Audio Engine, Music Library, User Interface, and System Integration. Each table records the feature's implementation status and its dependencies within the product. For the product framing behind these capabilities, see [./overview.md](./overview.md); for how they are built, see [../technical/architecture.md](../technical/architecture.md).
 
 ## Audio Engine
 
 The core playback system: decoding multiple audio formats, managing the audio output stream, and providing playback controls. All decoding is pure Rust; output goes through the operating system's standard audio stack.
 
-| Feature | Summary | Status | Priority | Depends On |
-|---|---|---|---|---|
-| Multi-format Decoding | Decode MP3, AAC, Opus, FLAC, OGG, WAV via symphonia | implemented | P0 | — |
-| Playback Control | Play, pause, stop, seek, volume with cpal output | implemented | P0 | Multi-format Decoding |
-| Playback Queue | Queue management, next/previous track, shuffle, repeat | implemented | P1 | Playback Control |
-| Gapless Playback | Pre-decode the next track for seamless transitions at track boundaries | implemented | P2 | Playback Queue |
-| ReplayGain Normalization | Track-gain leveling from ReplayGain tags, peak-capped, opt-in | implemented | P2 | Playback Control, Metadata Extraction |
+| Feature | Summary | Status | Depends On |
+|---|---|---|---|
+| Multi-format Decoding | Decode MP3, AAC, Opus, FLAC, OGG, WAV via symphonia | implemented | — |
+| Playback Control | Play, pause, stop, seek, volume with cpal output | implemented | Multi-format Decoding |
+| Playback Queue | Queue management, next/previous track, shuffle, repeat | implemented | Playback Control |
+| Gapless Playback | Pre-decode the next track for seamless transitions at track boundaries | implemented | Playback Queue |
+| ReplayGain Normalization | Track-gain leveling from ReplayGain tags, peak-capped, opt-in | implemented | Playback Control, Metadata Extraction |
 
 **Multi-format Decoding.** riff plays MP3, AAC in M4A containers, Opus in OGG containers, FLAC, OGG Vorbis, and WAV. MP3, AAC, FLAC, Vorbis, and WAV use symphonia's native decoders; Opus uses the symphonia-adapter-libopus adapter because symphonia 0.5 ships no native Opus decoder. Decoding is streaming — even very large FLAC files are read packet by packet rather than loaded into memory — and failures (corrupt headers, truncated files, unsupported sub-codecs such as ALAC) surface as structured errors naming the file and the reason, never as crashes. Encoding, transcoding, DRM-protected files, and network streaming are out of scope.
 
@@ -30,20 +28,20 @@ The core playback system: decoding multiple audio formats, managing the audio ou
 
 The system that discovers, indexes, and organizes local audio files: scanning directories, extracting tags, resolving cover art, and keeping the index fresh and persistent.
 
-| Feature | Summary | Status | Priority | Depends On |
-|---|---|---|---|---|
-| Library Scanning | Recursively scan directories for audio files | implemented | P0 | — |
-| Metadata Extraction | Extract and store tags from audio containers | implemented | P0 | Library Scanning |
-| Cover Art Resolution | Resolve cover: embedded metadata, then filesystem fallback | implemented | P1 | Metadata Extraction |
-| Library Search | Search filters the open section's entity columns (Artists, Albums, All Tracks, Folders) by artist, album artist, album, and title | implemented | P1 | Metadata Extraction |
-| Music Library Management | Manage multiple library paths, add/delete, persist the list | implemented | P0 | Library Scanning |
-| Library Persistence | Persist scanned tracks in the Application Store so the library loads instantly on startup | implemented | P1 | Library Scanning, Music Library Management |
-| Folder Watching | Auto-detect added and deleted files, per-path toggle, debounced rescan | implemented | P1 | Library Scanning |
-| Tag Writing | Edit a track's tags from the UI; written via lofty on a background thread | implemented | P1 | Metadata Extraction |
-| Smart Playlists | Locally generated discovery lists: Recently Added, Most Played, Recently Played, Never Played, Lost Gems | implemented | P1 | Library Persistence |
-| Custom Playlists | Named playlists with ordered tracks; create, rename, delete, persist | implemented | P1 | Playback Queue, Library Scanning |
-| Library Counts & Status | One read model answering the sidebar counts (tracks, artists, albums, genres, smart lists, playlists), per-folder track counts, and the last full-scan timestamp | implemented | P1 | Library Persistence |
-| Clear Library | Wipe the indexed collection while preserving playlists and settings | implemented | P2 | Library Persistence |
+| Feature | Summary | Status | Depends On |
+|---|---|---|---|
+| Library Scanning | Recursively scan directories for audio files | implemented | — |
+| Metadata Extraction | Extract and store tags from audio containers | implemented | Library Scanning |
+| Cover Art Resolution | Resolve cover: embedded metadata, then filesystem fallback | implemented | Metadata Extraction |
+| Library Search | Search filters the open section's entity columns (Artists, Albums, All Tracks, Folders) by artist, album artist, album, and title | implemented | Metadata Extraction |
+| Music Library Management | Manage multiple library paths, add/delete, persist the list | implemented | Library Scanning |
+| Library Persistence | Persist scanned tracks in the Application Store so the library loads instantly on startup | implemented | Library Scanning, Music Library Management |
+| Folder Watching | Auto-detect added and deleted files, per-path toggle, debounced rescan | implemented | Library Scanning |
+| Tag Editing | Edit a track's tags from the UI; written via lofty on a background thread | implemented | Metadata Extraction |
+| Smart Playlists | Locally generated discovery lists computed from the user's own listening | implemented | Library Persistence |
+| Custom Playlists | Named playlists with ordered tracks; create, rename, delete, persist | implemented | Playback Queue, Library Scanning |
+| Library Counts & Status | One read model answering the sidebar counts (tracks, artists, albums, genres, smart lists, playlists), per-folder track counts, and the last full-scan timestamp | implemented | Library Persistence |
+| Clear Library | Wipe the indexed collection while preserving playlists and settings | implemented | Library Persistence |
 
 **Library Scanning.** Each registered library path is walked recursively with walkdir, and every file with a supported audio extension is indexed. Scanning runs on a background thread so the UI never blocks, and rescans are incremental — already-indexed paths are skipped. A track's identity is its full file path, so the same file is never indexed twice.
 
@@ -55,7 +53,7 @@ The system that discovers, indexes, and organizes local audio files: scanning di
 
 **Music Library Management.** A settings page lists every registered library path and lets you add, remove, and rescan them. On macOS and Windows, "Add Library" opens the native OS folder picker (via rfd); on Linux it is a validated text input with autocomplete — nonexistent paths and non-directories get clear error messages, and the settings page carries platform notes documenting what the text-input picker can and cannot do. The list survives restarts, adding an existing path is a no-op, and removing a path deletes only the index entries — never the files on disk. Paths that point to an ejected drive or unmounted share are shown as unavailable rather than silently dropped, so you can decide when to remove them. Each path gets its own Scan button, plus a Scan All for the whole collection.
 
-**Library Persistence.** The full scanned library — tracks, artists, albums, and per-track play history — lives in the Application Store (`riff.sqlite3`) in the platform data-local directory (via the directories crate). The store is the single authority: every logical change commits as one small durable transaction, and scan batches (~10 tracks) commit incrementally so an interrupted scan keeps everything already saved. The library is available on the first frame of a launch, read through Session Projections over store queries, so a 50,000-track collection is browsable almost instantly instead of waiting for a disk walk. A missing store starts fresh; a corrupt one is set aside automatically (preserved beside a fresh copy) and the app continues. Schema evolution runs through ordered, checksummed migrations.
+**Library Persistence.** The full scanned library — tracks, artists, albums, and per-track play history — lives in the Application Store (`riff.sqlite3`) in the platform data-local directory (via the directories crate). The store is the single authority: every logical change commits as one small durable transaction, and scan batches (~10 tracks) commit incrementally so an interrupted scan keeps everything already saved. The library is available at launch, read through Session Projections over store queries, so the library is browsable on the first frame instead of waiting for a disk walk. A missing store starts fresh; a corrupt one is set aside automatically (preserved beside a fresh copy) and the app continues. Schema evolution runs through ordered, checksummed migrations.
 
 **Library Counts & Status.** The backend answers "how big is my library" in one place: a single read model returns the sidebar's counts — total tracks, artists, albums, genres, each smart playlist's total, each user playlist's size, and the number of registered folder roots — plus per-folder track counts for the Library settings pane and the timestamp of the last completed full scan. Counts are served through Session Views and cached per generation, so a committed scan, tag edit, or playlist edit refetches them and nothing goes stale; the sidebar footer and Settings read the same source.
 
@@ -64,7 +62,7 @@ The system that discovers, indexes, and organizes local audio files: scanning di
 
 **Tag Editing.** Tags are shown and edited in the Detail Panel's inline editor (the old "Edit Tags" modal is retired). The Detail Panel's readout renders one row per editable field — Title, Artist, Album, Album Artist, Genre, Year, Track Number — with that Track's values; an Album readout aggregates each field across its Tracks (the shared value, orange `(different)` when they disagree, grey `(none)` when none carry it). Right-clicking a Track offers **Edit Tags**, which selects the Track and focuses the editor's first field; clicking a tag row does the same. Editing is available to every user, gated or not. Saving a Track commits one durable change (file tags via lofty on a background thread plus the Store facts, no rescan); saving an Album readout submits one request per Track with only the edited fields, reporting "Saved N of M tracks" — with the first failure reason — when the batch lands. Failures, such as read-only files or unsupported tag formats, surface as graceful errors naming the file rather than losing the edit silently.
 
-**Smart Playlists.** Five discovery playlists are generated locally from data riff already has: Recently Added, Most Played, Recently Played (tracks ordered by their most recent finished play), Never Played, and Lost Gems (tracks unheard for more than ninety days). Nothing leaves the machine — the lists are computed as store queries, and the play counts and timestamps they rely on persist in the Application Store across restarts. They behave like any other playable list: selecting one fills the queue.
+**Smart Playlists.** The discovery playlists are generated locally from data riff already has, and their membership is computed as store queries. Nothing leaves the machine — the play counts and timestamps they rely on persist in the Application Store across restarts. They behave like any other playable list: selecting one fills the queue.
 
 **Custom Playlists.** You can create named playlists, add tracks to them from the library's context menus (with deduplication, so a track appears once per playlist), reorder their contents, rename them, and delete them. Playlists persist in the Application Store — every mutation commits as one immediate durable transaction, because playlists are user data. Entries whose files have vanished stay visible, rendered struck-through as "(missing)", and are excluded from playback rather than breaking the list.
 
@@ -74,31 +72,31 @@ The system that discovers, indexes, and organizes local audio files: scanning di
 
 The egui-based graphical interface: the main window, a dual-view library explorer, the player control bar, cover art display, and the Now Playing view. It runs on Linux, Windows, and macOS with minimal external dependencies.
 
-| Feature | Summary | Status | Priority | Depends On |
-|---|---|---|---|---|
-| Main Application Window | egui window with cross-platform support; custom titlebar close hides to tray on macOS/Windows, an OS close quits | implemented | P0 | — |
-| Library Explorer Panel | Dual library/folder views with toggle, folder playback, context menus, search | implemented | P0 | Library Search |
-| Column Browser Navigation | Section-driven elastic columns (Artists → Albums → Tracks; Genres → Artists → Albums → Tracks) with breadcrumb drill-down and a collapsible inspector offering Play / Add to Queue | implemented | P1 | Library Search, Library Persistence |
-| Titlebar Search | Global "Search or jump to…" field in the titlebar (shared chrome, present on every View): Ctrl+K to focus, Escape to dismiss, typing filters the Library listing in real time | implemented | P1 | Library Search |
-| Player Control Bar | Transport controls, progress bar, volume with mute, stop behind advanced mode | implemented | P0 | Playback Control |
-| Cover Art Display | Display resolved cover art in the UI | implemented | P1 | Cover Art Resolution |
-| Now Playing View | Full track info, large cover art, clickable up-next queue | implemented | P2 | Playback Queue, Cover Art Display |
-| Progressive Disclosure | Advanced mode reveals the Advanced-only smart lists and the stop control; tag editing (REQ-UI-006) is available to every user | implemented | P1 | Smart Playlists, Tag Editing |
-| Keyboard Accessibility & High Contrast | Full keyboard navigation, visible focus indicator, persistent high-contrast theme | implemented | P1 | Main Application Window |
+| Feature | Summary | Status | Depends On |
+|---|---|---|---|
+| Main Application Window | egui window with cross-platform support; custom titlebar close hides to tray on macOS/Windows, an OS close quits | implemented | — |
+| Library Explorer Panel | Dual library/folder views with toggle, folder playback, context menus, search | implemented | Library Search |
+| Column Browser Navigation | Section-driven elastic columns (Artists → Albums → Tracks; Genres → Artists → Albums → Tracks) with breadcrumb drill-down and a collapsible inspector offering Play / Add to Queue | implemented | Library Search, Library Persistence |
+| Titlebar Search | Global "Search or jump to…" field in the titlebar (shared chrome, present on every View): Ctrl+K to focus, Escape to dismiss, typing filters the Library listing in real time | implemented | Library Search |
+| Player Control Bar | Transport controls, progress bar, volume with mute, stop behind advanced mode | implemented | Playback Control |
+| Cover Art Display | Display resolved cover art in the UI | implemented | Cover Art Resolution |
+| Now Playing View | Full track info, large cover art, clickable up-next queue | implemented | Playback Queue, Cover Art Display |
+| Progressive Disclosure | Advanced mode reveals the Advanced-only smart lists and the stop control; tag editing is available to every user | implemented | Smart Playlists, Tag Editing |
+| Keyboard Accessibility & High Contrast | Full keyboard navigation, visible focus indicator, persistent high-contrast theme | implemented | Main Application Window |
 
 **Main Application Window.** The whole UI is an egui application hosted by eframe, with window size and position persisted between sessions. On macOS and Windows the split close paths apply: the custom titlebar close button hides the window to the system tray with playback continuing, while an OS-level close (Alt+F4, taskbar Close, Cmd+Q) and the tray's Quit quit for real; on Linux, where there is no tray, closing the window quits by design (see [./decisions/002-no-tray-on-linux.md](./decisions/002-no-tray-on-linux.md)).
 
-**Library Explorer Panel.** The left panel is a flat, always-visible sectioned nav with a live count on every row: LIBRARY (All Tracks, Artists, Albums, Genres, Folders — each opening the browser in its variant), SMART LISTS (Recently Added, Recently Played, Most Played, Favorites; Never Played and Lost Gems relocate behind Advanced mode), and PLAYLISTS. The Library variants browse by metadata — artist, then album (grouped by album artist, sorted by year), then track in track-number order. The Folders variant mirrors the disk: each library path is a root node, only directories that actually contain audio appear, and children load lazily so huge trees stay responsive. Double-clicking a folder replaces the queue with everything under it and starts playing; right-click menus on folders and tracks offer Play, Play Next, and Append to Queue. The currently playing track is marked in both views. A sidebar footer carries the Add-folder action and the "Last scan X ago" stamp.
+**Library Explorer Panel.** The left panel is a flat, always-visible sectioned nav with a live count on every row: LIBRARY (All Tracks, Artists, Albums, Genres, Folders — each opening the browser in its variant), SMART LISTS, and PLAYLISTS. The Library variants browse by metadata — artist, then album (grouped by album artist, sorted by year), then track in track-number order. The Folders variant mirrors the disk: each library path is a root node, only directories that actually contain audio appear, and children load lazily so huge trees stay responsive. Double-clicking a folder replaces the queue with everything under it and starts playing; right-click menus on folders and tracks offer Play, Play Next, and Append to Queue. The currently playing track is marked in both views. A sidebar footer carries the Add-folder action and the "Last scan X ago" stamp.
 
-**Column Browser Navigation.** The library stage is elastic: its columns follow the selected facet and the drill-down depth instead of a fixed three-pane shape. Artists drills Artists → Albums → Tracks, Albums drills Albums → Tracks, and Genres drills Genres → Artists → Albums → Tracks with genre-scoped listings at every level; All Tracks, playlists, smart lists, and the folder tree render one full-width listing. An active search query leaves the open section's columns in place and filters each to its hits (see Library Search) instead of taking over the stage as a flat track list. Selecting a row in any column truncates deeper levels and populates the next column to the right; the Tracks column's breadcrumb climbs back by truncating the path to the clicked level. Every track listing (the Tracks column, All Tracks, search results, playlists, smart lists, and the folder tree's tracks) draws the same 40px row, with the per-row favorite control in its leading cell: clicking the heart commits the flag straight to the Application Store, and the Favorites smart list follows on its next read. A collapsible inspector on the right shows the deepest selection (album, artist, genre, or the selected track on single-list stages) with its cover, metadata, a tag section (see Tag Editing), and Play / Add to Queue quick actions — fully hidden when nothing is selected, click-to-lock only. Entity columns keep a preferred 280px width while the last column absorbs the remainder, and narrow windows shrink columns toward their minimum floors with no horizontal scrolling.
+**Column Browser Navigation.** The library stage is elastic: its columns follow the selected facet and the drill-down depth instead of a fixed three-pane shape. Artists drills Artists → Albums → Tracks, Albums drills Albums → Tracks, and Genres drills Genres → Artists → Albums → Tracks with genre-scoped listings at every level; All Tracks, playlists, smart lists, and the folder tree render one full-width listing. Selecting a row in any column truncates deeper levels and populates the next column to the right; the Tracks column's breadcrumb climbs back by truncating the path to the clicked level. Every track listing (the Tracks column, All Tracks, search results, playlists, smart lists, and the folder tree's tracks) draws the same row, with the per-row favorite control in its leading cell: clicking the heart commits the flag straight to the Application Store, and the Favorites smart list follows on its next read. A collapsible inspector on the right shows the deepest selection (album, artist, genre, or the selected track on single-list stages) with its cover, metadata, a tag section (see Tag Editing), and Play / Add to Queue quick actions — fully hidden when nothing is selected, click-to-lock only. Entity columns keep a preferred width while the last column absorbs the remainder, and narrow windows shrink columns toward their minimum floors with no horizontal scrolling.
 
 **Player Control Bar.** The always-visible bottom bar carries previous / play-pause / next, a click-to-seek progress bar with elapsed and total time in MM:SS form, a volume slider with a mute toggle that restores the exact previous volume when unmuted, shuffle and repeat toggles, and a queue position indicator such as "3 / 42". A Stop button is available in advanced mode, keeping the default surface minimal (see Progressive Disclosure below); stop semantics themselves live in the engine.
 
-**Cover Art Display.** Resolved cover art renders alongside track information, backed by the same resolution and LRU-texture pipeline described under Cover Art Resolution, with a placeholder glyph when no art exists. Rendering is fixed-size and clamped in both places art appears — the library detail pane (200 px) and the Now Playing view (300 px) — so odd-sized images stay contained.
+**Cover Art Display.** Resolved cover art renders alongside track information, backed by the same resolution and LRU-texture pipeline described under Cover Art Resolution, with a placeholder glyph when no art exists. Rendering is fixed-size and clamped in both places art appears — the library detail pane and the Now Playing view — so odd-sized images stay contained.
 
-**Now Playing View.** A togglable view focused on the current track: large cover art (300 px), the full metadata field set (title, artist, album, album artist, year, genre, track number), and the upcoming queue with clickable rows that promote a track via Play Next. An in-view seek slider mirrors the control bar's progress and clamps the same way, and with nothing playing the view shows a calm empty state instead of dangling controls.
+**Now Playing View.** A togglable view focused on the current track: large cover art, the full metadata field set (title, artist, album, album artist, year, genre, track number), and the upcoming queue with clickable rows that promote a track via Play Next. An in-view seek slider mirrors the control bar's progress and clamps the same way, and with nothing playing the view shows a calm empty state instead of dangling controls.
 
-**Progressive Disclosure.** The default interface stays minimal; an advanced-mode toggle in settings reveals the power features — tag editing, the Advanced-only smart lists (Never Played, Lost Gems; the four core smart lists are always visible in the sidebar), and the transport's stop control. The intent is that a first-time user sees a player, not a database frontend, while the collector-grade tooling stays one toggle away.
+**Progressive Disclosure.** The default interface stays minimal; an advanced-mode toggle in settings reveals the power features — the transport's stop control. The intent is that a first-time user sees a player, not a database frontend, while the collector-grade tooling stays one toggle away.
 
 **Keyboard Accessibility & High Contrast.** The entire UI is operable from the keyboard, with a clearly visible focus indicator showing where you are. A high-contrast theme is available from settings; the choice persists across restarts, and switching it off fully restores the normal theme.
 
@@ -106,13 +104,13 @@ The egui-based graphical interface: the main window, a dual-view library explore
 
 Cross-platform integration with the desktop: the system tray and per-platform window and audio behavior.
 
-| Feature | Summary | Status | Priority | Depends On |
-|---|---|---|---|---|
-| System Tray Icon | Hide-to-tray via the custom close, restore, playback controls, quit (macOS/Windows only) | implemented | P1 | Main Application Window |
-| Linux Folder Picker | Validated text-input folder picker with autocomplete and clear errors | implemented | P2 | Music Library Management |
-| Cross-platform Support | Linux, Windows, macOS window and audio compatibility | implemented | P0 | Main Application Window |
+| Feature | Summary | Status | Depends On |
+|---|---|---|---|
+| System Tray Icon | Hide-to-tray via the custom close, restore, playback controls, quit (macOS/Windows only) | implemented | Main Application Window |
+| Linux Folder Picker | Validated text-input folder picker with autocomplete and clear errors | implemented | Music Library Management |
+| Cross-platform Support | Linux, Windows, macOS window and audio compatibility | implemented | Main Application Window |
 
-**System Tray Icon.** On macOS and Windows, riff lives in the system tray (built on tray-icon and muda). The custom titlebar close hides the window to the tray with playback continuing; an OS close (Alt+F4 / taskbar Close / Cmd+Q) and the tray's Quit quit for real; the tooltip shows the current track as "Artist - Title"; left-click shows the window; and the right-click menu offers Play/Pause, Next Track, Previous Track, Show Window, and Quit (which stops playback, then exits). It deliberately does not exist on Linux — the tray dependency stack (libayatana-appindicator) is not reliably present across distributions, so Linux builds run as a normal window-only application where closing the window quits. End-user details are in [./user-guide.md](./user-guide.md).
+**System Tray Icon.** On macOS and Windows, riff lives in the system tray (built on tray-icon and muda). The custom titlebar close hides the window to the tray with playback continuing; an OS close (Alt+F4 / taskbar Close / Cmd+Q) and the tray's Quit quit for real; the tooltip shows the current track as "Artist - Title"; left-click shows the window; and the right-click menu offers Play/Pause, Next Track, Previous Track, Show Window, and Quit (which stops playback, then exits). It deliberately does not exist on Linux — the tray dependency stack (libayatana-appindicator) is not reliably present across distributions, so Linux builds run as a normal window-only application where closing the window quits.
 
 **Linux Folder Picker.** On Linux, where the native-dialog dependency stack is not assumed, "Add Library" is a text input field rather than a native dialog. Input is validated with autocomplete over existing directories; entering a path that does not exist, or points at a file rather than a directory, produces a clear error instead of a silent failure. The settings page documents the platform's limitations in-app, so the difference from macOS and Windows is explained where you configure it.
 
@@ -120,7 +118,7 @@ Cross-platform integration with the desktop: the system tray and per-platform wi
 
 ## Deferred / Future
 
-These capabilities were considered and explicitly deferred. They are not bugs and not forgotten; each has a stated reason, and the most likely candidates for promotion are discussed in [./roadmap.md](./roadmap.md).
+These capabilities were considered and explicitly deferred. They are not bugs and not forgotten; each has a stated reason.
 
 - **Equalizer / audio effects** — per-band EQ, reverb, and similar. A nice-to-have, not essential for the first release.
 - **ReplayGain analysis and album-gain mode** — computing loudness data for untagged libraries and album-based leveling. Tag-based track ReplayGain ships today (see Audio Engine); the analysis pass remains deferred. Album gain is read and displayed, but playing an album at its album level is not what that deferred item means — it is the leveling, not the readout, that is still outstanding.

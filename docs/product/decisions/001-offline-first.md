@@ -37,6 +37,6 @@ This is an identity of the product, not a limitation that may be lifted later.
 
 ## Related Documents
 
-- [Overview](./overview.md) — "What riff Is Not" section.
-- [Personas](./personas.md) — all three personas.
-- [Features](./features.md) — Deferred / Future section.
+- [Overview](../overview.md) — "What riff Is Not" section.
+- [Personas](../personas.md) — all three personas.
+- [Features](../features.md) — Deferred / Future section.

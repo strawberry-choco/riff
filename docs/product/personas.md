@@ -1,6 +1,6 @@
 # Target Users
 
-riff is not trying to serve everyone who listens to audio. It is built for people whose music is a collection of files they own and organize themselves, and who want a player that respects that. The three personas below describe the users riff is designed around: what they are trying to do, what frustrates them about the players they have tried, and how riff's actual feature set — described in full in [./features.md](./features.md) — meets them. The product framing behind these choices is in [./overview.md](./overview.md).
+riff is not trying to serve everyone who listens to audio. It is built for people whose music is a collection of files they own and organize themselves, and who want a player that respects that. The three personas below describe the users riff is designed around: what they are trying to do, and what frustrates them about the players they have tried. The feature set that meets them is catalogued in [./features.md](./features.md); the product framing behind these choices is in [./overview.md](./overview.md).
 
 ## The Music Listener / Collector
 
@@ -21,10 +21,6 @@ Maya has been accumulating music for twenty years. Her collection lives in sever
 - Cloud-first players that treat local files as a second-class afterthought, or demand an account and an upload step for music she already owns.
 - Libraries that take minutes to appear after launch because the player re-walks every disk on startup.
 
-**How riff helps**
-
-riff's Music Library Management exists precisely for collections like Maya's: multiple registered paths combined into one unified library, added through the native folder picker on macOS and Windows (or a direct path input on Linux), persisted across restarts, and removable without ever touching the files on disk. Folder watching with a two-second debounce means copied albums index themselves automatically, and deleted files are evicted from the index so search never lies. The library cache loads her whole collection on the first frame of a launch instead of re-scanning, and the dual Library/Folders explorer matches both of her browsing mental models. On macOS and Windows the tray icon keeps playback going with the window hidden.
-
 ## The Minimalist
 
 Jonas wants a music player the way he wants a text editor: small, fast, and quiet. He does not have a cloud music subscription and does not want one; his music is a modest, well-ordered folder that he backs up himself. He is deeply uninterested in creating accounts, accepting telemetry, or watching a player download metadata he never asked for. Every previous player he tried either nagged him about a premium tier or came bundled with services he had to disable one by one.
@@ -41,10 +37,6 @@ Jonas wants a music player the way he wants a text editor: small, fast, and quie
 - Players that are really storefronts or service clients with a playback feature attached.
 - Bloated dependency stacks and Electron-scale memory use for what should be a simple task.
 - Being unable to tell what a program is doing on the network, or being sure it is doing nothing.
-
-**How riff helps**
-
-riff is offline by construction, not by configuration: there is no streaming, no online lookup, no scrobbling, and no telemetry to turn off, because none of it exists in the codebase. It ships as one binary from one Rust crate, starts instantly from its library cache, and uses an immediate-mode UI that stays light. The feature set is deliberately bounded — transport controls, queue, shuffle and repeat, volume, search, cover art — with equalizers, visualizations, and internet features explicitly out of scope. What Jonas sees is what the program does.
 
 ## The Archivist
 
@@ -66,7 +58,7 @@ Priya's collection is a preservation project. Everything is FLAC or lossless, ri
 
 **How riff helps**
 
-riff decodes FLAC (and MP3, AAC, Opus, OGG Vorbis, WAV) with streaming, packet-based decoding, so even very large lossless files play with bounded memory. Metadata extraction reads the full tag set with lofty, and album grouping is driven by the album artist field with fallback to track artist — compilations land where she put them. Cover art resolution is deterministic and documented: embedded metadata always wins, then a case-insensitive filesystem fallback in a fixed priority order (cover, folder, album, front), so her curated artwork is what gets displayed. The library is a regenerable index — a JSON cache of tracks, artists, and albums — not an opaque database: a scan rebuilds it from the files, which remain the source of truth.
+Two of Priya's concerns are answered by the implementation itself rather than by a feature toggle. Decoding is streaming and packet-based, so even very large lossless files play with bounded memory instead of being read whole. And cover art resolution is deterministic: embedded metadata always wins, then a case-insensitive filesystem fallback in a fixed, documented name priority order, so her curated artwork is what gets displayed. Everything else she cares about — the tag set that is read and written, album grouping by album artist, and the index that reflects the collection — is catalogued in [./features.md](./features.md).
 
 ## Common ground
 

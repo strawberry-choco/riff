@@ -4,8 +4,7 @@
 // path, no window required) and compares them pixel-for-pixel against
 // committed baselines under `tests/snapshots/`. The set is authored against
 // the **dark** palette per ADR 0004, plus the light-palette mirrors and the
-// High Contrast token-set variants the coverage audit
-// (docs/engineering/golden-image-gaps.md) asked for; render through
+// High Contrast token-set variants; render through
 // [`tests::snapshot`] / [`tests::snapshot_animating`], never a bare harness.
 //
 // See docs/engineering/golden-image-testing.md for the authoring,
@@ -964,11 +963,21 @@ mod tests {
     ) {
         use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::settings;
-        use riff_gui::ui::theme::SURFACE_BG;
 
         // Full-canvas background (determinism rule).
+        //
+        // `palette.background`, not the fixed `SURFACE_BG` the component
+        // goldens use. The settings page used to paint its own card fill
+        // (`palette.surface`) over this backdrop, so a hardcoded dark
+        // background was harmless; now that the card's fill is gone (ticket
+        // 02) the page has no backdrop of its own and whatever is behind it
+        // shows through. Production fills the whole app frame with
+        // `palette.background` (`RiffApp::update`) and sets
+        // `v.window_fill` from it, so the golden must too — otherwise the
+        // light palette renders near-black ink on the harness's dark
+        // `SURFACE_BG` and the heading and nav labels disappear.
         let background = ui.ctx().layer_painter(egui::LayerId::background());
-        background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
+        background.rect_filled(ui.ctx().content_rect(), 0.0, palette.background);
 
         let mut cache = IconCache::new();
         let content = settings_content_with(libraries);
@@ -1885,12 +1894,7 @@ mod tests {
         });
     }
     // =========================================================================
-    // Gap-audit goldens (docs/engineering/golden-image-gaps.md)
-    //
-    // Everything below closes a gap the audit lists: the light palette and
-    // High Contrast (P0-1/2), the focus ring (P0-3), the folder-tree code
-    // paths (P0-5), the unpinned surfaces (P1), state variants of
-    // already-pinned regions (P2), and three cheap regression nets (P3).
+    // Coverage-audit goldens
     //
     // Same determinism rules as every golden above: fixed size, fixed DPI,
     // full-canvas background, Inter only, and no hover-dependent rendering.
@@ -3105,6 +3109,171 @@ mod tests {
                     )],
                 );
             },
+        );
+    }
+
+    /// Ticket 04, the **two-column branch**: a stage wide enough for the
+    /// Library pane's lower four sections to settle into two balanced columns
+    /// under a full-width Libraries card. Named for the branch it pins.
+    ///
+    /// NOTE the width: the *launch* stage (`settings_stage_size()`, 920px)
+    /// does **not** split. The pane's content column there measures 607px
+    /// after the 176px nav, the hairline, `NAV_GAP` and `PANE_PAD`, and the
+    /// `ScrollArea` reserves a further ~16px — 13px short of
+    /// `MIN_TWO_COL_W` (620). Two columns need a stage of about 936px, i.e. a
+    /// window of roughly 1216px. This golden therefore uses a stage that
+    /// genuinely reaches the branch it names.
+    /// A stage between the minimum and the two-column breakpoint, where the
+    /// pane's sections are still one stack but the rows have enough room for
+    /// the three-band reflow to breathe.
+    ///
+    /// Added alongside the minimum-stage golden because the two pin different
+    /// regimes: at 520 the pane content is ~205px and the reflow is barely
+    /// viable, while here it is comfortable. A regression that only shows at one
+    /// of the two — over-eager path truncation at the tight end, say — is
+    /// distinguishable rather than hidden by whichever one is pinned.
+    #[test]
+    fn settings_library_rows_stacked_mid_dark_matches_golden_baseline() {
+        snapshot(
+            "settings_library_rows_stacked_mid_dark",
+            egui::vec2(700.0, 840.0),
+            Palette::dark(),
+            |ui, palette| draw_settings_modal(ui, palette, SettingsSection::Library),
+        );
+    }
+
+    /// A stage wide enough for the Library pane to actually take its
+    /// two-column branch (ticket 04). See the note on that golden for why the
+    /// launch stage does not qualify.
+    fn settings_two_column_stage_size() -> egui::Vec2 {
+        egui::vec2(1280.0, 840.0)
+    }
+
+    #[test]
+    fn settings_library_two_column_dark_matches_golden_baseline() {
+        snapshot(
+            "settings_library_two_column_dark",
+            settings_two_column_stage_size(),
+            Palette::dark(),
+            |ui, palette| draw_settings_modal(ui, palette, SettingsSection::Library),
+        );
+    }
+
+    /// The same stage in the **light** palette. Ticket 05 exists because the
+    /// redesign would otherwise ship on dark evidence alone, and the light
+    /// palette is derived by rule (a channel-wise mirror), so a mirrored surface
+    /// that reads wrong is invisible to every unit test.
+    ///
+    /// Same stage size as the dark sibling on purpose: the palette is then the
+    /// *only* variable between the three two-column goldens, which makes the
+    /// ticket's "scrutinise the mirrored surfaces" a controlled comparison
+    /// rather than three unrelated pictures. The hairline between the columns
+    /// and the gap around it are exactly what a mirror is most likely to get
+    /// wrong, so the comparison is only meaningful if the geometry is pinned.
+    #[test]
+    fn settings_library_two_column_light_matches_golden_baseline() {
+        snapshot(
+            "settings_library_two_column_light",
+            settings_two_column_stage_size(),
+            Palette::light(),
+            |ui, palette| draw_settings_modal(ui, palette, SettingsSection::Library),
+        );
+    }
+
+    /// The same stage in **High Contrast**. The only high-contrast settings
+    /// coverage in the suite; the two existing HC goldens are the browser column
+    /// and the focused titlebar search. HC raises ink to pure white/grey and
+    /// re-points the focus ring, so it is the palette most able to make the
+    /// hairline and the error-coloured scan line fall apart.
+    #[test]
+    fn settings_library_two_column_hc_matches_golden_baseline() {
+        snapshot(
+            "settings_library_two_column_hc",
+            settings_two_column_stage_size(),
+            Palette::dark().high_contrast(),
+            |ui, palette| draw_settings_modal(ui, palette, SettingsSection::Library),
+        );
+    }
+
+    /// Ticket 04, the **stacked fallback**: the minimum stage, where the pane is
+    /// far too narrow for two columns and falls back to one stack. The minimum
+    /// stage is what the ticket reasons about — a ~284px content column cannot
+    /// carry two.
+    #[test]
+    fn settings_library_stacked_min_dark_matches_golden_baseline() {
+        snapshot(
+            "settings_library_stacked_min_dark",
+            library_stage_size(),
+            Palette::dark(),
+            |ui, palette| draw_settings_modal(ui, palette, SettingsSection::Library),
+        );
+    }
+
+    // --- Ticket 05: the palette × stage matrix, completed -----------------------
+    //
+    // Ticket 05 asks for the settings page "in all three palettes at both window
+    // sizes: dark, light, and high contrast, at the normal stage and at the
+    // minimum stage". The matrix now reads:
+    //
+    // ```text
+    //                    920 normal   1280 two-column   520 min   700 mid
+    //   dark              settings_dark  ..._two_column_  ..._min_  ..._mid_
+    //   light             settings_light ..._two_column_     below
+    //   high contrast        below     ..._two_column_     below
+    // ```
+    //
+    // These three close the gaps, and each is a *controlled* comparison: the
+    // stage size and the fixture come from the same helpers as its dark sibling
+    // (`settings_stage_size` / `library_stage_size` and `draw_settings_modal`,
+    // which already routes through `draw_settings_modal_with_libraries` and
+    // `settings_content_with`), so the palette is the only variable. That is
+    // what makes a mirrored surface readable: `Palette::light()` is derived by
+    // rule rather than hand-picked, so a surface that inverts wrongly is
+    // invisible to any test that is not looking at it.
+    //
+    // Filenames carry palette and stage because the `settings_library_*` prefix
+    // already means the two-column family, and these are single-column states.
+
+    /// The minimum stage in the **light** palette — the narrowest, mirrored
+    /// surface in the whole matrix, and the one the ticket singles out as
+    /// riskiest. The three-band stacked row and the wrapped chip row both have
+    /// to stay legible when every surface relationship is inverted.
+    #[test]
+    fn settings_stacked_min_light_matches_golden_baseline() {
+        snapshot(
+            "settings_stacked_min_light",
+            library_stage_size(),
+            Palette::light(),
+            |ui, palette| draw_settings_modal(ui, palette, SettingsSection::Library),
+        );
+    }
+
+    /// The **normal** stage in High Contrast — the missing "at the normal stage"
+    /// half of the matrix for HC, and a new state for this page: the only HC
+    /// settings coverage until now was the 1280 two-column render. HC lifts ink
+    /// to pure white, pushes secondary text to grey(200), brightens the
+    /// hairlines and borders, and re-points the focus ring, so it is the palette
+    /// most able to make a hairline or a muted description fall apart.
+    #[test]
+    fn settings_normal_hc_matches_golden_baseline() {
+        snapshot(
+            "settings_normal_hc",
+            settings_stage_size(),
+            Palette::dark().high_contrast(),
+            |ui, palette| draw_settings_modal(ui, palette, SettingsSection::Library),
+        );
+    }
+
+    /// The minimum stage in High Contrast. The narrowest column and the
+    /// highest-contrast ink in the same frame, which is where a border that
+    /// reads as too heavy and text that reads as too dim would both show.
+    #[test]
+    fn settings_stacked_min_hc_matches_golden_baseline() {
+        snapshot(
+            "settings_stacked_min_hc",
+            library_stage_size(),
+            Palette::dark().high_contrast(),
+            |ui, palette| draw_settings_modal(ui, palette, SettingsSection::Library),
         );
     }
 

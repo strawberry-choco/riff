@@ -28,6 +28,5 @@ This decision is enforced via conditional compilation (`#[cfg(target_os = "linux
 
 ## Related Documents
 
-- [Features](./features.md) — System Tray Icon feature.
-- [Platform Support](../technical/platform-support.md).
-- [Architecture](../technical/architecture.md) — Platform-specific code.
+- [Features](../features.md) — System Tray Icon feature.
+- [Architecture](../../technical/architecture.md) — Platform-specific code.

@@ -12,16 +12,8 @@ If any of these files don't exist, **proceed silently**. Don't flag their absenc
 
 ## File structure
 
-Single-context repo — one glossary and one ADR record at the root, shared by all six crates:
-
-```
-/
-├── CONTEXT.md
-├── docs/adr/
-│   ├── 0001-sqlite-is-the-authoritative-application-store.md
-│   └── 0009-vertical-crate-split-of-the-backend.md
-└── crates/<crate>/
-```
+Single-context repo — one glossary and one ADR record shared by the whole workspace, not
+a set of per-crate or per-domain copies.
 
 ## Use the glossary's vocabulary
 

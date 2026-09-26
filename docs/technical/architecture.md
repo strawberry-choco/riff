@@ -1,12 +1,12 @@
 # Architecture
 
-riff is a lightweight, offline-first desktop music player written in Rust on top of the egui immediate-mode UI framework. It ships as a Cargo **workspace** of seven crates with no code-generation step and no plugin system; persistence runs through ordered, checksummed SQLite migrations (see [./persistence.md](./persistence.md)). The architecture is a **vertical capability split**: the headless backend is divided into crates by capability with a strict, compiler-enforced dependency chain, infrastructure adapters that wrap external crates sit in one dedicated crate at the edge, and a single composition root wires everything together at startup.
+riff is a lightweight, offline-first desktop music player written in Rust on top of the egui immediate-mode UI framework. It ships as a Cargo **workspace** with no code-generation step and no plugin system; persistence runs through ordered, checksummed SQLite migrations. The architecture is a **vertical capability split**: the headless backend is divided into crates by capability with a strict, compiler-enforced dependency chain, infrastructure adapters that wrap external crates sit in one dedicated crate at the edge, and a single composition root wires everything together at startup.
 
 This document is the reference for how the workspace is organized, how the crates are allowed to depend on one another, and what belongs where. For the runtime view of the system see [./threading-model.md](./threading-model.md) and [./data-flow.md](./data-flow.md); for the concrete types that flow between layers see [./data-model.md](./data-model.md). The split decision and its rationale are recorded in [ADR 0009](../adr/0009-vertical-crate-split-of-the-backend.md).
 
 ## Overview
 
-The workspace members are five backend crates, the frontend, and the integration-test crate:
+The workspace members:
 
 | Crate | Role | Responsibility |
 |-------|------|----------------|
@@ -56,7 +56,7 @@ Each crate owns the types and ports it consumes; there is no shared dumping-grou
 
 It owns the stored entities (`Track`, `TrackId`, `TrackMetadata`, `Album`, `Artist`, `Playlist`, `PlaylistId`, `SmartPlaylistKind`, `CoverSource`) and `METADATA_VERSION`, the Application Store ports (migrations, settings, playlists, library query, library mutation), and the store DTOs (`Settings`, `ScalarSettings`, `WatchState`, `PlaylistEntry`, `StoreGeneration`, `StoreChanged`, the Lost Gems threshold) plus the `StoreError` type. It is `std`-only and implements nothing — the SQLite adapter lives in `riff-infra`. The settings port and DTOs live here — not in a capability slice — because ports must sit below the adapter crate and the Application Store is one table family with one generation scheme; this is a contract placement, not a capability claim.
 
-**The read seam has one named shape.** A browse surface's total and its visible window are a **Listing Page** (`Page<T>`): one fact, read from the Application Store under **one connection acquisition**, so no committed write can interleave the two halves. The page carries no generation — an earlier revision stamped it with the counter observed inside that acquisition, nothing ever read the stamp, and ADR 0002's 2026-09-23 amendment deleted it; which generation a cached level was filled at is the Session Projection's concern. The nine paged listings each declare their own page read on `LibraryQueryStore` (`tracks_page`, `search_page`, `hit_albums_page`, `hit_artists_page`, `artists_page`, `albums_page`, `genres_page`, `artists_in_genre_page`, `artist_albums_in_genre_page`) rather than pairing a window read with a count read. Everything a cached level needs to decide — observe the generation once, serve while it is current, otherwise load and commit — is `GenerationCache::level` in `levels.rs`, beside the `GenerationCache` primitive it drives. Placement follows the cache primitive's own rule: the two capability crates are siblings with no edge between them, and playback's generation caches adopt the same procedure later.
+**The read seam has one named shape.** A browse surface's total and its visible window are a **Listing Page** (`Page<T>`): one fact, read from the Application Store under **one connection acquisition**, so no committed write can interleave the two halves. The page carries no generation — an earlier revision stamped it with the counter observed inside that acquisition, nothing ever read the stamp, and ADR 0002's 2026-09-23 amendment deleted it; which generation a cached level was filled at is the Session Projection's concern. Each paged listing declares its own page read on `LibraryQueryStore` (`tracks_page`, `search_page`, `hit_albums_page`, `hit_artists_page`, `artists_page`, `albums_page`, `genres_page`, `artists_in_genre_page`, `artist_albums_in_genre_page`) rather than pairing a window read with a count read. Everything a cached level needs to decide — observe the generation once, serve while it is current, otherwise load and commit — is `GenerationCache::level` in `levels.rs`, beside the `GenerationCache` primitive it drives. Placement follows the cache primitive's own rule: the two capability crates are siblings with no edge between them, and playback's generation caches adopt the same procedure later.
 
 `METADATA_VERSION` sits beside `TrackMetadata` because it versions that struct's shape, and the scan reads and stamps it through the two Library ports (`LibraryQueryStore::metadata_version`, `LibraryMutationStore::stamp_metadata_version`) rather than through `SettingsStore`: the scan worker holds the Library pair, and a value the app writes on a scan's behalf is not a user preference — it never enters `ScalarSettings` and never renders in Settings, though `app_settings` is where the column physically lives.
 
@@ -92,10 +92,10 @@ It owns egui widget code, the main window and its views, fonts and icon rasteriz
 
 ### Inside `riff-gui`: the internal component layer
 
-`riff-gui` has one frontend consumer, so the shared widgetry is an **internal two-tier layer, not a crate** — the workspace dependency graph is unchanged, and a separate crate stays a decision for when a second consumer, a publication need, or a measured independent-build need appears. New UI work starts by asking which tier it belongs to:
+`riff-gui` has one frontend consumer, so the shared widgetry is an **internal three-tier layer, not a crate** — the workspace dependency graph is unchanged, and a separate crate stays a decision for when a second consumer, a publication need, or a measured independent-build need appears. New UI work starts by asking which tier it belongs to:
 
-- **Primitives** — `theme`, `icons`, `fonts`, `row`, `button`, `text_field`, `toggle_switch`, `linear`, `artwork`, `empty_state`, `feedback`, `menu`, `prompts`, `stage`, `up_next`. They own reusable presentation and interaction behavior. The contract is props in, responses or typed intents out: they receive the `egui` context, the active `Palette`, an icon/cache dependency where needed, presentation values, and **caller-owned** buffers. They never name `RiffApp`, a session, `SessionViews`, a service front end, a store port, `Transport`, an application generation, or a native integration, and they never hold a shared handle to one. `component_boundary_tests` sweeps these files for exactly those names, alongside ADR 0004's token sweeps.
-- **Feature composites** — `app` and its pane modules, `chrome`, `sidebar`, `browser`, `detail`, `selection`, `playerbar`, `now_playing`, `settings`. Recognizably riff-specific: they combine primitives with content, and they are where application state is legitimately held.
+- **Primitives** — the reusable presentation and interaction widgets that views compose from. The contract is props in, responses or typed intents out: they receive the `egui` context, the active `Palette`, an icon/cache dependency where needed, presentation values, and **caller-owned** buffers. They never name `RiffApp`, a session, `SessionViews`, a service front end, a store port, `Transport`, an application generation, or a native integration, and they never hold a shared handle to one. `component_boundary_tests` sweeps these files for exactly those names, alongside ADR 0004's token sweeps.
+- **Feature composites** — the recognizably riff-specific views: they combine primitives with content, and they are where application state is legitimately held.
 - **Host adapters** — the `impl RiffApp` blocks (including `app/library_picker.rs` and `app/tag_editor.rs`) plus `tray` and `window_visibility`. They resolve the props, map emitted intents onto `Transport` / store / session / native effects, and keep platform behavior (the folder picker, Linux's text-path flow, the no-tray policy) explicit rather than hidden inside a generic widget.
 
 The theme, fonts, and icons stay the single design authority through all three tiers: every component module reads its values from `theme.rs`, so a future crate moves them together rather than leaving a second token store behind.
@@ -149,7 +149,7 @@ All thread-to-thread communication uses `crossbeam_channel`. See [./threading-mo
 - Infrastructure maps external crate errors into the owning port's error at the adapter boundary, so crate-specific error types never leak above `riff-infra`.
 - Playback failures surface to the session as typed notices through the event inbox's notice channel (source + severity), not as a cross-slice state write.
 - The UI displays user-friendly messages and never panics on a recoverable error.
-- Mutex access uses the `MutexExt::lock_or_recover` helper (defined in `riff-backend`), which recovers a poisoned lock instead of panicking, so a panic on one thread does not cascade into every other thread that shares a session mutex.
+- Mutex access uses the `MutexExt::lock_or_recover` helper, defined once in `riff-persistence/src/sync.rs` and re-exported by `riff-backend`, which recovers a poisoned lock instead of panicking, so a panic on one thread does not cascade into every other thread that shares a session mutex.
 
 ## Validation Checklist
 
@@ -173,8 +173,6 @@ Use this checklist when adding or reviewing a component:
 - **UI thread blocking**: a `riff-gui` handler performs scanning or image decoding synchronously. Move it to a worker thread and use a channel.
 - **Callback spaghetti**: an audio callback calls UI methods directly. Use channels for all thread-to-thread communication; never call UI code from a non-UI thread.
 - **Stringly typed errors**: errors passed as bare `String` across a port. Use the owning crate's typed error enum so callers can match on variants.
-
-Note that the two-session split (`PlaybackSession` / `LibrarySession` behind their own mutexes) is a deliberate design, not an accident: each session is owned and mutated by the capability that cares about it, and the only cross-slice interaction (a playback failure setting a scan-status message) is a typed notice through the event inbox. Keep all session access short and never hold one session's lock while acquiring the other's.
 
 ## Ambiguity Signals
 
@@ -200,5 +198,4 @@ These are decisions with more than one defensible answer. Surface them explicitl
 - [./threading-model.md](./threading-model.md) — threads, channels, shared state, and real-time constraints.
 - [./data-flow.md](./data-flow.md) — step-by-step sequences for playback, scanning, and cover resolution.
 - [./data-model.md](./data-model.md) — the entities, the two session structs, the store ports, and the port traits.
-- [./dependencies.md](./dependencies.md) — every dependency, grouped by owning crate.
 - [ADR 0009](../adr/0009-vertical-crate-split-of-the-backend.md) — the crate-split decision and its consequences.

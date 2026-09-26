@@ -154,10 +154,17 @@ pub fn playlist_rename_prompt(ui: &mut egui::Ui, draft: &mut String) -> Option<P
 // --- Destructive confirmation -----------------------------------------------------
 
 /// The confirmation copy beside the destructive Clear Library action. It says
-/// what the wipe does *and* what it keeps, so the listener is not left to
-/// infer whether Playlists and Settings survive.
-pub const CLEAR_LIBRARY_CONFIRM_COPY: &str =
-    "Remove every indexed track? Playlists and settings are kept.";
+/// what the wipe does, what it keeps, and how the collection comes back, so the
+/// listener is not left to infer whether Playlists and Settings survive or
+/// whether the library is gone for good.
+///
+/// The recovery clause is the substance the footer used to carry in a note of
+/// its own ("rebuild it on the next scan"). That note went when the in-pane
+/// clear row became the page footer, whose single note is the generic
+/// immediate-apply line — so the consequence explanation lives here, beside the
+/// action it belongs to, rather than being lost.
+pub const CLEAR_LIBRARY_CONFIRM_COPY: &str = "Remove every indexed track? Playlists and settings are kept, and the collection \
+     rebuilds on the next scan.";
 
 /// The confirming action's copy, distinct from the plain "Cancel" beside it.
 pub const CLEAR_LIBRARY_CONFIRM_LABEL: &str = "Confirm";

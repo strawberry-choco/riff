@@ -31,6 +31,6 @@ A track's identity (`TrackId`) is its full file path as a string. The same file 
 
 ## Related Documents
 
-- [Features](./features.md) — Library Scanning, Library Cache Persistence.
-- [Data Model](../technical/data-model.md).
-- [Data Flow](../technical/data-flow.md).
+- [Features](../features.md) — Library Scanning, Library Persistence.
+- [Data Model](../../technical/data-model.md).
+- [Data Flow](../../technical/data-flow.md).

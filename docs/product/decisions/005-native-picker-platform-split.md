@@ -28,6 +28,4 @@ This decision is enforced via conditional compilation: the native-picker path is
 
 ## Related Documents
 
-- [Features](./features.md) — Music Library Management.
-- [User Guide](./user-guide.md) — "Adding a music library" section.
-- [Platform Support](../technical/platform-support.md).
+- [Features](../features.md) — Music Library Management.

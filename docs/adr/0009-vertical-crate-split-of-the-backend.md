@@ -84,11 +84,8 @@ their ports. `riff-backend` depends on all four. The frontend depends only on
 
 ## As-Built Amendments (2026-08-29)
 
-Verification of the shipped layout against this ADR found the decision itself sound
-(five crates, the dependency chain, the persistence-crate criterion, the two seam
-fixes, the Up Next move, the error split, and the frontend depending only on
-`riff-backend` all match). Three placements deviated from the crate bullet lists
-above and are recorded here as the as-built truth:
+Three placements deviated from the crate bullet lists above and are recorded here as the
+as-built truth:
 
 - **The facade-adjacent services stayed in `riff-backend`.** The ADR's `riff-library`
   bullet lists "views", "tag editing", and "filesystem watching" among the slice's
@@ -104,12 +101,11 @@ above and are recorded here as the as-built truth:
   bullet originally named a `FacadeTransport` type said to be defined beside
   `ChannelTransport` and the `Transport` trait. No such symbol exists anywhere in the
   workspace, and none ever did: `riff-backend`'s Composition Root wires `ChannelTransport`
-  around the shared sessions directly (`composition.rs:363`, `:367`), using the optional
-  dispatch-recorder hook (`ChannelTransport::new_recording`) to report commands to the
-  Backend Events inbox. The distinction this bullet was drawing — that the facade-facing
-  transport sits in the playback capability rather than in the facade crate — is correct
-  and is how it was built; only the type name was wrong. The crate bullets did not assign
-  the facade transport; the spec had placed it in `riff-backend`.
+  around the shared sessions directly in `riff-backend/src/composition.rs`, using the
+  optional dispatch-recorder hook (`ChannelTransport::new_recording`) to report commands
+  to the Backend Events inbox. The distinction this bullet was drawing — that the
+  facade-facing transport sits in the playback capability rather than in the facade
+  crate — is correct and is how it was built; only the type name was wrong.
 - **The `riff-backend` re-export surface serves the test suite as well as the
   frontend.** Historical `riff_backend::…` import paths resolve for both consumers;
   the workspace-root test crate imports through it.

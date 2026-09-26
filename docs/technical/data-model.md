@@ -1,6 +1,6 @@
 # Data Model
 
-This document describes the concrete types that make up riff's state: the stored entities in `riff-persistence`, the playback domain types in `riff-playback`, the two session structs, and the port traits that define the boundaries infrastructure implements. The Application Store (`riff.sqlite3`) is the single authoritative — and single — implementation of collection semantics: there is no second in-memory copy of the library, and views read the store through port queries and Session Projections. See [./persistence.md](./persistence.md) for how each type is stored and [./architecture.md](./architecture.md) for where these types live and how crates may use them.
+This document describes the concrete types that make up riff's state: the stored entities in `riff-persistence`, the playback domain types in `riff-playback`, the two session structs, and the port traits that define the boundaries infrastructure implements. The Application Store (`riff.sqlite3`) is the single authoritative — and single — implementation of collection semantics: there is no second in-memory copy of the library, and views read the store through port queries and Session Projections. See [./architecture.md](./architecture.md) for where these types live and how crates may use them.
 
 ## Stored Entities (`riff-persistence`)
 
@@ -197,13 +197,11 @@ pub struct LibrarySession {
 | `selected_track` | The track selected in the UI details panel (view-independent). |
 | `view_mode` | Which top-level View is showing: `Library`, `NowPlaying`, or `Settings`. |
 | `search_query` | The current search bar text. |
-| `library_paths` | The registered `LibraryPaths` value — one fact-set per root: the path, its Readiness, its Watch State, its live watcher, and its rows in the Application Store. The three collections are its private fields; the module's operations are the only way in. |
-| `library_statuses` | The per-root Readiness inside `LibraryPaths` — written through `report_readiness`, read through `readiness`. Not a session field. |
+| `library_paths` | The registered `LibraryPaths` value — one fact-set per root: the path, its Readiness, its Watch State, its live watcher, and its rows in the Application Store. The three collections are its private fields; the module's operations are the only way in. Readiness is written through `report_readiness` and read through `readiness`; Watch State is written only by `set_watch`, `set_watching_for_all`, and `retire`, each persisting the whole map in one write. |
 | `scan_status` | A human-readable status/error line for the most recent scan or playback error (playback errors arrive as typed notices through the event inbox). |
 | `browse_mode` | Whether the sidebar shows the metadata hierarchy (`Library`) or the folder tree (`Folders`). |
 | `selected_folder` | The selected folder in Folders browse mode. |
-| `ui_flags` | Exactly four flags, all of them read and persisted: `advanced_mode`, `high_contrast`, `smart_lists_collapsed`, `close_quits_app`. There is no `show_artists_view` field, and the six further display toggles an early mockup named (`compact_density`, `show_track_numbers`, `show_artwork`, `show_duration`, `show_play_count`, `show_date_added`) were never read or persisted and are gone from the struct. |
-| `watch_states` | The per-root Watch State inside `LibraryPaths` — written only by `set_watch`, `set_watching_for_all`, and `retire`, each persisting the whole map in one write. Not a session field. |
+| `ui_flags` | Exactly four flags, all of them read and persisted: `advanced_mode`, `high_contrast`, `smart_lists_collapsed`, `close_quits_app`. There is no `show_artists_view` field, and no display toggle is declared that is not read and persisted. |
 
 ### Supporting enums
 
@@ -283,9 +281,8 @@ pub trait FilesystemWatch: Send {
 
 Two supporting data types cross these traits — `AudioFormatInfo` (`sample_rate`, `channels`) and `DecodedCover` (`rgba`, `width`, `height`), alongside the `RequestedSize` (`width`, `height`) box a cover is decoded to fit.
 
-The concrete implementations — `SymphoniaDecoder`, `CpalAudioOutput`, `LoftyMetadataReader`, `LoftyMetadataWriter`, `ImageCoverLoader`, `AudioFileScanner`, `FilesystemWatcher`, and `SqliteStore` — all live in `riff-infra`. `CpalAudioOutput` additionally exposes the richer surface the engine port maps onto (`initialize`/`start`, which owns the device-default-rate fallback, `clear_buffer`, `set_replaygain`, `effective_sample_rate`). See [./dependencies.md](./dependencies.md) for the crates behind them.
+The concrete implementations — `SymphoniaDecoder`, `CpalAudioOutput`, `LoftyMetadataReader`, `LoftyMetadataWriter`, `ImageCoverLoader`, `AudioFileScanner`, `FilesystemWatcher`, and `SqliteStore` — all live in `riff-infra`. `CpalAudioOutput` additionally exposes the richer surface the engine port maps onto (`initialize`/`start`, which owns the device-default-rate fallback, `clear_buffer`, `set_replaygain`, `effective_sample_rate`).
 
 ## See also
 
 - [./architecture.md](./architecture.md) — the layer rules that constrain these types.
-- [./persistence.md](./persistence.md) — how these types persist in the Application Store.

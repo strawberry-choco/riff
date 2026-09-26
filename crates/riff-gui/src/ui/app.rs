@@ -73,6 +73,12 @@ fn label_numbered(track: &Track) -> String {
     )
 }
 
+/// The now-playing title/meta lines, resolved once per frame by
+/// [`RiffApp::render_control_bar`] (the bar renders before every stage) and
+/// carried through [`RiffApp::now_playing_labels`] to the Now Playing stage,
+/// so neither surface builds the strings twice.
+type NowPlayingLabels = (Option<Arc<str>>, Option<Arc<str>>);
+
 /// Transient UI prompt/focus flags are genuinely two-state; the fourth bool
 /// only exists on Linux (`settings_show_input`), which is where the lint fires.
 #[allow(clippy::struct_excessive_bools)]
@@ -109,6 +115,11 @@ pub struct RiffApp {
     /// The playing track's id whose cover the Now Playing stage last
     /// requested/rendered; only re-cloned when the track moves.
     now_playing_cover_key: Option<String>,
+    /// This frame's resolved current-track `(title, meta_line)` lines:
+    /// stashed once by `render_control_bar` (the bar renders before every
+    /// stage) and read by the Now Playing stage, so both surfaces share one
+    /// `Arc` handout and the strings are never built twice.
+    now_playing_labels: NowPlayingLabels,
     /// The current `TrackId` the window title and tray tooltip were last
     /// pushed for (REQ-SI-001): both OS side effects only fire when this
     /// identity moves — pure command suppression, never staleness.
@@ -246,6 +257,7 @@ impl RiffApp {
             smart_playlist_view: None,
             playlist_view: None,
             now_playing_cover_key: None,
+            now_playing_labels: (None, None),
             last_title_key: TitleKey::Unset,
             playerbar_readouts: crate::ui::playerbar::SeekReadouts::new(),
             stage_readouts: crate::ui::playerbar::SeekReadouts::new(),
@@ -1971,7 +1983,9 @@ impl RiffApp {
     /// at the exact 88px playerbar token height, drawn by the restyled
     /// playerbar widgets. Every reported [`crate::ui::playerbar::
     /// PlayerBarAction`] routes through [`apply_player_bar_action`], so each
-    /// control still emits its engine command.
+    /// control still emits its engine command. Also stashes this frame's
+    /// `(title, meta_line)` handout in [`Self::now_playing_labels`] for the
+    /// Now Playing stage.
     fn render_control_bar(
         &mut self,
         ui: &mut egui::Ui,
@@ -1999,12 +2013,28 @@ impl RiffApp {
             playback.queue.current_index.map_or(0, |i| i + 1),
             playback.queue.tracks.len()
         );
+        // The current track's display lines, resolved once per frame here —
+        // the bar renders before every stage — and returned for the Now
+        // Playing stage so the two surfaces never build the strings twice.
+        let (title, meta_line) = match self.views.playback_current() {
+            Some(track) => (
+                Some(Arc::from(track.metadata.display_title(&track.file_path))),
+                Some(Arc::from(format!(
+                    "{} - {}",
+                    track.metadata.display_artist(),
+                    track.metadata.display_album()
+                ))),
+            ),
+            None => (None, None),
+        };
         self.playerbar_readouts.sync(
             playback.current_position.current,
             playback.current_position.total,
         );
         let content = crate::ui::playerbar::PlayerBarContent {
             cover,
+            title: title.clone(),
+            meta_line: meta_line.clone(),
             playback: playback.playback_state,
             position: playback.current_position.current,
             total: playback.current_position.total,
@@ -2053,6 +2083,7 @@ impl RiffApp {
         for action in self.playerbar_actions.drain(..) {
             apply_player_bar_action(action, library, playback, self.transport.as_ref());
         }
+        self.now_playing_labels = (title, meta_line);
     }
 }
 
@@ -2910,6 +2941,8 @@ impl RiffApp {
         library: &mut LibrarySession,
         playback: &PlaybackSession,
     ) {
+        // The title and meta lines ride the bar's once-per-frame handout.
+        let (title, meta_line) = self.now_playing_labels.clone();
         let palette = self.theme.active;
 
         // Current track + cover from the LRU texture cache; misses enqueue a
@@ -2938,21 +2971,15 @@ impl RiffApp {
             .as_ref()
             .map(|key| self.resolve_cover_texture(ui.ctx(), key, COVER_HERO));
         self.now_playing_cover_key = cover_key;
-        // Text block + Up Next rows formatted straight from the playback
-        // projection's resolved tracks each frame; staleness is the
-        // projection's job, not the widget layer's.
-        let (title, meta_line, details) = match self.views.playback_current() {
-            Some(track) => (
-                Some(Arc::from(track.metadata.display_title(&track.file_path))),
-                Some(Arc::from(format!(
-                    "{} - {}",
-                    track.metadata.display_artist(),
-                    track.metadata.display_album()
-                ))),
-                crate::ui::now_playing::metadata_details(&track.metadata).map(Arc::from),
-            ),
-            None => (None, None, None),
-        };
+        // The title and meta lines ride the bar's once-per-frame handout;
+        // only the details line is stage-only, resolved here from the
+        // playback projection (staleness is the projection's job, not the
+        // widget layer's).
+        let details = self
+            .views
+            .playback_current()
+            .and_then(|track| crate::ui::now_playing::metadata_details(&track.metadata))
+            .map(Arc::from);
         let up_next: Arc<[UpNextEntry]> = crate::ui::now_playing::up_next_entries(
             self.views.playback_up_next(),
             crate::ui::now_playing::UP_NEXT_LIMIT,

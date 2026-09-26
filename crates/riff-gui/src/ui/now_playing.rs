@@ -425,8 +425,9 @@ fn up_next_section(
 
 /// A design-scale [`egui::FontId`] at `size`, riding the family the installed
 /// token style mapped onto `key` (so weight families resolve even before the
-/// vendored fonts are installed).
-fn styled_font(ui: &egui::Ui, key: egui::TextStyle, size: f32) -> egui::FontId {
+/// vendored fonts are installed). Shared with the player bar's now-playing
+/// zone, which paints at the same scale.
+pub(crate) fn styled_font(ui: &egui::Ui, key: egui::TextStyle, size: f32) -> egui::FontId {
     let family = ui
         .style()
         .text_styles

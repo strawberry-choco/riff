@@ -16,13 +16,15 @@
 
 use eframe::egui;
 use std::fmt::Write as _;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::icons::{Icon, IconCache};
 use super::linear;
 use super::theme::geometry::playerbar::{
-    COVER, GHOST_BTN, MIN_INNER_H, PLAY_BTN, QUEUE_LABEL_SPACE, QUEUE_PANEL_HEADER_H,
-    QUEUE_PANEL_MAX_LIST_H, QUEUE_PANEL_W, VOLUME_THUMB, VOLUME_W,
+    CENTER_MIN_W, COVER, GHOST_BTN, MIN_INNER_H, MIN_TEXT_W, NOW_PLAYING_GAP, NOW_PLAYING_LINE_GAP,
+    NOW_PLAYING_MIN_W, NOW_PLAYING_W, PLAY_BTN, QUEUE_LABEL_SPACE, QUEUE_PANEL_HEADER_H,
+    QUEUE_PANEL_MAX_LIST_H, QUEUE_PANEL_W, TEXT_HIDE_META_W, VOLUME_THUMB, VOLUME_W,
 };
 use super::theme::geometry::seek::{TIME_LABEL_SPACE, TRACK_H};
 use super::theme::geometry::sidebar::ROW_H;
@@ -124,6 +126,14 @@ pub struct PlayerBarContent<'a> {
     /// Real cover texture from the app's LRU cache; `None` paints the
     /// gradient placeholder.
     pub cover: Option<egui::TextureHandle>,
+    /// Current track title; `None` renders the idle copy. An `Arc`-shared
+    /// cache handout like [`NowPlayingContent`]'s labels (allocation plan
+    /// 2.2), so fresh frames bump refcounts instead of rebuilding strings.
+    ///
+    /// [`NowPlayingContent`]: crate::ui::now_playing::NowPlayingContent
+    pub title: Option<Arc<str>>,
+    /// `"Artist - Album"` line under the title.
+    pub meta_line: Option<Arc<str>>,
     /// Drives which action the primary button reports.
     pub playback: PlaybackState,
     /// Elapsed playback position.
@@ -213,10 +223,32 @@ pub fn show_player_bar(
     let inner = rect.shrink2(egui::vec2(16.0, vpad));
     let cy = inner.center().y;
 
-    // --- Left: now-playing cover ------------------------------------------
+    // --- Right cluster ------------------------------------------------------
+    let queue_left = show_right_cluster(ui, cache, palette, content, inner, actions);
+
+    // --- Left: now-playing zone (cover + title/meta lines) -------------------
+    // The zone is elastic: the fixed right cluster and the protected center
+    // column get their room first.
+    let cluster_w = inner.right() - queue_left;
+    let zone_w = now_playing_zone_width(inner.width(), cluster_w);
     let cover_rect = egui::Rect::from_min_size(
         egui::pos2(inner.left(), cy - COVER / 2.0),
         egui::vec2(COVER, COVER),
+    );
+    let text_w = zone_w - COVER - NOW_PLAYING_GAP;
+    // Below `MIN_TEXT_W` no legible line survives: paint the cover alone —
+    // the full title still rides in the zone's tooltip.
+    let hide_text = text_w < MIN_TEXT_W;
+    let zone_rect = if hide_text {
+        cover_rect
+    } else {
+        egui::Rect::from_min_size(cover_rect.min, egui::vec2(zone_w, COVER))
+    };
+    let button = super::button::begin_icon_button(
+        ui,
+        zone_rect,
+        egui::Id::new("playerbar_now_playing"),
+        false,
     );
     paint_cover(
         ui,
@@ -224,17 +256,127 @@ pub fn show_player_bar(
         content.cover.as_ref().map(egui::TextureHandle::id),
         cover_rect,
     );
-
-    // --- Right cluster ------------------------------------------------------
-    let queue_left = show_right_cluster(ui, cache, palette, content, inner, actions);
+    if !hide_text {
+        paint_now_playing_text(
+            ui,
+            palette,
+            content,
+            egui::pos2(cover_rect.right() + NOW_PLAYING_GAP, cy),
+            text_w,
+        );
+    }
+    if super::button::finish_icon_button(ui, palette, &button, &now_playing_label(content)) {
+        actions.push(PlayerBarAction::ToggleExpanded);
+    }
 
     // --- Center column: seek row above centered transport -------------------
     let center = egui::Rect::from_min_max(
-        egui::pos2(cover_rect.right() + 20.0, inner.top()),
+        egui::pos2(zone_rect.right() + 20.0, inner.top()),
         egui::pos2(queue_left - 20.0, inner.bottom()),
     );
     show_seek_row(ui, palette, content, readouts, center, actions);
     transport_row(ui, cache, palette, content, center, actions);
+}
+
+/// Width of the now-playing zone for one frame's bar geometry: the bar's
+/// inner width minus the right cluster and the two 20px gaps protecting the
+/// center column, clamped between [`NOW_PLAYING_MIN_W`] and [`NOW_PLAYING_W`]
+/// (issue 01's layout contract). The floor is soft: when the bar cannot hold
+/// both the zone floor and [`CENTER_MIN_W`], the protected center wins and
+/// the zone yields to it (down to nothing, where the text rules below shed
+/// the whole text column) — the bar degrades in the fixed order, never
+/// overlaps.
+#[must_use]
+pub fn now_playing_zone_width(inner_w: f32, cluster_w: f32) -> f32 {
+    let room = inner_w - cluster_w - 40.0 - CENTER_MIN_W;
+    room.clamp(NOW_PLAYING_MIN_W, NOW_PLAYING_W)
+        .min(room.max(0.0))
+}
+
+/// The zone's accessible name and hover tooltip: the full, un-elided
+/// `"Title — Artist - Album"`, or the idle copy when no track is loaded.
+fn now_playing_label(content: &PlayerBarContent<'_>) -> String {
+    match (&content.title, &content.meta_line) {
+        (Some(title), Some(meta)) => format!("{title} \u{2014} {meta}"),
+        (Some(title), None) => title.to_string(),
+        (None, Some(meta)) => meta.to_string(),
+        (None, None) => "Nothing playing".to_owned(),
+    }
+}
+
+/// A one-row [`egui::text::LayoutJob`] for the now-playing zone's text
+/// column: `text` laid out in `font` on `ink`, hard-capped to `max_w`. The
+/// wrap settings mirror the sidebar's tree-row label elide — measurement-
+/// driven, exactly one row, and `break_anywhere` so even a filename-style
+/// unbroken token elides instead of overflowing the bar (issue 04). The
+/// un-truncated string is what reaches the zone's accessible name and hover
+/// tooltip, never this job's painted output.
+#[must_use]
+pub fn now_playing_text_job(
+    text: &str,
+    font: egui::FontId,
+    ink: egui::Color32,
+    max_w: f32,
+) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::simple(text.to_owned(), font, ink, max_w);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('\u{2026}');
+    job
+}
+
+/// The zone's two text lines, vertically centered on the cover and
+/// left-aligned at `pos`: the title at `TEXT_SM` on `ink`, the
+/// `"Artist - Album"` meta at `TEXT_XS` on `ink_2`. With no track loaded the
+/// same slots carry the idle copy on `ink_2`/`ink_3` — same geometry either
+/// way, so the bar never reflows when playback starts. Both lines are
+/// one-row galleys elided at `text_w` (see [`now_playing_text_job`]); the
+/// first degradation step drops the meta line entirely below
+/// `TEXT_HIDE_META_W` (it still rides in the zone's tooltip).
+fn paint_now_playing_text(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    content: &PlayerBarContent<'_>,
+    pos: egui::Pos2,
+    text_w: f32,
+) {
+    let title_font = super::now_playing::styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM);
+    let meta_font = super::now_playing::styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS);
+    let (title, title_ink, meta, meta_ink) = match content.title.as_deref() {
+        Some(title) => (
+            title,
+            palette.ink,
+            content.meta_line.as_deref().unwrap_or(""),
+            palette.ink_2,
+        ),
+        None => (
+            "Nothing playing",
+            palette.ink_2,
+            "Pick a track from your library to start",
+            palette.ink_3,
+        ),
+    };
+    let title_galley =
+        ui.fonts_mut(|f| f.layout_job(now_playing_text_job(title, title_font, title_ink, text_w)));
+    let meta_galley = (text_w >= TEXT_HIDE_META_W).then(|| {
+        ui.fonts_mut(|f| f.layout_job(now_playing_text_job(meta, meta_font, meta_ink, text_w)))
+    });
+
+    let painter = ui.painter();
+    let title_h = title_galley.size().y;
+    let block_h = title_h
+        + meta_galley
+            .as_ref()
+            .map_or(0.0, |g| NOW_PLAYING_LINE_GAP + g.size().y);
+    let top = pos.y - block_h / 2.0;
+    painter.galley(egui::pos2(pos.x, top), title_galley, title_ink);
+    if let Some(galley) = meta_galley {
+        painter.galley(
+            egui::pos2(pos.x, top + title_h + NOW_PLAYING_LINE_GAP),
+            galley,
+            meta_ink,
+        );
+    }
 }
 
 /// The queue-open ghost button (handoff issue 13): the list-music glyph,

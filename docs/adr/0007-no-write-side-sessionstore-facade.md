@@ -15,7 +15,7 @@ At the time of this decision there is no such behaviour left to absorb:
 
 - The SQLite store locks itself and bumps both session generations
   (`StoreGeneration` for Library, the dedicated playlist generation) **inside its own
-  mutation impls** (landed in `f10c2e4`, "delete mutex store pass-through adapters").
+  mutation impls** (landed as "delete mutex store pass-through adapters").
   There is no mutation adapter layer for a facade to own.
 - Each of the three ports is already a deep module: its interface carries real,
   documented semantics (one immediate durable transaction per mutation, dangling

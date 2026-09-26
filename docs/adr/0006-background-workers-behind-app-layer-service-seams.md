@@ -3,7 +3,7 @@
 **Status**: Accepted
 **Date**: 2026-08-25
 
-The cover loader and tag-write worker threads are currently spawned inline by `RiffApp::new` (`src/ui/app.rs`), which holds their raw channel ends, their request/result protocols, the cover request-dedup and negative caches, and the post-write store-refresh orchestration. This makes the render layer own thread lifecycle and durability-sensitive persistence ordering, and leaves the Tag Edit save flow with no test surface — no adapter can stand in for the worker, so `app_tests`/`ui_tests` cannot exercise write-then-persist except through real Lofty disk I/O.
+The cover loader and tag-write worker threads are currently spawned inline by `RiffApp::new` (`crates/riff-gui/src/ui/app.rs`), which holds their raw channel ends, their request/result protocols, the cover request-dedup and negative caches, and the post-write store-refresh orchestration. This makes the render layer own thread lifecycle and durability-sensitive persistence ordering, and leaves the Tag Edit save flow with no test surface — no adapter can stand in for the worker, so `app_tests`/`ui_tests` cannot exercise write-then-persist except through real Lofty disk I/O.
 
 We will extract two modules into the application layer, spawned by the composition root exactly like the Audio Engine (ADR precedent: "extract audio engine"):
 
@@ -18,9 +18,8 @@ We will extract two modules into the application layer, spawned by the compositi
 
 ## Consequences
 
-- `RiffApp::new` loses two inline `thread::spawn`s, four channels, and the cover request/negative-cache fields; its constructor interface shrinks.
+- `RiffApp::new` loses its inline worker spawns, channels and cover-cache fields; its constructor interface shrinks.
 - Trait-handle style matches every existing port (`SettingsStore`, `PlaylistStore`, `LibraryMutationStore`); tests inject mock handles.
 - The `TagWriteRequest`/`TagWriteResult` structs move out of the UI layer into the service implementation.
 - Cover texture caching (GPU textures) deliberately stays on the main thread — the seam falls between decoded image and GPU texture, where egui forces it.
-- Extraction order: Tag Edit Service first (durability-sensitive, currently untested path), Cover Service fast-follow on the same pattern.
 - Domain language: CONTEXT.md gains **Tag Edit** for the user action this module serves.

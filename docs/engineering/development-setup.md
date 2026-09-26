@@ -2,8 +2,6 @@
 
 This guide gets a new contributor from a fresh machine to a running build of riff. riff is a lightweight, offline-first desktop music player written in Rust on top of the egui immediate-mode GUI framework. It is a Cargo workspace with no code-generation step and no feature flags, so the setup is deliberately minimal: install a recent Rust toolchain, clone the repository, and run `cargo`.
 
-Everything on this page reflects the current state of the repository. Where this document offers guidance beyond what is wired up today, it is labeled as a recommendation.
-
 ## Prerequisites
 
 The only hard requirement is a Rust toolchain. Every crate declares `rust-version = "1.95"` in its manifest, so you want a toolchain at or above that version. Note that this MSRV is informational only; there is no CI job that enforces it, so a slightly older compiler may happen to work but is not supported.
@@ -12,7 +10,7 @@ Install Rust via [rustup](https://rustup.rs/), which manages the compiler, `carg
 
 ```bash
 rustup update stable
-rustc --version   # confirm 1.95 or newer
+rustc --version
 ```
 
 ### Platform-specific prerequisites
@@ -43,7 +41,7 @@ cd riff
 cargo build
 ```
 
-The first build downloads and compiles all dependencies, which takes several minutes. Subsequent builds are incremental and much faster. To run the application during development, use `cargo run -p riff-gui`, which builds (if needed) and launches the player in one step.
+The first build downloads and compiles all dependencies. Subsequent builds are incremental and much faster. To run the application during development, use `cargo run -p riff-gui`, which builds (if needed) and launches the player in one step.
 
 ## Commands
 
@@ -64,14 +62,7 @@ A typical inner loop is `cargo check` while editing, `cargo fmt` and `cargo clip
 
 One practical note: because the workspace splits pure logic from the adapter stack, you can type-check and test the pure crates (`cargo test -p riff-playback -p riff-library -p riff-persistence`) without a C compiler or platform audio libraries — only `riff-infra` (bundled SQLite) and `riff-gui` need the native toolchain.
 
-## Build Profiles
-
-riff tunes its two build profiles for their respective roles. The settings live in the root `Cargo.toml` and apply to every workspace member:
-
-- The `dev` profile sets `opt-level = 1`. This keeps debug builds reasonably fast to compile while still producing a binary responsive enough for interactive UI work.
-- The `release` profile sets `opt-level = 3`, `lto = true`, `codegen-units = 1`, and `strip = true`. Link-time optimization and single-codegen-unit compilation enable whole-program optimization, and `strip` removes debug symbols. The result is a small, fully optimized standalone binary.
-
-The trade-off is compile time: a release build is significantly slower than a debug build because LTO and `codegen-units = 1` defeat incremental parallel codegen. This is expected and normal. Use `cargo run -p riff-gui` (dev) for iteration and reserve `cargo build --release -p riff-gui` for producing distributable binaries. See [release-and-packaging.md](./release-and-packaging.md) for the release workflow.
+The two build profiles and their trade-offs are described in [release-and-packaging.md](./release-and-packaging.md).
 
 ## Notes
 
@@ -81,6 +72,3 @@ A few facts about the project shape that simplify expectations:
 - **No codegen step.** There is no build script output, no schema generation, and no asset pipeline to run before compiling.
 - **Embedded migrations.** State persists in the Application Store (`riff.sqlite3` via rusqlite, bundled — in `riff-infra`). Schema evolution runs through ordered, checksummed migrations applied automatically on open — there is no external migration tooling to run.
 - **CI pipeline.** `.github/workflows/ci.yml` runs the quality gate (`cargo fmt --check`, `cargo clippy --all-targets`, `cargo test`) on push and pull requests to main, on Linux and Windows runners. There are no pre-commit hooks.
-- **MSRV is informational.** `rust-version = "1.95"` documents the intended minimum compiler but is not enforced by automation.
-
-For where the application stores its state and how logging is configured, see [../reference/configuration.md](../reference/configuration.md).

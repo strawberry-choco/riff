@@ -24,17 +24,7 @@ The audio engine thread is the heart of playback. It is a single long-lived loop
 
 ## Wiring at Startup
 
-`AppRuntime::spawn` opens the Application Store first — open/migration failures are returned to the caller, never silently tolerated — and then wires everything:
-
-```rust
-let (settings, playlists, library_mutations, library_queries, generation,
-     playlist_generation, changes_rx) = open_application_store(store_path)?;
-let backend_events = Arc::new(Mutex::new(BackendEvents::default()));
-let (playback, library) = (Arc::new(Mutex::new(PlaybackSession::default())),
-                           Arc::new(Mutex::new(LibrarySession::default())));
-let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
-let (update_tx, update_rx) = unbounded::<PlaybackUpdate>();
-```
+`AppRuntime::spawn` opens the Application Store first — open/migration failures are returned to the caller, never silently tolerated — and then wires everything: the playback and library sessions, the command and update channels, the event inbox, and the store port views.
 
 One shared `SqliteStore` connection serves every store port view; both session generations (library and playlist) bump inside the store's mutation impls, and the `StoreChanged` stream feeds the event inbox. The UI's `Box<dyn Transport>` and the tray's transport are both `ChannelTransport`s wired with the same shared recorder closure, so every dispatched command is reported onto one observable event inbox before being forwarded to the engine's command channel. The scan service, watcher manager, tag-edit service, and cover service are constructed over the real adapters here, and their worker threads are owned by the returned `RuntimeLifecycle`. The frontend then receives everything it renders with as one `AppRuntime` value.
 

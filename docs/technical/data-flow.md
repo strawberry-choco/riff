@@ -1,6 +1,6 @@
 # Data Flow
 
-This document walks through the three primary runtime flows in riff — playing a track, scanning a library, and resolving cover art — as step-by-step sequences. Each flow crosses several threads and crates; the filenames referenced are the real ones in the workspace. For the threads involved and the constraints that govern them, see [./threading-model.md](./threading-model.md). For how state persists in the Application Store, see [./persistence.md](./persistence.md).
+This document walks through the three primary runtime flows in riff — playing a track, scanning a library, and resolving cover art — as step-by-step sequences. Each flow crosses several threads and crates; the filenames referenced are the real ones in the workspace. For the threads involved and the constraints that govern them, see [./threading-model.md](./threading-model.md).
 
 ## Flow 1: Play a Track
 
@@ -126,28 +126,15 @@ If resolution fails at any point, the worker logs a warning and reports no image
 
 The audio engine pushes decoded samples into the output adapter's ring buffer; the cpal callback pulls from it. The engine never responds to callback requests directly. This one-directional flow keeps the real-time audio thread free of any blocking call and isolates it from the decoder's pacing.
 
-### Backpressure
-
-Backpressure lives inside the output adapter: the engine's write blocks when the lock-free ring buffer is full, so the decoder can never outrun playback. The engine still polls the command channel on a 10 ms cadence between chunks, so pause, stop, and seek stay responsive.
-
-### Drain on EOF
-
-When the decoder reaches end-of-file, the engine waits for the remaining buffer to drain through the callback before stopping the stream, so the tail of the track is not clipped. A `Stop` command during the drain discards the remaining samples immediately.
-
-### Buffer lifetime
-
-The shared buffer is not cleared on a natural stop — it drains on its own through the callback. It is cleared explicitly only at the start of a new track, on a `Stop` command, or on a `Seek`. This avoids both stale samples bleeding into a new track and unnecessary clearing during normal playback.
-
 ### Continuation ownership
 
 **Continuation** — `riff-playback/src/domain/continuation.rs` — decides what plays next. The Playback Coordinator commits play history for the finished track and then asks it, and the Audio Engine asks the same arbiter for a listener's Next or Previous, so repeat-one replay, the shuffle order, the stop-at-end rule and the Queue Fill's ordering live in one pure module rather than in the two callers. The callers keep only their own aftermath: the coordinator marks the session stopped and drops the current index, the engine tears down its decoder and output. Playback failures surface as typed notices instead of state writes.
 
 ### Cover priority
 
-Embedded cover art always wins. Only when a track has no embedded art does the resolver fall back to a filesystem image in the track's directory, checking a fixed list of common names (`cover`, `folder`, `album`, `front` with `.jpg`/`.jpeg`/`.png` extensions, matched case-insensitively). Decoded covers are cached in the service's LRU (cap 50) and rendered textures in the UI's LRU (max 50), so a track's cover is decoded at most once per session.
+Embedded art first, filesystem fallback second — the resolution order and the names the fallback accepts are defined in the **Cover Art** entry of [../reference/glossary.md](../reference/glossary.md).
 
 ## See also
 
 - [./threading-model.md](./threading-model.md) — the threads and constraints behind these flows.
-- [./persistence.md](./persistence.md) — how state persists in the Application Store.
 - [./data-model.md](./data-model.md) — the types that flow through these sequences.

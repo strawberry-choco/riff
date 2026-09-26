@@ -51,9 +51,9 @@ an intention.
   the staleness contract had one implementation instead of one copy per crate. It did
   not: the procedure — observe the generation, serve the cached value while it is
   current, otherwise load and commit — was hand-copied at every cached level across the
-  projection modules in six different spellings, and the eight paged reads above the
-  projections stayed fresh by comparing two *separate* observations of the counter, a
-  guard that can report "unchanged" across a write that did land. Both duplications are
+  projection modules, and the paged reads above the projections stayed fresh by comparing
+  two *separate* observations of the counter, a guard that can report "unchanged" across a
+  write that did land. Both duplications are
   gone: `GenerationCache::level` (`riff-persistence`, `levels.rs`) is the one
   implementation of that procedure for a cached level, and a paged listing reads one
   **Listing Page** — its total and its visible window taken under a single connection
@@ -83,26 +83,21 @@ Both are corrected here rather than left as descriptions of an intention.
   visible window are taken under **one connection acquisition**, so no committed write can
   interleave them. Which generation a cached level was filled at is the cache's business,
   not the page's. `CONTEXT.md`'s Listing Page entry now says so.
-- **Freshness moves inside `GenerationCache` for every level that can declare one.**
-  Five hand-written observe-compare-load-commit bodies now declare themselves on
-  `level`: `smart.rs`'s list (its over-serving limit rule lives in the `read` closure, which
-  is where a rule about which cached answers count belongs), `counts.rs`'s `last_scan` (the
-  cached absence is a `Some(None)` from `read`, so the tri-state slot stays and the procedure
-  does not), `playlists.rs`'s list (its cache value became a one-slot bundle, because
-  "loaded, and there are none" must not read as a miss), and both `riff-playback` caches.
-  The claim that the playback caches were merely "designed to adopt" it was too cautious —
-  `refresh`'s second freshness dimension is queue shape, and `level`'s `read` closure receives
-  the cached bundle while capturing the caller's live queue, so a shape mismatch is expressed
-  as `read` returning `None`. What blocked that cache was only `V: Default`, not the interface.
-  Measured rather than rounded: nine epoch observations fell to **four** — the two below plus
-  two in the playback `current`/`up_next` reads, which have no loader to run and so are not
-  level-shaped; they guard a `peek` by hand, which is the primitive's documented fallback use.
+- **Freshness moved inside `GenerationCache` for every level that can declare one**, and
+  the migration is complete; `playlists.rs`'s resolved-view cache is the named exception
+  below. The claim that the playback caches were merely "designed to adopt" it was too
+  cautious — `refresh`'s second freshness dimension is queue shape, and `level`'s `read`
+  closure receives the cached bundle while capturing the caller's live queue, so a shape
+  mismatch is expressed as `read` returning `None`. What blocked that cache was only
+  `V: Default`, not the interface. The playback reads, which have no loader to run and so
+  are not level-shaped, guard a `peek` by hand, which is the primitive's documented
+  fallback use.
 - **One exception is named rather than absorbed.** `playlists.rs`'s resolved-view cache
   keys on two counters, because a Library change can invalidate a Playlist's resolved rows
   while a Playlist change cannot. `level` is single-stamp by the decision above, and
   growing it for one caller is the interface widening this record's whole read-path work
   argues against. So `GenerationCache::observe()` and `slot()` stay public — for that caller,
-  and for the two playback reads that have no loader to run — and the honest description of
-  this change is a **use-site collapse — nine observations to four — not an interface
-  collapse**. If the two-counter case ever spreads, growing `level` is a decision to be
+  and for the two playback reads that have no loader to run — and the honest description
+  of this change is a **use-site collapse, not an interface collapse**. If the two-counter
+  case ever spreads, growing `level` is a decision to be
   recorded, not a refactor to be performed.

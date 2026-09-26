@@ -4819,9 +4819,25 @@ mod tests {
         // CONTEXT.md: the action is "Clear Library"; "Clear Library Cache" is
         // a retired term even though the mockup uses it.
         assert_eq!(settings::CLEAR_LIBRARY_LABEL, "Clear Library");
+        // The action's explanatory copy moved with it into the confirm dialog
+        // when the in-pane clear row was deleted (ticket 02): the footer has
+        // one note, `FOOTER_NOTE`, so the dedicated line under the button is
+        // gone. The glossary guard follows the copy that still ships.
         assert_eq!(
-            settings::CLEAR_LIBRARY_NOTE,
-            "Clear the indexed collection and rebuild it on the next scan."
+            riff_gui::ui::prompts::CLEAR_LIBRARY_CONFIRM_COPY,
+            "Remove every indexed track? Playlists and settings are kept, and the \
+             collection rebuilds on the next scan."
+        );
+        // The recovery clause the footer note used to carry must survive
+        // somewhere, or a destructive action loses its consequence.
+        assert!(
+            riff_gui::ui::prompts::CLEAR_LIBRARY_CONFIRM_COPY.contains("next scan"),
+            "the confirm copy must still say the collection rebuilds on the next scan"
+        );
+        assert!(
+            !riff_gui::ui::prompts::CLEAR_LIBRARY_CONFIRM_COPY.contains("Cache")
+                && !settings::CLEAR_LIBRARY_LABEL.contains("Cache"),
+            "no user-visible Clear Library copy may use the retired 'Cache' term"
         );
         // Ghost styling: transparent until hover, then destructive @ 10%.
         let dark = theme::Palette::dark();
@@ -4976,6 +4992,977 @@ mod tests {
         harness.get_by_label(label).click();
         harness.run();
         harness
+    }
+
+    // --- Library pane columns (ticket 04) ---------------------------------------
+
+    /// The Library pane's branch is chosen by `MIN_TWO_COL_W`, and the
+    /// boundary itself is pinned: at exactly the breakpoint the pane splits.
+    #[test]
+    fn test_library_pane_splits_two_columns_at_and_above_the_breakpoint() {
+        use riff_gui::ui::settings::{LibraryPaneColumns, settings_pane_columns};
+        use riff_gui::ui::theme::geometry::settings::{COLUMN_GAP, MIN_TWO_COL_W};
+
+        // Comfortably below: one stacked column at the full available width.
+        for width in [MIN_TWO_COL_W - 1.0, MIN_TWO_COL_W - 200.0, 284.0] {
+            assert!(
+                matches!(
+                    settings_pane_columns(width),
+                    LibraryPaneColumns::Stacked { .. }
+                ),
+                "{width}px is below MIN_TWO_COL_W ({MIN_TWO_COL_W}) and must stack"
+            );
+        }
+
+        // Exactly at the breakpoint: the token is the *minimum* width at which
+        // the pane is allowed to split, so it splits here.
+        assert!(
+            matches!(
+                settings_pane_columns(MIN_TWO_COL_W),
+                LibraryPaneColumns::TwoColumns { .. }
+            ),
+            "exactly MIN_TWO_COL_W ({MIN_TWO_COL_W}) must take the two-column branch"
+        );
+
+        // Comfortably above: two columns.
+        for width in [MIN_TWO_COL_W + 1.0, 900.0, 1400.0] {
+            assert!(
+                matches!(
+                    settings_pane_columns(width),
+                    LibraryPaneColumns::TwoColumns { .. }
+                ),
+                "{width}px is at or above MIN_TWO_COL_W and must split"
+            );
+        }
+
+        // The stacked column is the whole width, and the two columns plus the
+        // gap are exactly the whole width — neither branch loses or invents
+        // horizontal space.
+        for width in [284.0, MIN_TWO_COL_W - 1.0] {
+            let LibraryPaneColumns::Stacked { width: column } = settings_pane_columns(width) else {
+                unreachable!("narrow widths stack");
+            };
+            assert_eq!(column, width, "the stacked column takes the full width");
+        }
+        for width in [MIN_TWO_COL_W, 900.0, 1400.0] {
+            let LibraryPaneColumns::TwoColumns { left, right } = settings_pane_columns(width)
+            else {
+                unreachable!("wide widths split");
+            };
+            assert_eq!(
+                left + COLUMN_GAP + right,
+                width,
+                "both columns plus COLUMN_GAP must span the available width at {width}px"
+            );
+        }
+    }
+
+    /// The two columns are balanced — the same width each — and separated by
+    /// exactly `COLUMN_GAP`.
+    #[test]
+    fn test_library_pane_columns_are_balanced_and_separated_by_the_token_gap() {
+        use riff_gui::ui::settings::{LibraryPaneColumns, settings_pane_columns};
+        use riff_gui::ui::theme::geometry::settings::COLUMN_GAP;
+
+        for width in [620.0_f32, 621.0, 700.0, 920.0, 1400.0, 1737.0] {
+            let LibraryPaneColumns::TwoColumns { left, right } = settings_pane_columns(width)
+            else {
+                panic!("{width}px must take the two-column branch");
+            };
+            assert_eq!(
+                left, right,
+                "the columns must be balanced at {width}px: {left} vs {right}"
+            );
+            assert_eq!(
+                (left + right) / 2.0,
+                (width - COLUMN_GAP) / 2.0,
+                "each column is half the available width less half the gap, at {width}px"
+            );
+            assert!(
+                left > 0.0,
+                "each column must be usable at {width}px: {left}"
+            );
+        }
+    }
+
+    /// The pane's own focus order is reading order, in **both** branches.
+    ///
+    /// The two-column split is a layout decision, never a reordering: the
+    /// sections still read Preferences, Formats, Last Full Scan, Artwork, and
+    /// Tab still visits them in that order. The ticket-02 test only pinned the
+    /// nav's contiguous run — a mutation that swapped Preferences and Formats
+    /// inside the left column survived it, which is why this exists.
+    ///
+    /// Observed with `Node::is_focused()` after each `key_press(Tab)`, so the
+    /// assertion is about the real focus chain, not about geometry.
+    #[test]
+    fn test_settings_pane_focus_order_is_reading_order_in_both_branches() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
+        use riff_gui::ui::theme::Palette;
+
+        // One probe per focusable pane widget, in reading order. These four are
+        // the *whole* of the pane's tab chain: the format chips and the
+        // Add Library / Scan All actions are not focusable widgets in this app,
+        // so they never appear. That is why a Formats/Preferences swap is
+        // invisible here and is guarded by geometry instead — see
+        // `test_settings_pane_columns_read_left_then_right`.
+        const READING_ORDER: [&str; 4] = [
+            "Watch for changes",
+            "Skip hidden files",
+            "Rescan now",
+            "Read embedded artwork",
+        ];
+
+        let walk_order = |width: f32| {
+            let content = sample_content();
+            let palette = Palette::dark();
+            let mut cache = icons::IconCache::new();
+            let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
+                egui_kittest::Harness::builder()
+                    .with_size(egui::vec2(width, 900.0))
+                    .with_pixels_per_point(1.0)
+                    .build_ui_state(
+                        move |ui, actions: &mut Vec<SettingsAction>| {
+                            actions.extend(show_settings_modal(
+                                ui,
+                                &mut cache,
+                                &palette,
+                                &content,
+                                SettingsSection::Library,
+                            ));
+                        },
+                        Vec::new(),
+                    );
+            harness.run();
+
+            let mut seen: Vec<String> = Vec::new();
+            for _ in 0..40 {
+                harness.key_press(egui::Key::Tab);
+                harness.run();
+                for label in READING_ORDER {
+                    if harness
+                        .query_by_label(label)
+                        .is_some_and(|n| n.is_focused())
+                        && seen.last().map(String::as_str) != Some(label)
+                    {
+                        seen.push(label.to_owned());
+                    }
+                }
+            }
+            seen
+        };
+
+        // Wide: the two-column branch. Narrow: the stacked fallback. Both must
+        // read the same way.
+        for (label, width) in [("two-column", 1280.0_f32), ("stacked", 520.0)] {
+            assert_eq!(
+                walk_order(width),
+                READING_ORDER,
+                "the {label} branch must visit the pane in reading order"
+            );
+        }
+    }
+
+    // --- Narrow-width row reflow (ticket 04 follow-up) -------------------------
+
+    /// The reflow activates below `LIBRARY_ROW_STACK_W` and not at or above it,
+    /// with the boundary itself pinned.
+    #[test]
+    fn test_row_flow_switches_at_the_stack_threshold() {
+        use riff_gui::ui::settings::{RowFlow, row_flow, row_height};
+        use riff_gui::ui::theme::geometry::settings::{LIBRARY_ROW_H, LIBRARY_ROW_STACK_W};
+
+        for width in [LIBRARY_ROW_STACK_W - 1.0, 205.0, 197.0, 100.0] {
+            assert_eq!(
+                row_flow(width),
+                RowFlow::Stacked,
+                "{width}px is below the threshold and must stack"
+            );
+        }
+        // Exactly at the threshold: like the two-column breakpoint, the token is
+        // the *minimum* width at which the row is allowed to stay inline.
+        assert_eq!(row_flow(LIBRARY_ROW_STACK_W), RowFlow::Inline);
+        for width in [LIBRARY_ROW_STACK_W + 1.0, 605.0, 965.0, 2000.0] {
+            assert_eq!(
+                row_flow(width),
+                RowFlow::Inline,
+                "{width}px is at or above the threshold and must stay inline"
+            );
+        }
+        assert!(
+            row_height(RowFlow::Stacked) > row_height(RowFlow::Inline),
+            "a stacked row must be taller than an inline one"
+        );
+        assert_eq!(row_height(RowFlow::Inline), LIBRARY_ROW_H);
+    }
+
+    /// The reflow is a **no-op at every already-pinned width**. This is what
+    /// protects the six Library-pane goldens: they render at 920 and 1280
+    /// stages, whose rows measure 605px and 965px — both far above the
+    /// threshold — so they must take the inline branch and the row's exact
+    /// historical height.
+    #[test]
+    fn test_row_reflow_is_a_noop_at_the_pinned_widths() {
+        use riff_gui::ui::settings::{RowFlow, row_flow, row_height};
+        use riff_gui::ui::theme::geometry::settings::LIBRARY_ROW_H;
+
+        // The measured row widths of the pinned renders, and the narrowest
+        // already-pinned row anywhere (a preference row inside the two-column
+        // Library layout).
+        for pinned in [605.0_f32, 965.0, 461.5] {
+            assert_eq!(
+                row_flow(pinned),
+                RowFlow::Inline,
+                "{pinned}px is an already-pinned row width and must not reflow"
+            );
+            assert_eq!(row_height(row_flow(pinned)), LIBRARY_ROW_H);
+        }
+    }
+
+    /// At the minimum stage no control is clipped and nothing overlaps.
+    ///
+    /// This is the regression guard for the defect the reflow fixes: before it,
+    /// the row's control cluster (~254px) was laid into a ~205px row, so Scan
+    /// overprinted the path and the strip ran off the card's right edge.
+    ///
+    /// The path itself is painted text, not a widget, so it has no query-tree
+    /// node; the guard is that the row takes its three-band stacked form, whose
+    /// bands are disjoint by construction, plus that every control node is
+    /// inside the card and does not overlap its neighbours.
+    #[test]
+    fn test_minimum_stage_library_row_has_no_overlap_or_clipping() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::{
+            RowFlow, SettingsSection, row_flow, row_height, show_settings_modal,
+        };
+        use riff_gui::ui::theme::Palette;
+        use riff_gui::ui::theme::geometry::window::MIN_STAGE_SIZE;
+
+        let path = sample_content().libraries[0]
+            .path
+            .to_string_lossy()
+            .to_string();
+        let content = sample_content();
+        let palette = Palette::dark();
+        let mut cache = icons::IconCache::new();
+        let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
+            egui_kittest::Harness::builder()
+                .with_size(MIN_STAGE_SIZE)
+                .with_pixels_per_point(1.0)
+                .build_ui_state(
+                    move |ui, actions: &mut Vec<SettingsAction>| {
+                        actions.extend(show_settings_modal(
+                            ui,
+                            &mut cache,
+                            &palette,
+                            &content,
+                            SettingsSection::Library,
+                        ));
+                    },
+                    Vec::new(),
+                );
+        harness.run();
+
+        // The row must have reflowed: the min-stage pane is far below the
+        // threshold, and the stacked form is three bands, so the path band and
+        // the control band cannot share a line.
+        assert_eq!(row_flow(197.0), RowFlow::Stacked);
+
+        // Every control the query tree can see, and where it sits. Scan and
+        // Watch carry path-qualified accessibility labels, so they are queried
+        // by those rather than by their painted text.
+        let labels = [
+            format!("Scan {path}"),
+            format!("Watch {path}"),
+            String::from("Remove library"),
+        ];
+        let mut controls: Vec<(String, egui::Rect)> = labels
+            .iter()
+            .filter_map(|label| {
+                harness
+                    .query_by_label(label)
+                    .map(|node| (label.clone(), node.rect()))
+            })
+            .collect();
+        assert!(
+            controls.len() >= 2,
+            "the library row's controls must be queryable at the minimum stage; found {:?}",
+            controls.iter().map(|(l, _)| l).collect::<Vec<_>>()
+        );
+        controls.sort_by(|a, b| a.1.left().total_cmp(&b.1.left()));
+
+        // Nothing runs off the pane: the rightmost control ends before the
+        // stage's right edge, which is where the old strip overflowed to.
+        for (label, rect) in &controls {
+            assert!(
+                rect.right() <= MIN_STAGE_SIZE.x,
+                "{label} runs off the right edge: {} > {}",
+                rect.right(),
+                MIN_STAGE_SIZE.x
+            );
+            assert!(
+                rect.width() > 0.0 && rect.height() > 0.0,
+                "{label} must be laid out with a real rect: {rect:?}"
+            );
+        }
+        // And no two controls overlap.
+        for pair in controls.windows(2) {
+            let (a, ra) = &pair[0];
+            let (b, rb) = &pair[1];
+            assert!(
+                ra.right() <= rb.left()
+                    || rb.right() <= ra.left()
+                    || ra.bottom() <= rb.top()
+                    || rb.bottom() <= ra.top(),
+                "{a} {ra:?} and {b} {rb:?} overlap"
+            );
+        }
+        // Sanity: the stacked height really is three bands, so the path band
+        // and the strip band are disjoint.
+        assert!(
+            row_height(RowFlow::Stacked)
+                > 2.0 * riff_gui::ui::theme::geometry::settings::SMALL_BTN_H
+        );
+    }
+
+    /// A preference description wraps to its text column instead of being
+    /// truncated, and the row grows to fit it.
+    #[test]
+    fn test_preference_description_wraps_instead_of_truncating() {
+        use riff_gui::ui::settings::{
+            RowFlow, preference_row_height, preference_text_width, row_flow,
+        };
+        use riff_gui::ui::theme::geometry::settings::PREF_ROW_H;
+
+        let narrow = preference_text_width(197.0);
+        let wide = preference_text_width(605.0);
+        assert!(narrow > 0.0, "the narrow text column must still be usable");
+        assert!(
+            narrow < wide,
+            "a narrower row must leave a narrower text column: {narrow} vs {wide}"
+        );
+        // The column is what is left after the toggle, so the description can
+        // never be laid out wider than the row minus the toggle.
+        assert!(narrow < 197.0, "the text column must exclude the toggle");
+
+        // A single-line description needs no extra height; a wrapped one does,
+        // and the row is never shorter than its inline height.
+        let title_h = 16.0_f32;
+        assert_eq!(
+            preference_row_height(RowFlow::Inline, title_h, title_h),
+            PREF_ROW_H,
+            "the inline height ignores the measured text entirely"
+        );
+        let wrapped = preference_row_height(RowFlow::Stacked, title_h, title_h * 3.0);
+        assert!(
+            wrapped > PREF_ROW_H,
+            "a three-line description must grow the row past PREF_ROW_H: {wrapped}"
+        );
+        assert_eq!(
+            preference_row_height(RowFlow::Stacked, title_h, 0.0),
+            PREF_ROW_H,
+            "a stacked row is never shorter than the inline height"
+        );
+        assert_eq!(row_flow(197.0), RowFlow::Stacked);
+    }
+
+    // --- Format-chip wrapping (ticket 05) --------------------------------------
+
+    /// The seven format chips' measured label widths, in `AUDIO_EXTENSIONS`
+    /// order, taken from the vendored Inter set at `TEXT_XS` with a temporary
+    /// probe inside `formats_card`:
+    ///
+    /// ```text
+    /// MP3 26.19   M4A 27.34   AAC 25.56   OPUS 33.53
+    /// OGG 27.16   FLAC 30.72  WAV 27.44
+    /// ```
+    ///
+    /// The chip widths add `CHIP_LABEL_PAD * 2` to each, and a single line adds
+    /// six `CHIP_GAP`s — the arithmetic behind `CHIP_ROW_NO_WRAP_W`. These are
+    /// recorded constants rather than measured live: this test is about the
+    /// wrapping arithmetic, and pinning the font metrics here would make it a
+    /// font test that breaks on an unrelated type change. The goldens are what
+    /// catch a real metric change.
+    const MEASURED_CHIP_LABELS: [f32; 7] = [26.19, 27.34, 25.56, 33.53, 27.16, 30.72, 27.44];
+
+    /// The chip widths, i.e. the measured labels plus the chip's own padding.
+    fn measured_chip_widths() -> Vec<f32> {
+        use riff_gui::ui::theme::geometry::settings::CHIP_LABEL_PAD;
+        MEASURED_CHIP_LABELS
+            .iter()
+            .map(|label| CHIP_LABEL_PAD * 2.0 + label)
+            .collect()
+    }
+
+    /// The content column the formats card gets at `MIN_STAGE_SIZE`, measured
+    /// the same way (the pane's frame inset less the card's own inner margin).
+    const MIN_STAGE_CHIP_AVAILABLE: f32 = 181.0;
+
+    /// Content columns at the widths the goldens already pin: the 920-stage
+    /// Library goldens and the 1280 two-column golden, both of which show all
+    /// seven chips on one line today and must keep doing so.
+    const WIDE_CHIP_AVAILABLE: [f32; 2] = [581.0, 445.5];
+
+    /// The chip row wraps below the measured threshold and does not at or above
+    /// it, with the boundary pinned exactly as `row_flow` pins its own.
+    #[test]
+    fn test_format_chip_row_wraps_only_below_the_measured_threshold() {
+        use riff_gui::ui::settings::{ChipFlow, chip_flow};
+        use riff_gui::ui::theme::geometry::settings::CHIP_ROW_NO_WRAP_W;
+
+        for width in [
+            MIN_STAGE_CHIP_AVAILABLE,
+            361.0,
+            CHIP_ROW_NO_WRAP_W - 1.0,
+            100.0,
+        ] {
+            assert_eq!(
+                chip_flow(width),
+                ChipFlow::Wrapped,
+                "{width}px is below the measured cluster and must wrap"
+            );
+        }
+        assert_eq!(
+            chip_flow(CHIP_ROW_NO_WRAP_W),
+            ChipFlow::OneLine,
+            "the token is the minimum width at which one line is allowed"
+        );
+        for width in [CHIP_ROW_NO_WRAP_W + 1.0, 581.0, 445.5, 2000.0] {
+            assert_eq!(
+                chip_flow(width),
+                ChipFlow::OneLine,
+                "{width}px fits the measured cluster and must stay on one line"
+            );
+        }
+
+        // The token has to agree with the measurement it claims to come from,
+        // or the two drift apart and the card sizes itself for one form while
+        // painting the other.
+        let cluster: f32 = measured_chip_widths().iter().sum::<f32>()
+            + riff_gui::ui::theme::geometry::settings::CHIP_GAP
+                * f32::from(u8::try_from(MEASURED_CHIP_LABELS.len() - 1).unwrap());
+        assert!(
+            CHIP_ROW_NO_WRAP_W >= cluster,
+            "the token {} must not be below the measured cluster {cluster:.2}",
+            CHIP_ROW_NO_WRAP_W
+        );
+        assert!(
+            CHIP_ROW_NO_WRAP_W - cluster < 1.0,
+            "the token should round the measurement up to whole pixels, not pad it"
+        );
+    }
+
+    /// At the minimum stage every chip is fully inside the card and none is
+    /// clipped, and at every wide width the layout is untouched.
+    #[test]
+    fn test_format_chips_all_fit_inside_the_card_at_the_minimum_stage() {
+        use riff_gui::ui::settings::{chip_block_height, chip_placements};
+        use riff_gui::ui::theme::geometry::settings::{CHIP_GAP, CHIP_H, CHIP_ROW_NO_WRAP_W};
+
+        let widths = measured_chip_widths();
+        let placements = chip_placements(&widths, MIN_STAGE_CHIP_AVAILABLE);
+
+        // This is the defect the wrap fixes: seven chips needing 413.94px in a
+        // 181px column, so the pre-wrap cursor ran off the card and clipped
+        // OPUS with a fifth chip peeking past the edge.
+        let needed: f32 = widths.iter().sum();
+        assert!(
+            needed > MIN_STAGE_CHIP_AVAILABLE,
+            "the measurement that motivates the wrap: {needed:.2} > {MIN_STAGE_CHIP_AVAILABLE}"
+        );
+
+        // Every chip lands inside the column, and on its own line where it must.
+        for (label, placement) in MEASURED_CHIP_LABELS.iter().zip(&placements) {
+            assert!(
+                placement.left >= 0.0,
+                "a chip must never start left of the column: {placement:?}"
+            );
+            assert!(
+                placement.left + placement.width <= MIN_STAGE_CHIP_AVAILABLE,
+                "chip {label} is clipped: right edge {:.2} > {MIN_STAGE_CHIP_AVAILABLE}",
+                placement.left + placement.width
+            );
+        }
+        assert!(
+            placements.iter().filter(|p| p.row > 0).count() > 0,
+            "the min stage must actually wrap"
+        );
+
+        // No two chips on the same row may overlap.
+        for (i, a) in placements.iter().enumerate() {
+            for b in &placements[i + 1..] {
+                if a.row != b.row {
+                    continue;
+                }
+                assert!(
+                    a.left + a.width <= b.left,
+                    "chips on row {} overlap: {a:?} and {b:?}",
+                    a.row
+                );
+            }
+        }
+
+        // The block grows to fit the rows it actually has, and the card's
+        // height follows the block.
+        let rows = placements.iter().map(|p| p.row + 1).max().unwrap_or(0);
+        assert!(rows >= 2, "the min stage needs more than one line: {rows}");
+        assert!(
+            chip_block_height(&placements) > CHIP_H,
+            "a wrapped block must be taller than one chip: {} vs {CHIP_H}",
+            chip_block_height(&placements)
+        );
+
+        // The no-op half, which is the part the goldens depend on: at every
+        // pinned wide width there is one line, at the offsets the pre-wrap
+        // running cursor produced, and the block is exactly one chip tall.
+        for available in WIDE_CHIP_AVAILABLE {
+            let wide = chip_placements(&widths, available);
+            assert!(
+                wide.iter().all(|p| p.row == 0),
+                "{available}px fits on one line but wrapped: {wide:?}"
+            );
+            assert_eq!(
+                chip_block_height(&wide),
+                CHIP_H,
+                "a one-line block must be exactly one chip tall"
+            );
+            // The running cursor: each chip starts where the previous one plus
+            // its own width plus one gap ends.
+            let mut expected = 0.0_f32;
+            for (placement, width) in wide.iter().zip(&widths) {
+                assert_eq!(placement.left, expected, "one-line offsets must not move");
+                expected += width + CHIP_GAP;
+            }
+        }
+
+        // The exact boundary, which the two widths above cannot reach: they all
+        // leave more than a gap of slack, so they would pass even with a cursor
+        // that wrongly counted the trailing gap as occupied. At the token's own
+        // value the cluster fills the column to within a pixel, so this is where
+        // "the last chip does not wrap on its own" is actually decided.
+        let at_threshold = chip_placements(&widths, CHIP_ROW_NO_WRAP_W);
+        assert!(
+            at_threshold.iter().all(|p| p.row == 0),
+            "the last chip must not wrap on its own at the threshold: {at_threshold:?}"
+        );
+        assert_eq!(chip_block_height(&at_threshold), CHIP_H);
+        // One pixel less and the final chip does have to move down.
+        let just_under = chip_placements(&widths, CHIP_ROW_NO_WRAP_W - 1.0);
+        assert!(
+            just_under.iter().filter(|p| p.row > 0).count() == 1,
+            "one pixel short of the cluster, exactly the last chip wraps: {just_under:?}"
+        );
+    }
+
+    /// The two-column branch *reads* left column then right column, and the
+    /// stacked branch reads strictly top to bottom.
+    ///
+    /// Guarded by rendered geometry through the query tree. The honest limit:
+    /// the format chips emit no accessible node, so they are neither focusable
+    /// nor queryable — Preferences/Formats order *within* the left column is
+    /// therefore not machine-guardable today and rests on golden review. What
+    /// this pins is the left/right split and the vertical order of the four
+    /// queryable pane widgets, in both branches.
+    #[test]
+    fn test_settings_pane_columns_read_left_then_right() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
+        use riff_gui::ui::theme::Palette;
+
+        /// Tall enough that the whole pane is laid out unclipped, so every
+        /// probed widget is visible in the first frame.
+        const PANE_PROBE_H: f32 = 1600.0;
+
+        /// The four pane widgets the query tree can see, in reading order.
+        const PROBED: [&str; 4] = [
+            "Watch for changes",
+            "Skip hidden files",
+            "Rescan now",
+            "Read embedded artwork",
+        ];
+
+        let render = |width: f32| {
+            let content = sample_content();
+            let palette = Palette::dark();
+            let mut cache = icons::IconCache::new();
+            let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
+                egui_kittest::Harness::builder()
+                    .with_size(egui::vec2(width, PANE_PROBE_H))
+                    .with_pixels_per_point(1.0)
+                    .build_ui_state(
+                        move |ui, actions: &mut Vec<SettingsAction>| {
+                            actions.extend(show_settings_modal(
+                                ui,
+                                &mut cache,
+                                &palette,
+                                &content,
+                                SettingsSection::Library,
+                            ));
+                        },
+                        Vec::new(),
+                    );
+            harness.run();
+            // All four rects are read in ONE frame, at ONE scroll position.
+            // Scrolling each label into view first would move the pane between
+            // measurements and make the tops incomparable — which silently
+            // disarmed the ordering assertions (a mutation that put Artwork
+            // above Last Full Scan survived until this was fixed).
+            PROBED
+                .iter()
+                .map(|label| {
+                    harness
+                        .query_by_label(label)
+                        .unwrap_or_else(|| {
+                            panic!("{label} must be visible at {width}px without scrolling")
+                        })
+                        .rect()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Wide: the two-column branch. Preferences/Formats (left) sit entirely
+        // left of Last Full Scan/Artwork (right).
+        let wide = render(1280.0);
+        let (watch, skip, rescan, embedded) = (wide[0], wide[1], wide[2], wide[3]);
+        assert!(
+            watch.right() < rescan.left(),
+            "Preferences is in the left column and must sit entirely left of the scan card: \
+             {} vs {}",
+            watch.right(),
+            rescan.left()
+        );
+        assert!(
+            skip.right() < rescan.left(),
+            "the left column must stay clear of the right column"
+        );
+        assert!(
+            embedded.left() > rescan.left(),
+            "Artwork reads below Last Full Scan inside the right column"
+        );
+        assert!(
+            embedded.top() > rescan.top(),
+            "Artwork must read below Last Full Scan in the right column"
+        );
+        assert!(
+            skip.top() > watch.top(),
+            "Preferences reads top to bottom inside the left column"
+        );
+
+        // Narrow: one stack, strictly top to bottom across all four sections.
+        let narrow = render(520.0);
+        for pair in narrow.windows(2) {
+            assert!(
+                pair[0].top() < pair[1].top(),
+                "the stacked branch reads top to bottom: {} ({}) must precede {} ({})",
+                pair[0].center().y,
+                pair[0].top(),
+                pair[1].center().y,
+                pair[1].top()
+            );
+        }
+    }
+
+    /// Both branches keep the *same* scroll area, so a short window scrolls
+    /// rather than clipping and crossing the breakpoint does not orphan the
+    /// scroll offset.
+    ///
+    /// Asserted behaviourally, not textually. The invariant is **"the offset is
+    /// not reset"**, not "the widget lands at the same pixel": the two branches
+    /// have different content heights, so a correctly-preserved offset puts the
+    /// content somewhere different. A branch with its own `id_salt` builds a
+    /// second scroll area starting at offset zero, which is what this catches.
+    #[test]
+    fn test_library_pane_scroll_offset_survives_a_branch_switch() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
+        use riff_gui::ui::theme::Palette;
+
+        // A short window, narrow enough for the stacked branch, so the pane is
+        // genuinely taller than the viewport and scrolling moves something.
+        const SHORT: f32 = 456.0;
+        const NARROW: f32 = 520.0;
+        const WIDE: f32 = 1280.0;
+
+        let drive = |width: f32| {
+            let content = sample_content();
+            let palette = Palette::dark();
+            let mut cache = icons::IconCache::new();
+            let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
+                egui_kittest::Harness::builder()
+                    .with_size(egui::vec2(width, SHORT))
+                    .with_pixels_per_point(1.0)
+                    .build_ui_state(
+                        move |ui, actions: &mut Vec<SettingsAction>| {
+                            actions.extend(show_settings_modal(
+                                ui,
+                                &mut cache,
+                                &palette,
+                                &content,
+                                SettingsSection::Library,
+                            ));
+                        },
+                        Vec::new(),
+                    );
+            harness.run();
+            harness
+        };
+
+        // Never scrolled, wide: where a *reset* scroll area would put the widget.
+        let fresh = drive(WIDE);
+        let wide_unscrolled = fresh.get_by_label("Rescan now").rect().top();
+        drop(fresh);
+
+        // Scroll the stacked branch, then cross the breakpoint in the SAME
+        // context, holding the height so only the branch changes.
+        let mut harness = drive(NARROW);
+        let narrow_unscrolled = harness.get_by_label("Rescan now").rect().top();
+        for _ in 0..8 {
+            harness.get_by_label("Rescan now").scroll_down();
+            harness.run();
+        }
+        let narrow_scrolled = harness.get_by_label("Rescan now").rect().top();
+        assert!(
+            narrow_scrolled < narrow_unscrolled,
+            "the pane must actually scroll in a short window: {narrow_unscrolled} -> \
+             {narrow_scrolled}"
+        );
+
+        harness.set_size(egui::vec2(WIDE, SHORT));
+        harness.run();
+        let wide_after_switch = harness.get_by_label("Rescan now").rect().top();
+        assert!(
+            (wide_after_switch - wide_unscrolled).abs() > 1.0,
+            "crossing the breakpoint must not reset the pane's scroll: the two-column \
+             branch shows Rescan now at {wide_after_switch}, but an unscrolled pane would \
+             show it at {wide_unscrolled} — a match means the stacked branch built its own \
+             scroll area"
+        );
+    }
+
+    /// The Artwork card holds only "Read embedded artwork" (ticket 03).
+    ///
+    /// The "Missing artwork" strategy row and the separator above nothing are
+    /// gone, so neither its title nor its "Generated colour" stand-in chip may
+    /// be painted. Asserted through the query tree rather than pixels.
+    #[test]
+    fn test_artwork_card_holds_only_the_read_embedded_preference() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
+
+        let content = sample_content();
+        let palette = theme::Palette::dark();
+        let mut cache = icons::IconCache::new();
+        let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
+            egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1280.0, 840.0))
+                .with_pixels_per_point(1.0)
+                .build_ui_state(
+                    move |ui, actions: &mut Vec<SettingsAction>| {
+                        actions.extend(show_settings_modal(
+                            ui,
+                            &mut cache,
+                            &palette,
+                            &content,
+                            SettingsSection::Library,
+                        ));
+                    },
+                    Vec::new(),
+                );
+        harness.run();
+
+        assert!(
+            harness.query_by_label("Missing artwork").is_none(),
+            "the Missing artwork strategy row must not be rendered"
+        );
+        assert!(
+            harness.query_by_label("Generated colour").is_none(),
+            "its generated-colour stand-in chip must not be rendered either"
+        );
+        assert!(
+            harness.query_by_label("Read embedded artwork").is_some(),
+            "the artwork card still holds the Read embedded artwork preference"
+        );
+    }
+
+    /// The Last Full Scan card must not resize as a scan's error count moves.
+    ///
+    /// The golden fixture hardcodes `errors: 3`, so no golden exercises the
+    /// zero case and the "still occupies its line" rule is unpinnable by
+    /// pixels. This drives the real pane at `errors: 0` and `errors: 5` and
+    /// asserts the card's geometry is identical.
+    ///
+    /// The probe is the card's own "Rescan now" button: it is laid out inside
+    /// the card, so if the card's height moved the button's rect would move
+    /// with it. The pure seam `scan_card_lines` is checked too, so the reason
+    /// is pinned as well as the symptom — the error line is always present,
+    /// and only its colour changes.
+    #[test]
+    fn test_scan_card_height_is_stable_across_error_counts() {
+        use riff_gui::ui::settings::{
+            SettingsSection, scan_card_height, scan_card_lines, scan_line_color,
+            show_settings_modal,
+        };
+        use riff_gui::ui::theme::Palette;
+        use riff_gui::ui::theme::geometry::settings::SCAN_CARD_H;
+
+        // The pure seam: three lines always, the error line's colour keyed to
+        // whether the count is non-zero.
+        let summary = |errors: usize| riff_backend::app::store::FullScanSummary {
+            at: std::time::SystemTime::now(),
+            files: 1284,
+            errors,
+        };
+        for errors in [0_usize, 1, 3, 999] {
+            let lines = scan_card_lines(Some(&summary(errors)));
+            assert_eq!(
+                lines.iter().count(),
+                riff_gui::ui::settings::ScanCardLines::LINES,
+                "the card must always paint three lines (errors = {errors})"
+            );
+            assert_eq!(
+                lines.error.is_signal,
+                errors > 0,
+                "the error line reads as a signal exactly when the count is non-zero \
+                 (errors = {errors})"
+            );
+        }
+        // No scan recorded still paints three lines, so the card cannot
+        // collapse on the very first run either.
+        assert_eq!(
+            scan_card_lines(None).iter().count(),
+            riff_gui::ui::settings::ScanCardLines::LINES,
+            "a page with no scan recorded still paints three lines"
+        );
+
+        // The error line wears the error role exactly when the count is
+        // non-zero, and the muted ink rung otherwise — including at zero.
+        for errors in [0_usize, 1, 3, 999] {
+            let lines = scan_card_lines(Some(&summary(errors)));
+            let dark = Palette::dark();
+            assert_eq!(
+                scan_line_color(&lines.error, &dark),
+                if errors > 0 { dark.error } else { dark.ink_3 },
+                "the error line's colour must track whether the count is non-zero \
+                 (errors = {errors})"
+            );
+            // The stamp is primary ink, never the error role.
+            assert_eq!(
+                scan_line_color(&lines.stamp, &dark),
+                dark.ink_3,
+                "only the error count may take the error role"
+            );
+        }
+
+        // The height the card allocates is a function of the line count and
+        // nothing else: every outcome allocates the same height.
+        for errors in [0_usize, 1, 3, 999] {
+            let lines = scan_card_lines(Some(&summary(errors)));
+            assert_eq!(
+                scan_card_height(&lines),
+                SCAN_CARD_H,
+                "the card must allocate SCAN_CARD_H whatever the counts (errors = {errors})"
+            );
+        }
+        assert_eq!(scan_card_height(&scan_card_lines(None)), SCAN_CARD_H);
+
+        // The rendered card: identical rect for a zero-error and a
+        // many-error scan.
+        let button_rect = |errors| {
+            let content = SettingsContent {
+                last_scan: Some(summary(errors)),
+                ..sample_content()
+            };
+            let palette = Palette::dark();
+            let mut cache = icons::IconCache::new();
+            let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
+                egui_kittest::Harness::builder()
+                    .with_size(egui::vec2(1280.0, 840.0))
+                    .with_pixels_per_point(1.0)
+                    .build_ui_state(
+                        move |ui, actions: &mut Vec<SettingsAction>| {
+                            actions.extend(show_settings_modal(
+                                ui,
+                                &mut cache,
+                                &palette,
+                                &content,
+                                SettingsSection::Library,
+                            ));
+                        },
+                        Vec::new(),
+                    );
+            harness.run();
+            use egui_kittest::kittest::Queryable;
+            let rect = harness.get_by_label("Rescan now").rect();
+            // Sanity: the probe really is the card, so a moved rect cannot be
+            // explained by the button being somewhere else entirely.
+            assert!(
+                rect.height() > 0.0 && rect.width() > 0.0,
+                "the Rescan now button must be laid out (errors = {errors})"
+            );
+            rect
+        };
+
+        let zero = button_rect(0);
+        let many = button_rect(5);
+        assert_eq!(
+            zero, many,
+            "the scan card must not move when the error count changes from 0 to 5"
+        );
+        assert!(
+            SCAN_CARD_H >= zero.height(),
+            "the card's token height must hold its action button"
+        );
+        // And the probe really does sit inside a card of the token height.
+        assert!(
+            zero.height() > 0.0 && zero.height() <= SCAN_CARD_H,
+            "the Rescan now button must fit the card's token height"
+        );
+    }
+
+    /// The page footer is part of the page frame, not the Library arm, so the
+    /// destructive Clear Library action is offered by every section rather than
+    /// only by Library. This drives each section in turn and clicks the real
+    /// footer button.
+    ///
+    /// Note the button is *not* scrolled into view first: the footer sits
+    /// outside the pane's `ScrollArea`, which is the point of moving it.
+    #[test]
+    fn test_clear_library_is_reachable_from_every_settings_section() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
+
+        for section in SettingsSection::ALL {
+            let content = sample_content();
+            let palette = theme::Palette::dark();
+            let mut cache = icons::IconCache::new();
+            let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
+                egui_kittest::Harness::builder()
+                    .with_size(egui::vec2(1280.0, 840.0))
+                    .with_pixels_per_point(1.0)
+                    .build_ui_state(
+                        move |ui, actions: &mut Vec<SettingsAction>| {
+                            actions.extend(show_settings_modal(
+                                ui, &mut cache, &palette, &content, section,
+                            ));
+                        },
+                        Vec::new(),
+                    );
+            harness.run();
+
+            assert!(
+                harness.query_by_label("Clear Library").is_some(),
+                "the footer must offer Clear Library on the {:?} section",
+                section.label()
+            );
+            harness.get_by_label("Clear Library").click();
+            harness.run();
+            assert!(
+                harness.state().contains(&SettingsAction::ClearLibrary),
+                "clicking the footer action on the {:?} section must report ClearLibrary",
+                section.label()
+            );
+        }
     }
 
     #[test]
@@ -8410,6 +9397,295 @@ mod browser_column_ui_tests {
                 }
             }
         }
+    }
+
+    // --- Settings page frame geometry (ticket 02) -------------------------------
+    //
+    // The full-stage Settings page is the one composition whose *intent* cannot
+    // be read off a golden: "fills the stage", "nav is exactly NAV_W" and
+    // "footer pinned to the bottom" are all claims about rects. They are
+    // asserted here through the same seam the view draws from —
+    // `settings::settings_page_rects` — so the test and the view cannot
+    // disagree about the frame, exactly as `record_stage_slots` guarantees for
+    // the elastic stage's columns.
+
+    /// The full-stage page frame fills the stage: it is inset by `PAGE_PAD` on
+    /// every side and nowhere else, and it is never capped to a card width.
+    ///
+    /// The centred card this replaced shrank to `MODAL_MAX_W` (760) on any wide
+    /// window and floated inside a `MODAL_PAD` (32) backdrop, so a 1600px stage
+    /// left 420px of empty margin on each side. That is the regression this
+    /// guards: the page must grow with the stage.
+    #[test]
+    fn test_settings_page_fills_the_stage_with_no_backdrop_margin() {
+        use riff_gui::ui::settings::settings_page_rects;
+        use riff_gui::ui::theme::geometry::settings as geo;
+
+        for stage in [1600.0_f32, 1280.0, 980.0, 760.0] {
+            let available =
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(stage, 840.0));
+            let r = settings_page_rects(available);
+
+            // Inset by PAGE_PAD on every side — and by PAGE_PAD *only*.
+            assert_eq!(
+                (
+                    r.page.left() - available.left(),
+                    available.right() - r.page.right()
+                ),
+                (geo::PAGE_PAD, geo::PAGE_PAD),
+                "the page is inset by PAGE_PAD left and right at a {stage}px stage"
+            );
+            assert_eq!(
+                (
+                    r.page.top() - available.top(),
+                    available.bottom() - r.page.bottom()
+                ),
+                (geo::PAGE_PAD, geo::PAGE_PAD),
+                "the page is inset by PAGE_PAD top and bottom at a {stage}px stage"
+            );
+
+            // No width cap: the page takes everything the stage offers minus
+            // the inset, so a wide window is not letterboxed.
+            assert_eq!(
+                r.page.width(),
+                stage - 2.0 * geo::PAGE_PAD,
+                "the page fills the {stage}px stage rather than capping at a card width"
+            );
+            assert!(
+                r.page.width() > 760.0 || stage < 812.0,
+                "a {stage}px stage must not produce a 760px floating card"
+            );
+        }
+    }
+
+    /// The nav column keeps its token width, and the header spans the whole
+    /// page while the footer is pinned to the page's bottom edge.
+    #[test]
+    fn test_settings_page_frame_pins_header_nav_and_footer() {
+        use riff_gui::ui::settings::settings_page_rects;
+        use riff_gui::ui::theme::geometry::settings as geo;
+
+        let available = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 840.0));
+        let r = settings_page_rects(available);
+
+        // Header: full page width, sitting at the page's top.
+        assert_eq!(
+            r.header.width(),
+            r.page.width(),
+            "the header spans the page"
+        );
+        assert_eq!(
+            r.header.left(),
+            r.page.left(),
+            "the header starts at the page edge"
+        );
+        assert_eq!(
+            r.header.right(),
+            r.page.right(),
+            "the header ends at the page edge"
+        );
+        assert_eq!(
+            r.header.top(),
+            r.page.top(),
+            "the header sits at the page top"
+        );
+
+        // Nav: exactly NAV_W, full body height, hard against the page's left.
+        assert_eq!(r.nav.width(), geo::NAV_W, "the nav column is NAV_W wide");
+        assert_eq!(
+            r.nav.left(),
+            r.page.left(),
+            "the nav is flush with the page's left edge"
+        );
+        assert_eq!(
+            r.nav.height(),
+            r.body.height(),
+            "the nav spans the body's full height"
+        );
+
+        // Pane: right of the nav by the hairline plus NAV_GAP.
+        assert_eq!(
+            r.pane.top(),
+            r.body.top(),
+            "the pane starts at the body's top"
+        );
+        assert_eq!(
+            r.pane.bottom(),
+            r.body.bottom(),
+            "the pane reaches the body's bottom"
+        );
+        assert!(
+            r.pane.left() >= r.nav.right() + geo::NAV_GAP,
+            "the pane clears the nav by NAV_GAP: pane.left {} vs nav.right {} + {}",
+            r.pane.left(),
+            r.nav.right(),
+            geo::NAV_GAP
+        );
+
+        // Footer: full page width, pinned to the page's BOTTOM edge. This is
+        // the assertion that distinguishes "pinned" from "floating mid-pane".
+        assert_eq!(
+            r.footer.width(),
+            r.page.width(),
+            "the footer spans the page"
+        );
+        assert_eq!(
+            r.footer.bottom(),
+            r.page.bottom(),
+            "the footer is pinned to the page's bottom"
+        );
+        assert_eq!(
+            r.footer.left(),
+            r.page.left(),
+            "the footer starts at the page edge"
+        );
+        assert_eq!(
+            r.footer.right(),
+            r.page.right(),
+            "the footer ends at the page edge"
+        );
+        assert_eq!(
+            r.footer.height(),
+            geo::FOOTER_H,
+            "the footer is FOOTER_H tall"
+        );
+
+        // The body is what is left over, and it is positive: the footer is
+        // pinned by the body taking the fill, not by an empty gap.
+        assert_eq!(
+            r.body.top(),
+            r.header.bottom(),
+            "the body begins under the header"
+        );
+        assert_eq!(
+            r.body.bottom(),
+            r.footer.top(),
+            "the body ends above the footer"
+        );
+        assert!(
+            r.body.height() > 0.0,
+            "the body must keep a positive height at 840px tall: {:?}",
+            r.body
+        );
+    }
+
+    /// Focus order in the settings page falls out of widget-creation order, not
+    /// an explicit focus call, so reordering the nav and pane scopes would
+    /// silently retarget Tab. The ticket notes that "no test will catch a
+    /// regression here"; this one does.
+    ///
+    /// egui 0.35 exposes no focus-*order* enumeration — `Memory::focus_order`
+    /// does not exist, and `Memory::move_focus` is never consumed by the
+    /// kittest harness (probed: three plain buttons stay at `None`). What does
+    /// work is the real keyboard path, `Harness::key_press(Key::Tab)`, so the
+    /// test walks the same chain a user walks.
+    ///
+    /// Nav item ids are reconstructible — `nav_item` registers
+    /// `Id::new(("settings_nav", label))` — so the walk is classified without
+    /// kittest having to hand ids back.
+    #[test]
+    fn test_settings_focus_order_visits_every_nav_item_before_the_pane() {
+        use riff_gui::ui::settings::{
+            LibraryRow, SettingsContent, SettingsSection, show_settings_modal,
+        };
+        use riff_gui::ui::theme::Palette;
+        use std::path::PathBuf;
+
+        let content = SettingsContent {
+            libraries: vec![LibraryRow {
+                path: PathBuf::from("C:\\Users\\stink\\Music"),
+                status: riff_backend::app::state::LibraryStatus::Scanned(1284),
+                watch: riff_backend::app::state::WatchState::Enabled,
+                indexed_tracks: 1284,
+            }],
+            ..SettingsContent::default()
+        };
+        let palette = Palette::dark();
+
+        let mut harness: egui_kittest::Harness<'_, ()> = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1280.0, 840.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, ()| {
+                    let mut cache = riff_gui::ui::icons::IconCache::new();
+                    show_settings_modal(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        SettingsSection::Library,
+                    );
+                },
+                (),
+            );
+        harness.run();
+
+        // Walk far enough to clear the nav and enter the pane. The page holds
+        // the header control, five nav items, the Library pane's controls and
+        // the footer's two actions, so 24 Tabs comfortably covers one lap.
+        let mut walk: Vec<egui::Id> = Vec::new();
+        for _ in 0..24 {
+            harness.key_press(egui::Key::Tab);
+            harness.run();
+            if let Some(id) = harness.ctx.memory(|m| m.focused()) {
+                walk.push(id);
+            }
+        }
+        let readable = |ids: &[egui::Id]| -> Vec<String> {
+            ids.iter().map(|id| id.short_debug_format()).collect()
+        };
+        assert!(
+            walk.len() > SettingsSection::ALL.len(),
+            "the Tab walk must reach the nav and the pane; walked {:?}",
+            readable(&walk)
+        );
+
+        // The nav scope is built as one contiguous run, in `SettingsSection::ALL`
+        // order. Anything interleaved into it would mean a pane widget was
+        // constructed between two nav items.
+        let nav_ids: Vec<egui::Id> = SettingsSection::ALL
+            .iter()
+            .map(|section| egui::Id::new(("settings_nav", section.label())))
+            .collect();
+        let first_nav = nav_ids
+            .iter()
+            .find_map(|id| walk.iter().position(|seen| seen == id))
+            .unwrap_or_else(|| {
+                panic!("no nav item is Tab-reachable; walked {:?}", readable(&walk))
+            });
+        for (offset, id) in nav_ids.iter().enumerate() {
+            assert_eq!(
+                walk.get(first_nav + offset),
+                Some(id),
+                "the nav must be one contiguous run in SettingsSection::ALL order; \
+                 position {offset} from the first nav item is {:?}, not {:?}. walked {:?}",
+                walk.get(first_nav + offset).map(|i| i.short_debug_format()),
+                id.short_debug_format(),
+                readable(&walk)
+            );
+        }
+
+        // The widget focused immediately BEFORE the nav run is the header's Back
+        // control, which `show_settings_modal` builds first. That is what pins
+        // the ordering claim: build the pane scope before the nav and the id in
+        // front of the run becomes a pane widget, failing here.
+        let back = egui::Id::new("settings_back");
+        assert_eq!(
+            first_nav.checked_sub(1).and_then(|i| walk.get(i)),
+            Some(&back),
+            "the nav must directly follow the header's Back control, so it is built \
+             before the pane scope; walked {:?}",
+            readable(&walk)
+        );
+
+        // And the pane is reachable after the nav.
+        let after_nav = walk.len() - (first_nav + nav_ids.len());
+        assert!(
+            after_nav > 0,
+            "widgets after the nav run must be reachable (the pane is not built first); \
+             walked {:?}",
+            readable(&walk)
+        );
     }
 
     /// Paint one neutral row band in isolation and return the rendered frame,

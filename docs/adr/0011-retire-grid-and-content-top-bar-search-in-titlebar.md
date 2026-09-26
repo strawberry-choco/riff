@@ -23,9 +23,8 @@ The persisted choice is retired from the Application Store schema: an append-onl
 
 ## Consequences
 
-- The titlebar is now the single top chrome strip (ADR 0005): the shell's top chrome became more consolidated, not less. The 32px field center-fits the existing 56px titlebar; no chrome height token changes and the fixed-chrome minimum window size is unchanged — removing the strip makes the Library stage meet its guaranteed minimum size again.
+- The titlebar is now the single top chrome strip (ADR 0005): the shell's top chrome became more consolidated, not less. The field center-fits the existing titlebar; no chrome height token changes and the fixed-chrome minimum window size is unchanged — removing the strip makes the Library stage meet its guaranteed minimum size again.
 - `BrowserLayout` is gone from `riff-backend`; `browser_layout` is gone from `ScalarSettings` (`riff-persistence`), the `app_settings` table and the scalar read/write SQL (`riff-infra`), and the Preferences round-trip. The store-query model (ADRs 0002, 0003) is untouched beyond the migrated scalar.
 - Migration 012 is append-only and checksummed like its predecessors; already-migrated stores reopen without re-applying it.
 - The content top bar module (`crate::ui::topbar`) and the `TOPBAR_H` token are deleted; the titlebar module (`crate::ui::chrome`) owns the search helpers.
-- Golden baselines: the content-top-bar goldens (idle, light, grid-toggle, search-focus variants) and the browser-grid golden are deleted; new titlebar-with-search goldens (idle, light, focused, focused-HC) replace them; the shell chrome goldens are regenerated with the search field in place and the strip gone. A golden comparison now fails if anyone resurrects a toggle, a tile path, or the extra strip.
-- Product documentation no longer lists the content top bar or a grid toggle as shipped; the iTunes comparison stops crediting the list/grid toggle as the view-options story.
+- Golden baselines: the goldens are re-baselined with the change; a golden comparison now fails if anyone resurrects a toggle, a tile path, or the extra strip.

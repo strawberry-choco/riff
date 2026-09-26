@@ -565,10 +565,11 @@ pub mod geometry {
     /// above is 32px where Now Playing's is 16px — so a reader must not assume
     /// one shared value behind a shared name.
     pub mod settings {
-        /// Gap between a section header and its card (`mb-4`): 16px.
-        pub const HEADER_GAP: f32 = 16.0;
-        /// Gap between sections (`mb-8` on each `<section>`): 32px.
-        pub const SECTION_GAP: f32 = 32.0;
+        /// Gap between a section header and its card. Revalued 16 -> 12 for the
+        /// tightened mockup rhythm the two-column Library pane reads with.
+        pub const HEADER_GAP: f32 = 12.0;
+        /// Gap between sections. Revalued 32 -> 12 for the same reason.
+        pub const SECTION_GAP: f32 = 12.0;
         /// Stage inset around the full-stage Settings page.
         pub const PAGE_PAD: f32 = 26.0;
         /// Gap between the left nav column and the content pane.
@@ -581,15 +582,58 @@ pub mod geometry {
         pub const PANE_PAD: f32 = 24.0;
         /// Height of one library row (`px-4 py-3` over ~24px of content).
         pub const LIBRARY_ROW_H: f32 = 48.0;
+        /// Row width below which a row STACKS instead of laying its content out
+        /// on one line. Revalued never — introduced with the narrow-width
+        /// reflow (the min-stage fallback), and derived, not guessed:
+        ///
+        /// - the library row's right-hand control cluster measures **254.41px**
+        ///   (readiness dot + label, Scan, Watch, trash, their 16px gaps and
+        ///   the 16px right padding). It is width-independent — it measures the
+        ///   same 254.41 at 605px and at 965px.
+        /// - a legible path line at `TEXT_SM` needs ~186px, about 24
+        ///   characters of the truncated path.
+        ///
+        /// 254.41 + 186 = 440.4, rounded to **440.0**.
+        ///
+        /// It has to land strictly inside the validated band. The narrowest
+        /// *already-validated* row is a preference row inside the two-column
+        /// Library layout, 461.5px, which must keep its single-line form; the
+        /// widest unvalidated one is the min-stage pane at 205px, which must
+        /// stack. 440 sits between them, so the reflow cannot move a golden
+        /// that is already pinned.
+        pub const LIBRARY_ROW_STACK_W: f32 = 440.0;
         /// Height of the Add Library / Scan All actions row (`px-4 py-4`).
         pub const ACTIONS_ROW_H: f32 = 64.0;
+        /// Gap between the Add Library and Scan All buttons when they share a
+        /// line. Previously a bare `12.0`; value unchanged.
+        pub const ACTIONS_ROW_GAP: f32 = 12.0;
+        /// A row button's own horizontal padding: leading `16`, an `8` gap
+        /// after the icon, and `32` of trailing pad, summed. Previously spelled
+        /// inline as `16.0 + 8.0 + label + 32.0`; the value is unchanged.
+        pub const ROW_BTN_PAD: f32 = 56.0;
         /// Height of one preference row (`px-4 py-3` over title +
         /// description).
         pub const PREF_ROW_H: f32 = 60.0;
-        /// Height of the Clear Library note row (`mt-4`, single line).
-        pub const CLEAR_ROW_H: f32 = 28.0;
+        /// Horizontal inset from a preference row's edge to its text. The
+        /// row's own padding, previously bare `16.0` literals; the value is
+        /// unchanged, only named, so no pinned golden moves.
+        pub const PREF_ROW_PAD: f32 = 16.0;
+        /// Vertical inset from a preference row's top and bottom to its text.
+        /// Previously bare `11.0` literals; value unchanged.
+        pub const PREF_ROW_TEXT_INSET: f32 = 11.0;
+        /// Gap between a preference row's title and its description when the
+        /// description wraps onto more than one line. New with the narrow-width
+        /// reflow; the single-line form does not read it.
+        pub const PREF_ROW_TEXT_GAP: f32 = 4.0;
         /// Status-dot diameter (`w-2 h-2`): 8px.
         pub const DOT_SIZE: f32 = 8.0;
+        /// Gap inside a readiness pair, between the dot and its label, and
+        /// between the pair and the control cluster. Previously bare `8.0`
+        /// literals; value unchanged.
+        pub const READINESS_GAP: f32 = 8.0;
+        /// Gap between a library row's path and the track count beside it.
+        /// Previously a bare `12.0`; value unchanged.
+        pub const LIBRARY_ROW_TEXT_GAP: f32 = 12.0;
         /// Secondary-button height (`px-3 py-1.5` at `text-xs`).
         pub const SMALL_BTN_H: f32 = 27.0;
         /// Primary/secondary action-button height (`px-4 py-2` at `text-sm`).
@@ -603,22 +647,63 @@ pub mod geometry {
         pub const CHIP_H: f32 = SMALL_BTN_H;
         /// Horizontal padding inside a format chip around its label.
         pub const CHIP_LABEL_PAD: f32 = 12.0;
-        /// Gap between adjacent format chips.
+        /// Gap between adjacent format chips. Used on both axes: the same gap
+        /// separates chips on one line and the chip rows when the card wraps.
         pub const CHIP_GAP: f32 = 8.0;
-        /// Height of the last-full-scan card.
-        pub const SCAN_CARD_H: f32 = 76.0;
-        /// Height of the pane footer's action row.
-        pub const FOOTER_H: f32 = 48.0;
-        /// Modal card width cap (`max-w-3xl`-ish).
-        pub const MODAL_MAX_W: f32 = 760.0;
-        /// Modal card height cap.
-        pub const MODAL_MAX_H: f32 = 600.0;
-        /// Backdrop margin around the card (`p-8`).
-        pub const MODAL_PAD: f32 = 32.0;
-        /// Header height (title row + close control).
-        pub const MODAL_HEADER_H: f32 = 56.0;
-        /// Left-nav column width.
-        pub const NAV_W: f32 = 180.0;
+        /// Narrowest content column in which all seven format chips still fit on
+        /// one line, measured with the vendored Inter set at [`TEXT_XS`]:
+        ///
+        /// ```text
+        /// label widths   26.19 + 27.34 + 25.56 + 33.53 + 27.16 + 30.72 + 27.44
+        ///               = 197.94
+        /// chip padding   CHIP_LABEL_PAD * 2 * 7  = 24 * 7       = 168.00
+        /// inter-chip gap CHIP_GAP * 6                            =  48.00
+        ///               ---------------------------------------------
+        /// cluster                                                  413.94
+        /// widest single chip  CHIP_LABEL_PAD * 2 + 33.53 (OPUS)  =  57.53
+        ///               ---------------------------------------------
+        /// threshold = max(cluster, widest chip)                    413.94
+        /// ```
+        ///
+        /// Rounded up to whole pixels, so `413.94` fits and `413.93` wraps.
+        /// Below it the chip row wraps and the card grows; at or above it every
+        /// pinned wide width (the 920-stage goldens at 581px of content and the
+        /// 1280 two-column golden at 445.5px) keeps the single-line layout the
+        /// pre-wrap code produced.
+        pub const CHIP_ROW_NO_WRAP_W: f32 = 414.0;
+        /// Height of the last-full-scan card. Revalued 76 -> 96 for the
+        /// three-line card (stamp, files indexed, errors on its own line).
+        /// Sized for three lines plus the card's vertical padding, so the card
+        /// never has to resize as a scan's error count changes.
+        pub const SCAN_CARD_H: f32 = 96.0;
+        /// Inset from the scan card's edges to its text and its action. The
+        /// card's own padding, previously bare `16.0` literals.
+        pub const SCAN_CARD_PAD: f32 = 16.0;
+        /// Horizontal padding inside a small button around its icon and label.
+        /// The scan card's Rescan action, the former clear row and the footer
+        /// all sized their small buttons with this bare `24.0`.
+        pub const SMALL_BTN_LABEL_PAD: f32 = 24.0;
+        /// Gap between the page footer's two right-hand actions. New with the
+        /// destructive ghost joining Done in the footer.
+        pub const FOOTER_ACTION_GAP: f32 = 12.0;
+        /// Height of the page footer's action row. Revalued 48 -> 36 for the
+        /// full-stage footer, which carries the destructive Clear Library
+        /// ghost beside Done at `ACTION_BTN_H` and so needs less band than
+        /// the old two-button row reserved.
+        pub const FOOTER_H: f32 = 36.0;
+        /// Height of the page header row (title + Back control). Replaces the
+        /// dropped `MODAL_HEADER_H` at the same value: the header lost its
+        /// modal card but kept its height.
+        pub const PAGE_HEADER_H: f32 = 56.0;
+        /// Left-nav column width. Revalued 180 -> 176 so the nav plus the
+        /// hairline and `NAV_GAP` land on the mockup's rhythm.
+        pub const NAV_W: f32 = 176.0;
+        /// Inset from the body's top to the nav column's first row, so the
+        /// column does not start hard against the header. Pre-existing value,
+        /// named here because the full-stage frame reuses it.
+        pub const NAV_TOP_INSET: f32 = 8.0;
+        /// Width of the hairline drawn between the nav column and the pane.
+        pub const NAV_HAIRLINE_W: f32 = 1.0;
         /// One left-nav row's height (`py-2` at text-sm).
         pub const NAV_ITEM_H: f32 = 32.0;
     }

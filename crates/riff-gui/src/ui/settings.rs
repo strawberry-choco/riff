@@ -1,9 +1,13 @@
 use crate::ui::button::{self as button, TextButton, Variant};
 use crate::ui::icons::{Icon, IconCache};
 use crate::ui::theme::geometry::settings::{
-    ACTION_BTN_H, ACTIONS_ROW_H, CHIP_GAP, CHIP_H, CHIP_LABEL_PAD, CLEAR_ROW_H, DOT_SIZE, FOOTER_H,
-    HEADER_GAP, LIBRARY_ROW_H, MODAL_HEADER_H, MODAL_MAX_H, MODAL_MAX_W, MODAL_PAD, NAV_ITEM_H,
-    NAV_W, PANE_PAD, PREF_ROW_H, SCAN_CARD_H, SECTION_GAP, SMALL_BTN_H, TRASH_BTN, WATCH_BOX,
+    ACTION_BTN_H, ACTIONS_ROW_GAP, ACTIONS_ROW_H, CHIP_GAP, CHIP_H, CHIP_LABEL_PAD,
+    CHIP_ROW_NO_WRAP_W, COLUMN_GAP, DOT_SIZE, FOOTER_ACTION_GAP, FOOTER_H, HEADER_GAP,
+    LIBRARY_ROW_H, LIBRARY_ROW_STACK_W, LIBRARY_ROW_TEXT_GAP, MIN_TWO_COL_W, NAV_GAP,
+    NAV_HAIRLINE_W, NAV_ITEM_H, NAV_TOP_INSET, NAV_W, PAGE_HEADER_H, PAGE_PAD, PANE_PAD,
+    PREF_ROW_H, PREF_ROW_PAD, PREF_ROW_TEXT_GAP, PREF_ROW_TEXT_INSET, READINESS_GAP, ROW_BTN_PAD,
+    SCAN_CARD_H, SCAN_CARD_PAD, SECTION_GAP, SMALL_BTN_H, SMALL_BTN_LABEL_PAD, TRASH_BTN,
+    WATCH_BOX,
 };
 use crate::ui::theme::{self, Palette};
 use eframe::egui;
@@ -15,6 +19,123 @@ use riff_backend::app::state::{
 use riff_backend::app::store::SettingsStore;
 use riff_backend::app::store::{AUDIO_EXTENSIONS, FullScanSummary};
 use std::path::PathBuf;
+use std::sync::Arc;
+
+/// How the Library pane's lower four sections are arranged at a given width.
+///
+/// A layout decision only. It never reorders anything: both branches walk the
+/// sections in the same reading order (Preferences, Formats, Last Full Scan,
+/// Artwork), and the two-column branch simply places Formats beside Last Full
+/// Scan instead of below it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LibraryPaneColumns {
+    /// One stacked column at the full available width — the narrow fallback.
+    Stacked {
+        /// The column's width, equal to the available width.
+        width: f32,
+    },
+    /// Two balanced columns separated by [`COLUMN_GAP`].
+    TwoColumns {
+        /// The left column's width.
+        left: f32,
+        /// The right column's width, equal to `left`.
+        right: f32,
+    },
+}
+
+/// The Library pane's column arrangement for an `available_width` content
+/// column.
+///
+/// The branch is [`MIN_TWO_COL_W`]: at or above it the lower sections split,
+/// below it they stack. The boundary is inclusive — the token is the *minimum*
+/// width at which the pane is allowed to split, so exactly [`MIN_TWO_COL_W`]
+/// splits.
+///
+/// Columns are balanced: each takes half the available width less half the
+/// gap, so the two plus the gap are exactly the available width. Pure, so the
+/// branch and the balance are assertable without pixels; the view allocates the
+/// rects this returns inside a scoped builder, the same idiom the elastic stage
+/// uses for its own columns.
+#[must_use]
+pub fn settings_pane_columns(available_width: f32) -> LibraryPaneColumns {
+    if available_width >= MIN_TWO_COL_W {
+        let column = (available_width - COLUMN_GAP) / 2.0;
+        LibraryPaneColumns::TwoColumns {
+            left: column,
+            right: column,
+        }
+    } else {
+        LibraryPaneColumns::Stacked {
+            width: available_width,
+        }
+    }
+}
+
+/// The Settings page frame's rectangles, derived from the stage rect the page
+/// is handed.
+///
+/// Split out of [`show_settings_modal`] so the frame's geometry is a pure
+/// function of the stage: the view draws from these rects and the UI tests
+/// assert the same function, so the two cannot disagree about whether the page
+/// fills the stage.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SettingsPageRects {
+    /// The whole page: the stage inset by [`PAGE_PAD`] on every side.
+    pub page: egui::Rect,
+    /// The header row — "Settings" and Back — spanning the page's full width.
+    pub header: egui::Rect,
+    /// What is left between the header and the footer: the fill that pins the
+    /// footer to the page's bottom edge.
+    pub body: egui::Rect,
+    /// The left nav column, [`NAV_W`] wide and the body's full height.
+    pub nav: egui::Rect,
+    /// The current section's content pane, right of the nav's hairline by
+    /// [`NAV_GAP`].
+    pub pane: egui::Rect,
+    /// The footer row, spanning the page's full width and pinned to its bottom.
+    pub footer: egui::Rect,
+}
+
+/// The Settings page's frame for a `available` stage rect.
+///
+/// The page fills the stage: the stage inset by [`PAGE_PAD`] on every side,
+/// with no width cap and no centring. Inside it the header takes the top strip
+/// at full width, the footer takes the bottom strip at full width, and the body
+/// — the fill between them — is what pins the footer down.
+#[must_use]
+pub fn settings_page_rects(available: egui::Rect) -> SettingsPageRects {
+    let page = available.shrink(PAGE_PAD);
+    let header = egui::Rect::from_min_max(
+        page.left_top(),
+        egui::pos2(page.right(), page.top() + PAGE_HEADER_H),
+    );
+    let footer = egui::Rect::from_min_max(
+        egui::pos2(page.left(), page.bottom() - FOOTER_H),
+        page.right_bottom(),
+    );
+    let body = egui::Rect::from_min_max(
+        egui::pos2(page.left(), header.bottom()),
+        egui::pos2(page.right(), footer.top()),
+    );
+    let nav = egui::Rect::from_min_max(
+        body.left_top(),
+        egui::pos2(body.left() + NAV_W, body.bottom()),
+    );
+    // Named `content` rather than `pane` only because clippy's `similar_names`
+    // reads `pane`/`page` as one character apart; the rect is the pane.
+    let content = egui::Rect::from_min_max(
+        egui::pos2(nav.right() + NAV_HAIRLINE_W + NAV_GAP, body.top()),
+        body.right_bottom(),
+    );
+    SettingsPageRects {
+        page,
+        header,
+        body,
+        nav,
+        pane: content,
+        footer,
+    }
+}
 
 /// Expand a leading `~/` (or a bare `~`) in `input` against the `HOME`
 /// environment variable. Returns the path unchanged when there is no leading
@@ -195,9 +316,6 @@ pub const SECTION_ADVANCED_INFO: &str = "ADVANCED & PLATFORM INFO";
 pub const CLEAR_LIBRARY_LABEL: &str = "Clear Library";
 /// The muted note beside the destructive ghost button (mockup structure,
 /// glossary language).
-pub const CLEAR_LIBRARY_NOTE: &str =
-    "Clear the indexed collection and rebuild it on the next scan.";
-
 /// Preference row copy: `(title, description)` verbatim from the mockup.
 pub const PREF_ADVANCED: (&str, &str) = (
     "Advanced mode",
@@ -237,12 +355,6 @@ pub const PREF_READ_EMBEDDED: (&str, &str) = (
     "Read embedded artwork",
     "Use artwork stored in track tags before folder images.",
 );
-/// Library pane preference copy. The mockup's only strategy renders as the
-/// current choice; a second strategy would turn this row into a selector.
-pub const PREF_MISSING_ART: (&str, &str) = (
-    "Missing artwork",
-    "Generated colour — a deterministic colour stand-in per item.",
-);
 /// Advanced pane preference copy: the custom title-bar close button's
 /// behavior. Offered only where a tray exists (macOS/Windows); Linux has no
 /// tray, so closing always quits there.
@@ -255,6 +367,9 @@ pub const PREF_CLOSE_QUITS: (&str, &str) = (
 pub const FOOTER_NOTE: &str = "Changes apply immediately";
 /// The Library pane footer's closing action.
 pub const DONE_LABEL: &str = "Done";
+/// The Last Full Scan card's action label, named so the card lays its text
+/// column out against a width it measures rather than one it assumes.
+pub const RESCAN_LABEL: &str = "Rescan now";
 
 // --- Stage content & actions -------------------------------------------------------
 
@@ -501,6 +616,212 @@ fn libraries_card(
         });
 }
 
+/// The width a preference row's text column has, at `available_width`: the row
+/// less its own padding, less the toggle, less the gap between them.
+///
+/// Pure, so "the description is wrapped to the column rather than truncated at
+/// the row's edge" is assertable without pixels.
+#[must_use]
+pub fn preference_text_width(available_width: f32) -> f32 {
+    (available_width
+        - PREF_ROW_PAD
+        - PREF_ROW_PAD
+        - theme::geometry::toggle::TOGGLE_W
+        - PREF_ROW_TEXT_GAP)
+        .max(0.0)
+}
+
+/// The height a preference row takes: its fixed height inline, or whatever the
+/// wrapped description needs when it stacks.
+///
+/// Never below [`PREF_ROW_H`], so a short description at a narrow width still
+/// gets the same row it gets everywhere else.
+#[must_use]
+pub fn preference_row_height(flow: RowFlow, title_h: f32, wrapped_desc_h: f32) -> f32 {
+    match flow {
+        RowFlow::Inline => PREF_ROW_H,
+        RowFlow::Stacked => (PREF_ROW_TEXT_INSET
+            + title_h
+            + PREF_ROW_TEXT_GAP
+            + wrapped_desc_h
+            + PREF_ROW_TEXT_INSET)
+            .max(PREF_ROW_H),
+    }
+}
+
+/// Shorten `text` until its galley fits `max_width`, dropping one character
+/// at a time.
+///
+/// Measurement-driven, so it needs no character-width constant: the budget is
+/// whatever the line actually has left after the icon, the gap and the track
+/// count. Returns the original string unchanged if it already fits.
+fn fit_to_width(
+    painter: &egui::Painter,
+    font: &egui::FontId,
+    text: &str,
+    max_width: f32,
+    color: egui::Color32,
+) -> String {
+    let mut candidate = text.to_owned();
+    if painter
+        .layout_no_wrap(candidate.clone(), font.clone(), color)
+        .size()
+        .x
+        <= max_width
+    {
+        return candidate;
+    }
+    while !candidate.is_empty() {
+        candidate.pop();
+        if painter
+            .layout_no_wrap(candidate.clone(), font.clone(), color)
+            .size()
+            .x
+            <= max_width
+        {
+            break;
+        }
+    }
+    candidate
+}
+
+/// Whether a row lays its content out on one line or stacks it, at
+/// `available_width`.
+///
+/// The one-line form puts a fixed control cluster on the right and the path on
+/// the left; when the two cannot both be legible the row stacks instead — path
+/// on the first line, readiness and controls on the second — and grows. Pure,
+/// so "the reflow is a no-op at the pinned widths" is assertable without
+/// pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowFlow {
+    /// One line: cluster right, path left, at today's geometry.
+    Inline,
+    /// Two lines: path on top, readiness and controls below.
+    Stacked,
+}
+
+/// The flow a row of `available_width` takes.
+///
+/// Derived from [`LIBRARY_ROW_STACK_W`] rather than hardcoded, and the token's
+/// own value is derived from the measured control cluster plus a legible path
+/// (see its doc comment). One token serves every row component because their
+/// validated-width bands overlap: the narrowest already-pinned row is 461.5px
+/// (a preference row in the two-column Library layout) and the widest
+/// unvalidated one is 205px (the min-stage pane), and 440 sits between.
+#[must_use]
+pub fn row_flow(available_width: f32) -> RowFlow {
+    if available_width < LIBRARY_ROW_STACK_W {
+        RowFlow::Stacked
+    } else {
+        RowFlow::Inline
+    }
+}
+
+/// The height a row takes for `flow`.
+///
+/// Derived from existing tokens rather than a new constant: the stacked form is
+/// one extra line of content beside the row's own height, and the tallest thing
+/// on that line is a small button.
+#[must_use]
+pub fn row_height(flow: RowFlow) -> f32 {
+    match flow {
+        RowFlow::Inline => LIBRARY_ROW_H,
+        RowFlow::Stacked => LIBRARY_ROW_H + SMALL_BTN_H + SMALL_BTN_H,
+    }
+}
+
+/// How the format chips lay out in a content column of `available_width`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChipFlow {
+    /// Every chip on one line — what every pinned wide width still shows.
+    OneLine,
+    /// Chips wrap onto as many lines as they need, and the card grows.
+    Wrapped,
+}
+
+/// The flow a format-chip row of `available_width` takes.
+///
+/// Derived from [`CHIP_ROW_NO_WRAP_W`], whose own value is the measured
+/// single-line cluster against the measured widest single chip (see the token's
+/// doc comment). As with [`row_flow`], the token is the *minimum* width at which
+/// the one-line form is allowed to stand: below it the row wraps.
+#[must_use]
+pub fn chip_flow(available_width: f32) -> ChipFlow {
+    if available_width < CHIP_ROW_NO_WRAP_W {
+        ChipFlow::Wrapped
+    } else {
+        ChipFlow::OneLine
+    }
+}
+
+/// Where one chip sits inside the card's content column, on a running cursor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChipPlacement {
+    /// Zero-based chip row; also the row's index into the card's height.
+    pub row: usize,
+    /// Offset from the content column's left edge.
+    pub left: f32,
+    /// The chip's own width, as measured from its label.
+    pub width: f32,
+}
+
+/// Lays the chips out on a running `x` cursor, breaking to a new line when the
+/// next chip would not fit.
+///
+/// This is the same hand-allocated running-cursor idiom the chips have always
+/// used, with the one thing it lacked: a line break. At or above
+/// [`CHIP_ROW_NO_WRAP_W`] every chip lands on row `0` at the offsets the
+/// pre-wrap code produced, so wide layouts are byte-identical.
+#[must_use]
+pub fn chip_placements(chip_widths: &[f32], available_width: f32) -> Vec<ChipPlacement> {
+    let mut placements = Vec::with_capacity(chip_widths.len());
+    let mut row = 0usize;
+    let mut x = 0.0_f32;
+    for &width in chip_widths {
+        // A chip wider than the column still gets its own line at the left
+        // edge: it cannot be made to fit, and truncating it would be worse
+        // than letting the card's own clip stop.
+        let breaks = !placements.is_empty() && x + width > available_width;
+        if breaks {
+            row += 1;
+            x = 0.0;
+        }
+        placements.push(ChipPlacement {
+            row,
+            left: x,
+            width,
+        });
+        // The trailing gap is not part of the line's occupied width, which is
+        // what keeps the last chip from wrapping on its own.
+        x += width + CHIP_GAP;
+    }
+    placements
+}
+
+/// The height the chip block needs for however many rows `placements` spans.
+///
+/// One row is exactly [`CHIP_H`], the height the card allocated before wrapping
+/// existed.
+#[must_use]
+pub fn chip_block_height(placements: &[ChipPlacement]) -> f32 {
+    // Counted by walking the placements rather than by multiplying a row count:
+    // one chip height per new row, one gap per break. No numeric cast involved.
+    let mut height = 0.0_f32;
+    let mut current_row = None;
+    for placement in placements {
+        if current_row == Some(placement.row) {
+            continue;
+        }
+        if current_row.is_some() {
+            height += CHIP_GAP;
+        }
+        height += CHIP_H;
+        current_row = Some(placement.row);
+    }
+    height
+}
+
 /// One library row: folder glyph, truncated path, then the readiness dot +
 /// label, Scan, Watch, and trash controls. Every derived string (the lossy
 /// path text, its truncation, and the per-control accessibility/hover
@@ -514,24 +835,54 @@ fn library_row(
     row: &LibraryRow,
     actions: &mut Vec<SettingsAction>,
 ) {
+    // One line while the row is wide enough for the control cluster *and* a
+    // legible path; below [`LIBRARY_ROW_STACK_W`] the row stacks — path on the
+    // first line, readiness and controls on the second — so neither is clipped
+    // and neither overprints the other. `Inline` reproduces the previous
+    // geometry exactly, which is what keeps the pinned widths untouched.
+    let flow = row_flow(ui.available_width());
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), LIBRARY_ROW_H),
+        egui::vec2(ui.available_width(), row_height(flow)),
         egui::Sense::hover(),
     );
+    // Inline keeps today's single band exactly. Stacked splits the row into
+    // three: the path, then the track count beside the readiness pair, then the
+    // control strip. Two bands are not enough at the minimum stage — the strip
+    // alone is ~180px and the count + readiness pair ~110px, against a ~205px
+    // row — so the row grows rather than letting either overprint the other.
+    let (path_band, meta_band, strip_band) = match flow {
+        RowFlow::Inline => (rect, rect, rect),
+        RowFlow::Stacked => {
+            let path_band = egui::Rect::from_min_max(
+                rect.left_top(),
+                egui::pos2(rect.right(), rect.top() + LIBRARY_ROW_H),
+            );
+            let meta_band = egui::Rect::from_min_max(
+                egui::pos2(rect.left(), path_band.bottom()),
+                egui::pos2(rect.right(), path_band.bottom() + SMALL_BTN_H),
+            );
+            (
+                path_band,
+                meta_band,
+                egui::Rect::from_min_max(meta_band.right_bottom(), rect.right_bottom()),
+            )
+        }
+    };
+
     let path_str = row.path.to_string_lossy();
     let display = truncate_path(&path_str, 48);
     let remove_label = format!("Remove {path_str} from your libraries");
     let watch_label = format!("Watch {path_str}");
     let scan_label = format!("Scan {path_str}");
 
-    library_row_path(ui, cache, palette, rect, row, &display);
+    library_row_path(ui, cache, palette, path_band, row, &display, flow);
     // Returns where the Scan button starts so the readiness pair can sit
     // gap-4 to its left.
     let layout = library_row_controls(
         ui,
         cache,
         palette,
-        rect,
+        strip_band,
         row,
         &path_str,
         &remove_label,
@@ -539,7 +890,43 @@ fn library_row(
         &scan_label,
         actions,
     );
-    library_row_readiness(ui, palette, rect, row, layout.scan_left);
+    match flow {
+        RowFlow::Inline => library_row_readiness(
+            ui,
+            palette,
+            rect,
+            row,
+            ReadinessSide::LeftOf(layout.scan_left),
+        ),
+        RowFlow::Stacked => {
+            library_row_meta(ui, palette, meta_band, row);
+        }
+    }
+}
+
+/// The stacked row's second band: the track count, then the readiness pair.
+fn library_row_meta(ui: &mut egui::Ui, palette: &Palette, rect: egui::Rect, row: &LibraryRow) {
+    let painter = ui.painter_at(rect);
+    let cy = rect.center().y;
+    let count_font = styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS).clone();
+    let count = painter.layout_no_wrap(
+        format!("{} tracks", row.indexed_tracks),
+        count_font,
+        palette.ink_3,
+    );
+    let count_x = rect.left() + PREF_ROW_PAD;
+    painter.galley(
+        egui::pos2(count_x, cy - count.size().y / 2.0),
+        count.clone(),
+        palette.ink_3,
+    );
+    library_row_readiness(
+        ui,
+        palette,
+        rect,
+        row,
+        ReadinessSide::RightOf(count_x + count.size().x + LIBRARY_ROW_TEXT_GAP),
+    );
 }
 
 /// The row's left cluster: folder glyph plus the (possibly struck-through)
@@ -551,6 +938,7 @@ fn library_row_path(
     rect: egui::Rect,
     row: &LibraryRow,
     display: &str,
+    flow: RowFlow,
 ) {
     let painter = ui.painter_at(rect);
     let cy = rect.center().y;
@@ -561,35 +949,50 @@ fn library_row_path(
         egui::Rect::from_center_size(egui::pos2(rect.left() + 24.0, cy), egui::vec2(16.0, 16.0));
     painter.image(folder_tex_id, folder_rect, UV_FULL, palette.ink_3);
 
-    let body_font = styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM);
+    let body_font = styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM).clone();
     let path_color = if is_unavailable {
         palette.warning
     } else {
         palette.ink
     };
-    let path_galley = painter.layout_no_wrap(display.to_owned(), body_font, path_color);
+    // The live per-folder track count, measured first because the path has to
+    // yield room for it.
+    let count_galley = painter.layout_no_wrap(
+        format!("{} tracks", row.indexed_tracks),
+        styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS),
+        palette.ink_3,
+    );
     let path_x = folder_rect.right() + 12.0;
+    // Inline keeps today's fixed 48-character truncation and paints the track
+    // count beside the path. Stacked gives the path its own band: it is fitted
+    // to whatever the band has left, and the count moves down to the meta band.
+    let stacked = flow == RowFlow::Stacked;
+    let path_text = match flow {
+        RowFlow::Inline => display.to_owned(),
+        RowFlow::Stacked => {
+            let budget = (rect.width() - (path_x - rect.left()) - PREF_ROW_PAD).max(0.0);
+            fit_to_width(&painter, &body_font, display, budget, path_color)
+        }
+    };
+    let path_galley = painter.layout_no_wrap(path_text, body_font, path_color);
     painter.galley(
         egui::pos2(path_x, cy - path_galley.size().y / 2.0),
         path_galley.clone(),
         path_color,
     );
 
-    // The live per-folder track count (design-handoff issues 05 and 12):
-    // muted, beside the path, so each row answers "how much lives here".
-    let count_galley = painter.layout_no_wrap(
-        format!("{} tracks", row.indexed_tracks),
-        styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS),
-        palette.ink_3,
-    );
-    painter.galley(
-        egui::pos2(
-            path_x + path_galley.size().x + 12.0,
-            cy - count_galley.size().y / 2.0,
-        ),
-        count_galley,
-        palette.ink_3,
-    );
+    // Muted, beside the path, so each row answers "how much lives here". In
+    // the stacked form the count has its own band, so it is not painted here.
+    if !stacked {
+        painter.galley(
+            egui::pos2(
+                path_x + path_galley.size().x + LIBRARY_ROW_TEXT_GAP,
+                cy - count_galley.size().y / 2.0,
+            ),
+            count_galley,
+            palette.ink_3,
+        );
+    }
     if is_unavailable {
         // Strikethrough for the missing root, as the previous row rendered it.
         painter.line_segment(
@@ -785,6 +1188,19 @@ fn watch_control(
     }
 }
 
+/// Which side of an anchor the readiness pair sits on.
+///
+/// Inline, the pair sits to the LEFT of the Scan button (its historical
+/// position, reproduced exactly). Stacked, it sits to the RIGHT of the track
+/// count on the meta band.
+#[derive(Debug, Clone, Copy)]
+enum ReadinessSide {
+    /// The pair's left edge is this far left of the anchor.
+    LeftOf(f32),
+    /// The pair's left edge is the anchor.
+    RightOf(f32),
+}
+
 /// The readiness dot + label at the far left of the control cluster
 /// (gap-2 inside the pair, gap-4 before it).
 fn library_row_readiness(
@@ -792,14 +1208,19 @@ fn library_row_readiness(
     palette: &Palette,
     rect: egui::Rect,
     row: &LibraryRow,
-    scan_left: f32,
+    side: ReadinessSide,
 ) {
     let painter = ui.painter_at(rect);
     let cy = rect.center().y;
     let ready = row.readiness();
     let label_font = styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS);
     let label_galley = painter.layout_no_wrap(ready.label().to_owned(), label_font, palette.ink_3);
-    let cluster_left = scan_left - 16.0 - (DOT_SIZE + 8.0 + label_galley.size().x);
+    let cluster_left = match side {
+        ReadinessSide::LeftOf(anchor) => {
+            anchor - PREF_ROW_PAD - (DOT_SIZE + READINESS_GAP + label_galley.size().x)
+        }
+        ReadinessSide::RightOf(anchor) => anchor,
+    };
     painter.circle_filled(
         egui::pos2(cluster_left + DOT_SIZE / 2.0, cy),
         DOT_SIZE / 2.0,
@@ -807,7 +1228,7 @@ fn library_row_readiness(
     );
     painter.galley(
         egui::pos2(
-            cluster_left + DOT_SIZE + 8.0,
+            cluster_left + DOT_SIZE + READINESS_GAP,
             cy - label_galley.size().y / 2.0,
         ),
         label_galley,
@@ -822,21 +1243,45 @@ fn actions_row(
     palette: &Palette,
     actions: &mut Vec<SettingsAction>,
 ) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), ACTIONS_ROW_H),
-        egui::Sense::hover(),
-    );
-    let painter = ui.painter_at(rect);
-    let cy = rect.center().y;
-
+    // The two buttons share a line while both fit beside each other; below
+    // [`LIBRARY_ROW_STACK_W`] they take one line each and the row grows, so
+    // neither runs off the pane's right edge. The widths are measured once and
+    // only the *placement* branches, so the single-line form is unchanged.
+    let probe = ui.painter();
     let add_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM);
-    let add_label_w = painter
+    let add_label_w = probe
         .layout_no_wrap("Add Library".to_owned(), add_font, palette.on_brand)
         .size()
         .x;
+    let scan_all_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM);
+    let scan_all_label_w = probe
+        .layout_no_wrap("Scan All".to_owned(), scan_all_font, palette.ink)
+        .size()
+        .x;
+    let add_w = ROW_BTN_PAD + add_label_w;
+    let scan_all_w = ROW_BTN_PAD + scan_all_label_w;
+    let side_by_side = PREF_ROW_PAD + add_w + ACTIONS_ROW_GAP + scan_all_w;
+    let stacked = ui.available_width() < side_by_side;
+
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(
+            ui.available_width(),
+            if stacked {
+                ACTIONS_ROW_H + ACTION_BTN_H
+            } else {
+                ACTIONS_ROW_H
+            },
+        ),
+        egui::Sense::hover(),
+    );
+    let cy = if stacked {
+        rect.top() + ACTION_BTN_H / 2.0
+    } else {
+        rect.center().y
+    };
     let add_rect = egui::Rect::from_min_size(
-        egui::pos2(rect.left() + 16.0, cy - ACTION_BTN_H / 2.0),
-        egui::vec2(16.0 + 8.0 + add_label_w + 32.0, ACTION_BTN_H),
+        egui::pos2(rect.left() + PREF_ROW_PAD, cy - ACTION_BTN_H / 2.0),
+        egui::vec2(add_w, ACTION_BTN_H),
     );
     if filled_button(
         ui,
@@ -854,14 +1299,20 @@ fn actions_row(
         actions.push(SettingsAction::AddLibrary);
     }
 
-    let scan_all_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM);
-    let scan_all_label_w = painter
-        .layout_no_wrap("Scan All".to_owned(), scan_all_font, palette.ink)
-        .size()
-        .x;
     let scan_all_rect = egui::Rect::from_min_size(
-        egui::pos2(add_rect.right() + 12.0, cy - ACTION_BTN_H / 2.0),
-        egui::vec2(16.0 + 8.0 + scan_all_label_w + 32.0, ACTION_BTN_H),
+        egui::pos2(
+            if stacked {
+                add_rect.left()
+            } else {
+                add_rect.right() + ACTIONS_ROW_GAP
+            },
+            if stacked {
+                add_rect.bottom() + ACTION_BTN_H / 2.0
+            } else {
+                cy - ACTION_BTN_H / 2.0
+            },
+        ),
+        egui::vec2(scan_all_w, ACTION_BTN_H),
     );
     if filled_button(
         ui,
@@ -880,59 +1331,14 @@ fn actions_row(
     }
 }
 
-/// The destructive ghost action under the libraries card: muted note on the
-/// left, error-tinted destructive button on the right (rendered through the
-/// shared [`Variant::Destructive`] primitive).
-fn clear_row(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    actions: &mut Vec<SettingsAction>,
-) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), CLEAR_ROW_H),
-        egui::Sense::hover(),
-    );
-    let painter = ui.painter_at(rect);
-    let cy = rect.center().y;
-
-    painter.text(
-        egui::pos2(rect.left() + 4.0, cy),
-        egui::Align2::LEFT_CENTER,
-        CLEAR_LIBRARY_NOTE,
-        styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM),
-        palette.ink_3,
-    );
-
-    let font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS);
-    let galley = painter.layout_no_wrap(CLEAR_LIBRARY_LABEL.to_owned(), font, palette.error);
-    let btn_w = galley.size().x + 24.0;
-    let btn_rect = egui::Rect::from_min_size(
-        egui::pos2(rect.right() - btn_w - 4.0, cy - SMALL_BTN_H / 2.0),
-        egui::vec2(btn_w, SMALL_BTN_H),
-    );
-    if button::text_button(
-        ui,
-        cache,
-        palette,
-        &TextButton {
-            id: egui::Id::new("settings_clear_library"),
-            rect: btn_rect,
-            label: CLEAR_LIBRARY_LABEL,
-            a11y: CLEAR_LIBRARY_LABEL,
-            tooltip: None,
-            icon: None,
-            small: true,
-            variant: Variant::Destructive,
-            enabled: true,
-        },
-    ) {
-        actions.push(SettingsAction::ClearLibrary);
-    }
-}
-
 /// The format chips card: one toggle chip per [`AUDIO_EXTENSIONS`] entry;
 /// enabled formats are indexed on the next scan (design-handoff issue 12).
+///
+/// The chips are measured first and then placed by [`chip_placements`], so a
+/// content column too narrow for all seven on one line wraps them onto as many
+/// lines as they need and the card grows to match. At or above
+/// [`CHIP_ROW_NO_WRAP_W`] there is exactly one line and the painted result is
+/// unchanged from the pre-wrap version.
 fn formats_card(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -946,24 +1352,51 @@ fn formats_card(
         .corner_radius(theme::RADIUS_LG)
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
-            let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width(), CHIP_H),
-                egui::Sense::hover(),
-            );
-            let painter = ui.painter_at(rect);
-            let mut x = rect.left();
+            let available = ui.available_width();
+            let font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS);
+            // Measure every chip before painting any of them: the card's height
+            // is the sum over the lines the placements come out on, which is
+            // not known until the last chip has been measured.
+            let mut labels = Vec::with_capacity(AUDIO_EXTENSIONS.len());
+            let mut chip_widths = Vec::with_capacity(AUDIO_EXTENSIONS.len());
             for extension in AUDIO_EXTENSIONS {
-                let enabled = content.scan_formats.iter().any(|f| f == extension);
                 let label = extension.to_uppercase();
-                let font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS);
-                let label_w = painter
-                    .layout_no_wrap(label.clone(), font, palette.ink)
+                let label_w = ui
+                    .painter()
+                    .layout_no_wrap(label.clone(), font.clone(), palette.ink)
                     .size()
                     .x;
-                let chip_w = CHIP_LABEL_PAD * 2.0 + label_w;
+                labels.push(label);
+                chip_widths.push(CHIP_LABEL_PAD * 2.0 + label_w);
+            }
+            let placements = chip_placements(&chip_widths, available);
+            // `chip_flow` is the token-backed summary of the same decision, while
+            // the cursor is what actually places the chips. They must agree: if
+            // the token ever drifts away from the measured cluster it was derived
+            // from, the card would size itself for one form and paint the other.
+            // An empty list has nothing to wrap and is excluded, since
+            // `chip_flow` only reports on the column, not on the contents.
+            debug_assert!(
+                placements.is_empty()
+                    || placements.iter().any(|placement| placement.row > 0)
+                        == matches!(chip_flow(available), ChipFlow::Wrapped),
+                "chip_flow and chip_placements must agree about wrapping"
+            );
+
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(available, chip_block_height(&placements)),
+                egui::Sense::hover(),
+            );
+            for ((extension, label), placement) in
+                AUDIO_EXTENSIONS.iter().zip(labels).zip(placements)
+            {
+                let enabled = content.scan_formats.iter().any(|f| f == extension);
                 let chip_rect = egui::Rect::from_min_size(
-                    egui::pos2(x, rect.top()),
-                    egui::vec2(chip_w, CHIP_H),
+                    egui::pos2(
+                        rect.left() + placement.left,
+                        rect.top() + chip_row_top(placement),
+                    ),
+                    egui::vec2(placement.width, CHIP_H),
                 );
                 let a11y = format!("Index {extension} files");
                 if filled_button(
@@ -984,13 +1417,138 @@ fn formats_card(
                         !enabled,
                     ));
                 }
-                x += chip_w + CHIP_GAP;
             }
         });
 }
 
-/// The last-full-scan card: when the scan finished and what it saw, with a
-/// Rescan now action (design-handoff issue 12).
+/// The y offset of a chip's row from the top of the chip block. Rows advance by
+/// one chip height plus the shared gap.
+fn chip_row_top(placement: ChipPlacement) -> f32 {
+    // Folded from the row index without a numeric cast: each row below the first
+    // adds one chip height and one gap.
+    let mut top = 0.0_f32;
+    for _ in 1..=placement.row {
+        top += CHIP_H + CHIP_GAP;
+    }
+    top
+}
+
+/// One line of the Last Full Scan card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanCardLine {
+    /// The line's copy.
+    pub text: String,
+    /// Whether this line wears the error role. Only the error count sets it,
+    /// and only when the count is non-zero — a scan that found nothing wrong
+    /// must not cry wolf.
+    pub is_signal: bool,
+}
+
+/// The three lines the Last Full Scan card always paints.
+///
+/// Three is a fixed count, not a function of the counts: a zero-error scan
+/// still occupies its error line, so the card cannot resize as a scan's error
+/// count moves. `SCAN_CARD_H` is sized for three lines and the card always
+/// allocates exactly that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanCardLines {
+    /// When the scan finished, in primary ink.
+    pub stamp: ScanCardLine,
+    /// How many files it indexed.
+    pub files: ScanCardLine,
+    /// How many errors it hit — the line that reads as a signal.
+    pub error: ScanCardLine,
+}
+
+impl ScanCardLines {
+    /// How many lines the card paints. Always three.
+    pub const LINES: usize = 3;
+
+    /// The lines, in paint order. Always [`ScanCardLines::LINES`] of them.
+    pub fn iter(&self) -> impl Iterator<Item = &ScanCardLine> {
+        [&self.stamp, &self.files, &self.error].into_iter()
+    }
+}
+
+/// Build the card's three lines from the last full scan summary.
+///
+/// Pure, so the "zero errors still occupies its line" rule is assertable
+/// without rendering: see
+/// `test_scan_card_height_is_stable_across_error_counts`.
+#[must_use]
+pub fn scan_card_lines(summary: Option<&FullScanSummary>) -> ScanCardLines {
+    match summary {
+        Some(summary) => {
+            let elapsed = summary.at.elapsed().unwrap_or_default();
+            let errors = summary.errors;
+            ScanCardLines {
+                stamp: ScanCardLine {
+                    text: format!(
+                        "Last full scan {}",
+                        crate::ui::sidebar::format_last_scan_ago(elapsed)
+                    ),
+                    is_signal: false,
+                },
+                files: ScanCardLine {
+                    text: format!("{} files indexed", summary.files),
+                    is_signal: false,
+                },
+                error: ScanCardLine {
+                    text: format!("{errors} errors"),
+                    is_signal: errors > 0,
+                },
+            }
+        }
+        None => ScanCardLines {
+            stamp: ScanCardLine {
+                text: String::from("No full scan recorded yet"),
+                is_signal: false,
+            },
+            files: ScanCardLine {
+                text: String::from("Run a scan to index your music folders."),
+                is_signal: false,
+            },
+            error: ScanCardLine {
+                text: String::from("0 errors"),
+                is_signal: false,
+            },
+        },
+    }
+}
+
+/// The colour a scan-card line is painted in.
+///
+/// A line that `is_signal` wears the error role; every other line wears the
+/// muted ink rung, including a zero-error count — so a clean scan does not cry
+/// wolf. Pure, so "the error count is painted in the error role when non-zero"
+/// is assertable without rendering.
+#[must_use]
+pub fn scan_line_color(line: &ScanCardLine, palette: &Palette) -> egui::Color32 {
+    if line.is_signal {
+        palette.error
+    } else {
+        palette.ink_3
+    }
+}
+
+/// The height the Last Full Scan card allocates, for `lines`.
+///
+/// Deliberately a function of the line count and nothing else — not of the
+/// files or error totals — so the card cannot resize as a scan's outcome
+/// changes. This is the seam `test_scan_card_height_is_stable_across_error_counts`
+/// pins.
+#[must_use]
+pub fn scan_card_height(lines: &ScanCardLines) -> f32 {
+    debug_assert_eq!(
+        lines.iter().count(),
+        ScanCardLines::LINES,
+        "the card paints three lines"
+    );
+    SCAN_CARD_H
+}
+
+/// The last-full-scan card: when the scan finished and what it saw, on three
+/// lines, with a Rescan now action (design-handoff issue 12).
 fn scan_status_card(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -1003,68 +1561,84 @@ fn scan_status_card(
         .stroke(egui::Stroke::new(1.0_f32, palette.border))
         .corner_radius(theme::RADIUS_LG)
         .show(ui, |ui| {
+            let lines = scan_card_lines(content.last_scan.as_ref());
+            // The card always allocates `scan_card_height`, sized for three
+            // lines, so a scan whose error count changes never resizes it.
             let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width(), SCAN_CARD_H),
+                egui::vec2(ui.available_width(), scan_card_height(&lines)),
                 egui::Sense::hover(),
             );
             let painter = ui.painter_at(rect);
-            let cy = rect.center().y;
 
-            let (stamp_line, counts_line) = match content.last_scan {
-                Some(summary) => {
-                    let elapsed = summary.at.elapsed().unwrap_or_default();
-                    (
-                        format!(
-                            "Last full scan {}",
-                            crate::ui::sidebar::format_last_scan_ago(elapsed)
-                        ),
-                        format!(
-                            "{} files indexed \u{b7} {} errors",
-                            summary.files, summary.errors
-                        ),
-                    )
-                }
-                None => (
-                    String::from("No full scan recorded yet"),
-                    String::from("Run a scan to index your music folders."),
-                ),
-            };
-
-            painter.text(
-                egui::pos2(rect.left() + 16.0, cy - 10.0),
-                egui::Align2::LEFT_CENTER,
-                stamp_line,
-                styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM),
-                palette.ink,
-            );
-            painter.text(
-                egui::pos2(rect.left() + 16.0, cy + 10.0),
-                egui::Align2::LEFT_CENTER,
-                counts_line,
-                styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS),
-                palette.ink_3,
-            );
-
+            // Action first: its width is what the text column has to yield, so
+            // the two never overlap and neither is hand-positioned against the
+            // other's arithmetic.
             let btn_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS);
             let btn_label_w = painter
-                .layout_no_wrap("Rescan now".to_owned(), btn_font, palette.ink)
+                .layout_no_wrap(RESCAN_LABEL.to_owned(), btn_font, palette.ink)
                 .size()
                 .x;
+            let btn_w = SMALL_BTN_LABEL_PAD + btn_label_w;
             let btn_rect = egui::Rect::from_min_size(
                 egui::pos2(
-                    rect.right() - 16.0 - (24.0 + btn_label_w),
-                    cy - SMALL_BTN_H / 2.0,
+                    rect.right() - SCAN_CARD_PAD - btn_w,
+                    rect.center().y - SMALL_BTN_H / 2.0,
                 ),
-                egui::vec2(24.0 + btn_label_w, SMALL_BTN_H),
+                egui::vec2(btn_w, SMALL_BTN_H),
             );
+
+            // A real vertical layout: the three lines are measured, then stacked
+            // by a child `Ui` that owns the column. No line is placed at an
+            // offset from the card's centre — the only arithmetic is halving a
+            // measured height so the block sits opposite the action.
+            let styles = [
+                (egui::TextStyle::Body, theme::TEXT_SM),
+                (egui::TextStyle::Small, theme::TEXT_XS),
+                (egui::TextStyle::Small, theme::TEXT_XS),
+            ];
+            let text_left = rect.left() + SCAN_CARD_PAD;
+            let text_width = (btn_rect.left() - SCAN_CARD_PAD - text_left).max(0.0);
+            let galleys: Vec<_> = lines
+                .iter()
+                .zip(styles)
+                .map(|(line, style)| {
+                    let color = scan_line_color(line, palette);
+                    let font = styled_font(ui, style.0, style.1);
+                    (
+                        color,
+                        painter.layout_no_wrap(line.text.clone(), font, color),
+                    )
+                })
+                .collect();
+            let block_h: f32 = galleys.iter().map(|(_, galley)| galley.size().y).sum();
+            let text_rect = egui::Rect::from_min_size(
+                egui::pos2(text_left, rect.center().y - block_h / 2.0_f32),
+                egui::vec2(text_width, block_h),
+            );
+            let mut text_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(text_rect)
+                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
+            );
+            for (color, galley) in &galleys {
+                text_ui.painter().galley(
+                    egui::pos2(text_rect.left(), text_ui.cursor().top()),
+                    galley.clone(),
+                    *color,
+                );
+                // Advance by the line's own height, so the stack needs no
+                // leading constant of its own.
+                text_ui.add_space(galley.size().y);
+            }
+
             if filled_button(
                 ui,
                 cache,
                 palette,
                 btn_rect,
                 egui::Id::new("settings_rescan_now"),
-                "Rescan now",
-                "Rescan now",
+                RESCAN_LABEL,
+                RESCAN_LABEL,
                 Some(Icon::RefreshCw),
                 false,
                 true,
@@ -1075,52 +1649,14 @@ fn scan_status_card(
         });
 }
 
-/// The Missing artwork strategy row: title + description on the left, the
-/// current strategy as a static brand chip on the right. One strategy ships
-/// today; a second would turn this into a selector.
-fn strategy_row(ui: &mut egui::Ui, palette: &Palette) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), PREF_ROW_H),
-        egui::Sense::hover(),
-    );
-    let painter = ui.painter_at(rect);
-    painter.text(
-        egui::pos2(rect.left() + 16.0, rect.top() + 11.0),
-        egui::Align2::LEFT_TOP,
-        PREF_MISSING_ART.0,
-        styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM),
-        palette.ink,
-    );
-    painter.text(
-        egui::pos2(rect.left() + 16.0, rect.bottom() - 11.0),
-        egui::Align2::LEFT_BOTTOM,
-        PREF_MISSING_ART.1,
-        styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS),
-        palette.ink_3,
-    );
-
-    let label = "Generated colour";
-    let font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS);
-    let label_w = painter
-        .layout_no_wrap(label.to_owned(), font, palette.on_brand)
-        .size()
-        .x;
-    let chip_rect = egui::Rect::from_center_size(
-        egui::pos2(rect.right() - 16.0 - label_w / 2.0 - 12.0, rect.center().y),
-        egui::vec2(label_w + 24.0, SMALL_BTN_H),
-    );
-    painter.rect_filled(chip_rect, theme::RADIUS_MD, palette.brand_primary);
-    painter.text(
-        chip_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        label,
-        styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS),
-        palette.on_brand,
-    );
-}
-
-/// The Library pane footer: the immediate-apply note on the left, the
-/// Reset-to-defaults (secondary) and Done (primary) actions on the right.
+/// The page footer: the immediate-apply note on the left, and the page's two
+/// actions on the right — Clear Library (destructive ghost) then Done
+/// (primary).
+///
+/// This used to be the Library pane's footer and now belongs to the page frame
+/// itself, which is what makes the destructive action reachable from every
+/// section rather than only from Library. It sits outside the pane's
+/// `ScrollArea`, so the actions never scroll away.
 fn library_footer(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -1142,7 +1678,7 @@ fn library_footer(
         palette.ink_3,
     );
 
-    // Done (primary) hugs the right edge; Reset sits to its left.
+    // Done (primary) hugs the right edge; Clear Library sits to its left.
     let done_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM);
     let done_w = painter
         .layout_no_wrap(DONE_LABEL.to_owned(), done_font, palette.on_brand)
@@ -1153,6 +1689,41 @@ fn library_footer(
         egui::pos2(rect.right() - done_w - 4.0, cy - ACTION_BTN_H / 2.0),
         egui::vec2(done_w, ACTION_BTN_H),
     );
+
+    // The destructive ghost, sized off its own label and set to the left of
+    // Done by the same edge inset the note uses on the left.
+    let clear_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS);
+    let clear_w = painter
+        .layout_no_wrap(CLEAR_LIBRARY_LABEL.to_owned(), clear_font, palette.error)
+        .size()
+        .x
+        + SMALL_BTN_LABEL_PAD;
+    let clear_rect = egui::Rect::from_min_size(
+        egui::pos2(
+            done_rect.left() - clear_w - FOOTER_ACTION_GAP,
+            cy - SMALL_BTN_H / 2.0,
+        ),
+        egui::vec2(clear_w, SMALL_BTN_H),
+    );
+    if button::text_button(
+        ui,
+        cache,
+        palette,
+        &TextButton {
+            id: egui::Id::new("settings_clear_library"),
+            rect: clear_rect,
+            label: CLEAR_LIBRARY_LABEL,
+            a11y: CLEAR_LIBRARY_LABEL,
+            tooltip: None,
+            icon: None,
+            small: true,
+            variant: Variant::Destructive,
+            enabled: true,
+        },
+    ) {
+        actions.push(SettingsAction::ClearLibrary);
+    }
+
     if filled_button(
         ui,
         cache,
@@ -1273,8 +1844,40 @@ fn preference_row(
     actions: &mut Vec<SettingsAction>,
 ) {
     let copy = pref.copy();
+    let flow = row_flow(ui.available_width());
+    let title_font = styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM).clone();
+    let desc_font = styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS).clone();
+
+    // The text column is whatever the row has left once the toggle is placed.
+    // In the single-line form the description is painted whole and the row
+    // keeps its fixed height; in the stacked form the description wraps to this
+    // width and the row grows to whatever the wrapped text needs, so it is
+    // never truncated mid-word.
+    let text_width = preference_text_width(ui.available_width());
+    // The title's own measured height drives the stacked layout, so the row
+    // grows to fit its text rather than to a guessed line count.
+    let title_galley =
+        ui.painter()
+            .layout_no_wrap(copy.0.to_owned(), title_font.clone(), palette.ink);
+    let title_h = title_galley.size().y;
+    let (row_h, desc_galley) = match flow {
+        RowFlow::Inline => (PREF_ROW_H, None),
+        RowFlow::Stacked => {
+            let wrapped = ui.painter().layout(
+                copy.1.to_owned(),
+                desc_font.clone(),
+                palette.ink_3,
+                text_width,
+            );
+            (
+                preference_row_height(flow, title_h, wrapped.size().y),
+                Some(wrapped),
+            )
+        }
+    };
+
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), PREF_ROW_H),
+        egui::vec2(ui.available_width(), row_h),
         egui::Sense::click(),
     );
     let painter = ui.painter_at(rect);
@@ -1282,19 +1885,15 @@ fn preference_row(
         painter.rect_filled(rect, theme::RADIUS_MD, palette.surface_2);
     }
 
-    painter.text(
-        egui::pos2(rect.left() + 16.0, rect.top() + 11.0),
-        egui::Align2::LEFT_TOP,
-        copy.0,
-        styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM),
-        palette.ink,
-    );
-    painter.text(
-        egui::pos2(rect.left() + 16.0, rect.bottom() - 11.0),
-        egui::Align2::LEFT_BOTTOM,
-        copy.1,
-        styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS),
-        palette.ink_3,
+    paint_preference_text(
+        ui,
+        palette,
+        rect,
+        &copy,
+        title_font,
+        desc_font,
+        desc_galley,
+        title_h,
     );
 
     let pill_rect = egui::Rect::from_center_size(
@@ -1375,64 +1974,68 @@ pub fn show_settings_modal(
 ) -> Vec<SettingsAction> {
     let mut actions = Vec::new();
 
-    // Center the card in the stage (a vertical layout never scrolls
-    // horizontally, so the cursor's left is the stage's left edge).
-    let avail = ui.available_size();
-    let card_w = (avail.x - 2.0 * MODAL_PAD).clamp(320.0, MODAL_MAX_W);
-    let card_h = (avail.y - 2.0 * MODAL_PAD).clamp(240.0, MODAL_MAX_H);
-    let x0 = ui.cursor().left() + ((avail.x - card_w) * 0.5).max(0.0);
-    let y0 = ui.cursor().top() + ((avail.y - card_h) * 0.5).max(0.0);
-    let card = egui::Rect::from_min_size(egui::pos2(x0, y0), egui::vec2(card_w, card_h));
+    // The page fills the stage: no floating card, no backdrop margin, no
+    // width cap. `settings_page_rects` owns the frame so the UI tests and this
+    // view cannot disagree about it.
+    let rects = settings_page_rects(ui.available_rect_before_wrap());
 
-    let painter = ui.painter_at(card);
-    painter.rect_filled(card, theme::RADIUS_LG, palette.surface);
-    painter.rect_stroke(
-        card,
-        theme::RADIUS_LG,
-        egui::Stroke::new(1.0_f32, palette.border),
-        egui::StrokeKind::Inside,
-    );
-
-    ui.scope_builder(egui::UiBuilder::new().max_rect(card), |ui| {
-        modal_header(ui, cache, palette, &mut actions);
-        let body_top = ui.cursor().top();
-        let body_h = card.bottom() - body_top;
-
-        // Left nav strip (below the header — anchored to the card's top it
-        // would paint its first item over the title).
-        let nav =
-            egui::Rect::from_min_size(egui::pos2(card.left(), body_top), egui::vec2(NAV_W, body_h));
-        let nav_inner = egui::Rect::from_min_max(
-            egui::pos2(nav.left(), nav.top() + 8.0),
-            egui::pos2(nav.right(), nav.bottom()),
-        );
-        ui.scope_builder(egui::UiBuilder::new().max_rect(nav_inner), |ui| {
-            for section in SettingsSection::ALL {
-                nav_item(ui, palette, section, section == current, &mut actions);
-            }
+    let painter = ui.painter_at(rects.page);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rects.page), |ui| {
+        // Header first: it owns the top strip at full page width, and its Back
+        // control is the first focusable widget on the page.
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rects.header), |ui| {
+            modal_header(ui, cache, palette, &mut actions);
         });
-        // Hairline between nav and pane.
-        painter.rect_filled(
-            egui::Rect::from_min_max(
-                egui::pos2(nav.right(), body_top),
-                egui::pos2(nav.right() + 1.0, card.bottom()),
-            ),
-            0.0,
-            palette.border,
-        );
 
-        // Current section's pane (dispatch added with the pane slices).
-        let pane = egui::Rect::from_min_max(egui::pos2(nav.right() + 1.0, body_top), card.max);
-        ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| {
-            section_pane(ui, cache, palette, content, current, &mut actions);
+        // Body takes the fill between header and footer; that fill is what
+        // pins the footer to the page's bottom edge.
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rects.body), |ui| {
+            // The nav scope must be built BEFORE the pane scope: focus order
+            // falls out of widget-creation order, and nothing calls
+            // `request_focus` to pin it. Reordering these two silently
+            // retargets Tab. `test_settings_focus_order_visits_every_nav_item_before_the_pane`
+            // guards it.
+            let nav_inner = egui::Rect::from_min_max(
+                egui::pos2(rects.nav.left(), rects.nav.top() + NAV_TOP_INSET),
+                rects.nav.right_bottom(),
+            );
+            ui.scope_builder(egui::UiBuilder::new().max_rect(nav_inner), |ui| {
+                for section in SettingsSection::ALL {
+                    nav_item(ui, palette, section, section == current, &mut actions);
+                }
+            });
+
+            // Hairline between nav and pane, immediately right of the nav so
+            // it keeps touching the column it belongs to.
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(rects.nav.right(), rects.body.top()),
+                    egui::pos2(rects.nav.right() + NAV_HAIRLINE_W, rects.body.bottom()),
+                ),
+                0.0,
+                palette.border,
+            );
+
+            // Current section's pane (dispatch added with the pane slices).
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rects.pane), |ui| {
+                section_pane(ui, cache, palette, content, current, &mut actions);
+            });
+        });
+
+        // Footer last, outside the scroll area, so the page's one destructive
+        // action is offered by every section rather than only by Library.
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rects.footer), |ui| {
+            library_footer(ui, cache, palette, &mut actions);
         });
     });
 
     actions
 }
 
-/// The modal's header: the "Settings" xl heading with a bordered close
+/// The page header: the "Settings" xl heading with a bordered close
 /// (arrow-left) control whose activation reports [`SettingsAction::Back`].
+/// Spans the full stage width. Named `modal_header` from when the page was a
+/// floating card; the name is kept to avoid churn.
 fn modal_header(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -1440,7 +2043,7 @@ fn modal_header(
     actions: &mut Vec<SettingsAction>,
 ) {
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), MODAL_HEADER_H),
+        egui::vec2(ui.available_width(), PAGE_HEADER_H),
         egui::Sense::hover(),
     );
     let painter = ui.painter_at(rect);
@@ -1536,6 +2139,206 @@ fn nav_item(
     }
 }
 
+/// The Library pane: the full-width Libraries card, then the lower four
+/// sections in two balanced columns or one stack, per
+/// [`settings_pane_columns`].
+fn library_pane(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    content: &SettingsContent,
+    actions: &mut Vec<SettingsAction>,
+) {
+    // The Libraries card keeps the full width: its rows and
+    // its Add Library / Scan All actions simply get more
+    // room than they had in the single stack.
+    section_header(ui, palette, SECTION_LIBRARIES);
+    ui.add_space(HEADER_GAP);
+    libraries_card(ui, cache, palette, content, actions);
+
+    ui.add_space(SECTION_GAP);
+    // The lower four sections settle into two balanced
+    // columns above MIN_TWO_COL_W and one stack below it.
+    // `settings_pane_columns` owns the branch; this only
+    // allocates the rects it hands back, the same idiom the
+    // elastic stage uses for its columns.
+    match settings_pane_columns(ui.available_width()) {
+        LibraryPaneColumns::Stacked { width } => {
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(width, ui.available_height()),
+                    ))
+                    .id_salt("settings-pane-column"),
+                |ui| library_lower_sections(ui, cache, palette, content, actions),
+            );
+        }
+        LibraryPaneColumns::TwoColumns { left, right } => {
+            ui.horizontal_top(|ui| {
+                // Left column: Preferences, then Formats.
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_min_size(
+                            ui.cursor().min,
+                            egui::vec2(left, ui.available_height()),
+                        ))
+                        .layout(egui::Layout::top_down(egui::Align::Min))
+                        .id_salt(("settings-pane-column", 0)),
+                    |ui| {
+                        preferences_card(
+                            ui,
+                            palette,
+                            content,
+                            actions,
+                            &[Preference::WatchChanges, Preference::SkipHidden],
+                        );
+
+                        ui.add_space(SECTION_GAP);
+                        section_header(ui, palette, SECTION_FORMATS);
+                        ui.add_space(HEADER_GAP);
+                        formats_card(ui, cache, palette, content, actions);
+                    },
+                );
+
+                // Right column: Last Full Scan, then Artwork.
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_min_size(
+                            ui.cursor().min,
+                            egui::vec2(right, ui.available_height()),
+                        ))
+                        .layout(egui::Layout::top_down(egui::Align::Min))
+                        .id_salt(("settings-pane-column", 1)),
+                    |ui| {
+                        section_header(ui, palette, SECTION_SCAN_STATUS);
+                        ui.add_space(HEADER_GAP);
+                        scan_status_card(ui, cache, palette, content, actions);
+
+                        ui.add_space(SECTION_GAP);
+                        section_header(ui, palette, SECTION_ARTWORK);
+                        ui.add_space(HEADER_GAP);
+                        artwork_card(ui, palette, content, actions);
+                    },
+                );
+            });
+        }
+    }
+}
+
+/// Paint a preference row's title and description.
+///
+/// The single-line form reproduces the previous fixed geometry exactly (title
+/// pinned to the top inset, description to the bottom inset), which is what
+/// keeps the pinned widths untouched. The stacked form stacks the title above
+/// the wrapped description using the title's own measured height.
+#[allow(clippy::too_many_arguments)]
+fn paint_preference_text(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    rect: egui::Rect,
+    copy: &(&str, &str),
+    title_font: egui::FontId,
+    desc_font: egui::FontId,
+    desc_galley: Option<Arc<egui::Galley>>,
+    title_h: f32,
+) {
+    let painter = ui.painter_at(rect);
+    if let Some(wrapped) = desc_galley {
+        let top = rect.top() + PREF_ROW_TEXT_INSET;
+        painter.galley(
+            egui::pos2(rect.left() + PREF_ROW_PAD, top),
+            painter.layout_no_wrap(copy.0.to_owned(), title_font, palette.ink),
+            palette.ink,
+        );
+        painter.galley(
+            egui::pos2(
+                rect.left() + PREF_ROW_PAD,
+                top + title_h + PREF_ROW_TEXT_GAP,
+            ),
+            wrapped,
+            palette.ink_3,
+        );
+    } else {
+        painter.text(
+            egui::pos2(rect.left() + PREF_ROW_PAD, rect.top() + PREF_ROW_TEXT_INSET),
+            egui::Align2::LEFT_TOP,
+            copy.0,
+            title_font,
+            palette.ink,
+        );
+        painter.text(
+            egui::pos2(
+                rect.left() + PREF_ROW_PAD,
+                rect.bottom() - PREF_ROW_TEXT_INSET,
+            ),
+            egui::Align2::LEFT_BOTTOM,
+            copy.1,
+            desc_font,
+            palette.ink_3,
+        );
+    }
+}
+
+/// The Artwork card: just the "Read embedded artwork" preference. The
+/// "Missing artwork" strategy row and the separator above nothing are gone
+/// (ticket 03).
+fn artwork_card(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    content: &SettingsContent,
+    actions: &mut Vec<SettingsAction>,
+) {
+    egui::Frame::new()
+        .fill(palette.surface)
+        .stroke(egui::Stroke::new(1.0_f32, palette.border))
+        .corner_radius(theme::RADIUS_LG)
+        .inner_margin(egui::Margin::same(4))
+        .show(ui, |ui| {
+            preference_row(
+                ui,
+                palette,
+                Preference::ReadEmbedded,
+                content.read_embedded_artwork,
+                actions,
+            );
+        });
+}
+
+/// The Library pane's lower four sections in the narrow fallback: one stacked
+/// column, in the same top-to-bottom reading order the two-column branch keeps
+/// (Preferences, Formats, Last Full Scan, Artwork).
+fn library_lower_sections(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    content: &SettingsContent,
+    actions: &mut Vec<SettingsAction>,
+) {
+    preferences_card(
+        ui,
+        palette,
+        content,
+        actions,
+        &[Preference::WatchChanges, Preference::SkipHidden],
+    );
+
+    ui.add_space(SECTION_GAP);
+    section_header(ui, palette, SECTION_FORMATS);
+    ui.add_space(HEADER_GAP);
+    formats_card(ui, cache, palette, content, actions);
+
+    ui.add_space(SECTION_GAP);
+    section_header(ui, palette, SECTION_SCAN_STATUS);
+    ui.add_space(HEADER_GAP);
+    scan_status_card(ui, cache, palette, content, actions);
+
+    ui.add_space(SECTION_GAP);
+    section_header(ui, palette, SECTION_ARTWORK);
+    ui.add_space(HEADER_GAP);
+    artwork_card(ui, palette, content, actions);
+}
+
 /// The right pane's content for the current section. Sections with existing
 /// content show it; the rest show a clear placeholder (full implementations
 /// are later tickets).
@@ -1555,53 +2358,7 @@ fn section_pane(
                 .inner_margin(egui::Margin::from(PANE_PAD))
                 .show(ui, |ui| match current {
                     SettingsSection::Library => {
-                        section_header(ui, palette, SECTION_LIBRARIES);
-                        ui.add_space(HEADER_GAP);
-                        libraries_card(ui, cache, palette, content, actions);
-                        ui.add_space(HEADER_GAP);
-                        clear_row(ui, cache, palette, actions);
-
-                        ui.add_space(SECTION_GAP);
-                        preferences_card(
-                            ui,
-                            palette,
-                            content,
-                            actions,
-                            &[Preference::WatchChanges, Preference::SkipHidden],
-                        );
-
-                        ui.add_space(SECTION_GAP);
-                        section_header(ui, palette, SECTION_FORMATS);
-                        ui.add_space(HEADER_GAP);
-                        formats_card(ui, cache, palette, content, actions);
-
-                        ui.add_space(SECTION_GAP);
-                        section_header(ui, palette, SECTION_SCAN_STATUS);
-                        ui.add_space(HEADER_GAP);
-                        scan_status_card(ui, cache, palette, content, actions);
-
-                        ui.add_space(SECTION_GAP);
-                        section_header(ui, palette, SECTION_ARTWORK);
-                        ui.add_space(HEADER_GAP);
-                        egui::Frame::new()
-                            .fill(palette.surface)
-                            .stroke(egui::Stroke::new(1.0_f32, palette.border))
-                            .corner_radius(theme::RADIUS_LG)
-                            .inner_margin(egui::Margin::same(4))
-                            .show(ui, |ui| {
-                                preference_row(
-                                    ui,
-                                    palette,
-                                    Preference::ReadEmbedded,
-                                    content.read_embedded_artwork,
-                                    actions,
-                                );
-                                row_separator(ui, palette, 16.0);
-                                strategy_row(ui, palette);
-                            });
-
-                        ui.add_space(SECTION_GAP);
-                        library_footer(ui, cache, palette, actions);
+                        library_pane(ui, cache, palette, content, actions);
                     }
                     SettingsSection::Advanced => {
                         // "Quit on close" is offered only where a tray exists:

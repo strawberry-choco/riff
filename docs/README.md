@@ -2,7 +2,7 @@
 
 Welcome to the documentation for **riff** — a lightweight, offline-first desktop music player built in Rust with egui. This is the single home for everything you need to understand the product, its architecture, and how to work on it.
 
-riff is a Cargo workspace — five backend capability crates, the frontend crate, and the integration-test crate — that plays local audio files (MP3, AAC, Opus, FLAC, OGG Vorbis, WAV) using pure-Rust libraries, manages a music library from one or more folders, and runs cross-platform on Linux, Windows, and macOS. It keeps no cloud dependencies by design.
+riff is a Cargo workspace that plays local audio files (MP3, AAC, Opus, FLAC, OGG Vorbis, WAV) using pure-Rust libraries, manages a music library from one or more folders, and runs cross-platform on Linux, Windows, and macOS. It keeps no cloud dependencies by design.
 
 ## How this documentation is organized
 
@@ -15,7 +15,7 @@ The docs are split into four buckets that follow how different readers approach 
 | [Engineering](engineering/development-setup.md) | Contributors | "How do I build, change, and release it correctly?" |
 | [Reference](reference/glossary.md) | Everyone | "What does term X mean, and where does state Y live?" |
 
-If you are new, start with [Product → Overview](product/overview.md). If you want to build or change riff, start with [Engineering → Development setup](engineering/development-setup.md) and read [Coding standards](engineering/coding-standards.md) before your first change. If you are debugging a build or runtime problem, go straight to [Troubleshooting](reference/troubleshooting.md).
+If you are new, start with [Product → Overview](product/overview.md). If you want to build or change riff, start with [Engineering → Development setup](engineering/development-setup.md) and read [Coding standards](engineering/coding-standards.md) before your first change.
 
 ## Document index
 
@@ -27,18 +27,6 @@ What riff is, what it does, and how to use it.
 - [Overview](product/overview.md) — what riff is, its offline-first philosophy, who it is for, and what it deliberately is not.
 - [Personas](product/personas.md) — the target users (the collector, the minimalist, the archivist) and how riff serves each.
 - [Features](product/features.md) — the canonical feature catalog: every epic and feature with status, priority, and dependencies, plus the deferred items.
-- [Roadmap](product/roadmap.md) — deferred items with their reasons, and recommended near-term improvements.
-- [User guide](product/user-guide.md) — how to run riff, build a library, browse, and play music, with platform-specific notes.
-
-**Specifications**
-- [Requirements](product/requirements.md) — atomic acceptance criteria for every feature, organized by epic. The canonical reference for what each feature must do.
-- [User flows](product/user-flows.md) — end-to-end user journeys across the product: first launch, daily browsing, search, folder playback, tray playback, and error recovery.
-- [Interaction specs](product/interaction-specs.md) — per-widget interaction behavior: what happens on every click, double-click, right-click, and toggle across the entire UI.
-- [Error states](product/error-states.md) — every error condition a user can encounter, what they see, what the system does, and how to recover.
-- [Specs](product/specs/) — detailed per-feature specifications for the features currently marked partial:
-  - [Player control bar](product/specs/player-control-bar.md)
-  - [Now Playing view](product/specs/now-playing-view.md)
-  - [System tray](product/specs/system-tray.md)
 
 **Product decisions**
 - [001: Offline-first design](product/decisions/001-offline-first.md) — why riff never connects to the internet.
@@ -51,12 +39,13 @@ What riff is, what it does, and how to use it.
 **Architecture decisions (ADRs)**
 
 - [ADR 0001: SQLite is the authoritative Application Store](adr/0001-sqlite-is-the-authoritative-application-store.md) — supersedes decision 004.
-- [ADR 0002: The UI reads the store through Session Projections](adr/0002-ui-reads-the-store-through-session-projections.md) — amended 2026-09-22: the staleness contract now has the single implementation the record claimed (`GenerationCache::level`), and a paged listing reads one Listing Page instead of a window plus a count.
-- [ADR 0003: Store query model](adr/0003-store-query-model.md) — amended 2026-09-22: bounded reads are Listing Pages, and the genre-scoped hit reads are named as the unbounded exception still outside that shape.
+- [ADR 0002: The UI reads the store through Session Projections](adr/0002-ui-reads-the-store-through-session-projections.md).
+- [ADR 0003: Store query model](adr/0003-store-query-model.md).
 - [ADR 0004: Dual-theme tokens despite a dark-only design source](adr/0004-dual-theme-tokens.md) — two palettes with High Contrast as a variant over each, and `crates/riff-gui/src/ui/theme.rs` as the single store and read source for every design value.
 - [ADR 0005: Custom window chrome (frameless) on all platforms](adr/0005-frameless-window-chrome-on-all-platforms.md).
 - [ADR 0006: Background workers behind app-layer service seams](adr/0006-background-workers-behind-app-layer-service-seams.md) — Tag Edit and Cover services replace the worker threads spawned inline by `RiffApp`.
 - [ADR 0007: No write-side SessionStore facade](adr/0007-no-write-side-sessionstore-facade.md) — the three store-mutation ports stay separate; the store owns generation bumps, so a facade would be a pass-through.
+- [ADR 0009: Vertical crate split of the backend](adr/0009-vertical-crate-split-of-the-backend.md) — the backend is split by capability into a strict, compiler-enforced dependency chain.
 - [ADR 0010: Inline tag editor in the detail panel](adr/0010-inline-tag-editor-in-the-detail-panel.md) — the Edit Tags modal moves into the detail panel as an inline editor with album-level tag aggregation and batch save.
 - [ADR 0011: Retire the grid browser layout and the content top bar](adr/0011-retire-grid-and-content-top-bar-search-in-titlebar.md) — the search field becomes shared titlebar chrome; the browser is permanently list-only and its persisted setting is migrated out of the store.
 
@@ -66,13 +55,9 @@ How riff is built and how it works at runtime.
 
 - [Architecture](technical/architecture.md) — the workspace crate split, the dependency chain, each crate's membership criterion, boundary rules, validation checklist, and anti-patterns.
 - [Design tokens](engineering/coding-standards.md#design-tokens) — where a design value lives (`theme.rs`), what view code may read and derive, and the three source sweeps that enforce it.
-- [Deepening plan](technical/deepening-plan.md) — the settled two-part refactor plan from the 2026-08-23 architecture review (One Library, playback engine seam) with per-step status tracking for resumability.
 - [Threading model](technical/threading-model.md) — the threads (all workers spawned by the Composition Root), the crossbeam channels between them, shared state, and real-time constraints.
 - [Data flow](technical/data-flow.md) — step-by-step sequences for the three primary flows: play a track, scan a library, resolve cover art.
 - [Data model](technical/data-model.md) — the domain entities, `AppState`, the Application Store ports, and the port traits.
-- [Dependencies](technical/dependencies.md) — every workspace dependency grouped by owning crate, with versions and purpose.
-- [Persistence](technical/persistence.md) — the Application Store (`riff.sqlite3`): schema, migrations, corruption recovery, save timing, Session Projections, Clear Library, and the in-memory cover-art LRU.
-- [Platform support](technical/platform-support.md) — the macOS/Windows/Linux feature matrix, conditional compilation, and why Linux omits the tray.
 
 ### Engineering
 
@@ -85,20 +70,11 @@ How to work on riff correctly.
 - [Golden-image testing](engineering/golden-image-testing.md) — the snapshot-test harness for visual parity: authoring goldens, re-baselining, and reviewing image diffs.
 - [Release and packaging](engineering/release-and-packaging.md) — the release profile, the manual release process today, and recommendations for release automation.
 
-**Spikes**
-- [Frameless window chrome](engineering/spikes/frameless-window-chrome-spike.md) — Issue 04 spike findings: go/no-go, the validated Windows implementation approach, and macOS/Linux risk with fallback plans.
-
 ### Reference
 
 Quick lookup.
 
 - [Glossary](reference/glossary.md) — product and technical terms, alphabetized.
-- [Troubleshooting](reference/troubleshooting.md) — common build and runtime issues as symptom / cause / fix.
-- [Configuration](reference/configuration.md) — where every piece of state and configuration lives, and how logging is controlled.
-
-## Relationship to the `.lattice/` tree
-
-This `docs/` tree **supersedes** the older `.lattice/` directory (`standards/architecture.md`, `requirements/index.md`, `requirements/features/`, and `context/`). The content from those files has been consolidated and rewritten here, corrected against the actual source tree — the older `.lattice/` documents referenced some module filenames (`playback_engine.rs`, `app_window.rs`, `library_panel.rs`, `control_bar.rs`, `cover_display.rs`) that do not exist in the codebase, and the project's `AGENTS.md` carried stale dependency versions and the incorrect claim that no tests exist. The documents in `docs/` reflect the verified reality instead. `AGENTS.md` now points here for architecture and feature references.
 
 ## Conventions
 

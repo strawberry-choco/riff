@@ -6,16 +6,8 @@ riff is organized as a Cargo workspace of capability crates. The single most imp
 
 ## Architecture Layering
 
-The workspace is divided into five backend crates plus the frontend:
-
-| Crate | Role | Responsibility |
-|---|---|---|
-| `riff-persistence` | Persistence contract | Stored entities and the Application Store ports and DTOs. `std` only. |
-| `riff-library` | Collection capability | Scanning, projections, playlists, covers; its own ports and error type. |
-| `riff-playback` | Playback capability | Queue, engine, gapless, coordinator, Transport; its own ports and error type. |
-| `riff-infra` | Adapters | Implements the slices' ports using external crates; owns every native dependency. |
-| `riff-backend` | Application API | Backend Events inbox, app-layer services, `LibrarySession`, Composition Root. |
-| `riff-gui` | Frontend | egui widgets, tray icon, native file dialogs, the `riff` binary. |
+What lives in which crate, and the criterion that decides it, is maintained in
+[../technical/architecture.md](../technical/architecture.md#crate-definitions-and-membership-criteria).
 
 ### Dependency direction
 
@@ -46,31 +38,20 @@ For the full treatment, including key flows and the threading model, see [../tec
 
 ## Design Tokens
 
-`crates/riff-gui/src/ui/theme.rs` is the only place a design value is written, and the only place view code reads one from (ADR 0004). Colors and the `Palette` slots, corner radii, the type scale, the spacing scale (`SPACE_*`), the chrome dimensions, and the component geometry under `theme::geometry`, grouped by the surface that paints it — `sidebar`, `browser`, `titlebar`, `playerbar`, `seek`, `now_playing`, `inspector`, `settings`, `hero`, `glow`, `toggle`, `window`.
+`crates/riff-gui/src/ui/theme.rs` is the only place a design value is written, and the only place view code reads one from (ADR 0004). It holds the colors and the `Palette` slots, the corner radii, the type scale, the spacing scale (`SPACE_*`), the chrome dimensions, and the component geometry under `theme::geometry`.
 
 The rules, and what each one is for:
 
 - **A view declares no design value of its own.** No `const ROW_H: f32 = 40.0;` in a view module, and no inline number where a token exists. Two surfaces each naming a bar `HEADER_H` at different heights is how the tokens drifted apart in the first place; under `theme::geometry` both keep their own name in their own namespace.
 - **A view derives no color of its own.** No `palette.error.gamma_multiply(0.1)` at a call site. Color math belongs beside the tokens it reads: `theme::glow`, `theme::hero_glyph`, `theme::destructive_fill`, `theme::blend_over`. Add a helper here rather than composing a color in a view.
-- **Contrast is a property of the tokens, not of the call sites.** If muted text is hard to read, fix `INK_3`; do not move the fifty-odd call sites to `INK_2`. The computed WCAG test holds every text token at 4.5:1 on the fills it paints on, in all four palette combinations.
+- **Contrast is a property of the tokens, not of the call sites.** If muted text is hard to read, fix `INK_3`; do not move the call sites to `INK_2`. The computed WCAG test holds every text token at 4.5:1 on the fills it paints on, in all four palette combinations.
 - **Structural stays with the algorithm.** Scroll and paging math, texture cache keys, a raster resolution, and how many rows a view asks its read model for are consequences of code, not of the design, and live in the view that computes them.
 
 Three mechanical sweeps in `tests/ui_tests.rs` enforce the first two rules against the source of `crates/riff-gui/src/ui/**` (`theme.rs` exempt, being the store): `test_view_code_contains_no_hardcoded_color_literals`, `test_view_code_declares_no_dimensions_of_its_own`, `test_view_code_sets_no_spacing_of_its_own`. A violation names the file and line, and the fix is always to move the value into `theme.rs` — never to widen a sweep.
 
 ## Linting with Clippy
 
-Lint levels are configured in `Cargo.toml` under `[lints.clippy]`, and tool-level options live in `clippy.toml`. The configuration enables the pedantic group as warnings, explicitly allows the nursery group, and carves out a small set of additional allowances:
-
-```toml
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "allow", priority = -1 }
-needless_pass_by_value = "allow"
-module_name_repetitions = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-must_use_candidate = "allow"
-```
+Lint levels are configured in `Cargo.toml` under `[lints.clippy]`, and tool-level options live in `clippy.toml`. The configuration enables the pedantic group as warnings, explicitly allows the nursery group, and carves out a small set of additional allowances.
 
 The five individually allowed lints are worth understanding, because they reflect deliberate project choices:
 
@@ -80,15 +61,7 @@ The five individually allowed lints are worth understanding, because they reflec
 - `missing_panics_doc` — functions that may panic are not required to document it.
 - `must_use_candidate` — the project does not annotate `#[must_use]` aggressively.
 
-`clippy.toml` sets the tool MSRV and a couple of behavioral options:
-
-```toml
-msrv = "1.95"
-avoid-breaking-exported-api = false
-upper-case-acronyms-aggressive = true
-```
-
-Run `cargo clippy` before committing. Pedantic lints are warnings, so the build will not fail on them, but a clean clippy run is the expected standard; see [contributing.md](./contributing.md) for the pull-request expectations.
+`clippy.toml` sets the tool MSRV (matching the `rust-version` in every crate manifest) and the project's behavioral options. Run `cargo clippy` before committing. Pedantic lints are warnings, so the build will not fail on them, but a clean clippy run is the expected standard; see [contributing.md](./contributing.md) for the pull-request expectations.
 
 ## Formatting with rustfmt
 
@@ -112,5 +85,5 @@ These implementation details are easy to get wrong and worth internalizing befor
 - **Cover art LRU is capped at 50 textures.** Cached textures live in a `cover_textures` map in `riff-gui` with manual LRU eviction tracked in a `cover_lru_keys` vector; the decoded-cover cache in `riff-library`'s `CoverService` is bounded by `COVER_CACHE_CAP` (50). Do not grow either unboundedly.
 - **Audio buffer management.** `CpalAudioOutput` (`riff-infra`) uses a lock-free SPSC ring buffer (`ringbuf`) shared between the decode loop (producer) and the cpal callback (consumer). The cpal callback must never block; it outputs silence when the buffer cannot keep up.
 - **Oversize decoded packets.** `SymphoniaDecoder` buffers decoded packets that are too large to emit in one call in an internal `pending_samples` buffer. Preserve this behavior when touching the decoder.
-- **Sample-rate fallback.** If a track's sample rate is unsupported by the device, output falls back to the device default rate. This is common on Windows WASAPI shared mode at 48 kHz; the effective rate is reported through the `AudioOutput::effective_sample_rate` port method.
+- **Sample-rate fallback.** The output stream always opens at the **device default** sample rate; a track's requested rate is not consulted. This is common on Windows WASAPI shared mode at 48 kHz.
 - **`TrackId` identity.** A track's identity is its full file path as a string (derived from `PathBuf::to_string_lossy()`). Renaming or moving a file therefore produces a new track identity.

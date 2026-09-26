@@ -9,7 +9,7 @@ One of the primary content areas selectable from the shared chrome — Library, 
 _Avoid_: page, stage, screen, tab
 
 **Section**:
-One of the four Library browse surfaces selectable from the sidebar — All Tracks, Artists, Albums, or Genres; exactly one is active at a time, and each keeps its own Scroll Memory while the app runs.
+One of the Library browse sections selectable from the sidebar; exactly one is active at a time, and each keeps its own Scroll Memory while the app runs.
 _Avoid_: view, tab, page
 
 **Drill Column**:
@@ -85,7 +85,7 @@ Persisted user preferences that are not music-collection data, such as Library P
 _Avoid_: config, options
 
 **Preferences**:
-The module that owns the Settings round-trip — hydrating Settings into the sessions on launch, committing session changes back to the Application Store; a preference change is durable by construction, never by call-site discipline. Structural preferences were the exception: Library Paths and Watch States were committed by call-site discipline at three separate sites, and the Library Path module closes it — every structural write now happens inside one of that module's operations, and `Preferences` only hydrates and diff-commits the scalars.
+The module that owns the Settings round-trip — hydrating Settings into the sessions on launch, committing session changes back to the Application Store; a preference change is durable by construction, never by call-site discipline. `Preferences` only hydrates and diff-commits the scalars; every structural write happens inside a `Library Path` module operation.
 _Avoid_: settings sync, persist helper
 
 **Library Path**:

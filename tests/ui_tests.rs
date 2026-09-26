@@ -3349,6 +3349,19 @@ mod tests {
         assert!((pb::GHOST_BTN - 32.0).abs() < f32::EPSILON);
         // ...and 4px tracks for both the seek row and the volume slider.
         assert!((seek::TRACK_H - 4.0).abs() < f32::EPSILON);
+        // The now-playing zone is elastic with a floor: widest 250px, never
+        // narrower than 140px before it sheds lines.
+        assert!((pb::NOW_PLAYING_W - 250.0).abs() < f32::EPSILON);
+        assert!((pb::NOW_PLAYING_MIN_W - 140.0).abs() < f32::EPSILON);
+        // The protected center column must always fit the transport row
+        // (ghost + 12 + play + 12 + ghost) with room to spare.
+        let transport_w = pb::GHOST_BTN * 2.0 + pb::PLAY_BTN + 12.0 * 2.0;
+        assert!(
+            pb::CENTER_MIN_W >= transport_w,
+            "the center floor ({}) must fit the {}px transport row",
+            pb::CENTER_MIN_W,
+            transport_w
+        );
     }
 
     #[test]
@@ -3397,10 +3410,13 @@ mod tests {
     }
 
     /// Representative bar content for interaction tests: playing, two minutes
-    /// into a 245s track, mid volume, shuffle on, nothing muted.
+    /// into a 245s track, mid volume, shuffle on, nothing muted, with a
+    /// current track titled "Roygbiv".
     fn playing_content() -> playerbar::PlayerBarContent<'static> {
         playerbar::PlayerBarContent {
             cover: None,
+            title: Some("Roygbiv".into()),
+            meta_line: Some("Boards of Canada".into()),
             playback: PlaybackState::Playing,
             position: std::time::Duration::from_mins(2),
             total: Some(std::time::Duration::from_secs(245)),
@@ -3463,6 +3479,184 @@ mod tests {
                 harness.state()
             );
         }
+    }
+
+    /// The now-playing zone (cover + text column) is one hit target that
+    /// reports the existing expand intent, reached through its full,
+    /// un-elided label (issue 03).
+    #[test]
+    fn test_now_playing_zone_click_reports_toggle_expanded() {
+        use riff_gui::ui::playerbar::PlayerBarAction;
+
+        let palette = theme::Palette::dark();
+        click_playerbar_sequence(
+            &palette,
+            &playing_content(),
+            &[(
+                "Roygbiv — Boards of Canada",
+                PlayerBarAction::ToggleExpanded,
+            )],
+        );
+
+        // Idle: the zone is still a hit target under the idle copy.
+        let idle = playerbar::PlayerBarContent {
+            title: None,
+            meta_line: None,
+            ..playing_content()
+        };
+        click_playerbar_sequence(
+            &palette,
+            &idle,
+            &[("Nothing playing", PlayerBarAction::ToggleExpanded)],
+        );
+    }
+
+    /// The layout contract (issue 05): the zone width rides its elastic band
+    /// at every width that affords it, yields to the protected center column
+    /// when it cannot, and the painted zone never overlaps the center — the
+    /// bar degrades in the fixed order down to cover-only.
+    #[test]
+    fn test_playerbar_now_playing_zone_geometry() {
+        use theme::geometry::playerbar as pb;
+
+        // The fixed right cluster's reservation, per the mockup contract:
+        // expand 32+16, volume 90+8, mute 32+14, queue 32+6, repeat 32+6,
+        // shuffle 32+10, queue label 52 = 362.
+        let cluster_w = 362.0;
+        let zone_w = |window_w: f32| playerbar::now_playing_zone_width(window_w - 32.0, cluster_w);
+        // What the bar actually paints for that zone width: below
+        // `MIN_TEXT_W` of text room the column is shed and the cover stands
+        // alone (issue 01's degradation order).
+        let painted_w = |window_w: f32| {
+            let zone = zone_w(window_w);
+            if zone - pb::COVER - pb::NOW_PLAYING_GAP < pb::MIN_TEXT_W {
+                pb::COVER
+            } else {
+                zone
+            }
+        };
+        // The center column: what is left of the painted zone and the two
+        // 20px gaps bracketing it.
+        let center_w = |window_w: f32| window_w - 32.0 - painted_w(window_w) - cluster_w - 40.0;
+
+        // The elastic band at the widths that afford it: 214 at the 800px
+        // harness (768 − 362 − 40 − 152), the 250px cap above that.
+        assert!(crate::test_utils::float_close(zone_w(800.0), 214.0));
+        for width in [1100.0, 1600.0] {
+            assert!(crate::test_utils::float_close(
+                zone_w(width),
+                pb::NOW_PLAYING_W
+            ));
+        }
+        // The protected center column holds at every width the shell can
+        // reach (MIN_WINDOW_SIZE.x is 800) — exactly CENTER_MIN_W at 800.
+        assert!(crate::test_utils::float_close(
+            center_w(800.0),
+            pb::CENTER_MIN_W
+        ));
+        for width in [800.0, 1100.0, 1600.0] {
+            assert!(
+                center_w(width) >= pb::CENTER_MIN_W - f32::EPSILON,
+                "center column {}px at {width}px must not fall below CENTER_MIN_W",
+                center_w(width)
+            );
+        }
+        // Below the floor's affordability the zone yields rather than
+        // overlapping: at 640 the formula's room (54) wins over the 140
+        // floor, the text column is shed to the bare cover, and the center
+        // still fits the 128px transport row.
+        let room_640 = 640.0 - 32.0 - cluster_w - 40.0 - pb::CENTER_MIN_W;
+        assert!(crate::test_utils::float_close(zone_w(640.0), room_640));
+        assert!(room_640 < pb::NOW_PLAYING_MIN_W);
+        assert!(crate::test_utils::float_close(painted_w(640.0), pb::COVER));
+        let transport_w = pb::GHOST_BTN * 2.0 + pb::PLAY_BTN + 12.0 * 2.0;
+        assert!(
+            center_w(640.0) >= transport_w,
+            "the center column must still fit the transport row at 640px, got {}",
+            center_w(640.0)
+        );
+        // Never negative, at any width.
+        for width in [640.0, 800.0, 1100.0, 1600.0] {
+            assert!((0.0..=pb::NOW_PLAYING_W).contains(&zone_w(width)));
+        }
+    }
+
+    /// A single-row (issue 04) layout: an unbroken token far wider than the
+    /// column still elides to exactly one row inside the given width — the
+    /// text block's height is constant, so a long title can never grow the
+    /// bar.
+    #[test]
+    fn test_now_playing_text_is_one_row_and_elided() {
+        let long_title = "Riffmixtape_2026_".repeat(12); // 192 chars, no break opportunity
+        let ctx = egui::Context::default();
+        // egui installs its fonts during the first `run`, so layout needs one frame.
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let job = playerbar::now_playing_text_job(
+            &long_title,
+            egui::FontId::proportional(14.0),
+            egui::Color32::WHITE,
+            150.0,
+        );
+        let galley = ctx.fonts_mut(|fonts| fonts.layout_job(job));
+        assert_eq!(
+            galley.rows.len(),
+            1,
+            "an over-long title must lay out as exactly one row"
+        );
+        assert!(galley.elided, "the row must be marked truncated");
+        assert!(
+            galley.size().x <= 150.0,
+            "the elided row must fit the column, got {}",
+            galley.size().x
+        );
+        assert!(
+            galley.rows[0].text().ends_with('\u{2026}'),
+            "the truncated row must carry the elide character"
+        );
+    }
+
+    /// The round trip (issue 04): the painted title is elided at the bar's
+    /// real width, but the accessible name — and with it the hover tooltip —
+    /// carries the full, untruncated string.
+    #[test]
+    fn test_elided_title_keeps_full_accessible_label() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::playerbar::PlayerBarAction;
+
+        let long_title = "Riffmixtape_2026_".repeat(12);
+        let content = playerbar::PlayerBarContent {
+            title: Some(long_title.as_str().into()),
+            ..playing_content()
+        };
+        let palette = theme::Palette::dark();
+        let mut cache = IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<PlayerBarAction>| {
+                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
+                    let mut buf = Vec::new();
+                    playerbar::show_player_bar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut readouts,
+                        &mut buf,
+                    );
+                    actions.extend(buf);
+                },
+                Vec::new(),
+            );
+        harness.run();
+        assert!(
+            harness
+                .query_by_label(&format!("{long_title} \u{2014} Boards of Canada"))
+                .is_some(),
+            "the zone's accessible name must be the full un-elided title + meta"
+        );
     }
 
     #[test]

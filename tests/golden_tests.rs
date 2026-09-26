@@ -632,11 +632,14 @@ mod tests {
         draw_playerbar_with(ui, palette, playerbar_content());
     }
 
-    /// The transport the `playerbar_*` goldens start from: playing,
-    /// shuffle engaged, unmuted, no repeat, queue closed.
+    /// The transport the `playerbar_*` goldens start from: playing
+    /// "Roygbiv" / "Boards of Canada", shuffle engaged, unmuted, no repeat,
+    /// queue closed.
     fn playerbar_content() -> riff_gui::ui::playerbar::PlayerBarContent<'static> {
         riff_gui::ui::playerbar::PlayerBarContent {
             cover: None,
+            title: Some("Roygbiv".into()),
+            meta_line: Some("Boards of Canada".into()),
             playback: riff_backend::domain::PlaybackState::Playing,
             position: std::time::Duration::from_mins(2),
             total: Some(std::time::Duration::from_secs(245)),
@@ -2923,6 +2926,60 @@ mod tests {
                 let mut content = playerbar_content();
                 content.queue_open = true;
                 content.expanded = true;
+                draw_playerbar_with(ui, palette, content);
+            },
+        );
+    }
+
+    // --- Now-playing zone baselines (playerbar-now-playing issue 05) --------------
+
+    /// The now-playing zone at a roomy 1100px, playing a short title:
+    /// cover + full title + meta line.
+    #[test]
+    fn playerbar_now_playing_dark_matches_golden_baseline() {
+        snapshot(
+            "playerbar_now_playing_dark",
+            egui::vec2(1100.0, theme::PLAYERBAR_H),
+            Palette::dark(),
+            draw_playerbar,
+        );
+    }
+
+    /// The same bar at the harness width with a title that cannot fit its
+    /// column: one elided line, meta still shown.
+    #[test]
+    fn playerbar_now_playing_long_title_dark_matches_golden_baseline() {
+        snapshot(
+            "playerbar_now_playing_long_title_dark",
+            egui::vec2(800.0, theme::PLAYERBAR_H),
+            Palette::dark(),
+            |ui, palette| {
+                let mut content = playerbar_content();
+                content.title = Some(
+                    "Everybody Loves the Sunshine (Extended Winter Remix With the Whole Band)"
+                        .into(),
+                );
+                draw_playerbar_with(ui, palette, content);
+            },
+        );
+    }
+
+    /// Idle bar: no current track — placeholder cover and the two muted idle
+    /// lines at the zone's exact playing-state geometry.
+    #[test]
+    fn playerbar_idle_dark_matches_golden_baseline() {
+        snapshot(
+            "playerbar_idle_dark",
+            egui::vec2(800.0, theme::PLAYERBAR_H),
+            Palette::dark(),
+            |ui, palette| {
+                let mut content = playerbar_content();
+                content.title = None;
+                content.meta_line = None;
+                content.playback = riff_backend::domain::PlaybackState::Stopped;
+                content.position = std::time::Duration::ZERO;
+                content.total = None;
+                content.queue_position = "0/0";
                 draw_playerbar_with(ui, palette, content);
             },
         );

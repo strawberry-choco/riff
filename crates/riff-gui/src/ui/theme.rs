@@ -491,6 +491,23 @@ pub mod geometry {
         pub const QUEUE_PANEL_MAX_LIST_H: f32 = 320.0;
         /// Height of the panel's "Up Next" header line.
         pub const QUEUE_PANEL_HEADER_H: f32 = 28.0;
+        /// Width of the now-playing zone (cover + two text lines) at its
+        /// widest.
+        pub const NOW_PLAYING_W: f32 = 250.0;
+        /// Narrowest the zone shrinks to before it starts shedding lines.
+        pub const NOW_PLAYING_MIN_W: f32 = 140.0;
+        /// Gap between the cover and the text column (the `SPACE_LG` value).
+        pub const NOW_PLAYING_GAP: f32 = 12.0;
+        /// Gap between the title line and the artist/album line.
+        pub const NOW_PLAYING_LINE_GAP: f32 = 2.0;
+        /// Smallest center column the bar protects: the transport row
+        /// (`GHOST_BTN * 2 + PLAY_BTN + 12 * 2` = 128) plus room for a usable
+        /// seek row and its two time readouts (24).
+        pub const CENTER_MIN_W: f32 = GHOST_BTN * 2.0 + PLAY_BTN + 12.0 * 2.0 + 24.0;
+        /// Text-column width below which the meta line is dropped.
+        pub const TEXT_HIDE_META_W: f32 = 96.0;
+        /// Text-column width below which only the cover is painted.
+        pub const MIN_TEXT_W: f32 = 56.0;
     }
 
     /// The Now Playing stage: the 240px cover, its copy block, the seek row,

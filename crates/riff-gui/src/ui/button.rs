@@ -106,6 +106,12 @@ pub enum Variant {
     Primary,
     /// Surface-filled secondary action (Scan All, Rescan now, format chips).
     Secondary,
+    /// Neutral-filled action that takes a translucent **brand** wash on hover:
+    /// the mockup's second tier, which is tinted rather than neutral, and the
+    /// same gesture as [`Variant::Destructive`] in the brand hue instead of the
+    /// error hue. Distinct from [`Variant::Secondary`] because not every
+    /// secondary action is tinted — the neutral ones say so by being Secondary.
+    Accent,
     /// Frameless text action that reveals a hover wash (breadcrumb crumbs).
     Ghost,
     /// Bordered neutral action (the Settings header Back control).
@@ -173,6 +179,25 @@ pub fn text_button_size(ui: &egui::Ui, palette: &Palette, label: &str, small: bo
         galley.size().x + 2.0 * ui.spacing().button_padding.x,
         ui.spacing().interact_size.y,
     )
+}
+
+/// Paint the primary action's face: the accent bloom behind it, then the
+/// lit-from-above brand gradient over it. **The one authority for that paint** —
+/// [`Variant::Primary`] and the player bar's play FAB both come through here, as
+/// does the inspector's quick-action row, so a primary action cannot come to
+/// read differently from its neighbour because one of them rolled its own.
+///
+/// `radius` is the shape's corner radius ([`theme::RADIUS_MD`] for a text
+/// button, half the width for a circle). Paint-only: both passes are bounded by
+/// `rect`, so no hit target moves, and the bloom deliberately reaches past it.
+pub fn paint_primary_face(ui: &egui::Ui, palette: &Palette, rect: egui::Rect, radius: f32) {
+    theme::paint_accent_glow(ui.painter(), palette, rect);
+    theme::paint_gradient_shape(
+        &ui.painter_at(rect),
+        rect,
+        radius,
+        theme::brand_gradient_stops(),
+    );
 }
 
 /// Render one shared semantic text button and report whether it was activated
@@ -243,6 +268,7 @@ pub fn paint_text_button(
         (true, Variant::Primary, _) => (palette.brand_primary, palette.on_brand, false),
         (true, Variant::Secondary, false) => (palette.surface_2, palette.ink, false),
         (true, Variant::Secondary, true) => (palette.surface_3, palette.ink, true),
+        (true, Variant::Accent, _) => (palette.surface_2, palette.ink, hovered),
         (true, Variant::Caption, false) => (palette.surface, palette.ink_2, false),
         (true, Variant::Ghost, false) => (theme::TRANSPARENT, palette.ink_2, false),
         (true, Variant::Ghost | Variant::Caption, true) => (palette.surface_2, palette.ink, false),
@@ -251,7 +277,22 @@ pub fn paint_text_button(
         }
     };
 
-    painter.rect_filled(rect, theme::RADIUS_MD, fill);
+    if enabled && variant == Variant::Primary {
+        // The mockup's primary action is the design's one flourish: a face lit
+        // from above and a soft accent bloom behind it, painted by the one
+        // authority every primary shares.
+        paint_primary_face(ui, palette, rect, theme::RADIUS_MD);
+    } else {
+        painter.rect_filled(rect, theme::RADIUS_MD, fill);
+    }
+    // The accent tier's hover: the neutral base stays and a translucent brand
+    // wash goes over it, which is what the mockup's `hover:bg-primary/10` does.
+    // Composited over the base rather than replacing it — so the resting fill is
+    // untouched and an idle button is byte-identical — and the same gesture
+    // `destructive_fill` makes one role down, in the brand hue.
+    if enabled && variant == Variant::Accent && hovered {
+        painter.rect_filled(rect, theme::RADIUS_MD, theme::accent_fill(palette, hovered));
+    }
     if matches!(variant, Variant::Caption) {
         painter.rect_stroke(
             rect,

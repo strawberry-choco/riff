@@ -309,8 +309,19 @@ pub enum Placeholder {
     /// The `surface_2` block carrying the music note as text at `size_px`
     /// (the Now Playing cover).
     EmojiWell { radius: f32, size_px: f32 },
-    /// The `surface_2`→`surface_3` gradient (the player bar's idle cover).
-    Gradient,
+    /// A plain rectangular gradient from `top` to `bottom` (the player bar's
+    /// idle cover).
+    ///
+    /// The stops travel with the variant rather than being named here, so the
+    /// gradient is the caller's to choose and this module never decides which
+    /// pair of rungs a placeholder wears. The system pair is
+    /// [`super::theme::placeholder_gradient_stops`].
+    Gradient {
+        /// Colour at the block's top edge.
+        top: egui::Color32,
+        /// Colour at the block's bottom edge.
+        bottom: egui::Color32,
+    },
 }
 
 /// One artwork block's props.
@@ -400,17 +411,11 @@ fn paint_placeholder(
                 palette.ink_3,
             );
         }
-        Placeholder::Gradient => {
-            // Two triangles whose vertex colors interpolate from surface_2
-            // (top) down to surface_3 (bottom).
-            let mut mesh = egui::Mesh::default();
-            mesh.colored_vertex(rect.left_top(), palette.surface_2);
-            mesh.colored_vertex(rect.right_top(), palette.surface_2);
-            mesh.colored_vertex(rect.right_bottom(), palette.surface_3);
-            mesh.colored_vertex(rect.left_bottom(), palette.surface_3);
-            mesh.add_triangle(0, 1, 2);
-            mesh.add_triangle(0, 2, 3);
-            painter.add(mesh);
+        Placeholder::Gradient { top, bottom } => {
+            // The caller's stops, painted by the shared gradient painter. A
+            // placeholder is a plain rectangle, so the radius is zero and takes
+            // that painter's rectangular path.
+            super::theme::paint_gradient_shape(painter, rect, 0.0, [top, bottom]);
         }
     }
 }

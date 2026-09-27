@@ -1,7 +1,7 @@
 use crate::ui::button::{self as button, TextButton, Variant};
 use crate::ui::icons::{Icon, IconCache};
 use crate::ui::theme::geometry::settings::{
-    ACTION_BTN_H, ACTIONS_ROW_GAP, ACTIONS_ROW_H, CHIP_GAP, CHIP_H, CHIP_LABEL_PAD,
+    ACTION_BTN_H, ACTIONS_ROW_GAP, ACTIONS_ROW_H, CARD_BORDER_W, CHIP_GAP, CHIP_H, CHIP_LABEL_PAD,
     CHIP_ROW_NO_WRAP_W, COLUMN_GAP, DOT_SIZE, FOOTER_ACTION_GAP, FOOTER_H, HEADER_GAP,
     LIBRARY_ROW_H, LIBRARY_ROW_STACK_W, LIBRARY_ROW_TEXT_GAP, MIN_TWO_COL_W, NAV_GAP,
     NAV_HAIRLINE_W, NAV_ITEM_H, NAV_TOP_INSET, NAV_W, PAGE_HEADER_H, PAGE_PAD, PANE_PAD,
@@ -527,12 +527,14 @@ fn section_header(ui: &mut egui::Ui, palette: &Palette, text: &str) {
 }
 
 /// A shared semantic text button, painted through [`button::text_button`]. The
-/// `primary` flag selects the brand `Primary` variant against the neutral
-/// `Secondary`; `small_text` picks the `text-xs` scale. `a11y` feeds the
-/// accessibility tree (per-path controls suffix their root so labels stay
-/// unique). Returns whether the button was clicked AND enabled.
+/// `variant` names the tier the button belongs to — `Primary`, the
+/// brand-gradient action; `Accent`, the brand-washed action; or the neutral
+/// `Secondary` — because the three are genuinely different roles and a
+/// `primary: bool` could only ever say two. `small_text` picks the `text-xs`
+/// scale. `a11y` feeds the accessibility tree (per-path controls suffix their
+/// root so labels stay unique). Returns whether the button was clicked AND
+/// enabled.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::fn_params_excessive_bools)] // 2×2 independent axes: brand vs surface × label size
 fn filled_button(
     ui: &egui::Ui,
     cache: &mut IconCache,
@@ -542,7 +544,7 @@ fn filled_button(
     label: &str,
     a11y: &str,
     icon: Option<Icon>,
-    primary: bool,
+    variant: Variant,
     small_text: bool,
     enabled: bool,
 ) -> bool {
@@ -558,11 +560,7 @@ fn filled_button(
             tooltip: None,
             icon,
             small: small_text,
-            variant: if primary {
-                Variant::Primary
-            } else {
-                Variant::Secondary
-            },
+            variant,
             enabled,
         },
     )
@@ -594,7 +592,7 @@ fn libraries_card(
 ) {
     egui::Frame::new()
         .fill(palette.surface)
-        .stroke(egui::Stroke::new(1.0_f32, palette.border))
+        .stroke(egui::Stroke::new(CARD_BORDER_W, palette.border))
         .corner_radius(theme::RADIUS_LG)
         .show(ui, |ui| {
             if content.libraries.is_empty() {
@@ -1295,7 +1293,7 @@ fn actions_row(
         "Add Library",
         "Add Library",
         Some(Icon::Plus),
-        true,
+        Variant::Primary,
         false,
         true,
     ) {
@@ -1326,7 +1324,7 @@ fn actions_row(
         "Scan All",
         "Scan All",
         Some(Icon::RefreshCw),
-        false,
+        Variant::Accent,
         false,
         true,
     ) {
@@ -1351,7 +1349,7 @@ fn formats_card(
 ) {
     egui::Frame::new()
         .fill(palette.surface)
-        .stroke(egui::Stroke::new(1.0_f32, palette.border))
+        .stroke(egui::Stroke::new(CARD_BORDER_W, palette.border))
         .corner_radius(theme::RADIUS_LG)
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
@@ -1411,7 +1409,22 @@ fn formats_card(
                     &label,
                     &a11y,
                     None,
-                    enabled,
+                    // PRE-EXISTING, deliberately preserved: this call site
+                    // passed `enabled` into the old `primary` slot, so a chip
+                    // has been painting as `Primary` — brand-filled — whenever
+                    // it is enabled, and only falls back to `Secondary` when
+                    // disabled. The golden shows it: the chip row is a band of
+                    // solid brand. That is almost certainly a slip (a chip is
+                    // not a primary action, and a chip that changes tier with
+                    // its own enabled state is not a tier at all), but fixing it
+                    // would restyle every idle chip, which is a resting-fill
+                    // change and therefore not this slice's business. Carried
+                    // forward verbatim so the wash stays the only difference.
+                    if enabled {
+                        Variant::Primary
+                    } else {
+                        Variant::Secondary
+                    },
                     true,
                     true,
                 ) {
@@ -1561,7 +1574,7 @@ fn scan_status_card(
 ) {
     egui::Frame::new()
         .fill(palette.surface)
-        .stroke(egui::Stroke::new(1.0_f32, palette.border))
+        .stroke(egui::Stroke::new(CARD_BORDER_W, palette.border))
         .corner_radius(theme::RADIUS_LG)
         .show(ui, |ui| {
             let lines = scan_card_lines(content.last_scan.as_ref());
@@ -1643,7 +1656,7 @@ fn scan_status_card(
                 RESCAN_LABEL,
                 RESCAN_LABEL,
                 Some(Icon::RefreshCw),
-                false,
+                Variant::Accent,
                 true,
                 true,
             ) {
@@ -1752,7 +1765,7 @@ fn library_footer(
         DONE_LABEL,
         DONE_LABEL,
         None,
-        true,
+        Variant::Primary,
         false,
         true,
     ) {
@@ -1887,7 +1900,7 @@ fn preferences_card(
 ) {
     egui::Frame::new()
         .fill(palette.surface)
-        .stroke(egui::Stroke::new(1.0_f32, palette.border))
+        .stroke(egui::Stroke::new(CARD_BORDER_W, palette.border))
         .corner_radius(theme::RADIUS_LG)
         .inner_margin(egui::Margin::same(4))
         .show(ui, |ui| {
@@ -2358,7 +2371,7 @@ fn artwork_card(
 ) {
     egui::Frame::new()
         .fill(palette.surface)
-        .stroke(egui::Stroke::new(1.0_f32, palette.border))
+        .stroke(egui::Stroke::new(CARD_BORDER_W, palette.border))
         .corner_radius(theme::RADIUS_LG)
         .inner_margin(egui::Margin::same(4))
         .show(ui, |ui| {

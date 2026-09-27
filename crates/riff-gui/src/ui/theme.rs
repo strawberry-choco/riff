@@ -105,20 +105,81 @@ pub const BRAND_600: Color32 = Color32::from_rgb(0xd9, 0x8a, 0x0d);
 /// `--riff-brand-700` — `#a66709`.
 pub const BRAND_700: Color32 = Color32::from_rgb(0xa6, 0x67, 0x09);
 
+/// The brand gradient's first stop: [`BRAND_400`], the lighter end. A wash that
+/// steps from here to [`BRAND_GRADIENT_BOTTOM`] reads as one lit shape; the
+/// same two rungs at full strength read as two flat bands.
+pub const BRAND_GRADIENT_TOP: Color32 = BRAND_400;
+/// The brand gradient's second stop: [`BRAND_500`], the primary and the deeper
+/// end.
+///
+/// Both stops are plain consts, not [`Palette`] slots: brand amber is
+/// identical in both families (ADR 0004), so a per-family slot for a
+/// family-invariant value would be a lie, and the light-mirror rule would then
+/// have to carve an exception for it. No hex is introduced — the gradient is
+/// the two rungs the scale already had, named for the gradient that reads
+/// them.
+pub const BRAND_GRADIENT_BOTTOM: Color32 = BRAND_500;
+
 // --- Dark surfaces (`--riff-bg`, `--riff-surface*`) --------------------------
 //
-// Deep-ink neutral ramp; darkest is the window background, lightest the
-// raised accent surface.
+// Deep-ink ramp; darkest is the window background, lightest the raised accent
+// surface. Two deliberate departures from the extracted mockup hexes
+// (`#101013 / #17171b / #1e1e23 / #26262d`), both of them intentional
+// amendments to the design handoff rather than drift:
+//
+// - **Wider separation.** The mockup's steps were 7 / 7 / 8, which read as one
+//   flat field at a glance — a panel edge was hard to find. This ramp steps
+//   9 / 9 over 4 / 4, so chrome, the row plane, cards and raised accents each
+//   hold their own plane without any view changing a single rectangle. The
+//   row plane takes the narrow half deliberately: it has to read as *under* a
+//   card, so the card's edge is the thing that has to stay findable.
+// - **A warm cast.** The mockup's neutrals were cool (blue channel highest),
+//   which sits at odds with the amber brand every surface has to carry. These
+//   wear a slight warm bias (red ≥ green ≥ blue, ~30° hue) so panels read as
+//   part of the same system as the amber instead of gray behind it.
+//
+// The ink ladder is unchanged and gains headroom, not loses it: every surface
+// went darker, so `ink_3` on `surface_3` measures ~4.70:1 where the mockup's
+// pair measured 4.63:1. The WCAG test in `tests/ui_tests.rs` holds that floor.
 
-/// `--riff-bg` — `#101013`, the window background.
-pub const SURFACE_BG: Color32 = Color32::from_rgb(0x10, 0x10, 0x13);
-/// `--riff-surface` — `#17171b`, panels and cards (the design's sidebar /
+/// `--riff-bg` — `#0e0d0c`, the window background.
+pub const SURFACE_BG: Color32 = Color32::from_rgb(0x0e, 0x0d, 0x0c);
+/// `--riff-surface` — `#161514`, panels and cards (the design's sidebar /
 /// top-bar / player-bar panel fill).
-pub const SURFACE: Color32 = Color32::from_rgb(0x17, 0x17, 0x1b);
-/// `--riff-surface-2` — `#1e1e23`, hover fills and popovers.
-pub const SURFACE_2: Color32 = Color32::from_rgb(0x1e, 0x1e, 0x23);
-/// `--riff-surface-3` — `#26262d`, raised accents.
-pub const SURFACE_3: Color32 = Color32::from_rgb(0x26, 0x26, 0x2d);
+pub const SURFACE: Color32 = Color32::from_rgb(0x16, 0x15, 0x14);
+/// `--riff-surface-2` — `#1f1d1b`, hover fills and popovers.
+pub const SURFACE_2: Color32 = Color32::from_rgb(0x1f, 0x1d, 0x1b);
+/// `--riff-surface-3` — `#282521`, raised accents.
+pub const SURFACE_3: Color32 = Color32::from_rgb(0x28, 0x25, 0x21);
+
+/// `--riff-surface-row` — `#121110`, the track/row plane: the field a list of
+/// rows is painted on, *below* the card plane rather than beside it.
+///
+/// The mockup draws that plane darker than its own cards, and the four-step
+/// ramp above has no slot for it — `surface` is the card plane, so rows would
+/// have had to share a field with the cards sitting on them. This const is the
+/// extra step that hierarchy asks for, and it splits the existing
+/// `background` → `surface` step of 24 in half rather than opening a new
+/// cadence: every step the ramp already had keeps the value it had, and a card
+/// still rises a full 12 off a row.
+///
+/// The mockup's own row hex is deliberately not this value, for two reasons,
+/// both amendments to the handoff rather than drift:
+///
+/// - **Taken literally it inverts the slot.** `#15151b` sums to 69, which is
+///   *above* `surface` at 63 — read against the ramp's own ordering it is a
+///   card, not a row, so it cannot be the row plane.
+/// - **It is cool-cast.** The ramp is deliberately warm (red ≥ green ≥ blue,
+///   ~30°) so panels sit in the amber brand's system; a blue-leaning row plane
+///   would be the one field in the app that does not. `#121110` is the
+///   half-step in the ramp's own register: +4 per channel off the background,
+///   carrying the same +1 hue the +8 steps carry.
+///
+/// The ink ladder is untouched and gains headroom here rather than losing it:
+/// `ink_3` measures 5.83:1 on this plane, darker than the 5.63:1 it reads at
+/// on `surface` but nowhere near the ramp's tight end. The WCAG test in
+/// `tests/ui_tests.rs` holds that floor.
+pub const SURFACE_ROW: Color32 = Color32::from_rgb(0x12, 0x11, 0x10);
 
 // --- Dark ink ladder (`--riff-ink`, `--riff-ink-2`, `--riff-ink-3`) ----------
 //
@@ -204,17 +265,69 @@ pub const STATE_INFO: Color32 = Color32::from_rgb(0x3b, 0x82, 0xf6);
 pub const FOCUS_RING: Color32 = Color32::from_rgb(0xa7, 0x8b, 0xfa);
 
 // --- Radius scale (`--riff-radius-*`) ----------------------------------------
+//
+// Lifted two px per step off the extracted mockup scale (4 / 8 / 12 / 16):
+// the mockup's small controls were nearly square, and at 12 px type the extra
+// softness is what makes a 24 px-tall control read as a control rather than a
+// rectangle. A corner radius is not a dimension — it moves no box edge and
+// costs no layout — so this is the one "generosity" lever the pinned chrome
+// geometry never had a say in.
 
-/// `--riff-radius-sm` — 4 px: small controls (buttons, inputs).
-pub const RADIUS_SM: f32 = 4.0;
-/// `--riff-radius-md` — 8 px: cards, menus, popovers.
-pub const RADIUS_MD: f32 = 8.0;
-/// `--riff-radius-lg` — 12 px: windows and large containers.
-pub const RADIUS_LG: f32 = 12.0;
-/// `--riff-radius-xl` — 16 px: hero surfaces such as the Now Playing cover.
-pub const RADIUS_XL: f32 = 16.0;
+/// `--riff-radius-sm` — 6 px: small controls (buttons, inputs).
+pub const RADIUS_SM: f32 = 6.0;
+/// `--riff-radius-md` — 10 px: cards, menus, popovers.
+pub const RADIUS_MD: f32 = 10.0;
+/// `--riff-radius-lg` — 14 px: windows and large containers.
+pub const RADIUS_LG: f32 = 14.0;
+/// `--riff-radius-xl` — 18 px: hero surfaces such as the Now Playing cover.
+pub const RADIUS_XL: f32 = 18.0;
 /// `--riff-radius-full` — 999 px: pills and circular elements.
 pub const RADIUS_FULL: f32 = 999.0;
+
+// --- Elevation (`--riff-shadow-*`) --------------------------------------------
+//
+// The mockup speaks elevation in Tailwind box-shadows — a soft, near-vertical
+// drop under popovers and floating chrome — and `style_from` is where that
+// language maps onto egui's [`egui::Shadow`]. egui's stock shadows carry a
+// hard diagonal offset (`[10, 20]`), which reads as library-default rather
+// than designed, so both families restate the mockup's centered drop instead.
+// Shadows paint outside every rect they wrap, so they move no layout; the
+// alphas are family-dependent only because a light canvas needs far less ink
+// for the same perceived depth.
+
+/// Menus, popovers and tooltips on the dark family: a tight vertical drop,
+/// the mockup's `shadow-lg` read over `--riff-surface`.
+pub const SHADOW_MENU_DARK: egui::Shadow = egui::Shadow {
+    offset: [0, 8],
+    blur: 20,
+    spread: 0,
+    color: Color32::from_black_alpha(115),
+};
+
+/// Menus, popovers and tooltips on the light family: the same geometry at the
+/// lower coverage a bright canvas needs.
+pub const SHADOW_MENU_LIGHT: egui::Shadow = egui::Shadow {
+    offset: [0, 8],
+    blur: 20,
+    spread: 0,
+    color: Color32::from_black_alpha(45),
+};
+
+/// Floating windows on the dark family: the menu drop, one step larger.
+pub const SHADOW_WINDOW_DARK: egui::Shadow = egui::Shadow {
+    offset: [0, 12],
+    blur: 28,
+    spread: 0,
+    color: Color32::from_black_alpha(120),
+};
+
+/// Floating windows on the light family: the same drop at light coverage.
+pub const SHADOW_WINDOW_LIGHT: egui::Shadow = egui::Shadow {
+    offset: [0, 12],
+    blur: 28,
+    spread: 0,
+    color: Color32::from_black_alpha(50),
+};
 
 // --- Spacing scale ------------------------------------------------------------
 //
@@ -582,9 +695,20 @@ pub mod geometry {
     /// above is 32px where Now Playing's is 16px — so a reader must not assume
     /// one shared value behind a shared name.
     pub mod settings {
-        /// Gap between a section header and its card. Revalued 16 -> 12 for the
+        /// Gap between the section header and its card. Revalued 16 -> 12 for the
         /// tightened mockup rhythm the two-column Library pane reads with.
         pub const HEADER_GAP: f32 = 12.0;
+        /// Width of a settings card's own hairline — the mockup's 1px
+        /// `border`, and the edge that *defines* the card.
+        ///
+        /// A settings card is the card plane plus this line: the mockup gives a
+        /// card no fill of its own, so the boundary between "card" and "the pane
+        /// behind it" is entirely the stroke. The width was a bare `1.0_f32` at
+        /// each of the five card call sites; the value is unchanged, only named,
+        /// so no pinned golden moves. Deliberately not a radius or a spacing
+        /// step — a stroke moves no box edge, which is what lets a card gain an
+        /// edge without reflowing a single pixel of its contents.
+        pub const CARD_BORDER_W: f32 = 1.0;
         /// Gap between sections. Revalued 32 -> 12 for the same reason.
         pub const SECTION_GAP: f32 = 12.0;
         /// Stage inset around the full-stage Settings page.
@@ -753,6 +877,9 @@ pub struct Palette {
     pub high_contrast: bool,
     /// Window background (`--riff-bg`).
     pub background: Color32,
+    /// Track/row plane — the field rows are painted on, below the card plane
+    /// (`--riff-surface-row`).
+    pub surface_row: Color32,
     /// Panel/card fill (`--riff-surface`).
     pub surface: Color32,
     /// Hover fills and popovers (`--riff-surface-2`).
@@ -802,6 +929,7 @@ impl Palette {
             dark: true,
             high_contrast: false,
             background: SURFACE_BG,
+            surface_row: SURFACE_ROW,
             surface: SURFACE,
             surface_2: SURFACE_2,
             surface_3: SURFACE_3,
@@ -837,11 +965,21 @@ impl Palette {
         Self {
             dark: false,
             high_contrast: false,
-            // Channel-wise mirrors of the dark surfaces (#101013 → #efefec …).
-            background: Color32::from_rgb(0xef, 0xef, 0xec),
-            surface: Color32::from_rgb(0xe8, 0xe8, 0xe4),
-            surface_2: Color32::from_rgb(0xe1, 0xe1, 0xdc),
-            surface_3: Color32::from_rgb(0xd9, 0xd9, 0xd2),
+            // Channel-wise mirrors of the dark surfaces, so the warm cast and
+            // the wider separation survive the flip: the dark ramp's warm bias
+            // (red highest) mirrors to a cool bias (blue highest), which is
+            // exactly what ADR 0004's rule predicts and what keeps light from
+            // reading as beige (#0e0d0c → #f1f2f3, #282521 → #d7dade).
+            background: Color32::from_rgb(0xf1, 0xf2, 0xf3),
+            // The row plane mirrors with the rest of the ramp (#121110 →
+            // #edeeef), which is what keeps it between `surface` and
+            // `background` in luminance: the half-step survives the flip
+            // because the flip is channel-wise and therefore order-preserving
+            // in sum.
+            surface_row: Color32::from_rgb(0xed, 0xee, 0xef),
+            surface: Color32::from_rgb(0xe9, 0xea, 0xeb),
+            surface_2: Color32::from_rgb(0xe0, 0xe2, 0xe4),
+            surface_3: Color32::from_rgb(0xd7, 0xda, 0xde),
             // The wash is brand-derived, so it is NOT mirrored (that would
             // turn it blue): the unchanged brand amber at the ~9% coverage
             // the dark wash reads over its surface keeps the hover warm on
@@ -932,13 +1070,281 @@ pub fn blend_over(bottom: egui::Color32, top: egui::Color32) -> egui::Color32 {
     )
 }
 
+/// The **dark** family's accent-glow strength: the mockup's accent wash
+/// `rgba(238, 122, 42, .35)` — 35% coverage.
+///
+/// The mockup's only stated glow strength, and it was measured on a dark
+/// surface, so it is the dark family's value verbatim. Only the strength comes
+/// from the mockup: its channels are a near-miss on brand-500 rather than a
+/// rung of the scale, and [`glow`] scales the palette's `brand_primary`, which
+/// supplies the hue.
+///
+/// **Per family, not one number.** A translucent wash's perceived strength
+/// depends on the backdrop's luminance, and this one is not family-invariant:
+/// over the dark card plane (`#161514`, L\* 6.8) 35% lifts the surface by
+/// **22.0 L\***, while the same 35% over the light plane (`#e9eaeb`, L\* 92.7)
+/// only drops it by **10.4 L\*** — 47% of the dark presence. The shared const
+/// was therefore reading *louder on dark*, not louder on light. Use
+/// [`glow_alpha`] to pick per family rather than reading this one directly.
+pub const GLOW_ALPHA: f32 = 0.35;
+
+/// The **light** family's accent-glow strength.
+///
+/// A light plane cannot glow: it already sits at the top of the luminance
+/// range, so an accent wash can only *tint* it — darken toward the brand — and
+/// no coverage turns that back into a bloom. Matching the dark family's 22.0 L\*
+/// here would mean dragging a near-white surface down by a fifth of its
+/// lightness, which reads as a dirty cast rather than as light. So the light
+/// value is set by how much ink a light canvas needs for the same *read*, and
+/// the app already answers that question elsewhere: [`SHADOW_MENU_LIGHT`] is
+/// 45 against [`SHADOW_MENU_DARK`]'s 115, a 0.39× split, for exactly the reason
+/// [`style_from`] gives — "a light canvas needs far less ink for the same
+/// perceived depth". This is that same 0.39× of [`GLOW_ALPHA`], landing the
+/// light wash at 4.4 L\* against the dark plane's 22.0.
+///
+/// High Contrast needs no value of its own: it inherits its base family's
+/// surfaces unchanged, so a HC plane is the base plane and the wash over it is
+/// the wash the base already had.
+pub const GLOW_ALPHA_LIGHT: f32 = 0.14;
+
+/// The accent-glow strength for `palette`'s family — [`GLOW_ALPHA`] on the dark
+/// families, [`GLOW_ALPHA_LIGHT`] on the light ones. What
+/// [`paint_accent_glow`] reads, and what a view should read rather than
+/// naming either constant.
+#[must_use]
+pub fn glow_alpha(palette: &Palette) -> f32 {
+    if palette.dark {
+        GLOW_ALPHA
+    } else {
+        GLOW_ALPHA_LIGHT
+    }
+}
+
+/// How far the accent glow's halo reaches beyond the control's own edge.
+///
+/// The mockup's lit-from-above flourish is a wide, faint bloom rather than a
+/// tight rim, so this is generous relative to the 27–40px controls it sits
+/// behind: roughly a third of a control's half-height. Wider than this and the
+/// bloom stops reading as light coming off the button and starts reading as a
+/// smudge on the pane behind it.
+pub const GLOW_SPREAD: f32 = 10.0;
+
 /// The brand glow wash at `alpha`: the palette's primary scaled by a layer's
 /// alpha fraction. The only sanctioned way to dim a palette color — view code
 /// reads a tint from here instead of scaling one at a call site (ADR 0004),
 /// which is what the color sweep in `tests/ui_tests.rs` enforces.
+///
+/// **Two kinds of caller, deliberately.** An *accent* glow — the wash behind a
+/// primary control — passes [`glow_alpha`] (formerly this module's single
+/// `GLOW_ALPHA`), because that strength is a per-family design decision with
+/// the measurements behind it. The other callers pass **a layer's own alpha**:
+/// `library.rs` and `now_playing.rs` each carry a `layer.alpha` that is a
+/// property of that layer's depth, not a restyle of the accent. Those are not
+/// mis-wired and must not be "fixed" onto `glow_alpha` — a layer that fades
+/// with its own alpha is the behaviour they are for.
 #[must_use]
 pub fn glow(palette: &Palette, alpha: f32) -> Color32 {
     palette.brand_primary.gamma_multiply(alpha)
+}
+
+/// The brand gradient's two stops, in paint order: the light rung first.
+///
+/// The direction lives here, beside the tokens, rather than at each call site —
+/// the mockup lights its primary actions from above, so the gradient always
+/// runs top-to-bottom and the [`BRAND_GRADIENT_TOP`] / [`BRAND_GRADIENT_BOTTOM`]
+/// naming already says which end is which. A call site that passes these two
+/// therefore cannot paint the gradient upside down.
+///
+/// egui 0.35 has no `LinearGradient` type, so this hands back the pair a
+/// gradient wants rather than a finished object; [`paint_gradient_shape`] is
+/// what turns it into pixels for a shape with rounded corners.
+#[must_use]
+pub fn brand_gradient_stops() -> [Color32; 2] {
+    [BRAND_GRADIENT_TOP, BRAND_GRADIENT_BOTTOM]
+}
+
+/// A rounded shape's outline as points around its perimeter, clockwise from the
+/// left end of its top edge. A `radius` of half the shorter side collapses the
+/// straight edges to points, which is how this module asks for a circle.
+///
+/// **Requires a positive `radius`.** At zero every arc collapses onto its own
+/// corner, so the outline degenerates to each corner repeated once per sample
+/// and 24 of the 28 fan triangles are zero-area. That still *paints* correctly —
+/// the four non-degenerate triangles cover the rect and `at_height` is affine in
+/// `y`, so the interpolation stays exact — but it leans on the rasteriser
+/// discarding degenerate triangles, which is an accident rather than a property
+/// anyone can read off the code. [`paint_gradient_shape`] therefore takes radius
+/// zero as its own rectangular path and never calls this with it; if you are
+/// about to pass `0.0`, that is the sign you want the rectangle, not this
+/// function.
+fn rounded_outline(rect: egui::Rect, radius: f32, per_corner: u16) -> Vec<egui::Pos2> {
+    let radius = radius.min(rect.width() / 2.0).min(rect.height() / 2.0);
+    // Each corner's arc centre and the angle it starts at, in order.
+    let corners = [
+        (
+            egui::pos2(rect.right() - radius, rect.top() + radius),
+            -std::f32::consts::FRAC_PI_2,
+        ),
+        (
+            egui::pos2(rect.right() - radius, rect.bottom() - radius),
+            0.0,
+        ),
+        (
+            egui::pos2(rect.left() + radius, rect.bottom() - radius),
+            std::f32::consts::FRAC_PI_2,
+        ),
+        (
+            egui::pos2(rect.left() + radius, rect.top() + radius),
+            std::f32::consts::PI,
+        ),
+    ];
+    let mut points = Vec::with_capacity(corners.len() * (per_corner as usize + 1));
+    for (centre, start) in corners {
+        for step in 0..=per_corner {
+            let angle =
+                start + std::f32::consts::FRAC_PI_2 * f32::from(step) / f32::from(per_corner);
+            points.push(egui::pos2(
+                centre.x + radius * angle.cos(),
+                centre.y + radius * angle.sin(),
+            ));
+        }
+    }
+    points
+}
+
+/// One channel of a linear blend between two gradient stops, rounded.
+///
+/// Both ends are `u8` and `t` is a fraction clamped to `0..=1`, so the result
+/// is in range by construction and the cast is only the rounding step — the
+/// same trade [`blend_over`] makes for the same reason.
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn blend_channel(from: u8, to: u8, t: f32) -> u8 {
+    (f32::from(from) + (f32::from(to) - f32::from(from)) * t).round() as u8
+}
+
+/// The artless-artwork placeholder's gradient stops: the two raised-surface
+/// rungs, light on top.
+///
+/// **The one system gradient every placeholder wears** (decision D2). It lives
+/// here rather than in the artwork module so the pair is a token choice like any
+/// other: a caller reads these and hands them to the placeholder variant, and
+/// nothing in a view names a rung. One pair for all placeholders is also what
+/// keeps the shared placeholder tile cacheable — per-identity stops would make
+/// every artless item its own texture again.
+#[must_use]
+pub fn placeholder_gradient_stops(palette: &Palette) -> [Color32; 2] {
+    [palette.surface_2, palette.surface_3]
+}
+
+/// Paint `rect` as a rounded shape filled with `stops` running **vertically**,
+/// `stops[0]` at the top edge and `stops[1]` at the bottom, each vertex taking
+/// the color its own height implies.
+///
+/// A mesh rather than `Shape::gradient_rect`, for two reasons: a gradient rect
+/// has square corners, and every control this paints for is rounded or
+/// circular. Colored vertices interpolate in the tessellator, so the shape's
+/// edge is antialiased by the same path a flat fill takes and the falloff costs
+/// one primitive. `radius` is a [`RADIUS_MD`] token for a button, or half the
+/// rect's width for a circle.
+///
+/// Paint-only: the mesh is bounded by `rect`, so it moves no box edge and
+/// changes no hit target.
+pub fn paint_gradient_shape(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    radius: f32,
+    [top, bottom]: [Color32; 2],
+) {
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return;
+    }
+    let at_height = |y: f32| {
+        let t = ((y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+        Color32::from_rgb(
+            blend_channel(top.r(), bottom.r(), t),
+            blend_channel(top.g(), bottom.g(), t),
+            blend_channel(top.b(), bottom.b(), t),
+        )
+    };
+    let mut mesh = egui::Mesh::default();
+
+    // A plain rectangle is its own path, and the honest one: four corners, two
+    // triangles, no centre vertex and no per-corner sampling. Rounding it to
+    // zero would produce the same pixels via [`rounded_outline`], but only
+    // because the fan's degenerate triangles happen to cover nothing — so the
+    // rectangle is spelled out here rather than leaned on.
+    if radius <= 0.0 {
+        mesh.colored_vertex(rect.left_top(), top);
+        mesh.colored_vertex(rect.right_top(), top);
+        mesh.colored_vertex(rect.right_bottom(), bottom);
+        mesh.colored_vertex(rect.left_bottom(), bottom);
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 2, 3);
+        painter.add(mesh);
+        return;
+    }
+
+    // A rounded shape: a fan from the centre over its outline, which is exact
+    // because the shape is convex.
+    let outline = rounded_outline(rect, radius, 6);
+    mesh.colored_vertex(rect.center(), at_height(rect.center().y));
+    for point in &outline {
+        mesh.colored_vertex(*point, at_height(point.y));
+    }
+    // A closed outline needs one triangle per edge, so the last one wraps back
+    // to the first outline vertex. Dropping that wrap leaves out the triangle
+    // spanning the shape's top edge and the centre — which, for a wide control,
+    // is most of its upper half.
+    let count = u32::try_from(outline.len()).expect("a rounded outline is a handful of points");
+    for index in 1..=count {
+        let next = if index == count { 1 } else { index + 1 };
+        mesh.add_triangle(0, index, next);
+    }
+    painter.add(mesh);
+}
+
+/// Paint the accent glow that sits **behind** a primary control: the brand
+/// accent at [`GLOW_ALPHA`] at the control's centre, falling to fully
+/// transparent [`GLOW_SPREAD`] beyond its edge.
+///
+/// A fan of triangles from the centre out to an ellipse around the control, so
+/// the bloom hugs the control's own proportions — circular for the play FAB,
+/// wide and shallow for a text button — instead of stamping a fixed disc that
+/// would pool in the corners of a wide control. Vertex interpolation supplies
+/// the falloff, so the halo has no hard edge anywhere and costs one primitive.
+///
+/// Call this BEFORE the control's face: the centre is the brightest part and the
+/// face covers it, which is what leaves a rim of light rather than a disc.
+///
+/// Paint-only, and deliberately unclipped — the halo is meant to reach past the
+/// control onto the pane behind it, so a painter scoped to the control's own
+/// rect (egui's `painter_at`) would erase it. What bounds it is the enclosing
+/// panel's clip.
+pub fn paint_accent_glow(painter: &egui::Painter, palette: &Palette, rect: egui::Rect) {
+    /// Segments around the halo. Enough that the rim does not read as a
+    /// polygon on a 40px control.
+    const SEGMENTS: u16 = 32;
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return;
+    }
+    let halo = rect.expand(GLOW_SPREAD);
+    let centre = rect.center();
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(centre, glow(palette, glow_alpha(palette)));
+    for step in 0..SEGMENTS {
+        let angle = std::f32::consts::TAU * f32::from(step) / f32::from(SEGMENTS);
+        mesh.colored_vertex(
+            egui::pos2(
+                centre.x + halo.width() / 2.0 * angle.cos(),
+                centre.y + halo.height() / 2.0 * angle.sin(),
+            ),
+            TRANSPARENT,
+        );
+    }
+    for step in 0..SEGMENTS {
+        mesh.add_triangle(0, 1 + u32::from(step), 1 + u32::from((step + 1) % SEGMENTS));
+    }
+    painter.add(mesh);
 }
 
 /// The tint a hero glyph is rasterized with: the palette's muted ink at the
@@ -948,12 +1354,35 @@ pub fn hero_glyph(palette: &Palette) -> Color32 {
     palette.ink_3.gamma_multiply(0.4)
 }
 
+/// The coverage a role's hover wash is painted at — the mockup's
+/// `hover:bg-*/10`, and the number that makes the accent wash and the
+/// destructive wash one gesture in two hues rather than two different
+/// strengths. [`destructive_fill`] carries the same 0.1 inline; this names it
+/// for the accent side, and both are the mockup's `/10`.
+pub const ACCENT_HOVER_COVERAGE: f32 = 0.1;
+
 /// The destructive ghost button's fill: transparent until hovered, then the
 /// error token at the mockup's 10% (`hover:bg-destructive/10`).
 #[must_use]
 pub fn destructive_fill(palette: &Palette, hovered: bool) -> Color32 {
     if hovered {
         palette.error.gamma_multiply(0.1)
+    } else {
+        TRANSPARENT
+    }
+}
+
+/// The accent tier's hover wash: transparent until hovered, then the brand
+/// token at the mockup's 10% (`hover:bg-primary/10`) — the identical gesture
+/// [`destructive_fill`] makes, in the brand hue rather than the error hue.
+///
+/// The counterpart helper for [`destructive_fill`], and for the same reason: a
+/// translucent role wash is derived here rather than at a call site, so the
+/// coverage cannot drift between the two and view code never scales a token.
+#[must_use]
+pub fn accent_fill(palette: &Palette, hovered: bool) -> Color32 {
+    if hovered {
+        palette.brand_primary.gamma_multiply(ACCENT_HOVER_COVERAGE)
     } else {
         TRANSPARENT
     }
@@ -1007,13 +1436,32 @@ pub fn style_from(palette: &Palette) -> egui::Style {
     v.window_corner_radius = corner(RADIUS_LG);
     v.menu_corner_radius = corner(RADIUS_MD);
 
+    // Elevation: popovers and floating chrome drop from the shadow tokens —
+    // a centered, near-vertical fall — instead of egui's stock diagonal
+    // smear, which reads as library-default rather than designed (ADR 0004:
+    // every visual value declared here). A shadow paints outside every rect
+    // it wraps, so this moves no layout; the two families differ only in how
+    // much ink a canvas needs for the same perceived depth.
+    v.popup_shadow = if palette.dark {
+        SHADOW_MENU_DARK
+    } else {
+        SHADOW_MENU_LIGHT
+    };
+    v.window_shadow = if palette.dark {
+        SHADOW_WINDOW_DARK
+    } else {
+        SHADOW_WINDOW_LIGHT
+    };
+
     // Links and status text.
     v.hyperlink_color = palette.brand_primary;
     v.warn_fg_color = palette.warning;
     v.error_fg_color = palette.error;
 
-    // Selection / keyboard-focus ring.
-    v.selection.bg_fill = palette.brand_primary.gamma_multiply(0.35);
+    // Selection / keyboard-focus ring. The wash sits at 22% brand so the ink
+    // it selects stays the loudest thing on its row; the ring is the focus
+    // token, never the brand amber (review P2-17).
+    v.selection.bg_fill = palette.brand_primary.gamma_multiply(0.22);
     v.selection.stroke = Stroke::new(focus_width, palette.focus_ring);
 
     // Widget states, each from tokens: sm corners everywhere; hover fills on

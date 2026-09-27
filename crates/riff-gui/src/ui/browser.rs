@@ -199,6 +199,20 @@ fn show_browser_list(
     scroll: Option<super::scroll_memory::ScrollControl>,
     actions: &mut Vec<BrowserAction>,
 ) -> f32 {
+    // The list is a field, and the field belongs to the list rather than to
+    // each row. A per-row fill could not cover it anyway: these rows are
+    // virtualized, so only a window of them is ever materialized, and a fill
+    // carried by the rows would end at the last rendered one and leave the
+    // rest of the column showing the card plane behind it. One paint over the
+    // list's viewport rect covers every pixel the scroll area can display,
+    // including the space below the final row. The radius is 0 because this
+    // is the plane, flush with the column edges — the rounded shapes stay on
+    // the rows and cards that sit on it.
+    ui.painter().rect_filled(
+        egui::Rect::from_min_size(ui.cursor().min, ui.available_size()),
+        0.0,
+        palette.surface_row,
+    );
     let mut scroll_area = egui::ScrollArea::vertical()
         .auto_shrink(false)
         .animated(false);

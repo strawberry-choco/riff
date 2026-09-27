@@ -509,8 +509,23 @@ struct QuickAction {
     action: SelectionAction,
 }
 
-/// One primary action button at `width` wide: the brand fill with its
-/// foreground ink, reporting `spec.action` when clicked.
+/// One primary action button at `width` wide, reporting `spec.action` when
+/// clicked.
+///
+/// Both quick actions come through here, and this is the only place either is
+/// painted, so the row cannot show one lit primary beside a flat one. The face
+/// is [`super::button::paint_primary_face`] — the same authority
+/// [`super::button::Variant::Primary`] and the player bar's FAB use — rather
+/// than a hand-rolled brand fill, which is what this button wore before the
+/// accent gradient landed and is exactly the drift that put two primaries in
+/// one row reading differently.
+///
+/// The rect is claimed from the cursor *before* the button is added so the
+/// bloom can go down first, then the button contributes only its glyph, its
+/// label and its state stroke over that face. `add_sized` lays the button out at
+/// the cursor, which is what makes the claim exact;
+/// `test_quick_action_claims_the_rect_its_button_actually_takes` in
+/// `tests/ui_tests.rs` is what keeps it that way.
 fn action_button(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -525,6 +540,10 @@ fn action_button(
         label,
         action,
     } = spec;
+    let size = egui::vec2(width, PLAY_H);
+    let rect = egui::Rect::from_min_size(ui.cursor().min, size);
+    super::button::paint_primary_face(ui, palette, rect, super::theme::RADIUS_SM);
+
     let texture = cache.texture(ui.ctx(), icon, 14.0, palette.on_brand);
     let button = egui::Button::image_and_text(
         egui::Image::new((texture, egui::vec2(14.0, 14.0))),
@@ -532,13 +551,11 @@ fn action_button(
             .text_style(egui::TextStyle::Body)
             .color(palette.on_brand),
     )
-    .fill(palette.brand_primary)
+    // The face is already down; the button keeps its glyph, label and state
+    // stroke and paints no fill of its own.
+    .fill(theme::TRANSPARENT)
     .corner_radius(super::theme::RADIUS_SM);
-    if ui
-        .add_sized([width, PLAY_H], button)
-        .on_hover_text(label)
-        .clicked()
-    {
+    if ui.add_sized(size, button).on_hover_text(label).clicked() {
         actions.push(action);
     }
 }

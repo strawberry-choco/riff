@@ -47,3 +47,33 @@ recorded here rather than edited out of the record:
 - **Contrast is now checked, not assumed.** A computed WCAG 2.1 contrast test in
   `tests/ui_tests.rs` holds every text token at 4.5:1 on the fills it paints on
   and every ring at 3:1.
+
+## Amendment — 2026-09-27 (row plane and family-split effect strength)
+
+The decision above stands, and token authority did not move: `theme.rs` is still
+the only store and the only read source. Two additions do change what the token
+set *contains*, so they are recorded here.
+
+- **The surface ramp gained a step, between the background and the card plane.**
+  `surface_row` is the field a list of rows is painted on. The mockup draws that
+  plane darker than its own cards; the four-step ramp had no slot for it, so
+  idle rows painted nothing and the pane behind them showed straight through.
+  It is a ramp step like any other — channel-wise mirrored into light, and
+  inherited unchanged by High Contrast, which re-picks no surface. The mockup's
+  own row hex was **not** adopted: read against the ramp it is lighter than
+  `surface`, so it would have inverted the very slot it populates. The adopted
+  value splits the existing background→surface step in half rather than opening
+  a new cadence, which is why no previously-pinned step moved. Note the
+  practical consequence: the contrast test's fill list went from five entries to
+  seven, because a row is now a fill that text can land on and the hover wash
+  composites differently over the row plane than over the card plane.
+- **Some effect strengths are family-split even though every colour is not.**
+  Brand amber stays family-invariant, but a *translucent wash over a plane* is
+  not a fixed quantity: the same 0.35 alpha reads as a large change on a
+  near-black plane and a much smaller one on a near-white one, because a light
+  surface can only be tinted downward and never bloomed. The accent glow is
+  therefore `GLOW_ALPHA` on the dark families and `GLOW_ALPHA_LIGHT` on the
+  light ones, the same shape as the already family-split `SHADOW_MENU_DARK` /
+  `_LIGHT`. This is a split in an *effect*, not a new colour rule: the hue is
+  still the one brand token in both families.
+

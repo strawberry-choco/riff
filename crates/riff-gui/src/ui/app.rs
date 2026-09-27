@@ -16,10 +16,15 @@ use crate::ui::window_visibility::VisibilityMessage;
 use eframe::egui;
 use riff_backend::app::MutexExt;
 use riff_backend::app::Transport;
-pub use riff_backend::app::cover_service::{COVER_CACHE_CAP, Covers, lru_insert};
+pub use riff_backend::app::cover_service::{
+    COVER_CACHE_CAP, ClearCacheOutcome, Covers, lru_insert,
+};
 // The artwork cache-key space moved to `ui::artwork` with the artwork primitive
 // (issue 13); these keep the historical `ui::app::` paths resolving.
-pub use crate::ui::artwork::{COVER_CARD, COVER_HERO, COVER_THUMB, CoverCacheKey, cover_cache_key};
+pub use crate::ui::artwork::{
+    COVER_CARD, COVER_HERO, COVER_IN_FLIGHT_CAP, COVER_TEXTURE_BYTE_BUDGET, COVER_THUMB,
+    CoverCacheKey, cover_cache_key,
+};
 // The elastic stage's sizing policy moved in with the stage geometry itself;
 // this keeps the historical `ui::app::column_widths` path resolving.
 pub use crate::ui::stage::column_widths;
@@ -99,6 +104,15 @@ pub struct RiffApp {
     pub(crate) scans: Box<dyn Scans>,
     cover_textures: std::collections::HashMap<CoverCacheKey, egui::TextureHandle>,
     cover_lru_keys: Vec<CoverCacheKey>,
+    /// Cover requests this frame has sent and not yet been answered, keyed exactly
+    /// as the texture map is. Without it every repaint of a row whose art has not
+    /// landed re-enqueues a request onto an unbounded channel — invisible when the
+    /// answer comes back in one heartbeat, and a real allocation plus a `PathBuf`
+    /// and `String` clone per frame per row when it does not.
+    cover_in_flight: std::collections::HashSet<CoverCacheKey>,
+    /// The LRU order of [`Self::cover_in_flight`], kept beside it the same way
+    /// `cover_lru_keys` tracks `cover_textures`.
+    cover_in_flight_keys: Vec<CoverCacheKey>,
     /// The Cover Service front end (ADR 0006): sends resolve intent and
     /// yields drained results; dedup and the negative cache live behind it.
     covers: Box<dyn Covers>,
@@ -146,6 +160,12 @@ pub struct RiffApp {
     /// Transient Clear Library confirmation (`true` = awaiting confirm).
     /// Grouped with the other transient prompts on `RiffApp`.
     pub(crate) clear_library_confirm: bool,
+    /// Transient Clear Thumbnail cache confirmation, same shape as the one above.
+    pub(crate) clear_thumbnail_cache_confirm: bool,
+    /// A Thumbnail-cache clear the worker has not answered yet. The frame drains
+    /// its outcome while this is set, and a second press is ignored — the way the
+    /// Tag Edit controller holds one outstanding record.
+    pub(crate) clear_cache_in_flight: bool,
     /// Ctrl+K request flag (issue 06): one-shot focus request for the global
     /// search field, consumed on the frame it lands.
     global_search_focus: bool,
@@ -252,6 +272,8 @@ impl RiffApp {
             scans,
             cover_textures: std::collections::HashMap::new(),
             cover_lru_keys: Vec::new(),
+            cover_in_flight: std::collections::HashSet::new(),
+            cover_in_flight_keys: Vec::new(),
             covers,
             tag_editor: InlineTagEditor::new(tag_edits),
             smart_playlist_view: None,
@@ -268,6 +290,8 @@ impl RiffApp {
             playlist_create_name: None,
             playlist_rename: None,
             clear_library_confirm: false,
+            clear_thumbnail_cache_confirm: false,
+            clear_cache_in_flight: false,
             global_search_focus: false,
             first_frame: true,
             watcher_manager,
@@ -389,9 +413,11 @@ impl RiffApp {
     /// UI-side check left is the texture cache (the texture LRU is
     /// UI-owned per the texture boundary); request deduplication and the
     /// negative cache live behind the service seam.
-    fn request_cover(&self, track_id: &TrackId, file_path: &Path, size: RequestedSize) {
+    fn request_cover(&mut self, track_id: &TrackId, file_path: &Path, size: RequestedSize) {
         request_cover_intent(
             &self.cover_textures,
+            &mut self.cover_in_flight,
+            &mut self.cover_in_flight_keys,
             self.covers.as_ref(),
             track_id.clone(),
             file_path.to_path_buf(),
@@ -455,6 +481,66 @@ impl RiffApp {
     /// so tracks resolved as artless under the old policy re-resolve.
     pub(crate) fn evict_generated_covers(&mut self) {
         crate::ui::artwork::evict_generated(&mut self.cover_textures, &mut self.cover_lru_keys);
+        // The markers go with them. A row that asked under the old policy has an
+        // outstanding request whose answer is about to be wrong for the new one, and
+        // leaving it marked would suppress the re-ask that the eviction above exists
+        // to cause.
+        self.cover_in_flight.clear();
+        self.cover_in_flight_keys.clear();
+    }
+
+    /// Begin a Thumbnail-cache clear for `ui::settings`, the sibling of
+    /// [`Self::evict_generated_covers`] in the same pane. The wipe runs on the cover
+    /// worker and [`Self::poll_cache_clear_outcome`] reports it once it settles, so
+    /// the frame only ever says "clearing" and never waits.
+    pub(crate) fn request_thumbnail_cache_clear(&mut self) {
+        if request_cache_clear(self.covers.as_ref(), &mut self.clear_cache_in_flight) {
+            self.feedback.set_library(
+                "Clearing the thumbnail cache\u{2026}".to_string(),
+                riff_backend::app::events::NoticeSeverity::Info,
+            );
+        }
+    }
+
+    /// Drain the settled outcome of a Thumbnail-cache clear and report it on the
+    /// status line the rest of the Library pane already uses. A cache that cannot
+    /// be cleared is an inconvenience, not a data-loss event, so this is one line
+    /// in the feedback board — never a modal.
+    /// Drain every background service's outstanding results into the feedback
+    /// board, in the order the status line is later composed from it. The three
+    /// drains are one step because their sequence relative to
+    /// `feedback.display_message()` is load-bearing: a slot filled after the
+    /// compose is a frame late.
+    fn drain_background_outcomes(&mut self, library: &mut LibrarySession) {
+        self.poll_library_updates(library);
+        self.tag_editor.poll_outcomes(&mut self.feedback);
+        self.poll_cache_clear_outcome();
+    }
+
+    fn poll_cache_clear_outcome(&mut self) {
+        let Some(outcome) = settle_cache_clear(
+            self.covers.as_ref(),
+            &mut self.clear_cache_in_flight,
+            &mut self.cover_textures,
+            &mut self.cover_lru_keys,
+        ) else {
+            return;
+        };
+        match outcome {
+            ClearCacheOutcome::Cleared => {
+                self.feedback.set_library(
+                    "Thumbnail cache cleared. Covers rebuild as you browse.".to_string(),
+                    riff_backend::app::events::NoticeSeverity::Info,
+                );
+            }
+            ClearCacheOutcome::Failed { reason } => {
+                tracing::warn!("Failed to clear the Thumbnail cache: {reason}");
+                self.feedback.set_library(
+                    "Failed to clear the Thumbnail cache \u{2014} nothing was changed.".to_string(),
+                    riff_backend::app::events::NoticeSeverity::Error,
+                );
+            }
+        }
     }
 
     /// Consume polled cover results into the UI texture cache: rgba→texture
@@ -465,6 +551,8 @@ impl RiffApp {
             self.covers.as_ref(),
             &mut self.cover_textures,
             &mut self.cover_lru_keys,
+            &mut self.cover_in_flight,
+            &mut self.cover_in_flight_keys,
             ctx,
         );
     }
@@ -778,8 +866,7 @@ impl eframe::App for RiffApp {
         self.scroll_memory.note_backend_events(&events);
         apply_backend_events(events, &mut self.feedback);
 
-        self.poll_library_updates(&mut library);
-        self.tag_editor.poll_outcomes(&mut self.feedback);
+        self.drain_background_outcomes(&mut library);
         // Compose the titlebar status line from the independent source slots,
         // so a Library Scan update cannot erase a live playback error or a Tag
         // Edit outcome (issue 11). The composed message feeds the existing
@@ -3102,6 +3189,8 @@ impl RiffApp {
         // beside it, so an uncovered row keeps today's geometry exactly.
         let cover = folder_cover_intent(
             &self.cover_textures,
+            &mut self.cover_in_flight,
+            &mut self.cover_in_flight_keys,
             self.covers.as_ref(),
             path,
             COVER_THUMB,
@@ -3182,14 +3271,38 @@ impl RiffApp {
 /// hero size is still a miss at thumbnail size.
 pub fn request_cover_intent<S: std::hash::BuildHasher>(
     textures: &std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
+    in_flight: &mut std::collections::HashSet<CoverCacheKey, S>,
+    in_flight_keys: &mut Vec<CoverCacheKey>,
     covers: &dyn Covers,
     track_id: TrackId,
     path: PathBuf,
     size: RequestedSize,
 ) {
-    if !textures.contains_key(&cover_cache_key(&track_id.0, size)) {
-        covers.request(track_id, path, size);
+    let key = cover_cache_key(&track_id.0, size);
+    if textures.contains_key(&key) || in_flight.contains(&key) {
+        return;
     }
+    mark_in_flight(in_flight, in_flight_keys, key);
+    covers.request(track_id, path, size);
+}
+
+/// Record that a `(identity, box)` has an outstanding request, keeping the marker
+/// set bounded by the same LRU discipline as the texture map.
+///
+/// The marker is dropped by [`cache_polled_covers`] when the answer arrives, so
+/// overflowing the cap can only ever forget a *recent* ask — and the cost of
+/// forgetting is one re-request, not a wrong image. Both structures are updated
+/// together because a key left in the list but not the set would be re-marked
+/// forever, and one left in the set but not the list could never be evicted.
+fn mark_in_flight<S: std::hash::BuildHasher>(
+    in_flight: &mut std::collections::HashSet<CoverCacheKey, S>,
+    in_flight_keys: &mut Vec<CoverCacheKey>,
+    key: CoverCacheKey,
+) {
+    for evicted in lru_insert(in_flight_keys, key.clone(), COVER_IN_FLIGHT_CAP) {
+        in_flight.remove(&evicted);
+    }
+    in_flight.insert(key);
 }
 
 /// The Folders tree's half of the same responsibility (ADR 0006): a folder row
@@ -3208,15 +3321,21 @@ pub fn request_cover_intent<S: std::hash::BuildHasher>(
 /// no further plumbing.
 pub fn folder_cover_intent<S: std::hash::BuildHasher>(
     textures: &std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
+    in_flight: &mut std::collections::HashSet<CoverCacheKey, S>,
+    in_flight_keys: &mut Vec<CoverCacheKey>,
     covers: &dyn Covers,
     folder: &Path,
     size: RequestedSize,
 ) -> Option<egui::TextureId> {
     let identity = folder.to_string_lossy().to_string();
-    if let Some(texture) = textures.get(&cover_cache_key(&identity, size)) {
+    let key = cover_cache_key(&identity, size);
+    if let Some(texture) = textures.get(&key) {
         return Some(texture.id());
     }
-    covers.request_folder(folder, size);
+    if !in_flight.contains(&key) {
+        mark_in_flight(in_flight, in_flight_keys, key);
+        covers.request_folder(folder, size);
+    }
     None
 }
 
@@ -3248,9 +3367,19 @@ pub fn cache_polled_covers<S: std::hash::BuildHasher>(
     covers: &dyn Covers,
     textures: &mut std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
     lru_keys: &mut Vec<CoverCacheKey>,
+    in_flight: &mut std::collections::HashSet<CoverCacheKey, S>,
+    in_flight_keys: &mut Vec<CoverCacheKey>,
     ctx: &egui::Context,
 ) {
     for (track_id, size, cover) in covers.poll() {
+        // Every delivered answer is terminal, `None` included: an artless row that
+        // kept its marker would never ask again, and a row whose art appears later
+        // would stay blank for the session. Cleared before the `continue` below for
+        // exactly that reason.
+        let key = cover_cache_key(&track_id.0, size);
+        in_flight.remove(&key);
+        in_flight_keys.retain(|existing| existing != &key);
+
         let Some(cover) = cover else {
             continue; // artless: the service negative-caches it
         };
@@ -3259,12 +3388,51 @@ pub fn cache_polled_covers<S: std::hash::BuildHasher>(
             &cover.rgba,
         );
         let texture = ctx.load_texture(&track_id.0, color_image, egui::TextureOptions::default());
-        let key = cover_cache_key(&track_id.0, size);
         textures.insert(key.clone(), texture);
         for old in lru_insert(lru_keys, key, COVER_CACHE_CAP) {
             textures.remove(&old);
         }
+        crate::ui::artwork::enforce_texture_byte_budget(textures, lru_keys);
     }
+}
+
+/// Ask the Cover worker to delete every cached Thumbnail, and record that one is
+/// outstanding. A press while a clear is still running is ignored rather than
+/// queued: the wipe is idempotent, and a second one only delays the answer the
+/// first already promised. Returns whether the request went out.
+pub fn request_cache_clear(covers: &dyn Covers, in_flight: &mut bool) -> bool {
+    if *in_flight {
+        return false;
+    }
+    covers.clear_cache();
+    *in_flight = true;
+    true
+}
+
+/// Drain the settled outcome of a Thumbnail-cache clear, and flush the texture map
+/// with it.
+///
+/// The flush happens here rather than when the button was pressed, and the order
+/// matters: at confirm time every visible row would re-request while the wipe was
+/// still queued behind those very requests, rebuilding the entries the user had
+/// just asked to delete. Settled is the moment the disk is genuinely empty, so it
+/// is the moment the screen can be emptied with it. A `Failed` clear leaves every
+/// texture in place — nothing was removed, so nothing has to be re-derived.
+pub fn settle_cache_clear<S: std::hash::BuildHasher>(
+    covers: &dyn Covers,
+    in_flight: &mut bool,
+    textures: &mut std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
+    lru_keys: &mut Vec<CoverCacheKey>,
+) -> Option<ClearCacheOutcome> {
+    if !*in_flight {
+        return None;
+    }
+    let outcome = covers.poll_cache_clear()?;
+    *in_flight = false;
+    if outcome == ClearCacheOutcome::Cleared {
+        crate::ui::artwork::evict_all_covers(textures, lru_keys);
+    }
+    Some(outcome)
 }
 
 /// Play a folder: start its first track and queue the rest as ONE batch

@@ -6159,6 +6159,52 @@ mod tests {
         }
     }
 
+    /// The Thumbnail clear has to be reachable where a listener whose Covers look
+    /// wrong actually is — the Library pane's Artwork card, beside the artwork
+    /// toggle — and reachable means *clickable*. A widget that exists but is
+    /// clipped below a `ScrollArea` satisfies `query_by_label` and still cannot be
+    /// pressed, so this asserts on the action the click returns rather than on the
+    /// label being present.
+    #[test]
+    fn test_clear_thumbnail_cache_is_reachable_from_the_library_section() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
+
+        for size in [egui::vec2(1280.0, 840.0), egui::vec2(920.0, 840.0)] {
+            let content = sample_content();
+            let palette = theme::Palette::dark();
+            let mut cache = icons::IconCache::new();
+            let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
+                egui_kittest::Harness::builder()
+                    .with_size(size)
+                    .with_pixels_per_point(1.0)
+                    .build_ui_state(
+                        move |ui, actions: &mut Vec<SettingsAction>| {
+                            actions.extend(show_settings_modal(
+                                ui,
+                                &mut cache,
+                                &palette,
+                                &content,
+                                SettingsSection::Library,
+                            ));
+                        },
+                        Vec::new(),
+                    );
+            harness.run();
+
+            harness
+                .get_by_label(riff_gui::ui::prompts::CLEAR_THUMBNAIL_CACHE_LABEL)
+                .click();
+            harness.run();
+            assert!(
+                harness
+                    .state()
+                    .contains(&SettingsAction::ClearThumbnailCache),
+                "the row in the Artwork card must answer a real click at {size:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_settings_nav_clicks_report_the_selected_section() {
         use egui_kittest::kittest::Queryable;
@@ -6976,15 +7022,19 @@ mod settings_scalar_handler_tests {
 #[cfg(test)]
 mod background_service_ui_tests {
     use super::*;
-    use riff_backend::app::cover_service::Covers;
+    use riff_backend::app::cover_service::{ClearCacheOutcome, Covers};
     use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
+    use riff_gui::ui::app::CoverCacheKey;
     use riff_gui::ui::app::{
-        COVER_CACHE_CAP, InlineTagEditor, InspectorContent, InspectorKind, cache_polled_covers,
-        cover_cache_key, folder_cover_intent, request_cover_intent,
+        COVER_CACHE_CAP, COVER_HERO, COVER_IN_FLIGHT_CAP, COVER_TEXTURE_BYTE_BUDGET,
+        InlineTagEditor, InspectorContent, InspectorKind, cache_polled_covers, cover_cache_key,
+        folder_cover_intent, request_cache_clear, request_cover_intent, settle_cache_clear,
     };
     use riff_gui::ui::selection::{TagField, TagRow, TagRowState};
     use riff_library::app::traits::{DecodedCover, RequestedSize};
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// Recording [`TagEdits`] fake: captures every submitted request and
@@ -7028,19 +7078,34 @@ mod background_service_ui_tests {
     }
 
     /// Recording [`Covers`] fake: captures request intent, serves nothing.
+    /// Records cache-clear requests too, and can be handed a scripted clear
+    /// outcome, so the in-progress → settled transition is driven without a thread.
     struct RecordingCovers {
         requested: Mutex<Vec<(TrackId, PathBuf, RequestedSize)>>,
+        clears: AtomicUsize,
+        clear_outcomes: Mutex<VecDeque<ClearCacheOutcome>>,
     }
 
     impl RecordingCovers {
         fn new() -> Self {
             Self {
                 requested: Mutex::new(Vec::new()),
+                clears: AtomicUsize::new(0),
+                clear_outcomes: Mutex::new(VecDeque::new()),
             }
         }
 
         fn requested(&self) -> Vec<(TrackId, PathBuf, RequestedSize)> {
             self.requested.lock().unwrap().clone()
+        }
+
+        fn clear_calls(&self) -> usize {
+            self.clears.load(Ordering::SeqCst)
+        }
+
+        /// Queue one settled outcome for the next `poll_cache_clear`.
+        fn serve_clear(&self, outcome: ClearCacheOutcome) {
+            self.clear_outcomes.lock().unwrap().push_back(outcome);
         }
     }
 
@@ -7061,6 +7126,284 @@ mod background_service_ui_tests {
         fn poll(&self) -> Vec<(TrackId, RequestedSize, Option<DecodedCover>)> {
             Vec::new()
         }
+
+        fn clear_cache(&self) {
+            self.clears.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn poll_cache_clear(&self) -> Option<ClearCacheOutcome> {
+            self.clear_outcomes.lock().unwrap().pop_front()
+        }
+    }
+
+    /// Fill the texture map the way a live frame does, placeholder tile included.
+    fn fill_texture_map(
+        ctx: &egui::Context,
+        textures: &mut HashMap<CoverCacheKey, egui::TextureHandle>,
+        lru_keys: &mut Vec<CoverCacheKey>,
+        count: usize,
+    ) {
+        let box_ = RequestedSize {
+            width: 8,
+            height: 8,
+        };
+        for index in 0..count {
+            let texture = ctx.load_texture(
+                format!("cover-{index}"),
+                egui::ColorImage::from_rgba_unmultiplied([8, 8], &vec![1u8; 8 * 8 * 4]),
+                egui::TextureOptions::default(),
+            );
+            let key = cover_cache_key(&format!("/music/{index}.mp3"), box_);
+            textures.insert(key.clone(), texture);
+            lru_keys.push(key);
+        }
+        let placeholder = ctx.load_texture(
+            "placeholder",
+            egui::ColorImage::from_rgba_unmultiplied([8, 8], &vec![2u8; 8 * 8 * 4]),
+            egui::TextureOptions::default(),
+        );
+        let key = riff_gui::ui::artwork::placeholder_cache_key();
+        textures.insert(key.clone(), placeholder);
+        lru_keys.push(key);
+    }
+
+    /// A clear that visibly does nothing gets pressed twice and doubted, and the
+    /// listener is left wondering whether the cache went. So the *settled* outcome
+    /// flushes the whole texture map — the placeholder tile included, which is what
+    /// distinguishes this from `evict_generated`'s deliberate half-eviction.
+    #[test]
+    fn test_a_settled_cache_clear_flushes_every_texture() {
+        let ctx = egui::Context::default();
+        let covers = RecordingCovers::new();
+        let mut textures = HashMap::new();
+        let mut lru_keys = Vec::new();
+        fill_texture_map(&ctx, &mut textures, &mut lru_keys, 3);
+        assert_eq!(textures.len(), 4, "three covers and the shared placeholder");
+
+        let mut in_flight = false;
+        assert!(
+            request_cache_clear(&covers, &mut in_flight),
+            "the first press reaches the worker"
+        );
+        assert!(in_flight, "and the frame now knows one is outstanding");
+        assert_eq!(covers.clear_calls(), 1);
+
+        // Nothing has settled: the wipe runs on the worker, so this frame must keep
+        // painting the covers it already has rather than blanking on a promise.
+        assert!(
+            settle_cache_clear(&covers, &mut in_flight, &mut textures, &mut lru_keys).is_none()
+        );
+        assert_eq!(
+            textures.len(),
+            4,
+            "a clear in progress has removed nothing yet"
+        );
+
+        covers.serve_clear(ClearCacheOutcome::Cleared);
+        assert_eq!(
+            settle_cache_clear(&covers, &mut in_flight, &mut textures, &mut lru_keys),
+            Some(ClearCacheOutcome::Cleared)
+        );
+        assert!(
+            textures.is_empty(),
+            "every texture is gone, so the next repaint shows placeholders and the rows re-request"
+        );
+        assert!(
+            lru_keys.is_empty(),
+            "and nothing is left in the LRU order either"
+        );
+        assert!(
+            !in_flight,
+            "settled, so a later press is allowed to start a fresh clear"
+        );
+
+        // Once settled, the frame stops asking the service at all.
+        assert!(
+            settle_cache_clear(&covers, &mut in_flight, &mut textures, &mut lru_keys).is_none()
+        );
+        covers.serve_clear(ClearCacheOutcome::Cleared);
+        assert!(
+            settle_cache_clear(&covers, &mut in_flight, &mut textures, &mut lru_keys).is_none(),
+            "an outcome is not drained into a clear nobody asked for"
+        );
+    }
+
+    /// A cache that could not be cleared has left its rungs on disk, so the screen
+    /// must keep what it is showing. Dropping textures here would re-request, hit
+    /// the cache that is still full, and look like the failure did something.
+    #[test]
+    fn test_a_failed_clear_reports_but_keeps_every_texture() {
+        let ctx = egui::Context::default();
+        let covers = RecordingCovers::new();
+        let mut textures = HashMap::new();
+        let mut lru_keys = Vec::new();
+        fill_texture_map(&ctx, &mut textures, &mut lru_keys, 2);
+
+        let mut in_flight = false;
+        request_cache_clear(&covers, &mut in_flight);
+        covers.serve_clear(ClearCacheOutcome::Failed {
+            reason: "read-only volume".to_string(),
+        });
+
+        assert_eq!(
+            settle_cache_clear(&covers, &mut in_flight, &mut textures, &mut lru_keys),
+            Some(ClearCacheOutcome::Failed {
+                reason: "read-only volume".to_string()
+            }),
+            "the reason reaches the caller so the status line can say it"
+        );
+        assert_eq!(textures.len(), 3, "a failed clear removes nothing");
+        assert!(!in_flight);
+    }
+
+    /// One clear at a time, the way the Tag Edit controller holds one outstanding
+    /// record: the wipe is idempotent, and a second request only delays the answer
+    /// the first already promised.
+    #[test]
+    fn test_a_second_clear_press_while_one_is_outstanding_is_ignored() {
+        let covers = RecordingCovers::new();
+        let mut in_flight = false;
+        assert!(request_cache_clear(&covers, &mut in_flight));
+        assert!(
+            !request_cache_clear(&covers, &mut in_flight),
+            "the frame must not queue a second wipe behind the first"
+        );
+        assert_eq!(covers.clear_calls(), 1);
+
+        covers.serve_clear(ClearCacheOutcome::Cleared);
+        let mut textures = HashMap::new();
+        let mut lru_keys = Vec::new();
+        settle_cache_clear(&covers, &mut in_flight, &mut textures, &mut lru_keys);
+        assert!(
+            request_cache_clear(&covers, &mut in_flight),
+            "and now a press counts"
+        );
+        assert_eq!(covers.clear_calls(), 2);
+    }
+
+    /// A `DecodedCover` of `px`×`px` opaque pixels — big enough that a handful of
+    /// them cross a byte budget a count cap cannot see.
+    fn square_cover(px: u32) -> DecodedCover {
+        DecodedCover {
+            rgba: vec![3u8; (px * px * 4) as usize],
+            width: px,
+            height: px,
+        }
+    }
+
+    /// The bug a count cap leaves in: the three canonical boxes differ by 80× in
+    /// GPU bytes, so 200 entries is 2.4 MB of thumbnails or ~200 MB of heroes, and
+    /// which one a user gets is decided by what they happened to scroll past.
+    /// Eviction is now by bytes, and it bites long before the count cap does.
+    #[test]
+    fn test_the_texture_cache_is_bounded_by_bytes_not_by_entry_count() {
+        let ctx = egui::Context::default();
+        let mut textures = HashMap::new();
+        let mut lru_keys = Vec::new();
+        let mut in_flight = HashSet::new();
+        let mut in_flight_keys = Vec::new();
+
+        // 18 uploads of 1024x1024 = 72 MB: nowhere near the 200-entry count cap, and
+        // over the byte budget from the 17th on.
+        let batch: Vec<(TrackId, RequestedSize, Option<DecodedCover>)> = (0..18)
+            .map(|index| {
+                let id = TrackId(format!("/music/big{index:02}.mp3"));
+                (id, COVER_HERO, Some(square_cover(1024)))
+            })
+            .collect();
+        cache_polled_covers(
+            &CannedCovers(batch),
+            &mut textures,
+            &mut lru_keys,
+            &mut in_flight,
+            &mut in_flight_keys,
+            &ctx,
+        );
+
+        let bytes: u64 = textures
+            .values()
+            .map(|texture| {
+                let [w, h] = texture.size();
+                (w * h * 4) as u64
+            })
+            .sum();
+        assert!(
+            bytes <= COVER_TEXTURE_BYTE_BUDGET,
+            "{} cached textures still hold {bytes} bytes, over the budget of {COVER_TEXTURE_BYTE_BUDGET}",
+            textures.len()
+        );
+        assert!(
+            textures.len() < 18 && textures.len() > 1,
+            "byte eviction, not the 200-entry cap: {} of 18 survived",
+            textures.len()
+        );
+        assert!(
+            textures.contains_key(&cover_cache_key("/music/big17.mp3", COVER_HERO)),
+            "the newest entry is never the one evicted"
+        );
+        assert!(
+            !textures.contains_key(&cover_cache_key("/music/big00.mp3", COVER_HERO)),
+            "and the oldest goes first"
+        );
+        assert_eq!(
+            lru_keys.len(),
+            textures.len(),
+            "the LRU order and the map agree after a budget-driven eviction"
+        );
+    }
+
+    /// The shared placeholder tile is one entry drawn at every box, and
+    /// `evict_generated`'s contract is that it alone is dropped when the palette
+    /// moves. Under a byte budget it must be excluded from the accounting *and*
+    /// skipped as a victim — otherwise the tile that guarantees every row has
+    /// something to paint becomes the first thing evicted, and it is always the
+    /// oldest.
+    #[test]
+    fn test_the_placeholder_survives_budget_driven_eviction() {
+        let ctx = egui::Context::default();
+        let mut textures = HashMap::new();
+        let mut lru_keys = Vec::new();
+        let mut in_flight = HashSet::new();
+        let mut in_flight_keys = Vec::new();
+
+        // The tile first, so it is the LRU tail and the obvious victim.
+        let tile = crate::ui::artwork::lookup_cover_texture(
+            &mut textures,
+            &mut lru_keys,
+            &ctx,
+            &riff_gui::ui::theme::Palette::dark(),
+            "/music/none.mp3",
+            COVER_HERO,
+        );
+        assert!(
+            textures.contains_key(&crate::ui::artwork::placeholder_cache_key()),
+            "a full miss uploads the shared tile, oldest in the order"
+        );
+        drop(tile);
+
+        let batch: Vec<(TrackId, RequestedSize, Option<DecodedCover>)> = (0..20)
+            .map(|index| {
+                let id = TrackId(format!("/music/huge{index:02}.mp3"));
+                (id, COVER_HERO, Some(square_cover(1024)))
+            })
+            .collect();
+        cache_polled_covers(
+            &CannedCovers(batch),
+            &mut textures,
+            &mut lru_keys,
+            &mut in_flight,
+            &mut in_flight_keys,
+            &ctx,
+        );
+
+        assert!(
+            textures.contains_key(&crate::ui::artwork::placeholder_cache_key()),
+            "the tile outlives an eviction that would otherwise take the oldest entry"
+        );
+        assert!(
+            lru_keys.contains(&crate::ui::artwork::placeholder_cache_key()),
+            "and stays in the order, so it is still a live entry rather than a stray"
+        );
     }
 
     /// Canned [`Covers`] fake whose single poll drains scripted results.
@@ -7073,6 +7416,12 @@ mod background_service_ui_tests {
 
         fn poll(&self) -> Vec<(TrackId, RequestedSize, Option<DecodedCover>)> {
             self.0.clone()
+        }
+
+        fn clear_cache(&self) {}
+
+        fn poll_cache_clear(&self) -> Option<ClearCacheOutcome> {
+            None
         }
     }
 
@@ -7599,18 +7948,53 @@ mod background_service_ui_tests {
         let mut textures: std::collections::HashMap<_, egui::TextureHandle> =
             std::collections::HashMap::new();
 
-        request_cover_intent(&textures, &covers, id.clone(), path.clone(), thumb);
+        let mut in_flight = HashSet::new();
+        let mut in_flight_keys = Vec::new();
+        let mut texture_lru = Vec::new();
+
+        request_cover_intent(
+            &textures,
+            &mut in_flight,
+            &mut in_flight_keys,
+            &covers,
+            id.clone(),
+            path.clone(),
+            thumb,
+        );
         assert_eq!(
             covers.requested(),
             vec![(id.clone(), path.clone(), thumb)],
             "an uncached track sends intent, with the box it wants, to the service"
         );
 
+        // The first answer arrives and is artless, so no texture lands: the
+        // thumbnail is still a miss at this box. Delivering it first is what keeps
+        // this test about the *cache* rather than about the in-flight marker —
+        // otherwise a suppressed second request could mean either thing.
+        let mut artless = CannedCovers(vec![(id.clone(), thumb, None)]);
+        cache_polled_covers(
+            &artless,
+            &mut textures,
+            &mut texture_lru,
+            &mut in_flight,
+            &mut in_flight_keys,
+            &ctx,
+        );
+        artless.0.clear();
+
         // A hero upload exists; a thumbnail request is still a miss. Reusing
         // the hero texture there would draw the wrong resolution and, worse,
         // never fetch the right one.
         textures.insert(cover_cache_key(&id.0, hero), hero_texture);
-        request_cover_intent(&textures, &covers, id.clone(), path.clone(), thumb);
+        request_cover_intent(
+            &textures,
+            &mut in_flight,
+            &mut in_flight_keys,
+            &covers,
+            id.clone(),
+            path.clone(),
+            thumb,
+        );
         assert_eq!(
             covers.requested(),
             vec![
@@ -7620,11 +8004,174 @@ mod background_service_ui_tests {
             "a track cached at another size issues a fresh request at this size"
         );
 
-        request_cover_intent(&textures, &covers, id.clone(), path.clone(), hero);
+        request_cover_intent(
+            &textures,
+            &mut in_flight,
+            &mut in_flight_keys,
+            &covers,
+            id.clone(),
+            path.clone(),
+            hero,
+        );
         assert_eq!(
             covers.requested().len(),
             2,
             "a texture already cached at exactly this box suppresses the request"
+        );
+    }
+
+    /// The repaint bug `07` exists for: a row whose Cover has not landed asked
+    /// again on *every* frame, against an unbounded channel. One request per
+    /// outstanding `(identity, box)` is the whole fix, and the marker has to
+    /// survive until the answer arrives.
+    #[test]
+    fn test_a_cover_request_still_outstanding_is_not_issued_again() {
+        let id = TrackId("/music/slow.mp3".to_string());
+        let path = PathBuf::from("/music/slow.mp3");
+        let box_ = RequestedSize {
+            width: 56,
+            height: 56,
+        };
+        let covers = RecordingCovers::new();
+        let textures: HashMap<CoverCacheKey, egui::TextureHandle> = HashMap::new();
+        let mut in_flight = HashSet::new();
+        let mut in_flight_keys = Vec::new();
+
+        for _frame in 0..40 {
+            request_cover_intent(
+                &textures,
+                &mut in_flight,
+                &mut in_flight_keys,
+                &covers,
+                id.clone(),
+                path.clone(),
+                box_,
+            );
+        }
+        assert_eq!(
+            covers.requested().len(),
+            1,
+            "forty repaints of one outstanding request are still one request"
+        );
+
+        // A different box for the same row is a different job, marker or not.
+        request_cover_intent(
+            &textures,
+            &mut in_flight,
+            &mut in_flight_keys,
+            &covers,
+            id.clone(),
+            path.clone(),
+            RequestedSize {
+                width: 512,
+                height: 512,
+            },
+        );
+        assert_eq!(covers.requested().len(), 2);
+    }
+
+    /// `None` is a terminal outcome too. A row that asked once and turned out to
+    /// be artless must be free to ask again — otherwise a single artless answer
+    /// silences that `(identity, box)` for the rest of the session.
+    #[test]
+    fn test_an_artless_answer_clears_the_marker_so_the_row_can_ask_again() {
+        let id = TrackId("/music/artless.mp3".to_string());
+        let path = PathBuf::from("/music/artless.mp3");
+        let box_ = RequestedSize {
+            width: 56,
+            height: 56,
+        };
+        let covers = RecordingCovers::new();
+        let ctx = egui::Context::default();
+        let mut textures = HashMap::new();
+        let mut lru_keys = Vec::new();
+        let mut in_flight = HashSet::new();
+        let mut in_flight_keys = Vec::new();
+
+        request_cover_intent(
+            &textures,
+            &mut in_flight,
+            &mut in_flight_keys,
+            &covers,
+            id.clone(),
+            path.clone(),
+            box_,
+        );
+        assert_eq!(in_flight.len(), 1);
+
+        cache_polled_covers(
+            &CannedCovers(vec![(id.clone(), box_, None)]),
+            &mut textures,
+            &mut lru_keys,
+            &mut in_flight,
+            &mut in_flight_keys,
+            &ctx,
+        );
+        assert!(
+            in_flight.is_empty(),
+            "an artless answer is still an answer, so the marker goes"
+        );
+        assert!(in_flight_keys.is_empty(), "and its place in the LRU too");
+        assert!(textures.is_empty(), "artless uploads nothing");
+
+        request_cover_intent(
+            &textures,
+            &mut in_flight,
+            &mut in_flight_keys,
+            &covers,
+            id.clone(),
+            path.clone(),
+            box_,
+        );
+        assert_eq!(
+            covers.requested().len(),
+            2,
+            "and the row is free to ask again"
+        );
+    }
+
+    /// The texture map is bounded, and this set grows per `(identity, box)` rather
+    /// than per cached texture — so without its own cap it would be a slow leak
+    /// across a scrolled library. Bounded, and the evicted entries are the *oldest*
+    /// markers, which cost one re-request each and nothing worse.
+    #[test]
+    fn test_the_in_flight_set_stays_within_its_cap() {
+        let covers = RecordingCovers::new();
+        let textures: HashMap<CoverCacheKey, egui::TextureHandle> = HashMap::new();
+        let mut in_flight = HashSet::new();
+        let mut in_flight_keys = Vec::new();
+        let box_ = RequestedSize {
+            width: 56,
+            height: 56,
+        };
+
+        for index in 0..3_000 {
+            let path = PathBuf::from(format!("/music/{index:04}.mp3"));
+            request_cover_intent(
+                &textures,
+                &mut in_flight,
+                &mut in_flight_keys,
+                &covers,
+                TrackId::from_path(&path),
+                path,
+                box_,
+            );
+        }
+        assert_eq!(
+            covers.requested().len(),
+            3_000,
+            "every distinct row still gets its request; the cap bounds the marker, not the asking"
+        );
+        assert!(
+            in_flight.len() <= COVER_IN_FLIGHT_CAP && in_flight_keys.len() <= COVER_IN_FLIGHT_CAP,
+            "set {} / list {} must stay at or under the cap of {COVER_IN_FLIGHT_CAP}",
+            in_flight.len(),
+            in_flight_keys.len()
+        );
+        assert_eq!(
+            in_flight.len(),
+            in_flight_keys.len(),
+            "the set and its LRU list must not drift apart, or an entry is unmarkable forever"
         );
     }
 
@@ -7642,7 +8189,14 @@ mod background_service_ui_tests {
         // A cold folder has nothing to paint, so the row keeps its glyph and
         // exactly one request goes out — for the directory itself.
         assert_eq!(
-            folder_cover_intent(&textures, &covers, dir, thumb),
+            folder_cover_intent(
+                &textures,
+                &mut HashSet::new(),
+                &mut Vec::new(),
+                &covers,
+                dir,
+                thumb
+            ),
             None,
             "an uncached folder has no texture to paint"
         );
@@ -7662,7 +8216,14 @@ mod background_service_ui_tests {
         let id = texture.id();
         textures.insert(cover_cache_key(&dir.to_string_lossy(), thumb), texture);
         assert_eq!(
-            folder_cover_intent(&textures, &covers, dir, thumb),
+            folder_cover_intent(
+                &textures,
+                &mut HashSet::new(),
+                &mut Vec::new(),
+                &covers,
+                dir,
+                thumb
+            ),
             Some(id),
             "the cached art is handed back for the row to paint"
         );
@@ -7695,7 +8256,14 @@ mod background_service_ui_tests {
         let mut textures = std::collections::HashMap::new();
         let mut lru_keys = Vec::new();
 
-        cache_polled_covers(&covers, &mut textures, &mut lru_keys, &ctx);
+        cache_polled_covers(
+            &covers,
+            &mut textures,
+            &mut lru_keys,
+            &mut HashSet::new(),
+            &mut Vec::new(),
+            &ctx,
+        );
 
         let texture = textures
             .get(&cover_cache_key("/music/art.mp3", big))
@@ -7739,7 +8307,14 @@ mod background_service_ui_tests {
         let full: Vec<_> = (0..COVER_CACHE_CAP)
             .map(|i| (track_at(i), thumb, Some(cover.clone())))
             .collect();
-        cache_polled_covers(&CannedCovers(full), &mut textures, &mut lru_keys, &ctx);
+        cache_polled_covers(
+            &CannedCovers(full),
+            &mut textures,
+            &mut lru_keys,
+            &mut HashSet::new(),
+            &mut Vec::new(),
+            &ctx,
+        );
         assert_eq!(
             textures.len(),
             COVER_CACHE_CAP,
@@ -7748,7 +8323,14 @@ mod background_service_ui_tests {
 
         let oldest = track_at(0);
         let newcomer = CannedCovers(vec![(oldest.clone(), hero, Some(cover))]);
-        cache_polled_covers(&newcomer, &mut textures, &mut lru_keys, &ctx);
+        cache_polled_covers(
+            &newcomer,
+            &mut textures,
+            &mut lru_keys,
+            &mut HashSet::new(),
+            &mut Vec::new(),
+            &ctx,
+        );
 
         assert!(
             !textures.contains_key(&cover_cache_key(&oldest.0, thumb)),
@@ -7812,7 +8394,14 @@ mod background_service_ui_tests {
         let mut textures = std::collections::HashMap::new();
         let mut lru_keys = Vec::new();
 
-        cache_polled_covers(&covers, &mut textures, &mut lru_keys, &ctx);
+        cache_polled_covers(
+            &covers,
+            &mut textures,
+            &mut lru_keys,
+            &mut HashSet::new(),
+            &mut Vec::new(),
+            &ctx,
+        );
 
         assert_eq!(
             textures.len(),
@@ -12593,7 +13182,7 @@ mod browser_column_ui_tests {
 mod whole_frame_tests {
     use egui_kittest::kittest::Queryable;
     use riff_backend::app::MutexExt;
-    use riff_backend::app::cover_service::Covers;
+    use riff_backend::app::cover_service::{ClearCacheOutcome, Covers};
     use riff_backend::app::events::BackendEvents;
     use riff_backend::app::scan_service::ScanOutcome;
     use riff_backend::app::state::{LibrarySession, LibraryStatus, PlaybackSession, ViewMode};
@@ -12636,6 +13225,12 @@ mod whole_frame_tests {
 
         fn poll(&self) -> Vec<(TrackId, RequestedSize, Option<DecodedCover>)> {
             Vec::new()
+        }
+
+        fn clear_cache(&self) {}
+
+        fn poll_cache_clear(&self) -> Option<ClearCacheOutcome> {
+            None
         }
     }
 
@@ -13739,10 +14334,11 @@ mod whole_frame_tests {
         }
 
         /// Drain the recording and return the distinct folder identities that
-        /// asked, in first-seen order. A click costs more than one frame, so
-        /// the asks-per-node is not the property — *which* nodes ask is. Every
-        /// ask is checked on the way through, including that the row never
-        /// invents a box of its own.
+        /// asked, in first-seen order, asserting each ask is at the thumbnail box.
+        ///
+        /// Under the in-flight marker this reports *what became visible since the
+        /// last drain* rather than everything on screen: a row that already has an
+        /// outstanding answer is not asked for again, which is the whole point.
         fn folder_nodes(shell: &Shell) -> Vec<String> {
             let mut asks = shell.folder_covers.lock().unwrap();
             let mut seen: Vec<String> = Vec::new();
@@ -13765,17 +14361,25 @@ mod whole_frame_tests {
             "a collapsed tree asks for the root's own cover and nothing else"
         );
 
-        // Opening the root makes its child a visible node, so the child joins
-        // the list while the root keeps asking.
+        // Opening the root makes its child a visible node, so the child asks.
+        // The root does **not** ask again: its first answer is still outstanding
+        // (`ShellCovers` never serves one), and a repaint is no reason to
+        // re-enqueue a request onto the unbounded channel.
         shell.harness.get_by_label("music").click();
         shell.harness.step();
         assert_eq!(
             folder_nodes(&shell),
-            vec![
-                root.to_string_lossy().to_string(),
-                child.to_string_lossy().to_string(),
-            ],
-            "one node per visible folder once the root opens"
+            vec![child.to_string_lossy().to_string()],
+            "only the newly visible folder asks; the root's outstanding request is not re-sent"
+        );
+
+        // And a frame that changes nothing sends nothing.
+        shell.harness.step();
+        shell.harness.step();
+        assert_eq!(
+            folder_nodes(&shell),
+            Vec::<String>::new(),
+            "two more repaints of an unchanged tree issue no new cover requests at all"
         );
     }
 
@@ -14716,6 +15320,54 @@ mod whole_frame_tests {
                 Vec::new(),
             );
         harness.run();
+
+        harness.get_by_label("Cancel").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![PromptOutcome::Cancel],
+            "Cancel is reported, not applied"
+        );
+
+        harness.state_mut().clear();
+        harness.get_by_label("Confirm").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![PromptOutcome::Confirm],
+            "the destructive Confirm is reported, not applied"
+        );
+    }
+
+    /// The Thumbnail clear is destructive and irreversible *in the moment* — there
+    /// is no eviction, so this is the only reclaim — so it asks before it acts, and
+    /// the widget itself never deletes: it only reports what the listener chose.
+    /// Same contract as the Clear Library row above, and the reason the Settings
+    /// action can set a flag rather than touch the disk.
+    #[test]
+    fn test_clear_thumbnail_cache_confirmation_reports_confirm_and_cancel() {
+        use riff_gui::ui::prompts::{
+            CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY, PromptOutcome, clear_thumbnail_cache_confirm,
+        };
+
+        let palette = riff_gui::ui::theme::Palette::dark();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(420.0, 88.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, outcomes: &mut Vec<PromptOutcome>| {
+                    let mut cache = riff_gui::ui::icons::IconCache::new();
+                    outcomes.extend(clear_thumbnail_cache_confirm(ui, &mut cache, &palette));
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        assert_ne!(
+            CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY,
+            riff_gui::ui::prompts::CLEAR_LIBRARY_CONFIRM_COPY,
+            "the two wipes sit one gap apart in the same footer, so their copy must not read alike"
+        );
 
         harness.get_by_label("Cancel").click();
         harness.run();

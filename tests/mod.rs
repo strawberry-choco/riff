@@ -82,6 +82,30 @@ pub fn inert_stop_flag() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
 
+/// The two halves every [`riff_library::app::traits::CoverLoader`] fake shares.
+///
+/// They delegate to `riff-infra`'s real decode and encode rather than inventing
+/// their own, because the whole point of the split is that the cached route and
+/// the source route run one implementation: a fake that stubbed `decode_thumbnail`
+/// would let the suite pass while the two routes drifted apart in production. The
+/// root suite depends on `riff-infra`, so it can hold the real thing.
+#[allow(clippy::missing_errors_doc)]
+pub fn fake_decode_thumbnail(
+    bytes: &[u8],
+    size: riff_library::app::traits::RequestedSize,
+) -> Result<riff_library::app::traits::DecodedCover, riff_library::app::errors::LibraryError> {
+    riff_infra::media::cover_loader::decode_thumbnail(bytes, size)
+}
+
+/// The encode half, for a fake's write path. See [`fake_decode_thumbnail`].
+#[allow(clippy::missing_errors_doc)]
+pub fn fake_encode_thumbnail(
+    cover: &riff_library::app::traits::DecodedCover,
+) -> Result<riff_persistence::thumbnail::EncodedThumbnail, riff_library::app::errors::LibraryError>
+{
+    riff_infra::media::cover_loader::encode_thumbnail(cover)
+}
+
 // Test utilities that can be used across test modules
 pub mod test_utils {
     use crate::domain::{TrackId, TrackMetadata};
@@ -502,6 +526,21 @@ pub mod mocks {
             _size: RequestedSize,
         ) -> Result<Option<DecodedCover>, LibraryError> {
             self.result.clone().map_err(LibraryError::CoverLoad)
+        }
+
+        fn decode_thumbnail(
+            &self,
+            bytes: &[u8],
+            size: RequestedSize,
+        ) -> Result<DecodedCover, LibraryError> {
+            crate::fake_decode_thumbnail(bytes, size)
+        }
+
+        fn encode_thumbnail(
+            &self,
+            cover: &DecodedCover,
+        ) -> Result<riff_persistence::thumbnail::EncodedThumbnail, LibraryError> {
+            crate::fake_encode_thumbnail(cover)
         }
     }
 
@@ -1959,6 +1998,12 @@ impl riff_library::app::cover_service::Covers for crate::mocks::MockCovers {
         Option<riff_library::app::traits::DecodedCover>,
     )> {
         Vec::new()
+    }
+
+    fn clear_cache(&self) {}
+
+    fn poll_cache_clear(&self) -> Option<riff_library::app::cover_service::ClearCacheOutcome> {
+        None
     }
 }
 

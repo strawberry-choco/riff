@@ -4,7 +4,10 @@
 pub mod cover_loader;
 pub mod metadata_reader;
 pub mod metadata_writer;
+pub mod thumbnail_path;
+pub mod thumbnail_store;
 
 pub use cover_loader::ImageCoverLoader;
 pub use metadata_reader::{LoftyMetadataReader, parse_replaygain_gain};
 pub use metadata_writer::LoftyMetadataWriter;
+pub use thumbnail_store::FileThumbnailCache;

@@ -233,6 +233,8 @@ impl RiffApp {
         let covers = &self.covers;
         let textures = &mut self.cover_textures;
         let lru_keys = &mut self.cover_lru_keys;
+        let in_flight = &mut self.cover_in_flight;
+        let in_flight_keys = &mut self.cover_in_flight_keys;
         let ctx = ui.ctx().clone();
         let total = albums.len();
         let mut item = |i: usize| -> Option<browser::BrowserItem> {
@@ -243,6 +245,8 @@ impl RiffApp {
             let thumbnail = album.tracks.first().map(|tid| {
                 request_cover_intent(
                     textures,
+                    in_flight,
+                    in_flight_keys,
                     covers.as_ref(),
                     tid.clone(),
                     PathBuf::from(&tid.0),
@@ -332,6 +336,8 @@ impl RiffApp {
         let covers = &self.covers;
         let textures = &mut self.cover_textures;
         let lru_keys = &mut self.cover_lru_keys;
+        let in_flight = &mut self.cover_in_flight;
+        let in_flight_keys = &mut self.cover_in_flight_keys;
         let ctx = ui.ctx().clone();
         // One window in hand (paginate-browse-columns issue 05): opening a
         // large genre reads only the visible artists, so a common genre like
@@ -363,6 +369,8 @@ impl RiffApp {
                 .map(|tid| {
                     request_cover_intent(
                         textures,
+                        in_flight,
+                        in_flight_keys,
                         covers.as_ref(),
                         tid.clone(),
                         PathBuf::from(&tid.0),
@@ -449,6 +457,8 @@ impl RiffApp {
         let covers = &self.covers;
         let textures = &mut self.cover_textures;
         let lru_keys = &mut self.cover_lru_keys;
+        let in_flight = &mut self.cover_in_flight;
+        let in_flight_keys = &mut self.cover_in_flight_keys;
         let ctx = ui.ctx().clone();
         let total = views
             .artist_albums_in_genre_page(artist, genre, SortDirection::Ascending, 0)
@@ -474,6 +484,8 @@ impl RiffApp {
             let thumbnail = album.tracks.first().map(|tid| {
                 request_cover_intent(
                     textures,
+                    in_flight,
+                    in_flight_keys,
                     covers.as_ref(),
                     tid.clone(),
                     PathBuf::from(&tid.0),
@@ -653,6 +665,8 @@ impl RiffApp {
         let covers = &self.covers;
         let textures = &mut self.cover_textures;
         let lru_keys = &mut self.cover_lru_keys;
+        let in_flight = &mut self.cover_in_flight;
+        let in_flight_keys = &mut self.cover_in_flight_keys;
         let ctx = ui.ctx().clone();
         // Anchor read: sizes the row range with the authoritative total
         // (computed before the closure borrows `views` mutably).
@@ -701,6 +715,8 @@ impl RiffApp {
             let thumbnail = views.artist_first_track(&name).map(|tid| {
                 request_cover_intent(
                     textures,
+                    in_flight,
+                    in_flight_keys,
                     covers.as_ref(),
                     tid.clone(),
                     PathBuf::from(&tid.0),
@@ -833,6 +849,8 @@ impl RiffApp {
         let covers = &self.covers;
         let textures = &mut self.cover_textures;
         let lru_keys = &mut self.cover_lru_keys;
+        let in_flight = &mut self.cover_in_flight;
+        let in_flight_keys = &mut self.cover_in_flight_keys;
         let ctx = ui.ctx().clone();
         // Anchor read: sizes the row range with the authoritative total
         // (computed before the closure borrows `views` mutably).
@@ -875,6 +893,8 @@ impl RiffApp {
                 .map(|tid| {
                     request_cover_intent(
                         textures,
+                        in_flight,
+                        in_flight_keys,
                         covers.as_ref(),
                         tid.clone(),
                         PathBuf::from(&tid.0),

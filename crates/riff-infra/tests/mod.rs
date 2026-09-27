@@ -14,6 +14,8 @@
 
 pub mod adapter_tests;
 pub mod store_tests;
+pub mod thumbnail_path_tests;
+pub mod thumbnail_store_tests;
 
 // --- Library re-exports -----------------------------------------------------
 //

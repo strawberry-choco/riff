@@ -764,14 +764,23 @@ mod tests {
     #[test]
     fn test_dark_surface_and_ink_tokens_match_the_mockup() {
         // Surfaces: --riff-bg / --riff-surface / --riff-surface-2 /
-        // --riff-surface-3. Values are the design handoff's extracted hex
-        // literals (docs/plans/design-handoff-gap-analysis.md, read back from
-        // the source SVGs: #17171B is the sidebar/top-bar/player-bar panel
-        // fill).
-        assert_eq!(theme::SURFACE_BG, egui::Color32::from_rgb(0x10, 0x10, 0x13));
-        assert_eq!(theme::SURFACE, egui::Color32::from_rgb(0x17, 0x17, 0x1b));
-        assert_eq!(theme::SURFACE_2, egui::Color32::from_rgb(0x1e, 0x1e, 0x23));
-        assert_eq!(theme::SURFACE_3, egui::Color32::from_rgb(0x26, 0x26, 0x2d));
+        // --riff-surface-3.
+        //
+        // These are NO LONGER the design handoff's extracted hex literals
+        // (#101013 / #17171b / #1e1e23 / #26262d). They are a deliberate
+        // amendment to it, made in the same commit as this comment: the ramp
+        // now steps 8/9/9 from a deeper base (was 7/7/8, which read as one
+        // flat field) and carries a slight warm bias (red ≥ green ≥ blue) so
+        // panels sit in the same system as the amber brand instead of reading
+        // as cool gray behind it. Every surface went darker, so the ink ladder
+        // below keeps — and slightly improves — its AA headroom: `ink_3` on
+        // `surface_3` measures ~4.70:1 where the original pair measured
+        // 4.63:1. The contrast test is what holds that floor; this test only
+        // pins the numbers so a future drift has to be a decision.
+        assert_eq!(theme::SURFACE_BG, egui::Color32::from_rgb(0x0e, 0x0d, 0x0c));
+        assert_eq!(theme::SURFACE, egui::Color32::from_rgb(0x16, 0x15, 0x14));
+        assert_eq!(theme::SURFACE_2, egui::Color32::from_rgb(0x1f, 0x1d, 0x1b));
+        assert_eq!(theme::SURFACE_3, egui::Color32::from_rgb(0x28, 0x25, 0x21));
 
         // Ink ladder. `ink` is the mockup's; the two muted rungs are the
         // design handoff's hexes lifted until they clear AA, so the literals
@@ -872,11 +881,15 @@ mod tests {
 
     #[test]
     fn test_radius_scale_constants_match_the_mockup() {
-        // --riff-radius-sm/md/lg/xl/full.
-        assert!((theme::RADIUS_SM - 4.0).abs() < f32::EPSILON);
-        assert!((theme::RADIUS_MD - 8.0).abs() < f32::EPSILON);
-        assert!((theme::RADIUS_LG - 12.0).abs() < f32::EPSILON);
-        assert!((theme::RADIUS_XL - 16.0).abs() < f32::EPSILON);
+        // --riff-radius-sm/md/lg/xl/full. Lifted 2 px per step off the
+        // extracted mockup scale (4/8/12/16): the mockup's small controls were
+        // nearly square next to 12–14 px type. A radius moves no box edge, so
+        // this is the one generosity lever the pinned chrome geometry has no
+        // say in — pinned here so the new numbers are a decision, not drift.
+        assert!((theme::RADIUS_SM - 6.0).abs() < f32::EPSILON);
+        assert!((theme::RADIUS_MD - 10.0).abs() < f32::EPSILON);
+        assert!((theme::RADIUS_LG - 14.0).abs() < f32::EPSILON);
+        assert!((theme::RADIUS_XL - 18.0).abs() < f32::EPSILON);
         assert!((theme::RADIUS_FULL - 999.0).abs() < f32::EPSILON);
     }
 
@@ -915,7 +928,7 @@ mod tests {
         assert_eq!(p.brand_primary, theme::BRAND_500);
         assert_eq!(p.focus_ring, theme::FOCUS_RING);
         assert_ne!(p.focus_ring, p.brand_primary);
-        assert_eq!(p.on_brand, egui::Color32::from_rgb(0x10, 0x10, 0x13));
+        assert_eq!(p.on_brand, egui::Color32::from_rgb(0x0e, 0x0d, 0x0c));
         assert_eq!(p.success, theme::STATE_SUCCESS);
         assert_eq!(p.warning, theme::STATE_WARNING);
         assert_eq!(p.error, theme::STATE_ERROR);
@@ -958,21 +971,26 @@ mod tests {
 
         assert!(!light.dark);
 
-        // Surfaces invert: worked example first (#101013 → #efefec), then the
-        // rule for the remaining ramp.
-        assert_eq!(light.background, egui::Color32::from_rgb(0xef, 0xef, 0xec));
+        // Surfaces invert: worked example first (#0e0d0c → #f1f2f3 — note the
+        // warm bias mirrors to a cool one, per the rule), then the rule for
+        // the remaining ramp.
+        assert_eq!(light.background, egui::Color32::from_rgb(0xf1, 0xf2, 0xf3));
+        assert_eq!(light.surface_row, mirror(dark.surface_row));
         assert_eq!(light.surface, mirror(dark.surface));
         assert_eq!(light.surface_2, mirror(dark.surface_2));
         assert_eq!(light.surface_3, mirror(dark.surface_3));
         // The ramp order flips: dark bg is the darkest step, light bg the
-        // lightest.
+        // lightest. `surface_row` is a step, not a beside: it sits between the
+        // background and the card plane in both families.
         assert!(
-            lum(dark.background) < lum(dark.surface)
+            lum(dark.background) < lum(dark.surface_row)
+                && lum(dark.surface_row) < lum(dark.surface)
                 && lum(dark.surface) < lum(dark.surface_2)
                 && lum(dark.surface_2) < lum(dark.surface_3)
         );
         assert!(
-            lum(light.background) > lum(light.surface)
+            lum(light.background) > lum(light.surface_row)
+                && lum(light.surface_row) > lum(light.surface)
                 && lum(light.surface) > lum(light.surface_2)
                 && lum(light.surface_2) > lum(light.surface_3)
         );
@@ -1577,13 +1595,14 @@ mod tests {
         assert_eq!(v.extreme_bg_color, theme::SURFACE_2);
 
         // Corner radii from the radius scale: sm widgets, md menus, lg windows
-        // (4/8/12 px transcribed from --riff-radius-*).
+        // (6/10/14 px from --riff-radius-*, after the +2 px-per-step lift —
+        // see the radius-scale test for why).
         assert_eq!(
             v.widgets.inactive.corner_radius,
-            egui::CornerRadius::same(4)
+            egui::CornerRadius::same(6)
         );
-        assert_eq!(v.menu_corner_radius, egui::CornerRadius::same(8));
-        assert_eq!(v.window_corner_radius, egui::CornerRadius::same(12));
+        assert_eq!(v.menu_corner_radius, egui::CornerRadius::same(10));
+        assert_eq!(v.window_corner_radius, egui::CornerRadius::same(14));
 
         // Strokes from the line tokens; the selection ring from the focus
         // token.
@@ -2245,13 +2264,25 @@ mod tests {
     /// surface ramp plus the row washes. `row_hover` is composited because the
     /// light family's wash is translucent and paints *over* a panel, while the
     /// dark one is opaque.
-    fn text_fills(palette: &theme::Palette) -> [(&'static str, egui::Color32); 5] {
+    ///
+    /// Listed in ramp order so a new step reads as a neighbour of the ones it
+    /// sits between. The wash appears twice on purpose: once over the card
+    /// plane (`surface`, where a popover or menu lands) and once over the row
+    /// plane (`surface_row`, where a hovered list row lands). The two are not
+    /// the same color in the light family, whose wash is translucent, so
+    /// checking one does not check the other.
+    fn text_fills(palette: &theme::Palette) -> [(&'static str, egui::Color32); 7] {
         [
             ("background", palette.background),
+            ("surface_row", palette.surface_row),
             ("surface", palette.surface),
             ("surface_2", palette.surface_2),
             ("surface_3", palette.surface_3),
             ("row_hover", over(palette.surface, palette.row_hover)),
+            (
+                "row_hover_on_row",
+                over(palette.surface_row, palette.row_hover),
+            ),
         ]
     }
 
@@ -5084,6 +5115,185 @@ mod tests {
                 },
                 Vec::new(),
             )
+    }
+
+    /// The rect of the largest contiguous field of `color` in the frame, or
+    /// `None` when the frame has none.
+    ///
+    /// Located in two steps, because no single measurement of the fill gives
+    /// the card's box. A bounding box over every matching pixel spans past the
+    /// card — the frame holds other small elements in the same color — so its
+    /// "edges" land on unrelated pixels. The widest *unbroken run* is the card's
+    /// body but only a lower bound on its width, because a control near one end
+    /// (the ReplayGain toggle) breaks the run short of the edge. So the run
+    /// fixes the card's height, and the left/right edges are then read off any
+    /// matching pixel within those rows, which is inside the card by
+    /// construction.
+    fn largest_fill_rect(frame: &image::RgbaImage, color: egui::Color32) -> Option<egui::Rect> {
+        let (width, height) = frame.dimensions();
+        let is_fill = |x: u32, y: u32| {
+            let p = frame.get_pixel(x, y);
+            p.0[0] == color.r() && p.0[1] == color.g() && p.0[2] == color.b()
+        };
+        // The widest unbroken run of the fill on each row.
+        let widest: Vec<Option<(u32, u32)>> = (0..height)
+            .map(|y| {
+                let mut best: Option<(u32, u32)> = None;
+                let mut start: Option<u32> = None;
+                for x in 0..=width {
+                    let filled = x < width && is_fill(x, y);
+                    match (filled, start) {
+                        (true, None) => start = Some(x),
+                        (false, Some(begin)) => {
+                            if best.is_none_or(|(a, b)| x - 1 - begin > b - a) {
+                                best = Some((begin, x - 1));
+                            }
+                            start = None;
+                        }
+                        _ => {}
+                    }
+                }
+                best
+            })
+            .collect();
+        let span = widest.iter().flatten().map(|(a, b)| b - a + 1).max()?;
+        // Every row still nearly as wide is the card's body, so its height.
+        let body = span * 3 / 5;
+        let top = widest
+            .iter()
+            .position(|r| r.is_some_and(|(a, b)| b - a + 1 >= body))? as u32;
+        let bottom = widest
+            .iter()
+            .rposition(|r| r.is_some_and(|(a, b)| b - a + 1 >= body))? as u32;
+        // Within the body, the fill's own horizontal extremes are the card's.
+        let in_body = |x: u32| (top..=bottom).any(|y| is_fill(x, y));
+        let left = (0..width).find(|x| in_body(*x))?;
+        let right = (0..width).rfind(|x| in_body(*x))?;
+        Some(egui::Rect::from_min_max(
+            egui::pos2(left as f32, top as f32),
+            egui::pos2(right as f32 + 1.0, bottom as f32 + 1.0),
+        ))
+    }
+
+    /// A settings card is the card plane plus the hairline that separates it
+    /// from the pane behind it. The mockup defines a card by its edge, not by
+    /// a fill of its own, so the fill alone leaves the card's boundary
+    /// unfindable against the pane it sits on.
+    ///
+    /// Both halves are checked. The edge is checked as an *edge* — a
+    /// border-colored pixel on each of the card's four sides — and not as a
+    /// count, because a count would be satisfied by `row_separator`, which
+    /// paints the same border token *inside* the card. Probing each side at its
+    /// own midpoint cannot be satisfied by an in-card line, nor by one
+    /// antialiased glyph: with the stroke gone the fill meets the pane directly
+    /// and the pixels in between read (18, 17, 16), a third of the way down
+    /// the gap, nowhere near either compositing of the border token.
+    #[test]
+    fn test_settings_card_paints_its_fill_and_a_border_defined_edge() {
+        use riff_gui::ui::settings::SettingsSection;
+        use riff_gui::ui::theme::Palette;
+
+        let palette = Palette::dark();
+        let content = sample_content();
+        // Playback is the one section that is a single card, so the card's own
+        // edge is separable from every other thing in the frame.
+        let mut harness = settings_modal_harness(&content, SettingsSection::Playback);
+        harness.run();
+        let frame = harness
+            .render()
+            .expect("the settings pane must render headlessly");
+
+        // The fill: the card plane, and a large field of it, so the card is
+        // unambiguously located before anything is probed around it.
+        let card = largest_fill_rect(&frame, palette.surface)
+            .expect("a settings card paints the card plane");
+        let (width, height) = frame.dimensions();
+        let fill = (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                let px = f32::from(*x as u16);
+                let py = f32::from(*y as u16);
+                let inside = px >= card.left()
+                    && px < card.right()
+                    && py >= card.top()
+                    && py < card.bottom();
+                let p = frame.get_pixel(*x, *y);
+                inside
+                    && p.0[0].abs_diff(palette.surface.r()) <= 2
+                    && p.0[1].abs_diff(palette.surface.g()) <= 2
+                    && p.0[2].abs_diff(palette.surface.b()) <= 2
+            })
+            .count();
+        assert!(
+            fill > 10_000,
+            "a settings card's interior paints the card plane ({fill} px in {card:?})"
+        );
+
+        // The edge: `border` is a translucent white, and the stroke is centered
+        // on the card's rect, so half of it falls outside the card and
+        // composites against the pane behind it. That outside half is the edge
+        // a viewer reads, and it is what these probes look for.
+        //
+        // Composited the way egui composites its own output: `Color32` is
+        // premultiplied, so the result is the stored top added onto the scaled
+        // bottom — NOT `theme::blend_over`, whose straight-alpha contract would
+        // give (15, 14, 13) here instead of the (39, 38, 37) the card's edge
+        // actually reads. Which half of the stroke lands on which pixel depends
+        // on where the rect's fractional edge falls, so both are accepted.
+        let composited_on = |behind: egui::Color32| {
+            let keep = 1.0 - f32::from(palette.border.a()) / 255.0;
+            let channel =
+                |top: u8, bottom: u8| (f32::from(top) + f32::from(bottom) * keep).round() as u8;
+            egui::Color32::from_rgb(
+                channel(palette.border.r(), behind.r()),
+                channel(palette.border.g(), behind.g()),
+                channel(palette.border.b(), behind.b()),
+            )
+        };
+        let edges = [
+            composited_on(palette.background),
+            composited_on(palette.surface),
+        ];
+        let at = |probe: (f32, f32)| -> Option<&image::Rgba<u8>> {
+            let (px, py) = (i64::from(probe.0 as i32), i64::from(probe.1 as i32));
+            (px >= 0 && py >= 0 && px < i64::from(width) && py < i64::from(height))
+                .then(|| frame.get_pixel(px as u32, py as u32))
+        };
+        let is_edge = |p: &image::Rgba<u8>| {
+            edges.iter().any(|want| {
+                p.0[0].abs_diff(want.r()) <= 6
+                    && p.0[1].abs_diff(want.g()) <= 6
+                    && p.0[2].abs_diff(want.b()) <= 6
+            })
+        };
+        // Each side is probed at its own midpoint, starting at the pixel just
+        // outside the fill and stepping two further out. The stroke is centered
+        // on the card's boundary, so its outer half lands on `left - 1`,
+        // `right`, `top - 1` and `bottom` respectively — the band exists because
+        // a 1px stroke lands across two pixel rows whenever its rect sits on a
+        // fractional coordinate.
+        let (mid_x, mid_y) = (card.center().x, card.center().y);
+        for (side, along, outward) in [
+            ("left", card.left() - 1.0, -1.0_f32),
+            ("right", card.right(), 1.0_f32),
+            ("top", card.top() - 1.0, -1.0_f32),
+            ("bottom", card.bottom(), 1.0_f32),
+        ] {
+            let vertical = side == "left" || side == "right";
+            let band = (0..=2).map(move |d| {
+                let along = along + d as f32 * outward;
+                if vertical {
+                    (along, mid_y)
+                } else {
+                    (mid_x, along)
+                }
+            });
+            assert!(
+                band.filter_map(at).any(is_edge),
+                "a settings card's {side} edge paints the border token, composited \
+                 to {edges:?} (card {card:?}, probed at {mid_x}/{mid_y})"
+            );
+        }
     }
 
     #[test]
@@ -10507,6 +10717,131 @@ mod browser_column_ui_tests {
             .count()
     }
 
+    /// Count frame pixels within a hair of `color` inside `rect`, at the same
+    /// +/-2 tolerance as [`count_band_color`] but scoped to one area, so a
+    /// test can ask what a plane painted over a specific region.
+    fn count_color_in(image: &image::RgbaImage, color: egui::Color32, rect: egui::Rect) -> usize {
+        let (width, height) = image.dimensions();
+        let x0 = rect.min.x.floor().max(0.0) as u32;
+        let y0 = rect.min.y.floor().max(0.0) as u32;
+        let x1 = (rect.max.x.ceil().max(0.0) as u32).min(width);
+        let y1 = (rect.max.y.ceil().max(0.0) as u32).min(height);
+        image
+            .enumerate_pixels()
+            .filter(|(x, y, p)| {
+                *x >= x0
+                    && *x < x1
+                    && *y >= y0
+                    && *y < y1
+                    && p.0[0].abs_diff(color.r()) <= 2
+                    && p.0[1].abs_diff(color.g()) <= 2
+                    && p.0[2].abs_diff(color.b()) <= 2
+            })
+            .count()
+    }
+
+    /// Render one browser column of idle rows over the card plane the shell
+    /// paints behind a column, and return the frame with the rect the list
+    /// occupied in it. The rows are all idle — no selection, no hover, no
+    /// focus — so the only plane the list paints is the field itself, and the
+    /// card plane is whatever the list failed to cover.
+    fn render_idle_list_field() -> (image::RgbaImage, egui::Rect) {
+        use riff_gui::ui::browser::show_browser_column;
+        /// Where the list lands, captured out of the frame so a test can count
+        /// the plane inside the list's own area rather than over the card's
+        /// padding around it.
+        #[derive(Clone, Copy, Default)]
+        struct ListRect(Option<egui::Rect>);
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let items = fixture_items();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, list: &mut ListRect| {
+                    // The pane behind the column is the card plane, exactly as
+                    // the shell paints it.
+                    let bg = ui.ctx().layer_painter(egui::LayerId::background());
+                    bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.surface);
+                    list.0 = Some(egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        ui.available_size(),
+                    ));
+                    let mut fixture_item = provider(&items);
+                    let column = BrowserColumn {
+                        sort_desc: false,
+                        show_sort: false,
+                        total: items.len(),
+                        item: &mut fixture_item,
+                        virtualize: false,
+                        empty_title: "",
+                        empty_hint: "",
+                    };
+                    show_browser_column(ui, &mut cache, &palette, column, &mut Vec::new());
+                },
+                ListRect::default(),
+            );
+        harness.run();
+        let list = harness
+            .state()
+            .0
+            .expect("the harness must have recorded where the list landed");
+        let image = harness.render().expect("the list must render headlessly");
+        (image, list)
+    }
+
+    /// An idle row sits on the row plane rather than on the card plane behind
+    /// it. The mockup draws a list as a field, so a card's edge stays findable
+    /// through it; the four-step ramp had no slot for that plane, which left
+    /// idle rows painting nothing and the card showing straight through. The
+    /// row plane is a property of the list rather than of a row, so the
+    /// container paints it once — which is also the only way it can cover the
+    /// list's whole area: these rows are virtualized, so a row-carried fill
+    /// would stop at the last row actually rendered.
+    #[test]
+    fn test_idle_row_paints_the_row_plane_under_the_card() {
+        use riff_gui::ui::theme::Palette;
+        use riff_gui::ui::theme::geometry::browser::ROW_H;
+        let palette = Palette::dark();
+        let (field, list) = render_idle_list_field();
+
+        assert!(
+            count_color_in(&field, palette.surface_row, list) > 1_000,
+            "an idle list paints the row plane"
+        );
+
+        // The card must not show through the field. The two planes sit four
+        // per channel apart on the ramp by design, so an antialiased glyph
+        // edge can land inside the +/-2 tolerance of either one — a few
+        // scattered pixels are not a field. What a missing plane looks like is
+        // the card filling the list, so the check is a budget: under 1% of the
+        // list area, against 100% if the plane were never painted.
+        let area = (list.width() * list.height()) as usize;
+        let card = count_color_in(&field, palette.surface, list);
+        assert!(
+            card * 100 < area,
+            "the card plane no longer shows through under idle rows: {card} of {area} px"
+        );
+
+        // And the field reaches past the last row rather than ending with it:
+        // the band below the three fixture rows is row plane, all of it, with
+        // no text in it to antialias against the card.
+        let below =
+            egui::Rect::from_min_max(egui::pos2(list.min.x, list.min.y + 3.0 * ROW_H), list.max);
+        assert_eq!(
+            count_color_in(&field, palette.surface, below),
+            0,
+            "no card plane below the last row"
+        );
+        assert_eq!(
+            count_color_in(&field, palette.surface_row, below),
+            (below.width() * below.height()) as usize,
+            "the field covers the list below its last row"
+        );
+    }
+
     /// The neutral row frame maps a row's interaction state to one set of
     /// design tokens: selected wins the selected fill, otherwise hover paints
     /// the wash, an idle row paints neither, and focus adds the ring —
@@ -10665,6 +11000,711 @@ mod browser_column_ui_tests {
             .expect("the text button must render headlessly")
     }
 
+    /// Render one primary text button on the card plane with room around it for
+    /// a halo to show, returning the frame and the button's rect. The rect is
+    /// fixed by this helper so a test can sample the face and the plane around
+    /// it without asking the harness where the button landed.
+    fn render_primary_button() -> (image::RgbaImage, egui::Rect) {
+        use riff_gui::ui::button::{TextButton, Variant, text_button};
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::theme::Palette;
+        let rect = egui::Rect::from_min_size(egui::pos2(40.0, 34.0), egui::vec2(120.0, 36.0));
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let id = egui::Id::new("test_primary_button");
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(200.0, 104.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(move |ui| {
+                let bg = ui.ctx().layer_painter(egui::LayerId::background());
+                bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.surface);
+                let spec = TextButton {
+                    id,
+                    rect,
+                    label: "Add Library",
+                    a11y: "Add Library",
+                    tooltip: None,
+                    icon: None,
+                    small: false,
+                    variant: Variant::Primary,
+                    enabled: true,
+                };
+                text_button(ui, &mut cache, &palette, &spec);
+            });
+        harness.run();
+        let frame = harness
+            .render()
+            .expect("the primary button must render headlessly");
+        (frame, rect)
+    }
+
+    /// The most common color in `band` — the fill a region was painted, with
+    /// the label's glyphs and their antialiasing ignored. A per-pixel probe
+    /// would land on a letterform often enough to make any claim about the fill
+    /// unreliable.
+    fn modal_color_in(frame: &image::RgbaImage, band: egui::Rect) -> egui::Color32 {
+        let (width, height) = frame.dimensions();
+        let x0 = band.left().max(0.0) as u32;
+        let y0 = band.top().max(0.0) as u32;
+        let x1 = (band.right().ceil().max(0.0) as u32).min(width);
+        let y1 = (band.bottom().ceil().max(0.0) as u32).min(height);
+        let mut counts: std::collections::HashMap<[u8; 3], usize> =
+            std::collections::HashMap::new();
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let p = frame.get_pixel(x, y);
+                *counts.entry([p.0[0], p.0[1], p.0[2]]).or_default() += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .max_by_key(|(_, n)| *n)
+            .map(|(c, _)| egui::Color32::from_rgb(c[0], c[1], c[2]))
+            .expect("the band must contain pixels")
+    }
+
+    /// Per-channel distance between two colors, for "which stop is this nearer".
+    fn color_distance(a: egui::Color32, b: egui::Color32) -> u32 {
+        u32::from(a.r().abs_diff(b.r()))
+            + u32::from(a.g().abs_diff(b.g()))
+            + u32::from(a.b().abs_diff(b.b()))
+    }
+
+    /// The primary button's face is a gradient, not a flat fill: the mockup
+    /// lights its primary actions from above, lighter at the top, so the face
+    /// has to run [`BRAND_GRADIENT_TOP`] to [`BRAND_GRADIENT_BOTTOM`] down its
+    /// own height. Sampled as the modal color of five horizontal bands, which
+    /// ignores the label, and required to be both non-uniform and monotonic —
+    /// a pair of equal samples, or a face that jumped to the light stop and
+    /// back, would not pass.
+    #[test]
+    fn test_primary_button_face_is_a_vertical_brand_gradient() {
+        use riff_gui::ui::theme::{BRAND_GRADIENT_BOTTOM, BRAND_GRADIENT_TOP, RADIUS_MD};
+        let (frame, rect) = render_primary_button();
+        // Inset by the corner radius so the rounded ends stay out of the sample.
+        let face = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + RADIUS_MD, rect.top()),
+            egui::pos2(rect.right() - RADIUS_MD, rect.bottom()),
+        );
+        let bands: Vec<egui::Color32> = (0..5)
+            .map(|i| {
+                let (t0, t1) = (i as f32 / 5.0, (i + 1) as f32 / 5.0);
+                modal_color_in(
+                    &frame,
+                    egui::Rect::from_min_max(
+                        egui::pos2(face.left(), face.top() + face.height() * t0),
+                        egui::pos2(face.right(), face.top() + face.height() * t1),
+                    ),
+                )
+            })
+            .collect();
+
+        assert_ne!(
+            bands[0], bands[4],
+            "the primary face is not a flat fill: top {bands:?}"
+        );
+        assert!(
+            color_distance(bands[0], BRAND_GRADIENT_TOP)
+                < color_distance(bands[0], BRAND_GRADIENT_BOTTOM),
+            "the top of the face is nearer the light stop, not the deep one"
+        );
+        assert!(
+            color_distance(bands[4], BRAND_GRADIENT_BOTTOM)
+                < color_distance(bands[4], BRAND_GRADIENT_TOP),
+            "the bottom of the face is nearer the deep stop, not the light one"
+        );
+        // Monotonic top-to-bottom: each band is nearer the deep stop than the
+        // one above it. A gradient that only darkened at one end, or one that
+        // reversed, fails here.
+        for pair in bands.windows(2) {
+            assert!(
+                color_distance(pair[1], BRAND_GRADIENT_BOTTOM)
+                    < color_distance(pair[0], BRAND_GRADIENT_BOTTOM),
+                "the face darkens monotonically down its height: {bands:?}"
+            );
+        }
+    }
+
+    /// A primary action sits on a soft accent glow: the brand accent, brightest
+    /// at the control and falling to nothing, so the button reads as lit rather
+    /// than pasted on. Checked just outside each side, where an unfocused
+    /// Primary paints nothing else, and then past the halo's own reach, where
+    /// the plane must be untouched — that second half is what separates a glow
+    /// from a flat tinted plate.
+    #[test]
+    fn test_primary_button_sits_on_a_soft_accent_glow() {
+        use riff_gui::ui::theme::{GLOW_ALPHA, GLOW_SPREAD, Palette, glow};
+        let palette = Palette::dark();
+        let (frame, rect) = render_primary_button();
+        let plane = palette.surface;
+        let (width, height) = frame.dimensions();
+        let at = |probe: egui::Pos2| -> egui::Color32 {
+            let (x, y) = (probe.x, probe.y);
+            assert!(
+                x >= 0.0 && y >= 0.0 && x < width as f32 && y < height as f32,
+                "probe {x}/{y} is outside the frame"
+            );
+            let p = frame.get_pixel(x as u32, y as u32);
+            egui::Color32::from_rgb(p.0[0], p.0[1], p.0[2])
+        };
+        // Brand-ness: how much further the pixel is toward the accent than the
+        // plane was. The accent is far redder than the plane, so a real glow
+        // raises red much more than it raises blue.
+        let tinted_toward_brand = |p: egui::Color32| {
+            i32::from(p.r()) - i32::from(p.b()) > i32::from(plane.r()) - i32::from(plane.b())
+        };
+
+        let mid_x = rect.center().x;
+        let mid_y = rect.center().y;
+        // The halo, sampled 3px and 5px out from each side's midpoint.
+        for (side, probe) in [
+            ("above", egui::pos2(mid_x, rect.top() - 3.0)),
+            ("below", egui::pos2(mid_x, rect.bottom() + 3.0)),
+            ("left", egui::pos2(rect.left() - 3.0, mid_y)),
+            ("right", egui::pos2(rect.right() + 3.0, mid_y)),
+        ] {
+            let p = at(probe);
+            assert_ne!(
+                p, plane,
+                "a soft accent glow reaches {side} the primary button"
+            );
+            assert!(
+                tinted_toward_brand(p),
+                "the glow {side} the button is tinted toward the brand accent, \
+                 not just lightened: {p:?} vs plane {plane:?}"
+            );
+        }
+
+        // Past the halo's own reach the plane is untouched, so this is a glow
+        // with a falloff and not a translucent plate behind the button.
+        let far = GLOW_SPREAD + 4.0;
+        for (side, probe) in [
+            ("above", egui::pos2(mid_x, rect.top() - far)),
+            ("left", egui::pos2(rect.left() - far, mid_y)),
+        ] {
+            assert_eq!(
+                at(probe),
+                plane,
+                "the glow has fallen off {side} the button by {far}px"
+            );
+        }
+        // And the accent is genuinely there at the sampled strength the token
+        // declares, so the halo is the token's wash and not a weaker imitation.
+        let lit = glow(&palette, GLOW_ALPHA);
+        assert!(
+            lit.a() > 0 && lit.a() < 255,
+            "GLOW_ALPHA {GLOW_ALPHA} yields a translucent wash, not an opaque one"
+        );
+    }
+
+    /// Pixels lying inside the brand ramp — within a hair of the channel range
+    /// spanned by the two gradient stops, so every point of the gradient counts
+    /// and a color from any other part of the system does not.
+    fn brand_ramp_pixels(frame: &image::RgbaImage) -> usize {
+        use riff_gui::ui::theme::{BRAND_GRADIENT_BOTTOM, BRAND_GRADIENT_TOP};
+        let (width, height) = frame.dimensions();
+        let (lo, hi) = (BRAND_GRADIENT_BOTTOM, BRAND_GRADIENT_TOP);
+        (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                let p = frame.get_pixel(*x, *y);
+                let on = |v: u8, lo: u8, hi: u8| {
+                    i32::from(v) >= i32::from(lo) - 2 && i32::from(v) <= i32::from(hi) + 2
+                };
+                on(p.0[0], lo.r(), hi.r())
+                    && on(p.0[1], lo.g(), hi.g())
+                    && on(p.0[2], lo.b(), hi.b())
+            })
+            .count()
+    }
+
+    /// Render one artless `Placeholder::Gradient` block over the card plane
+    /// with the given stops, and return the frame.
+    fn render_gradient_placeholder(top: egui::Color32, bottom: egui::Color32) -> image::RgbaImage {
+        use riff_gui::ui::artwork::{Artwork, Fit, Placeholder, paint};
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::theme::Palette;
+        let _ = IconCache::new();
+        let palette = Palette::dark();
+        let rect = egui::Rect::from_min_size(egui::pos2(30.0, 30.0), egui::vec2(60.0, 40.0));
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(120.0, 100.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(move |ui| {
+                let bg = ui.ctx().layer_painter(egui::LayerId::background());
+                bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.surface);
+                paint(
+                    ui.painter(),
+                    &palette,
+                    &Artwork {
+                        rect,
+                        texture: None,
+                        fit: Fit::Fill,
+                        tint: riff_gui::ui::theme::TEXTURE_TINT,
+                        placeholder: Some(Placeholder::Gradient { top, bottom }),
+                        border: None,
+                    },
+                );
+            });
+        harness.run();
+        harness
+            .render()
+            .expect("the placeholder must render headlessly")
+    }
+
+    /// The artless-artwork placeholder's gradient is the **caller's** to choose.
+    /// Before this the variant's paint named `surface_2` and `surface_3` itself,
+    /// so the gradient was fixed inside `artwork.rs` and a caller could not
+    /// paint anything else — which is what made the design system's gradient a
+    /// per-module decision rather than a token. So the assertion is that a
+    /// supplied pair *reaches the pixels*: two different pairs must render two
+    /// different frames, and the supplied stops must be the ones on screen.
+    #[test]
+    fn test_gradient_placeholder_paints_the_stops_its_caller_supplied() {
+        use riff_gui::ui::theme::placeholder_gradient_stops;
+        let palette = riff_gui::ui::theme::Palette::dark();
+
+        // The system pair the app ships: the two raised-surface rungs.
+        let [sys_top, sys_bottom] = placeholder_gradient_stops(&palette);
+        let system = render_gradient_placeholder(sys_top, sys_bottom);
+
+        // A pair the module could not have chosen for itself.
+        let other = render_gradient_placeholder(
+            riff_gui::ui::theme::BRAND_GRADIENT_TOP,
+            riff_gui::ui::theme::BRAND_GRADIENT_BOTTOM,
+        );
+        let differing = system
+            .as_raw()
+            .iter()
+            .zip(other.as_raw())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            differing > 1_000,
+            "a caller-supplied stop pair reaches the pixels: two different pairs \
+             must render two different frames ({differing} bytes differ)"
+        );
+
+        // And the supplied stops really are the ends of what was painted: the
+        // block's top row matches the top stop and its bottom row the bottom
+        // stop. Read from the block's own interior, a third of the way in, so
+        // neither row is an antialiased edge.
+        let sample = |frame: &image::RgbaImage, y: u32| as_color(frame.get_pixel(60, y));
+        let top_row = sample(&other, 30 + 40 / 3);
+        let bottom_row = sample(&other, 30 + 40 * 2 / 3);
+        assert!(
+            color_distance(top_row, riff_gui::ui::theme::BRAND_GRADIENT_TOP)
+                < color_distance(top_row, riff_gui::ui::theme::BRAND_GRADIENT_BOTTOM),
+            "the supplied top stop is the lighter end of what was painted: {top_row:?}"
+        );
+        assert!(
+            color_distance(bottom_row, riff_gui::ui::theme::BRAND_GRADIENT_BOTTOM)
+                < color_distance(bottom_row, riff_gui::ui::theme::BRAND_GRADIENT_TOP),
+            "the supplied bottom stop is the deeper end of what was painted: {bottom_row:?}"
+        );
+    }
+
+    /// High Contrast is a *variant over* its base, so a slot it does not
+    /// deliberately re-pick must come through untouched. This is the exhaustive
+    /// half of that claim: the existing variant test names a handful of fields,
+    /// and the whole surface ramp — `surface_row` included — is not among them,
+    /// so a future edit that gave HC its own row plane would slip past it.
+    #[test]
+    fn test_high_contrast_inherits_every_surface_including_the_row_plane() {
+        for (base, variant) in [
+            (
+                riff_gui::ui::theme::Palette::dark(),
+                riff_gui::ui::theme::Palette::dark().high_contrast(),
+            ),
+            (
+                riff_gui::ui::theme::Palette::light(),
+                riff_gui::ui::theme::Palette::light().high_contrast(),
+            ),
+        ] {
+            for field in [
+                "background",
+                "surface_row",
+                "surface",
+                "surface_2",
+                "surface_3",
+            ] {
+                let value = |p: &riff_gui::ui::theme::Palette| match field {
+                    "background" => p.background,
+                    "surface_row" => p.surface_row,
+                    "surface" => p.surface,
+                    "surface_2" => p.surface_2,
+                    _ => p.surface_3,
+                };
+                assert_eq!(
+                    value(&variant),
+                    value(&base),
+                    "High Contrast inherits {field} from its base rather than \
+                     re-picking it"
+                );
+            }
+            // And brand is family-invariant, so the gradient's stops and the
+            // glow's strength cannot drift between the two variants either.
+            assert_eq!(variant.brand_primary, base.brand_primary);
+        }
+    }
+
+    /// The accent glow's strength is per family, and the split is deliberate
+    /// rather than cosmetic: a translucent wash's perceived strength depends on
+    /// the backdrop's luminance, so one number cannot serve both. Measured in
+    /// CIE L\*, the dark family's wash lifts its plane by ~22 and the light
+    /// family's tints its plane by ~4, which is the read a light canvas needs
+    /// for the same signal. High Contrast inherits its base family's value
+    /// because it inherits its base family's surfaces, so there is no third
+    /// number to keep in step.
+    #[test]
+    fn test_accent_glow_strength_is_split_per_family_and_hc_inherits_it() {
+        use riff_gui::ui::theme::Palette;
+        use riff_gui::ui::theme::glow_alpha;
+        // Read through a Vec so the values are not const-folded at the call
+        // site: the point of these assertions is the value, and a folded
+        // comparison would be asserting the compiler's arithmetic back at it.
+        let strengths: Vec<f32> = vec![
+            glow_alpha(&Palette::dark()),
+            glow_alpha(&Palette::light()),
+            glow_alpha(&Palette::dark().high_contrast()),
+            glow_alpha(&Palette::light().high_contrast()),
+        ];
+        let (dark, light, dark_hc, light_hc) =
+            (strengths[0], strengths[1], strengths[2], strengths[3]);
+
+        assert!(
+            (dark - 0.35).abs() < 1e-6,
+            "dark keeps the mockup's 0.35, got {dark}"
+        );
+        assert!(
+            (light - 0.14).abs() < 1e-6,
+            "light is the value the shadow tokens' 0.39x split implies, got {light}"
+        );
+        assert!(
+            light < dark,
+            "a light plane cannot glow — it is already at the top of the luminance \
+             range — so its wash is a tint and needs less ink, not more \
+             (light {light} vs dark {dark})"
+        );
+        assert_eq!(
+            dark_hc, dark,
+            "High Contrast re-picks no dark glow strength of its own"
+        );
+        assert_eq!(
+            light_hc, light,
+            "High Contrast re-picks no light glow strength of its own"
+        );
+    }
+
+    /// A frame pixel as an egui color, for the distance comparisons.
+    fn as_color(p: &image::Rgba<u8>) -> egui::Color32 {
+        egui::Color32::from_rgb(p.0[0], p.0[1], p.0[2])
+    }
+
+    /// Render the inspector's quick-action row — the primary play action beside
+    /// **Add to Queue** — and return the frame. Both buttons are primaries, so
+    /// whatever the test finds on one it must find on the other.
+    fn render_quick_actions() -> image::RgbaImage {
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::selection::{SelectionPanel, TagDraft};
+        use riff_gui::ui::theme::Palette;
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        // Tall enough to reach the quick-action row: it sits below the 200px art
+        // block, and the panel body scrolls, so a short stage would clip it away.
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(300.0, 560.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, _actions: &mut Vec<riff_gui::ui::selection::SelectionAction>| {
+                    let bg = ui.ctx().layer_painter(egui::LayerId::background());
+                    bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.background);
+                    riff_gui::ui::selection::show_selection_panel(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        SelectionPanel {
+                            art: None,
+                            title: Some("Music Has the Right to Children"),
+                            subtitle: Some("Boards of Canada · 1998"),
+                            details: &[],
+                            tags: &[],
+                            editor: None::<&mut TagDraft>,
+                            single: false,
+                            queue: true,
+                        },
+                        &mut Vec::new(),
+                    );
+                },
+                Vec::new(),
+            );
+        harness.run();
+        harness
+            .render()
+            .expect("the quick-action row must render headlessly")
+    }
+
+    /// **Add to Queue** sits in the same row as the primary play action, so the
+    /// two must be painted by the same authority — the lit-from-above face and
+    /// the accent bloom, not a flat brand fill beside a gradient. Before this
+    /// the row mixed the two, which is the defect: the assertion is that *both*
+    /// faces show vertical gradient variation *and* *both* sit on a glow, so a
+    /// row where only one is lit cannot pass.
+    #[test]
+    fn test_both_quick_actions_are_painted_as_primaries() {
+        use riff_gui::ui::theme::{BRAND_GRADIENT_BOTTOM, BRAND_GRADIENT_TOP};
+        let frame = render_quick_actions();
+
+        // A face is a set of COLUMNS that show more than one brand-ish colour
+        // down their height — which is precisely what a vertical gradient is and
+        // what a flat fill cannot be. Working in columns rather than rows means
+        // the label's glyphs cannot break the measurement, and the two faces are
+        // then the two horizontal clusters, separated by the row's gap.
+        //
+        // The tolerance is wide enough for the whole gradient between the two
+        // stops and narrow enough to exclude the bloom, which composites to
+        // about (49, 46, 43) and sits nowhere near either rung.
+        let is_brandish = |p: &image::Rgba<u8>| {
+            let near = |c: egui::Color32| {
+                p.0[0].abs_diff(c.r()) <= 24
+                    && p.0[1].abs_diff(c.g()) <= 24
+                    && p.0[2].abs_diff(c.b()) <= 24
+            };
+            near(BRAND_GRADIENT_TOP) || near(BRAND_GRADIENT_BOTTOM)
+        };
+        let gradient_columns: Vec<u32> = (0..frame.width())
+            .filter(|x| {
+                let mut seen: Vec<image::Rgba<u8>> = Vec::new();
+                for y in 0..frame.height() {
+                    let p = *frame.get_pixel(*x, y);
+                    if is_brandish(&p) && !seen.contains(&p) {
+                        seen.push(p);
+                    }
+                }
+                seen.len() >= 2
+            })
+            .collect();
+        assert!(
+            !gradient_columns.is_empty(),
+            "a gradient face shows more than one brand-ish colour down its height"
+        );
+
+        // Cluster the columns; the row's two buttons are two clusters.
+        let mut clusters: Vec<(u32, u32)> = Vec::new();
+        for x in gradient_columns {
+            match clusters.last_mut() {
+                Some(last) if x <= last.1 + 1 => last.1 = x,
+                _ => clusters.push((x, x)),
+            }
+        }
+        let faces: Vec<(u32, u32)> = clusters.into_iter().filter(|(a, b)| b - a >= 20).collect();
+        assert_eq!(
+            faces.len(),
+            2,
+            "both quick actions are lit faces, so two gradient clusters are present: {faces:?}"
+        );
+
+        // Each face independently: the colour at its top must be nearer the
+        // light stop than the colour at its bottom. Per face, so a row where
+        // only the first is lit fails on the second.
+        for (index, (left, right)) in faces.iter().enumerate() {
+            let mut rows: Vec<(u32, image::Rgba<u8>)> = Vec::new();
+            for y in 0..frame.height() {
+                // The modal brand-ish colour on this row within the face: the
+                // fill, ignoring whatever glyph lands on it.
+                let mut counts: std::collections::HashMap<[u8; 3], usize> =
+                    std::collections::HashMap::new();
+                for x in *left..=*right {
+                    let p = *frame.get_pixel(x, y);
+                    if is_brandish(&p) {
+                        *counts.entry([p.0[0], p.0[1], p.0[2]]).or_default() += 1;
+                    }
+                }
+                if let Some((c, _)) = counts.into_iter().max_by_key(|(_, n)| *n) {
+                    rows.push((y, image::Rgba([c[0], c[1], c[2], 255])));
+                }
+            }
+            let (top_y, top_c) = rows.first().copied().expect("a face has rows");
+            let (bottom_y, bottom_c) = rows.last().copied().expect("a face has rows");
+            assert_ne!(
+                top_c, bottom_c,
+                "quick action {index} is a flat fill, not a gradient \
+                 (top {top_c:?} at y={top_y} == bottom {bottom_c:?} at y={bottom_y})"
+            );
+            assert!(
+                color_distance(as_color(&top_c), BRAND_GRADIENT_TOP)
+                    < color_distance(as_color(&bottom_c), BRAND_GRADIENT_TOP),
+                "quick action {index} is lit from above: its top {top_c:?} is nearer \
+                 the light stop than its bottom {bottom_c:?}"
+            );
+        }
+    }
+
+    /// The quick-action row's face is painted before its button is added, so the
+    /// bloom can go down first — which means the row claims the button's rect
+    /// from the cursor before `add_sized` allocates it. That claim is only
+    /// correct while `add_sized` still lays the button out at the cursor, so
+    /// this holds the two together: a future layout change that moves the
+    /// button would light the wrong rect, and this fails instead.
+    #[test]
+    fn test_quick_action_claims_the_rect_its_button_actually_takes() {
+        use riff_gui::ui::theme::geometry::inspector::PLAY_H;
+        let claimed: std::rc::Rc<std::cell::RefCell<Vec<(egui::Rect, egui::Rect)>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        {
+            let sink = std::rc::Rc::clone(&claimed);
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(300.0, 120.0))
+                .with_pixels_per_point(1.0)
+                .build_ui(move |ui| {
+                    ui.horizontal(|ui| {
+                        for i in 0..2 {
+                            let size = egui::vec2(140.0, PLAY_H);
+                            let rect = egui::Rect::from_min_size(ui.cursor().min, size);
+                            let button = egui::Button::new(egui::RichText::new("X"))
+                                .fill(riff_gui::ui::theme::TRANSPARENT);
+                            let response = ui.add_sized(size, button);
+                            sink.borrow_mut().push((rect, response.rect));
+                            let _ = i;
+                        }
+                    });
+                });
+            harness.run();
+        }
+        for (claim, taken) in claimed.borrow().iter() {
+            assert_eq!(
+                claim, taken,
+                "a button takes the rect claimed from the cursor"
+            );
+        }
+    }
+
+    /// Render one accent-tier text button over the card plane, at rest or
+    /// hovered. `paint_text_button` takes `hovered` as an argument, so this
+    /// observes the two states in one frame each without moving a pointer —
+    /// the same technique the row-band test uses for its four states.
+    fn render_accent_button(hovered: bool) -> (image::RgbaImage, egui::Rect) {
+        use riff_gui::ui::button::{Variant, paint_text_button};
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::theme::Palette;
+        let rect = egui::Rect::from_min_size(egui::pos2(40.0, 34.0), egui::vec2(120.0, 36.0));
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(200.0, 104.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(move |ui| {
+                let bg = ui.ctx().layer_painter(egui::LayerId::background());
+                bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.surface);
+                paint_text_button(
+                    ui,
+                    &mut cache,
+                    &palette,
+                    rect,
+                    "Rescan now",
+                    None,
+                    false,
+                    Variant::Accent,
+                    true,
+                    hovered,
+                    false,
+                );
+            });
+        harness.run();
+        let frame = harness
+            .render()
+            .expect("the accent button must render headlessly");
+        (frame, rect)
+    }
+
+    /// The mockup's second tier is not neutral: a secondary action takes a
+    /// translucent **brand** wash on hover, the same gesture the destructive
+    /// button makes in the error hue. So this is about the wash's *hue*, which
+    /// is what separates it from the neutral hover it replaced — a
+    /// `surface_3` hover is also "not the resting fill", so merely watching the
+    /// face change would pass on the old code.
+    #[test]
+    fn test_accent_button_washes_toward_the_brand_hue_on_hover_only() {
+        use riff_gui::ui::button::Variant;
+        use riff_gui::ui::theme::{self, Palette, RADIUS_MD, accent_fill};
+        let palette = Palette::dark();
+
+        // Redness over blueness: the brand ramp is warm, so an accent wash
+        // pushes this up hard. The warmest *neutral* on the surface ramp is
+        // `surface_3` at (40, 37, 33) — a lead of 7 — so a threshold well above
+        // that cannot be met by any neutral the button could be painted.
+        let warmth = |c: egui::Color32| i32::from(c.r()) - i32::from(c.b());
+        let face = |frame: &image::RgbaImage, rect: egui::Rect| {
+            // The top band of the face, clear of the vertically centred label
+            // and inset past the corner radius, so this reads the fill only.
+            let band = egui::Rect::from_min_max(
+                egui::pos2(rect.left() + RADIUS_MD, rect.top() + 2.0),
+                egui::pos2(rect.right() - RADIUS_MD, rect.top() + 0.3 * rect.height()),
+            );
+            modal_color_in(frame, band)
+        };
+
+        let (resting, rect) = render_accent_button(false);
+        let (hovered, _) = render_accent_button(true);
+        let at_rest = face(&resting, rect);
+        let on_hover = face(&hovered, rect);
+
+        assert_eq!(
+            at_rest, palette.surface_2,
+            "an accent button at rest is the neutral base, unchanged"
+        );
+        assert!(
+            warmth(at_rest) <= 8,
+            "at rest there is no brand wash: {at_rest:?} is neutral (warmth {})",
+            warmth(at_rest)
+        );
+        assert!(
+            warmth(on_hover) >= 18,
+            "on hover the face washes toward the brand hue, not a neutral step: \
+             {on_hover:?} has warmth {} (at rest {at_rest:?} had {})",
+            warmth(on_hover),
+            warmth(at_rest)
+        );
+        // And it is the helper's wash doing it, at the coverage the helper
+        // declares — not some stronger hand-picked tint.
+        //
+        // Composited the way egui composites its own output: `Color32` is
+        // premultiplied, so the result is the stored top added onto the scaled
+        // bottom. `theme::blend_over` is the straight-alpha helper and would
+        // apply the alpha a second time, giving (30, 27, 25) instead — which is
+        // also what a naive reading of "10% over the base" suggests and is why
+        // this is worth stating explicitly.
+        let wash_over = |base: egui::Color32| {
+            let keep = 1.0 - f32::from(accent_fill(&palette, true).a()) / 255.0;
+            let channel =
+                |top: u8, bottom: u8| (f32::from(top) + f32::from(bottom) * keep).round() as u8;
+            egui::Color32::from_rgb(
+                channel(accent_fill(&palette, true).r(), base.r()),
+                channel(accent_fill(&palette, true).g(), base.g()),
+                channel(accent_fill(&palette, true).b(), base.b()),
+            )
+        };
+        assert_eq!(
+            on_hover,
+            wash_over(palette.surface_2),
+            "the hover wash is accent_fill composited over the base"
+        );
+        // The two washes are one gesture in two hues: same coverage, so a
+        // destructive button and an accent button read as siblings.
+        assert_eq!(
+            accent_fill(&palette, true).a(),
+            theme::destructive_fill(&palette, true).a(),
+            "the accent and destructive washes are painted at the same coverage"
+        );
+        // At rest the helper contributes nothing at all, which is what keeps an
+        // idle golden byte-identical.
+        assert_eq!(
+            accent_fill(&palette, false),
+            riff_gui::ui::theme::TRANSPARENT
+        );
+        assert_ne!(Variant::Accent, Variant::Secondary);
+    }
+
     /// The shared semantic-text-button foundation paints each variant from one
     /// set of tokens and gives every variant the same focus/disabled parity:
     /// Primary is brand-filled, Destructive carries the error ink, a focused
@@ -10681,9 +11721,15 @@ mod browser_column_ui_tests {
             .color;
 
         let primary = render_text_button(Variant::Primary, false, false);
+        // Primary's face is the brand gradient, so it is painted from the light
+        // rung down to the deep one rather than in one flat brand tone. The
+        // invariant here is unchanged — Primary is the brand-painted variant,
+        // against Destructive's "never brand-filled" below — only the pixels it
+        // is stated in. The dedicated gradient test owns the stops and the
+        // falloff; this one still asks for a whole field of brand paint.
         assert!(
-            count_band_color(&primary, palette.brand_primary) > 1_000,
-            "Primary paints the brand fill"
+            brand_ramp_pixels(&primary) > 1_000,
+            "Primary paints the brand ramp"
         );
 
         let destructive = render_text_button(Variant::Destructive, false, false);

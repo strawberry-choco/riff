@@ -896,6 +896,7 @@ fn paint_cover(
     texture: Option<egui::TextureId>,
     rect: egui::Rect,
 ) {
+    let [top, bottom] = theme::placeholder_gradient_stops(palette);
     super::artwork::paint(
         &ui.painter_at(rect),
         palette,
@@ -904,7 +905,7 @@ fn paint_cover(
             texture,
             fit: super::artwork::Fit::Fill,
             tint: theme::TEXTURE_TINT,
-            placeholder: Some(super::artwork::Placeholder::Gradient),
+            placeholder: Some(super::artwork::Placeholder::Gradient { top, bottom }),
             border: Some(theme::RADIUS_MD),
         },
     );
@@ -958,7 +959,10 @@ fn primary_play_button(
     let button = super::button::begin_icon_button(ui, rect, egui::Id::new("playerbar_play"), false);
     let painter = ui.painter_at(rect);
 
-    painter.circle_filled(rect.center(), rect.width() / 2.0, palette.brand_primary);
+    // The FAB is the app's most-reached primary action, so it wears the same
+    // lit-from-above face and the same accent bloom as a `Primary` text button —
+    // through the same authority, so the two cannot drift.
+    super::button::paint_primary_face(ui, palette, rect, rect.width() / 2.0);
     if button.hovered {
         painter.circle_stroke(
             rect.center(),

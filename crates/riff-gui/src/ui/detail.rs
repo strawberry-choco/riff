@@ -260,6 +260,18 @@ fn track_list(
     tracks: &[TrackRow],
     actions: &mut Vec<DetailAction>,
 ) {
+    // The track list is a field, painted by the list rather than by each row:
+    // these rows are virtualized, so a row-carried fill would stop at the last
+    // rendered row and leave the column below it on the card plane. See
+    // [`super::browser::show_browser_list`] for the same paint on the listing
+    // side. The cursor is already past the breadcrumb and the album header
+    // here, so the plane starts below them: the album's own block stays on the
+    // card and only the track rows move to the row plane.
+    ui.painter().rect_filled(
+        egui::Rect::from_min_size(ui.cursor().min, ui.available_size()),
+        0.0,
+        palette.surface_row,
+    );
     let total = tracks.len();
     let mut scroll_area = egui::ScrollArea::vertical()
         .auto_shrink(false)

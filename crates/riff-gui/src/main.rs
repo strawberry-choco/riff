@@ -10,6 +10,11 @@ use riff_backend::composition::AppRuntime;
 use riff_gui::ui::RiffApp;
 use riff_gui::ui::window_visibility::spawn_visibility_listener;
 
+// stops a console window flashing on Windows release builds; it also
+// detaches stderr, so `tracing_subscriber::fmt::init()` below is a no-op
+// from the user's point of view — intended, not a regression. Debug builds
+// keep the console (`not(debug_assertions)`), so logs stay visible.
+#[cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 fn main() {
     color_eyre::install().expect("failed to install color_eyre");
     tracing_subscriber::fmt::init();

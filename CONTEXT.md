@@ -141,7 +141,7 @@ The operation that discovers audio files under a Library Path and commits them i
 _Avoid_: scanner thread, directory walker
 
 **Detail Panel**:
-The rightmost selection readout showing the currently selected entity or Track — its art, title, secondary line, tag rows, and detail rows. It follows the live selection: single-clicking a Track anywhere shows that Track; selecting an Album, Artist, or Genre in the browser shows the entity readout.
+The rightmost selection readout showing the currently selected entity or Track — its art, title, secondary line, tag rows, and detail rows. It follows the live selection: single-clicking a Track anywhere shows that Track; selecting an Album, Artist, or Genre in the browser shows the entity readout. A readout displays rather than acts: it carries no action buttons and no menu of its own, because an entity's actions belong to the entity. Its one way inward is the tag rows, which open the Inline Tag Editor.
 _Avoid_: inspector, selection panel, readout column
 
 **Inline Tag Editor**:

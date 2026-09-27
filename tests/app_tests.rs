@@ -5790,6 +5790,7 @@ mod cover_service_tests {
     use super::*;
     use riff_backend::app::cover_service::{COVER_CACHE_CAP, CoverService, Covers};
     use riff_backend::domain::CoverSource;
+    use riff_infra::media::FileThumbnailCache;
     use riff_library::app::errors::LibraryError;
     use riff_library::app::traits::{
         AudioFormatInfo, CoverLoader, DecodedCover, MetadataReader, RequestedSize,
@@ -5820,6 +5821,43 @@ mod cover_service_tests {
             rgba: vec![7; 4 * 4 * 4],
             width: 4,
             height: 4,
+        }
+    }
+
+    /// A cover Source that really exists on disk, plus the cache root its
+    /// Thumbnails are filed under.
+    ///
+    /// Both halves have to be real for a cache hit to be reachable at all: the
+    /// entry is named from the Source's `(mtime, len)`, so a path that cannot be
+    /// `stat`ed — like every `/music/t1.mp3` the dedup tests use — can only ever
+    /// miss, which is what leaves those tests' semantics untouched. Cloning is
+    /// cheap and the scratch directory outlives the last clone.
+    #[derive(Clone)]
+    struct CoverScratch {
+        dir: Arc<tempfile::TempDir>,
+        track: PathBuf,
+        cache_root: PathBuf,
+    }
+
+    impl CoverScratch {
+        fn new() -> Self {
+            let dir = Arc::new(tempfile::tempdir().expect("a scratch directory"));
+            let track = dir.path().join("t1.mp3");
+            std::fs::write(&track, b"a track file with an embedded picture").expect("writable");
+            let cache_root = dir.path().join("covers");
+            Self {
+                dir,
+                track,
+                cache_root,
+            }
+        }
+
+        fn cache(&self) -> FileThumbnailCache {
+            FileThumbnailCache::with_root(self.cache_root.clone())
+        }
+
+        fn track_id(&self) -> TrackId {
+            TrackId::from_path(&self.track)
         }
     }
 
@@ -5873,6 +5911,21 @@ mod cover_service_tests {
             }
             self.result.clone().map_err(LibraryError::CoverLoad)
         }
+
+        fn decode_thumbnail(
+            &self,
+            bytes: &[u8],
+            size: RequestedSize,
+        ) -> Result<DecodedCover, LibraryError> {
+            crate::fake_decode_thumbnail(bytes, size)
+        }
+
+        fn encode_thumbnail(
+            &self,
+            cover: &DecodedCover,
+        ) -> Result<riff_persistence::thumbnail::EncodedThumbnail, LibraryError> {
+            crate::fake_encode_thumbnail(cover)
+        }
     }
 
     // --- Harness ---------------------------------------------------------------
@@ -5883,6 +5936,10 @@ mod cover_service_tests {
         reader_calls: Arc<AtomicUsize>,
         loader_calls: Arc<AtomicUsize>,
         loader_sizes: Arc<Mutex<Vec<RequestedSize>>>,
+        /// The Source and cache root this pair is wired to. Tests that resolve a
+        /// path which does not exist never touch it; the restart test shares it
+        /// with a second service.
+        scratch: CoverScratch,
     }
 
     /// Wire a real service/worker pair over the counting fakes and run the
@@ -5902,6 +5959,21 @@ mod cover_service_tests {
         loader_result: Result<Option<DecodedCover>, String>,
         gate: Option<crossbeam_channel::Receiver<()>>,
     ) -> Harness {
+        let scratch = CoverScratch::new();
+        let harness = spawn_over(&scratch, source, loader_result, gate, true);
+        Harness { scratch, ..harness }
+    }
+
+    /// The same pair over a caller-owned Source, cache root and artwork policy —
+    /// the entry point a test needs when the cache itself is what is under
+    /// observation.
+    fn spawn_over(
+        scratch: &CoverScratch,
+        source: CoverSource,
+        loader_result: Result<Option<DecodedCover>, String>,
+        gate: Option<crossbeam_channel::Receiver<()>>,
+        read_embedded_artwork: bool,
+    ) -> Harness {
         let reader_calls = Arc::new(AtomicUsize::new(0));
         let loader_calls = Arc::new(AtomicUsize::new(0));
         let loader_sizes = Arc::new(Mutex::new(Vec::new()));
@@ -5916,7 +5988,8 @@ mod cover_service_tests {
                 sizes: Arc::clone(&loader_sizes),
                 gate: gate.map(Mutex::new),
             }),
-            Box::new(|| true),
+            Arc::new(scratch.cache()),
+            Box::new(move || read_embedded_artwork),
             inert_stop_flag(),
         );
         std::thread::spawn(move || worker.run());
@@ -5925,6 +5998,11 @@ mod cover_service_tests {
             reader_calls,
             loader_calls,
             loader_sizes,
+            scratch: CoverScratch {
+                dir: Arc::clone(&scratch.dir),
+                track: scratch.track.clone(),
+                cache_root: scratch.cache_root.clone(),
+            },
         }
     }
 
@@ -5975,6 +6053,163 @@ mod cover_service_tests {
         // The resolver chain drove the real ports: one tag read, one load.
         assert_eq!(h.reader_calls.load(Ordering::SeqCst), 1);
         assert_eq!(h.loader_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// The feature in one sentence: a Thumbnail survives the process that made
+    /// it. Resolve a Cover, drop the entire service, build a second one over the
+    /// same cache root, ask again — and the loader, the only thing in the chain
+    /// that can read a file and decode it, is never reached.
+    #[test]
+    fn test_a_resolved_thumbnail_survives_the_service_that_made_it() {
+        let scratch = CoverScratch::new();
+        let image = test_image();
+        let source = || CoverSource::Embedded(vec![1, 2, 3].into());
+
+        let first = spawn_over(&scratch, source(), Ok(Some(image.clone())), None, true);
+        first
+            .service
+            .request(first.scratch.track_id(), first.scratch.track.clone(), SMALL);
+        let results = poll_until(&first.service, 1);
+        assert_eq!(
+            results[0].2.as_ref(),
+            Some(&image),
+            "the first request has nothing cached, so it resolves the slow way"
+        );
+        assert_eq!(first.loader_calls.load(Ordering::SeqCst), 1);
+        drop(first);
+
+        let second = spawn_over(&scratch, source(), Ok(Some(image.clone())), None, true);
+        second.service.request(
+            second.scratch.track_id(),
+            second.scratch.track.clone(),
+            SMALL,
+        );
+        let results = poll_until(&second.service, 1);
+        assert_eq!(
+            results[0].2.as_ref(),
+            Some(&image),
+            "the stored rung decodes back to the same pixels"
+        );
+        assert_eq!(
+            second.loader_calls.load(Ordering::SeqCst),
+            0,
+            "a restart must not read the source or decode it again"
+        );
+    }
+
+    /// The fingerprint is the invalidation policy, so replacing the Source file
+    /// has to force a re-read rather than serve the rung filed under the old one.
+    #[test]
+    fn test_replacing_the_source_forces_a_rebuild() {
+        let scratch = CoverScratch::new();
+        let image = test_image();
+        let source = || CoverSource::Embedded(vec![1, 2, 3].into());
+
+        let first = spawn_over(&scratch, source(), Ok(Some(image.clone())), None, true);
+        first
+            .service
+            .request(first.scratch.track_id(), first.scratch.track.clone(), SMALL);
+        poll_until(&first.service, 1);
+        drop(first);
+
+        // A different file length moves the entry name on its own, so this needs
+        // no pause for mtime granularity.
+        std::fs::write(&scratch.track, b"a different track file entirely").unwrap();
+
+        let second = spawn_over(&scratch, source(), Ok(Some(image.clone())), None, true);
+        second.service.request(
+            second.scratch.track_id(),
+            second.scratch.track.clone(),
+            SMALL,
+        );
+        poll_until(&second.service, 1);
+        assert_eq!(
+            second.loader_calls.load(Ordering::SeqCst),
+            1,
+            "a changed source is read and decoded again rather than served stale"
+        );
+    }
+
+    /// Turning "Read embedded artwork" off moves the key from the Track's own
+    /// file to the folder image beside it, so the embedded rung cannot be served
+    /// — which is the live bug the negative cache has, keyed on a bare `TrackId`
+    /// and cleared by nothing.
+    #[test]
+    fn test_turning_off_embedded_artwork_does_not_serve_the_cached_embedded_rung() {
+        let scratch = CoverScratch::new();
+        let embedded = test_image();
+        let mut folder_art = test_image();
+        folder_art.rgba[0] = 200;
+
+        let cached = spawn_over(
+            &scratch,
+            CoverSource::Embedded(vec![1, 2, 3].into()),
+            Ok(Some(embedded.clone())),
+            None,
+            true,
+        );
+        cached.service.request(
+            cached.scratch.track_id(),
+            cached.scratch.track.clone(),
+            SMALL,
+        );
+        poll_until(&cached.service, 1);
+        drop(cached);
+
+        let after_toggle = spawn_over(
+            &scratch,
+            CoverSource::None,
+            Ok(Some(folder_art.clone())),
+            None,
+            false,
+        );
+        after_toggle.service.request(
+            after_toggle.scratch.track_id(),
+            after_toggle.scratch.track.clone(),
+            SMALL,
+        );
+        let results = poll_until(&after_toggle.service, 1);
+        assert_eq!(
+            results[0].2.as_ref(),
+            Some(&folder_art),
+            "the folder Cover is what the toggle asks for"
+        );
+        assert_eq!(
+            after_toggle.loader_calls.load(Ordering::SeqCst),
+            1,
+            "and it is resolved, not served from the rung cached under the track's own file"
+        );
+    }
+
+    /// A cache that cannot be written must not fail the resolution: the pixels
+    /// still come back, and the only cost is that the next request decodes again.
+    #[test]
+    fn test_a_failed_cache_write_still_delivers_the_cover() {
+        let scratch = CoverScratch::new();
+        // Occupied by a regular file, so every write under it fails.
+        std::fs::write(&scratch.cache_root, b"not a directory at all").unwrap();
+        let image = test_image();
+
+        let harness = spawn_over(
+            &scratch,
+            CoverSource::Embedded(vec![1, 2, 3].into()),
+            Ok(Some(image.clone())),
+            None,
+            true,
+        );
+        harness.service.request(
+            harness.scratch.track_id(),
+            harness.scratch.track.clone(),
+            SMALL,
+        );
+        let results = poll_until(&harness.service, 1);
+
+        assert_eq!(
+            results[0].2.as_ref(),
+            Some(&image),
+            "the resolve is not failed by the cache"
+        );
+        assert_eq!(harness.loader_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -6031,6 +6266,21 @@ mod cover_service_tests {
             self.seen.lock().unwrap().push(source.clone());
             self.result.clone().map_err(LibraryError::CoverLoad)
         }
+
+        fn decode_thumbnail(
+            &self,
+            bytes: &[u8],
+            size: RequestedSize,
+        ) -> Result<DecodedCover, LibraryError> {
+            crate::fake_decode_thumbnail(bytes, size)
+        }
+
+        fn encode_thumbnail(
+            &self,
+            cover: &DecodedCover,
+        ) -> Result<riff_persistence::thumbnail::EncodedThumbnail, LibraryError> {
+            crate::fake_encode_thumbnail(cover)
+        }
     }
 
     #[test]
@@ -6041,6 +6291,7 @@ mod cover_service_tests {
         let reader_calls = Arc::new(AtomicUsize::new(0));
         let loader_calls = Arc::new(AtomicUsize::new(0));
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let scratch = CoverScratch::new();
         let (service, worker) = CoverService::new(
             Box::new(SharedReader {
                 source: CoverSource::Embedded(vec![1, 2, 3].into()),
@@ -6051,6 +6302,7 @@ mod cover_service_tests {
                 result: Ok(Some(test_image())),
                 calls: Arc::clone(&loader_calls),
             }),
+            Arc::new(scratch.cache()),
             Box::new(|| false),
             inert_stop_flag(),
         );
@@ -6406,12 +6658,13 @@ mod cover_service_tests {
 // here: the order, the case-insensitive match, the on-disk spelling a hit
 // carries, and both ways a directory yields no art. Together they are what
 // makes the shared-probe extraction (folder-covers issue 01) a refactor with a
-// safety net rather than a hope — the Cover Service tests all resolve paths
-// that do not exist on disk, so they never reach the walk.
+// safety net rather than a hope — the Cover Service tests resolve paths that
+// mostly do not exist on disk, so they never reach the walk.
 mod cover_resolver_tests {
     use super::*;
     use riff_backend::app::CoverResolver;
     use riff_backend::domain::CoverSource;
+    use riff_infra::media::FileThumbnailCache;
     use riff_library::app::errors::LibraryError;
     use riff_library::app::traits::{
         AudioFormatInfo, CoverLoader, DecodedCover, MetadataReader, RequestedSize,
@@ -6466,12 +6719,28 @@ mod cover_resolver_tests {
             self.seen.lock().unwrap().push(source.clone());
             Ok(None)
         }
+
+        fn decode_thumbnail(
+            &self,
+            bytes: &[u8],
+            size: RequestedSize,
+        ) -> Result<DecodedCover, LibraryError> {
+            crate::fake_decode_thumbnail(bytes, size)
+        }
+
+        fn encode_thumbnail(
+            &self,
+            cover: &DecodedCover,
+        ) -> Result<riff_persistence::thumbnail::EncodedThumbnail, LibraryError> {
+            crate::fake_encode_thumbnail(cover)
+        }
     }
 
     /// Resolve a track parked at `track_in` with embedded art allowed but
     /// absent, returning the one source the loader was asked for.
     fn fallback_source(track_in: &Path) -> CoverSource {
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let scratch = tempfile::tempdir().expect("a scratch directory");
         let resolver = CoverResolver::new(
             Box::new(NoEmbeddedArt {
                 reads: Arc::new(AtomicUsize::new(0)),
@@ -6479,6 +6748,7 @@ mod cover_resolver_tests {
             Box::new(RecordingLoader {
                 seen: Arc::clone(&seen),
             }),
+            Arc::new(FileThumbnailCache::with_root(scratch.path().join("covers"))),
         );
         let resolved = resolver
             .resolve(track_in, true, BOX)
@@ -6617,6 +6887,7 @@ mod cover_resolver_tests {
     fn folder_probe(dir: &Path) -> (CoverSource, usize) {
         let reads = Arc::new(AtomicUsize::new(0));
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let scratch = tempfile::tempdir().expect("a scratch directory");
         let resolver = CoverResolver::new(
             Box::new(NoEmbeddedArt {
                 reads: Arc::clone(&reads),
@@ -6624,6 +6895,7 @@ mod cover_resolver_tests {
             Box::new(RecordingLoader {
                 seen: Arc::clone(&seen),
             }),
+            Arc::new(FileThumbnailCache::with_root(scratch.path().join("covers"))),
         );
         let resolved = resolver
             .resolve_folder(dir, BOX)
@@ -8849,6 +9121,507 @@ mod listing_page_coherence_tests {
                 .collect::<Vec<_>>(),
             ["Cid", "Bee", "Ada"],
             "and the rows are the reversed listing's own"
+        );
+    }
+}
+
+// --- End-to-end proofs over real image bytes (thumbnail-cache issue 05) ------
+//
+// Nothing else in the tree runs a real image through `CoverSource → resolve →
+// decode → poll → cache`, and this feature's entire claim is about that chain. The
+// `cover_service_tests` above resolve paths that do not exist on disk, which keeps
+// the Thumbnail cache inert there — necessary for their dedup assertions, useless
+// for proving persistence. So this module is the chain with real encoded JPEGs, a
+// real `FileThumbnailCache` over a scratch directory, and a real `CoverWorker` on a
+// real thread. Only the tag read is faked, and it is not what the feature is about.
+mod cover_thumbnail_cache_tests {
+    use super::*;
+    use riff_backend::app::cover_service::{ClearCacheOutcome, CoverService, Covers};
+    use riff_backend::domain::CoverSource;
+    use riff_gui::ui::app::{COVER_CARD, COVER_HERO, COVER_THUMB};
+    use riff_infra::media::FileThumbnailCache;
+    use riff_library::app::errors::LibraryError;
+    use riff_library::app::traits::{
+        AudioFormatInfo, CoverLoader, DecodedCover, MetadataReader, RequestedSize,
+    };
+    use riff_persistence::thumbnail::{EncodedThumbnail, ThumbnailCache};
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    const TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// A 600×600 Cover: big enough that every canonical box actually shrinks it, so
+    /// the no-upscale rule is the only thing that could make two rungs agree.
+    const SOURCE_PX: u32 = 600;
+
+    /// A horizontal gradient, encoded by `03`'s real encoder — so the bytes the
+    /// source file holds, the bytes the cache holds, and the pixels the UI would
+    /// upload are all produced by the same code the app runs. Flat art would hide a
+    /// resample bug; a gradient does not.
+    fn gradient_jpeg() -> Vec<u8> {
+        let mut rgba = Vec::with_capacity((SOURCE_PX * SOURCE_PX * 4) as usize);
+        for _row in 0..SOURCE_PX {
+            for x in 0..SOURCE_PX {
+                let shade = (x * 255 / SOURCE_PX) as u8;
+                rgba.extend_from_slice(&[shade, 40, 255 - shade, 255]);
+            }
+        }
+        fake_encode_thumbnail(&DecodedCover {
+            rgba,
+            width: SOURCE_PX,
+            height: SOURCE_PX,
+        })
+        .expect("an opaque gradient encodes as JPEG")
+        .bytes
+    }
+
+    /// An album directory as it exists on disk: a real `cover.jpg`, twelve real
+    /// track files beside it, and the cache root their rungs share.
+    struct Album {
+        dir: Arc<tempfile::TempDir>,
+        cover: PathBuf,
+        cache_root: PathBuf,
+    }
+
+    impl Album {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("a scratch album directory");
+            let cover = dir.path().join("cover.jpg");
+            let cache_root = dir.path().join("covers");
+            std::fs::write(&cover, gradient_jpeg()).expect("the cover is writable");
+            for index in 1..=12 {
+                std::fs::write(
+                    dir.path().join(format!("0{index:02} - track.mp3")),
+                    b"a track file",
+                )
+                .expect("a track is writable");
+            }
+            Self {
+                dir: Arc::new(dir),
+                cover,
+                cache_root,
+            }
+        }
+
+        fn track(&self, index: usize) -> PathBuf {
+            self.dir
+                .path()
+                .join(format!("0{:02} - track.mp3", index + 1))
+        }
+
+        fn cache(&self) -> Arc<dyn ThumbnailCache> {
+            Arc::new(FileThumbnailCache::with_root(self.cache_root.clone()))
+        }
+
+        /// Every stored entry, by name. The cache has no index, so the directory
+        /// listing *is* the accounting.
+        fn entries(&self) -> Vec<String> {
+            let mut found = Vec::new();
+            let Ok(buckets) = std::fs::read_dir(&self.cache_root) else {
+                return found;
+            };
+            for bucket in buckets.flatten() {
+                let Ok(rungs) = std::fs::read_dir(bucket.path()) else {
+                    continue;
+                };
+                for rung in rungs.flatten() {
+                    if rung.path().extension().is_some_and(|ext| ext == "img") {
+                        found.push(rung.path().to_string_lossy().to_string());
+                    }
+                }
+            }
+            found.sort();
+            found
+        }
+    }
+
+    /// A [`CoverLoader`] over real bytes that counts the loads the cache is supposed
+    /// to make unnecessary. Decode and encode are `riff-infra`'s real ones, so the
+    /// cached route cannot quietly disagree with the source route here and agree in
+    /// production.
+    struct RealBytesLoader {
+        bytes: Arc<[u8]>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CoverLoader for RealBytesLoader {
+        fn load_cover(
+            &self,
+            source: &CoverSource,
+            size: RequestedSize,
+        ) -> Result<Option<DecodedCover>, LibraryError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            // `Ok(None)` for no cover is the port's own contract, and the real
+            // adapter keeps it: a fake that answered with pixels regardless would
+            // make an artless resolve look served.
+            match source {
+                CoverSource::None => Ok(None),
+                _ => fake_decode_thumbnail(&self.bytes, size).map(Some),
+            }
+        }
+
+        fn decode_thumbnail(
+            &self,
+            bytes: &[u8],
+            size: RequestedSize,
+        ) -> Result<DecodedCover, LibraryError> {
+            fake_decode_thumbnail(bytes, size)
+        }
+
+        fn encode_thumbnail(&self, cover: &DecodedCover) -> Result<EncodedThumbnail, LibraryError> {
+            fake_encode_thumbnail(cover)
+        }
+    }
+
+    /// The tag read, canned. Which `CoverSource` a track yields is settled by lofty
+    /// and is not what these proofs are about; that the *file* the resolve keys on
+    /// is real is what matters.
+    struct FixedReader {
+        source: CoverSource,
+    }
+
+    impl MetadataReader for FixedReader {
+        fn read_all(
+            &self,
+            _path: &Path,
+        ) -> Result<(TrackMetadata, Duration, CoverSource, AudioFormatInfo), LibraryError> {
+            Err(LibraryError::Io(
+                "not exercised by the Thumbnail cache tests".to_string(),
+            ))
+        }
+
+        fn read_cover_source(&self, _path: &Path) -> Result<CoverSource, LibraryError> {
+            Ok(self.source.clone())
+        }
+    }
+
+    /// One service/worker pair, with the loader counter that proves a hit.
+    struct Served {
+        service: CoverService,
+        loader_calls: Arc<AtomicUsize>,
+    }
+
+    fn serve(album: &Album, source: CoverSource) -> Served {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (service, worker) = CoverService::new(
+            Box::new(FixedReader { source }),
+            Box::new(RealBytesLoader {
+                bytes: Arc::from(gradient_jpeg().into_boxed_slice()),
+                calls: Arc::clone(&calls),
+            }),
+            album.cache(),
+            Box::new(|| true),
+            inert_stop_flag(),
+        );
+        std::thread::spawn(move || worker.run());
+        Served {
+            service,
+            loader_calls: calls,
+        }
+    }
+
+    fn ask(service: &CoverService, path: &Path, size: RequestedSize) {
+        service.request(TrackId::from_path(path), path.to_path_buf(), size);
+    }
+
+    fn drain(
+        service: &CoverService,
+        expected: usize,
+    ) -> Vec<(TrackId, RequestedSize, Option<DecodedCover>)> {
+        let mut collected = Vec::new();
+        let start = Instant::now();
+        while collected.len() < expected && start.elapsed() < TIMEOUT {
+            collected.extend(service.poll());
+            if collected.len() < expected {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        collected
+    }
+
+    /// Mean per-channel difference between two decodes of the same Cover.
+    fn mean_channel_error(a: &DecodedCover, b: &DecodedCover) -> u64 {
+        let total: u64 = a
+            .rgba
+            .iter()
+            .zip(b.rgba.iter())
+            .map(|(x, y)| u64::from(x.abs_diff(*y)))
+            .sum();
+        total / u64::try_from(a.rgba.len()).unwrap_or(1).max(1)
+    }
+
+    /// Proof 1, and the user's requirement in one sentence: a Cover already
+    /// resolved in a previous run does not read or decode its source again. The
+    /// second service is a new process for all the cache can tell — nothing is
+    /// shared but the directory.
+    #[test]
+    fn test_a_resolved_cover_is_not_decoded_again_after_a_restart() {
+        let album = Album::new();
+        let track = album.track(0);
+
+        let first = serve(&album, CoverSource::None);
+        ask(&first.service, &track, COVER_CARD);
+        let cold = drain(&first.service, 1).remove(0).2.expect("art");
+        assert_eq!(first.loader_calls.load(Ordering::SeqCst), 1);
+        assert_eq!((cold.width, cold.height), (200, 200));
+        drop(first);
+
+        let second = serve(&album, CoverSource::None);
+        ask(&second.service, &track, COVER_CARD);
+        let warm = drain(&second.service, 1).remove(0).2.expect("art");
+
+        assert_eq!(
+            second.loader_calls.load(Ordering::SeqCst),
+            0,
+            "the loader is the only thing that can read and decode a Cover, and it was never called"
+        );
+        assert_eq!(
+            (warm.width, warm.height),
+            (cold.width, cold.height),
+            "the cached rung arrives at the box it was asked for"
+        );
+        assert_eq!(warm.rgba.len(), cold.rgba.len());
+        // The rung is a JPEG of the pixels the first run decoded, so a warm start is
+        // one generation of lossy compression away from a cold one. That is the
+        // accepted trade for a terminal rung — and it is asserted rather than
+        // assumed, because a gradient would show a real resample bug immediately.
+        assert!(
+            mean_channel_error(&cold, &warm) <= 2,
+            "a second JPEG generation on a smooth gradient must stay visually identical, got a mean \
+             channel error of {}",
+            mean_channel_error(&cold, &warm)
+        );
+    }
+
+    /// Proof 2: the fingerprint is the whole invalidation policy. A replaced cover
+    /// file is a different entry, so the new art is decoded rather than the old
+    /// rung served.
+    #[test]
+    fn test_replacing_the_cover_file_rebuilds_the_rung() {
+        let album = Album::new();
+        let track = album.track(0);
+
+        let before = serve(&album, CoverSource::None);
+        ask(&before.service, &track, COVER_CARD);
+        drain(&before.service, 1);
+        assert_eq!(album.entries().len(), 1);
+        drop(before);
+
+        std::fs::write(&album.cover, vec![0u8; 4_096]).expect("the cover is writable");
+
+        let after = serve(&album, CoverSource::None);
+        ask(&after.service, &track, COVER_CARD);
+        let rebuilt = drain(&after.service, 1).remove(0).2.expect("art");
+        assert_eq!(
+            after.loader_calls.load(Ordering::SeqCst),
+            1,
+            "a cover whose (mtime, len) moved is not the cover the cache holds a rung for"
+        );
+        // The replaced file is not a decodable image at all, so the rung the rebuild
+        // stored is the *old* art: the resolve that missed fell back to the loader,
+        // which serves the gradient. What proves invalidation is the counter.
+        assert_eq!((rebuilt.width, rebuilt.height), (200, 200));
+        assert_eq!(
+            album.entries().len(),
+            2,
+            "old and new coexist; nothing is edited in place"
+        );
+    }
+
+    /// Proof 3: the three canonical boxes are three rungs on disk, and no rung
+    /// answers for another.
+    #[test]
+    fn test_each_canonical_box_is_its_own_rung_on_disk() {
+        let album = Album::new();
+        let track = album.track(0);
+        let served = serve(&album, CoverSource::None);
+
+        for size in [COVER_THUMB, COVER_CARD, COVER_HERO] {
+            ask(&served.service, &track, size);
+        }
+        let results = drain(&served.service, 3);
+        let sizes: Vec<(u32, u32)> = results
+            .iter()
+            .map(|(_, _, cover)| {
+                let cover = cover.as_ref().expect("art at every box");
+                (cover.width, cover.height)
+            })
+            .collect();
+        assert_eq!(
+            sizes,
+            vec![(56, 56), (200, 200), (512, 512)],
+            "a 600x600 source is larger than every box, so each rung is its own reduction"
+        );
+        assert_eq!(album.entries().len(), 3, "three rungs, not one shared file");
+
+        // And they stay distinct after a restart: each box asks for its own.
+        drop(served);
+        let warm = serve(&album, CoverSource::None);
+        ask(&warm.service, &track, COVER_HERO);
+        let hero = drain(&warm.service, 1).remove(0).2.expect("art");
+        assert_eq!((hero.width, hero.height), (512, 512));
+        assert_eq!(
+            warm.loader_calls.load(Ordering::SeqCst),
+            0,
+            "the hero rung is found by its own name, not served by the thumbnail's"
+        );
+    }
+
+    /// Proof 4 — the entire justification for keying on the Source. Twelve tracks
+    /// of one album resolve to the same `cover.jpg`, so they share one stored
+    /// ladder rather than storing twelve identical ones.
+    #[test]
+    fn test_twelve_tracks_of_one_album_share_one_stored_ladder() {
+        let album = Album::new();
+        let served = serve(&album, CoverSource::None);
+
+        for index in 0..12 {
+            for size in [COVER_THUMB, COVER_CARD, COVER_HERO] {
+                ask(&served.service, &album.track(index), size);
+            }
+        }
+        let results = drain(&served.service, 36);
+        assert_eq!(results.len(), 36, "every track at every box is answered");
+        assert!(
+            results.iter().all(|(_, _, cover)| cover.is_some()),
+            "no track of the album is artless"
+        );
+
+        assert_eq!(
+            album.entries().len(),
+            3,
+            "one ladder for the album, not twelve: the key is the cover file, not the track"
+        );
+        assert_eq!(
+            served.loader_calls.load(Ordering::SeqCst),
+            3,
+            "one decode per box, ever — the other 33 requests were answered by the shared rungs"
+        );
+    }
+
+    /// Proof 5: nothing at all is persisted for an artless subject, which is what
+    /// makes "a cover.jpg appeared in this folder later" correct with no directory
+    /// component in the key and no rescan signal.
+    #[test]
+    fn test_an_artless_track_persists_nothing() {
+        let empty = Arc::new(tempfile::tempdir().expect("a scratch directory"));
+        let track = empty.path().join("01 - track.mp3");
+        std::fs::write(&track, b"a track with no artwork anywhere").unwrap();
+        let album = Album {
+            dir: Arc::clone(&empty),
+            cover: empty.path().join("cover.jpg"),
+            cache_root: empty.path().join("covers"),
+        };
+
+        let served = serve(&album, CoverSource::None);
+        ask(&served.service, &track, COVER_CARD);
+        let results = drain(&served.service, 1);
+        assert_eq!(results[0].2, None, "artless, and reported as such");
+        assert!(
+            album.entries().is_empty(),
+            "a negative result is never written to disk"
+        );
+        assert!(!album.cache_root.exists(), "not even the root is created");
+    }
+
+    /// Proof 6: a directory's own Cover goes through the same cache — and shares
+    /// it with the tracks inside it, because a folder row and a track in that
+    /// folder resolve to the *same* `cover.jpg`.
+    #[test]
+    fn test_a_folder_cover_shares_the_ladder_with_the_tracks_inside_it() {
+        let album = Album::new();
+        let folder = album.dir.path().to_path_buf();
+
+        let served = serve(&album, CoverSource::None);
+        served.service.request_folder(&folder, COVER_CARD);
+        let results = drain(&served.service, 1);
+        assert_eq!(
+            results[0]
+                .2
+                .as_ref()
+                .map(|cover| (cover.width, cover.height)),
+            Some((200, 200)),
+            "the directory's own cover file is what the row shows"
+        );
+        assert_eq!(served.loader_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(album.entries().len(), 1);
+
+        ask(&served.service, &album.track(0), COVER_CARD);
+        let track_result = drain(&served.service, 1).remove(0).2.expect("art");
+        assert_eq!((track_result.width, track_result.height), (200, 200));
+        assert_eq!(
+            served.loader_calls.load(Ordering::SeqCst),
+            1,
+            "the track found the folder row's rung already stored — one Source, one entry"
+        );
+        assert_eq!(album.entries().len(), 1);
+    }
+
+    /// Drain the settled outcome of a clear request, off the UI thread.
+    fn poll_clear(service: &CoverService) -> Option<ClearCacheOutcome> {
+        let start = Instant::now();
+        loop {
+            if let Some(outcome) = service.poll_cache_clear() {
+                return Some(outcome);
+            }
+            if start.elapsed() >= TIMEOUT {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// The only reclaim the design has, proven through the seam the UI uses: the
+    /// deletion happens on the worker, its outcome is polled, and after it the
+    /// next request genuinely re-reads and re-decodes — the end-to-end counterpart
+    /// to proof 3 above.
+    #[test]
+    fn test_clearing_the_cache_forces_a_re_resolve_and_repopulates() {
+        let album = Album::new();
+        let track = album.track(0);
+        let served = serve(&album, CoverSource::None);
+
+        ask(&served.service, &track, COVER_CARD);
+        drain(&served.service, 1);
+        assert_eq!(served.loader_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(album.entries().len(), 1);
+
+        served.service.clear_cache();
+        assert_eq!(
+            poll_clear(&served.service),
+            Some(ClearCacheOutcome::Cleared),
+            "the settled outcome arrives through the poll, not by blocking the caller"
+        );
+        assert!(album.entries().is_empty(), "the whole tree is gone");
+
+        ask(&served.service, &track, COVER_CARD);
+        let again = drain(&served.service, 1);
+        assert!(
+            again[0].2.is_some(),
+            "the cover still resolves after a clear"
+        );
+        assert_eq!(
+            served.loader_calls.load(Ordering::SeqCst),
+            2,
+            "and it had to read and decode the source again — nothing was left to serve it"
+        );
+        assert_eq!(album.entries().len(), 1, "the rung is stored anew");
+    }
+
+    /// Pressing clear on a cache that was never written is a success, not a fault:
+    /// `remove_dir_all` of an absent root is exactly the state the user asked for.
+    #[test]
+    fn test_clearing_a_cache_that_was_never_written_reports_success() {
+        let album = Album::new();
+        assert!(!album.cache_root.exists());
+        let served = serve(&album, CoverSource::None);
+
+        served.service.clear_cache();
+        assert_eq!(
+            poll_clear(&served.service),
+            Some(ClearCacheOutcome::Cleared)
         );
     }
 }

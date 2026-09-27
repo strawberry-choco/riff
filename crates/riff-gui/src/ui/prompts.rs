@@ -219,3 +219,65 @@ pub fn clear_library_confirm(
         None
     }
 }
+
+/// What the row says before the listener commits. The recovery clause is the
+/// substance: it says what a clear *costs*, because the action has no automatic
+/// counterpart — there is no eviction, so this is the only reclaim there is.
+pub const CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY: &str = "Delete every cached cover thumbnail? Each album's artwork is read and decoded again the next time it is shown.";
+
+/// The action's own label, kept distinct from "Clear Library" — the two sit in the
+/// same pane and wipe very different things.
+pub const CLEAR_THUMBNAIL_CACHE_LABEL: &str = "Clear Thumbnail cache";
+
+/// The inline confirmation for the destructive Clear Thumbnail cache action,
+/// rendered beneath the stage until confirmed or cancelled. Same shape and same
+/// tokens as [`clear_library_confirm`]: the warning line in the palette's warning
+/// colour, the affirmative action in [`button::Variant::Destructive`].
+///
+/// Deleting the rungs is not a data-loss event — the sources are untouched and the
+/// cache rebuilds as you browse — but it is irreversible in the moment and slow to
+/// undo, so it asks first like every other destructive row here.
+pub fn clear_thumbnail_cache_confirm(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+) -> Option<PromptOutcome> {
+    let mut confirmed = false;
+    let mut cancelled = false;
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new(CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY).color(palette.warning));
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(
+            button::text_button_size(ui, palette, CLEAR_LIBRARY_CONFIRM_LABEL, false),
+            egui::Sense::hover(),
+        );
+        if button::text_button(
+            ui,
+            cache,
+            palette,
+            &button::TextButton {
+                id: egui::Id::new("clear_thumbnail_cache_confirm_action"),
+                rect,
+                label: CLEAR_LIBRARY_CONFIRM_LABEL,
+                a11y: CLEAR_LIBRARY_CONFIRM_LABEL,
+                tooltip: None,
+                icon: None,
+                small: false,
+                variant: button::Variant::Destructive,
+                enabled: true,
+            },
+        ) {
+            confirmed = true;
+        }
+        if ui.button("Cancel").clicked() {
+            cancelled = true;
+        }
+    });
+    if confirmed {
+        Some(PromptOutcome::Confirm)
+    } else if cancelled {
+        Some(PromptOutcome::Cancel)
+    } else {
+        None
+    }
+}

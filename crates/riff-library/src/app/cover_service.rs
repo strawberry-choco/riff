@@ -4,6 +4,7 @@
 use crate::app::cover_resolver::CoverResolver;
 use crate::infra::ports::{CoverLoader, DecodedCover, MetadataReader, RequestedSize};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
+use riff_persistence::thumbnail::ThumbnailCache;
 use riff_persistence::track::TrackId;
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -41,9 +42,11 @@ pub fn lru_insert<K: PartialEq>(keys: &mut Vec<K>, key: K, cap: usize) -> Vec<K>
 /// fire-and-forget requests, poll drained results.
 ///
 /// A request names the display box it wants, and the result reports it back so
-/// the caller can file the pixels under the right key. The worker keeps no
-/// decoded cache between requests, so the same subject at two sizes is two
-/// independent jobs — a re-read and a re-decode each.
+/// the caller can file the pixels under the right key. Each box is still its own
+/// job — nothing decoded in memory is kept between them. What *does* survive is
+/// the Thumbnail cache on disk: a box already stored for a Cover's Source is
+/// read back and decoded from those bytes, so a restart costs a `stat` and an
+/// `open` rather than a re-read of the source and a full-resolution re-decode.
 pub trait Covers: Send {
     fn request(&self, track_id: TrackId, path: PathBuf, size: RequestedSize);
     /// Ask for the cover art of a directory *itself* — the Folders tree's row
@@ -53,6 +56,13 @@ pub trait Covers: Send {
     /// no tags.
     fn request_folder(&self, folder: &Path, size: RequestedSize);
     fn poll(&self) -> Vec<(TrackId, RequestedSize, Option<DecodedCover>)>;
+    /// Ask the worker to delete every cached Thumbnail. Never blocks, and may be
+    /// pressed again while one is outstanding — the front end owns that flag, the
+    /// way the Tag Edit controller owns its in-flight record.
+    fn clear_cache(&self);
+    /// Drain the settled outcome of a clear, if the worker has finished one.
+    /// Non-blocking: `None` means it is still going, or nothing was asked.
+    fn poll_cache_clear(&self) -> Option<ClearCacheOutcome>;
 }
 
 /// Whether embedded artwork may be read, answered fresh for every
@@ -69,9 +79,37 @@ enum CoverSubject {
     Folder(PathBuf),
 }
 
-/// A request accepted by the worker: what it is for, where to read it, and the
-/// box it is wanted at.
-type Request = (TrackId, CoverSubject, RequestedSize);
+/// One job on the cover worker's queue.
+///
+/// Clearing the Thumbnail cache travels this channel rather than being done by
+/// whoever asked, for two reasons that are one fact: `remove_dir_all` over a few
+/// hundred thousand entries takes seconds, and a wipe that runs *between*
+/// resolutions cannot interleave with a write and leave behind exactly the
+/// entries the user just asked to get rid of.
+enum CoverRequest {
+    Resolve {
+        identity: TrackId,
+        subject: CoverSubject,
+        size: RequestedSize,
+    },
+    ClearCache,
+}
+
+/// The single combined outcome of a Thumbnail-cache clear (ADR 0006).
+///
+/// It is deliberately the same two-branch shape as `TagEditOutcome`: one verdict
+/// for the whole operation, and a failure that says why rather than passing
+/// quietly. A cache that cannot be cleared is an inconvenience, not a data-loss
+/// event, so this reports into the same status line the rest of the Library pane
+/// uses — never a modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClearCacheOutcome {
+    /// Every cached Thumbnail is gone. Clearing an already-empty cache is here,
+    /// not in `Failed`: that *is* the state the listener asked for.
+    Cleared,
+    /// Nothing was removed; the reason is fit to show in the status line.
+    Failed { reason: String },
+}
 
 /// A delivered result: the subject's identity, the box it was asked for, and
 /// the pixels.
@@ -79,8 +117,9 @@ type Resolution = (TrackId, RequestedSize, Option<DecodedCover>);
 
 /// Front-end of the Cover Service.
 pub struct CoverService {
-    request_tx: Sender<Request>,
+    request_tx: Sender<CoverRequest>,
     result_rx: Receiver<Resolution>,
+    clear_rx: Receiver<ClearCacheOutcome>,
 }
 
 impl CoverService {
@@ -88,20 +127,24 @@ impl CoverService {
     pub fn new(
         metadata_reader: Box<dyn MetadataReader>,
         cover_loader: Box<dyn CoverLoader>,
+        cache: Arc<dyn ThumbnailCache>,
         policy: CoverPolicy,
         stop: Arc<AtomicBool>,
     ) -> (Self, CoverWorker) {
         let (request_tx, request_rx) = unbounded();
         let (result_tx, result_rx) = unbounded();
+        let (clear_tx, clear_rx) = unbounded();
         (
             Self {
                 request_tx,
                 result_rx,
+                clear_rx,
             },
             CoverWorker {
                 request_rx,
                 result_tx,
-                resolver: CoverResolver::new(metadata_reader, cover_loader),
+                clear_tx,
+                resolver: CoverResolver::new(metadata_reader, cover_loader, cache),
                 policy,
                 backlog: VecDeque::new(),
                 pending: HashSet::new(),
@@ -114,17 +157,21 @@ impl CoverService {
 
 impl Covers for CoverService {
     fn request(&self, track_id: TrackId, path: PathBuf, size: RequestedSize) {
-        let _ = self
-            .request_tx
-            .send((track_id, CoverSubject::Track(path), size));
+        let _ = self.request_tx.send(CoverRequest::Resolve {
+            identity: track_id,
+            subject: CoverSubject::Track(path),
+            size,
+        });
     }
 
     fn request_folder(&self, folder: &Path, size: RequestedSize) {
         let folder = folder.to_path_buf();
         let identity = TrackId::from_path(&folder);
-        let _ = self
-            .request_tx
-            .send((identity, CoverSubject::Folder(folder), size));
+        let _ = self.request_tx.send(CoverRequest::Resolve {
+            identity,
+            subject: CoverSubject::Folder(folder),
+            size,
+        });
     }
 
     fn poll(&self) -> Vec<Resolution> {
@@ -134,18 +181,28 @@ impl Covers for CoverService {
         }
         results
     }
+
+    fn clear_cache(&self) {
+        let _ = self.request_tx.send(CoverRequest::ClearCache);
+    }
+
+    fn poll_cache_clear(&self) -> Option<ClearCacheOutcome> {
+        self.clear_rx.try_recv().ok()
+    }
 }
 
 /// Blocking back-end of the Cover Service.
 pub struct CoverWorker {
-    request_rx: Receiver<Request>,
+    request_rx: Receiver<CoverRequest>,
     result_tx: Sender<Resolution>,
+    clear_tx: Sender<ClearCacheOutcome>,
     resolver: CoverResolver,
     /// The read-embedded-artwork policy, evaluated fresh per resolution.
     policy: CoverPolicy,
-    backlog: VecDeque<Request>,
+    backlog: VecDeque<CoverRequest>,
     /// In-flight jobs, keyed by identity *and* size: the same subject wanted at
-    /// two sizes is two jobs, because nothing decoded is retained between them.
+    /// two sizes is two jobs, because a Thumbnail is never a source for a larger
+    /// one and so the rungs are not interchangeable.
     pending: HashSet<(TrackId, RequestedSize)>,
     /// Subjects resolved as having no artwork. Keyed by identity alone: an
     /// artless subject is artless at every size, so one entry suppresses all of
@@ -162,38 +219,55 @@ pub struct CoverWorker {
 }
 
 impl CoverWorker {
-    /// Resolve covers until the request channel closes or the Composition
-    /// Root asks the worker to stop. Spawns nothing; run this on the
-    /// dedicated cover thread.
+    /// Resolve covers and answer clear requests until the request channel closes
+    /// or the Composition Root asks the worker to stop. Spawns nothing; run this
+    /// on the dedicated cover thread.
     pub fn run(mut self) {
-        while let Some((identity, subject, size)) = self.next_accepted() {
-            // The embedded-art policy is consulted on the track arm only: a
-            // directory's cover is a plain image file, so there is no tag read
-            // for the toggle to gate.
-            let (result, path) = match subject {
-                CoverSubject::Track(path) => {
-                    let read_embedded = (self.policy)();
-                    let result = self.resolver.resolve(&path, read_embedded, size);
-                    (result, path)
+        while let Some(request) = self.next_accepted() {
+            match request {
+                CoverRequest::ClearCache => {
+                    let outcome = match self.resolver.clear_cache() {
+                        Ok(()) => ClearCacheOutcome::Cleared,
+                        Err(e) => ClearCacheOutcome::Failed {
+                            reason: e.to_string(),
+                        },
+                    };
+                    let _ = self.clear_tx.send(outcome);
                 }
-                CoverSubject::Folder(path) => {
-                    let result = self.resolver.resolve_folder(&path, size);
-                    (result, path)
+                CoverRequest::Resolve {
+                    identity,
+                    subject,
+                    size,
+                } => {
+                    // The embedded-art policy is consulted on the track arm only: a
+                    // directory's cover is a plain image file, so there is no tag read
+                    // for the toggle to gate.
+                    let (result, path) = match subject {
+                        CoverSubject::Track(path) => {
+                            let read_embedded = (self.policy)();
+                            let result = self.resolver.resolve(&path, read_embedded, size);
+                            (result, path)
+                        }
+                        CoverSubject::Folder(path) => {
+                            let result = self.resolver.resolve_folder(&path, size);
+                            (result, path)
+                        }
+                    };
+                    let result = match result {
+                        Ok(resolved) => resolved,
+                        Err(e) => {
+                            tracing::warn!("Cover resolution failed for {:?}: {}", path, e);
+                            None
+                        }
+                    };
+                    self.pending.remove(&(identity.clone(), size));
+                    if result.is_none() {
+                        let _ = lru_insert(&mut self.negative, identity.clone(), COVER_CACHE_CAP);
+                    }
+                    self.absorb_raced((&identity, size));
+                    let _ = self.result_tx.send((identity, size, result));
                 }
-            };
-            let result = match result {
-                Ok(resolved) => resolved,
-                Err(e) => {
-                    tracing::warn!("Cover resolution failed for {:?}: {}", path, e);
-                    None
-                }
-            };
-            self.pending.remove(&(identity.clone(), size));
-            if result.is_none() {
-                let _ = lru_insert(&mut self.negative, identity.clone(), COVER_CACHE_CAP);
             }
-            self.absorb_raced((&identity, size));
-            let _ = self.result_tx.send((identity, size, result));
         }
     }
 
@@ -204,8 +278,9 @@ impl CoverWorker {
     /// blocking: an idle worker is the normal case, and the expiry is the
     /// only moment it can notice a stop request. A tick that finds nothing
     /// leaves the backlog, the pending set, and the negative cache exactly as
-    /// they were — the dedup semantics below are unchanged.
-    fn next_accepted(&mut self) -> Option<Request> {
+    /// they were — the dedup semantics below are unchanged. A clear request is
+    /// never deduped: it carries no identity, and two presses mean two wipes.
+    fn next_accepted(&mut self) -> Option<CoverRequest> {
         loop {
             if self.backlog.is_empty() {
                 match self.request_rx.recv_timeout(WORKER_POLL) {
@@ -224,12 +299,14 @@ impl CoverWorker {
             }
 
             let candidate = self.backlog.pop_front()?;
-            let suppressed = self.pending.contains(&(candidate.0.clone(), candidate.2))
-                || self.negative.iter().any(|cached| cached == &candidate.0);
-            if suppressed {
-                continue;
+            if let CoverRequest::Resolve { identity, size, .. } = &candidate {
+                let suppressed = self.pending.contains(&(identity.clone(), *size))
+                    || self.negative.iter().any(|cached| cached == identity);
+                if suppressed {
+                    continue;
+                }
+                self.pending.insert((identity.clone(), *size));
             }
-            self.pending.insert((candidate.0.clone(), candidate.2));
             return Some(candidate);
         }
     }
@@ -239,7 +316,11 @@ impl CoverWorker {
     /// different size for the same subject is a separate job and stays queued.
     fn absorb_raced(&mut self, just_resolved: (&TrackId, RequestedSize)) {
         while let Ok(request) = self.request_rx.try_recv() {
-            if (&request.0, request.2) != just_resolved {
+            let keep = match &request {
+                CoverRequest::ClearCache => true,
+                CoverRequest::Resolve { identity, size, .. } => (identity, *size) != just_resolved,
+            };
+            if keep {
                 self.backlog.push_back(request);
             }
         }

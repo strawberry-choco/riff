@@ -52,6 +52,14 @@ _Avoid_: song, file
 A Track's stable identity string, derived from its full file path; renaming or moving a file yields a new TrackId.
 _Avoid_: track number, row ID
 
+**Cover**:
+The artwork a Track or a directory displays — embedded in a Track's own file, or a cover file in a Track's parent folder; a directory's is a cover file inside it. Every Track has exactly one Cover, and one that cannot be found is artless.
+_Avoid_: thumbnail, artwork, art, image, album art
+
+**Thumbnail**:
+A Cover reduced to a fixed pixel box for display in the UI. Derived, display-only, and never a source for a larger size.
+_Avoid_: cover, artwork, icon, texture
+
 **Artist**:
 A grouping of Albums credited to one Album Artist name.
 _Avoid_: performer, contributor

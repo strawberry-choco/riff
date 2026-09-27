@@ -21,10 +21,13 @@ use crossbeam_channel::unbounded;
 use riff_infra::audio::decoder::default_codec_registry;
 use riff_infra::audio::{CpalAudioOutput, SymphoniaDecoder};
 use riff_infra::filesystem::{AudioFileScanner, FilesystemWatcher};
-use riff_infra::media::{ImageCoverLoader, LoftyMetadataReader, LoftyMetadataWriter};
+use riff_infra::media::{
+    FileThumbnailCache, ImageCoverLoader, LoftyMetadataReader, LoftyMetadataWriter,
+};
 use riff_infra::store::SqliteStore;
 use riff_persistence::errors::StoreError;
 use riff_persistence::store::{LibraryMutationStore, PlaylistStore, ScanOptions, SettingsStore};
+use riff_persistence::thumbnail::ThumbnailCache;
 
 use riff_library::app::cover_service::{CoverPolicy, CoverService};
 use riff_library::app::scan_service::ScanService;
@@ -78,6 +81,13 @@ pub struct AppRuntime {
     pub tag_edits: Box<dyn crate::app::tag_edit_service::TagEdits>,
     /// The Cover service front-end handle.
     pub covers: Box<dyn riff_library::app::cover_service::Covers>,
+    /// The persistent Thumbnail cache, shared with the Cover worker.
+    ///
+    /// `AppRuntime` holds a handle rather than the Cover service owning it alone,
+    /// because clearing it is a user action (`06`) and the cache outlives any one
+    /// of its consumers. The port is `Send + Sync`, so one `Arc` is genuinely one
+    /// cache — which a second instance pointing at the same directory would not be.
+    pub thumbnail_cache: Arc<dyn ThumbnailCache>,
 }
 
 /// The other half of [`AppRuntime::spawn`]: the worker threads the runtime
@@ -343,9 +353,11 @@ impl AppRuntime {
         // threads — spawned here exactly like the Audio Engine.
         let tag_edit_stop = Arc::new(AtomicBool::new(false));
         let cover_stop = Arc::new(AtomicBool::new(false));
+        let thumbnail_cache: Arc<dyn ThumbnailCache> = Arc::new(FileThumbnailCache::new()?);
         let (tag_edits, covers, tag_edit, cover) = spawn_background_services(
             library_query_store.clone(),
             library_mutation_store.clone(),
+            Arc::clone(&thumbnail_cache),
             Arc::clone(&tag_edit_stop),
             Arc::clone(&cover_stop),
         );
@@ -384,6 +396,7 @@ impl AppRuntime {
             session_views,
             tag_edits: Box::new(tag_edits),
             covers: Box::new(covers),
+            thumbnail_cache,
         };
 
         let lifecycle = RuntimeLifecycle {
@@ -475,6 +488,7 @@ fn spawn_fs_watcher(scans: ScanService) -> (Arc<Mutex<Option<WatcherManager>>>, 
 fn spawn_background_services(
     library_queries: SqliteStore,
     library_mutations: SqliteStore,
+    thumbnail_cache: Arc<dyn ThumbnailCache>,
     tag_edit_stop: Arc<AtomicBool>,
     cover_stop: Arc<AtomicBool>,
 ) -> (TagEditService, CoverService, JoinHandle<()>, JoinHandle<()>) {
@@ -503,6 +517,7 @@ fn spawn_background_services(
     let (covers, cover_worker) = CoverService::new(
         Box::new(LoftyMetadataReader::new()),
         Box::new(ImageCoverLoader::new()),
+        thumbnail_cache,
         cover_policy,
         cover_stop,
     );

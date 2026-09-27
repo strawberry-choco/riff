@@ -40,6 +40,8 @@ impl RiffApp {
             // music-icon placeholder tile.
             request_cover_intent(
                 &self.cover_textures,
+                &mut self.cover_in_flight,
+                &mut self.cover_in_flight_keys,
                 self.covers.as_ref(),
                 tid.clone(),
                 PathBuf::from(&tid.0),

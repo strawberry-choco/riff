@@ -110,12 +110,27 @@ A track becomes current or is selected for display (riff-gui/src/ui/)
           (cover.jpg/png, folder.jpg/png, album.jpg/png, front.jpg/png — case-insensitive)
           and, if found, ImageCoverLoader decodes that file
        -> If CoverSource::Filesystem(path): ImageCoverLoader decodes that file directly
-  -> The decoded image is cached in the service's bounded LRU (cap 50) and
-     delivered to the UI over the response poll
+  -> The resolved Source's file (the image itself for a folder cover, the track's
+     own file for embedded art) names a rung in the Thumbnail cache:
+       -> hit: the stored JPEG/PNG is handed to the same decode-and-fit step, and
+          the source file is never read or decoded — but an *embedded* cover has
+          still cost the lofty tag parse that produced the bytes
+       -> miss: decode as above, then encode and store the rung (a failed store is
+          logged and ignored; it must never fail the resolve)
+     Keyed on the Source rather than the track, so every track of one album shares
+     the folder cover's ladder. Nothing is stored for an artless result.
+  -> The decoded image is delivered to the UI over the response poll. The service
+     keeps no decoded cover between requests; its only in-memory cache is the
+     artless-verdict LRU (`negative`), capped at `COVER_CACHE_CAP`
   -> UI drains the response channel:
        -> builds an egui::ColorImage from the RGBA bytes and loads it as a texture
-       -> inserts it into cover_textures and touches the LRU (max 50 entries)
-  -> Subsequent frames fetch the texture from the LRU cache without re-decoding
+       -> inserts it into cover_textures and touches the LRU, then trims the map
+         back inside both bounds: `COVER_CACHE_CAP` entries *or*
+         `COVER_TEXTURE_BYTE_BUDGET` bytes, whichever is reached first. The shared
+         placeholder tile is exempt from both.
+  -> Subsequent frames fetch the texture from that in-memory LRU without asking at
+     all; a frame that finds nothing there gets a placeholder plus a request, and
+     a request that the disk already answers costs one stat and one open
 ```
 
 If resolution fails at any point, the worker logs a warning and reports no image, so the UI simply displays no cover rather than surfacing an error; the service's negative cache prevents retry storms for artless tracks.

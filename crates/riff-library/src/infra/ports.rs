@@ -4,6 +4,7 @@
 //! notify watcher) live in `riff-infra` and implement these traits.
 
 use crate::app::errors::LibraryError;
+use riff_persistence::thumbnail::{EncodedThumbnail, ThumbnailBox};
 use riff_persistence::track::CoverSource;
 use std::time::Duration;
 
@@ -83,6 +84,22 @@ pub trait CoverLoader: Send + Sync {
         source: &CoverSource,
         size: RequestedSize,
     ) -> Result<Option<DecodedCover>, LibraryError>;
+
+    /// Decode bytes that arrived from somewhere *other* than a `CoverSource` —
+    /// the Thumbnail cache — and fit them into `size`.
+    ///
+    /// Reached through this port rather than called directly because the one
+    /// decode implementation is `riff-infra`'s, and the resolver that needs it
+    /// sits below it in the dependency chain. Split out of `load_cover` so the
+    /// cached route and the source route cannot drift apart.
+    fn decode_thumbnail(
+        &self,
+        bytes: &[u8],
+        size: RequestedSize,
+    ) -> Result<DecodedCover, LibraryError>;
+
+    /// Encode a decoded Cover into the bytes the Thumbnail cache stores.
+    fn encode_thumbnail(&self, cover: &DecodedCover) -> Result<EncodedThumbnail, LibraryError>;
 }
 
 /// Trait for filesystem watchers (implemented by infrastructure).
@@ -114,6 +131,18 @@ pub trait FilesystemWatch: Send {
 pub struct RequestedSize {
     pub width: u32,
     pub height: u32,
+}
+
+impl From<RequestedSize> for ThumbnailBox {
+    /// The display box a request wants *is* the cache entry's box — one
+    /// requested size, one stored rung. Mapping rather than reusing the type
+    /// keeps the persistence contract free of this crate's vocabulary.
+    fn from(size: RequestedSize) -> Self {
+        Self {
+            width: size.width,
+            height: size.height,
+        }
+    }
 }
 
 /// Cover art decoded to RGBA8 pixels by the [`CoverLoader`] adapter.

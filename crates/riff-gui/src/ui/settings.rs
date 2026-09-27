@@ -454,6 +454,9 @@ pub enum SettingsAction {
     SetWatch(PathBuf, bool),
     /// Wipe the indexed collection (playlists and settings kept).
     ClearLibrary,
+    /// Delete every cached cover Thumbnail. The only reclaim the Thumbnail cache
+    /// has, so it asks first — and it touches nothing the listener made.
+    ClearThumbnailCache,
     /// Set the Advanced mode preference.
     SetAdvanced(bool),
     /// Set the High contrast preference.
@@ -1649,9 +1652,14 @@ fn scan_status_card(
         });
 }
 
-/// The page footer: the immediate-apply note on the left, and the page's two
-/// actions on the right — Clear Library (destructive ghost) then Done
-/// (primary).
+/// The page footer: the immediate-apply note on the left, and the page's three
+/// actions on the right — Clear Thumbnail cache and Clear Library (both
+/// destructive ghosts) then Done (primary).
+///
+/// The Thumbnail clear belongs here rather than in the Library pane's Artwork card
+/// beside the toggle it relates to: measured at 920×840, a row at the bottom of
+/// that card sits behind this footer and answers no click. This is the one reclaim
+/// a cache with no eviction has, so it cannot live below the fold.
 ///
 /// This used to be the Library pane's footer and now belongs to the page frame
 /// itself, which is what makes the destructive action reachable from every
@@ -1670,14 +1678,6 @@ fn library_footer(
     let painter = ui.painter_at(rect);
     let cy = rect.center().y;
 
-    painter.text(
-        egui::pos2(rect.left() + 4.0, cy),
-        egui::Align2::LEFT_CENTER,
-        FOOTER_NOTE,
-        styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM),
-        palette.ink_3,
-    );
-
     // Done (primary) hugs the right edge; Clear Library sits to its left.
     let done_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM);
     let done_w = painter
@@ -1690,38 +1690,57 @@ fn library_footer(
         egui::vec2(done_w, ACTION_BTN_H),
     );
 
-    // The destructive ghost, sized off its own label and set to the left of
-    // Done by the same edge inset the note uses on the left.
-    let clear_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS);
-    let clear_w = painter
-        .layout_no_wrap(CLEAR_LIBRARY_LABEL.to_owned(), clear_font, palette.error)
-        .size()
-        .x
-        + SMALL_BTN_LABEL_PAD;
-    let clear_rect = egui::Rect::from_min_size(
-        egui::pos2(
-            done_rect.left() - clear_w - FOOTER_ACTION_GAP,
-            cy - SMALL_BTN_H / 2.0,
-        ),
-        egui::vec2(clear_w, SMALL_BTN_H),
-    );
-    if button::text_button(
+    // The two destructive ghosts, chained right-to-left off Done. Each is sized off
+    // its own label, so neither carries a hardcoded width.
+    let (library_left, cleared_library) = footer_ghost(
         ui,
         cache,
         palette,
-        &TextButton {
-            id: egui::Id::new("settings_clear_library"),
-            rect: clear_rect,
-            label: CLEAR_LIBRARY_LABEL,
-            a11y: CLEAR_LIBRARY_LABEL,
-            tooltip: None,
-            icon: None,
-            small: true,
-            variant: Variant::Destructive,
-            enabled: true,
-        },
-    ) {
+        &painter,
+        CLEAR_LIBRARY_LABEL,
+        done_rect.left(),
+        cy,
+        egui::Id::new("settings_clear_library"),
+    );
+    if cleared_library {
         actions.push(SettingsAction::ClearLibrary);
+    }
+    // The two wipes are told apart by their labels and by entirely different
+    // confirm copy: one removes the indexed collection, the other only art that
+    // was derived from it and rebuilds on its own.
+    let (thumbnails_left, cleared_thumbnails) = footer_ghost(
+        ui,
+        cache,
+        palette,
+        &painter,
+        crate::ui::prompts::CLEAR_THUMBNAIL_CACHE_LABEL,
+        library_left,
+        cy,
+        egui::Id::new("settings_clear_thumbnail_cache"),
+    );
+    if cleared_thumbnails {
+        actions.push(SettingsAction::ClearThumbnailCache);
+    }
+
+    // The immediate-apply note takes only what the action chain leaves. It is
+    // generic chrome; the actions are the point of this row. Measured at the
+    // minimum supported width, a sentence and three actions do not share one line,
+    // and the note is the thing that goes — the alternative is an action that
+    // silently stops being clickable, which is how the only reclaim a cache with no
+    // eviction becomes impossible to reach.
+    let note_font = styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM);
+    let note_w = painter
+        .layout_no_wrap(FOOTER_NOTE.to_owned(), note_font.clone(), palette.ink_3)
+        .size()
+        .x;
+    if rect.left() + 4.0 + note_w + FOOTER_ACTION_GAP <= thumbnails_left {
+        painter.text(
+            egui::pos2(rect.left() + 4.0, cy),
+            egui::Align2::LEFT_CENTER,
+            FOOTER_NOTE,
+            note_font,
+            palette.ink_3,
+        );
     }
 
     if filled_button(
@@ -1739,6 +1758,54 @@ fn library_footer(
     ) {
         actions.push(SettingsAction::Back);
     }
+}
+
+/// One destructive footer ghost: sized off its own label and hung to the left of
+/// `right_of`, so the footer's actions chain right-to-left without any of them
+/// carrying a width the next label change would invalidate. Returns the rect's
+/// left edge with the click verdict, which is where the next ghost in the chain
+/// measures from.
+#[allow(clippy::too_many_arguments)]
+fn footer_ghost(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    painter: &egui::Painter,
+    label: &str,
+    right_of: f32,
+    cy: f32,
+    id: egui::Id,
+) -> (f32, bool) {
+    let width = painter
+        .layout_no_wrap(
+            label.to_owned(),
+            styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS),
+            palette.error,
+        )
+        .size()
+        .x
+        + SMALL_BTN_LABEL_PAD;
+    let left = right_of - width - FOOTER_ACTION_GAP;
+    let clicked = button::text_button(
+        ui,
+        cache,
+        palette,
+        &TextButton {
+            id,
+            rect: egui::Rect::from_min_size(
+                egui::pos2(left, cy - SMALL_BTN_H / 2.0),
+                egui::vec2(width, SMALL_BTN_H),
+            ),
+            label,
+            a11y: label,
+            tooltip: None,
+            icon: None,
+            small: true,
+            variant: Variant::Destructive,
+            enabled: true,
+        },
+    );
+    (left, clicked)
 }
 
 /// The boolean preferences the stage drives through the reusable toggle
@@ -2518,6 +2585,9 @@ impl super::app::RiffApp {
         if self.clear_library_confirm {
             self.render_clear_library_confirm(ui, library);
         }
+        if self.clear_thumbnail_cache_confirm {
+            self.render_clear_thumbnail_cache_confirm(ui);
+        }
     }
 
     /// Apply one [`SettingsAction`] through the app's state/service/store
@@ -2562,6 +2632,9 @@ impl super::app::RiffApp {
                 );
             }
             SettingsAction::ClearLibrary => self.clear_library_confirm = true,
+            SettingsAction::ClearThumbnailCache => {
+                self.clear_thumbnail_cache_confirm = true;
+            }
             SettingsAction::SetAdvanced(value) => {
                 library.ui_flags.advanced_mode = value;
             }
@@ -2649,6 +2722,27 @@ impl super::app::RiffApp {
             }
             Some(crate::ui::prompts::PromptOutcome::Cancel) => {
                 self.clear_library_confirm = false;
+            }
+            None => {}
+        }
+    }
+
+    /// The inline confirmation for the destructive Clear Thumbnail cache action,
+    /// shaped like [`Self::render_clear_library_confirm`]. What differs is what
+    /// Confirm does: the deletion is handed to the cover worker rather than run on
+    /// this thread, because `remove_dir_all` over a few hundred thousand entries
+    /// takes seconds and a frame may not wait for it.
+    fn render_clear_thumbnail_cache_confirm(&mut self, ui: &mut egui::Ui) {
+        let palette = self.theme.active;
+        let outcome =
+            crate::ui::prompts::clear_thumbnail_cache_confirm(ui, &mut self.icons, &palette);
+        match outcome {
+            Some(crate::ui::prompts::PromptOutcome::Confirm) => {
+                self.clear_thumbnail_cache_confirm = false;
+                self.request_thumbnail_cache_clear();
+            }
+            Some(crate::ui::prompts::PromptOutcome::Cancel) => {
+                self.clear_thumbnail_cache_confirm = false;
             }
             None => {}
         }

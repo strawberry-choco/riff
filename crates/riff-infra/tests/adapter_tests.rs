@@ -334,7 +334,7 @@ fn test_image_cover_loader_new() {
 
 /// Encode a `w`×`h` PNG whose every pixel is `rgba`, as the fixture an
 /// embedded cover or a cover file would carry.
-fn png_fixture(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
+pub fn png_fixture(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
     let buffer: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
         image::ImageBuffer::from_pixel(width, height, image::Rgba(rgba));
     let mut out = std::io::Cursor::new(Vec::new());
@@ -534,6 +534,71 @@ fn test_load_cover_reports_truncated_artwork_as_a_cover_load_error() {
     );
 }
 
+// --- The decode half, on its own --------------------------------------------
+//
+// `03` splits the cover loader so the cache can supply bytes and the decode stay
+// here, in one implementation. These drive `decode_thumbnail` directly: no
+// `CoverSource`, no filesystem, no tempdir — which is exactly the point, since
+// the cached path has no file to read.
+
+#[test]
+fn test_decode_thumbnail_fits_supplied_bytes_without_reading_a_file() {
+    let bytes = png_fixture(8, 4, [1, 2, 3, 255]);
+
+    let cover = riff_infra::media::cover_loader::decode_thumbnail(
+        &bytes,
+        RequestedSize {
+            width: 4,
+            height: 4,
+        },
+    )
+    .expect("a real PNG in memory decodes");
+
+    // The same contain-fit the `load_cover` tests above pin: a 2:1 source into a
+    // square box is limited by width, so the height follows the aspect ratio.
+    assert_eq!(
+        (cover.width, cover.height),
+        (4, 2),
+        "width binds on a wide source"
+    );
+    assert_eq!(cover.rgba.len(), 4 * 2 * 4, "row-major RGBA8");
+}
+
+/// A source that already fits is not resampled, so its bytes are what a plain
+/// decode of the same file produces. `load_cover` already pins this behaviour
+/// end to end; here it is pinned for the path the cache takes, where the same
+/// bytes arrive from a disk entry instead of a cover file.
+#[test]
+fn test_decode_thumbnail_leaves_a_source_that_already_fits_byte_for_byte() {
+    let bytes = png_fixture(2, 2, [10, 20, 30, 255]);
+
+    let cover = riff_infra::media::cover_loader::decode_thumbnail(&bytes, BIG_BOX)
+        .expect("a real PNG in memory decodes");
+
+    assert_eq!((cover.width, cover.height), (2, 2), "never upscaled");
+    assert_eq!(
+        cover.rgba,
+        vec![
+            10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255,
+        ],
+        "unpremultiplied RGBA8, byte-identical to a plain decode"
+    );
+}
+
+#[test]
+fn test_decode_thumbnail_reports_a_container_it_cannot_decode_as_a_cover_load_error() {
+    // The GIF header the `load_cover` gate test uses, arriving as cached bytes.
+    let gif = b"GIF89a\x01\x00\x01\x00\x00\x00\x00";
+
+    let error = riff_infra::media::cover_loader::decode_thumbnail(gif, BIG_BOX)
+        .expect_err("an unsupported container is not a cover");
+
+    assert!(
+        matches!(error, LibraryError::CoverLoad(ref message) if message.contains("Unsupported")),
+        "the allowlist is enforced by the decode half, not by the read it was split from: {error}"
+    );
+}
+
 #[test]
 fn test_audio_file_scanner_new() {
     let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -723,4 +788,103 @@ fn test_filesystem_watcher_new() {
     let (tx, _) = crossbeam_channel::unbounded::<Vec<PathBuf>>();
     let _result = FilesystemWatcher::new(tx);
     // The result could be Ok or Err depending on the system
+}
+
+// --- The encode half, for the cache's write path ------------------------------
+//
+// A stored Thumbnail is a *terminal* rung: nothing is ever derived from it, and
+// that is the only reason a lossy container is acceptable here. A larger rung
+// decoded out of a smaller lossy one would not be, and this design never does
+// that — each box is encoded from the source's own pixels.
+
+/// JPEG has no alpha channel, so a Cover that carries one cannot be stored as
+/// JPEG without being flattened over a background the app never chose. The
+/// decision, pinned here rather than left to fall out: an opaque Cover is stored
+/// as JPEG, and a Cover with any non-opaque pixel is stored losslessly instead.
+#[test]
+fn test_encode_thumbnail_stores_png_only_for_a_cover_that_carries_alpha() {
+    let opaque = riff_library::app::traits::DecodedCover {
+        rgba: vec![
+            200, 100, 50, 255, 200, 100, 50, 255, 200, 100, 50, 255, 200, 100, 50, 255,
+        ],
+        width: 2,
+        height: 2,
+    };
+    let opaque_entry = riff_infra::media::cover_loader::encode_thumbnail(&opaque)
+        .expect("an opaque cover is encodable");
+    assert_eq!(
+        image::guess_format(&opaque_entry.bytes).unwrap(),
+        image::ImageFormat::Jpeg,
+        "opaque art takes the lossy container, which is the size budget the design is built on"
+    );
+
+    let mut alpha = opaque.clone();
+    alpha.rgba[7] = 0;
+    let alpha_entry = riff_infra::media::cover_loader::encode_thumbnail(&alpha)
+        .expect("a cover with alpha is encodable");
+    assert_eq!(
+        image::guess_format(&alpha_entry.bytes).unwrap(),
+        image::ImageFormat::Png,
+        "flattening this pixel would bake in a background colour egui is currently blending over"
+    );
+
+    let read_back = riff_infra::media::cover_loader::decode_thumbnail(&alpha_entry.bytes, BIG_BOX)
+        .expect("the stored rung decodes through the same half the cache uses");
+    assert_eq!(
+        read_back.rgba[7], 0,
+        "the transparent pixel survives the round trip; a JPEG could not have kept it"
+    );
+}
+
+/// The round trip through the two halves the cache actually performs: encode a
+/// decoded Cover, read the bytes back through `decode_thumbnail`, and the image
+/// is the same size with near-enough the same pixels.
+///
+/// The tolerance is JPEG's, not a fudge: a flat-colour block survives DCT as
+/// almost exactly its own DC value, and the assert below is what records how
+/// well. The dimensions must match *exactly* — a rung is filed under the box it
+/// was requested at, so a size that moved in the round trip would mean the cache
+/// entry and the pixels disagree.
+#[test]
+fn test_encode_thumbnail_round_trips_a_cover_through_decode_thumbnail() {
+    let width = 64;
+    let height = 32;
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for _ in 0..width * height {
+        rgba.extend_from_slice(&[10, 20, 30, 255]);
+    }
+    let cover = riff_library::app::traits::DecodedCover {
+        rgba,
+        width,
+        height,
+    };
+
+    let entry =
+        riff_infra::media::cover_loader::encode_thumbnail(&cover).expect("encodes to a Thumbnail");
+    assert_eq!(
+        (entry.width, entry.height),
+        (width, height),
+        "the entry reports the pixels it holds"
+    );
+
+    let read_back = riff_infra::media::cover_loader::decode_thumbnail(
+        &entry.bytes,
+        RequestedSize { width, height },
+    )
+    .expect("the stored bytes decode");
+    assert_eq!((read_back.width, read_back.height), (width, height));
+    assert_eq!(read_back.rgba.len(), cover.rgba.len());
+
+    let worst = read_back
+        .rgba
+        .iter()
+        .zip(cover.rgba.iter())
+        .map(|(got, want)| got.abs_diff(*want))
+        .max()
+        .unwrap_or(u8::MAX);
+    assert!(
+        worst <= 4,
+        "a flat JPEG block should sit within a few levels of its source, got a worst channel \
+         error of {worst}"
+    );
 }

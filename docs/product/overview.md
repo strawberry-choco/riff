@@ -14,7 +14,7 @@ Everything happens on your machine. The library, playlists, and settings live in
 
 **Your files are the library.** riff does not import, copy, or reorganize your music. It indexes what is on disk and remembers that index in the Application Store so the next launch is instant. Remove a library path and the index entries go away; your files are never touched. Edit your tags or drop a new album into a watched folder, and riff picks the change up on the next scan.
 
-**Lightweight by construction.** One binary, immediate-mode UI, and a workspace that keeps the core logic in pure-Rust crates. The Application Store means the library is browsable on the first frame of a launch instead of re-walking the disk on every start. Decoding streams packet by packet rather than loading whole files into memory, and cover art is decoded on a background thread and held in a small LRU cache.
+**Lightweight by construction.** One binary, immediate-mode UI, and a workspace that keeps the core logic in pure-Rust crates. The Application Store means the library is browsable on the first frame of a launch instead of re-walking the disk on every start. Decoding streams packet by packet rather than loading whole files into memory, and cover art is decoded on a background thread, with each display size kept as a Thumbnail on disk so a relaunch does not re-decode the album.
 
 **Cross-platform without lowest-common-denominator.** The core experience — scanning, browsing, playing — is identical everywhere. Platform integration is adapted rather than faked: macOS and Windows get a native folder picker and a system tray icon; Linux gets a plain text path input and runs window-only.
 

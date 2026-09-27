@@ -2,8 +2,11 @@
 
 use crate::app::errors::LibraryError;
 use crate::infra::ports::{CoverLoader, DecodedCover, MetadataReader, RequestedSize};
+use riff_persistence::errors::StoreError;
+use riff_persistence::thumbnail::{ThumbnailBox, ThumbnailCache};
 use riff_persistence::track::CoverSource;
 use std::path::Path;
+use std::sync::Arc;
 
 /// The file names a track's directory is probed for, in priority order: an
 /// album carrying both `cover.jpg` and `folder.jpg` shows its `cover.jpg`.
@@ -40,16 +43,24 @@ const FOLDER_COVER_NAMES: [&str; 3] = ["cover.jpg", "cover.jpeg", "cover.png"];
 pub struct CoverResolver {
     metadata_reader: Box<dyn MetadataReader>,
     cover_loader: Box<dyn CoverLoader>,
+    /// The persistent Thumbnail cache. Consulted here rather than in a component
+    /// of its own because this already decides "may I skip this read" — a second
+    /// place answering that question is how the two come apart. Shared because the
+    /// Composition Root keeps a handle for the user's clear action (`06`), and two
+    /// instances pointing at one directory would not be one cache.
+    cache: Arc<dyn ThumbnailCache>,
 }
 
 impl CoverResolver {
     pub fn new(
         metadata_reader: Box<dyn MetadataReader>,
         cover_loader: Box<dyn CoverLoader>,
+        cache: Arc<dyn ThumbnailCache>,
     ) -> Self {
         Self {
             metadata_reader,
             cover_loader,
+            cache,
         }
     }
 
@@ -70,16 +81,17 @@ impl CoverResolver {
         } else {
             CoverSource::None
         };
-
-        match source {
-            CoverSource::Embedded(_) | CoverSource::Filesystem(_) => {
-                self.cover_loader.load_cover(&source, size)
-            }
-            CoverSource::None => {
-                let fallback = Self::find_filesystem_cover(track_path)?;
-                self.cover_loader.load_cover(&fallback, size)
-            }
-        }
+        // Only a subject that is still artless after the folder probe reaches
+        // the loader as `CoverSource::None` — and it still reaches it, because
+        // "there is no cover" is the loader's answer to give, not this
+        // resolver's. Nothing is persisted for that answer, which is what makes
+        // "a cover.jpg appeared in this folder later" correct by construction:
+        // no directory-mtime key component, and no rescan signal.
+        let source = match Self::source_file(&source, track_path) {
+            Some(_) => source,
+            None => Self::find_filesystem_cover(track_path)?,
+        };
+        self.sized(&source, track_path, size)
     }
 
     /// Resolve the cover art *of a directory itself*, for the Folders-tree row
@@ -96,7 +108,71 @@ impl CoverResolver {
         size: RequestedSize,
     ) -> Result<Option<DecodedCover>, LibraryError> {
         let source = Self::first_candidate(dir, &FOLDER_COVER_NAMES);
-        self.cover_loader.load_cover(&source, size)
+        self.sized(&source, dir, size)
+    }
+
+    /// The one resolution path every Cover shares: look for a cached Thumbnail of
+    /// this Source at this box, and only read and decode the Source if there is
+    /// none.
+    fn sized(
+        &self,
+        source: &CoverSource,
+        track_path: &Path,
+        size: RequestedSize,
+    ) -> Result<Option<DecodedCover>, LibraryError> {
+        // The cache is keyed on the Source's file rather than the Track's, which
+        // is what collapses the twelve Tracks of one album onto one stored
+        // ladder. For embedded art the Source *is* the Track's own file, so a hit
+        // has still cost the tag read that produced `source`: lofty
+        // materialises the picture bytes (`metadata_reader.rs:156`), so the parse
+        // necessarily reads the whole embedded image. What a hit removes is the
+        // decode and the resize — not the read, and claiming otherwise here would
+        // invite a later "optimisation" premised on a falsehood.
+        let Some(source_path) = Self::source_file(source, track_path) else {
+            return self.cover_loader.load_cover(source, size);
+        };
+        let box_ = size.into();
+        if let Some(cached) = self.cache.load(source_path, box_) {
+            return self
+                .cover_loader
+                .decode_thumbnail(&cached.bytes, size)
+                .map(Some);
+        }
+
+        let Some(cover) = self.cover_loader.load_cover(source, size)? else {
+            return Ok(None);
+        };
+        self.persist(source_path, box_, &cover);
+        Ok(Some(cover))
+    }
+
+    /// Encode and store the rung just decoded. A failure here is logged and
+    /// dropped: a cache that cannot be written costs one more decode later, and
+    /// must never fail the resolution the caller is waiting on.
+    fn persist(&self, source_path: &Path, box_: ThumbnailBox, cover: &DecodedCover) {
+        let thumbnail = match self.cover_loader.encode_thumbnail(cover) {
+            Ok(thumbnail) => thumbnail,
+            Err(e) => {
+                tracing::warn!("Could not encode the Thumbnail for {source_path:?}: {e}");
+                return;
+            }
+        };
+        if let Err(e) = self.cache.store(source_path, box_, &thumbnail) {
+            tracing::warn!("Could not cache the Thumbnail for {source_path:?}: {e}");
+        }
+    }
+
+    /// Which file the Cover physically lives in — the cache key. Embedded art is
+    /// inside the Track's own file; a folder Cover is the image itself.
+    ///
+    /// Exhaustive over the three variants, so a future `CoverSource` is a compile
+    /// error here rather than a rung that silently never caches.
+    fn source_file<'a>(source: &'a CoverSource, track_path: &'a Path) -> Option<&'a Path> {
+        match source {
+            CoverSource::Embedded(_) => Some(track_path),
+            CoverSource::Filesystem(path) => Some(path),
+            CoverSource::None => None,
+        }
     }
 
     fn find_filesystem_cover(track_path: &Path) -> Result<CoverSource, LibraryError> {
@@ -105,6 +181,18 @@ impl CoverResolver {
             .ok_or_else(|| LibraryError::Io("Track has no parent directory".to_string()))?;
 
         Ok(Self::first_candidate(parent, &TRACK_COVER_NAMES))
+    }
+
+    /// Delete every cached Thumbnail. The worker runs this between resolutions, so
+    /// no write can be in flight against it; the caller reports the outcome and
+    /// nothing else depends on it.
+    ///
+    /// This clears the rungs, not the resolutions in flight: a Cover already
+    /// decoded is still delivered, and a Cover already reported artless stays in the
+    /// worker's negative cache for now — that cache is RAM-only and is deliberately
+    /// out of this feature's scope.
+    pub fn clear_cache(&self) -> Result<(), StoreError> {
+        self.cache.clear()
     }
 
     /// The one directory probe behind every cover-art lookup: read `dir`,

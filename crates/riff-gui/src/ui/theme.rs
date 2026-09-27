@@ -1,15 +1,134 @@
 //! The design system: every visual value riff ships with is declared here and
 //! read from here (ADR 0004) — colors, corner radii, the type scale, the
-//! spacing scale, the chrome dimensions, and the component geometry grouped by
-//! the surface that paints it. The color helpers below ([`blend_over`],
-//! [`glow`], [`destructive_fill`]) are the only sanctioned way to derive one
-//! color from another; view code never scales a token at a call site.
+//! spacing scale, the chrome dimensions, the component geometry grouped by the
+//! surface that paints it, elevation, and the motion durations. The color
+//! helpers below ([`blend_over`], [`glow`], [`destructive_fill`]) are the only
+//! sanctioned way to derive one color from another; view code never scales a
+//! token at a call site.
 //!
-//! Two guards in `tests/ui_tests.rs` keep that true rather than merely
+//! Three sweeps in `tests/ui_tests.rs` keep that true rather than merely
 //! intended: a source sweep that fails on a color derived outside this module,
-//! and one that fails on a geometry constant declared inside a view. What
-//! their absence had already produced is recorded in
+//! one that fails on a geometry constant declared inside a view, and one that
+//! fails on a spacing gap set at a call site. What their absence had already
+//! produced is recorded in
 //! `.scratch/design-handoff/review-2026-09-19.md`.
+//!
+//! ## The motion rule
+//!
+//! Motion is a designed dimension with the same standing as spacing and radius,
+//! and [`MOTION_DEFAULT`] / [`MOTION_HOVER`] are its tokens. Four rules govern
+//! their use:
+//!
+//! 1. **The global duration is the default.** Every tween — riff's or egui's —
+//!    runs for [`MOTION_DEFAULT`] unless it has a stated reason to be
+//!    different, and such a surface *names the token* rather than repeating a
+//!    number. A duration literal in a view is a token that escaped this
+//!    module, and the dimension sweep already fails on one: a duration is a
+//!    `f32`, so it needs no new guard to be caught.
+//! 2. **A control's value indicator never tweens toward the pointer.** A value
+//!    indicator that eases toward the pointer is decoupled from the value
+//!    being set — for the length of the tween it points at a position the
+//!    control is not at yet — which is a correctness problem, not a polish
+//!    problem. This is what makes the seek bar's hover thumb appear and
+//!    disappear in the same frame the pointer arrives and leaves: the thumb
+//!    *is* the pointer's verdict on where the control is, so a fade on it
+//!    would be the app slowly coming around to an answer the pointer already
+//!    gave.
+//! 3. **A riff-driven tween must be served frames while it is unsettled**,
+//!    because egui's animation manager advances a tween's value whenever it is
+//!    asked and never schedules the pass that would ask again — a tween that
+//!    nothing re-asks renders as the single frame that started it, which reads
+//!    as a dropped frame rather than as motion. A surface satisfies this one
+//!    of two ways, and both are in the tree. The Folders tree's unfold in
+//!    `ui/app.rs` writes its own `request_repaint`, because it predates the
+//!    finding below. The row band's wash and the two button washes rely on
+//!    egui's: `animate_bool_with_time_and_easing` ends in `if 0.0 < t < 1.0
+//!    { self.request_repaint(); }` (`egui-0.35.0/src/context.rs:3145-3148`),
+//!    so a fading surface is served every frame of its own tween and writing a
+//!    second request would be riff saying what egui has already said.
+//!
+//!    Either way the condition is **bounded at both ends**, and that half is
+//!    what keeps the app's frame budget intact: a tween resting at exactly
+//!    `0.0` or settled at `1.0` asks for nothing, so fifty idle rows and a
+//!    screen of idle buttons cost nothing. A one-sided `t < 1.0` would be true
+//!    for all of them at once, forever. The reliance on egui's bound is
+//!    *verified, not assumed* — the frame-loop tests in `tests/ui_tests.rs`
+//!    read egui's own repaint-cause list per pass and see exactly one request
+//!    while a tween is in flight and none at either end, so a later change that
+//!    adds a duplicate request fails a test rather than quietly costing frames.
+//! 4. **Press feedback is instant**, deliberately outside the tween
+//!    allow-list. A press tween delays the acknowledgement of a gesture the
+//!    user has already made, and at the app's frame cadence a tween shorter
+//!    than one frame renders as a flicker rather than as a press.
+//!
+//! **Which hovers tween is a threshold, not a list.** A hover change tweens
+//! when it is large in area or large in alpha step — the two conditions under
+//! which an instant swap reads as flicker instead of as responsiveness. The
+//! track row's band (the largest hover surface in the app, and the one a moving
+//! pointer crosses fastest) and the accent and destructive button washes
+//! (fully transparent to a low-alpha tint, on the two affordances where a
+//! missed click costs most) are what that rule selects today; anything else
+//! has to argue the same way to join them.
+//!
+//! ### What stays instant, and why
+//!
+//! The threshold above is the rule. The list below is the evidence for it — what
+//! the rule has selected so far — and it is written down here so the next hover
+//! is judged against a principle with the precedents in view, rather than
+//! re-argued from taste. **A new surface answers one question first: is this
+//! large in area, or a large alpha step?** If it is, it asks for [`MOTION_HOVER`]
+//! and nothing more. If it is not, it is on this list, and here is why each
+//! entry is:
+//!
+//! - **The per-variant button fills** — every role in `paint_text_button` except
+//!   the accent and destructive washes. A `surface_2` → `surface_3` step is nine
+//!   of 255 on a 36 px target: small in both of the threshold's terms, and
+//!   already under the eye because the pointer is on it.
+//! - **The hover stroke** the same painter draws — one pixel, which is the
+//!   smallest delta this design system can express.
+//! - **The toggle switch's stroke swap** (`toggle_switch.rs`) — a one-pixel
+//!   border-token-to-ring-token change. It is a *stroke swap*, not a fill: there
+//!   is no area to fade, and a tween on a 1 px line reads as a rendering
+//!   artefact rather than as motion.
+//! - **The trash icon tint** (`settings.rs`) — `ink_3` to `error` on a 16 px
+//!   glyph. A hue swap at glyph scale, and one the destructive wash's own
+//!   precedence argues for: the *fill* of a destructive affordance is where a
+//!   missed click costs, and this is a glyph, not a target.
+//! - **The settings navigation item fill** (`settings.rs`) — `row_hover` under a
+//!   short label. The same small lightness step as the row band it sits beside,
+//!   on a fraction of the row band's area, and the eye is tracking a single
+//!   pointer across a list of them one item at a time.
+//! - **The playlist ghost glyphs** (`sidebar.rs`) — hover-reveal: the glyph goes
+//!   from not painted to painted at full ink. Appearing is the feedback, and a
+//!   glyph fading up from nothing is a *hint* of an affordance rather than the
+//!   affordance.
+//! - **The player-bar ghost disc** (`playerbar.rs`) — a 32 px `surface_2` disc
+//!   behind a 16 px glyph, revealed on hover. Small in area, and it is the
+//!   neighbour of the play FAB, whose press fills the same disc; a disc that
+//!   faded would leave the transport bar mid-fade while the button under the
+//!   pointer had already committed.
+//! - **The caption buttons** (`button.rs`) — bordered `surface` actions whose
+//!   hover is a `surface_2` fill. Small in both terms, on the one surface that
+//!   is a *secondary* navigation affordance rather than a cost-of-missed-click
+//!   action.
+//!
+//! The cost that decides all of them is the same and is worth stating once: a
+//! tween is not free. It allocates an animation id and asks the frame loop for a
+//! pass on every frame it is in flight, so a hover tween on a surface that lives
+//! in a list is multiplied by the number of rows on screen. That is why the
+//! allow-list is two surfaces long and why the two are the two the threshold
+//! selects — a list of fifty buttons that is not accent-tier costs nothing.
+//!
+//! **Press is not on this list and is not a candidate for it.** Rule 4 is the
+//! whole of the press rule; this is only the note that the two lists are not
+//! related, so a press tween cannot arrive later as "polish" on the grounds
+//! that the neighbouring hover tweened.
+//!
+//! **A custom easing curve, if one is ever needed, is a plain `fn` in this
+//! module, beside the tokens it serves.** egui takes easing as a function
+//! pointer, so a curve declared anywhere else is a curve that can drift away
+//! from the durations it is paired with — and the pairing is the whole of the
+//! design. There is no other place to put one that is safer than here.
 //!
 //! Two palettes ship:
 //!
@@ -348,6 +467,58 @@ pub const SPACE_XL: f32 = 16.0;
 /// 24 px — the hero-scale gaps (the mockup's `mb-6`).
 pub const SPACE_XXL: f32 = 24.0;
 
+// --- Motion -------------------------------------------------------------------
+//
+// Durations, in **seconds** — the one family whose unit is not a pixel, and
+// deliberately so: these are read as times by egui's animation manager, and a
+// token whose unit changes with its consumer is a token someone will
+// eventually read as the wrong dimension.
+//
+// Both values are flat consts rather than [`Palette`] slots, on the same
+// argument as [`BRAND_GRADIENT_BOTTOM`]: motion is family-invariant, and a
+// per-family slot for a family-invariant value would be a lie that the
+// light-mirror rule then has to carve an exception for. High Contrast changes
+// legibility, not tempo — a contrast mode that also slowed the window down
+// would be answering a problem nobody asked it to solve, and four motion token
+// sets would be four things to keep coherent for no gain. This is a
+// deliberate choice to stay inside ADR 0004's "variant token sets" allowance
+// without needing it.
+//
+// A sibling of the radius and spacing families at the module root rather than a
+// member of `geometry`: those two name the dimensions a surface paints with,
+// and these are app-wide, not owned by any one surface.
+
+/// The global default duration, in seconds, for everything egui animates on
+/// its own: popup and area fades, scrollbar expansion and fade, the collapsing
+/// tree. Published onto [`egui::Style::animation_time`] by [`style_from`], so
+/// one token is the tempo of every widget riff does not animate itself.
+///
+/// Sits **marginally below** egui's shipped `0.2` s, for two reasons. Nothing
+/// should feel slower as a result of the design system gaining a tempo — a
+/// value above the framework default would read as a change to the app's
+/// personality rather than as the framework's default becoming a chosen one.
+/// And the Folders tree needs the extra frames: its unfold is a riff-driven
+/// tween, and a longer window is the difference between an unfold that has
+/// several frames to show itself in and one that snaps. (The frame requests
+/// themselves are the tree's, not this token's — see the motion rule above.)
+pub const MOTION_DEFAULT: f32 = 0.18;
+
+/// The hover duration, in seconds, for riff-authored hover washes only.
+///
+/// Deliberately not published: a hover wash riff drives passes this value to
+/// its own tween explicitly, where egui's stock widget tweens read
+/// [`MOTION_DEFAULT`] off the style. A wash riff authors is not a popup, and
+/// asking it to move at the global tempo makes the pointer feel like it is
+/// dragging something across the surface.
+///
+/// A little over half the default. A hover wash is the one tween the user is
+/// looking *at* when it runs, and it answers a gesture that has already
+/// happened, so latency reads as lag rather than as polish. It is a floor
+/// partner to the global default, not a scale: nothing sits between the two,
+/// and anything that needs its own duration states why rather than picking a
+/// number.
+pub const MOTION_HOVER: f32 = 0.10;
+
 // --- Chrome dimensions (`--riff-titlebar-h`, `--riff-sidebar-w`,
 // `--riff-playerbar-h`) ---------------------------------------------------------
 
@@ -562,10 +733,44 @@ pub mod geometry {
     /// the monospace time readouts and draw the same hairline track, so those
     /// two numbers are one token rather than two that have to agree by
     /// accident.
+    ///
+    /// The grab affordance lives here too, beside the track it modifies: the
+    /// thickness the track grows to while it is held
+    /// ([`TRACK_H_ACTIVE`](seek::TRACK_H_ACTIVE)) and the thumb that appears
+    /// while the pointer is on it ([`THUMB_D`](seek::THUMB_D)).
     pub mod seek {
         /// Track height of the seek row (and the volume slider riding the same
         /// row): 4px.
         pub const TRACK_H: f32 = 4.0;
+        /// Track height while the bar is grabbed: 6px, up from the idle
+        /// [`TRACK_H`]'s 4px.
+        ///
+        /// A second, unambiguous "you have hold of this" signal, and the one that
+        /// survives a fast drag, where a thumb is being tracked rather than read.
+        /// 6px is 1.5× the idle bar: enough to register at a glance, small enough
+        /// that the thickened bar still sits comfortably inside the tightest hit
+        /// area either surface builds it in (`now_playing::SEEK_H`, 24px).
+        ///
+        /// It is a token beside [`TRACK_H`] rather than a number at the paint
+        /// site for the ordinary reason everything in this module exists: the two
+        /// seek surfaces must grab identically, and a thickness declared in a view
+        /// is exactly what the dimension sweep exists to catch.
+        pub const TRACK_H_ACTIVE: f32 = 6.0;
+        /// Diameter of the seek thumb — the handle the pointer's verdict on
+        /// "where am I on this bar" is drawn on: 12px.
+        ///
+        /// This is the *seek* surface's own diameter, deliberately not the volume
+        /// slider's [`VOLUME_THUMB`](super::playerbar::VOLUME_THUMB), for the
+        /// reason this module groups by surface: the two thumbs say different
+        /// things. The volume slider's is a standing state indicator on a control
+        /// that is never without one; this one materialises from nothing the frame
+        /// the pointer arrives, so it carries the whole "this bar can be grabbed"
+        /// claim by itself and is drawn 2px larger for it. It is also measured
+        /// against [`TRACK_H_ACTIVE`] rather than the idle [`TRACK_H`], because it
+        /// has to cap the thickest state of the track it rides on, and against
+        /// `now_playing::SEEK_H` because it must not spill over the time readouts
+        /// flanking the bar.
+        pub const THUMB_D: f32 = 12.0;
         /// Horizontal room reserved at each end of the seek row for the
         /// monospace time readouts ("62:03" fits with margin).
         pub const TIME_LABEL_SPACE: f32 = 44.0;
@@ -1070,6 +1275,72 @@ pub fn blend_over(bottom: egui::Color32, top: egui::Color32) -> egui::Color32 {
     )
 }
 
+/// `color` painted at coverage `t`: the same colour, `t` of the way toward
+/// fully transparent. Exactly [`egui::Color32::TRANSPARENT`] at `t = 0.0` and
+/// exactly `color` at `t = 1.0`.
+///
+/// **Why the store needed this.** Until the row band's hover wash (issue 06)
+/// the only `t`-parameterised blend in the module was the private,
+/// `u8`-per-channel [`blend_channel`], which is the right primitive for a
+/// gradient between two *known* stops and the wrong one here: a fading wash
+/// interpolates toward a backdrop its painter never sees, so there is no
+/// second colour to name. Scaling coverage is the whole of the operation, and
+/// it wants one colour at `Color32` granularity.
+///
+/// **It is the store's only straight-alpha construction, and that is what
+/// makes it the thing to paint.** [`egui::Color32`] stores its bytes
+/// premultiplied by their own alpha, so a build of "constant RGB, varying
+/// coverage" is exactly what `from_rgba_unmultiplied` does on the way in. The
+/// other route — take an opaque token and `gamma_multiply` it by `t` — is also
+/// correct to paint, and the two agree, but the premultiplied result no longer
+/// *reads* as `color` at partial coverage. That distinction is what
+/// [`blend_t`]'s doc turns on.
+///
+/// Not for a gradient — reach for [`blend_t`] when the second colour is known.
+#[must_use]
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub fn wash_at(color: egui::Color32, t: f32) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(
+        color.r(),
+        color.g(),
+        color.b(),
+        (t.clamp(0.0, 1.0) * 255.0).round() as u8,
+    )
+}
+
+/// Direct interpolation between two colours at tween value `t`: `from` at
+/// `t = 0.0`, `to` at `t = 1.0`, and a channel-wise blend of the two in
+/// between.
+///
+/// **Why this is not `blend_over` with a faded `top`, which is what the row
+/// band was specified to use.** Because `blend_over`'s contract is a
+/// *straight-alpha* top, and [`egui::Color32`] cannot hold one: it stores
+/// premultiplied bytes, and every constructor premultiplies on the way in. So a
+/// `Color32` built at partial coverage is *already* scaled, and handing it to
+/// `blend_over` multiplies the coverage by itself — `t * t`, a fill that moves
+/// at the wrong rate and toward a hue that drifts as it goes. Measured on the
+/// selected-plus-hovered row: the specified route landed on `rgb(30, …)` at the
+/// midpoint, which is darker than *both* states it was supposed to sit between
+/// (`rgb(40, …)` and `rgb(42, …)`) — a colour belonging to neither, which is
+/// precisely what the anti-crossfade rule exists to prevent. The store's other
+/// `t`-parameterised primitive, [`blend_channel`], already does this without
+/// the round trip, so this is that primitive lifted to `Color32` granularity
+/// rather than a third way of blending.
+///
+/// **What it is for.** A surface holding two states and moving along the line
+/// that joins their tokens, with no third colour anywhere on the path. Every
+/// value between the endpoints is a mix of two app colours, so both endpoints
+/// are states that already existed.
+#[must_use]
+pub fn blend_t(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
+    egui::Color32::from_rgb(
+        blend_channel(from.r(), to.r(), t),
+        blend_channel(from.g(), to.g(), t),
+        blend_channel(from.b(), to.b(), t),
+    )
+}
+
 /// The **dark** family's accent-glow strength: the mockup's accent wash
 /// `rgba(238, 122, 42, .35)` — 35% coverage.
 ///
@@ -1357,19 +1628,52 @@ pub fn hero_glyph(palette: &Palette) -> Color32 {
 /// The coverage a role's hover wash is painted at — the mockup's
 /// `hover:bg-*/10`, and the number that makes the accent wash and the
 /// destructive wash one gesture in two hues rather than two different
-/// strengths. [`destructive_fill`] carries the same 0.1 inline; this names it
-/// for the accent side, and both are the mockup's `/10`.
+/// strengths. Both are the mockup's `/10`, which is why they are two names for
+/// one number: the accent side is the one the token family names, and the
+/// destructive side would otherwise be a bare literal in a helper.
 pub const ACCENT_HOVER_COVERAGE: f32 = 0.1;
+
+/// The destructive side of [`ACCENT_HOVER_COVERAGE`]: the same mockup `/10`, in
+/// the error hue. The two washes are one gesture in two colours, and the
+/// equality the test suite pins is a fact about these two names rather than
+/// about two literals that happen to match.
+pub const DESTRUCTIVE_HOVER_COVERAGE: f32 = 0.1;
 
 /// The destructive ghost button's fill: transparent until hovered, then the
 /// error token at the mockup's 10% (`hover:bg-destructive/10`).
 #[must_use]
 pub fn destructive_fill(palette: &Palette, hovered: bool) -> Color32 {
     if hovered {
-        palette.error.gamma_multiply(0.1)
+        palette.error.gamma_multiply(DESTRUCTIVE_HOVER_COVERAGE)
     } else {
         TRANSPARENT
     }
+}
+
+/// The destructive ghost button's fill at hover-wash tween value `t`: the
+/// [`destructive_fill`] wash fading up to coverage
+/// [`DESTRUCTIVE_HOVER_COVERAGE`].
+///
+/// **A pure function of `t`, deliberately.** `t` is the only input besides the
+/// palette, so the fade is assertable at its endpoints and its midpoint without
+/// a frame, a renderer, or a pixel — which is the only reason the motion spec
+/// is able to cover this change at all (`.scratch/ui-motion/spec.md`, "Coverage
+/// of each change"). The painter's only job is to read `t` and hand it here.
+///
+/// **The two endpoints are what make the tween affordable.** `t = 0` is
+/// [`TRANSPARENT`], so an unhovered destructive button paints exactly what it
+/// painted before the wash existed, and `t = 1` is
+/// `destructive_fill(palette, true)`, so a settled hover is the same pixel it
+/// has always been. Every golden in the suite captures one of those two states
+/// and neither may move — which is what makes "a wash fades in" a safe change
+/// rather than a re-baselining. The endpoint identity is asserted in the suite
+/// rather than assumed, because it goes through a rounding step on each side
+/// ([`wash_at`] rounds `t * 255`; `gamma_multiply` rounds each channel by
+/// `0.1`) and the two are equal only because they round the same quantity the
+/// same way — a claim worth a test and not worth a comment's optimism.
+#[must_use]
+pub fn destructive_wash(palette: &Palette, t: f32) -> Color32 {
+    wash_at(palette.error, t * DESTRUCTIVE_HOVER_COVERAGE)
 }
 
 /// The accent tier's hover wash: transparent until hovered, then the brand
@@ -1385,6 +1689,86 @@ pub fn accent_fill(palette: &Palette, hovered: bool) -> Color32 {
         palette.brand_primary.gamma_multiply(ACCENT_HOVER_COVERAGE)
     } else {
         TRANSPARENT
+    }
+}
+
+/// The accent tier's hover wash at tween value `t`: the [`accent_fill`] wash
+/// fading up to coverage [`ACCENT_HOVER_COVERAGE`].
+///
+/// **A pure function of `t`, for the same reason as [`destructive_wash`],** and
+/// its two endpoints carry the same weight: `t = 0` is [`TRANSPARENT`] and
+/// `t = 1` is `accent_fill(palette, true)`, so an idle accent button and a
+/// settled hovered one both paint precisely what they painted before this wash
+/// tweened. Those two states are what the golden suite captures.
+///
+/// **Why the accent tier is on the allow-list and the other five are not** is
+/// the motion rule's threshold, not this function's: both washes go from fully
+/// transparent to a low-alpha tint, so the step is large in alpha, and they sit
+/// on the two affordances where a missed click costs most. The per-variant
+/// fills in `paint_text_button` are small lightness deltas on small targets and
+/// stay instant, and the record of that line is beside the tokens.
+///
+/// **[`wash_at`] takes the un-premultiplied token and a coverage — which is why
+/// the coverage is *multiplied* in rather than the settled wash passed whole.
+/// [`wash_at`] is a straight-alpha construction: it hands the bytes to
+/// `from_rgba_unmultiplied`, which premultiplies them on the way in. A
+/// `Color32` arriving here is already premultiplied, so the obvious-looking
+/// `wash_at(accent_fill(palette, true), t)` premultiplies a second time and,
+/// worse, takes its alpha from `t` alone — at `t = 1.0` it lands on
+/// `rgb(24, 13, 3)` at **alpha 255**, an opaque near-black where the wash is a
+/// 10% tint. That is the same premultiplied trap the row band hit through
+/// `blend_over`, from the other side: the rule both times is that a translucent
+/// result is built from an un-premultiplied colour plus a coverage, never by
+/// re-scaling something already scaled. So `t = 0.5` here is half a wash, not a
+/// quarter of one.
+#[must_use]
+pub fn accent_wash(palette: &Palette, t: f32) -> Color32 {
+    wash_at(palette.brand_primary, t * ACCENT_HOVER_COVERAGE)
+}
+
+/// The row band's fill at hover-wash tween value `t`: the wash alone on an
+/// unselected row, and the wash blended **directly** onto the selected fill on
+/// a row that is both.
+///
+/// **A pure function of `t`, deliberately.** `t` is the only input besides the
+/// palette, so the wash can be asserted at its endpoints and its midpoint
+/// without a frame, a renderer, or a pixel — which is the only reason the
+/// motion spec is able to cover this change at all (`.scratch/ui-motion/spec.md`,
+/// "Coverage of each change"). The painter's only job is to read `t` and hand
+/// it here.
+///
+/// **Why coverage scales and the RGB does not move.** The same band is painted
+/// over the sidebar's row surface and over the browser's canvas, and the
+/// painter is handed neither. An RGB lerp would have to guess a backdrop, and
+/// the guess would be wrong for one of the two surfaces — so the fade scales
+/// [`wash_at`] over whatever is actually there and the wash's own hue is
+/// constant from the first frame to the last. The two endpoints are what make
+/// that affordable: `t = 0` is [`TRANSPARENT`], so an idle row paints nothing
+/// at all, and `t = 1` is `row_hover` exactly, so a settled hover is
+/// byte-identical to the instant swap this replaces. Every golden in the suite
+/// captures one of those two states.
+///
+/// **Why selected-plus-hovered blends rather than crossfades.** A crossfade
+/// between the selected fill and the wash would pass through a colour that
+/// belongs to neither state — a colour the app never defines and no token
+/// names. [`blend_t`] walks the straight line between the two instead, so
+/// every value on the path is a mix of two app colours, and both endpoints
+/// land on a state that already existed: `surface_3` when the row is selected
+/// and unhovered, `row_hover` once the wash has covered it. A selected,
+/// unhovered row is therefore unchanged, and a selected, hovered one lifts
+/// toward the wash exactly as an unselected hovered row does.
+///
+/// The two branches share their endpoints by construction — `surface_3` and
+/// `row_hover` — so the *set* of colours the band can ever be is the same
+/// whether or not the row is selected, and each branch only differs in what it
+/// does between them: the selected branch lifts the existing fill, the
+/// unselected one lays the wash over a backdrop it cannot see.
+#[must_use]
+pub fn row_band_fill(palette: &Palette, selected: bool, t: f32) -> Color32 {
+    if selected {
+        blend_t(palette.surface_3, palette.row_hover, t)
+    } else {
+        wash_at(palette.row_hover, t)
     }
 }
 
@@ -1406,6 +1790,19 @@ pub fn style_from(palette: &Palette) -> egui::Style {
     // Typography: the design type scale (Issue 02) rides along with the
     // token style so every install re-applies it.
     style.text_styles = text_styles();
+
+    // Motion: the design's tempo, published onto the field egui's animation
+    // manager reads for *its own* tweens — popup and area fades, scrollbar
+    // expansion and fade, the collapsing tree. Before this, every one of them
+    // ran at egui's shipped 0.2 s by inheritance, which made the framework's
+    // default the app's tempo. It is a `Style` field rather than a `Visuals`
+    // field, so it is set here rather than through the `v` chain below.
+    //
+    // No call site is migrated because there is nothing to migrate: riff never
+    // wrote `animation_time` anywhere, and a riff-driven tween passes its own
+    // duration (see the motion rule in this module's doc). Four palettes, one
+    // tempo — motion is family-invariant, so this is not a `palette` read.
+    style.animation_time = MOTION_DEFAULT;
 
     // High Contrast variants thicken focus-bearing strokes (REQ-UI-007).
     let focus_width = if palette.high_contrast {

@@ -213,6 +213,11 @@ fn show_browser_list(
         0.0,
         palette.surface_row,
     );
+    // `.animated(false)`: this column is driven by a `ScrollControl`, so it
+    // jumps to a named offset (a restored position, or the top after a
+    // selection change) and a keep-in-view jump must not lerp. The flag governs
+    // programmatic scroll-to offsets only, not wheel feel — the reason is
+    // written once on [`ScrollControl`](super::scroll_memory::ScrollControl).
     let mut scroll_area = egui::ScrollArea::vertical()
         .auto_shrink(false)
         .animated(false);
@@ -399,9 +404,11 @@ fn browser_row(
 
     let focused = ui.memory(|m| m.has_focus(response.id));
     super::row::paint_row_band(
+        ui,
         &painter,
         palette,
         rect,
+        response.id,
         item.selected,
         response.hovered(),
         focused,

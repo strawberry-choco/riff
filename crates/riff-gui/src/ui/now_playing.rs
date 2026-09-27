@@ -343,6 +343,12 @@ fn seek_row(
             hit,
             value: frac,
             thumb: None,
+            // The same grab affordance the player bar's seek row has, taken
+            // through the same seam: a thumb of the seek surface's own diameter
+            // while the pointer is on the bar, and a thicker track while it is
+            // dragged. The diameter is a token of that surface, so this call site
+            // names the affordance and declares no dimension of its own.
+            hover_thumb: true,
             interactive: content.total.is_some(),
             label: "Seek",
         },

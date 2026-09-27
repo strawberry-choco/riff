@@ -1580,7 +1580,8 @@ mod tests {
 
     #[test]
     fn test_style_from_applies_dark_tokens_to_the_global_style() {
-        let v = theme::style_from(&theme::Palette::dark()).visuals;
+        let style = theme::style_from(&theme::Palette::dark());
+        let v = &style.visuals;
 
         // Window background + panel surfaces from the surface tokens.
         assert_eq!(v.panel_fill, theme::SURFACE);
@@ -1609,12 +1610,29 @@ mod tests {
         assert_eq!(v.widgets.inactive.bg_stroke.color, theme::BORDER);
         assert_eq!(v.selection.stroke.color, theme::Palette::dark().focus_ring);
         assert!(v.dark_mode);
+
+        // The motion family is published, not merely declared: this is the pin
+        // that makes the theme store the authority over time. If the publish
+        // ever stops, egui silently falls back to its own 0.2 s default and
+        // every popup fade, scrollbar expansion and collapsing body inherits
+        // the framework's tempo instead of the design's.
+        assert_eq!(style.animation_time, theme::MOTION_DEFAULT);
+
+        // Two durations, two jobs: the hover wash is a distinct, shorter step.
+        // Equal values would mean one token wearing two names, and a hover
+        // wash is the case that must never read as lag. Bound to locals so
+        // this reads as a relation between two values rather than as a
+        // restatement of the declarations above it.
+        let (default, hover) = (theme::MOTION_DEFAULT, theme::MOTION_HOVER);
+        assert_ne!(hover, default);
+        assert!(hover < default);
     }
 
     #[test]
     fn test_style_from_applies_light_tokens_when_given_the_light_palette() {
         let light = theme::Palette::light();
-        let v = theme::style_from(&light).visuals;
+        let style = theme::style_from(&light);
+        let v = &style.visuals;
 
         assert!(!v.dark_mode);
         assert_eq!(v.panel_fill, light.surface);
@@ -1622,6 +1640,12 @@ mod tests {
         assert_eq!(v.override_text_color, Some(light.ink));
         assert_eq!(v.widgets.hovered.weak_bg_fill, light.surface_2);
         assert_eq!(v.widgets.inactive.bg_stroke.color, light.border);
+
+        // Motion is palette-invariant, so the light family publishes the same
+        // duration as the dark one. High Contrast changes legibility, not
+        // tempo, and per-palette motion sets would be four things to keep
+        // coherent for no gain.
+        assert_eq!(style.animation_time, theme::MOTION_DEFAULT);
     }
 
     #[test]
@@ -1629,7 +1653,8 @@ mod tests {
         // REQ-UI-007 carried over: focused/selected elements get strokes
         // thicker than egui's 1.0 default, over either base.
         for base in [theme::Palette::dark(), theme::Palette::light()] {
-            let v = theme::style_from(&base.high_contrast()).visuals;
+            let style = theme::style_from(&base.high_contrast());
+            let v = &style.visuals;
             assert!(
                 v.selection.stroke.width > 1.0,
                 "selection stroke for {} base",
@@ -1641,6 +1666,18 @@ mod tests {
                 if base.dark { "dark" } else { "light" }
             );
             assert_eq!(v.dark_mode, base.dark);
+
+            // High Contrast is the palette most likely to acquire a
+            // motion token set by accident — it is where a "slower, clearer"
+            // instinct would land. Asserted inside the loop so the
+            // invariance is pinned over both High Contrast families, not just
+            // the dark one.
+            assert_eq!(
+                style.animation_time,
+                theme::MOTION_DEFAULT,
+                "High Contrast over the {} base must not slow the app down",
+                if base.dark { "dark" } else { "light" }
+            );
         }
     }
 
@@ -2812,6 +2849,314 @@ mod tests {
                 "bar heights are normalized: got {h}"
             );
         }
+    }
+
+    /// Measure every bar's period off the curve that actually ships.
+    ///
+    /// A bar's height is `(sin(rate * t + offset) * 0.5 + 0.5)` clamped, so it
+    /// returns to its OWN phase-zero height twice per cycle: at the half
+    /// period (a sine is odd about its start) and again at the full one. The
+    /// first return is therefore the half period and the second is the period,
+    /// which is what this walks: a forward scan for sign changes of
+    /// `heights(t) - heights(0)` — every bar's `cos(offset)` is non-zero, so
+    /// every crossing is transversal and can be bisected — stopping at the
+    /// second one.
+    ///
+    /// The point of measuring rather than copying is that the band these
+    /// periods are then held to is the tempo contract, and a copy of the rate
+    /// literals could only ever agree with the implementation by coincidence.
+    /// Reading the period back out of the painted function cannot go stale.
+    fn measured_equalizer_periods() -> [f64; 4] {
+        let at_zero = sidebar::equalizer_heights(0.0);
+        let probe = |bar: usize, t: f64| sidebar::equalizer_heights(t)[bar] - at_zero[bar];
+        // 0.5 ms of scan: the two crossings of a bar in the 0.38–0.52 s band
+        // are at least 0.19 s apart, so the scan cannot step over one.
+        let step = 0.5e-3;
+        let mut periods = [0.0_f64; 4];
+        for (bar, period) in periods.iter_mut().enumerate() {
+            let mut crossings = 0;
+            let mut lo = step;
+            let mut tau = step;
+            let mut side = probe(bar, tau).is_sign_positive();
+            while tau < 3.0 {
+                tau += step;
+                let here = probe(bar, tau).is_sign_positive();
+                if here == side {
+                    continue;
+                }
+                // A crossing: bisect it to f64 precision, then keep scanning
+                // from it, so the next crossing found is a whole half cycle on.
+                let (mut a, mut b) = (lo, tau);
+                for _ in 0..40 {
+                    let mid = 0.5 * (a + b);
+                    if probe(bar, mid).is_sign_positive() == side {
+                        a = mid;
+                    } else {
+                        b = mid;
+                    }
+                }
+                lo = 0.5 * (a + b);
+                side = here;
+                crossings += 1;
+                if crossings == 2 {
+                    *period = lo;
+                    break;
+                }
+            }
+            assert_eq!(
+                crossings, 2,
+                "bar {bar}'s height must come back to its phase-zero value \
+                 twice per cycle; found {crossings} return(s) in 3 s, so its \
+                 rate is not animating at all"
+            );
+        }
+        periods
+    }
+
+    /// The tempo: every bar's cycle lands in 0.38–0.52 s, and the four rates
+    /// sit within about 1.23× of each other.
+    ///
+    /// The old rates (5.1 / 6.3 / 4.7 / 5.9 rad/s) ran at 1.232 / 0.997 /
+    /// 1.336 / 1.065 s per cycle — a mean of 1.158 s, which reads as swaying
+    /// rather than as playing. The band and the spread are what stop the
+    /// tempo being walked back down: the spread is the difference between four
+    /// voices and one shape breathing, so a set that hits the band but leaves
+    /// the rates 1.34× apart has reproduced the same defect at a new speed.
+    #[test]
+    fn test_equalizer_bar_periods_land_in_the_tightened_band() {
+        let periods = measured_equalizer_periods();
+        for (bar, period) in periods.iter().enumerate() {
+            assert!(
+                (0.38..=0.52).contains(period),
+                "bar {bar}'s period is {period:.3} s; every cycle must land in \
+                 0.38–0.52 s for the group to read as playing"
+            );
+        }
+        // spread = fastest rate / slowest rate = shortest period / longest
+        // period, so the measured periods carry the spread without the rates
+        // ever being written down twice.
+        let shortest = periods.iter().copied().fold(f64::INFINITY, f64::min);
+        let longest = periods.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let spread = longest / shortest;
+        assert!(
+            (spread - 1.23).abs() < 0.01,
+            "the four rates span {spread:.3}×; they must stay within about \
+             1.23× of each other or the group reads as one shape breathing \
+             instead of four voices dancing"
+        );
+    }
+
+    /// The floor: each bar spends about a quarter of its cycle pinned at the
+    /// minimum height, which reads as a VU meter's bottom stop rather than as
+    /// a stall. This is the recorded reason the floor is kept, so it is pinned
+    /// rather than asserted in prose — retune the floor and this says how long
+    /// the bars sit on it.
+    ///
+    /// The fraction is a property of the floor against a sine, not of the
+    /// tempo: `0.15` sits `asin(0.7)` past the trough, so exactly
+    /// `(pi - 2 * asin(0.7)) / 2pi` = 25.3% of every cycle is under it. What
+    /// the tempo changes is how long that is in wall-clock time — 0.11 s of a
+    /// 0.45 s cycle, against 0.29 s of a 1.16 s one.
+    #[test]
+    fn test_equalizer_bar_floor_dwells_about_a_quarter_of_each_cycle() {
+        let periods = measured_equalizer_periods();
+        // A 0.25 ms step: the dwell fraction is then good to a few hundredths
+        // of a percent, and the samples cover exactly one cycle from its start.
+        let step = 0.25e-3;
+        for (bar, period) in periods.iter().enumerate() {
+            let samples = (period / step).round() as usize;
+            let pinned = (0..samples)
+                .filter(|i| sidebar::equalizer_heights(*i as f64 * step)[bar] == 0.15)
+                .count();
+            let dwell = pinned as f64 / samples as f64;
+            assert!(
+                (0.24..=0.27).contains(&dwell),
+                "bar {bar} sits on the minimum height for {dwell:.3} of its \
+                 cycle; the floor is kept because that is the bottom stop of a \
+                 VU meter, and it should stay near the quarter of a cycle the \
+                 sine puts there"
+            );
+        }
+    }
+
+    /// The offsets: unchanged, and pinned where they are legible — the height
+    /// each bar takes at phase zero, which is its own offset's
+    /// `sin * 0.5 + 0.5`. The offsets are what make the group read as dancing;
+    /// the tempo was the thing that had to change, so nothing here may.
+    ///
+    /// A sine's reflection about its own axis is invisible to a height
+    /// reading, so this pins the offsets' sense rather than their sign. No
+    /// downstream behaviour depends on which side of the axis they start on.
+    #[test]
+    fn test_equalizer_bar_phase_offsets_are_unchanged() {
+        let offsets = [0.0_f64, 1.3, 2.6, 3.9];
+        let expected = offsets.map(|offset| (offset.sin() * 0.5 + 0.5).clamp(0.15, 1.0) as f32);
+        let at_zero = sidebar::equalizer_heights(0.0);
+        for (bar, (got, want)) in at_zero.into_iter().zip(expected).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "bar {bar} starts at {got} but offset {} rad starts it at \
+                 {want}; the phase offsets are the dancing and must not move",
+                offsets[bar]
+            );
+        }
+        // And the group is four voices, not one bar repeated: the offsets
+        // spread the bars apart at every phase, phase zero included.
+        for (later, height) in at_zero.iter().enumerate().skip(1) {
+            assert!(
+                (height - at_zero[0]).abs() > 0.01,
+                "the four bars must sit at four different heights, not one \
+                 height four times: bar {later} is at {} like bar 0 in \
+                 {at_zero:?}",
+                height
+            );
+        }
+    }
+
+    /// A harness over one now-playing sidebar row whose `playing` flag the
+    /// test flips between frames through the returned [`Cell`].
+    ///
+    /// The row is the only widget in the canvas, so every pixel that moves
+    /// between two frames moved because the equalizer moved — the label, the
+    /// band and the glyph are the same in all of them.
+    fn now_playing_row_harness(
+        playing: bool,
+    ) -> (
+        egui_kittest::Harness<'static>,
+        std::rc::Rc<std::cell::Cell<bool>>,
+    ) {
+        let palette = theme::Palette::dark();
+        let flag = std::rc::Rc::new(std::cell::Cell::new(playing));
+        let seen = std::rc::Rc::clone(&flag);
+        let mut cache = icons::IconCache::new();
+        let harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(theme::SIDEBAR_W - 24.0, 48.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(move |ui| {
+                sidebar::tree_row(
+                    ui,
+                    &mut cache,
+                    &palette,
+                    sidebar::TreeRow {
+                        indent_level: 1,
+                        icon: Some(icons::Icon::Music),
+                        cover: None,
+                        label: "Ready Let's Go",
+                        count: None,
+                        meta: None,
+                        favorite: None,
+                        selected: false,
+                        now_playing: true,
+                        playing: seen.get(),
+                        art_slot: false,
+                    },
+                );
+            });
+        (harness, flag)
+    }
+
+    /// The pixels two frames disagree on, and the box that disagreement sits
+    /// in. The count is the evidence for "only the bars moved"; the box is the
+    /// evidence for where. Comparing frames as whole images instead would print
+    /// every pixel of a 256x48 canvas into the failure.
+    fn pixel_diff(
+        left: &image::RgbaImage,
+        right: &image::RgbaImage,
+    ) -> (usize, Option<(u32, u32, u32, u32)>) {
+        assert_eq!(
+            left.dimensions(),
+            right.dimensions(),
+            "frames must be the same size to be compared"
+        );
+        let mut moved = 0;
+        let mut bounds = None;
+        for (x, y, pixel) in left.enumerate_pixels() {
+            if *pixel == *right.get_pixel(x, y) {
+                continue;
+            }
+            moved += 1;
+            let (x0, y0, x1, y1) = bounds.unwrap_or((x, y, x + 1, y + 1));
+            bounds = Some((x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1)));
+        }
+        (moved, bounds)
+    }
+
+    /// Pause HOLDS the last advanced phase; it does not reset it.
+    ///
+    /// Resetting snapped all four bars to their phase-zero heights, which is a
+    /// lopsided staircase — phase zero is not a shape the four sine waves
+    /// happen to be in agreement on. The phase therefore lives in egui's memory
+    /// keyed on the row, and the row paints from it whether or not it is
+    /// playing, so the pause is a freeze rather than a rewind.
+    ///
+    /// A row that has never played has no stored phase and paints phase zero;
+    /// the exact zero value is pinned by the idle goldens staying byte
+    /// identical, which is the stronger place for it, and what is pinned here
+    /// is that such a row never drifts and that the held phase is a real phase
+    /// rather than a reset.
+    #[test]
+    fn test_equalizer_pause_holds_the_last_advanced_phase() {
+        // Step, never `run()`: a playing row asks for a repaint every frame,
+        // which is exactly what `run()` refuses to settle.
+        let (mut playing, flag) = now_playing_row_harness(true);
+        playing.step();
+        playing.step();
+        playing.step();
+        let last_playing = playing.render().expect("the row renders headlessly");
+
+        flag.set(false);
+        playing.step();
+        let paused = playing.render().expect("the paused row renders headlessly");
+        let (moved, where_) = pixel_diff(&last_playing, &paused);
+        assert_eq!(
+            moved, 0,
+            "pausing must hold the last advanced phase, not snap the four bars \
+             to their phase-zero staircase; {moved} pixels moved, at {where_:?}"
+        );
+
+        playing.step();
+        let paused_again = playing.render().expect("the paused row renders");
+        let (drifted, where_) = pixel_diff(&paused, &paused_again);
+        assert_eq!(
+            drifted, 0,
+            "and the held phase must survive the frame boundary it was read on; \
+             {drifted} pixels moved, at {where_:?}"
+        );
+
+        // A row that has never played has nothing to hold: it starts at phase
+        // zero and stays there, so it never drifts.
+        let (mut never_played, _) = now_playing_row_harness(false);
+        never_played.step();
+        let idle_frame_one = never_played.render().expect("the row renders headlessly");
+        never_played.step();
+        let idle_frame_two = never_played.render().expect("the row renders headlessly");
+        let (drifted, where_) = pixel_diff(&idle_frame_one, &idle_frame_two);
+        assert_eq!(
+            drifted, 0,
+            "a row that has never played must not drift: it has no phase to \
+             advance; {drifted} pixels moved, at {where_:?}"
+        );
+        let (moved, where_) = pixel_diff(&idle_frame_one, &last_playing);
+        assert!(
+            moved > 0,
+            "the held phase is a real phase: a paused row must not look like a \
+             row that has never played (phase zero)"
+        );
+        // ...and the only thing that may differ between them is the equalizer:
+        // a 14x14 indicator in the row's leading strip, so the label, the band
+        // and the glyph are the same in both frames.
+        let (x0, y0, x1, y1) = where_.expect("the two frames must differ somewhere");
+        assert!(
+            x1 - x0 <= 14 && y1 - y0 <= 14,
+            "the two frames may differ only inside the 14x14 equalizer \
+             indicator; they differ over {x0},{y0} to {x1},{y1}"
+        );
+        assert!(
+            x1 * 2 <= idle_frame_one.width(),
+            "and only in the row's leading strip, not in its label; they differ \
+             up to x={x1} of a {}-px row",
+            idle_frame_one.width()
+        );
     }
 
     #[test]
@@ -10683,10 +11028,18 @@ mod browser_column_ui_tests {
 
     /// Paint one neutral row band in isolation and return the rendered frame,
     /// so a test can count which design token actually filled the row.
+    ///
+    /// The band's wash is tweened (issue 06), so this helper hands the painter a
+    /// `Ui` and a row id and lets the band settle: `Harness::run` keeps stepping
+    /// while a repaint is outstanding, and a hovered row asks for one on every
+    /// frame of its wash. `focused` still arrives as a plain flag, exactly as it
+    /// did before — the id is only here to carry the wash's tween, which is why
+    /// no widget has to claim it.
     fn render_row_band(selected: bool, hovered: bool, focused: bool) -> image::RgbaImage {
         use riff_gui::ui::row::paint_row_band;
         use riff_gui::ui::theme::Palette;
         let palette = Palette::dark();
+        let id = egui::Id::new("test_row_band");
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(240.0, 80.0))
             .with_pixels_per_point(1.0)
@@ -10696,7 +11049,7 @@ mod browser_column_ui_tests {
                 let rect =
                     egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(200.0, 40.0));
                 let painter = ui.painter();
-                paint_row_band(painter, &palette, rect, selected, hovered, focused);
+                paint_row_band(ui, painter, &palette, rect, id, selected, hovered, focused);
             });
         harness.run();
         harness
@@ -10892,6 +11245,299 @@ mod browser_column_ui_tests {
             0,
             "an unfocused row paints no ring"
         );
+    }
+
+    /// A `Color32`'s channels as a fraction of its own alpha — the
+    /// *un-premultiplied* RGB, which is the colour a translucent wash is
+    /// nominally "of". `Color32` stores premultiplied bytes, so a wash that
+    /// keeps its hue reads the same here at every coverage; a wash that had
+    /// lerped its RGB toward some backdrop would not.
+    fn nominal_rgb(color: egui::Color32) -> [f32; 3] {
+        let a = f32::from(color.a()).max(1.0) / 255.0;
+        [
+            f32::from(color.r()) / a,
+            f32::from(color.g()) / a,
+            f32::from(color.b()) / a,
+        ]
+    }
+
+    /// Issue 06: the row band's hover wash is a pure function of its tween
+    /// value, asserted at both endpoints and at the midpoint — the seam the
+    /// motion spec names for this change, so the fade is checkable without
+    /// pixels and without a frame loop.
+    ///
+    /// The endpoints are the whole reason the function is allowed to exist.
+    /// `t = 0` must be *fully transparent* and `t = 1` must be *exactly the
+    /// token*, so a row that never hovered and a hover that has settled paint
+    /// byte-for-byte what they painted before the wash was introduced: every
+    /// existing golden in the suite captures the `t = 0` or the `t = 1` state,
+    /// and neither may move.
+    ///
+    /// The midpoint is asserted twice over, because the two are different
+    /// claims. It must be *strictly between* the endpoints, and it must be the
+    /// same colour at partial coverage rather than a colour halfway to a
+    /// guessed backdrop — the painter does not know what the band sits on (a
+    /// sidebar row and a browser row have different surfaces behind them), so
+    /// interpolating RGB would be interpolating toward a fiction.
+    #[test]
+    fn test_row_band_hover_wash_is_a_pure_function_of_its_tween_value() {
+        use riff_gui::ui::theme::{Palette, row_band_fill};
+
+        let palette = Palette::dark();
+
+        // --- The unselected band: transparent at rest, the token once settled.
+        let idle = row_band_fill(&palette, false, 0.0);
+        assert_eq!(
+            idle,
+            egui::Color32::TRANSPARENT,
+            "t=0 must be fully transparent, so an unhovered row paints what it painted \
+             before the wash existed"
+        );
+        let settled = row_band_fill(&palette, false, 1.0);
+        assert_eq!(
+            settled, palette.row_hover,
+            "t=1 must be exactly the row_hover token, so a settled hover is byte-identical \
+             to the instant swap this wash replaces"
+        );
+
+        let mid = row_band_fill(&palette, false, 0.5);
+        assert!(
+            mid != idle && mid != settled,
+            "the midpoint must be strictly between the two endpoints, not equal to either: \
+             {mid:?}"
+        );
+        assert!(
+            mid.a() > 0 && mid.a() < 255,
+            "the midpoint's coverage must be strictly between nothing and the full token, \
+             which is what 'half a wash' means: alpha {} of {mid:?}",
+            mid.a()
+        );
+        let wash_hue = nominal_rgb(palette.row_hover);
+        let mid_hue = nominal_rgb(mid);
+        for (channel, (got, want)) in mid_hue.iter().zip(wash_hue.iter()).enumerate() {
+            assert!(
+                (got - want).abs() <= 1.0,
+                "channel {channel} of the midpoint drifted from the token's own hue \
+                 ({got} vs {want}): the wash scales coverage, it does not lerp RGB toward a \
+                 backdrop the painter cannot see"
+            );
+        }
+
+        // --- The selected band: unchanged while idle, blended while hovered.
+        // Both endpoints are the same two app colours the unselected band uses,
+        // which is the point — a selected, hovered row is *interpolated*
+        // between two states the app defines, never crossfaded through a third
+        // colour that belongs to neither.
+        assert_eq!(
+            row_band_fill(&palette, true, 0.0),
+            palette.surface_3,
+            "a selected, unhovered row is byte-identical to the selected fill it painted \
+             before the wash existed"
+        );
+        assert_eq!(
+            row_band_fill(&palette, true, 1.0),
+            palette.row_hover,
+            "at full coverage the wash is opaque, so a settled selected+hovered row lands on \
+             the wash token and not on some third colour"
+        );
+        let selected_mid = row_band_fill(&palette, true, 0.5);
+        for (channel, (got, low, high)) in [
+            (
+                selected_mid.r(),
+                palette.surface_3.r(),
+                palette.row_hover.r(),
+            ),
+            (
+                selected_mid.g(),
+                palette.surface_3.g(),
+                palette.row_hover.g(),
+            ),
+            (
+                selected_mid.b(),
+                palette.surface_3.b(),
+                palette.row_hover.b(),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (lo, hi) = if low < high { (low, high) } else { (high, low) };
+            assert!(
+                got > lo && got < hi,
+                "channel {channel} of the selected+hovered midpoint ({got}) is not strictly \
+                 between the selected fill ({low}) and the wash ({high}): the two are blended \
+                 directly, never through a colour that belongs to neither state"
+            );
+        }
+    }
+
+    /// Build a one-row harness that paints the shared row band, with the
+    /// pointer state held in the harness state so a test can hover the row
+    /// between steps.
+    fn row_band_frame_loop(step_dt: f32, id: egui::Id) -> egui_kittest::Harness<'static, bool> {
+        use riff_gui::ui::row::paint_row_band;
+        use riff_gui::ui::theme::Palette;
+        let palette = Palette::dark();
+        egui_kittest::Harness::builder()
+            .with_size(egui::vec2(240.0, 80.0))
+            .with_pixels_per_point(1.0)
+            .with_step_dt(step_dt)
+            .build_ui_state(
+                move |ui, hovered: &mut bool| {
+                    let rect =
+                        egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(200.0, 40.0));
+                    paint_row_band(ui, ui.painter(), &palette, rect, id, false, *hovered, false);
+                },
+                false,
+            )
+    }
+
+    /// The source files that asked for a repaint on the pass that has just
+    /// finished, or an empty vector if nothing did.
+    ///
+    /// **Why the cause list and not `requested_repaint_last_pass`.** egui
+    /// swaps the accumulated causes into their "previous pass" slot at the
+    /// *start* of a pass (`egui-0.35.0/src/context.rs:101-105`), so a reading
+    /// taken right after `step` describes the pass before the one that ran. The
+    /// cause list is exact, though — it is cleared each pass and refilled only
+    /// by an actual `request_repaint` call — so reading it *before* stepping
+    /// describes the pass that has just finished, and no alignment arithmetic
+    /// is needed.
+    ///
+    /// The two boolean seams cannot answer this at all, and it is worth saying
+    /// why. `requested_repaint_last_pass` is `prev_pass_paint_delay == ZERO`,
+    /// and an immediate request leaves `repaint_delay` at `ZERO` for the next
+    /// pass as well, so it stays true for two passes after the last ask — it
+    /// reports "a repaint was requested recently", not "this pass asked".
+    /// `has_requested_repaint` is worse, counting the same `outstanding` flag.
+    /// Neither can distinguish a settled tween from one still running, and
+    /// neither says *who* asked.
+    fn asked_by(harness: &egui_kittest::Harness<'_, bool>) -> Vec<String> {
+        harness
+            .ctx
+            .repaint_causes()
+            .iter()
+            .map(|cause| format!("{}:{}", cause.file, cause.line))
+            .collect()
+    }
+
+    /// Issue 06: the row band's wash is served frames while it is in flight and
+    /// asks for nothing once it has settled — and an idle row asks for nothing
+    /// ever.
+    ///
+    /// **The finding this pins.** egui 0.35's
+    /// `animate_bool_with_time_and_easing` already ends in
+    /// `if 0.0 < animated_value && animated_value < 1.0 { self.request_repaint(); }`
+    /// (`egui-0.35.0/src/context.rs:3145-3148`). The wash therefore needs *no*
+    /// frame request of its own: adding one would be a second call for the same
+    /// frame, from riff, saying what egui has already said. The bound at both
+    /// ends is egui's, and that is the half that matters here — an unhovered
+    /// band rests at exactly `0.0`, so the one-sided reading `t < 1.0` would be
+    /// true for all fifty rows in a list forever and pin the app at an uncapped
+    /// frame rate with the pointer nowhere near it.
+    ///
+    /// So the oracle is egui's own cause list, per pass: an idle pass and every
+    /// settled pass must be silent, and an in-flight pass must make **exactly
+    /// one** request. That last half is what fails if someone later "fixes" the
+    /// missing request the way the Folders tree's is written — by adding a
+    /// duplicate.
+    #[test]
+    fn test_row_band_hover_wash_asks_for_frames_only_while_it_is_in_flight() {
+        use riff_gui::ui::theme::MOTION_HOVER;
+
+        /// One step of the harness clock, chosen so the hover token spans
+        /// several frames and the settle is observable rather than a single
+        /// lucky step.
+        const STEP_DT: f32 = 0.02;
+        /// Passes sampled, several times the longest a motion token could
+        /// publish.
+        const SAMPLED_PASSES: usize = 20;
+        /// Settled passes the sample must end with, so "stops asking" is
+        /// asserted over a run and not over one frame.
+        const SETTLED_PASSES: usize = 4;
+
+        let mut harness = row_band_frame_loop(STEP_DT, egui::Id::new("row_band_frame_loop"));
+
+        // One pass with the row idle. This seeds the tween at `0.0`, which is
+        // what lets the next pass read a *transition* rather than the animation
+        // manager's first-call snap to the target.
+        harness.step();
+        assert!(
+            asked_by(&harness).is_empty(),
+            "an idle row band must ask the frame loop for nothing: the tween rests at exactly \
+             0.0, and a one-sided `t < 1.0` bound would make this true for every row in a \
+             fifty-row list forever"
+        );
+
+        *harness.state_mut() = true;
+        // Read the causes of the pass that just finished, then run the next —
+        // see [`asked_by`]. The first entry is therefore the idle pass above,
+        // and the rest follow the pointer onto the row.
+        let mut sampled: Vec<Vec<String>> = Vec::with_capacity(SAMPLED_PASSES);
+        for _ in 0..SAMPLED_PASSES {
+            sampled.push(asked_by(&harness));
+            harness.step();
+        }
+        let asked: Vec<bool> = sampled.iter().map(|causes| !causes.is_empty()).collect();
+
+        // Asking is one contiguous run, and the run's length is the claim that
+        // the wash runs on the *hover* token rather than the published global
+        // default: at this step MOTION_HOVER (0.10 s) is five passes and
+        // MOTION_DEFAULT (0.18 s) is nine, so a wash that had picked up
+        // `Style::animation_time` instead of passing the token explicitly
+        // would be caught here — and an instant swap would never ask at all.
+        let asking = asked.iter().filter(|asked| **asked).count();
+        let longest_run = asked
+            .iter()
+            .fold((0usize, 0usize), |(best, current), asked| {
+                let current = if *asked { current + 1 } else { 0 };
+                (best.max(current), current)
+            })
+            .0;
+        let hover_passes = (MOTION_HOVER / STEP_DT).ceil() as usize;
+        assert_eq!(
+            asking, longest_run,
+            "frames must be asked for across the whole tween, not in bursts: {asked:?}"
+        );
+        assert!(
+            (2..=hover_passes).contains(&asking),
+            "the wash must tween for roughly MOTION_HOVER ({MOTION_HOVER}s ≈ {hover_passes} \
+             passes at {STEP_DT}s) and asked for a frame on {asking} of {SAMPLED_PASSES}: an \
+             instant swap never asks, a tween that never settles asks forever. asked={asked:?}"
+        );
+        assert!(
+            SAMPLED_PASSES - asking >= SETTLED_PASSES,
+            "the sample holds fewer than {SETTLED_PASSES} settled passes, so 'a settled hover \
+             asks for nothing' is unproven: {asked:?}"
+        );
+
+        // The other half of the finding: **exactly one** request per in-flight
+        // pass, and it is the tween read.
+        //
+        // `Context::request_repaint` is `#[track_caller]`, so a `RepaintCause`
+        // names riff's *call site* — the `animate_bool_with_time` line in
+        // `row.rs` — not egui's own `request_repaint` line. Attribution by file
+        // therefore cannot tell "egui's wrapper asked on riff's behalf" from
+        // "riff asked", because both are `row.rs`. The count can: a redundant
+        // `ui.ctx().request_repaint()` in the wash would be a *second* cause on
+        // every in-flight pass, and the settled passes would keep asking.
+        for (pass, causes) in sampled.iter().enumerate() {
+            if causes.is_empty() {
+                continue;
+            }
+            assert_eq!(
+                causes.len(),
+                1,
+                "pass {pass} made {causes:?} — the wash must cost exactly one repaint \
+                 request per in-flight frame, the one egui's animate_bool_with_time already \
+                 issues while the value is strictly between 0 and 1. A second cause is riff \
+                 asking again for a frame it has already been given."
+            );
+            assert!(
+                causes[0].contains("riff-gui/src/ui/row.rs"),
+                "pass {pass} asked for a frame from outside the row band: {causes:?}"
+            );
+        }
     }
 
     /// Render one shared icon button and return the frame, so a test can see
@@ -11588,6 +12234,11 @@ mod browser_column_ui_tests {
         use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::theme::Palette;
         let rect = egui::Rect::from_min_size(egui::pos2(40.0, 34.0), egui::vec2(120.0, 36.0));
+        // The two wash roles keep their tween under the button's own widget id,
+        // so the probe needs one. This helper renders the accent tier at rest
+        // and settled, which are the two endpoints, so the id is never asked to
+        // remember a tween in flight.
+        let id = egui::Id::new("render_accent_button");
         let palette = Palette::dark();
         let mut cache = IconCache::new();
         let mut harness = egui_kittest::Harness::builder()
@@ -11600,6 +12251,7 @@ mod browser_column_ui_tests {
                     ui,
                     &mut cache,
                     &palette,
+                    id,
                     rect,
                     "Rescan now",
                     None,
@@ -11607,6 +12259,7 @@ mod browser_column_ui_tests {
                     Variant::Accent,
                     true,
                     hovered,
+                    false,
                     false,
                 );
             });
@@ -11926,6 +12579,13 @@ mod browser_column_ui_tests {
                         hit,
                         value,
                         thumb: None,
+                        // Issue 08 added the hover-driven thumb as its own field,
+                        // so this literal has to answer it. `false` is what this
+                        // test's contract already wanted: it counts fill pixels on
+                        // a bar the pointer is not over, and the resting half of
+                        // that — no thumb, idle thickness — is now pinned by
+                        // `seek_affordance_tests` with the hover slot actually on.
+                        hover_thumb: false,
                         interactive,
                         label: "Seek",
                     },
@@ -16521,6 +17181,233 @@ mod whole_frame_tests {
             "while the inspector keeps rendering the new readout"
         );
     }
+
+    /// A Folders-tree shell whose harness advances the clock in 20 ms steps
+    /// (issue 03).
+    ///
+    /// The shared [`build`] takes kittest's default step, a quarter of a
+    /// second — longer than any unfold duration the motion tokens can publish,
+    /// so a single step snaps the tween straight to its end state and the
+    /// in-flight frames the frame-loop contract is about never exist. A step
+    /// short enough that several frames fall inside the tween is the only way
+    /// to observe one; nothing else about the shell differs, so the fold,
+    /// selection and cover wiring are the production ones.
+    fn folders_shell(step_dt: f32) -> Shell {
+        let playback = Arc::new(Mutex::new(PlaybackSession::default()));
+        let library = Arc::new(Mutex::new(LibrarySession::default()));
+        let backend_events = Arc::new(Mutex::new(BackendEvents::default()));
+        let folder_covers = Arc::new(Mutex::new(Vec::new()));
+        let settings_calls = Arc::new(Mutex::new(Vec::new()));
+
+        let (app, _visibility_tx) = RiffApp::new_for_test(
+            Arc::clone(&playback),
+            Arc::clone(&library),
+            Box::new(MockTransport::new()),
+            Box::new(MockScans::default()),
+            Box::new(MockSettingsStore::with_shared_calls(Arc::clone(
+                &settings_calls,
+            ))),
+            Box::new(MockPlaylistStore::default()),
+            Box::new(MockLibraryMutationStore::new()),
+            SessionViews::new(
+                Box::new(MockLibraryQueryStore {
+                    folder_has_audio: true,
+                    folder_children: vec![PathBuf::from("/music/boards")],
+                    folder_direct_tracks: vec![track("t1.mp3", "Ready Let's Go")],
+                    ..Default::default()
+                }),
+                Box::new(MockPlaylistStore::default()),
+                StoreGeneration::new(),
+                StoreGeneration::new(),
+            ),
+            Box::new(MockTagEdits),
+            Box::new(ShellCovers(Arc::clone(&folder_covers))),
+            Arc::clone(&backend_events),
+        );
+
+        let harness = egui_kittest::Harness::builder()
+            .with_size(WINDOW)
+            .with_step_dt(step_dt)
+            .build_eframe(|cc| {
+                riff_gui::ui::fonts::configure_fonts(&cc.egui_ctx);
+                app
+            });
+
+        Shell {
+            harness,
+            playback,
+            library,
+            backend_events,
+            scans: MockScans::default(),
+            settings_calls,
+            folder_covers,
+        }
+    }
+
+    /// The repaint requests the *previous* pass attributed to riff's own UI
+    /// code, as source lines, and whether that pass was an immediate repaint.
+    ///
+    /// Attribution is the only oracle that can answer the question this seam
+    /// exists for — "did *riff* ask for this frame?" — and the two boolean
+    /// seams both fail to:
+    ///
+    /// - `has_requested_repaint` is true on every pass of any whole-shell
+    ///   harness, because the end-of-frame idle tick schedules one every frame
+    ///   regardless of what is on screen. It cannot tell a moving tree from a
+    ///   still one.
+    /// - `requested_repaint_last_pass` *is* true for the whole tween even with
+    ///   the fix reverted, because egui 0.35's `animate_bool_*` convenience
+    ///   wrapper ends in `if 0.0 < value && value < 1.0 { request_repaint() }`.
+    ///   egui's own consumers therefore already get frames from inside the
+    ///   animation helper, and a bool assertion would pass with riff's
+    ///   contribution deleted.
+    ///
+    /// So the contract under test is the one the issue actually states: riff
+    /// drives its own frames rather than riding on a dependency's incidental
+    /// request. `RepaintCause`'s file and line are public, documented fields
+    /// ("what file had the call that requested the repaint?"), and
+    /// `repaint_causes` is egui's own answer to "why are we repainting?".
+    ///
+    /// Both values describe the same pass: at the start of a pass egui swaps
+    /// the accumulated causes and the settled paint delay into their
+    /// "previous pass" slots, so reading both after a `step` describes the
+    /// frame that step ran rather than the next one.
+    fn last_pass_repaint(shell: &Shell) -> (std::collections::BTreeSet<u32>, bool) {
+        let ctx = &shell.harness.ctx;
+        let asked_by_riff = ctx
+            .repaint_causes()
+            .iter()
+            .filter(|cause| cause.file.ends_with("riff-gui/src/ui/app.rs"))
+            .map(|cause| cause.line)
+            .collect();
+        (asked_by_riff, ctx.requested_repaint_last_pass())
+    }
+
+    /// Issue 03: the Folders tree asks for its own frames while a body is
+    /// unfolding, and asks for nothing once it has settled.
+    ///
+    /// egui's animation manager advances a tween's value whenever it is asked
+    /// but never schedules the pass that would ask again, so a riff-driven
+    /// tween that does not say "there is another frame" itself renders as the
+    /// one frame that started it. The tree's own row is the surface, the
+    /// condition is the collapsing body's own openness rather than a timer, and
+    /// the whole point of writing it as "not settled" is that a settled
+    /// subtree costs the frame loop nothing.
+    ///
+    /// Settled is asserted in both directions, and that is not decoration. A
+    /// closed body rests at openness `0.0`, so the one-sided reading of "not
+    /// settled" — `openness < 1.0` — is true for every collapsed folder forever
+    /// and pins the sidebar at uncapped frame rate with the tree shut. The
+    /// honest translation of "in flight" for this accessor is the open
+    /// interval, and a closed tree asserting nothing is what pins it there.
+    #[test]
+    fn test_folders_tree_asks_for_its_own_frames_only_while_a_body_is_settling() {
+        use riff_backend::app::state::BrowseMode;
+        use std::collections::BTreeSet;
+
+        /// Frames sampled across one unfold and one fold. 20 ms each, so the
+        /// window is several times the longest unfold duration a motion token
+        /// could publish and ends well past the settled state.
+        const SAMPLED_FRAMES: usize = 20;
+        /// Settled frames the sample must contain past the end of the tween, so
+        /// "stops asking" is asserted over a run and not over one lucky frame.
+        const SETTLED_FRAMES: usize = 4;
+
+        let mut shell = folders_shell(0.02);
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.browse_mode = BrowseMode::Folders;
+            library
+                .library_paths
+                .hydrate(&riff_backend::app::store::Settings {
+                    library_paths: vec![PathBuf::from("/music")],
+                    ..Default::default()
+                });
+        }
+
+        /// Step once and report that pass's two observations: whether riff asked
+        /// for a repaint beyond the resting baseline, and whether the pass was
+        /// an immediate repaint rather than a delayed one.
+        fn sample(shell: &mut Shell, resting: &BTreeSet<u32>) -> (bool, bool) {
+            shell.harness.step();
+            let (asked_by_riff, immediate) = last_pass_repaint(shell);
+            (
+                asked_by_riff.difference(resting).next().is_some(),
+                immediate,
+            )
+        }
+
+        // A frame with the tree closed, so the resting baseline below is a
+        // settled surface rather than a cold one.
+        shell.harness.step();
+        let (resting, _) = last_pass_repaint(&shell);
+        assert!(
+            !resting.is_empty(),
+            "the shell's end-of-frame idle tick is the baseline this test subtracts; \
+             a frame that requested nothing at all would make the subtraction vacuous"
+        );
+
+        shell.harness.get_by_label("music").click();
+        let unfold: Vec<(bool, bool)> = (0..SAMPLED_FRAMES)
+            .map(|_| sample(&mut shell, &resting))
+            .collect();
+
+        shell.harness.get_by_label("music").click();
+        let fold: Vec<(bool, bool)> = (0..SAMPLED_FRAMES)
+            .map(|_| sample(&mut shell, &resting))
+            .collect();
+
+        for (label, sampled) in [("unfold", &unfold), ("fold", &fold)] {
+            let asked: Vec<bool> = sampled.iter().map(|(asked, _)| *asked).collect();
+
+            // Asking is one contiguous run, not a stutter: every pass from the
+            // first to the last asked, which is the shape "while the body is
+            // moving" takes, and the run's end is where the body landed.
+            let first = asked
+                .iter()
+                .position(|asked| *asked)
+                .unwrap_or_else(|| panic!("the {label} never asked riff for a frame: {asked:?}"));
+            let last = asked
+                .iter()
+                .rposition(|asked| *asked)
+                .unwrap_or_else(|| panic!("the {label} never asked riff for a frame: {asked:?}"));
+            assert!(
+                asked[first..=last].iter().all(|asked| *asked),
+                "the tree stopped and started asking mid-{label} instead of asking \
+                 across the whole tween: {asked:?}"
+            );
+            assert!(
+                asked.len() - 1 - last >= SETTLED_FRAMES,
+                "the sampled window holds fewer than {SETTLED_FRAMES} settled frames \
+                 after the {label}, so 'stops asking' is unproven: {asked:?}"
+            );
+
+            // Corroboration, not the discriminator: the pass the tree asked in
+            // was an immediate repaint, so the tween is served the very next
+            // frame rather than waiting out the 100 ms idle tick. This holds
+            // even with the fix reverted, which is exactly why the attribution
+            // above is what carries the contract.
+            assert!(
+                sampled
+                    .iter()
+                    .filter(|(asked, _)| *asked)
+                    .all(|(_, immediate)| *immediate),
+                "a pass the tree asked for must be an immediate repaint: {sampled:?}"
+            );
+        }
+
+        // The whole shell back at rest — tree closed, every body settled —
+        // must not be asking for anything either. This is the assertion that
+        // keeps the condition two-sided, and it is the one an idle-cost
+        // regression breaks first.
+        for _ in 0..SETTLED_FRAMES {
+            let (asked, _) = sample(&mut shell, &resting);
+            assert!(
+                !asked,
+                "a settled, closed Folders tree must ask the frame loop for nothing"
+            );
+        }
+    }
 }
 
 // --- Context menus: shared item conventions and typed intents (issue 15) -----
@@ -17246,6 +18133,847 @@ mod library_path_ui_tests {
 // inside the token sweeps' view, and that the historical frontend paths the
 // extraction promised to keep on resolving actually still resolve.
 
+/// Press feedback, wired (issue 05).
+///
+/// `IconButton::pressed` was computed on every frame by `begin_icon_button` and
+/// read by no painter: the app had hover feedback and none at all for a press.
+/// These probes drive a real pointer press through egui_kittest and hold two
+/// things at once — the state the widget's own `Response` reports, and the
+/// pixels the painter chose from it. "A press reports a state distinct from
+/// hover" is only a claim if the two can be told apart, so every probe keeps
+/// the idle, hover and press frames side by side.
+///
+/// **The press is simulated, not injected.** `Harness::drag_at` queues an
+/// `egui::Event::PointerButton { pressed: true }` and `Harness::step` runs
+/// exactly one frame with it. `Harness::run` cannot be used for the press: it
+/// steps until nothing is repainting, and `RawInput::take` resets the pointer
+/// between frames, so by the second frame the press has already been released.
+/// egui's `is_pointer_button_down_on` reads `Interaction::potential_click_id`,
+/// which the press sets from the *previous* frame's widget rects — which is why
+/// every probe settles with `run()` before the pointer arrives.
+/// The accent and destructive button washes fade in (issue 07).
+///
+/// Two seams, in the order the motion spec's coverage table names them. The
+/// **pure function** is the primary one: each wash is a function of a tween
+/// value alone, so the fade is assertable at its endpoints and its midpoint
+/// with no frame, no renderer and no pixel. The **frame loop** is the
+/// supporting one: it pins the property the pure function cannot see — that
+/// only these two roles allocate a tween at all, so a hovered list of fifty
+/// buttons that are not accent-tier costs nothing.
+///
+/// **The pointer has to be re-sent every frame.** `Harness::step` takes
+/// `RawInput::take` per frame, so a pointer that arrived on one frame is gone
+/// on the next; a probe that hovers once and then steps is measuring an
+/// unhovered button. `Harness::run` is worse for this: it steps until nothing
+/// repaints, which is exactly what a settled tween is asking for. Every probe
+/// below therefore sends `hover_at` and steps, once per sampled pass.
+#[cfg(test)]
+mod button_wash_tests {
+    use riff_gui::ui::button::Variant;
+    use riff_gui::ui::theme::{self, MOTION_HOVER, Palette};
+
+    /// One step of the harness clock, small enough that the hover token spans
+    /// several frames — the same choice the row band's frame-loop test makes,
+    /// and for the same reason: at the default 0.25 s step a 0.10 s tween
+    /// saturates inside one frame and there is nothing left to observe.
+    const STEP_DT: f32 = 0.02;
+    /// Passes sampled per probe, several times the longest a motion token
+    /// could publish.
+    const SAMPLED_PASSES: usize = 20;
+    /// Settled passes the sample must end with, so "stops asking" is asserted
+    /// over a run and not over one frame.
+    const SETTLED_PASSES: usize = 4;
+
+    /// A `Color32`'s channels as a fraction of its own alpha — the
+    /// *un-premultiplied* RGB, which is the colour a translucent wash is
+    /// nominally "of". `Color32` stores premultiplied bytes, so a wash that
+    /// keeps its hue reads the same here at every coverage; one that had lerped
+    /// its RGB toward a backdrop would drift. The row-band test carries the
+    /// same helper privately; this is that helper, for the same reason.
+    fn nominal_rgb(color: egui::Color32) -> [f32; 3] {
+        let a = f32::from(color.a()).max(1.0) / 255.0;
+        [
+            f32::from(color.r()) / a,
+            f32::from(color.g()) / a,
+            f32::from(color.b()) / a,
+        ]
+    }
+
+    /// The source files that asked for a repaint on the pass that has just
+    /// finished, or an empty vector if nothing did.
+    ///
+    /// egui swaps the accumulated causes into a "previous pass" slot at the
+    /// *start* of a pass (`egui-0.35.0/src/context.rs:101-105`), so a reading
+    /// taken right after `step` describes the pass that just ran, and no
+    /// alignment arithmetic is needed. `Context::request_repaint` is
+    /// `#[track_caller]`, so a cause names riff's call site — the
+    /// `animate_bool_with_time` line in `button.rs` — rather than egui's own.
+    fn asked_by(harness: &egui_kittest::Harness<'_, ()>) -> Vec<String> {
+        harness
+            .ctx
+            .repaint_causes()
+            .iter()
+            .map(|cause| format!("{}:{}", cause.file, cause.line))
+            .collect()
+    }
+
+    /// The causes attributed to riff's button module, which is where a wash's
+    /// tween read lives. Filtered by file because egui's own housekeeping
+    /// (a pointer move, a focus change) also asks for frames, and the claim
+    /// under test is about the ones a *riff tween* issues.
+    fn asked_by_buttons(harness: &egui_kittest::Harness<'_, ()>) -> Vec<String> {
+        asked_by(harness)
+            .into_iter()
+            .filter(|cause| cause.contains("riff-gui/src/ui/button.rs"))
+            .collect()
+    }
+
+    /// One text button of `variant` over the card plane, with a clock small
+    /// enough to see a hover token fade. No tooltip: a tooltip schedules its own
+    /// frame, and the probe is counting the tween's.
+    fn wash_probe(
+        variant: Variant,
+        label: &'static str,
+    ) -> (egui_kittest::Harness<'static, ()>, egui::Rect) {
+        let palette = Palette::dark();
+        let rect = egui::Rect::from_min_size(egui::pos2(40.0, 22.0), egui::vec2(120.0, 36.0));
+        let id = egui::Id::new(label);
+        let mut cache = riff_gui::ui::icons::IconCache::new();
+        let harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(200.0, 80.0))
+            .with_pixels_per_point(1.0)
+            .with_step_dt(STEP_DT)
+            .build_ui_state(
+                move |ui, _: &mut ()| {
+                    let bg = ui.ctx().layer_painter(egui::LayerId::background());
+                    bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.surface);
+                    let _ = riff_gui::ui::button::text_button(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &riff_gui::ui::button::TextButton {
+                            id,
+                            rect,
+                            label,
+                            a11y: label,
+                            tooltip: None,
+                            icon: None,
+                            small: false,
+                            variant,
+                            enabled: true,
+                        },
+                    );
+                },
+                (),
+            );
+        (harness, rect)
+    }
+
+    /// The last frame's pixels, with the card plane the probe painted behind
+    /// the button so a comparison reads the button and not the window.
+    fn render_probe(harness: &mut egui_kittest::Harness<'_, ()>) -> image::RgbaImage {
+        harness
+            .render()
+            .expect("the wash probe must render headlessly")
+    }
+
+    /// Walk the pointer onto the button and hold it there for
+    /// [`SAMPLED_PASSES`] passes, returning the first hovered frame, the last
+    /// one, and the repaint causes attributed to `button.rs` on **each** pass.
+    ///
+    /// The causes come back per pass and un-collapsed, because the *count* on a
+    /// pass is the claim: a tween that asked twice would show up as a second
+    /// cause on every in-flight pass while leaving the number of asking passes
+    /// exactly where it was, so a probe that reduced each pass to a bool could
+    /// not tell a tween from a tween plus a redundant request.
+    ///
+    /// The first frame is read *after* the first hover step, and the last after
+    /// the final one, so both are frames the pointer was on the button for.
+    fn hover_frames(
+        harness: &mut egui_kittest::Harness<'_, ()>,
+        rect: egui::Rect,
+    ) -> (image::RgbaImage, image::RgbaImage, Vec<Vec<String>>) {
+        // Settling first is what registers the tween at 0.0, and it has to come
+        // before the pointer arrives: egui's `animate_bool` returns its target
+        // outright on the *first* call for an id it has never seen, so a probe
+        // that hovered before the button had ever painted at rest would measure
+        // a snap and call it a fade.
+        harness.run();
+        let mut causes_per_pass = Vec::with_capacity(SAMPLED_PASSES);
+        let mut first = None;
+        let mut last = None;
+        for pass in 0..SAMPLED_PASSES {
+            harness.hover_at(rect.center());
+            harness.step();
+            causes_per_pass.push(asked_by_buttons(harness));
+            let frame = render_probe(harness);
+            if pass == 0 {
+                first = Some(frame.clone());
+            }
+            last = Some(frame);
+        }
+        (
+            first.expect("one hovered frame"),
+            last.expect("one settled frame"),
+            causes_per_pass,
+        )
+    }
+
+    /// Issue 07: each button wash is a pure function of its tween value,
+    /// asserted at both endpoints and at the midpoint — the seam the motion
+    /// spec's coverage table names for this change ("endpoints match the two
+    /// tokens; the midpoint is strictly between them").
+    ///
+    /// **The endpoints are the contract that lets this change exist at all.**
+    /// `t = 0` must be fully transparent and `t = 1` must be *exactly* the
+    /// wash the instant swap painted, which is asserted against the existing
+    /// `accent_fill` / `destructive_fill` helpers rather than against a
+    /// literal: the tweened form is defined in terms of them, so this is the
+    /// pin that the definition has not quietly changed what "fully hovered"
+    /// means. Every golden in the suite captures an unhovered or a settled
+    /// button, and neither may move.
+    ///
+    /// The midpoint is asserted three ways, because they are three claims. It
+    /// is *strictly between* the endpoints; its *coverage* is strictly between
+    /// nothing and the full wash; and its *hue* is the wash's own, because a
+    /// wash is laid over a backdrop the painter never sees — scaling coverage
+    /// is the whole operation, and an RGB lerp would be interpolating toward a
+    /// fiction. That last one is what catches the premultiplied-alpha trap:
+    /// `egui::Color32` holds premultiplied bytes, so compositing a faded wash
+    /// through `blend_over` multiplies the coverage by itself and lands on a
+    /// colour darker than *both* endpoints — a colour belonging to neither
+    /// state, which is the exact failure the store's rules exist to prevent.
+    /// Assert one wash's endpoints, midpoint and hue, given its
+    /// `t`-parameterised form and the settled colour it must land on. Shared by
+    /// both roles because they are the same gesture in two hues, and running
+    /// the identical assertions over both is what shows that.
+    fn assert_wash(
+        role: &str,
+        at: impl Fn(f32) -> egui::Color32,
+        settled: egui::Color32,
+        nominal_of: egui::Color32,
+    ) {
+        let idle = at(0.0);
+        assert_eq!(
+            idle,
+            theme::TRANSPARENT,
+            "{role}: t=0 must be fully transparent, so an unhovered button paints what it painted \
+             before the wash tweened"
+        );
+        assert_eq!(
+            at(1.0),
+            settled,
+            "{role}: t=1 must be exactly the wash the instant swap painted, so a settled hover is \
+             byte-identical to the behaviour this replaces"
+        );
+
+        let mid = at(0.5);
+        assert!(
+            mid != idle && mid != settled,
+            "{role}: the midpoint must be strictly between the two endpoints, not equal to \
+             either: {mid:?}"
+        );
+        assert!(
+            mid.a() > 0 && mid.a() < settled.a(),
+            "{role}: the midpoint's coverage must be strictly between nothing and the full wash, \
+             which is what 'half a wash' means: alpha {} of the wash's {}",
+            mid.a(),
+            settled.a()
+        );
+        // The hue is the wash's own at every coverage — the anti-crossfade
+        // property, asserted in the value rather than in a frame, and against
+        // the *token* the wash is nominally "of" rather than against the settled
+        // wash, so the claim is that the fade changes coverage and nothing else.
+        //
+        // **The bound is half a byte step at the midpoint's own alpha, not a
+        // round number.** These targets are *translucent* — a 10% wash — so the
+        // stored bytes are premultiplied by 13/255 at the midpoint and one byte
+        // step there is worth 255/13 = 19.6 nominal units; rounding the same
+        // quantity two ways puts the brand's green at 137.3 and 127.5 around a
+        // true 130. A +/-1 tolerance (which is what an *opaque* target like the
+        // row band's `row_hover` affords) would fail on quantisation alone, and
+        // loosening it to a whole byte step would be toothless. Half a step is
+        // exactly what the rounding guarantees, and a crossfade — which is what
+        // compositing through `blend_over` would produce — misses it by an
+        // order of magnitude, because it also lands opaque.
+        let half_step = 127.5 / f32::from(mid.a());
+        let (nominal, target) = (nominal_rgb(mid), nominal_rgb(nominal_of));
+        for (channel, (got, want)) in nominal.iter().zip(target.iter()).enumerate() {
+            assert!(
+                (got - want).abs() <= half_step,
+                "{role}: channel {channel} of the midpoint drifted from the wash's own hue ({got} \
+                 vs {want}, within {half_step} of half a byte step at alpha {}): a wash scales \
+                 coverage over a backdrop the painter cannot see, and never lerps RGB toward a \
+                 guess at it",
+                mid.a()
+            );
+        }
+    }
+
+    /// Issue 07: each button wash is a pure function of its tween value,
+    /// asserted at both endpoints and at the midpoint — the seam the motion
+    /// spec's coverage table names for this change ("endpoints match the two
+    /// tokens; the midpoint is strictly between them").
+    ///
+    /// **The endpoints are the contract that lets this change exist at all.**
+    /// They are asserted against the existing `accent_fill` /
+    /// `destructive_fill` helpers rather than against a literal, because the
+    /// tweened forms are *defined* in terms of them: this is the pin that the
+    /// definition has not quietly changed what "fully hovered" means. Every
+    /// golden in the suite captures an unhovered or a settled button, and
+    /// neither may move.
+    ///
+    /// The midpoint carries two further claims. Its *coverage* is strictly
+    /// between nothing and the full wash — that is what "half a wash" means.
+    /// And its *hue* is the wash's own, because a wash is laid over a backdrop
+    /// the painter never sees: scaling coverage is the whole operation, and an
+    /// RGB lerp would be interpolating toward a fiction. That last one is what
+    /// catches the premultiplied-alpha trap — `egui::Color32` holds
+    /// premultiplied bytes, so compositing a faded wash through `blend_over`
+    /// multiplies the coverage by itself and lands on a colour darker than
+    /// *both* endpoints, which is the exact failure the store's rules exist to
+    /// prevent.
+    ///
+    /// **Red, proven by revert:** before these two functions existed the suite
+    /// did not compile — `error[E0425]: cannot find function 'accent_wash' in
+    /// module 'theme'`, with egui pointing at `destructive_fill` as the
+    /// similarly-named function — which is the honest red for a test whose
+    /// subject is a function. It earned its keep immediately after: the first
+    /// implementation, `wash_at(accent_fill(palette, true), t)`, failed the
+    /// endpoint assertion with `left: #18_0D_03_FF` against
+    /// `right: #18_0D_03_1A` — a 10% wash landing **opaque**, because
+    /// `wash_at` builds straight-alpha and was handed a colour that was already
+    /// premultiplied. Fixing the *production* code (feed it the un-premultiplied
+    /// token and a coverage) is what the endpoint assertion is for.
+    #[test]
+    fn test_the_accent_and_destructive_washes_are_pure_functions_of_their_tween_values() {
+        let palette = Palette::dark();
+        assert_wash(
+            "accent",
+            |t| theme::accent_wash(&palette, t),
+            theme::accent_fill(&palette, true),
+            palette.brand_primary,
+        );
+        assert_wash(
+            "destructive",
+            |t| theme::destructive_wash(&palette, t),
+            theme::destructive_fill(&palette, true),
+            palette.error,
+        );
+    }
+
+    /// Issue 07: only the two wash roles tween, and they ask for frames only
+    /// while they are in flight.
+    ///
+    /// This is the property the pure function cannot see, and it is the one
+    /// that keeps the feature affordable: a tween allocates an animation id and
+    /// asks the frame loop for a pass, so a variant that tweens for tidiness
+    /// multiplies that cost by every button on screen. So the probe pins both
+    /// halves from the outside:
+    ///
+    /// - a hovered **Secondary** — a role with a real hover treatment (a
+    ///   `surface_3` face and the hover stroke) that must nonetheless be
+    ///   **instant** — asks for no frame from `button.rs` on any pass, and its
+    ///   first hovered frame is already **pixel-identical to its own settled
+    ///   frame**. That is the byte-identity claim, stated against the only
+    ///   comparison that can mean it: a hovered button legitimately repaints,
+    ///   so "identical to unhovered" would be a claim about nothing. Identical
+    ///   to *settled* is the claim that no tween was allocated.
+    /// - a hovered **Accent** asks for a frame across the whole tween and then
+    ///   stops, and its first hovered frame differs from its settled one —
+    ///   which is what a fade looks like from the outside.
+    ///
+    /// The asking run's length is the claim that the wash runs on the *hover*
+    /// token rather than the published global default: at this step
+    /// `MOTION_HOVER` (0.10 s) is five passes and `MOTION_DEFAULT` (0.18 s) is
+    /// nine, so a wash that had picked up `Style::animation_time` instead of
+    /// passing the token explicitly is caught here.
+    /// **Red, proven by revert, twice.** Before the tween was wired the Accent
+    /// probe reported `asked for a frame on 0 of 20` with
+    /// `asked=[false, false, ... x20]` — the instant swap's signature, which is
+    /// also what an *un*-tweened implementation looks like from the outside.
+    /// Reverting only the wiring in `paint_text_button` (leaving both
+    /// `theme::accent_wash` and `theme::destructive_wash` in place) reproduces
+    /// that identical red while the pure-function test above stays green. That
+    /// split is the point of having two tests: the value and the clock are
+    /// separate claims, and only one of them can be wrong at a time.
+    ///
+    /// **The per-pass count, proven by duplication.** The asking-pass assertions
+    /// above cannot see a redundant `request_repaint`, because asking twice does
+    /// not make a pass any more *asked-for* than asking once. So the redundant
+    /// request was added to `wash_tween` in the form rule 3 warns about —
+    /// `if 0.0 < t && t < 1.0 { ui.ctx().request_repaint(); }`, which is how the
+    /// Folders tree writes its own — and this failed with:
+    ///
+    /// ```text
+    /// pass 1 made ["crates/riff-gui/src/ui/button.rs:166",
+    ///               "crates/riff-gui/src/ui/button.rs:170"] — the accent wash must cost
+    /// exactly one repaint request per in-flight frame …
+    ///   left: 2
+    ///  right: 1
+    /// ```
+    ///
+    /// Two things are worth keeping from that output. The two causes name
+    /// **two different lines of `button.rs`** — `:166` the
+    /// `animate_bool_with_time` and `:170` the redundant call — so
+    /// `#[track_caller]` attributes per call site and a duplicate is legible in
+    /// the failure message rather than merely counted. And the row band's
+    /// frame-loop test **passed with the duplicate in place** (measured, not
+    /// assumed): it drives a different animation id in a different module, so
+    /// nothing outside this module's own frame loop can stand in for it. That is
+    /// why the store's rule-3 claim needed pinning *here* and not just there.
+    #[test]
+    fn test_only_the_accent_and_destructive_washes_tween() {
+        let hover_passes = (MOTION_HOVER / STEP_DT).ceil() as usize;
+
+        // --- Secondary: a real hover treatment, deliberately instant. --------
+        let (mut harness, rect) = wash_probe(Variant::Secondary, "Rescan now");
+        harness.run();
+        assert!(
+            asked_by_buttons(&harness).is_empty(),
+            "an idle button must ask the frame loop for nothing"
+        );
+        let (first_secondary, settled_secondary, causes_secondary) =
+            hover_frames(&mut harness, rect);
+        assert!(
+            causes_secondary.iter().all(Vec::is_empty),
+            "a hovered secondary asked for frames {causes_secondary:?} — only the accent and \
+             destructive washes are on the allow-list, and a per-variant fill is not one of them"
+        );
+        assert_eq!(
+            first_secondary, settled_secondary,
+            "a hovered secondary's first frame must be pixel-identical to its settled one: the \
+             hover swap is instant, so there is no tween sample to find part-applied"
+        );
+
+        // --- Accent: the same gesture, and this one fades. --------------------
+        let (mut harness, rect) = wash_probe(Variant::Accent, "Rescan now");
+        harness.run();
+        let (first_accent, settled_accent, causes_accent) = hover_frames(&mut harness, rect);
+
+        let asked_accent: Vec<bool> = causes_accent
+            .iter()
+            .map(|causes| !causes.is_empty())
+            .collect();
+        let asking = asked_accent.iter().filter(|asked| **asked).count();
+        let longest_run = asked_accent
+            .iter()
+            .fold((0usize, 0usize), |(best, current), asked| {
+                let current = if *asked { current + 1 } else { 0 };
+                (best.max(current), current)
+            })
+            .0;
+        assert_eq!(
+            asking, longest_run,
+            "frames must be asked for across the whole tween, not in bursts: {asked_accent:?}"
+        );
+        assert!(
+            (2..=hover_passes).contains(&asking),
+            "the accent wash must tween for roughly MOTION_HOVER ({MOTION_HOVER}s ≈ \
+             {hover_passes} passes at {STEP_DT}s) and asked for a frame on {asking} of \
+             {SAMPLED_PASSES}: an instant swap never asks, a tween that never settles asks \
+             forever. asked={asked_accent:?}"
+        );
+        assert!(
+            SAMPLED_PASSES - asking >= SETTLED_PASSES,
+            "the sample holds fewer than {SETTLED_PASSES} settled passes, so 'a settled hover \
+             asks for nothing' is unproven: {asked_accent:?}"
+        );
+        assert_ne!(
+            first_accent, settled_accent,
+            "the accent wash must actually fade: its first hovered frame is identical to its \
+             settled one, so nothing moved between them"
+        );
+
+        // **Exactly one request per in-flight pass, and none once settled.** This
+        // is the half the asking-pass count above cannot see, and it is what
+        // makes the store's rule-3 claim true for *this* surface: the wash relies
+        // on egui's bound for its frames, so a redundant
+        // `ui.ctx().request_repaint()` beside the tween read would be riff
+        // saying what egui has already said, once per frame of every fade in the
+        // app. It leaves the number of asking passes untouched, so only the
+        // per-pass count catches it.
+        //
+        // `Context::request_repaint` is `#[track_caller]`, so a `RepaintCause`
+        // names riff's *call site* — the `animate_bool_with_time` line in
+        // `button.rs` — and not egui's own `request_repaint`. Attribution by file
+        // therefore cannot by itself tell "egui's wrapper asked on riff's
+        // behalf" from "riff asked": both are `button.rs`. The count can.
+        for (pass, causes) in causes_accent.iter().enumerate() {
+            match asked_accent[pass] {
+                true => assert_eq!(
+                    causes.len(),
+                    1,
+                    "pass {pass} made {causes:?} — the accent wash must cost exactly one repaint \
+                     request per in-flight frame, the one egui's animate_bool_with_time already \
+                     issues while the value is strictly between 0 and 1. A second cause is riff \
+                     asking again for a frame it has already been given."
+                ),
+                false => assert!(
+                    causes.is_empty(),
+                    "pass {pass} asked for a frame after the wash had settled: {causes:?} — a \
+                     settled tween asks for nothing, which is the bound at the far end"
+                ),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod press_feedback_tests {
+    use riff_gui::ui::button::Variant;
+    use riff_gui::ui::{icons, sidebar, theme};
+
+    /// What one driven frame reported for the probed button, read back out of
+    /// the button's own `Response` — egui's verdict, not the painter's.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    struct PressProbe {
+        /// The pointer is over the button.
+        hovered: bool,
+        /// The pointer is held down on the button.
+        pressed: bool,
+    }
+
+    /// One driven frame: its pixels, and the state the probed button reported
+    /// while it was being painted.
+    struct PressFrame {
+        image: image::RgbaImage,
+        state: PressProbe,
+    }
+
+    /// Count frame pixels within a hair of `color` inside `rect` — the same
+    /// +/-2 tolerance and the same shape as the row-band counter in
+    /// `browser_column_ui_tests`, which is the idiom for asking *which fill a
+    /// painter chose*. That counter is private to its module, so this probe
+    /// carries its own.
+    fn press_count_color(
+        image: &image::RgbaImage,
+        color: egui::Color32,
+        rect: egui::Rect,
+    ) -> usize {
+        let (width, height) = image.dimensions();
+        let x0 = rect.min.x.floor().max(0.0) as u32;
+        let y0 = rect.min.y.floor().max(0.0) as u32;
+        let x1 = (rect.max.x.ceil().max(0.0) as u32).min(width);
+        let y1 = (rect.max.y.ceil().max(0.0) as u32).min(height);
+        image
+            .enumerate_pixels()
+            .filter(|(x, y, p)| {
+                *x >= x0
+                    && *x < x1
+                    && *y >= y0
+                    && *y < y1
+                    && p.0[0].abs_diff(color.r()) <= 2
+                    && p.0[1].abs_diff(color.g()) <= 2
+                    && p.0[2].abs_diff(color.b()) <= 2
+            })
+            .count()
+    }
+
+    /// The framework's own active fill, as the theme store publishes it: read
+    /// straight off the style rather than off a `palette.*` field, because the
+    /// claim under test is that riff's buttons and egui's stock widgets agree
+    /// about what a press looks like — which is only true if both read the one
+    /// style.
+    fn active_fill() -> egui::Color32 {
+        theme::style_from(&theme::Palette::dark())
+            .visuals
+            .widgets
+            .active
+            .bg_fill
+    }
+
+    /// Stand the app's style up inside the probe. Only the widget-state block is
+    /// installed, because `style_from` also names riff's vendored font families
+    /// and nothing binds those in a headless context — a harness limitation, and
+    /// nothing about it touches the fill a button reads.
+    fn use_riff_widget_style(ctx: &egui::Context) {
+        let active = active_fill();
+        ctx.style_mut_of(egui::Theme::Dark, |style| {
+            style.visuals.widgets.active.bg_fill = active;
+        });
+    }
+
+    /// Read the probe out of the widget egui registered under `id` this frame.
+    fn press_probe_of(ctx: &egui::Context, id: egui::Id) -> PressProbe {
+        ctx.read_response(id)
+            .map_or_else(PressProbe::default, |response| PressProbe {
+                hovered: response.hovered(),
+                pressed: response.is_pointer_button_down_on(),
+            })
+    }
+
+    /// The band of a button's face a pixel count is read from: an interior
+    /// strip along the left edge, clear of the centred glyph, of the rounded
+    /// corners, and of the mouse cursor `Harness::render` synthesises at the
+    /// pointer. A colour counted here is the fill the painter chose and nothing
+    /// else — the cursor is white on black and its antialiased edge walks the
+    /// neutral surface ramp, which is exactly what an "this fill must be
+    /// absent" assertion would otherwise trip over.
+    fn press_face_patch(rect: egui::Rect) -> egui::Rect {
+        egui::Rect::from_min_max(
+            egui::pos2(rect.min.x + 8.0, rect.min.y + 8.0),
+            egui::pos2(rect.min.x + 14.0, rect.max.y - 8.0),
+        )
+    }
+
+    /// The strip a hover *stroke* is read from: the button's top edge, where an
+    /// inside stroke actually lands, held clear of the corner arcs (a stroke
+    /// follows the rounded outline, so a count over the corners would measure
+    /// the radius rather than the stroke).
+    fn press_stroke_band(rect: egui::Rect) -> egui::Rect {
+        egui::Rect::from_min_max(
+            egui::pos2(rect.min.x + 14.0, rect.min.y),
+            egui::pos2(rect.max.x - 14.0, rect.min.y + 2.0),
+        )
+    }
+
+    /// The last frame's pixels. The probe paints the card plane behind the
+    /// button first, so every count below reads a fill and never the window.
+    fn render_probe(harness: &mut egui_kittest::Harness<'_, PressProbe>) -> image::RgbaImage {
+        harness
+            .render()
+            .expect("the press probe must render headlessly")
+    }
+
+    /// Settle the probe, walk the pointer onto it for one hover frame, then hold
+    /// the button down for one press frame, returning both frames with the state
+    /// each reported.
+    fn drive_press(
+        harness: &mut egui_kittest::Harness<'_, PressProbe>,
+        rect: egui::Rect,
+    ) -> (PressFrame, PressFrame) {
+        harness.run();
+        harness.hover_at(rect.center());
+        harness.step();
+        let hovered = PressFrame {
+            image: render_probe(harness),
+            state: *harness.state(),
+        };
+        // The press gets a frame of its own and no further pointer event, so
+        // the frame is exactly "over the button, button held down".
+        harness.drag_at(rect.center());
+        harness.step();
+        let pressed = PressFrame {
+            image: render_probe(harness),
+            state: *harness.state(),
+        };
+        (hovered, pressed)
+    }
+
+    /// One text button of `variant` over the card plane, recording the state it
+    /// reports. Driven through `text_button` — the real entry point — so a
+    /// probe cannot pass by a painter production does not take.
+    fn press_text_button(
+        variant: Variant,
+        label: &'static str,
+    ) -> (egui_kittest::Harness<'static, PressProbe>, egui::Rect) {
+        let palette = theme::Palette::dark();
+        let rect = egui::Rect::from_min_size(egui::pos2(40.0, 22.0), egui::vec2(120.0, 36.0));
+        let id = egui::Id::new(label);
+        let mut cache = icons::IconCache::new();
+        let harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(200.0, 80.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, probe: &mut PressProbe| {
+                    let bg = ui.ctx().layer_painter(egui::LayerId::background());
+                    bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.surface);
+                    let _ = riff_gui::ui::button::text_button(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &riff_gui::ui::button::TextButton {
+                            id,
+                            rect,
+                            label,
+                            a11y: label,
+                            tooltip: None,
+                            icon: None,
+                            small: false,
+                            variant,
+                            enabled: true,
+                        },
+                    );
+                    *probe = press_probe_of(ui.ctx(), id);
+                },
+                PressProbe::default(),
+            );
+        use_riff_widget_style(&harness.ctx);
+        (harness, rect)
+    }
+
+    /// The same, for the hand-painted ghost icon button — one of the painters
+    /// that holds an `IconButton` and read only its `hovered` field.
+    fn press_icon_button() -> (egui_kittest::Harness<'static, PressProbe>, egui::Rect) {
+        let palette = theme::Palette::dark();
+        let rect = egui::Rect::from_min_size(egui::pos2(84.0, 24.0), egui::vec2(32.0, 32.0));
+        let id = egui::Id::new("press_icon_probe");
+        let mut cache = icons::IconCache::new();
+        let harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(200.0, 80.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, probe: &mut PressProbe| {
+                    let bg = ui.ctx().layer_painter(egui::LayerId::background());
+                    bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.surface);
+                    let _ = sidebar::ghost_icon_button(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        rect,
+                        id,
+                        icons::Icon::Trash,
+                        "Delete playlist",
+                        true,
+                    );
+                    *probe = press_probe_of(ui.ctx(), id);
+                },
+                PressProbe::default(),
+            );
+        use_riff_widget_style(&harness.ctx);
+        (harness, rect)
+    }
+
+    /// A ghost text button's press is a state of its own. Idle is transparent,
+    /// hover is the hover fill, press is the active fill — three different
+    /// faces, so a press that still looked like a hover would be visible on the
+    /// face alone and no stroke has to be read to tell it.
+    ///
+    /// The pressed face is also *complete* on that one frame. Press is instant
+    /// by decision (`theme::MOTION_*` is a hover-family allow-list that press
+    /// deliberately sits outside), so the first pressed frame is already the
+    /// whole active fill rather than a tween's first sample on its way there.
+    ///
+    /// **Red, proven by revert:** with `pressed` unthreaded from `text_button`
+    /// back out of `paint_text_button`, the press frame paints the hover fill
+    /// and this fails with `left: 0, right: 120` on the active-fill count — the
+    /// state assertion above it still passes, because egui was reporting the
+    /// press all along and no painter was listening.
+    #[test]
+    fn test_a_pressed_text_button_paints_a_state_distinct_from_hover() {
+        let palette = theme::Palette::dark();
+        // The pressed fill is egui's own active fill, which the theme store
+        // publishes from the palette's interact styles — so riff's buttons and
+        // egui's stock widgets cannot disagree about what a press looks like.
+        assert_eq!(
+            active_fill(),
+            palette.surface_3,
+            "the framework's active fill is the palette's own pressed surface"
+        );
+
+        let (mut harness, rect) = press_text_button(Variant::Ghost, "Delete all");
+        let patch = press_face_patch(rect);
+        let area = (patch.width() * patch.height()) as usize;
+        let (hovered, pressed) = drive_press(&mut harness, rect);
+
+        assert_eq!(
+            hovered.state,
+            PressProbe {
+                hovered: true,
+                pressed: false
+            },
+            "a pointer over the button is a hover and nothing more"
+        );
+        assert_eq!(
+            pressed.state,
+            PressProbe {
+                hovered: true,
+                pressed: true
+            },
+            "a held button reports a press — the state no painter used to read"
+        );
+        let hover_hovered = press_count_color(&hovered.image, palette.surface_2, patch);
+        let active_hovered = press_count_color(&hovered.image, palette.surface_3, patch);
+        let active_pressed = press_count_color(&pressed.image, palette.surface_3, patch);
+        let hover_pressed = press_count_color(&pressed.image, palette.surface_2, patch);
+        assert_eq!(
+            (hover_hovered, active_hovered),
+            (area, 0),
+            "a hovered ghost button wears the hover fill, whole"
+        );
+        assert_eq!(
+            active_pressed, area,
+            "the first pressed frame is already the whole active fill — press is \
+             instant, so there is no tween sample to find part-filled"
+        );
+        assert_eq!(
+            hover_pressed, 0,
+            "press REPLACES the hover fill rather than compositing with it"
+        );
+    }
+
+    /// A secondary button's face cannot carry the difference — its hover fill
+    /// *is* the active fill — so what tells a press from a hover there is the
+    /// hover stroke dropping away. A held button must never look both hovered
+    /// and pressed.
+    ///
+    /// **Red, proven by revert:** with `pressed` unthreaded, a held button is
+    /// told only that it is hovered, so the stroke stays and this fails with
+    /// `left: 92, right: 0` — 92 px of hover stroke on a button that is down.
+    #[test]
+    fn test_a_press_drops_the_text_button_hover_stroke() {
+        let palette = theme::Palette::dark();
+
+        let (mut harness, rect) = press_text_button(Variant::Secondary, "Rescan now");
+        let band = press_stroke_band(rect);
+        let (hovered, pressed) = drive_press(&mut harness, rect);
+
+        assert!(pressed.state.pressed, "the press is reported here too");
+        let stroke_hovered = press_count_color(&hovered.image, palette.focus_ring, band);
+        let stroke_pressed = press_count_color(&pressed.image, palette.focus_ring, band);
+        assert!(
+            stroke_hovered > 0,
+            "a hovered secondary button carries the hover stroke, else the next \
+             assertion would pass on a frame that painted none"
+        );
+        assert_eq!(
+            stroke_pressed, 0,
+            "a press drops the hover stroke: a held button must never look both \
+             hovered and pressed"
+        );
+    }
+
+    /// The other half of the write-only field: the painters that already hold an
+    /// `IconButton` now read `pressed` too. A ghost icon button has no hover
+    /// fill to swap out — hovering only reveals the glyph — so its press is the
+    /// first frame that paints a face at all, which is why the hover frame
+    /// counts zero.
+    ///
+    /// **Red, proven by revert:** with the `button.pressed` arm removed from
+    /// `sidebar::ghost_icon_button`, this fails on a zero pixel count — "found
+    /// 0 px of the active fill #28_25_21_FF in the face", because nothing paints
+    /// a fill behind the glyph while the button is held down.
+    #[test]
+    fn test_a_pressed_ghost_icon_button_paints_the_active_fill() {
+        let active = active_fill();
+
+        let (mut harness, rect) = press_icon_button();
+        let patch = press_face_patch(rect);
+        let (hovered, pressed) = drive_press(&mut harness, rect);
+
+        assert_eq!(
+            pressed.state,
+            PressProbe {
+                hovered: true,
+                pressed: true
+            },
+            "the icon button reports the press it used to compute and discard"
+        );
+        let fill_hovered = press_count_color(&hovered.image, active, patch);
+        let fill_pressed = press_count_color(&pressed.image, active, patch);
+        assert_eq!(
+            fill_hovered, 0,
+            "hover alone paints no fill on a ghost icon button"
+        );
+        assert!(
+            fill_pressed > 0,
+            "a held ghost icon button paints the framework's active fill, found \
+             {fill_pressed} px of the active fill {active:?} in the face"
+        );
+    }
+}
+
 #[cfg(test)]
 mod component_boundary_tests {
     use eframe::egui;
@@ -17435,5 +19163,239 @@ mod component_boundary_tests {
             riff_gui::ui::app::apply_list_menu_intent;
         let _duration: fn(std::time::Duration) -> String = riff_gui::ui::app::format_duration;
         let _expand: fn(&str) -> std::path::PathBuf = riff_gui::ui::settings::expand_tilde;
+    }
+}
+
+/// Seek-bar affordance (issue 08): the hover thumb, the dragged-track
+/// thickening, and the geometry tokens that own both.
+///
+/// The spec's coverage table is explicit that this change is appearance-only and
+/// that no hover is simulated, so nothing here drives a pointer onto a control.
+/// What these tests pin instead is everything the hover is *built from*, which is
+/// the part that can rot with no pixel ever changing:
+///
+/// - the dimensions are tokens in the seek surface's own store, ordered so the
+///   grabbed track is thicker than the idle one and the thumb caps it;
+/// - at rest a seek bar paints no thumb and its track is the idle thickness —
+///   and the *same* counter, on a frame that differs only in which of the
+///   control's two thumb slots the diameter comes from, does find a thumb on a
+///   control that wears one unconditionally, so the first assertion cannot pass
+///   on a frame that renders nothing at all;
+/// - the thickening is a pure function of the caller's rect and the drag state,
+///   asserted directly, with no frame and no pointer involved.
+///
+/// That last one is why the derivation is a `pub fn` rather than an expression
+/// inside `paint`: dragging must change the track's thickness and *only* its
+/// thickness, or the bar shifts under the pointer at the moment the user can
+/// least afford to see it move.
+mod seek_affordance_tests {
+    use riff_gui::ui::linear::{LinearControl, active_track, linear_control};
+    use riff_gui::ui::theme::Palette;
+    use riff_gui::ui::theme::geometry::now_playing::SEEK_H;
+    use riff_gui::ui::theme::geometry::playerbar::VOLUME_THUMB;
+    use riff_gui::ui::theme::geometry::seek::{THUMB_D, TRACK_H, TRACK_H_ACTIVE};
+    use std::collections::BTreeSet;
+
+    /// Frame pixels within a hair of `color`, at the same +/-2 tolerance the rest
+    /// of this suite uses because rounded edges antialias.
+    fn count_near(image: &image::RgbaImage, color: egui::Color32) -> usize {
+        image
+            .pixels()
+            .filter(|p| {
+                p.0[0].abs_diff(color.r()) <= 2
+                    && p.0[1].abs_diff(color.g()) <= 2
+                    && p.0[2].abs_diff(color.b()) <= 2
+            })
+            .count()
+    }
+
+    /// How many distinct pixel rows carry `color` anywhere in the frame — the
+    /// painted *height* of a band, read straight off the pixels rather than off
+    /// the caller's own rect. A row count is used instead of a pixel count
+    /// because the band's width is not what these tests claim anything about.
+    fn rows_carrying(image: &image::RgbaImage, color: egui::Color32) -> usize {
+        image
+            .enumerate_pixels()
+            .filter(|(_, _, p)| {
+                p.0[0].abs_diff(color.r()) <= 2
+                    && p.0[1].abs_diff(color.g()) <= 2
+                    && p.0[2].abs_diff(color.b()) <= 2
+            })
+            .map(|(_, y, _)| y)
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    /// Render one seek-bar-shaped linear control **at rest** and hand back the
+    /// frame. No pointer event is ever fed to the harness, so egui has no
+    /// `latest_pos` at all: nothing is hovered, nothing is dragged, and — the
+    /// reason this seam is usable at all — `Harness::render` paints no cursor
+    /// triangle either (it only does so when a pointer is in the window).
+    ///
+    /// The two flags select which thumb the control wears: a seek bar asks for
+    /// the hover-driven one and the volume slider brings its own, so holding
+    /// everything else fixed leaves exactly one thing varying between the pair of
+    /// frames the resting test compares.
+    fn render_at_rest(hover_thumb: bool, always_thumb: bool) -> image::RgbaImage {
+        let palette = Palette::dark();
+        let track = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(160.0, TRACK_H));
+        let hit = track.expand2(egui::vec2(0.0, 12.0));
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(200.0, 48.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(move |ui| {
+                linear_control(
+                    ui,
+                    &palette,
+                    &LinearControl {
+                        id: egui::Id::new("test_seek_rest"),
+                        track,
+                        hit,
+                        value: 0.5,
+                        thumb: always_thumb.then_some(VOLUME_THUMB),
+                        hover_thumb,
+                        interactive: true,
+                        label: "Seek",
+                    },
+                );
+            });
+        harness.run();
+        harness
+            .render()
+            .expect("the linear control renders headlessly")
+    }
+
+    /// The three dimensions this affordance is built from are tokens in the seek
+    /// surface's own store, and they are ordered the only way that reads:
+    /// dragging thickens the track, and the thumb is big enough to cap the
+    /// thickest state of the track it rides on.
+    ///
+    /// The upper bounds are the real constraint: both seek surfaces build a hit
+    /// area out of their own row heights, Now Playing's being the tighter of the
+    /// two at 24px, so a thumb or a grabbed track taller than that would spill
+    /// onto the meta text above the row.
+    #[test]
+    fn test_seek_thickness_and_thumb_are_ordered_tokens_in_the_seek_store() {
+        // Read through locals: the tokens are `const`s, and an assertion the
+        // compiler can fold to `true` is a build error under this workspace's
+        // clippy configuration. The player-bar token test writes its pins as
+        // `(token - value).abs()` for the same reason.
+        let (idle, active, thumb, hit_h, volume) =
+            (TRACK_H, TRACK_H_ACTIVE, THUMB_D, SEEK_H, VOLUME_THUMB);
+
+        assert!(idle > 0.0, "the idle track is a real thickness: {idle}");
+
+        assert!(
+            active > idle,
+            "the grabbed track must be thicker than the idle one — that difference \
+             is the whole grab signal: idle {idle}, active {active}"
+        );
+        assert!(
+            active <= hit_h,
+            "the grabbed track has to stay inside the tightest seek hit area \
+             ({hit_h}px in Now Playing), or it bleeds onto the row above it"
+        );
+
+        assert!(
+            thumb >= active,
+            "the thumb caps the thickest state of the track, so it cannot be \
+             smaller than it: thumb {thumb}, active track {active}"
+        );
+        assert!(
+            thumb <= hit_h,
+            "the thumb has to stay inside the tightest seek hit area ({hit_h}px), \
+             or it spills over the time readouts flanking the bar"
+        );
+
+        // The volume slider's thumb is a *different* dimension on a *different*
+        // surface, and it is unchanged: the volume control keeps its own 10px
+        // always-visible thumb, which is what keeps the two bars distinguishable
+        // by purpose instead of looking like one of them lost its thumb.
+        assert!(
+            (volume - 10.0).abs() < f32::EPSILON,
+            "the volume slider keeps its mockup thumb diameter: {volume}"
+        );
+    }
+
+    /// At rest a seek bar paints no thumb, and its track is the idle thickness.
+    ///
+    /// The two frames share their drawing code, value, position and hit area, and
+    /// differ only in which of the control's two thumb slots the diameter comes
+    /// from — the second frame being the volume slider's real shape, at the
+    /// volume slider's own diameter. So it is the control that keeps the first
+    /// assertion honest: without it, "no ink pixels" would also be what a control
+    /// that painted nothing at all would report, and the band-height count would
+    /// be carrying the whole test.
+    #[test]
+    fn test_seek_bar_paints_no_thumb_at_rest_and_keeps_the_idle_thickness() {
+        let palette = Palette::dark();
+
+        let seek = render_at_rest(true, false);
+        assert_eq!(
+            count_near(&seek, palette.ink),
+            0,
+            "a seek bar the pointer is not over paints no thumb — the affordance \
+             that says where the pointer is must be absent, not dimmed"
+        );
+        assert_eq!(
+            rows_carrying(&seek, palette.surface_3),
+            TRACK_H as usize,
+            "an ungrabbed track is painted at the idle thickness, so the only \
+             hover-driven change to the bar's pixels is an added thumb"
+        );
+
+        // The control: same code, same value, same ink — but a thumb the control
+        // wears unconditionally, exactly like the volume slider's.
+        let always = render_at_rest(false, true);
+        assert!(
+            count_near(&always, palette.ink) > 0,
+            "the same counter finds the volume slider's always-visible thumb, so \
+             the resting assertion above is about the hover gate and not about a \
+             frame that renders nothing"
+        );
+    }
+
+    /// The grabbed track is the caller's own span and centre at the *token's*
+    /// thickness: the thickening is a thickness, not a delta on whatever height
+    /// the caller happened to ask for, and at rest it is the caller's rect
+    /// byte-for-byte so an idle frame cannot drift by a rounding step.
+    #[test]
+    fn test_dragged_track_thickens_on_the_same_span_and_centre() {
+        let idle = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(160.0, TRACK_H));
+
+        assert_eq!(
+            active_track(idle, false),
+            idle,
+            "at rest the painted track *is* the caller's rect — no re-derivation, so \
+             an idle frame is identical to a golden's"
+        );
+
+        let grabbed = active_track(idle, true);
+        assert_eq!(
+            (grabbed.left(), grabbed.right()),
+            (idle.left(), idle.right()),
+            "grabbing changes the thickness only: the horizontal span — and with it \
+             the fraction any pointer position maps to — must not move"
+        );
+        assert!(
+            (grabbed.center().y - idle.center().y).abs() < f32::EPSILON,
+            "the grabbed track keeps the idle track's centre, so the bar does not \
+             shift under a pointer that is already sitting on it"
+        );
+        assert!(
+            (grabbed.height() - TRACK_H_ACTIVE).abs() < f32::EPSILON,
+            "the grabbed track is the active token: {} vs {TRACK_H_ACTIVE}",
+            grabbed.height()
+        );
+        assert!(grabbed.height() > idle.height());
+
+        // A caller that ever passes a taller rect than `TRACK_H` still gets the
+        // same grabbed bar, measured from the token and not from its own height.
+        let tall = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(160.0, SEEK_H));
+        assert!(
+            (active_track(tall, true).height() - TRACK_H_ACTIVE).abs() < f32::EPSILON,
+            "the active thickness is the token, never the caller's height plus a \
+             delta"
+        );
     }
 }

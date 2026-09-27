@@ -628,6 +628,11 @@ fn show_seek_row(
             hit: seek_hit,
             value: frac,
             thumb: None,
+            // A seek bar grows a thumb of the seek surface's own diameter while
+            // the pointer is on it, and thickens while it is dragged. The
+            // diameter is not passed here: it is a token of that surface, so this
+            // call site names the affordance and declares no dimension of its own.
+            hover_thumb: true,
             interactive: content.total.is_some(),
             label: "Seek",
         },
@@ -668,6 +673,11 @@ fn draw_volume_slider(
             hit: vol_hit,
             value: volume,
             thumb: Some(VOLUME_THUMB),
+            // Issue 08 added the seek bar's hover-driven grab affordance as its
+            // own field, so this literal has to answer it: `false` is the volume
+            // slider's pre-existing behaviour, unchanged — its thumb is the
+            // permanent one above, and it never thickens its track.
+            hover_thumb: false,
             interactive: true,
             label: "Volume",
         },
@@ -929,12 +939,21 @@ fn ghost_circle_button(
     let button = super::button::begin_icon_button(ui, rect, id, false);
     let painter = ui.painter_at(rect);
 
-    if button.hovered {
+    // Press replaces hover, and drops the hover ring with it: a held button
+    // must not look like a hovered one that is somehow also held. Instant, like
+    // every press — rule 4 of the motion rule in `theme`.
+    if button.pressed {
+        painter.circle_filled(
+            rect.center(),
+            rect.width() / 2.0,
+            super::button::active_fill(ui),
+        );
+    } else if button.hovered {
         painter.circle_filled(rect.center(), rect.width() / 2.0, palette.surface_2);
     }
     let tint = if active {
         palette.brand_primary
-    } else if button.hovered {
+    } else if button.hovered || button.pressed {
         palette.ink
     } else {
         palette.ink_2
@@ -962,13 +981,29 @@ fn primary_play_button(
     // The FAB is the app's most-reached primary action, so it wears the same
     // lit-from-above face and the same accent bloom as a `Primary` text button —
     // through the same authority, so the two cannot drift.
-    super::button::paint_primary_face(ui, palette, rect, rect.width() / 2.0);
-    if button.hovered {
-        painter.circle_stroke(
+    //
+    // Press replaces that face, and the hover ring with it: the app's most
+    // pressed control is the one that must acknowledge a press instantly (rule
+    // 4 of the motion rule in `theme`), and the framework's own active fill is
+    // what a stock egui button would show here — so a held FAB and a held egui
+    // button are the same event wearing the same face. The bloom is left in
+    // place: it reaches past the button, and a held button that also dimmed its
+    // glow would read as disabled rather than as pressed.
+    if button.pressed {
+        painter.circle_filled(
             rect.center(),
             rect.width() / 2.0,
-            egui::Stroke::new(1.5_f32, palette.border),
+            super::button::active_fill(ui),
         );
+    } else {
+        super::button::paint_primary_face(ui, palette, rect, rect.width() / 2.0);
+        if button.hovered {
+            painter.circle_stroke(
+                rect.center(),
+                rect.width() / 2.0,
+                egui::Stroke::new(1.5_f32, palette.border),
+            );
+        }
     }
     let tex_id = cache.texture(ui.ctx(), icon, 18.0, palette.on_brand);
     let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(18.0, 18.0));

@@ -2538,6 +2538,14 @@ impl RiffApp {
             return;
         }
 
+        // `.animated(false)`: this list is driven by a `ScrollControl`, so it
+        // jumps to a named offset (a restored position, or the top after a
+        // selection change) and a keep-in-view jump must not lerp. The flag
+        // governs programmatic scroll-to offsets only, not wheel feel — the
+        // reason is written once on
+        // [`ScrollControl`](crate::ui::scroll_memory::ScrollControl). The other
+        // `ScrollArea`s in this file (and elsewhere) leave the flag on on
+        // purpose; do not "fix" the inconsistency by flipping them.
         let scroll_area = egui::ScrollArea::vertical()
             .id_salt(control.salt)
             .animated(false)
@@ -3258,6 +3266,40 @@ impl RiffApp {
                 );
             }
         });
+
+        // The tree drives its own unfold (issue 03). egui's animation manager
+        // advances a tween's value whenever it is asked and never schedules the
+        // pass that would ask again, so a riff-driven tween that does not say
+        // "there is another frame" itself renders as the single frame that
+        // started it — a click that looks like a dropped frame. Every surface
+        // riff tweens therefore carries its own "ask while not settled"
+        // condition, and this is the Folders tree's.
+        //
+        // The clock is the collapsing state's own openness, not a timer: it is
+        // the value the tween is actually moving, so the request stops on the
+        // frame the body lands rather than one duration after it started, and
+        // retuning the published duration cannot desynchronise the two.
+        //
+        // "Not settled" is the *open* interval, not `openness < 1.0`. A closed
+        // body rests at exactly `0.0`, so the one-sided reading is true for
+        // every collapsed folder forever: the sidebar would ask the frame loop
+        // for a frame on every pass with the tree shut, trading a missing
+        // frame during a tween for a permanently uncapped loop. The bound at
+        // zero is what keeps a settled surface — open or shut — silent.
+        //
+        // The accessor reports `1.0` outright under
+        // `Memory::everything_is_visible`, a debug-only flag riff never sets,
+        // so a flag-set test pays nothing for this and production cannot take
+        // the early out.
+        //
+        // The unfold duration is not retuned here. It was always going to be
+        // what the motion tokens publish; the missing frame request was the
+        // whole defect, and a shorter duration would have hidden it rather
+        // than fixed it.
+        let openness = collapsing.openness(ui.ctx());
+        if openness > 0.0 && openness < 1.0 {
+            ui.ctx().request_repaint();
+        }
     }
 }
 

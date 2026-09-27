@@ -90,7 +90,8 @@ mod tests {
     }
 
     /// Build a harness whose ui closure stays inert until the palette's style
-    /// and the Inter faces are installed on it.
+    /// and the Inter faces are installed on it, with time-driven style fields
+    /// pinned after both ([`pin_settled_time`]).
     ///
     /// `HarnessBuilder::build_ui` draws — and then `run_ok`s — frames from
     /// inside its own constructor, i.e. before the caller gets `harness.ctx`
@@ -117,6 +118,11 @@ mod tests {
             });
         theme::install(&harness.ctx, &palette);
         harness.ctx.set_fonts(inter_only_font_definitions());
+        // AFTER the palette install, never before: `theme::install` replaces
+        // the whole `Arc<Style>` for the palette's theme from a
+        // `Style::default()`-derived build, so a determinism pass issued
+        // earlier is silently undone. See [`pin_settled_time`].
+        pin_settled_time(&harness.ctx);
         ready.set(true);
         harness
     }
@@ -150,8 +156,21 @@ mod tests {
     ///   the *next* frame — `browser_column_focused_dark` needs frame two for
     ///   its focus ring.
     ///
-    /// The harness never advances `input.time`, so a fixed frame count is
-    /// still deterministic: the equalizer bars sit at phase 0 in every frame.
+    /// The clock is **not** frozen, and that is exactly what makes a fixed
+    /// frame count the whole contract. kittest never *sets* `input.time`; it
+    /// only sets `input.predicted_dt` to its fixed
+    /// `HarnessBuilder::step_dt` (0.25 s), and egui derives
+    /// `time = prev + predicted_dt`. The clock therefore advances by exactly
+    /// 0.25 s per frame — moving, but by a machine-independent amount, so a
+    /// fixed frame count pins a fixed clock value and the render is
+    /// deterministic.
+    ///
+    /// The consequence, recorded so it is not rediscovered: the playing row's
+    /// equalizer reads that clock for its bar phase, so its baseline sits at
+    /// whatever phase two frames reaches. A tempo change in
+    /// `sidebar::equalizer_heights` legitimately moves `sidebar_playing_dark`
+    /// — that is a re-baseline, not a flake, and nothing else has to move
+    /// with it.
     fn snapshot_animating(
         name: &str,
         size: egui::Vec2,
@@ -198,6 +217,102 @@ mod tests {
                     ui.add(play);
                 });
         });
+    }
+
+    // --- Harness determinism (ui-motion issue 01) -------------------------------
+
+    /// Pin the three time-driven [`egui::Style`] fields on **both** theme
+    /// slots: tween duration, programmatic scroll animation, cursor blink.
+    ///
+    /// egui 0.35 has no `Context::set_animation_time` and no
+    /// `Context::disable_scroll_animation` — these are plain fields on
+    /// `Style`, so the style is the only lever and the whole install has to be
+    /// re-asserted, not patched field-by-field before someone else's install
+    /// runs.
+    ///
+    /// **Both** slots, even though [`theme::install`] writes one: it calls
+    /// `set_style_of`, which replaces that theme's whole `Arc<Style>` with a
+    /// `Style::default()`-derived build, silently restoring egui's 0.2 s tween,
+    /// its 0.1–0.3 s scroll tween and a blinking cursor for that slot; the
+    /// other slot keeps whatever egui shipped. Asserting this *after* the
+    /// install is the whole point — "baselines capture settled state" has to be
+    /// a decision the suite makes, not an accident of call order.
+    ///
+    /// The scroll tween goes through [`egui::style::ScrollAnimation::none`],
+    /// egui's own spelling of "no scroll animation" (`points_per_second:
+    /// INFINITY`, `duration: 0..=0`), so a change to that spelling upstream
+    /// reaches us for free instead of being re-derived here.
+    ///
+    /// The production path is deliberately untouched. The windowed app *is*
+    /// supposed to animate, so egui's defaults stay where they are; this is a
+    /// suite concern and lives in the suite.
+    fn pin_settled_time(ctx: &egui::Context) {
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+            style.visuals.text_cursor.blink = false;
+        });
+    }
+
+    /// Assert [`pin_settled_time`]'s invariant on both theme slots.
+    ///
+    /// The failure this guards is silent: a `style_from` that grew a motion
+    /// field, or a `set_style_of` moved ahead of the re-assert, would shift
+    /// every affected baseline by a fraction of a tween and fail nothing until
+    /// someone diffed eighty PNGs. So the invariant is asserted, not just
+    /// commented — and the assertion is about the *style*, which is the
+    /// decision input, not about a pixel.
+    fn assert_settled_on_both_slots(ctx: &egui::Context) {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let style = ctx.style_of(theme);
+            assert_eq!(
+                style.animation_time, 0.0,
+                "{theme:?} slot: tweened values must snap, so a golden never \
+                 captures a mid-flight value"
+            );
+            assert_eq!(
+                style.scroll_animation.duration,
+                egui::Rangef::new(0.0, 0.0),
+                "{theme:?} slot: a scroll-to offset must land in one frame, not lerp"
+            );
+            assert!(
+                style.scroll_animation.points_per_second.is_infinite()
+                    && style.scroll_animation.points_per_second.is_sign_positive(),
+                "{theme:?} slot: `ScrollAnimation::none()` spells 'no animation' as \
+                 an infinite speed — anything finite reintroduces a distance-scaled \
+                 duration"
+            );
+            assert!(
+                !style.visuals.text_cursor.blink,
+                "{theme:?} slot: a blinking caret is a function of the clock, not of \
+                 the frame, and would make every focused-text golden a coin flip"
+            );
+        }
+    }
+
+    #[test]
+    fn golden_helper_pins_settled_time_on_both_theme_slots() {
+        let _slot = harness_slot();
+        let harness = with_golden_style(
+            egui::vec2(64.0, 64.0),
+            Palette::dark(),
+            |_ui: &mut egui::Ui, _palette: &Palette| {},
+        );
+        assert_settled_on_both_slots(&harness.ctx);
+    }
+
+    /// The composed-`RiffApp` harness installs its palette from *inside* its own
+    /// first `update`, so it inherits neither the `ready` gate nor the
+    /// re-assert that [`with_golden_style`] issues. It gets its own
+    /// [`pin_settled_time`] for exactly that reason, and this test is what
+    /// keeps the two from drifting apart — a future harness that forgot to
+    /// re-assert would otherwise be a silent mid-blink or mid-tween capture,
+    /// which is the failure mode this whole mechanism exists to prevent.
+    #[test]
+    fn composed_shell_harness_pins_settled_time_on_both_theme_slots() {
+        let _slot = harness_slot();
+        let shell = composed_shell(egui::vec2(1280.0, 800.0));
+        assert_settled_on_both_slots(&shell.ctx);
     }
 
     // --- Golden baselines --------------------------------------------------------
@@ -3067,8 +3182,11 @@ mod tests {
         );
     }
 
-    /// The sidebar's `playing: true` equalizer row. The bars read `input.time`,
-    /// which the harness leaves at 0, so the animation is deterministic here.
+    /// The sidebar's `playing: true` equalizer row. The bars read `input.time`
+    /// — which the harness does not leave at 0 but advances by its fixed 0.25 s
+    /// step every frame — so this golden is deterministic because the *frame
+    /// count* is fixed, and its bar phase is the phase two frames reaches.
+    /// Retuning the equalizer's tempo legitimately moves this one image.
     #[test]
     fn sidebar_playing_dark_matches_golden_baseline() {
         snapshot_animating(
@@ -3933,6 +4051,23 @@ mod tests {
         // frame cannot have cached a system-fallback metric into a galley that
         // survives into the snapshot frame.
         harness.ctx.set_fonts(inter_only_font_definitions());
+        // The composed shell needs its own [`pin_settled_time`] for the same
+        // reason `with_golden_style` does, and by the same mechanism: kittest's
+        // `Harness::new` zeroes animation time, scroll animation and cursor
+        // blink on both slots (`egui_kittest-0.35.0/src/lib.rs`), but it does so
+        // *before* it runs the app, and the app's first `update` then calls
+        // `theme::install`, which replaces the whole dark-slot `Arc<Style>`
+        // with a `Style::default()`-derived build and hands all three back to
+        // egui's defaults. This harness does not go through `with_golden_style`
+        // — it builds a real `RiffApp` through `build_eframe` — so it inherits
+        // neither the gate nor the re-assert. Pinned by
+        // `composed_shell_harness_pins_settled_time_on_both_theme_slots`.
+        //
+        // The re-assert survives the two `snapshot_composed_shell` frames
+        // because `RiffApp::apply_theme` short-circuits on an unchanged
+        // `(dark, high_contrast)` selection: installation happens once at init
+        // and again only when the theme selection changes, never per frame.
+        pin_settled_time(&harness.ctx);
         harness
     }
 
@@ -3945,9 +4080,12 @@ mod tests {
     ) {
         // The app schedules a periodic repaint tick every frame (the end-of-
         // frame responsiveness heartbeat), so `run()` would spin past its step
-        // budget. The harness never advances `input.time`, so a fixed two
-        // frames is deterministic — the same contract `snapshot_animating`
-        // relies on.
+        // budget. The harness does not freeze `input.time`: it never sets it,
+        // and egui derives it as `prev + predicted_dt` with `predicted_dt`
+        // pinned to the harness's fixed 0.25 s step. So the clock moves — a
+        // fixed two frames is deterministic because the clock lands on the
+        // same value on every machine, which is the same contract
+        // `snapshot_animating` relies on.
         shell.run_steps(2);
         let frame = shell
             .render()

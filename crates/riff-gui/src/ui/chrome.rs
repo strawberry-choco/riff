@@ -431,7 +431,16 @@ fn window_control_button(
     let button = super::button::begin_icon_button(ui, rect, id, false);
     let painter = ui.painter_at(rect);
 
-    if button.hovered {
+    // Press replaces the hover fill rather than compositing with it, so a held
+    // window control never looks like a hovered one that is somehow also held —
+    // and the pressed fill is the framework's own active fill, read off the
+    // style, so these controls agree with egui's stock widgets about what a
+    // press is. Instant (rule 4 of the motion rule in `theme`). The destructive
+    // close's error red is a *hover* treatment, so it steps aside for the press
+    // exactly as the neutral one does.
+    if button.pressed {
+        painter.rect_filled(rect, theme::RADIUS_SM, super::button::active_fill(ui));
+    } else if button.hovered {
         let fill = if danger {
             palette.error
         } else {

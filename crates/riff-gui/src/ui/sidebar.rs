@@ -39,21 +39,127 @@ pub fn indent_px(level: usize) -> f32 {
 
 // --- Equalizer bars -------------------------------------------------------------
 
+/// The equalizer's repaint budget: 20 Hz, which is the cadence the app already
+/// runs at while playback is running, so the bars cost no repaint the player
+/// was not already paying for.
+///
+/// At the tempo below this is 8–10 samples per cycle per bar (0.41–0.50 s
+/// cycles sampled every 50 ms), which is clean: no bar's peak or trough falls
+/// between two samples. 60 Hz would triple the app's *continuous* repaint cost
+/// for a 14x14 px decoration, and a decoration is the worst thing to spend a
+/// frame budget on — the eye reads the tempo, not the frame rate. Kept as a
+/// named constant so the budget is stated once, next to the reason, rather than
+/// as a bare `50` in the painter.
+///
+/// A `Duration` and not a float on purpose: a float constant of a measured
+/// type in a view module is what the dimension sweep is for (ADR 0004), and a
+/// repaint interval is a frame budget, not a design token.
+const EQ_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
+
 /// Normalized equalizer-bar heights for `phase` seconds of playback time:
 /// each bar bounces on its own sine wave with a small phase offset, so the
 /// group reads as dancing rather than pulsing. Pure and deterministic — the
-/// golden harness renders it idle, and `ui_tests` pins the animation
-/// properties.
+/// same phase always yields the same four heights, so a held phase (see
+/// [`equalizer_phase`]) is simply a held argument and nothing about the
+/// animation's shape needs a harness, a renderer or a frame to verify.
+///
+/// The rates are 12.5 / 15.4 / 13.7 / 14.6 rad/s against the 5.1 / 6.3 / 4.7 /
+/// 5.9 this replaced, and they moved NON-uniformly, which is the whole point:
+///
+/// - **Tempo.** The periods come down from 1.232 / 0.997 / 1.336 / 1.065 s to
+///   0.503 / 0.408 / 0.459 / 0.430 s — a mean of 1.158 s to a mean of 0.450 s,
+///   2.57x faster. At a second per cycle the group sways; at half a second it
+///   reads as playing. Scaling all four rates by a constant would have hit the
+///   same tempo and left the next point untouched.
+/// - **Spread.** 15.4 / 12.5 = 1.232x, down from 6.3 / 4.7 = 1.34x. The
+///   offsets are what make four bars read as dancing; the spread is what made
+///   them read as ONE shape breathing, because at 1.34x the fastest bar runs a
+///   third of a cycle ahead of the slowest and they visibly slide into and out
+///   of agreement. At 1.23x they stay neighbours.
+/// - **Offsets.** Unchanged at 0.0 / 1.3 / 2.6 / 3.9 rad. The tempo was the
+///   defect; the offsets were not.
+///
+/// They stay inline literals here rather than becoming a `const`: they are
+/// algorithmic shape data for one hand-painted glyph, which is the category a
+/// view is allowed to own, and a float `const` in a view module is exactly what
+/// `test_view_code_declares_no_dimensions_of_its_own` exists to catch. Moving
+/// them into `theme.rs` would put shape data in the design-token store, and
+/// widening the sweep to allow it is not the failure mode that sweep has.
+///
+/// **The golden baseline's phase is set by the harness's frame count**, not by
+/// a token: `sidebar_playing_dark` renders this row with `playing: true`
+/// through `snapshot_animating`, so the baseline captures the bars mid-dance.
+/// A tempo change here therefore moves that baseline, and that is a
+/// re-baseline rather than a regression. What the phase is is worth recording
+/// exactly, because it is not obvious: the harness never *sets* `input.time`,
+/// it pins `predicted_dt` to a fixed 0.25 s step, and egui derives
+/// `time = prev + predicted_dt` from a clock that also runs through the
+/// harness's own build frames. Reading `input.time` therefore captured
+/// 0.5167 s and 0.7667 s on the two painted frames — 0.25 s of build frame the
+/// `ready` gate had already spent before the composition drew anything. The
+/// held phase accumulates the same two 0.25 s steps from zero, so the baseline
+/// now sits at exactly 0.5 s: a pure function of the frame count, which is the
+/// determinism contract the harness's doc claims and did not quite have. The
+/// idle sidebar baselines (`sidebar_dark`, `sidebar_light`) pin a row that has
+/// never played, and a never-played row has no phase to advance, so they stay
+/// byte-identical through any retune here.
 #[must_use]
 #[expect(clippy::cast_possible_truncation)]
 pub fn equalizer_heights(phase: f64) -> [f32; EQ_BAR_COUNT] {
     let t = phase;
     [
-        ((t * 5.1 + 0.0).sin() * 0.5 + 0.5).clamp(0.15, 1.0) as f32,
-        ((t * 6.3 + 1.3).sin() * 0.5 + 0.5).clamp(0.15, 1.0) as f32,
-        ((t * 4.7 + 2.6).sin() * 0.5 + 0.5).clamp(0.15, 1.0) as f32,
-        ((t * 5.9 + 3.9).sin() * 0.5 + 0.5).clamp(0.15, 1.0) as f32,
+        ((t * 12.5 + 0.0).sin() * 0.5 + 0.5).clamp(0.15, 1.0) as f32,
+        ((t * 15.4 + 1.3).sin() * 0.5 + 0.5).clamp(0.15, 1.0) as f32,
+        ((t * 13.7 + 2.6).sin() * 0.5 + 0.5).clamp(0.15, 1.0) as f32,
+        ((t * 14.6 + 3.9).sin() * 0.5 + 0.5).clamp(0.15, 1.0) as f32,
     ]
+}
+
+/// The equalizer phase this frame, in seconds of playback time, for the row
+/// with id `row_id`.
+///
+/// **A paused row holds the last advanced phase; it does not reset it.**
+/// Reading the phase as zero whenever the row is not playing snapped all four
+/// bars to their phase-zero heights on every pause, which is a lopsided
+/// staircase — phase zero is not a shape the four sine waves happen to be in
+/// agreement on (they sit at 0.50 / 0.98 / 0.76 / 0.16 there), so pressing
+/// pause visibly snapped the decoration into a shape that playing never
+/// produces.
+///
+/// The phase therefore lives in egui's memory under the row's own id, salted so
+/// it cannot collide with the row's focus or interaction state, and it only
+/// advances while the row is playing. `Memory::data` is a map keyed on
+/// `egui::Id` that egui never clears between frames — `insert_temp` means "not
+/// written to `memory.json` on shutdown", not "per frame" — so the held value
+/// survives the frame boundary it was read on, a window resize, and a re-layout
+/// that keeps the row's id, without becoming a field on [`TreeRow`] or on
+/// whatever read model the caller built the row from. A row that has never
+/// played has no entry and paints phase zero, which is what keeps every
+/// never-playing baseline byte-identical.
+///
+/// Not persisted, deliberately: a launch has no last advanced phase to restore,
+/// and a phase carried across a restart would be a resume from an arbitrary
+/// point in a cycle the user never reached.
+///
+/// egui's own `InputState::time` would be the alternative, and it is what this
+/// used to read. It is the WRONG clock for a pause: it keeps running while
+/// paused, so resuming would jump the bars forward by however long the pause
+/// lasted rather than continuing from the shape they were frozen at. The
+/// advance is `stable_dt` — egui's animation clock, the delta it expects the
+/// next frame to take — clamped to a quarter of a second, because a stalled
+/// frame (a blocked disk, a laptop waking) would otherwise fling the bars a
+/// second and a half ahead. The clamp is inline rather than named: a float
+/// constant in a view module is what the dimension sweep is for, and a frame
+/// budget is not a design token (see [`EQ_REPAINT_INTERVAL`]).
+fn equalizer_phase(ui: &egui::Ui, row_id: egui::Id, playing: bool) -> f64 {
+    let key = row_id.with("eq_phase");
+    let held = ui.memory(|m| m.data.get_temp::<f64>(key)).unwrap_or(0.0);
+    if !playing {
+        return held;
+    }
+    let phase = held + f64::from(ui.input(|i| i.stable_dt.clamp(0.0, 0.25)));
+    ui.memory_mut(|m| m.data.insert_temp(key, phase));
+    phase
 }
 
 /// Paint the equalizer-bars indicator into `rect`: `heights` are normalized
@@ -118,12 +224,20 @@ pub fn ghost_icon_button(
     hover_reveal: bool,
 ) -> bool {
     let button = super::button::begin_icon_button(ui, rect, id, false);
-    if !hover_reveal || button.hovered {
-        let tint = if button.hovered {
-            palette.ink
-        } else {
-            palette.ink_3
-        };
+    // A ghost button has no hover *fill* — hovering only reveals the glyph at
+    // full ink — so the press is the first thing it ever paints behind that
+    // glyph: a held ghost button wears the framework's active fill, which is
+    // what a stock egui button of the same size would wear, and the glyph goes
+    // to full ink with it. Press replaces hover here rather than adding to it
+    // for the same reason it does everywhere else (rule 4 of the motion rule in
+    // `theme`): the two are states, not strengths, and this one is instant.
+    let lit = button.hovered || button.pressed;
+    if button.pressed {
+        ui.painter_at(rect)
+            .rect_filled(rect, theme::RADIUS_SM, super::button::active_fill(ui));
+    }
+    if !hover_reveal || lit {
+        let tint = if lit { palette.ink } else { palette.ink_3 };
         let tex_id = cache.texture(ui.ctx(), icon, 16.0, tint);
         ui.painter_at(rect)
             .image(tex_id, rect.shrink(4.0), UV_FULL, tint);
@@ -370,9 +484,11 @@ fn paint_row_band(
 ) {
     let focused = ui.memory(|m| m.has_focus(cells.response.id));
     super::row::paint_row_band(
+        ui,
         painter,
         palette,
         cells.whole,
+        cells.response.id,
         row.selected,
         cells.hovered(),
         focused,
@@ -482,11 +598,9 @@ fn paint_row_leading(
 
     if row.now_playing {
         // The animated equalizer-bars indicator replaces the old play glyph.
-        let phase = if row.playing {
-            ui.ctx().input(|i| i.time)
-        } else {
-            0.0
-        };
+        // The phase is the row's own, held across a pause — see
+        // [`equalizer_phase`].
+        let phase = equalizer_phase(ui, cells.response.id, row.playing);
         let heights = equalizer_heights(phase);
         let eq_rect = egui::Rect::from_center_size(
             egui::pos2(x + 7.0, cells.rect.center().y),
@@ -495,8 +609,9 @@ fn paint_row_leading(
         paint_equalizer(painter, eq_rect, palette.brand_primary, &heights);
         x += 14.0 + ICON_GAP;
         if row.playing {
-            // Keep the bars dancing between repaints.
-            ui.ctx().request_repaint_after(Duration::from_millis(50));
+            // Keep the bars dancing between repaints, at the budget the
+            // tempo was chosen to suit.
+            ui.ctx().request_repaint_after(EQ_REPAINT_INTERVAL);
         }
     }
 
@@ -609,9 +724,11 @@ pub fn playlist_row(
 
     let focused = ui.memory(|m| m.has_focus(response.id));
     super::row::paint_row_band(
+        ui,
         &painter,
         palette,
         rect,
+        response.id,
         selected,
         response.hovered(),
         focused,

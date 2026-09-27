@@ -40,8 +40,13 @@ A mismatch fails the test and prints the absolute path of the diff image.
      one `run()` is wrong or not enough: an always-repainting widget (the
      playing row's equalizer) blows the step budget, and focus requested
      through a widget's own `Response` only lands in the **next** frame.
-     Two fixed frames are rendered; the harness never advances `input.time`,
-     so the result is still deterministic.
+     Two fixed frames are rendered. The harness never *sets* `input.time` — it
+     only pins `input.predicted_dt` to its fixed 0.25 s step, and egui derives
+     `time = prev + predicted_dt` — so two frames land on the same clock value
+     on every machine. Deterministic, but the clock is **moving**: a golden
+     whose content reads `input.time` (the playing row's equalizer bars) is
+     pinned to a phase set by the frame count, so retuning that animation's
+     tempo legitimately moves that one baseline.
 
    Both go through `with_golden_style`, which keeps the ui closure inert until
    the style and fonts are installed. That matters: `HarnessBuilder::build_ui`
@@ -144,6 +149,31 @@ run. The harness enforces several rules; keep them when adding goldens:
   make baselines non-portable.
 - **Fixed geometry.** Every harness pins its window size and
   `pixels_per_point(1.0)` so host DPI scaling cannot change output dimensions.
+- **Settled state, re-asserted *after* the palette install.** kittest's
+  `Harness::new` zeroes `Style::animation_time`, `Style::scroll_animation` and
+  `Style::visuals.text_cursor.blink` on **both** theme slots before the first
+  frame. riff then installs the palette, and `theme::install` replaces that
+  theme's whole `Arc<Style>` with a `Style::default()`-derived build — which
+  hands all three straight back to egui's defaults, undoing the harness's own
+  determinism. `with_golden_style` therefore re-asserts the three fields after
+  `theme::install` (as `pin_settled_time`), and the composed-`RiffApp` harness
+  re-asserts them after construction because it installs its own palette inside
+  its first `update` and never passes through `with_golden_style`. So "baselines
+  capture settled state" is a decision the suite makes, not a coincidence of
+  call order — which is what lets a tween be introduced on a surface without
+  silently re-baselining every affected image. **The app's own theme
+  installation path is untouched**: the windowed app is *supposed* to animate,
+  and this is a suite concern.
+- **Time is moving, not frozen — so the frame count is the contract.** The
+  harness never *sets* `input.time`; it pins `input.predicted_dt` to a fixed
+  0.25 s step and egui derives `time = prev + predicted_dt`. A fixed frame
+  count therefore lands on a fixed clock value on every machine, which is why
+  `run_steps(2)` is deterministic. The corollary to remember when a golden
+  moves for no visible reason: a surface that reads `input.time` (the playing
+  row's equalizer bars) is pinned to a *phase* set by the frame count, so
+  retuning its tempo legitimately moves that one baseline.
+  `snapshot_animating`'s doc comment in `tests/golden_tests.rs` records the
+  same fact at the call site.
 - **Full-canvas background.** Under kittest the root UI is inset from the
   true screen rect; paint the palette background through
   `ctx.layer_painter(LayerId::background())` over `ctx.screen_rect()` (as

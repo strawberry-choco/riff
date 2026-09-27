@@ -21,22 +21,25 @@ Audio output is provided by the `cpal` crate, which talks to each operating syst
 |---|---|---|
 | Windows | WASAPI | None — ships with the OS |
 | macOS | CoreAudio | None — ships with the OS |
-| Linux | ALSA | ALSA development headers are often required to compile `cpal` |
+| Linux | ALSA | ALSA development headers are required to compile `cpal` |
 
-On Debian/Ubuntu you typically need the ALSA development package before the first build will succeed:
+Note that ALSA is not the only Linux dependency. The windowing stack in `riff-gui` (`winit`) also needs X11/xcb and Wayland development headers, and `cpal` needs `libudev-dev`, so a first build of the GUI fails without them too — the ALSA headers are just the most commonly-missing piece. The full list CI installs on `ubuntu-latest`, which is authoritative, is in [../../CONTRIBUTING.md](../../CONTRIBUTING.md#prerequisites):
 
 ```bash
-sudo apt-get install libasound2-dev pkg-config
+sudo apt-get install pkg-config libasound2-dev libudev-dev \
+  libx11-dev libxcursor-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
+  libxcb-xfixes0-dev libxi-dev libxkbcommon-dev libxkbcommon-x11-dev \
+  libwayland-dev libssl-dev mesa-vulkan-drivers
 ```
 
-The exact package name varies by distribution (for example `alsa-lib-devel` on Fedora). If the build fails inside `cpal` or `alsa-sys` on Linux, missing ALSA headers are almost always the cause. Note that the audio stack lives only in `riff-infra`: the pure-Rust crates (`riff-persistence`, `riff-library`, `riff-playback`) build and their tests run without any native audio libraries.
+The exact package names vary by distribution (for example `alsa-lib-devel` on Fedora). If the build fails inside `cpal` or `alsa-sys` on Linux, missing ALSA headers are almost always the cause; if it fails inside `winit` or `x11-dl`, it is the windowing headers. Note that the audio stack lives only in `riff-infra`: the pure-Rust crates (`riff-persistence`, `riff-library`, `riff-playback`) build and their tests run without any native audio libraries.
 
 ## Clone and Build
 
 Clone the repository and build in debug mode:
 
 ```bash
-git clone <repository-url> riff
+git clone https://github.com/strawberry-choco/riff riff
 cd riff
 cargo build
 ```
@@ -71,4 +74,4 @@ A few facts about the project shape that simplify expectations:
 - **No feature flags.** There are no Cargo features to enable or disable. The only conditional compilation is per-target-OS (`#[cfg(target_os = "linux")]` and its negation) for platform-specific system integration such as the tray icon and native file dialogs.
 - **No codegen step.** There is no build script output, no schema generation, and no asset pipeline to run before compiling.
 - **Embedded migrations.** State persists in the Application Store (`riff.sqlite3` via rusqlite, bundled — in `riff-infra`). Schema evolution runs through ordered, checksummed migrations applied automatically on open — there is no external migration tooling to run.
-- **CI pipeline.** `.github/workflows/ci.yml` runs the quality gate (`cargo fmt --check`, `cargo clippy --all-targets`, `cargo test`) on push and pull requests to main, on Linux and Windows runners. There are no pre-commit hooks.
+- **CI pipeline.** `.github/workflows/ci.yml` runs the quality gate (`cargo fmt --check`, `cargo clippy --all-targets`, `cargo test`) on push and pull requests to master, on Linux and Windows runners. There are no pre-commit hooks.

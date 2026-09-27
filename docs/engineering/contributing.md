@@ -18,7 +18,7 @@ Every contribution must respect the crate split and its dependency chain (see [A
 
 A typical contribution workflow looks like this:
 
-1. Create a branch from the latest main branch.
+1. Create a branch from the latest master branch.
 2. Make your change, keeping each new module in the crate whose membership criterion it satisfies.
 3. Run `cargo fmt` so formatting matches the project default (there is no `rustfmt.toml`).
 4. Run `cargo clippy` and resolve any new warnings. Pedantic lints are enabled as warnings; a clean run is the expected standard.

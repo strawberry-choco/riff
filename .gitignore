@@ -16,6 +16,10 @@ target/
 
 .omo
 .scratch
+# Local design-tool scratch: generated sample audio, mockup exports, session
+# notes. Must never be committed — it holds copyrighted audio files and notes
+# containing the author's home directory paths.
+.workbuddy/
 debug-output.txt
 # Added by code-review-graph
 .code-review-graph/

@@ -3,10 +3,6 @@
 <h3 align="center">A quiet music player for the collection you already own.</h3>
 
 <p align="center">
-  <a href="https://github.com/strawberry-choco/riff/releases"><img src="https://img.shields.io/badge/-Windows-2b88d8?logo=windows&logoColor=white" alt="Download for Windows"></a>
-  <a href="https://github.com/strawberry-choco/riff/releases"><img src="https://img.shields.io/badge/-macOS-111?logo=apple&logoColor=white" alt="Download for macOS"></a>
-  <a href="https://github.com/strawberry-choco/riff/releases"><img src="https://img.shields.io/badge/-Linux-333?logo=linux&logoColor=white" alt="Download for Linux"></a>
-  <a href="https://github.com/strawberry-choco/riff/releases/latest"><img src="https://img.shields.io/github/v/release/strawberry-choco/riff?label=release" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache 2.0 license"></a>
   <a href="https://github.com/strawberry-choco/riff/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/strawberry-choco/riff/ci.yml?branch=master&label=CI" alt="Build status"></a>
 </p>
@@ -25,7 +21,7 @@ It is built for people who treat their music as a collection: the ones who tag t
 
 ## Get riff
 
-[Download the latest release](https://github.com/strawberry-choco/riff/releases/latest) for Windows, macOS, or Linux. riff is pre-1.0: the everyday path works, and the rough edges are named below.
+**There is nothing to download yet.** riff is pre-1.0 and no packaged build has been published, so the only way to run it is to [build it from source](#building-from-source) — a stable Rust toolchain and, on Linux, the development headers listed in [CONTRIBUTING.md](CONTRIBUTING.md). The everyday path works; the rough edges are named below.
 
 **First run, in three moves:**
 
@@ -98,7 +94,9 @@ cargo run -p riff-gui
 
 ## Contributing
 
-Bug reports and feature requests go to [the issue tracker](https://github.com/strawberry-choco/riff/issues). Before you write code, [docs/README.md](docs/README.md) indexes the product specs, the architecture reference, and the engineering conventions the project holds itself to.
+**[CONTRIBUTING.md](CONTRIBUTING.md) is the front door** — it has the prerequisites, the exact build and verify commands, the pull request checklist, and the honest warning that the committed golden-image baselines are byte-exact and can fail on different hardware.
+
+Bug reports and feature requests go to [the issue tracker](https://github.com/strawberry-choco/riff/issues). [docs/README.md](docs/README.md) indexes the product specs, the architecture reference, and the engineering conventions the project holds itself to.
 
 The design has a hard boundary worth knowing about: riff stays offline. Features that would need a server, an account, or a network call are out of scope, and [docs/product/decisions/001-offline-first.md](docs/product/decisions/001-offline-first.md) records why.
 
@@ -106,4 +104,4 @@ The design has a hard boundary worth knowing about: riff stays offline. Features
 
 riff is licensed under the **Apache License 2.0** — see [LICENSE](LICENSE).
 
-It ships with the [Inter](assets/fonts/Inter-LICENSE-OFL.txt) typeface (SIL Open Font License) and [Lucide](assets/icons/LICENSE-Lucide.txt) icons (ISC license).
+It ships with the [Inter](crates/riff-gui/assets/fonts/Inter-LICENSE-OFL.txt) typeface (SIL Open Font License) and [Lucide](crates/riff-gui/assets/icons/LICENSE-Lucide.txt) icons (ISC license). Both are embedded in the binary, so the fonts and icons travel with the executable.

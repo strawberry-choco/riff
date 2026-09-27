@@ -9,6 +9,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# this workflow only runs `cargo fmt`/`clippy`/`test` and needs no write
+# access. Stating the token scope explicitly stops a future tag-triggered
+# release workflow from silently inheriting a broader repository default.
+permissions:
+  contents: read
+
 jobs:
   check:
     name: fmt + clippy + test (${{ matrix.os }})
@@ -19,9 +25,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # eframe 0.34 (wgpu + winit x11/wayland + clipboard) and cpal 0.18 (ALSA)
+      # eframe 0.35 (wgpu + winit x11/wayland + clipboard) and cpal 0.18 (ALSA)
       # need these headers to COMPILE on Linux. tray-icon/muda/rfd are gated to
       # non-Linux targets, so libgtk-3-dev is intentionally NOT required here.
       # mesa-vulkan-drivers provides the lavapipe software Vulkan adapter that
@@ -50,7 +56,7 @@ jobs:
       # (Swatinem/rust-cache under the hood) and PR problem-matchers. Successor to
       # the archived actions-rs/toolchain.
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           toolchain: stable
           components: rustfmt, clippy

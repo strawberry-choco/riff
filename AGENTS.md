@@ -60,7 +60,7 @@ cargo build --release -p riff-gui          # release build (LTO, stripped)
 
 **Test suite**: Per-crate suites sit with the code they cover; cross-crate integration, UI and golden suites sit in the single workspace-root `riff-tests` crate. `docs/engineering/testing-strategy.md` is authoritative on placement, and the golden-image snapshot workflow is in `docs/engineering/golden-image-testing.md`.
 
-**CI**: `.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy --all-targets`, `cargo test --all-targets` on push/PR to `main` (Linux + Windows matrix). No pre-commit hooks.
+**CI**: `.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy --all-targets`, `cargo test --all-targets` on push/PR to `master` (Linux + Windows matrix). No pre-commit hooks.
 
 ## State Persistence
 

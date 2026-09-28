@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/b337f3b2-969d-4b01-9102-62586a71cab3" alt="riff's library: artists, albums and tracks in one row of columns, with cover art and a detail inspector" width="900">
+  <img src="docs/assets/readme/library.png" alt="riff's library: artists, albums and tracks in one row of columns, with cover art and a detail inspector" width="900">
   <br>
   <em>riff browsing a demo library — the artists and albums in these screenshots are invented for testing.</em>
 </p>
@@ -54,9 +54,9 @@ It is built for people who treat their music as a collection: the ones who tag t
 **Plays:** MP3 · FLAC · AAC (M4A) · Opus · OGG Vorbis · WAV
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/b4eafcde-66cc-41f5-9273-762f39457cee" alt="A playlist called Night Drive open in riff, with the queue panel showing what is up next" width="440">
+  <img src="docs/assets/readme/playlist-queue.png" alt="A playlist called Night Drive open in riff, with the queue panel showing what is up next" width="440">
   &nbsp;&nbsp;
-  <img src="https://github.com/user-attachments/assets/6835b10e-54f6-4032-92fd-e11976a011d3" alt="riff's Now Playing view: large cover art, full metadata, and the up-next list" width="440">
+  <img src="docs/assets/readme/now-playing.png" alt="riff's Now Playing view: large cover art, full metadata, and the up-next list" width="440">
 </p>
 
 ## Who riff is not for

@@ -63,6 +63,17 @@ pub trait Transport: Send {
     /// Add `track` to the end of the queue.
     fn add_to_queue(&self, track: TrackId);
 
+    /// Append `tracks` to the end of the queue as one batch — what a whole
+    /// collection's **Add to Queue** does. One `AddMany`, so the queue mutates
+    /// once under one lock with one shuffle regeneration, instead of once per
+    /// Track in a fan-out.
+    ///
+    /// It does NOT start playback, and that is the one thing separating it from
+    /// [`Transport::play_many`]: playing a collection means playing its first
+    /// Track, so `play_many` sends a `Play` ahead of its `AddMany`, while
+    /// queueing a collection leaves the current Track alone and playing.
+    fn add_many(&self, tracks: Vec<TrackId>);
+
     /// Play `first`, append `rest` behind it as one batch (folder/album
     /// enqueue pattern): one `Play` plus a single `AddMany`, so the queue
     /// mutates once under one lock with one shuffle regeneration.
@@ -176,6 +187,10 @@ impl Transport for ChannelTransport {
 
     fn add_to_queue(&self, track: TrackId) {
         self.send(PlaybackCommand::AddToQueue(track));
+    }
+
+    fn add_many(&self, tracks: Vec<TrackId>) {
+        self.send(PlaybackCommand::AddMany(tracks));
     }
 
     fn play_many(&self, first: TrackId, rest: Vec<TrackId>) {
@@ -379,6 +394,29 @@ mod tests {
             "the batch mutates the queue once under one lock"
         );
         assert!(rx.try_recv().is_err(), "no per-track AddToQueue fan-out");
+    }
+
+    /// The one thing that separates `add_many` from `play_many`: queueing a
+    /// batch must not START anything. A whole collection enqueued as one batch
+    /// mutates the queue once under one lock with one shuffle regeneration,
+    /// exactly as `play_many` does — but no `Play` goes out, so the current
+    /// Track keeps playing straight through it.
+    #[test]
+    fn add_many_sends_exactly_one_add_many_and_never_a_play() {
+        let (t, rx) = transport();
+
+        t.add_many(vec![id("a"), id("b"), id("c")]);
+
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(PlaybackCommand::AddMany(vec![id("a"), id("b"), id("c"),])),
+            "the whole batch arrives in the order it was given, as one command"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "queueing a batch sends nothing else — and in particular no Play, which \
+             is the one thing that must not happen here: the current Track plays on"
+        );
     }
 
     #[test]

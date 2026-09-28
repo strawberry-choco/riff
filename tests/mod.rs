@@ -951,6 +951,11 @@ pub mod mocks {
         PlayMany(TrackId, Vec<TrackId>),
         PlayNext(TrackId),
         AddToQueue(TrackId),
+        /// A whole collection enqueued as one batch. Distinct from N
+        /// `AddToQueue` sends on purpose: the port's promise is that the queue
+        /// mutates once, and a fake that fanned it out could not tell a real
+        /// batch from a per-Track loop.
+        AddMany(Vec<TrackId>),
         Pause,
         Resume,
         Next,
@@ -1014,6 +1019,10 @@ pub mod mocks {
 
         fn add_to_queue(&self, track: TrackId) {
             self.record(TransportIntent::AddToQueue(track));
+        }
+
+        fn add_many(&self, tracks: Vec<TrackId>) {
+            self.record(TransportIntent::AddMany(tracks));
         }
 
         fn pause(&self) {

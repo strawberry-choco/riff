@@ -18,9 +18,9 @@ use riff_backend::app::state::{
 
 use super::super::browser;
 use super::{
-    COVER_THUMB, ColumnKind, RiffApp, apply_browser_action, apply_detail_action,
-    apply_drill_action, column_plan, request_cover_intent, resolve_detail_content,
-    resolve_inspector, smart_list_openable,
+    COVER_THUMB, CollectionMenuEffects, ColumnKind, RiffApp, apply_browser_action,
+    apply_collection_menu, apply_detail_action, apply_drill_action, column_plan,
+    request_cover_intent, resolve_detail_content, resolve_inspector, smart_list_openable,
 };
 
 /// The stage's single-column states: stages that are not a LIBRARY section's
@@ -122,9 +122,15 @@ impl RiffApp {
     ) {
         match kind {
             ColumnKind::Root => match library.library_section {
-                LibrarySection::Artists => self.render_artists_browser(ui, library, query),
-                LibrarySection::Albums => self.render_albums_browser(ui, library, query),
-                LibrarySection::Genres => self.render_genres_browser(ui, library, query),
+                LibrarySection::Artists => {
+                    self.render_artists_browser(ui, library, playback, query);
+                }
+                LibrarySection::Albums => {
+                    self.render_albums_browser(ui, library, playback, query);
+                }
+                LibrarySection::Genres => {
+                    self.render_genres_browser(ui, library, playback, query);
+                }
                 LibrarySection::AllTracks => {
                     unreachable!("the All Tracks section plans a Flat column")
                 }
@@ -160,6 +166,7 @@ impl RiffApp {
                 self.render_albums_drill_column(
                     ui,
                     library,
+                    playback,
                     &albums,
                     1,
                     LibrarySection::Artists,
@@ -172,7 +179,7 @@ impl RiffApp {
                     return;
                 };
                 let genre = genre.clone();
-                self.render_genre_artists_column(ui, library, &genre);
+                self.render_genre_artists_column(ui, library, playback, &genre);
             }
             ColumnKind::GenreArtistAlbums => {
                 let (Some(BrowserSelection::Genre(genre)), Some(BrowserSelection::Artist(artist))) =
@@ -181,9 +188,9 @@ impl RiffApp {
                     return;
                 };
                 let (genre, artist) = (genre.clone(), artist.clone());
-                self.render_genre_album_drill_column(ui, library, &artist, &genre);
+                self.render_genre_album_drill_column(ui, library, playback, &artist, &genre);
             }
-            ColumnKind::Tracks => self.render_tracks_column(ui, library, playback, query),
+            ColumnKind::Tracks => self.render_tracks_column(ui, library, query),
         }
     }
 
@@ -216,12 +223,16 @@ impl RiffApp {
     /// chips) over `albums`, with the album row's cover thumbnail, `Artist ·
     /// Year` detail line, and `(album artist, title)` composite key.
     /// Highlighting reads `library.browser_path[level]`; a row selection
-    /// lands at that level via [`apply_drill_action`].
+    /// lands at that level via [`apply_drill_action`], and so does a
+    /// right-click on the row — via [`apply_collection_menu`], which also acts
+    /// on the album. `playback` travels with them because the Shuffle item
+    /// completes in the playback session's queue.
     #[allow(clippy::too_many_arguments)]
     fn render_albums_drill_column(
         &mut self,
         ui: &mut egui::Ui,
         library: &mut LibrarySession,
+        playback: &mut PlaybackSession,
         albums: &[riff_backend::domain::Album],
         level: usize,
         section: LibrarySection,
@@ -305,14 +316,33 @@ impl RiffApp {
             &mut actions,
         );
         for action in actions {
+            // One predicate answers "did the selection move?", for a click and
+            // for a right-click alike — see `BrowserAction::selects_a_row`. It
+            // is asked HERE, above the match, so no arm can be added that
+            // selects without also resetting the drill's scroll.
+            if action.selects_a_row() {
+                self.scroll_memory
+                    .note_selection_in(crate::ui::scroll_memory::ListSlot::Drill(
+                        crate::ui::scroll_memory::DrillSlot::ArtistAlbums,
+                    ));
+            }
             match action {
                 browser::BrowserAction::Select(key) => {
-                    self.scroll_memory.note_selection_in(
-                        crate::ui::scroll_memory::ListSlot::Drill(
-                            crate::ui::scroll_memory::DrillSlot::ArtistAlbums,
-                        ),
-                    );
                     apply_drill_action(section, level, key, library);
+                }
+                browser::BrowserAction::ContextMenu { key, intents } => {
+                    apply_collection_menu(
+                        &key,
+                        &intents,
+                        section,
+                        level,
+                        CollectionMenuEffects {
+                            library,
+                            playback,
+                            transport: self.transport.as_ref(),
+                            views: &mut self.views,
+                        },
+                    );
                 }
                 browser::BrowserAction::ToggleSort => {}
             }
@@ -321,11 +351,17 @@ impl RiffApp {
 
     /// The Genres section's artists-in-genre column (level 1): every artist
     /// carrying the genre, with their genre-scoped album count. Rows select
-    /// the artist at level 1. Renders one window in hand (issue 05).
+    /// the artist at level 1, and a right-click on one both selects it and
+    /// acts on it. Renders one window in hand (issue 05).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one paged genre-artists listing with its right-click dispatch"
+    )]
     fn render_genre_artists_column(
         &mut self,
         ui: &mut egui::Ui,
         library: &mut LibrarySession,
+        playback: &mut PlaybackSession,
         genre: &str,
     ) {
         use riff_backend::app::store::SortDirection;
@@ -421,14 +457,29 @@ impl RiffApp {
             &mut actions,
         );
         for action in actions {
+            if action.selects_a_row() {
+                self.scroll_memory
+                    .note_selection_in(crate::ui::scroll_memory::ListSlot::Drill(
+                        crate::ui::scroll_memory::DrillSlot::GenreArtists,
+                    ));
+            }
             match action {
                 browser::BrowserAction::Select(key) => {
-                    self.scroll_memory.note_selection_in(
-                        crate::ui::scroll_memory::ListSlot::Drill(
-                            crate::ui::scroll_memory::DrillSlot::GenreArtists,
-                        ),
-                    );
                     apply_drill_action(LibrarySection::Genres, 1, key, library);
+                }
+                browser::BrowserAction::ContextMenu { key, intents } => {
+                    apply_collection_menu(
+                        &key,
+                        &intents,
+                        LibrarySection::Genres,
+                        1,
+                        CollectionMenuEffects {
+                            library,
+                            playback,
+                            transport: self.transport.as_ref(),
+                            views: &mut self.views,
+                        },
+                    );
                 }
                 browser::BrowserAction::ToggleSort => {}
             }
@@ -441,11 +492,16 @@ impl RiffApp {
     /// deeper reads only the visible albums. The row shape matches the
     /// shared album drill column: cover thumbnail, "Artist · Year" detail,
     /// `(album artist, title)` composite key; a row selection lands at level
-    /// 2 via [`apply_drill_action`].
+    /// 2 via [`apply_drill_action`], and a right-click lands there too.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one paged genre-albums listing with its right-click dispatch"
+    )]
     fn render_genre_album_drill_column(
         &mut self,
         ui: &mut egui::Ui,
         library: &mut LibrarySession,
+        playback: &mut PlaybackSession,
         artist: &str,
         genre: &str,
     ) {
@@ -541,14 +597,29 @@ impl RiffApp {
             &mut actions,
         );
         for action in actions {
+            if action.selects_a_row() {
+                self.scroll_memory
+                    .note_selection_in(crate::ui::scroll_memory::ListSlot::Drill(
+                        crate::ui::scroll_memory::DrillSlot::GenreArtistAlbums,
+                    ));
+            }
             match action {
                 browser::BrowserAction::Select(key) => {
-                    self.scroll_memory.note_selection_in(
-                        crate::ui::scroll_memory::ListSlot::Drill(
-                            crate::ui::scroll_memory::DrillSlot::GenreArtistAlbums,
-                        ),
-                    );
                     apply_drill_action(LibrarySection::Genres, 2, key, library);
+                }
+                browser::BrowserAction::ContextMenu { key, intents } => {
+                    apply_collection_menu(
+                        &key,
+                        &intents,
+                        LibrarySection::Genres,
+                        2,
+                        CollectionMenuEffects {
+                            library,
+                            playback,
+                            transport: self.transport.as_ref(),
+                            views: &mut self.views,
+                        },
+                    );
                 }
                 browser::BrowserAction::ToggleSort => {}
             }
@@ -556,26 +627,43 @@ impl RiffApp {
     }
 
     /// The Tracks column (the stage's last column): the existing
-    /// `DetailColumn` shape — breadcrumb trail, album header with Play all /
-    /// Shuffle, and the album's track list. Entity listings are their own columns
-    /// now, so the widget receives no rows.
+    /// `DetailColumn` shape — breadcrumb trail, album header, and the album's
+    /// track list. The header is a readout, so the column holds no action
+    /// surface of its own; the album's actions are reached from its row in
+    /// the Albums column. Entity listings are their own columns now, so the
+    /// widget receives no rows.
+    ///
+    /// The TRACKS are not readouts: each row carries the shared Track menu, so
+    /// a Track's actions do not depend on which Column happens to be showing
+    /// it. The column resolves what the menu needs from the FRAME once — the
+    /// playlist targets especially, because the menu is PAINTED from them before
+    /// anything can be chosen from it — and hands the widget a per-row factory
+    /// rather than one finished menu, because one of the menu's props is a fact
+    /// about a single row: the widget reports the outcome as a
+    /// [`crate::ui::detail::DetailAction`], and the two appliers every other
+    /// Track row reaches are called below.
+    ///
+    /// # The accepted rough edge, in the host's words
+    ///
+    /// Those appliers include [`apply_track_menu_open`](super::apply_track_menu_open),
+    /// so opening one of these menus makes that Track the selection — the same
+    /// report a flat-list Track row's menu makes. In this column that has one
+    /// visible consequence, recorded here so the next reader learns it from the
+    /// code rather than reporting it as a regression:
+    ///
+    /// **Right-clicking a Track in this column selects it, which switches the
+    /// Detail Panel from the Album readout to the Track readout, so the Album's
+    /// Tag Aggregation and Batch Tag Edit are hidden until the Album is
+    /// selected again.** It follows directly from right-click selecting, it is
+    /// recoverable (the Album is selected again from its row in the Albums
+    /// column), and the spec accepts it rather than working around it.
     fn render_tracks_column(
         &mut self,
         ui: &mut egui::Ui,
         library: &mut LibrarySession,
-        playback: &mut PlaybackSession,
         query: &str,
     ) {
         let content = resolve_detail_content(&mut self.views, library, query);
-        // The play batch the album header's actions start: the shown
-        // (filtered) tracks in store order — under a query that is exactly
-        // what the Tracks column renders, so Play all / Shuffle start the
-        // visible rows (genre-scoped in the Genres path).
-        let album_tracks: Vec<TrackId> = content
-            .tracks
-            .iter()
-            .map(|row| TrackId(row.key.clone()))
-            .collect();
         let (empty_title, empty_hint): (&str, String) = if query.is_empty() {
             (
                 "Nothing here yet",
@@ -586,6 +674,37 @@ impl RiffApp {
                 "No matching tracks",
                 format!("Nothing in this view matches '{query}'."),
             )
+        };
+        // The playlist list is resolved UP FRONT, before the widget renders:
+        // the menu is painted from it on the frame it opens, which is the same
+        // frame the listener may choose from it. A Track in this column is in
+        // no Playlist, so the menu offers the ADD targets and no removal.
+        let playlists = self.views.playlists();
+        let options: Vec<(PlaylistId, String)> = playlists
+            .iter()
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect();
+        // `playable` and `editable` are true of every row here by
+        // construction, and that is not an optimistic guess: a row only exists
+        // because the store resolved that Track for this album's listing, and
+        // the column has always offered its rows unconditionally — a
+        // double-click has always started one without asking whether the file
+        // is still there. The reduced menu stays the playlist entry's
+        // property, which is the one surface that flags a vanished file.
+        //
+        // The menu is a FACT ABOUT A ROW, though, not about the column, and the
+        // one prop that says so is `favorite`: an album's Tracks are Favourited
+        // independently, so a single menu value for the whole column would put
+        // the same Favourite wording on every row and be wrong on all but one of
+        // them. So the widget is handed a factory over the row and the host
+        // still owns every flag — it is the same `BrowserColumn::item` shape a
+        // virtualized listing already uses to hand out per-row data.
+        let track_menu = |row: &crate::ui::detail::TrackRow| crate::ui::menu::TrackMenu {
+            playable: true,
+            editable: true,
+            favorite: row.favorite,
+            playlists: &options,
+            remove_from_playlist: false,
         };
         let mut actions = Vec::new();
         // The Tracks column resets to the top whenever the selection feeding
@@ -604,6 +723,7 @@ impl RiffApp {
                 header: content.header.as_ref(),
                 tracks: &content.tracks,
                 rows: &[],
+                track_menu: Some(&track_menu),
                 empty_title,
                 empty_hint: &empty_hint,
             },
@@ -611,14 +731,51 @@ impl RiffApp {
             &mut actions,
         );
         for action in actions {
-            apply_detail_action(
-                action,
-                library,
-                playback,
-                self.transport.as_ref(),
-                self.library_mutations.as_mut(),
-                &album_tracks,
-            );
+            // A Track menu is NOT a second dispatch: it is reported here and
+            // answered by the SAME two appliers every other Track row reaches,
+            // through the same effects bag. Routing it through
+            // `apply_detail_action` instead would be the fork this column
+            // must not have — two surfaces that answer a right-click
+            // "similarly" rather than identically.
+            match action {
+                crate::ui::detail::DetailAction::TrackMenu { key, intents } => {
+                    let track_id = TrackId(key);
+                    // OPENING is what selects, whether or not anything was
+                    // chosen from the menu.
+                    super::apply_track_menu_open(
+                        &track_id,
+                        super::TrackMenuOpen::Opened,
+                        &mut library.selected_track,
+                    );
+                    if intents.is_empty() {
+                        continue;
+                    }
+                    // The Track itself, resolved at dispatch time through the
+                    // same seam the Detail Panel's Track readout uses; it is
+                    // what "Edit Tags" needs to open its draft, and its absence
+                    // is what reduces that one item.
+                    let track = self.views.selected_track(&track_id);
+                    let mut effects = super::TrackMenuEffects {
+                        track_id: &track_id,
+                        track: track.as_ref(),
+                        selected_track: &mut library.selected_track,
+                        tag_editor: &mut self.tag_editor,
+                        transport: self.transport.as_ref(),
+                        playlist_store: self.playlist_store.as_mut(),
+                        library_mutations: self.library_mutations.as_mut(),
+                        remove_from_playlist: None,
+                    };
+                    for intent in intents {
+                        super::apply_track_menu_intent(intent, &mut effects);
+                    }
+                }
+                action => apply_detail_action(
+                    action,
+                    library,
+                    self.transport.as_ref(),
+                    self.library_mutations.as_mut(),
+                ),
+            }
         }
     }
 
@@ -637,6 +794,7 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         library: &mut LibrarySession,
+        playback: &mut PlaybackSession,
         query: &str,
     ) {
         use riff_backend::app::state::BrowserSelection;
@@ -772,13 +930,36 @@ impl RiffApp {
         );
         self.scroll_memory.end_section(visit, actual);
         for action in actions {
-            if matches!(&action, browser::BrowserAction::Select(_)) {
+            // THE GUARD. `selects_a_row` is the one predicate that answers
+            // "did the selection move?", and it is asked above the match so
+            // that adding an arm which selects cannot leave the scroll stale:
+            // a right-click that moved the selection but not the scroll would
+            // leave the list pointing at the wrong place. Answered identically
+            // by all six entity Columns.
+            if action.selects_a_row() {
                 self.scroll_memory
                     .note_selection_in(crate::ui::scroll_memory::ListSlot::Section(
                         riff_backend::app::state::LibrarySection::Artists,
                     ));
             }
-            apply_browser_action(action, library);
+            match action {
+                browser::BrowserAction::ContextMenu { key, intents } => {
+                    let section = library.library_section;
+                    apply_collection_menu(
+                        &key,
+                        &intents,
+                        section,
+                        0,
+                        CollectionMenuEffects {
+                            library,
+                            playback,
+                            transport: self.transport.as_ref(),
+                            views: &mut self.views,
+                        },
+                    );
+                }
+                other => apply_browser_action(other, library),
+            }
         }
     }
 
@@ -819,6 +1000,7 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         library: &mut LibrarySession,
+        playback: &mut PlaybackSession,
         query: &str,
     ) {
         use riff_backend::app::state::BrowserSelection;
@@ -964,13 +1146,31 @@ impl RiffApp {
         );
         self.scroll_memory.end_section(visit, actual);
         for action in actions {
-            if matches!(&action, browser::BrowserAction::Select(_)) {
+            // THE GUARD — see the Artists root's identical comment.
+            if action.selects_a_row() {
                 self.scroll_memory
                     .note_selection_in(crate::ui::scroll_memory::ListSlot::Section(
                         riff_backend::app::state::LibrarySection::Albums,
                     ));
             }
-            apply_browser_action(action, library);
+            match action {
+                browser::BrowserAction::ContextMenu { key, intents } => {
+                    let section = library.library_section;
+                    apply_collection_menu(
+                        &key,
+                        &intents,
+                        section,
+                        0,
+                        CollectionMenuEffects {
+                            library,
+                            playback,
+                            transport: self.transport.as_ref(),
+                            views: &mut self.views,
+                        },
+                    );
+                }
+                other => apply_browser_action(other, library),
+            }
         }
     }
 
@@ -987,6 +1187,7 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         library: &mut LibrarySession,
+        playback: &mut PlaybackSession,
         query: &str,
     ) {
         use riff_backend::app::state::BrowserSelection;
@@ -1058,13 +1259,31 @@ impl RiffApp {
         );
         self.scroll_memory.end_section(visit, actual);
         for action in actions {
-            if matches!(&action, browser::BrowserAction::Select(_)) {
+            // THE GUARD — see the Artists root's identical comment.
+            if action.selects_a_row() {
                 self.scroll_memory
                     .note_selection_in(crate::ui::scroll_memory::ListSlot::Section(
                         riff_backend::app::state::LibrarySection::Genres,
                     ));
             }
-            apply_browser_action(action, library);
+            match action {
+                browser::BrowserAction::ContextMenu { key, intents } => {
+                    let section = library.library_section;
+                    apply_collection_menu(
+                        &key,
+                        &intents,
+                        section,
+                        0,
+                        CollectionMenuEffects {
+                            library,
+                            playback,
+                            transport: self.transport.as_ref(),
+                            views: &mut self.views,
+                        },
+                    );
+                }
+                other => apply_browser_action(other, library),
+            }
         }
     }
 }

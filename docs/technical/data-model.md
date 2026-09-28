@@ -123,7 +123,8 @@ pub struct PlaybackPosition {
 ```rust
 pub enum PlaybackCommand {
     Play(TrackId), Pause, Resume, Stop, Seek(Duration), SetVolume(f32),
-    Next, Previous, ToggleVisibility, PlayNext(TrackId), AddToQueue(TrackId), PlayPause,
+    Next, Previous, PlayNext(TrackId), AddToQueue(TrackId),
+    AddMany(Vec<TrackId>), PlayPause,
 }
 
 pub enum PlaybackUpdate {

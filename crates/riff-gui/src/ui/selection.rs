@@ -1,11 +1,17 @@
 //! The selection panel (design-handoff issue 10), since the elastic-column
 //! task the **inspector**: the stage's rightmost column, shown only while a
-//! selection exists. A readout of the selected entity or track — its art,
-//! title, subtitle, and a details list — with the orange primary play
-//! action (**Play album** for an entity readout, **Play** for a track
-//! readout that plays just that one track), plus **Add to Queue** in its
-//! inspector form. A selection readout, not a view: it follows the live
-//! selection, and the Now Playing view stays untouched.
+//! selection exists. A READOUT of the selected entity or track — its art,
+//! title, subtitle, the kind of thing it is, its tag rows, and a details
+//! list. A selection readout, not a view: it follows the live selection, and
+//! the Now Playing view stays untouched.
+//!
+//! A readout displays; it does not act. It used to carry a Play action and an
+//! Add to Queue action; both are gone, with the buttons that reported them and
+//! the two [`SelectionAction`] variants they carried. An entity's actions are
+//! reachable from that entity's own context menu, and there is nothing here to
+//! press. The one way INWARD is a tag row: clicking one opens the Inline Tag
+//! Editor, an album batch draft applies to every Track of the album, and Save
+//! and Cancel are unchanged.
 //!
 //! Pure widget seam, same discipline as [`crate::ui::browser`] and
 //! [`crate::ui::detail`]: the widget paints from [`Palette`] tokens and
@@ -17,21 +23,28 @@ use riff_backend::domain::TrackId;
 use std::path::PathBuf;
 
 use super::icons::IconCache;
-use super::theme::geometry::inspector::{ART_H, PLAY_H};
+use super::theme::geometry::inspector::ART_H;
 use super::theme::{self, Palette};
 
 /// What the user did to the selection panel this frame; `app.rs` applies
 /// these to the sessions.
+///
+/// Every variant here is TAG EDITING. The panel used to report a play action
+/// and a queue action as well; both are gone with the buttons that reported
+/// them, because an entity's actions live on that entity's own context menu and
+/// a readout does not act.
+///
+/// The `Edit` postfix is kept deliberately. Three tag-editor intents are all
+/// this enum holds now, so the variants look redundantly suffixed — but the
+/// suffix is what tells them apart from the other action enums a host matches
+/// in the same breath, and renaming public variants to satisfy a lint the
+/// deletion merely exposed would be churn, not clarity.
+#[expect(
+    clippy::enum_variant_names,
+    reason = "the Edit postfix is the seam's naming convention, kept stable"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectionAction {
-    /// The panel's primary play action: for an entity readout, start the
-    /// selection's tracks from the top in order; for a single-track readout
-    /// (`SelectionPanel::single`), play just that one track.
-    PlayAlbum,
-    /// The panel's **Add to Queue**: append the selection's track batch to
-    /// the end of the playback queue, following the context menu's per-track
-    /// queue precedent.
-    Queue,
     /// Save the open inline editor's draft through the Tag Edits seam
     /// (the Save button or Enter).
     SaveTagEdit,
@@ -280,6 +293,12 @@ pub struct SelectionPanel<'a> {
     pub title: Option<&'a str>,
     /// `"Artist · Year"`-style secondary line.
     pub subtitle: Option<&'a str>,
+    /// What KIND of thing is being read out, already named for display:
+    /// "Album", "Artist", "Genre", or "Track". The caller resolves it from
+    /// whatever selected the readout, so this seam never learns the app's own
+    /// kind type. The header chip says exactly this, which is why it is passed
+    /// as a name rather than derived here.
+    pub kind: &'a str,
     /// The details list rows, resolved by the caller.
     pub details: &'a [SelectionDetail],
     /// The tag section rows (Title → Track Number), resolved by the caller —
@@ -293,16 +312,6 @@ pub struct SelectionPanel<'a> {
     /// draft's buffers and reports the bar's actions — the app layer owns the
     /// draft and the request.
     pub editor: Option<&'a mut TagDraft>,
-    /// Whether the readout is a single track (a track row single-clicked in
-    /// any listing). The primary action then reads **Play** and plays just
-    /// that one track; entity readouts read **Play album** and start the
-    /// whole batch.
-    pub single: bool,
-    /// Whether the quick-action row renders **Add to Queue** beside the
-    /// primary play action (the elastic-column inspector). `false` keeps the
-    /// panel's original single Play album action — the rendering the
-    /// `selection_panel` golden pins.
-    pub queue: bool,
 }
 
 /// The empty state's copy: what the panel says before any album has been
@@ -323,7 +332,9 @@ pub fn show_selection_panel(
     panel: SelectionPanel<'_>,
     actions: &mut Vec<SelectionAction>,
 ) {
-    header(ui, palette, panel.title.is_some());
+    // The chip rides with the title: with nothing selected there is no kind to
+    // name, and the empty state is not a readout of anything.
+    header(ui, palette, panel.title.is_some().then_some(panel.kind));
     egui::ScrollArea::vertical()
         .id_salt("selection_panel_readout")
         .auto_shrink(false)
@@ -332,7 +343,23 @@ pub fn show_selection_panel(
         });
 }
 
-/// The panel's body: art, title line, quick actions, tag section, details.
+/// The panel's body: art, title line, tag section, details.
+///
+/// The rhythm is the readout's and nothing else's: the art, then the title
+/// block, then the tag section, then the details grid, with the design's
+/// [`theme::SPACE_LG`] at each BOUNDARY between them. The action row that used
+/// to sit between the title block and the tag rows is gone, and so is the
+/// divider that separated it — the space that divider occupied is the title
+/// block's own trailing space, so removing the buttons closed the gap under
+/// the title rather than opening a hole.
+///
+/// A boundary is a place where a section ENDS and the next one begins, so a
+/// gap goes with one and only where there is one. A readout with no tag rows —
+/// an Artist or a Genre — was being handed both of the twelve-pixel gaps back
+/// to back with nothing between them, which put its first section a full gap
+/// lower than every other readout's: 33 px of blank under the subtitle against
+/// 21 px on a readout that has tags, and the panel's largest hole standing in
+/// the one column that had nothing to fill it.
 fn readout(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -342,7 +369,7 @@ fn readout(
 ) {
     if let Some(title) = panel.title {
         album_art(ui, palette, panel.art);
-        ui.add_space(12.0);
+        ui.add_space(theme::SPACE_LG);
         ui.heading(title);
         if let Some(subtitle) = panel.subtitle {
             ui.label(
@@ -351,22 +378,18 @@ fn readout(
                     .color(palette.ink_2),
             );
         }
-        ui.add_space(12.0);
-        if panel.queue {
-            action_row(ui, cache, palette, panel.single, actions);
-        } else {
-            primary_play_button(ui, cache, palette, panel.single, actions);
+        if panel.editor.is_some() || !panel.tags.is_empty() {
+            ui.add_space(theme::SPACE_LG);
+            if let Some(editor) = panel.editor.as_deref_mut() {
+                editor_section(ui, cache, palette, editor, actions);
+            } else {
+                tag_section(ui, palette, panel.tags, actions);
+            }
         }
-        ui.add_space(12.0);
-        if let Some(editor) = panel.editor.as_deref_mut() {
-            editor_section(ui, cache, palette, editor, actions);
-        } else if !panel.tags.is_empty() {
-            tag_section(ui, palette, panel.tags, actions);
-        }
-        ui.add_space(12.0);
+        ui.add_space(theme::SPACE_LG);
         details_list(ui, palette, panel.details);
     } else {
-        ui.add_space(12.0);
+        ui.add_space(theme::SPACE_LG);
         ui.label(egui::RichText::new(EMPTY_TITLE).color(palette.ink_2));
         ui.label(
             egui::RichText::new(EMPTY_HINT)
@@ -376,9 +399,16 @@ fn readout(
     }
 }
 
-/// The `SELECTION` header row: the muted caps label with the selection
-/// kind's chip at the right edge (design: `Album` on a raised pill).
-fn header(ui: &mut egui::Ui, palette: &Palette, with_chip: bool) {
+/// The `SELECTION` header row: the muted caps label with the readout KIND's
+/// chip at the right edge.
+///
+/// The chip is a plain label. It used to be an `egui::Button` with no click
+/// handler at all, wearing a raised pill — a control that invited a press and
+/// did nothing when given one, and whose text was the hardcoded string
+/// "Album", so every kind of readout announced itself as an Album. A readout
+/// displays; a label is what a readout wears. `kind` is `None` when there is no
+/// readout, which is the only case in which the chip is not drawn.
+fn header(ui: &mut egui::Ui, palette: &Palette, kind: Option<&str>) {
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.label(
@@ -387,16 +417,9 @@ fn header(ui: &mut egui::Ui, palette: &Palette, with_chip: bool) {
                     .color(palette.ink_3),
             );
         });
-        if with_chip {
+        if let Some(kind) = kind {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let chip = egui::Button::new(
-                    egui::RichText::new("Album")
-                        .text_style(egui::TextStyle::Small)
-                        .color(palette.ink),
-                )
-                .fill(palette.surface_2)
-                .corner_radius(super::theme::RADIUS_SM);
-                ui.add(chip);
+                ui.label(egui::RichText::new(kind).text_style(egui::TextStyle::Small));
             });
         }
     });
@@ -421,143 +444,6 @@ fn album_art(ui: &mut egui::Ui, palette: &Palette, art: Option<&egui::TextureHan
             border: None,
         },
     );
-}
-
-/// The primary play action: a full-width orange button — the brand fill with
-/// its foreground ink — reporting [`SelectionAction::PlayAlbum`]. A track
-/// readout (`single`) reads **Play** and plays just that one track; an entity
-/// readout reads **Play album**. The visible text doubles as the
-/// accessibility label.
-fn primary_play_button(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    single: bool,
-    actions: &mut Vec<SelectionAction>,
-) {
-    let width = ui.available_width();
-    action_button(
-        ui,
-        cache,
-        palette,
-        width,
-        play_quick_action(single),
-        actions,
-    );
-}
-
-/// The inspector's quick-action row: the primary play action and **Add to
-/// Queue** side by side, each half the panel width. The visible texts double
-/// as the accessibility labels; the queue action follows the context menu's
-/// per-track queue precedent.
-fn action_row(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    single: bool,
-    actions: &mut Vec<SelectionAction>,
-) {
-    let width = ui.available_width();
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = theme::SPACE_MD;
-        let half = (width - theme::SPACE_MD) / 2.0;
-        action_button(ui, cache, palette, half, play_quick_action(single), actions);
-        action_button(
-            ui,
-            cache,
-            palette,
-            half,
-            QuickAction {
-                text: "Add to Queue",
-                icon: super::icons::Icon::ListMusic,
-                label: "Add this selection's tracks to the queue",
-                action: SelectionAction::Queue,
-            },
-            actions,
-        );
-    });
-}
-
-/// The primary play action's spec: for a single-track readout it reads
-/// **Play** and plays just that one track; for an entity readout it reads
-/// **Play album** and starts the whole selection.
-fn play_quick_action(single: bool) -> QuickAction {
-    if single {
-        QuickAction {
-            text: "Play",
-            icon: super::icons::Icon::Play,
-            label: "Play this track",
-            action: SelectionAction::PlayAlbum,
-        }
-    } else {
-        QuickAction {
-            text: "Play album",
-            icon: super::icons::Icon::Play,
-            label: "Play the whole album",
-            action: SelectionAction::PlayAlbum,
-        }
-    }
-}
-
-/// One quick-action button's spec: the visible text (doubling as the
-/// accessibility label), its icon, the hover label, and the action it
-/// reports.
-struct QuickAction {
-    text: &'static str,
-    icon: super::icons::Icon,
-    label: &'static str,
-    action: SelectionAction,
-}
-
-/// One primary action button at `width` wide, reporting `spec.action` when
-/// clicked.
-///
-/// Both quick actions come through here, and this is the only place either is
-/// painted, so the row cannot show one lit primary beside a flat one. The face
-/// is [`super::button::paint_primary_face`] — the same authority
-/// [`super::button::Variant::Primary`] and the player bar's FAB use — rather
-/// than a hand-rolled brand fill, which is what this button wore before the
-/// accent gradient landed and is exactly the drift that put two primaries in
-/// one row reading differently.
-///
-/// The rect is claimed from the cursor *before* the button is added so the
-/// bloom can go down first, then the button contributes only its glyph, its
-/// label and its state stroke over that face. `add_sized` lays the button out at
-/// the cursor, which is what makes the claim exact;
-/// `test_quick_action_claims_the_rect_its_button_actually_takes` in
-/// `tests/ui_tests.rs` is what keeps it that way.
-fn action_button(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    width: f32,
-    spec: QuickAction,
-    actions: &mut Vec<SelectionAction>,
-) {
-    let QuickAction {
-        text,
-        icon,
-        label,
-        action,
-    } = spec;
-    let size = egui::vec2(width, PLAY_H);
-    let rect = egui::Rect::from_min_size(ui.cursor().min, size);
-    super::button::paint_primary_face(ui, palette, rect, super::theme::RADIUS_SM);
-
-    let texture = cache.texture(ui.ctx(), icon, 14.0, palette.on_brand);
-    let button = egui::Button::image_and_text(
-        egui::Image::new((texture, egui::vec2(14.0, 14.0))),
-        egui::RichText::new(text)
-            .text_style(egui::TextStyle::Body)
-            .color(palette.on_brand),
-    )
-    // The face is already down; the button keeps its glyph, label and state
-    // stroke and paints no fill of its own.
-    .fill(theme::TRANSPARENT)
-    .corner_radius(super::theme::RADIUS_SM);
-    if ui.add_sized(size, button).on_hover_text(label).clicked() {
-        actions.push(action);
-    }
 }
 
 /// The inline editor: one in-place field per tag field, prefilled from the

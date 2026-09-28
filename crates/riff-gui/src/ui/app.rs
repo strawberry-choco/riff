@@ -614,6 +614,25 @@ impl RiffApp {
 
     /// Attach the shared track context menu to `response`. See
     /// [`show_track_context_menu`] for the available actions.
+    ///
+    /// The ONE attach point for every Track row in the app: the flat All Tracks
+    /// list and the search results under it, a smart playlist's Tracks, a folder
+    /// node's Tracks, and a user playlist's entries — valid and missing alike.
+    /// Selection is part of the attach rather than a fact each site works out
+    /// for itself, which is what makes those six surfaces answer a right-click
+    /// identically instead of merely similarly.
+    ///
+    /// What the gesture adds is the selection and nothing else: the row's
+    /// click, double-click, and heart paths are untouched, so a right-click
+    /// still starts no playback and still begins no drag, and the drag handle
+    /// under a reorderable row still belongs to the drag.
+    ///
+    /// The menu's props are read off the row's own `track` here, which is what
+    /// makes one answer per row: the Favourite item's label flips on
+    /// `track.favorite`, and a listing may hold a mix of Favourited and
+    /// un-Favourited rows. The Favourite item's own write is the SAME durable
+    /// setter the heart's is — `library_mutations.set_track_favorite` — so the
+    /// two are one change with two doors.
     fn attach_track_menu(
         &mut self,
         response: &egui::Response,
@@ -630,16 +649,33 @@ impl RiffApp {
             .map(|p| (p.id.clone(), p.name.clone()))
             .collect();
         let palette = self.theme.active;
-        let mut effects = TrackMenuEffects {
-            track_id,
-            track,
-            selected_track: &mut library.selected_track,
-            tag_editor: &mut self.tag_editor,
-            transport: self.transport.as_ref(),
-            playlist_store: self.playlist_store.as_mut(),
-            remove_from_playlist,
+        let open = {
+            let mut effects = TrackMenuEffects {
+                track_id,
+                track,
+                selected_track: &mut library.selected_track,
+                tag_editor: &mut self.tag_editor,
+                transport: self.transport.as_ref(),
+                playlist_store: self.playlist_store.as_mut(),
+                library_mutations: self.library_mutations.as_mut(),
+                remove_from_playlist,
+            };
+            show_track_context_menu(response, &palette, &options, &mut effects)
         };
-        show_track_context_menu(response, &palette, &options, &mut effects);
+        // The selection is the OPENING's effect, applied through its own
+        // pointer-free applier and not through the item path above: a
+        // right-click that opens the menu and is then dismissed chose nothing
+        // and has still selected. The effects bag is released first because it
+        // holds the very slot this writes.
+        apply_track_menu_open(
+            track_id,
+            if open {
+                TrackMenuOpen::Opened
+            } else {
+                TrackMenuOpen::NotOpened
+            },
+            &mut library.selected_track,
+        );
     }
 
     /// Commit one track's favorite flag: the heart every track row carries.
@@ -680,6 +716,13 @@ impl RiffApp {
     /// Shared clickable track row behind every track listing: restyled 40px
     /// tree row + selection/play/context-menu wiring. `label` lets callers
     /// keep their display formats ("Artist - Title", "01. Title").
+    ///
+    /// Three gestures, three separate things. A click selects; a double-click
+    /// selects AND plays; a right-click opens the menu and selects, through
+    /// [`Self::attach_track_menu`], which is what keeps the Detail Panel and the
+    /// menu describing the same Track. The right-click is not a weaker click:
+    /// it never reaches the transport, and the row's drag affordance is not its
+    /// business.
     #[allow(clippy::too_many_arguments)]
     fn interactive_track_row(
         &mut self,
@@ -1055,56 +1098,187 @@ fn apply_titlebar_action(
 }
 
 /// Apply one [`crate::ui::browser::BrowserAction`] (handoff issue 08) to the
-/// library session: the sort toggle and genre chips are session fields; a
-/// row selection resolves per section into the [`BrowserSelection`] the
-/// stage's root column consumes, landing at level 0 (`select_at(0, …)`) so
-/// drill-down restarts from the root. Track rows select through
-/// `library.selected_track` (the existing `interactive_track_row` flow), so
-/// the All Tracks variant never sets a browser selection. The drill columns
-/// (level 1 / 2) go through [`apply_drill_action`].
+/// library session: the sort toggle is a session field; a row selection
+/// resolves per section into the [`BrowserSelection`] the stage's root column
+/// consumes, landing at level 0 (`select_at(0, …)`) so drill-down restarts from
+/// the root. Track rows select through `library.selected_track` (the existing
+/// `interactive_track_row` flow), so the All Tracks variant never sets a
+/// browser selection. The drill columns (level 1 / 2) go through
+/// [`apply_drill_action`].
+///
+/// A [`BrowserAction::ContextMenu`](crate::ui::browser::BrowserAction::ContextMenu)
+/// is answered by [`apply_collection_menu`], which needs the playback session,
+/// the transport, and the Session Views seam as well as the library — this
+/// function holds only the library, so the section roots route that variant
+/// there instead of here. The arm exists because the match must stay
+/// exhaustive, and it is never reached from the app.
 pub fn apply_browser_action(
     action: crate::ui::browser::BrowserAction,
     library: &mut LibrarySession,
 ) {
-    use riff_backend::app::state::BrowserSelection;
     match action {
         crate::ui::browser::BrowserAction::ToggleSort => {
             library.browser_sort_desc = !library.browser_sort_desc;
         }
         crate::ui::browser::BrowserAction::Select(key) => {
-            let selection = match library.library_section {
-                LibrarySection::Artists => Some(BrowserSelection::Artist(key)),
-                LibrarySection::Genres => Some(BrowserSelection::Genre(key)),
-                LibrarySection::Albums => {
-                    key.split_once('\u{1f}')
-                        .map(|(artist, title)| BrowserSelection::Album {
-                            artist: artist.to_owned(),
-                            title: title.to_owned(),
-                        })
-                }
-                LibrarySection::AllTracks => None,
-            };
-            if let Some(selection) = selection {
-                library.select_at(0, selection);
-            }
+            let section = library.library_section;
+            apply_entity_selection(&key, section, 0, library);
+        }
+        crate::ui::browser::BrowserAction::ContextMenu { .. } => {}
+    }
+}
+
+/// What kind of entity a browser row denotes.
+///
+/// One classifier for the six entity Columns, because a row's key alone does not
+/// say: an Album's key is the `(artist, title)` composite and an Artist's or a
+/// Genre's is a bare name, and one section hosts two of those at different
+/// depths — an artist's drill column lists Albums, not Artists. Both consumers,
+/// where the row's selection lands and which Tracks the row denotes, read the
+/// row's kind from here, so a row can never be SELECTED as one thing and PLAYED
+/// as another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EntityRow {
+    /// An Album, named by the store's own `(album artist, title)` identity.
+    Album { artist: String, title: String },
+    /// An Artist, named by its own name.
+    Artist(String),
+    /// A Genre, named by its own name.
+    Genre(String),
+}
+
+impl EntityRow {
+    /// The selection this row's click and right-click both land on.
+    fn selection(&self) -> BrowserSelection {
+        match self {
+            Self::Album { artist, title } => BrowserSelection::Album {
+                artist: artist.clone(),
+                title: title.clone(),
+            },
+            Self::Artist(name) => BrowserSelection::Artist(name.clone()),
+            Self::Genre(name) => BrowserSelection::Genre(name.clone()),
         }
     }
 }
 
+/// The entity a row at `level` of `section` denotes. `None` where the section
+/// lists no entity rows — the All Tracks listing, and any depth that does not
+/// exist — so a key that could mean nothing selects nothing and plays nothing.
+fn entity_row(key: &str, section: LibrarySection, level: usize) -> Option<EntityRow> {
+    match (section, level) {
+        (LibrarySection::Albums, 0)
+        | (LibrarySection::Artists, 1)
+        | (LibrarySection::Genres, 2) => {
+            key.split_once('\u{1f}')
+                .map(|(artist, title)| EntityRow::Album {
+                    artist: artist.to_owned(),
+                    title: title.to_owned(),
+                })
+        }
+        // The Genres section's first drill column lists that genre's ARTISTS,
+        // which is the one place a bare name at level 1 is not an Album row.
+        (LibrarySection::Artists, 0) | (LibrarySection::Genres, 1) => {
+            Some(EntityRow::Artist(key.to_owned()))
+        }
+        (LibrarySection::Genres, 0) => Some(EntityRow::Genre(key.to_owned())),
+        // The All Tracks listing has no entity rows, and neither has any depth
+        // the stage does not plan: nothing to select, nothing to play.
+        _ => None,
+    }
+}
+
+/// Apply the selection one entity row's key denotes, at that row's own depth.
+/// Shared by the section roots' [`apply_browser_action`] and the drill columns'
+/// [`apply_drill_action`] so a click and a right-click on the same row are
+/// literally the same line of code.
+fn apply_entity_selection(
+    key: &str,
+    section: LibrarySection,
+    level: usize,
+    library: &mut LibrarySession,
+) {
+    if let Some(row) = entity_row(key, section, level) {
+        library.select_at(level, row.selection());
+    }
+}
+
+/// The Track batch the entity a row denotes covers.
+///
+/// Resolved HERE, when the item is dispatched, and never when the menu was
+/// built — so a scan or a tag edit that committed in between is reflected in
+/// what gets played, queued, or shuffled.
+///
+/// The three kinds answer differently, and the difference is the point:
+///
+/// - an **Album** is that album's tracks, keyed by the store's `(artist,
+///   title)` identity;
+/// - an **Artist** is every track across its albums, so the walk is over the
+///   artist's album table;
+/// - a **Genre** is the tracks CARRYING that genre, which is a genuinely
+///   different set — not the library's tracks filtered, but a different walk
+///   (the genre's artists, their genre-scoped albums, and those albums'
+///   genre-scoped tracks), gated on the genre still being in the read model.
+///   The gate is what a gone genre's row looks like from here: nothing to play.
+pub fn entity_track_ids(
+    key: &str,
+    section: LibrarySection,
+    level: usize,
+    views: &mut SessionViews,
+) -> Vec<TrackId> {
+    match entity_row(key, section, level) {
+        Some(EntityRow::Album { artist, title }) => views
+            .album_tracks(&artist, &title)
+            .iter()
+            .map(|track| track.id.clone())
+            .collect(),
+        Some(EntityRow::Artist(name)) => views
+            .artist_albums(&name)
+            .iter()
+            .flat_map(|album| album.tracks.iter().cloned())
+            .collect(),
+        Some(EntityRow::Genre(genre)) => {
+            let known = views.genres().iter().any(|row| row.genre == genre);
+            if !known {
+                return Vec::new();
+            }
+            let mut ids = Vec::new();
+            for artist in views.artists_in_genre(&genre).iter() {
+                for album in views.artist_albums_in_genre(&artist.name, &genre).iter() {
+                    for track in views
+                        .album_tracks_in_genre(&album.artist, &album.title, &genre)
+                        .iter()
+                    {
+                        ids.push(track.id.clone());
+                    }
+                }
+            }
+            ids
+        }
+        None => Vec::new(),
+    }
+}
+
 /// Apply one [`crate::ui::detail::DetailAction`] (handoff issue 09) to the
-/// sessions and the store. `album_tracks` is the current album's track ids
-/// in store order, resolved by the caller from the Session Views seam —
-/// the play batch the header's two actions start. Playback follows the
-/// folder-enqueue precedent: one `play_many` batch, never per-track sends.
+/// sessions and the store.
+///
+/// The header's **Play all** and **Shuffle** used to arrive here as a batch of
+/// the shown rows resolved by the caller; both are gone with the buttons, and
+/// so is the batch parameter that fed them. What remains moves selection and
+/// commits a favorite: a batch play is reached from a collection's menu
+/// instead, through [`play_album_batch`].
 pub fn apply_detail_action(
     action: crate::ui::detail::DetailAction,
     library: &mut LibrarySession,
-    playback: &mut PlaybackSession,
     transport: &dyn Transport,
     library_mutations: &mut dyn LibraryMutationStore,
-    album_tracks: &[TrackId],
 ) {
     use crate::ui::detail::DetailAction as Action;
+    // Two arms below are deliberate no-ops for reasons of their own, so the
+    // identical bodies are the point rather than a merge waiting to happen.
+    #[expect(
+        clippy::match_same_arms,
+        reason = "each no-op arm carries its own reason for being unreachable here"
+    )]
     match action {
         // A breadcrumb segment at level `i` climbs the drill-down path back
         // to that level: level 0 empties the path (the section root).
@@ -1114,19 +1288,6 @@ pub fn apply_detail_action(
         // fire from the app. The widget seam keeps the variant for its
         // own contract (tests render rows directly).
         Action::SelectRow(_) => {}
-        Action::PlayAll | Action::Shuffle => {
-            // An empty album starts nothing — and never re-enables shuffle.
-            if album_tracks.is_empty() {
-                return;
-            }
-            if action == Action::Shuffle {
-                // Shuffle state lives in the session queue (same as the
-                // player bar's toggle); the batch itself is the ordinary
-                // play_many.
-                playback.queue.set_shuffle(true);
-            }
-            play_album_batch(album_tracks, transport);
-        }
         Action::SelectTrack(key) => {
             library.selected_track = Some(TrackId(key));
         }
@@ -1134,41 +1295,19 @@ pub fn apply_detail_action(
             library.selected_track = Some(TrackId(key.clone()));
             transport.play(TrackId(key));
         }
+        // A Track row's menu report CANNOT be answered here: choosing an item
+        // needs the Playlist Store and the Inline Tag Editor, which are not
+        // this applier's parameters, and re-using the Track menu's own applier
+        // means reaching the same two appliers every other Track row reaches.
+        // The one call site that can receive this report — the Tracks column —
+        // intercepts it before it gets here, which is why this arm is a
+        // documented no-op rather than a second dispatch of its own.
+        Action::TrackMenu { .. } => {}
         Action::SetFavorite { key, favorite } => {
             if let Err(e) = library_mutations.set_track_favorite(&TrackId(key.clone()), favorite) {
                 tracing::warn!("Failed to commit the favorite flag for {key}: {e}");
             }
         }
-    }
-}
-
-/// Apply one [`crate::ui::selection::SelectionAction`] (handoff issue 10).
-/// `track_ids` is the selection's track ids in store order, resolved by the
-/// caller from the Session Views seam — the batch the panel's Play starts
-/// (one `play_many` batch, never per-track sends) or the Queue action
-/// appends (the context menu's per-track queue precedent). An empty batch
-/// starts and queues nothing.
-pub fn apply_selection_action(
-    action: crate::ui::selection::SelectionAction,
-    transport: &dyn Transport,
-    track_ids: &[TrackId],
-) {
-    match action {
-        crate::ui::selection::SelectionAction::PlayAlbum => {
-            play_album_batch(track_ids, transport);
-        }
-        crate::ui::selection::SelectionAction::Queue => {
-            for tid in track_ids {
-                transport.add_to_queue(tid.clone());
-            }
-        }
-        // The inline editor's Save/Cancel/StartEdit intents are consumed by
-        // the selection panel before they ever reach this public seam (the
-        // app layer owns the draft and the request), so they never carry a
-        // track batch — and are never dispatched here.
-        crate::ui::selection::SelectionAction::SaveTagEdit
-        | crate::ui::selection::SelectionAction::CancelTagEdit
-        | crate::ui::selection::SelectionAction::StartEdit => {}
     }
 }
 
@@ -1178,35 +1317,27 @@ pub fn apply_selection_action(
 /// composites for album rows, bare names for artist rows), and
 /// [`LibrarySession::select_at`] truncates any deeper path entries. The
 /// root column's selections keep going through [`apply_browser_action`]
-/// (`select_at(0, …)`), so drill-down always restarts from the root.
+/// (`select_at(0, …)`), so drill-down always restarts from the root. Both
+/// reach [`apply_entity_selection`], which is the one place the key's
+/// meaning is decided.
 pub fn apply_drill_action(
     section: LibrarySection,
     level: usize,
     key: String,
     library: &mut LibrarySession,
 ) {
-    let selection = match (section, level) {
-        // Album rows: an artist's albums (Artists, level 1) and an
-        // artist's albums within a genre (Genres, level 2).
-        (LibrarySection::Artists, 1) | (LibrarySection::Genres, 2) => {
-            key.split_once('\u{1f}')
-                .map(|(artist, title)| BrowserSelection::Album {
-                    artist: artist.to_owned(),
-                    title: title.to_owned(),
-                })
-        }
-        // Artist rows: the artists carrying a genre (Genres, level 1).
-        (LibrarySection::Genres, 1) => Some(BrowserSelection::Artist(key)),
-        _ => None,
-    };
-    if let Some(selection) = selection {
-        library.select_at(level, selection);
-    }
+    apply_entity_selection(&key, section, level, library);
 }
 
-/// Start an album batch: its first track plays, the rest queue behind it —
-/// exactly [`play_folder`]'s gesture. An empty album starts nothing (and
-/// never re-enables shuffle).
+/// The one shared batch-play helper: a list's first Track plays and the rest
+/// queue behind it as a single `play_many` batch — exactly [`play_folder`]'s
+/// gesture. An empty batch starts nothing, and so never re-enables shuffle.
+///
+/// It has no caller in [`apply_detail_action`] any more — the Tracks column's
+/// header buttons that used to reach it are gone — and it is deliberately not
+/// folded into what replaced them. A whole-list menu's Play and Shuffle, on
+/// the album, artist, genre, playlist, smart-playlist and folder surfaces, are
+/// what still reach it, so it must never be deleted as dead code.
 fn play_album_batch(album_tracks: &[TrackId], transport: &dyn Transport) {
     let Some(first) = album_tracks.first() else {
         return;
@@ -1424,8 +1555,13 @@ pub struct InspectorContent {
     /// The selection's cover art source (a track id); `None` renders the
     /// neutral placeholder block.
     pub art_track: Option<TrackId>,
-    /// The selection's track ids in store order — the batch Play and
-    /// Add to Queue actions start.
+    /// The selection's track ids in store order — the tag editor's targets.
+    /// The batch Play and Add to Queue actions these once started are retired
+    /// (they moved to the collection context menu); what reads this field now
+    /// is [`RiffApp::open_inline_draft`], which opens the Track draft from the
+    /// first id and the Album batch draft from all of them, and
+    /// `InlineTagEditor::draft_belongs`, which checks an open draft still
+    /// belongs to the readout it was opened from.
     pub track_ids: Vec<TrackId>,
     pub details: Vec<crate::ui::selection::SelectionDetail>,
     /// The tag section's seven resolved rows (Title → Track Number), for
@@ -2587,7 +2723,7 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         library: &mut LibrarySession,
-        playback: &PlaybackSession,
+        playback: &mut PlaybackSession,
         kind: SmartPlaylistKind,
     ) {
         // Bounded playlists cap at 50 entries; open-ended ones list all.
@@ -2611,9 +2747,10 @@ impl RiffApp {
         if !tracks.is_empty() {
             let tids: Vec<TrackId> = tracks.iter().map(|t| t.id.clone()).collect();
             show_list_context_menu(
-                &header.response,
+                &header_response(ui, &header),
                 &self.theme.active,
                 self.transport.as_ref(),
+                playback,
                 &tids,
             );
         }
@@ -2817,7 +2954,7 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         library: &mut LibrarySession,
-        playback: &PlaybackSession,
+        playback: &mut PlaybackSession,
         playlist_id: &PlaylistId,
     ) {
         let playlists = self.views.playlists();
@@ -2848,9 +2985,10 @@ impl RiffApp {
         });
         if !valid_ids.is_empty() {
             show_list_context_menu(
-                &header.response,
+                &header_response(ui, &header),
                 &self.theme.active,
                 self.transport.as_ref(),
+                playback,
                 &valid_ids,
             );
         }
@@ -2890,6 +3028,18 @@ impl RiffApp {
 
     /// One row of [`Self::render_playlist_view`]: a normal track row for
     /// valid entries, a flagged "missing" row otherwise.
+    ///
+    /// The two shapes differ in what the menu can OFFER and in nothing else.
+    /// A missing entry's menu is reduced — no playback action, no tag editor,
+    /// and no Favourite — because its file cannot play, and because the heart
+    /// this very branch replaces with a flagged label is what the menu's own
+    /// Favourite item is gated on: the two agree because both are the same
+    /// condition, not because either watches the other. Its right-click still
+    /// selects it, because selection is a property of the row the menu is on
+    /// rather than of the menu's contents, and the Detail Panel has to describe
+    /// the same Track either way. The entry's identity survives the file: only
+    /// the file went, so the store still resolves the Track and the readout is
+    /// real.
     #[allow(clippy::too_many_arguments)]
     fn render_playlist_entry(
         &mut self,
@@ -2941,8 +3091,18 @@ impl RiffApp {
     /// 12): the standard interactive track row wrapped in egui's built-in
     /// drag-and-drop support ([`sidebar::reorderable_row`]). Releasing a row
     /// on another persists the new order through the [`PlaylistStore`] port
-    /// via [`commit_playlist_reorder`] (ADR 0002); clicks, double-clicks,
-    /// and the shared context menu behave exactly as before.
+    /// via [`commit_playlist_reorder`] (ADR 0002); clicks and double-clicks
+    /// behave exactly as before.
+    ///
+    /// The row's drag hit-area sits UNDERNEATH the row's own response, and
+    /// [`sidebar::reorderable_row`] documents why the ordering cannot be the
+    /// other way round: egui's hit test swallows clicks that land on a
+    /// drag-only widget stacked above a click widget. So that ordering is what
+    /// lets a secondary click reach the row at all, which is why a right-click
+    /// here opens the menu and selects the Track exactly as on every other
+    /// Track row — and why it begins no drag. Reordering is the row's own
+    /// gesture and the menu's is the right button; neither is the other's
+    /// business.
     #[allow(clippy::too_many_arguments)]
     fn render_reorderable_playlist_row(
         &mut self,
@@ -3109,7 +3269,7 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         library: &mut LibrarySession,
-        playback: &PlaybackSession,
+        playback: &mut PlaybackSession,
         query: &str,
     ) {
         if library.library_paths.paths().is_empty() {
@@ -3145,7 +3305,7 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         library: &mut LibrarySession,
-        playback: &PlaybackSession,
+        playback: &mut PlaybackSession,
         path: &std::path::Path,
         level: usize,
         query: &str,
@@ -3238,6 +3398,7 @@ impl RiffApp {
                 &row.response,
                 &self.theme.active,
                 self.transport.as_ref(),
+                playback,
                 &folder_track_ids,
             );
         }
@@ -3515,7 +3676,7 @@ pub struct TrackMenuEffects<'a> {
     /// The Track the menu was attached to — the subject of every intent.
     pub track_id: &'a TrackId,
     /// The track itself; `None` (e.g. a playlist entry whose file is missing)
-    /// suppresses playback actions and "Edit Tags".
+    /// suppresses playback actions, "Edit Tags", and the Favourite item.
     pub track: Option<&'a Track>,
     /// The selection slot: the "Edit Tags" intent selects the Track before the
     /// inline editor opens, so the readout follows the entry point.
@@ -3529,6 +3690,13 @@ pub struct TrackMenuEffects<'a> {
     /// The Application Store's playlists section: entry mutations commit
     /// through it as one immediate durable transaction.
     pub playlist_store: &'a mut dyn PlaylistStore,
+    /// The Application Store's library section, and the Favourite flag's only
+    /// durable home. The Favourite item writes through the SAME port method the
+    /// row's heart does ([`LibraryMutationStore::set_track_favorite`]), so the
+    /// menu is a second path to one change rather than a second way of storing
+    /// it — which is the whole reason it is here and not a variant of the
+    /// Playlist Store above.
+    pub library_mutations: &'a mut dyn LibraryMutationStore,
     /// When `Some`, the row belongs to that Playlist, so the menu offers the
     /// removal and this is the playlist it removes from.
     pub remove_from_playlist: Option<&'a PlaylistId>,
@@ -3536,28 +3704,49 @@ pub struct TrackMenuEffects<'a> {
 
 /// Shared track context menu. The rows and their meanings belong to
 /// [`crate::ui::menu`]; this only decides which rows exist, renders them inside
-/// egui's popup, and hands each emitted intent to
-/// [`apply_track_menu_intent`] — so no Transport command, store write, or
-/// editor draft can happen while the menu is being painted.
+/// egui's popup, and hands each emitted intent to [`apply_track_menu_intent`] —
+/// so no Transport command, store write, or editor draft can happen while the
+/// menu is being painted.
+///
+/// The props are read off `effects` per row, which is why every Track-row
+/// surface can answer one way for a Favourited Track and the other way for an
+/// un-Favourited one in the same frame without any of them knowing about the
+/// others.
+///
+/// Returns whether the popup was open on this frame, which is the menu's only
+/// selection-carrying report: the row's identity, and the fact that its menu
+/// opened, apart from anything the listener chose from it. `false` means the row
+/// was merely painted. The popup is egui's own transient one, keyed by the row's
+/// response identity rather than by any index, so a virtualized listing keeps no
+/// per-row open state — and a row materialized only because it was on screen is
+/// all the report needs to say.
 fn show_track_context_menu(
     response: &egui::Response,
     palette: &Palette,
     playlists: &[(PlaylistId, String)],
     effects: &mut TrackMenuEffects<'_>,
-) {
+) -> bool {
     let menu = crate::ui::menu::TrackMenu {
         playable: effects.track.is_some(),
         editable: effects.track.is_some(),
+        // The row's OWN flag, read off the Track the host resolved for it: the
+        // item's label flips on this, and a listing can hold a mix of
+        // Favourited and un-Favourited rows. A missing-file entry has no Track
+        // to read, and is offered no Favourite in the first place.
+        favorite: effects.track.is_some_and(|track| track.favorite),
         playlists,
         remove_from_playlist: effects.remove_from_playlist.is_some(),
     };
     let mut intents = Vec::new();
-    response.context_menu(|ui| {
-        crate::ui::menu::track_menu(ui, palette, &menu, &mut intents);
-    });
+    let open = response
+        .context_menu(|ui| {
+            crate::ui::menu::track_menu(ui, palette, &menu, &mut intents);
+        })
+        .is_some();
     for intent in intents {
         apply_track_menu_intent(intent, effects);
     }
+    open
 }
 
 /// Apply one emitted Track-menu intent. Every effect in the app's track menus
@@ -3594,6 +3783,22 @@ pub fn apply_track_menu_intent(
                 tracing::warn!("Failed to remove playlist entry: {e}");
             }
         }
+        // The Favourite item commits the flag the menu said it would, through
+        // the one durable setter the row's heart also uses: one immediate
+        // transaction, the committed mutation bumps the library generation so
+        // the projections re-resolve the row on the next frame with zero caller
+        // action (ADR 0002). Nothing else moves — no transport command, no
+        // playlist entry, no tag draft — because a Favourite is a library fact
+        // and nothing else. A failed commit changes nothing and is logged, the
+        // same as the heart's.
+        TrackMenuIntent::SetFavorite(favorite) => {
+            if let Err(e) = effects
+                .library_mutations
+                .set_track_favorite(&track_id, favorite)
+            {
+                tracing::warn!("Failed to commit the favorite flag for {}: {e}", track_id.0);
+            }
+        }
         // "Edit Tags" is the inline editor's entry point: it selects the Track
         // (so the Detail Panel shows its readout) and opens the per-selection
         // draft focused on the first tag field (Issue 04).
@@ -3615,12 +3820,100 @@ pub fn apply_track_menu_intent(
     }
 }
 
+/// What one Track row's menu reported besides the items the listener chose:
+/// whether the popup was open on this frame.
+///
+/// A report in its own right rather than a flag among [`TrackMenuEffects`],
+/// because those are the slots an intent acts THROUGH while this is the menu
+/// itself acting. OPENING is a different event from CHOOSING, and they are kept
+/// apart on purpose: the selection is the open's, so a right-click that opens a
+/// menu and is then dismissed has still selected — which would be false if the
+/// effect rode along on an item choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackMenuOpen {
+    /// The row's popup was open on this frame — with nothing chosen yet, or
+    /// with a choice [`apply_track_menu_intent`] has already answered.
+    Opened,
+    /// The row was painted and nothing opened on it: the state a list of Track
+    /// rows spends almost all of its frames in, and the one that must move
+    /// nothing at all.
+    NotOpened,
+}
+
+/// Apply one Track row's menu-open report: OPENING the menu makes that Track the
+/// selected Track, and that is all the open does.
+///
+/// Two deliberate shapes here.
+///
+/// The selection is an argument rather than something read back off the click,
+/// which is what makes the whole step reachable — and provable — with no pointer
+/// in the test: the row was right-clicked a long way from here, and everything
+/// that click caused is spelled out in these two values. It is the same reason
+/// the entity rows' selection is an argument to [`apply_collection_menu`].
+///
+/// And it is a free function over plain borrows rather than a method on
+/// [`TrackMenuEffects`], for the same reason plus one: the effects bag is the
+/// menu's item path, and an open with no item chosen has no item path to run.
+/// Putting this in the bag would have meant either a slot nothing reads or a
+/// constructor that stands in for a pointer the test does not have.
+///
+/// A `NotOpened` report moves nothing — neither the selection it would have
+/// written nor the one already there. The report moves the selection; it never
+/// owns it.
+pub fn apply_track_menu_open(
+    track_id: &TrackId,
+    open: TrackMenuOpen,
+    selected_track: &mut Option<TrackId>,
+) {
+    if matches!(open, TrackMenuOpen::Opened) {
+        *selected_track = Some(track_id.clone());
+    }
+}
+
+/// A header row that a right-click can reach.
+///
+/// [`show_list_context_menu`] hangs its popup off an `egui::Response`, and
+/// `Response::context_menu` opens only when that response SENSES a secondary
+/// click. A `ui.horizontal` layout's response is `Sense::hover()` — it is a
+/// rectangle, not a control — so a menu attached to one can never open, however
+/// many items it offers. That is invisible until something right-clicks the
+/// header, and then the menu is simply absent.
+///
+/// Registering the header's own rect as a click-sensing widget under a name
+/// unique to this position is what makes it a control for this one purpose.
+/// `Response::interact` is NOT enough: it keeps the layout's shared background
+/// id, which every other layout also uses, so the interaction is lost. Nothing
+/// else reads this response — a primary click on the header still selects
+/// nothing, opens nothing, and navigates nowhere, which is the whole point of a
+/// header being a pure peek (see [`show_list_context_menu`]).
+fn header_response(ui: &egui::Ui, header: &egui::InnerResponse<()>) -> egui::Response {
+    ui.interact(
+        header.response.rect,
+        ui.id().with("whole_list_context_menu"),
+        egui::Sense::click(),
+    )
+}
+
 /// Shared whole-list context menu (playlist/folder headers). Like the track
-/// menu it reports intents and lets the host act on them afterwards.
+/// menu it reports intents and lets the host act on them afterwards. The
+/// playback session travels with the transport because one of the four items —
+/// Shuffle — is the one that is not a transport command at all: it completes its
+/// intent in the queue, engaging shuffle there and then playing the batch
+/// through this menu's own [`apply_list_menu_intent`] arm. It is the playback
+/// session and never the library session, so the two locks are never held
+/// together.
+///
+/// Nothing here SELECTS, OPENS, or NAVIGATES. A header has no readout for a
+/// selection to stay consistent with, so right-clicking one is a pure peek: the
+/// four items act on the list and the view is left exactly as it was. The
+/// entity rows in the Artists, Albums, and Genres Columns, and the Track rows
+/// wherever a Track is listed, are the deliberate opposite — they DO select,
+/// which is why they attach a different renderer and a different applier.
 fn show_list_context_menu(
     response: &egui::Response,
     palette: &Palette,
     transport: &dyn Transport,
+    playback: &mut PlaybackSession,
     track_ids: &[TrackId],
 ) {
     let mut intents = Vec::new();
@@ -3628,38 +3921,102 @@ fn show_list_context_menu(
         crate::ui::menu::list_menu(ui, palette, &mut intents);
     });
     for intent in intents {
-        apply_list_menu_intent(intent, track_ids, transport);
+        apply_list_menu_intent(intent, track_ids, transport, playback);
+    }
+}
+
+/// The host slots one collection menu's effects answer to — assembled by the
+/// attach site and applied by [`apply_collection_menu`], the counterpart of
+/// [`TrackMenuEffects`] for the Track menu. Nothing in here is reachable while
+/// the menu is being painted: the renderer only reports a choice, or the fact
+/// that the menu was opened at all.
+pub struct CollectionMenuEffects<'a> {
+    /// The library session: opening an entity row's menu selects it, so the
+    /// menu just opened and the Detail Panel describe the same entity.
+    pub library: &'a mut LibrarySession,
+    /// The playback session: the Shuffle item's flag lives on its queue, and
+    /// the batch intents go to the engine from there.
+    pub playback: &'a mut PlaybackSession,
+    /// The playback command port the batch intents go through.
+    pub transport: &'a dyn Transport,
+    /// The Session Views seam, which resolves the row's Track batch at
+    /// dispatch time.
+    pub views: &'a mut SessionViews,
+}
+
+/// Apply one entity row's context-menu report: the selection, then whatever the
+/// listener chose.
+///
+/// `section` and `level` say which entity the row's `key` names, and the caller
+/// supplies them because only the caller knows them — a section root passes the
+/// session's own section and level 0, which is exactly what a plain click on
+/// the same row passes, while a drill column passes the section and depth it
+/// rendered with. Neither can disagree with itself about which row was clicked.
+///
+/// The selection is applied FIRST and unconditionally, before the intents are
+/// looked at: OPENING the menu is what moves it, so a right-click that chooses
+/// nothing still leaves the readout agreeing with the menu on screen. That is
+/// also why the selection is an argument here rather than something read back
+/// off the click — this whole function is reachable, and provable, without a
+/// pointer.
+///
+/// Each intent then goes through [`apply_list_menu_intent`], the same applier a
+/// playlist header, a smart playlist header, and a folder node use, so the four
+/// items mean one thing on all six set-of-Tracks surfaces and their effect logic
+/// is written once rather than twice.
+pub fn apply_collection_menu(
+    key: &str,
+    intents: &[crate::ui::menu::ListMenuIntent],
+    section: LibrarySection,
+    level: usize,
+    effects: CollectionMenuEffects<'_>,
+) {
+    apply_entity_selection(key, section, level, effects.library);
+    for intent in intents {
+        let batch = entity_track_ids(key, section, level, effects.views);
+        apply_list_menu_intent(*intent, &batch, effects.transport, effects.playback);
     }
 }
 
 /// Apply one emitted whole-list intent, preserving the list's current shape:
-/// **Play** starts the first Track and queues the rest behind it, **Play Next**
-/// inserts the whole list in order, **Append to Queue** adds it at the end.
+/// **Play** starts the first Track and queues the rest behind it as one batch,
+/// **Play Next** inserts the whole list in order, **Add to Queue** adds it at
+/// the end, and **Shuffle** engages shuffle and then plays the same batch.
+/// `playback` is the session the shuffle flag lives on, borrowed only by that
+/// one arm.
 pub fn apply_list_menu_intent(
     intent: crate::ui::menu::ListMenuIntent,
     track_ids: &[TrackId],
     transport: &dyn Transport,
+    playback: &mut PlaybackSession,
 ) {
     use crate::ui::menu::ListMenuIntent;
     match intent {
-        ListMenuIntent::Play => {
-            let Some(first) = track_ids.first() else {
-                return;
-            };
-            transport.play(first.clone());
-            for tid in &track_ids[1..] {
-                transport.add_to_queue(tid.clone());
-            }
-        }
+        // The collection's Play is the SAME helper the album header's and the
+        // Detail Panel's Play use, so a Track menu and a collection menu cannot
+        // drift apart: one `play_many` batch, never a command per Track.
+        ListMenuIntent::Play => play_album_batch(track_ids, transport),
         ListMenuIntent::PlayNext => {
             for tid in track_ids.iter().rev() {
                 transport.play_next(tid.clone());
             }
         }
-        ListMenuIntent::AppendToQueue => {
-            for tid in track_ids {
-                transport.add_to_queue(tid.clone());
+        // A whole collection queued is ONE `AddMany`, not a per-Track fan-out:
+        // the queue mutates once under one lock with one shuffle regeneration.
+        // Nothing is played — the current Track carries on — which is the one
+        // thing that keeps this apart from `play_many` above.
+        ListMenuIntent::AddToQueue => transport.add_many(track_ids.to_vec()),
+        // Shuffle is a one-shot that STARTS the collection: engage shuffle,
+        // then play the same batch Play would. Shuffle stays on afterwards —
+        // the album header's long-standing behaviour, preserved rather than
+        // quietly changed. An empty list starts nothing and never so much as
+        // turns shuffle on, exactly as the album header's Shuffle does.
+        ListMenuIntent::Shuffle => {
+            if track_ids.is_empty() {
+                return;
             }
+            playback.queue.set_shuffle(true);
+            play_album_batch(track_ids, transport);
         }
     }
 }

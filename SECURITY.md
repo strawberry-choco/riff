@@ -24,7 +24,7 @@ Please do not attach a real media file you care about. A minimal, synthetic file
 
 | Version | Supported |
 |---|---|
-| `0.2.x` — the current in-development series (`0.2.0` is the current version) | Yes |
+| `0.1.x` — the current in-development series (`0.1.0` is the current version) | Yes |
 | `master` | Yes |
 | Any earlier series | No |
 | Any fork | No |

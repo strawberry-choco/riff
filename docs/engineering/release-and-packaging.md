@@ -16,7 +16,7 @@ The workflow triggers on `push` to a tag matching `v*`. The tag is the only inpu
 
 The first job, `verify`, compares the pushed tag against the workspace version and exits non-zero on a mismatch, before any build starts. The version is read with `cargo metadata --no-deps`, piped to a parser, **not** by grepping a manifest: the version is single-sourced in `[workspace.package]` and every member inherits it with `version.workspace = true`, so no member manifest contains a literal `version = "..."` any more and a grep-based guard would match nothing and pass vacuously.
 
-The rule is that the tag is `v` plus the workspace version, optionally followed by a SemVer pre-release and/or build suffix (`v0.2.0`, `v0.2.0-rc.1`, `v0.2.0+20260928`). The numeric core must match exactly; anything that is not a release tag at all — `vfoo`, `v1.2`, `v1.2.3.4` — is rejected separately. The failure message names both the tag and the version cargo reported.
+The rule is that the tag is `v` plus the workspace version, optionally followed by a SemVer pre-release and/or build suffix (`v0.1.0`, `v0.1.0-rc.1`, `v0.1.0+20260928`). The numeric core must match exactly; anything that is not a release tag at all — `vfoo`, `v1.2`, `v1.2.3.4` — is rejected separately. The failure message names both the tag and the version cargo reported.
 
 This guard lives in `release.yml` and not in `ci.yml` on purpose. CI triggers only on pushes to `master` and on pull requests, so a tag-versus-version check there would never execute: it would be a guard that always passes because it never runs.
 
@@ -33,7 +33,7 @@ This guard lives in `release.yml` and not in `ci.yml` on purpose. CI triggers on
 
 The two macOS labels are pinned to currently-GA images, and keeping them current is a maintenance task rather than a preference. GitHub supports the latest two macOS releases and deprecates the rest, which means a deprecated image goes through announced brownouts and then disappears. Because `release` needs all four legs, one retired label does not degrade the release — it blocks it, with no partial publish. `macos-13` has already been removed from `actions/runner-images` and `macos-14` is badged deprecated, so an earlier version of this table named two runners that could not have run at all. When bumping, check the current table in `actions/runner-images`, and do not collapse both macOS legs to `macos-latest`: that label is arm64, so it would silently drop the Intel build while the artifact name still claimed `macos-x86_64`. Intel needs the explicit `-intel` label.
 
-The published names are `riff-<tag>-<slug>.tar.gz` (and `.zip` on Windows) — for example `riff-v0.2.0-linux-x86_64.tar.gz`.
+The published names are `riff-<tag>-<slug>.tar.gz` (and `.zip` on Windows) — for example `riff-v0.1.0-linux-x86_64.tar.gz`.
 
 **Each archive contains exactly one file, the executable.** There is no assets folder, and that is not a packaging oversight waiting to be fixed: the Inter faces are `include_bytes!`-ed and the Lucide icons `include_str!`-ed by `crates/riff-gui/src/ui/fonts.rs` and `crates/riff-gui/src/ui/icons.rs`, so the binary carries its own fonts and icons. The Unix legs use `tar -czf` with a member name, which keeps the archive flat; the Windows leg uses `Compress-Archive` on `target/release/riff.exe` — the `.exe` suffix matters, and a Unix path there would package nothing at all.
 

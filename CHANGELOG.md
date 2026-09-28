@@ -5,9 +5,9 @@ All notable changes to riff are recorded in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## About the history before 0.2.0
+## About the history before 0.1.0
 
-**Everything before 0.2.0 predates this file and is not in Keep a Changelog form.**
+**Everything before 0.1.0 predates this file and is not in Keep a Changelog form.**
 The pre-release commit history is freeform — `add animation`, `improve ui`,
 `refactor`, and so on — with no conventional-commit prefixes, no pull-request
 numbers, and no changelog file to append to. Nothing has been retro-fitted: the
@@ -24,12 +24,12 @@ and pull requests between the previous tag and the new one.
 
 Nothing yet. The next set of changes collects here until the next tag.
 
-## [0.2.0]
+## [0.1.0]
 
 <!--
-  No date yet: 0.2.0 has not been released, so there is no honest date to print.
+  No date yet: 0.1.0 has not been released, so there is no honest date to print.
   The tag does not exist until the release workflow runs. Replace this comment
-  with the release date when the tag is pushed, and repoint the `[0.2.0]` link
+  with the release date when the tag is pushed, and repoint the `[0.1.0]` link
   at the release page below.
 -->
 
@@ -115,4 +115,4 @@ upload.
   into the binary, so the executable needs no companion asset files.
 
 [Unreleased]: https://github.com/strawberry-choco/riff/commits/master
-[0.2.0]: https://github.com/strawberry-choco/riff/releases
+[0.1.0]: https://github.com/strawberry-choco/riff/releases

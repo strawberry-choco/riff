@@ -743,13 +743,18 @@ fn test_filesystem_watcher_forwards_debounced_audio_batches() {
     use std::time::{Duration, Instant};
 
     let dir = tempfile::tempdir().unwrap();
+    // FSEvents (macOS) reports events under the canonical path — on this
+    // machine /var/folders/... surfaces as /private/var/folders/... — so the
+    // watcher must be registered on, and the expectation built from, the
+    // canonical form for the comparison below to match.
+    let watch_root = dir.path().canonicalize().unwrap();
     let (tx, rx) = crossbeam_channel::unbounded::<Vec<PathBuf>>();
     let mut watcher = FilesystemWatcher::new(tx).expect("watcher must build");
-    watcher.watch(dir.path()).expect("watch must register");
+    watcher.watch(&watch_root).expect("watch must register");
 
     // One burst: an audio file and a non-audio file, written back to
     // back so the debouncer coalesces them into one flush.
-    let song = dir.path().join("song.mp3");
+    let song = watch_root.join("song.mp3");
     std::fs::write(&song, b"audio").unwrap();
     std::fs::write(dir.path().join("notes.txt"), b"text").unwrap();
 

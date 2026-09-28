@@ -98,10 +98,18 @@ upload.
   and a queue position indicator.
 - **Favorites** — a per-row heart that commits straight to the store and feeds
   the corresponding smart list.
-- **System tray** on macOS and Windows — hide-to-tray on the custom titlebar
-  close with playback continuing, a tooltip showing the current track, and a
-  menu with Play/Pause, Next, Previous, Show Window, and Quit. Deliberately
-  absent on Linux, where closing the window quits.
+- **System tray** on macOS and Windows — hide-to-tray from the close gesture (the
+  custom titlebar close on Windows, the native traffic light on macOS) with
+  playback continuing, a tooltip showing the current track, and a menu with
+  Play/Pause, Next, Previous, Show Window, and Quit. A "Quit on close" setting
+  (Settings → Advanced) makes closing quit instead. Deliberately absent on Linux,
+  where closing the window quits.
+- **A per-platform window frame** — a frameless window with riff's own
+  minimize/maximize/close controls on Windows and Linux; on macOS the native
+  title bar, with riff's titlebar strip rendering behind it and the system's
+  traffic lights as the window controls, centred in the strip rather than riding
+  high-left where AppKit's own 28pt titlebar would put them, and without a
+  per-platform split of the strip's own layout or design tokens.
 - **Native folder picker** on macOS and Windows (`rfd`); a validated
   text-input picker with autocomplete and clear errors on Linux.
 - **Settings** — library paths and per-path watch state, ReplayGain, advanced

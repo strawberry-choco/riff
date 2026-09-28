@@ -24,6 +24,7 @@ pub mod stage;
 pub mod text_field;
 pub mod theme;
 pub mod toggle_switch;
+pub mod traffic_lights;
 pub mod tray;
 pub mod up_next;
 pub mod window_visibility;

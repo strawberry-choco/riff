@@ -657,6 +657,19 @@ pub mod geometry {
         /// enough to hit [`SEARCH_MAX_W`] — the same inset the content top bar
         /// used.
         pub const SEARCH_EDGE_INSET: f32 = 12.0;
+        /// Left inset of the wordmark cluster on the custom-chrome platforms:
+        /// the strip's first element starts this far into the window.
+        pub const WORDMARK_LEFT_INSET: f32 = 16.0;
+        /// Fixed fallback for the macOS traffic-light clearance, in egui
+        /// points: how far the strip's left cluster starts past the window's
+        /// left edge on the native-chrome branch. The standard macOS cluster
+        /// spans ~66pt including its margins; this is the documented floor
+        /// used wherever eframe cannot measure the real lights (no window
+        /// handle yet, non-AppKit builds, headless tests). The measured value
+        /// — eframe's window-chrome metrics divided by the zoom factor — is
+        /// the target and only ever raises it; see
+        /// `chrome::traffic_light_clearance`.
+        pub const TRAFFIC_LIGHT_CLEARANCE: f32 = 68.0;
     }
 
     /// The sidebar's tree row — the row height every list in the app lays out

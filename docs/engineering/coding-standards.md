@@ -23,6 +23,18 @@ Dependencies always follow the chain, and lower crates know nothing about higher
 
 The slices never touch `symphonia`, `cpal`, `lofty`, `image`, or `rusqlite` directly. Instead they declare port traits, and `riff-infra` provides the concrete implementations. Construction and wiring happen exclusively in `riff-backend/src/composition.rs` via manual constructor injection; there is no DI framework. No file other than the Composition Root should call `::new()` on an adapter and hand it across a boundary.
 
+### Platform branches
+
+Where behavior must differ by OS, the difference is **one pure decision function**, and every call site that depends on it reads that function rather than its own `#[cfg]`. `riff-gui`'s `chrome::chrome_mode()` is the worked example: one `ChromeMode` answer consumed by both the launch viewport configuration and the titlebar renderer, so the two cannot disagree about which convention the window is running under.
+
+The reason is testability, not tidiness. A `cfg` branch is invisible to every machine that is not the target OS, so on Linux and Windows CI the macOS branch can never be compiled — and therefore can never be asserted. A function that *returns* the decision as data is assertable everywhere: the unreachable half of a platform split becomes a value any test can name on any runner. Keep the wrapper (`chrome_mode()`) separate from the consumers that take the decision as a parameter (`viewport_builder_for(mode)`), so the parameterised half stays executable and testable on every host — the "assert both branches as data" test only exists because of that split.
+
+Residual `#[cfg]`s are for **compilation, not for decisions**. They compile a branch's code out where it cannot run and carry a comment saying why — the unreachable match arm, a native-only API, a tray handle. A `cfg` that picks *behavior* (a different widget, a string, a layout) is the smell this rule exists to catch: it is only acceptable when the code cannot exist on the other platform at all, and then it belongs at the adapter edge, not in a view.
+
+Design values that differ per platform are still design values, so they still live in `theme.rs`: the macOS traffic-light clearance is a token like any other, and the fixed constant is the floor a runtime measurement may raise, not a second number kept beside it.
+
+The shape this rule produces is worth naming, because it is the generalisable form and not a one-off: **one platform leaf that touches the OS — and the `unsafe` with it — and every decision above it a pure function asserted on every platform.** `ui::traffic_lights` is the worked example. The module compiles on all three platforms; its `apply` is a no-op off macOS, which is what lets the single call site in `RiffApp::logic` stay one ungated line; only the `AppKit` body behind `#[cfg(target_os = "macos")]` is code no CI machine compiles, and that body is where the OS calls, the two `superview` walks, and their `SAFETY` arguments live. Everything that *decides* anything sits above that leaf as a plain function over `f64` — `traffic_light_plan`, `needs_reapply` — asserted in `tests/ui_tests.rs` with no `cfg` at all, so the Linux and Windows legs execute the geometry that positions macOS's traffic lights. The same shape in the dependency graph: a platform-only native dependency goes under a `[target.'cfg(...)'.dependencies]` section (`objc2-app-kit`, pinned to the version eframe already resolves so the types unify and the cost is zero), so other platforms' CI never compiles the leaf's OS binding at all. If a new platform branch cannot be drawn this way — a decision living inside the gated body — that is the signal the decision belongs in a function the other platforms can call.
+
 ### Validation checklist
 
 Before submitting a change, confirm:
@@ -33,6 +45,8 @@ Before submitting a change, confirm:
 4. The persistence contract stays dependency-free, and the slices stay pure Rust.
 5. There is no `egui` code outside `riff-gui`, and no audio decoding in the frontend.
 6. Only `riff-backend/src/composition.rs` constructs and wires infrastructure.
+7. Any new per-OS branch is the one decision function every call site reads, and its non-native branch is asserted as data rather than assumed.
+8. Any new platform-only OS interop is one leaf whose native binding is compiled out on the other platforms and declared under `[target.'cfg(...)'.dependencies]`, with every decision it makes a pure function asserted on all of them.
 
 For the full treatment, including key flows and the threading model, see [../technical/architecture.md](../technical/architecture.md).
 

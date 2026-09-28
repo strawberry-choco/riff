@@ -42,7 +42,7 @@ What riff is, what it does, and how to use it.
 - [ADR 0002: The UI reads the store through Session Projections](adr/0002-ui-reads-the-store-through-session-projections.md).
 - [ADR 0003: Store query model](adr/0003-store-query-model.md).
 - [ADR 0004: Dual-theme tokens despite a dark-only design source](adr/0004-dual-theme-tokens.md) — two palettes with High Contrast as a variant over each, and `crates/riff-gui/src/ui/theme.rs` as the single store and read source for every design value.
-- [ADR 0005: Custom window chrome (frameless) on all platforms](adr/0005-frameless-window-chrome-on-all-platforms.md).
+- [ADR 0005: Custom window chrome (frameless) on all platforms](adr/0005-frameless-window-chrome-on-all-platforms.md) — amended 2026-09-28: the decision stands on Windows and Linux; macOS keeps its native decorations, with a transparent title bar and the system's traffic lights as the window controls; the windowed macOS spike passed and its gate is closed, with the native path confirmed as the shipping path.
 - [ADR 0006: Background workers behind app-layer service seams](adr/0006-background-workers-behind-app-layer-service-seams.md) — Tag Edit and Cover services replace the worker threads spawned inline by `RiffApp`.
 - [ADR 0007: No write-side SessionStore facade](adr/0007-no-write-side-sessionstore-facade.md) — the three store-mutation ports stay separate; the store owns generation bumps, so a facade would be a pass-through.
 - [ADR 0009: Vertical crate split of the backend](adr/0009-vertical-crate-split-of-the-backend.md) — the backend is split by capability into a strict, compiler-enforced dependency chain.
@@ -66,7 +66,7 @@ How riff is built and how it works at runtime.
 How to work on riff correctly.
 
 - [Development setup](engineering/development-setup.md) — prerequisites, the command set, and build-profile notes.
-- [Coding standards](engineering/coding-standards.md) — layering rules, clippy and formatting configuration, the error-handling pattern, and the implementation gotchas.
+- [Coding standards](engineering/coding-standards.md) — layering rules, the per-OS branch rule, clippy and formatting configuration, the error-handling pattern, and the implementation gotchas.
 - [Contributing](engineering/contributing.md) — how to orient yourself and the pull-request checklist.
 - [Testing strategy](engineering/testing-strategy.md) — the per-crate suites and the workspace-root integration/golden suite, plus prioritized recommendations.
 - [Golden-image testing](engineering/golden-image-testing.md) — the snapshot-test harness for visual parity: authoring goldens, re-baselining, and reviewing image diffs.

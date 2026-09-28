@@ -4113,6 +4113,8 @@ dependencies = [
  "egui",
  "egui_extras",
  "muda",
+ "objc2-app-kit 0.3.2",
+ "raw-window-handle",
  "resvg",
  "rfd",
  "riff-backend",

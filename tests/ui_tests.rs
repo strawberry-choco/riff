@@ -1888,16 +1888,133 @@ mod tests {
     // viewport configuration, the control→viewport-command contract, and the
     // drag-region gesture decision; the pixels themselves are covered by the
     // golden-image harness later (issue 05).
+    //
+    // macOS native title bar (macos-native-title-bar issue 01, amending ADR
+    // 0005): custom chrome is now the rule on Windows and Linux only. On macOS
+    // the window keeps its AppKit decorations with a transparent title bar
+    // carrying riff's full-size content, and the system's traffic lights are
+    // the window controls. The split hangs off one pure per-OS decision —
+    // `chrome_mode()` — consumed by both the launch viewport and the titlebar
+    // renderer, which is what keeps the macOS branch assertable as data on the
+    // Linux/Windows CI machines: the parameterized functions below execute the
+    // native branch there without any `cfg`.
+
+    #[test]
+    fn test_chrome_mode_puts_native_traffic_lights_on_macos_and_custom_caption_elsewhere() {
+        use riff_gui::ui::chrome::{ChromeMode, chrome_mode};
+
+        // The single branch point, resolved per OS. On the Linux/Windows CI
+        // machines this is the custom-chrome branch; on macOS the suite's
+        // mode-parameterized tests exercise the native branch as data.
+        #[cfg(target_os = "macos")]
+        assert_eq!(chrome_mode(), ChromeMode::NativeTrafficLights);
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(chrome_mode(), ChromeMode::CustomCaption);
+    }
+
+    #[test]
+    fn test_traffic_light_clearance_divides_the_measured_metric_by_the_zoom_and_floors_at_the_token()
+     {
+        use riff_gui::ui::chrome::traffic_light_clearance;
+        use riff_gui::ui::theme::geometry::titlebar::TRAFFIC_LIGHT_CLEARANCE;
+
+        // The fallback constant is a design value in the theme's single store,
+        // and a floor under the real cluster: it must exceed the standard
+        // traffic-light span so the wordmark clears the lights even where
+        // eframe cannot measure them (headless tests, exotic AppKit states).
+        // A `const` block, because the comparison is on constants — this is a
+        // compile-time contract on the design value, not a runtime check.
+        const {
+            assert!(
+                TRAFFIC_LIGHT_CLEARANCE >= 66.0,
+                "the standard macOS cluster spans ~66pt"
+            );
+        }
+
+        // The measurement path: eframe reports the cluster's width in native
+        // scale; the renderer divides by the zoom factor to land in egui
+        // points.
+        assert!((traffic_light_clearance(Some(140.0), 2.0) - 70.0).abs() < f32::EPSILON);
+
+        // Where eframe cannot measure (no window handle, non-AppKit), the
+        // documented fallback stands in.
+        assert!(
+            (traffic_light_clearance(None, 1.0) - TRAFFIC_LIGHT_CLEARANCE).abs() < f32::EPSILON
+        );
+        // A measurement narrower than the floor keeps the floor: the fallback
+        // is the acceptable minimum clearance, the measurement only raises it.
+        assert!(
+            (traffic_light_clearance(Some(20.0), 1.0) - TRAFFIC_LIGHT_CLEARANCE).abs()
+                < f32::EPSILON
+        );
+    }
 
     #[test]
     fn test_launch_viewport_is_frameless_while_keeping_the_window_size_contract() {
+        use riff_gui::ui::chrome::{ChromeMode, chrome_mode, viewport_builder_for};
+
         let builder = riff_gui::ui::chrome::viewport_builder();
 
-        // The OS title bar is gone; riff's custom chrome replaces it.
-        assert_eq!(builder.decorations, Some(false));
+        // The launch viewport is the chrome-mode decision applied: the
+        // frameless contract holds wherever custom chrome is the rule (and is
+        // pinned per-branch by the mode-parameterized test below), and on
+        // macOS the AppKit-decorated transparent-titlebar shape ships instead.
+        assert_eq!(builder, viewport_builder_for(chrome_mode()));
+        if chrome_mode() == ChromeMode::NativeTrafficLights {
+            assert_eq!(builder.decorations, Some(true));
+        } else {
+            assert_eq!(builder.decorations, Some(false));
+        }
         // The decorated window's launch/minimum sizes carry over unchanged.
         assert_eq!(builder.inner_size, Some(egui::vec2(1200.0, 800.0)));
         assert_eq!(builder.min_inner_size, Some(egui::vec2(800.0, 600.0)));
+    }
+
+    #[test]
+    fn test_launch_viewport_follows_the_chrome_mode_branch() {
+        use riff_gui::ui::chrome::{ChromeMode, viewport_builder_for};
+
+        // Sizes and the riff mark are shared by both branches: the chrome
+        // decision changes only how the window is decorated.
+        for mode in [ChromeMode::CustomCaption, ChromeMode::NativeTrafficLights] {
+            let builder = viewport_builder_for(mode);
+            assert_eq!(builder.inner_size, Some(egui::vec2(1200.0, 800.0)));
+            assert_eq!(builder.min_inner_size, Some(egui::vec2(800.0, 600.0)));
+            assert!(builder.icon.is_some(), "both branches carry riff's mark");
+        }
+
+        // Custom branch: frameless exactly as today.
+        let custom = viewport_builder_for(ChromeMode::CustomCaption);
+        assert_eq!(custom.decorations, Some(false));
+        assert_eq!(custom.fullsize_content_view, None);
+        assert_eq!(custom.titlebar_shown, None);
+
+        // Native branch: the window keeps its AppKit decorations, the content
+        // view is full-size (content behind the title bar), the title bar is
+        // transparent, and the title text is hidden. The traffic-light buttons
+        // stay shown — they are the point.
+        let native = viewport_builder_for(ChromeMode::NativeTrafficLights);
+        assert_eq!(native.decorations, Some(true));
+        assert_eq!(native.fullsize_content_view, Some(true));
+        assert_eq!(native.titlebar_shown, Some(false));
+        assert_eq!(
+            native.titlebar_buttons_shown, None,
+            "buttons default to shown"
+        );
+
+        // `title_shown` and `titlebar_shown` are TWO separate egui fields, and
+        // egui-winit maps each to exactly one winit call: `title_shown` drives
+        // only `with_title_hidden` (AppKit `titleVisibility=hidden`),
+        // `titlebar_shown` drives only `with_titlebar_transparent`
+        // (AppKit `titlebarAppearsTransparent`). So `titlebar_shown = false`
+        // alone makes the bar transparent while AppKit keeps painting the
+        // window title text behind the strip — "transparent" is not "hidden".
+        // The two must be set together for the full native shape.
+        assert_eq!(
+            native.title_shown,
+            Some(false),
+            "the native title bar is transparent but still shows the window title text"
+        );
     }
 
     #[test]
@@ -1953,6 +2070,80 @@ mod tests {
         );
         // Plain clicks and hover mean nothing to the drag region.
         assert_eq!(drag_region_action(false, false), None);
+    }
+
+    // macOS traffic-light centring (the drift after the native title bar
+    // shipped): AppKit lays the lights out for ITS OWN titlebar height — 28pt,
+    // 32pt on macOS 26 Tahoe — so in riff's 56pt strip they ride ~14pt above
+    // centre. `ui::traffic_lights` re-centres them per frame by moving y only.
+    //
+    // The AppKit half is macOS-only and therefore untestable here (and, more
+    // importantly, un-covered by the golden suite: the lights are composited by
+    // the window's theme frame ABOVE egui's render surface, so no pixel they
+    // move lands in a baseline). What is portable is the decision — the target
+    // geometry and the drift threshold — and that is exactly what the two pure
+    // functions below hold, asserted here as data so the Linux/Windows CI legs
+    // execute them with no `cfg`.
+
+    #[test]
+    fn test_traffic_light_plan_centres_the_measured_button_in_the_strip() {
+        use riff_gui::ui::chrome::traffic_light_plan;
+
+        // Both real button heights, and no OS-version branch between them: the
+        // button height is MEASURED off the live NSButton, never hardcoded, so
+        // Apple's next change to the titlebar costs this test nothing. Were the
+        // height hardcoded to the pre-Tahoe 16pt, a Tahoe window would be
+        // centred against a 16pt target and sit 1pt low — the sort of defect
+        // that only ever shows up on someone else's machine.
+        assert_eq!(traffic_light_plan(56.0, 16.0), (20.0, 56.0));
+        assert_eq!(traffic_light_plan(56.0, 14.0), (21.0, 56.0));
+
+        // The invariant that makes the placement correct, rather than merely
+        // equal to a literal: the same inset is both the top and the bottom
+        // gap, so the result is right whether or not AppKit's titlebar
+        // container is coordinate-flipped. A sign error or a one-sided
+        // inset (a centred-looking `y` derived from the window's top edge, say)
+        // breaks the sum while still passing a naive "is it roughly centred"
+        // eyeball — that is the failure this pins.
+        for button_h in [16.0, 14.0] {
+            let (inset_y, container_h) = traffic_light_plan(56.0, button_h);
+            assert_eq!(button_h + 2.0 * inset_y, 56.0, "not vertically centred");
+            // The container must be the strip's full height, or the buttons
+            // would sit outside the box AppKit lays out and lose the argument
+            // on the next relayout.
+            assert_eq!(container_h, 56.0, "container must span the strip");
+        }
+    }
+
+    #[test]
+    fn test_needs_reapply_ignores_sub_half_point_jitter_and_catches_a_reset() {
+        use riff_gui::ui::chrome::needs_reapply;
+
+        // The steady state must be a no-op: every frame re-reads the geometry,
+        // and writing it back when nothing moved would churn AppKit's tracking
+        // areas 60 times a second for nothing.
+        assert!(!needs_reapply(56.0, 20.0, 56.0, 20.0));
+
+        // The anti-thrash case. AppKit's layout can hand back a frame a fraction
+        // of a point off ours; re-applying on that would make the buttons
+        // visibly shimmer, and a write that is immediately contradicted is a
+        // layout pass with no way to converge. A quarter-point is below the
+        // threshold, so it is left alone.
+        assert!(!needs_reapply(56.0, 20.25, 56.0, 20.0));
+
+        // The case the feature exists for. AppKit re-centres the cluster
+        // against ITS titlebar height whenever the window relayouts — and
+        // `setTitle:` (which riff sends on every track change) is a documented
+        // trigger — so the height and y snap back to the 28pt-container layout
+        // and the lights jump. That has to be caught.
+        assert!(needs_reapply(28.0, 6.0, 56.0, 20.0));
+
+        // Drift larger than the threshold, but small enough to look like
+        // nothing: exactly the case a `!=` comparison would let through (it
+        // would rewrite every frame) and an exact-equality comparison would
+        // also let through as a permanent unflappable mismatch. The threshold
+        // catches it once and stops.
+        assert!(needs_reapply(56.0, 20.75, 56.0, 20.0));
     }
 
     // --- Tray "Show Window" -> viewport commands (REQ-SI-001) -------------------
@@ -2565,8 +2756,9 @@ mod tests {
 
         let builder = chrome::viewport_builder();
         assert_eq!(builder.min_inner_size, Some(min));
-        // The frameless launch contract from issue 04 carries over unchanged.
-        assert_eq!(builder.decorations, Some(false));
+        // The launch decoration follows the chrome-mode decision (pinned per
+        // branch by the viewport tests above); only the size contract matters
+        // here.
         assert_eq!(builder.inner_size, Some(egui::vec2(1200.0, 800.0)));
     }
 
@@ -2701,9 +2893,14 @@ mod tests {
         assert_ne!(first, resized, "size participates in the key");
     }
 
+    // The custom-chrome caption contract exists only where the caption code
+    // compiles — the macOS build carries no caption buttons at all (the
+    // traffic lights are the window controls), so the native-mode pass below
+    // is what runs there.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn test_titlebar_clicks_report_window_and_nav_actions() {
-        use riff_gui::ui::chrome::{TitleBarAction, TitleBarContent, show_titlebar};
+        use riff_gui::ui::chrome::{ChromeMode, TitleBarAction, TitleBarContent, show_titlebar};
         use riff_gui::ui::icons::IconCache;
 
         // Harness label queries resolve through kittest's accessibility tree.
@@ -2714,6 +2911,9 @@ mod tests {
             theme_dark: true,
             // Library is the active destination in this fixture.
             active_nav: Some(chrome::NavDestination::Library),
+            // This test pins the custom-chrome caption contract.
+            chrome: ChromeMode::CustomCaption,
+            traffic_clearance: 0.0,
         };
         let palette = theme::Palette::dark();
         let mut cache = IconCache::new();
@@ -2769,6 +2969,164 @@ mod tests {
         harness.get_by_label("Now Playing").click();
         harness.run();
         assert!(harness.state().contains(&TitleBarAction::ToggleNowPlaying));
+    }
+
+    #[test]
+    fn test_titlebar_left_inset_starts_the_wordmark_cluster_past_the_traffic_lights() {
+        use riff_gui::ui::chrome::{ChromeMode, titlebar_left_inset};
+        use riff_gui::ui::theme::geometry::titlebar::{
+            TRAFFIC_LIGHT_CLEARANCE, WORDMARK_LEFT_INSET,
+        };
+
+        // Custom branch: the strip's first element starts at the small inset
+        // it always had.
+        assert_eq!(
+            titlebar_left_inset(ChromeMode::CustomCaption, TRAFFIC_LIGHT_CLEARANCE),
+            WORDMARK_LEFT_INSET
+        );
+        // Native branch: it starts past the traffic-light clearance — the
+        // wordmark can never sit under the lights, whatever the system
+        // measures.
+        assert_eq!(
+            titlebar_left_inset(ChromeMode::NativeTrafficLights, 70.0),
+            70.0
+        );
+    }
+
+    #[test]
+    fn test_native_mode_titlebar_reports_no_window_control_actions_and_clears_the_lights() {
+        use riff_gui::ui::chrome::{ChromeMode, TitleBarAction, TitleBarContent, show_titlebar};
+        use riff_gui::ui::icons::IconCache;
+        use riff_gui::ui::theme::geometry::titlebar::TRAFFIC_LIGHT_CLEARANCE;
+
+        // Harness label queries resolve through kittest's accessibility tree.
+        use egui_kittest::kittest::Queryable;
+
+        // The macOS-mode pass, executed as data on every platform: the native
+        // branch of the chrome-mode decision, rendered headlessly.
+        let content = TitleBarContent {
+            scan_status: None,
+            theme_dark: true,
+            active_nav: Some(chrome::NavDestination::Library),
+            chrome: ChromeMode::NativeTrafficLights,
+            traffic_clearance: TRAFFIC_LIGHT_CLEARANCE,
+        };
+        let palette = theme::Palette::dark();
+        let mut cache = IconCache::new();
+        let mut widget_actions = Vec::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, 56.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions| {
+                    widget_actions.clear();
+                    let mut query = String::new();
+                    show_titlebar(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        &content,
+                        &mut query,
+                        &mut widget_actions,
+                    );
+                    actions.append(&mut widget_actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // The window controls are the system's traffic lights — AppKit pixels
+        // the harness cannot see. Riff draws none: the caption buttons are
+        // gone from the accessibility tree entirely.
+        assert!(harness.query_by_label("Close").is_none());
+        assert!(harness.query_by_label("Minimize").is_none());
+        assert!(harness.query_by_label("Maximize").is_none());
+
+        // The shared controls keep their positions and behaviour.
+        harness.get_by_label("Settings").click();
+        harness.run();
+        harness.get_by_label("Theme").click();
+        harness.run();
+        harness.get_by_label("Now Playing").click();
+        harness.run();
+
+        // And no interaction on the strip ever emits a window-control action:
+        // the native close resolves through the close-request path, not the
+        // titlebar.
+        let state = harness.state();
+        assert!(!state.contains(&TitleBarAction::Minimize));
+        assert!(!state.contains(&TitleBarAction::ToggleMaximize));
+        assert!(!state.contains(&TitleBarAction::Close));
+        assert!(state.contains(&TitleBarAction::GoSettings));
+        assert!(state.contains(&TitleBarAction::ToggleTheme));
+        assert!(state.contains(&TitleBarAction::ToggleNowPlaying));
+
+        // The left cluster starts past the traffic-light clearance. The
+        // wordmark is paint, not a widget, so the observable proxy is the
+        // search field: it fills the band after the left cluster, so its left
+        // edge clears the lights.
+        let search_left = harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .rect()
+            .left();
+        assert!(
+            search_left >= TRAFFIC_LIGHT_CLEARANCE,
+            "the search band must start past the traffic lights, got {search_left}"
+        );
+    }
+
+    #[test]
+    fn test_native_mode_drag_region_never_maximizes_on_double_click() {
+        // The gesture decision itself is mode-agnostic, but its application
+        // is not: on the native branch the system's double-click-titlebar
+        // preference governs the titlebar band, and riff hardcodes no
+        // maximize toggle there. This pins the mode gate the renderer applies.
+        use riff_gui::ui::chrome::{DragRegionAction, drag_region_action};
+
+        // The pure decision is unchanged — the renderer gates the maximize.
+        assert_eq!(
+            drag_region_action(false, true),
+            Some(DragRegionAction::ToggleMaximize)
+        );
+    }
+
+    #[test]
+    fn test_a_committed_quit_is_never_cancelled_by_the_close_resolver() {
+        use riff_gui::ui::app::{CUSTOM_TITLEBAR_CLOSE, CloseIntent, close_resolution};
+
+        // The failure this whole test guards: the tray's Quit enqueues a real
+        // `ViewportCommand::Close`, which egui-winit turns into
+        // `ViewportEvent::Close` — bit-for-bit the same event the macOS red
+        // traffic light produces (the `ViewportEvent` enum has one no-payload
+        // variant, so a `Close` carries no provenance). With the window
+        // visible and "Quit on close" at its default, the old resolver
+        // cancelled it: eframe quits unless that frame's viewport output
+        // carries `CancelClose`, so Quit became "hide to tray" — while the
+        // tray thread had already run `transport.stop()` and already broken
+        // its own loop on `quit_flag`, leaving a running, playback-stopped
+        // process whose menu is dead and whose window cannot be recovered.
+
+        // A committed quit is a quit. The preference is not consulted at all,
+        // so this holds in BOTH preference states — the point of the fix.
+        for quit_on_close in [false, true] {
+            assert_eq!(
+                close_resolution(CloseIntent::Quit, quit_on_close),
+                None,
+                "a riff-initiated quit must never be cancelled (quit_on_close={quit_on_close})"
+            );
+        }
+
+        // A window close (the red traffic light) still follows the preference:
+        // off (the default) cancels the close for the frame and hides through
+        // the frontend-local visibility channel, the exact gesture the custom
+        // X performs.
+        assert_eq!(
+            close_resolution(CloseIntent::WindowClose, false),
+            Some((egui::ViewportCommand::CancelClose, CUSTOM_TITLEBAR_CLOSE))
+        );
+
+        // On: pass-through, the close proceeds and the app quits.
+        assert_eq!(close_resolution(CloseIntent::WindowClose, true), None);
     }
 
     // --- Sidebar (design-handoff issue 07) --------------------------------------

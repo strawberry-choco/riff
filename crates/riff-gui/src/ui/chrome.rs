@@ -20,9 +20,11 @@
 
 use super::icons::{Icon, IconCache, icon_button};
 use super::theme::geometry::sidebar::SEARCH_H;
+#[cfg(not(target_os = "macos"))]
+use super::theme::geometry::titlebar::{CAPTION_BTN_H, CAPTION_BTN_W};
 use super::theme::geometry::titlebar::{
-    CAPTION_BTN_H, CAPTION_BTN_W, CAPTION_GAP, SEARCH_EDGE_INSET, SEARCH_GAP, SEARCH_MAX_W,
-    WORDMARK_GAP,
+    CAPTION_GAP, SEARCH_EDGE_INSET, SEARCH_GAP, SEARCH_MAX_W, TRAFFIC_LIGHT_CLEARANCE,
+    WORDMARK_GAP, WORDMARK_LEFT_INSET,
 };
 use super::theme::geometry::window;
 use super::theme::{self, Palette};
@@ -30,6 +32,9 @@ use eframe::egui;
 use riff_backend::app::state::{BrowseMode, ViewMode};
 
 /// Full-texture UV rect for [`egui::Painter::image`] (sidebar precedent).
+/// Only the caption cluster's glyphs use it here; that cluster is not
+/// compiled on macOS, so neither is this.
+#[cfg(not(target_os = "macos"))]
 const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
 /// The static normalized bar heights of the wordmark's equalizer glyph — a
@@ -41,17 +46,177 @@ const WORDMARK_BARS: [f32; 4] = [0.55, 0.95, 0.7, 0.4];
 /// glyph instead of upscaling a blocky one.
 pub const APP_ICON_PX: u32 = 64;
 
+/// Which window-chrome convention this platform runs under — the single
+/// branch point for the per-OS split (macos-native-title-bar issue 01,
+/// amending ADR 0005). Both the launch viewport configuration and the
+/// titlebar renderer consume this decision, so the branches cannot drift
+/// apart; it is pure data, which is what makes the macOS branch assertable
+/// from the Linux/Windows CI machines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChromeMode {
+    /// Windows/Linux: the window is frameless and riff draws its own
+    /// Windows-convention caption controls in the strip's top-right corner.
+    #[default]
+    CustomCaption,
+    /// macOS: the window keeps its `AppKit` decorations with a transparent
+    /// title bar carrying riff's full-size content; the system's traffic
+    /// lights are the window controls and riff draws none.
+    NativeTrafficLights,
+}
+
+/// The per-OS chrome decision every chrome branch hangs off: native traffic
+/// lights on macOS, custom caption controls elsewhere. One pure function —
+/// the viewport builder and the titlebar renderer both read it, never their
+/// own `cfg`s.
+#[must_use]
+pub fn chrome_mode() -> ChromeMode {
+    #[cfg(target_os = "macos")]
+    {
+        ChromeMode::NativeTrafficLights
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ChromeMode::CustomCaption
+    }
+}
+
 /// Launch viewport configuration for the frameless window: the decorated
 /// window's launch size carries over unchanged, OS decorations are replaced
 /// by riff's custom titlebar, the minimum size fits the fixed shell, and the
 /// OS gets riff's own mark rather than eframe's default `e` icon.
 #[must_use]
 pub fn viewport_builder() -> egui::ViewportBuilder {
-    egui::ViewportBuilder::default()
+    viewport_builder_for(chrome_mode())
+}
+
+/// The launch viewport configuration for one chrome branch — the launch
+/// viewport's consumption of the [`chrome_mode`] decision, kept separate from
+/// the wrapper so the native (macOS) branch stays executable and assertable
+/// as data on every platform. The sizes and the riff mark are shared; only
+/// the decoration differs:
+///
+/// - [`ChromeMode::CustomCaption`]: frameless exactly as before — OS
+///   decorations are replaced by riff's custom titlebar.
+/// - [`ChromeMode::NativeTrafficLights`]: the window keeps its `AppKit`
+///   decorations with a full-size content view, a transparent title bar, and
+///   a hidden title, so the strip renders behind the system title bar and the
+///   traffic lights stay native and correctly placed. The traffic-light
+///   buttons stay shown — they are the point.
+#[must_use]
+pub fn viewport_builder_for(mode: ChromeMode) -> egui::ViewportBuilder {
+    let builder = egui::ViewportBuilder::default()
         .with_inner_size([1200.0, 800.0])
         .with_min_inner_size([window::MIN_WINDOW_SIZE.x, window::MIN_WINDOW_SIZE.y])
-        .with_decorations(false)
-        .with_icon(window_icon())
+        .with_icon(window_icon());
+    match mode {
+        ChromeMode::CustomCaption => builder.with_decorations(false),
+        ChromeMode::NativeTrafficLights => builder
+            .with_decorations(true)
+            .with_fullsize_content_view(true)
+            // Two separate egui fields, because egui-winit maps each to exactly
+            // one winit call (egui-winit 0.35 src/lib.rs):
+            //
+            //   title_shown      -> with_title_hidden(title_shown == false)
+            //                      -> AppKit `titleVisibility = hidden`
+            //   titlebar_shown   -> with_titlebar_transparent(titlebar_shown == false)
+            //                      -> AppKit `titlebarAppearsTransparent = true`
+            //
+            // Nothing maps one to the other, so setting only `titlebar_shown`
+            // yields a transparent bar that AppKit still paints the window
+            // title text into — visible behind the strip. Both are required.
+            .with_title_shown(false)
+            .with_titlebar_shown(false),
+    }
+}
+
+/// The strip's left-cluster clearance on the native-chrome branch, in egui
+/// points: the macOS traffic lights' span, measured where eframe can measure
+/// it (`eframe::WindowChromeMetrics`, reported in native scale and divided by
+/// the zoom factor to land in egui points), floored at the documented
+/// fallback [`TRAFFIC_LIGHT_CLEARANCE`] where it cannot. The measurement is
+/// the target; the fixed constant is the acceptable floor — a clearance below
+/// the real cluster would put the wordmark under the lights.
+#[must_use]
+pub fn traffic_light_clearance(measured_native_width: Option<f32>, zoom_factor: f32) -> f32 {
+    measured_native_width.map_or(TRAFFIC_LIGHT_CLEARANCE, |w| {
+        (w / zoom_factor).max(TRAFFIC_LIGHT_CLEARANCE)
+    })
+}
+
+/// How far into the strip the left cluster (wordmark, scan status) starts, in
+/// egui points. On the custom branch this is the small inset it always was;
+/// on the native branch it is the traffic-light clearance, so the cluster can
+/// never sit under the system's lights.
+#[must_use]
+pub fn titlebar_left_inset(mode: ChromeMode, traffic_clearance: f32) -> f32 {
+    match mode {
+        ChromeMode::CustomCaption => WORDMARK_LEFT_INSET,
+        ChromeMode::NativeTrafficLights => traffic_clearance,
+    }
+}
+
+/// The traffic lights' measured width in native scale, straight from eframe's
+/// window-chrome metrics — `None` wherever eframe cannot measure: no window
+/// yet, a non-AppKit window handle, or any non-macOS build (the metrics are
+/// macOS-only). Feed it to [`traffic_light_clearance`], which divides by the
+/// zoom factor and floors at the documented fallback.
+#[must_use]
+pub fn measured_traffic_lights_width(frame: &eframe::Frame) -> Option<f32> {
+    #[cfg(target_os = "macos")]
+    {
+        use raw_window_handle::HasWindowHandle;
+        let window = frame.winit_window()?;
+        let handle = window.window_handle().ok()?;
+        eframe::WindowChromeMetrics::from_window_handle(&handle.as_raw())
+            .map(|metrics| metrics.traffic_lights_size.x)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = frame;
+        None
+    }
+}
+
+/// How far a measured frame may differ from its target before the `AppKit` shell
+/// bothers to write it back, in points. The drift check runs every frame, so
+/// the epsilon is what separates "a layout pass with no effect" from
+/// "`AppKit` re-centred the cluster again" — it must sit above the sub-point
+/// noise `AppKit`'s own layout produces and below the ~14pt jump it produces on
+/// a real relayout. Not a design value: it is a tolerance on a measurement,
+/// which is why it lives here with the algorithm rather than in the token store.
+const TRAFFIC_LIGHT_DRIFT_EPSILON: f64 = 0.5;
+
+/// Where the traffic lights sit vertically inside riff's strip, and how tall the
+/// `AppKit` titlebar container must be to hold them: `(inset_y, container_h)`.
+///
+/// `AppKit` centres the standard buttons for ITS OWN titlebar height — 28pt
+/// pre-Tahoe, 32pt on macOS 26, with 16pt/14pt button frames — so in riff's
+/// 56pt strip they ride roughly 14pt above centre. This is the correction:
+/// the inset is half of whatever is left after the measured button, so
+/// `button_h + 2 * inset_y == strip_h` by construction. That equality is the
+/// property worth protecting, because it makes the placement correct whether or
+/// not the container is coordinate-flipped — only the container's *anchor* is
+/// orientation-sensitive, and that lives in [`crate::ui::traffic_lights`].
+///
+/// `strip_h` is [`crate::ui::theme::TITLEBAR_H`] read, never a literal: the
+/// strip is 56pt on every platform and this must not become a way to make it
+/// otherwise. `button_h` is measured off the live `NSButton` rather than
+/// hardcoded, so Apple's next titlebar change costs nothing.
+#[must_use]
+pub fn traffic_light_plan(strip_h: f64, button_h: f64) -> (f64, f64) {
+    ((strip_h - button_h) / 2.0, strip_h)
+}
+
+/// Whether the measured geometry has drifted far enough from the target to be
+/// worth writing. The steady state is the fast path: `AppKit` resets the
+/// button positions on relayout (and `setTitle:` — which riff sends on every
+/// track change — is a documented trigger), so the check is what puts them
+/// back, but with the epsilon in place a settled window performs zero `AppKit`
+/// writes.
+#[must_use]
+pub fn needs_reapply(measured_h: f64, measured_y: f64, target_h: f64, target_y: f64) -> bool {
+    (measured_h - target_h).abs() > TRAFFIC_LIGHT_DRIFT_EPSILON
+        || (measured_y - target_y).abs() > TRAFFIC_LIGHT_DRIFT_EPSILON
 }
 
 /// Where a navigation action leads. Library and Folders are the two library
@@ -158,7 +323,9 @@ pub fn drag_region_action(drag_started: bool, double_clicked: bool) -> Option<Dr
 }
 
 /// Everything the shell titlebar needs to render one frame (Issue 06).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+// `Eq` had to go when the traffic-light clearance joined: a float field on an
+// otherwise discrete struct. `PartialEq` covers every comparison made on it.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct TitleBarContent<'a> {
     /// Library scan status line shown next to the wordmark.
     pub scan_status: Option<&'a str>,
@@ -167,6 +334,13 @@ pub struct TitleBarContent<'a> {
     /// Which nav destination is active; `None` while Now Playing replaces
     /// the view (then the Now Playing control carries the active tint).
     pub active_nav: Option<NavDestination>,
+    /// The chrome branch this frame renders under — `chrome_mode()` in
+    /// production, passed in so the native (macOS) branch stays executable
+    /// and assertable as data on every platform.
+    pub chrome: ChromeMode,
+    /// The traffic-light clearance in egui points for the native branch, from
+    /// [`traffic_light_clearance`]. Ignored on the custom branch.
+    pub traffic_clearance: f32,
 }
 
 /// What the user did to the titlebar this frame. The app applies these
@@ -228,11 +402,14 @@ pub fn show_titlebar(
         egui::Sense::click_and_drag(),
     );
 
-    // Wordmark at the left edge: the sound-wave equalizer glyph plus "riff",
-    // both in the brand orange. The cluster sits at the very top-left of the
-    // window; the text is measured so the scan status starts clear of it.
+    // Wordmark after the left inset: on the custom branch the small inset it
+    // always had; on the native branch past the traffic-light clearance. The
+    // text is measured so the scan status starts clear of it.
     let mark_rect = egui::Rect::from_center_size(
-        egui::pos2(rect.left() + 16.0 + 9.0, rect.center().y),
+        egui::pos2(
+            rect.left() + titlebar_left_inset(content.chrome, content.traffic_clearance) + 9.0,
+            rect.center().y,
+        ),
         egui::vec2(18.0, 20.0),
     );
     paint_equalizer_mark(&ui.painter_at(mark_rect), mark_rect, palette.brand_primary);
@@ -245,8 +422,14 @@ pub fn show_titlebar(
         match action {
             DragRegionAction::StartDrag => ui.send_viewport_cmd(egui::ViewportCommand::StartDrag),
             DragRegionAction::ToggleMaximize => {
-                let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
-                ui.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                // Custom chrome only: on the native branch the system's own
+                // double-click-titlebar preference governs the titlebar band
+                // (its drag surface), and riff hardcodes no maximize toggle
+                // there — a mac owner's system setting wins.
+                if content.chrome == ChromeMode::CustomCaption {
+                    let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                    ui.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                }
             }
         }
     }
@@ -278,11 +461,24 @@ pub fn show_titlebar(
             None => 0.0,
         };
 
-    // Window controls at the top-right corner: three caption-style hit strips
-    // flush to the edge (Windows convention — minimize | maximize | close,
-    // zero gap between them). Drawn after the drag region so they win clicks
-    // over their slice of the strip.
-    let minimize_left = draw_caption_controls(ui, cache, palette, rect, actions);
+    // Window controls: on the custom branch, three caption-style hit strips
+    // flush to the top-right corner (Windows convention — minimize |
+    // maximize | close, zero gap between them), drawn after the drag region
+    // so they win clicks over their slice of the strip. On the native branch
+    // the system's traffic lights are the window controls and riff emits no
+    // window-control actions at all — the caption code is not even compiled
+    // on macOS.
+    let minimize_left = match content.chrome {
+        ChromeMode::NativeTrafficLights => rect.right(),
+        #[cfg(not(target_os = "macos"))]
+        ChromeMode::CustomCaption => draw_caption_controls(ui, cache, palette, rect, actions),
+        // chrome_mode() never answers CustomCaption on macOS, so this arm
+        // exists only to keep the match exhaustive there — it renders the
+        // same right edge as the native arm. The caption code above stays
+        // cfg'd out: no dead button code on the native branch.
+        #[cfg(target_os = "macos")]
+        ChromeMode::CustomCaption => rect.right(),
+    };
 
     // Nav controls (theme / Now Playing / Settings toggles) at the
     // right edge, Windows order, ending one gap left of the caption pair.
@@ -344,6 +540,10 @@ pub fn show_titlebar(
 /// areas flush to the top-right corner (Windows convention, zero gap between
 /// them), observed actions appended to `actions`. Returns the minimize
 /// strip's left edge — the nav cluster ends one [`CAPTION_GAP`] left of it.
+///
+/// Custom chrome only: not compiled on macOS, where the system's traffic
+/// lights are the window controls.
+#[cfg(not(target_os = "macos"))]
 fn draw_caption_controls(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -414,6 +614,7 @@ fn draw_caption_controls(
 /// tinted glyph centered in the full hit area. The label doubles as the hover
 /// tooltip and the assistive-tech name.
 #[expect(clippy::too_many_arguments)]
+#[cfg(not(target_os = "macos"))]
 fn window_control_button(
     ui: &mut egui::Ui,
     cache: &mut IconCache,

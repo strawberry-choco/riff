@@ -48,6 +48,10 @@ egui = "0.35"
 eframe = { version = "0.35", features = ["default", "persistence"] }
 epi = { package = "egui_extras", version = "0.35", features = ["image"] }
 
+# Window-handle access for eframe's window-chrome metrics (the macOS
+# traffic-light clearance)
+raw-window-handle = "0.6"
+
 # Lucide icon glyph rasterization for the shell chrome
 resvg = "0.48"
 
@@ -65,6 +69,22 @@ crossbeam-channel = "0.5"
 tray-icon = "0.24"
 muda = "0.19"
 rfd = "0.17"
+
+# macOS traffic-light placement (`ui::traffic_lights`). Pinned to 0.3.2 —
+# deliberately the version eframe 0.35 already resolves — so every feature
+# listed here is already in the graph (zero build cost) and `NSWindow`
+# unifies with eframe's own. 0.2.2 is in the lock only because winit 0.30.13
+# pins it; using that one instead would put two distinct `NSWindow` types in
+# the build. `NSControl` is required, not decorative: `standardWindowButton`
+# is gated on `NSButton` + `NSControl` + `NSView` together.
+#
+# No `objc2-foundation`: the AppKit geometry types are re-exported from
+# `objc2-app-kit`, and this module only reads measured rects and mutates
+# `.origin.y` / `.size.height` in place, so it never has to name one.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std", "NSWindow", "NSView", "NSButton", "NSControl",
+] }
 
 [dev-dependencies]
 egui = "0.35"

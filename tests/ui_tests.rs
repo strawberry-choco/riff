@@ -11393,7 +11393,7 @@ mod browser_column_ui_tests {
             .ctx
             .repaint_causes()
             .iter()
-            .map(|cause| format!("{}:{}", cause.file, cause.line))
+            .map(|cause| format!("{}:{}", cause.file.replace('\\', "/"), cause.line))
             .collect()
     }
 
@@ -17991,10 +17991,18 @@ mod whole_frame_tests {
     /// frame that step ran rather than the next one.
     fn last_pass_repaint(shell: &Shell) -> (std::collections::BTreeSet<u32>, bool) {
         let ctx = &shell.harness.ctx;
+        // Normalized to `/` because `file!()` bakes in backslash separators on
+        // Windows, where an un-normalized `ends_with` against a forward-slash
+        // module path never matches and the idle tick reads as absent.
         let asked_by_riff = ctx
             .repaint_causes()
             .iter()
-            .filter(|cause| cause.file.ends_with("riff-gui/src/ui/app.rs"))
+            .filter(|cause| {
+                cause
+                    .file
+                    .replace('\\', "/")
+                    .ends_with("riff-gui/src/ui/app.rs")
+            })
             .map(|cause| cause.line)
             .collect();
         (asked_by_riff, ctx.requested_repaint_last_pass())
@@ -20270,12 +20278,16 @@ mod button_wash_tests {
     /// alignment arithmetic is needed. `Context::request_repaint` is
     /// `#[track_caller]`, so a cause names riff's call site — the
     /// `animate_bool_with_time` line in `button.rs` — rather than egui's own.
+    ///
+    /// The separators are normalized to `/`: `file!()` on Windows bakes in
+    /// backslash paths, so a `contains` against a forward-slash module path
+    /// never matches there and every ask reads as silence.
     fn asked_by(harness: &egui_kittest::Harness<'_, ()>) -> Vec<String> {
         harness
             .ctx
             .repaint_causes()
             .iter()
-            .map(|cause| format!("{}:{}", cause.file, cause.line))
+            .map(|cause| format!("{}:{}", cause.file.replace('\\', "/"), cause.line))
             .collect()
     }
 

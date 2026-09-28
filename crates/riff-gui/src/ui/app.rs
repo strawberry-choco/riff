@@ -11,7 +11,12 @@ use crate::ui::now_playing::{NowPlayingAction, UpNextEntry};
 use crate::ui::playerbar::PlayerBarAction;
 use crate::ui::settings::SettingsSection;
 use crate::ui::theme::{self, Palette};
-#[cfg(not(target_os = "linux"))]
+// Ungated, unlike the visibility *channel* fields: `CUSTOM_TITLEBAR_CLOSE` is
+// compiled on every platform (it is the pure data `close_resolution` hands
+// back, which is deliberately ungated so the close decision stays assertable
+// from the Linux/Windows CI machines), so the type it is declared with must be
+// in scope on Linux too. Gating this import with the channel would leave the
+// const unnameable there.
 use crate::ui::window_visibility::VisibilityMessage;
 use eframe::egui;
 use riff_backend::app::MutexExt;
@@ -43,6 +48,11 @@ use riff_backend::app::watcher_manager::WatcherManager;
 use riff_backend::domain::{PlaybackState, PlaylistId, SmartPlaylistKind, Track, TrackId};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+// The app-wide quit intent, read by the macOS close block below. Gated to
+// macOS with the field and the parameter that carry it: nothing on Windows or
+// Linux names it, and an ungated import would be an `unused_imports` there.
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicBool;
 
 /// Theme selection state: the light/dark choice plus the (dark, high-contrast)
 /// combination last installed on the egui context, so the token style is
@@ -237,6 +247,19 @@ pub struct RiffApp {
     /// because egui never reports real visibility back to it (see `logic`).
     #[cfg(not(target_os = "linux"))]
     window_hidden: bool,
+    /// The app-wide quit intent, shared with the tray (a clone of
+    /// `AppRuntime::spawn`'s `quit_flag`). The tray stores `true` BEFORE it
+    /// enqueues its `Close`, and the macOS close block below loads it to tell a
+    /// riff-initiated quit apart from an OS window close — a distinction
+    /// `ViewportEvent::Close` does not carry, since that variant has no
+    /// payload and is identical to the one the red traffic light produces.
+    ///
+    /// macOS-only: Windows has no native close request to resolve (its frameless
+    /// OS close always quits) and Linux has no tray, so nothing there reads the
+    /// flag and a `not(linux)` gate would make CI's `-D warnings` fail on
+    /// `dead_code` for a field no Windows code path touches.
+    #[cfg(target_os = "macos")]
+    quit_flag: Arc<AtomicBool>,
     /// The Backend Events inbox: the observable surface both the Transport
     /// wrapper and the tray thread record dispatched commands onto, and the
     /// inbox the UI drains at the start of every frame.
@@ -264,6 +287,9 @@ impl RiffApp {
         #[cfg(not(target_os = "linux"))]
         visibility_listener: crate::ui::window_visibility::VisibilityListener,
         #[cfg(not(target_os = "linux"))] visibility_tx: crate::ui::window_visibility::VisibilityTx,
+        // Trailing so the macOS-only wiring is an add-on to the cross-platform
+        // list rather than interleaved with it.
+        #[cfg(target_os = "macos")] quit_flag: Arc<AtomicBool>,
     ) -> Self {
         Self {
             playback,
@@ -324,6 +350,8 @@ impl RiffApp {
             visibility_tx,
             #[cfg(not(target_os = "linux"))]
             window_hidden: false,
+            #[cfg(target_os = "macos")]
+            quit_flag,
             backend_events,
         }
     }
@@ -380,8 +408,33 @@ impl RiffApp {
             visibility_listener,
             #[cfg(not(target_os = "linux"))]
             visibility_tx.clone(),
+            // The app is the only consumer of the quit intent in a headless
+            // test (no tray exists to set it), so it starts cleared and stays
+            // that way — the same "a test pushes a request through the tray's
+            // channel" arrangement the visibility sender below documents.
+            #[cfg(target_os = "macos")]
+            Arc::new(AtomicBool::new(false)),
         );
         (app, visibility_tx)
+    }
+
+    /// Load the persisted preferences from the first frame's session
+    /// snapshots, exactly once. Runs before anything reads [`Self::prefs`] —
+    /// and before the theme is applied — so a persisted choice (High Contrast
+    /// in particular) takes effect on the very first frame instead of the
+    /// second. Guarded by [`Self::first_frame`], which it clears.
+    fn hydrate_prefs_once(
+        &mut self,
+        playback: &Arc<Mutex<PlaybackSession>>,
+        library: &Arc<Mutex<LibrarySession>>,
+    ) {
+        self.prefs = Preferences::hydrate(
+            playback,
+            library,
+            self.settings_store.as_ref(),
+            self.transport.as_ref(),
+        );
+        self.first_frame = false;
     }
 
     /// Apply the active theme to the context (REQ-UI-007, Issue 01). The
@@ -798,8 +851,17 @@ impl RiffApp {
     /// preference — by default it hides through the frontend-local
     /// [`VisibilityMessage(false)`] visibility channel (applied by `logic()`
     /// one frame later), and only when the preference is on does it send a
-    /// real `Close`. OS-level close (Alt+F4 / Cmd+Q) is untouched and always
-    /// quits. On Linux there is no tray, so the X always really closes.
+    /// real `Close`. On Linux there is no tray, so the X always really closes.
+    ///
+    /// This is NOT where a macOS close is resolved, and it must not become
+    /// one: the native branch's window controls are the system's traffic
+    /// lights, and `chrome.rs` never calls `draw_caption_controls` on
+    /// `ChromeMode::NativeTrafficLights` (the caption code is `cfg`'d out
+    /// there), so `TitleBarAction::Close` is unreachable on macOS — the red
+    /// button's close is resolved by [`close_resolution`] in `ui()`'s native
+    /// block instead. Unifying these two paths would reintroduce the
+    /// tray-Quit cancellation bug, because this one resolves a `Close` through
+    /// the preference alone and cannot see the quit intent.
     fn apply_titlebar_actions(&mut self, ctx: &egui::Context, library: &mut LibrarySession) {
         for action in self.titlebar_actions.drain(..) {
             if action == TitleBarAction::Close {
@@ -816,6 +878,40 @@ impl RiffApp {
             } else {
                 apply_titlebar_action(action, ctx, library, &mut self.theme);
             }
+        }
+    }
+
+    /// Resolve the macOS native close request (the red traffic light) for the
+    /// frame `ui()` is building, and act on it.
+    ///
+    /// Called as the first thing `ui()` does, because eframe reads
+    /// `close_requested()` at the top of the frame and quits unless THAT
+    /// frame's viewport output carries [`egui::ViewportCommand::CancelClose`]
+    /// — so the decision cannot be deferred, and nothing else in the frame may
+    /// get to queue a competing close first.
+    ///
+    /// The event carries no provenance (see [`CloseIntent`]): the tray's Quit
+    /// enqueues the same `Close` the red light produces. The quit flag is the
+    /// one fact that separates them, and the tray stores it before enqueueing —
+    /// see the ordering note in `tray.rs`. The load is `Acquire` to pair with
+    /// that `Release` store; the correctness argument rests on that pair, not
+    /// on any third-party crate's internal mutex.
+    ///
+    /// A no-op when eframe reported no close request, and on Windows/Linux
+    /// (not compiled) — their frameless OS close always quits.
+    #[cfg(target_os = "macos")]
+    fn resolve_native_close(&mut self, ui: &egui::Ui, library: &LibrarySession) {
+        if !ui.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+        let intent = if self.quit_flag.load(std::sync::atomic::Ordering::Acquire) {
+            CloseIntent::Quit
+        } else {
+            CloseIntent::WindowClose
+        };
+        if let Some((cancel, hide)) = close_resolution(intent, library.ui_flags.close_quits_app) {
+            ui.ctx().send_viewport_cmd(cancel);
+            let _ = self.visibility_tx.send(hide);
         }
     }
 
@@ -843,14 +939,20 @@ impl eframe::App for RiffApp {
     /// viewport commands.
     ///
     /// There is no close-to-tray veto here (split-close-paths, owner decision
-    /// 2026-09-19): a close that reaches eframe is a quit, period — OS close
-    /// (Alt+F4 / taskbar Close / Cmd+Q) passes through, and the tray Quit now
-    /// enqueues the real close itself. The custom titlebar X never sends a
-    /// `Close`; it hides through the frontend-local visibility channel drained
-    /// below. On Linux there is no tray, so the default no-op `logic` applies
-    /// and closing quits normally.
+    /// 2026-09-19): a close that reaches eframe is a quit, period. On
+    /// Windows/Linux the frameless OS close (Alt+F4, taskbar Close) and the
+    /// tray Quit both pass through untouched. On macOS that is no longer quite
+    /// the whole story — the red traffic light's close IS resolved against the
+    /// "Quit on close" preference, in `ui()`'s native block, so that a window
+    /// close can still hide to the tray. What survives unchanged on every
+    /// platform is the rule that stops the resolver from eating a quit: a
+    /// riff-initiated quit is identified by the shared quit flag and is never
+    /// cancelled (see [`CloseIntent`]). The custom titlebar X never sends a
+    /// `Close` anywhere; it hides through the frontend-local visibility
+    /// channel drained below. On Linux there is no tray, so the default no-op
+    /// `logic` applies and closing quits normally.
     #[cfg(not(target_os = "linux"))]
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Reconcile frontend-local visibility requests, drained from the tray's
         // own channel (Issue 03). Every request is carried out whether or not
         // this tick already believes it is in that state; no backend state is
@@ -865,9 +967,23 @@ impl eframe::App for RiffApp {
                 ctx.send_viewport_cmd(command);
             }
         }
+
+        // Re-centre the macOS traffic lights in riff's 56pt strip (a no-op
+        // elsewhere, so the call stays ungated). This runs in `logic()` and not
+        // in `ui()` for two reasons: eframe skips `ui()` while the window is
+        // hidden, so a hidden window would come back un-recentred, and
+        // `logic()` runs before `ui()` measures the clearance the titlebar
+        // renders against — the lights are in place first, every frame.
+        //
+        // The parameter is named `frame` (not `_frame`) even though only the
+        // macOS build has work to do: the no-op `apply` takes it on every other
+        // platform, which is what keeps Windows from seeing an unused
+        // variable. Clippy's `used_underscore_binding` rules out the other
+        // way round.
+        crate::ui::traffic_lights::apply(frame);
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Clone both Arcs BEFORE locking: the guards borrow `self`, and the
         // whole frame below calls `self.<method>(...)` — exactly how the
         // pre-split frame loop handled `self.state`.
@@ -875,13 +991,7 @@ impl eframe::App for RiffApp {
         let library_arc = self.library.clone();
 
         if self.first_frame {
-            self.prefs = Preferences::hydrate(
-                &playback_arc,
-                &library_arc,
-                self.settings_store.as_ref(),
-                self.transport.as_ref(),
-            );
-            self.first_frame = false;
+            self.hydrate_prefs_once(&playback_arc, &library_arc);
         }
 
         // Snapshot playback first (lock → clone → drop), then take the
@@ -893,6 +1003,12 @@ impl eframe::App for RiffApp {
         // held live for the whole frame.
         let mut playback = playback_arc.lock_or_recover().clone();
         let mut library = library_arc.lock_or_recover();
+
+        // Native close request (macOS traffic lights) — resolved first, in the
+        // very frame eframe reported it in, because eframe quits unless THAT
+        // frame's output carries the cancel. See `resolve_native_close`.
+        #[cfg(target_os = "macos")]
+        self.resolve_native_close(ui, &library);
 
         // Apply the active theme (REQ-UI-007 accessibility). Done after the
         // first-frame load so a persisted high-contrast choice takes effect on
@@ -948,6 +1064,16 @@ impl eframe::App for RiffApp {
                     active_nav: crate::ui::chrome::NavDestination::active(
                         library.view_mode,
                         library.browse_mode,
+                    ),
+                    // The chrome-mode decision, consumed here so the launch
+                    // viewport and this renderer cannot drift apart. The
+                    // clearance is measured from the window where eframe can
+                    // measure it (macOS); the ignored-elsewhere value is the
+                    // documented fallback.
+                    chrome: crate::ui::chrome::chrome_mode(),
+                    traffic_clearance: crate::ui::chrome::traffic_light_clearance(
+                        crate::ui::chrome::measured_traffic_lights_width(frame),
+                        ui.ctx().zoom_factor(),
                     ),
                 };
                 self.titlebar_actions.clear();
@@ -1050,9 +1176,75 @@ impl eframe::App for RiffApp {
 /// visibility channel and `logic()` applies the hide one frame later. The X
 /// must never send a `Close`: with the close-to-tray veto gone, any close
 /// that reaches eframe quits. On Linux there is no tray, so the titlebar
-/// drain sends a real `ViewportCommand::Close` instead.
-#[cfg(not(target_os = "linux"))]
+/// drain sends a real `ViewportCommand::Close` instead — the constant stays
+/// compiled there as the pure data [`close_resolution`] hands back, but no
+/// Linux production code sends it.
 pub const CUSTOM_TITLEBAR_CLOSE: VisibilityMessage = VisibilityMessage(false);
+
+/// Why a close reached eframe this frame.
+///
+/// The signal itself carries no provenance: egui-winit turns a
+/// `ViewportCommand::Close` into `ViewportEvent::Close`, and
+/// `egui::ViewportEvent` has exactly one variant with no payload, so that
+/// event is bit-for-bit identical to the one winit's own
+/// `WindowEvent::CloseRequested` produces for the macOS red traffic light.
+/// There is no in-band way to tell the two apart at the point riff decides,
+/// so the app consults a fact it already knows instead: the app-wide
+/// `quit_flag` from `AppRuntime::spawn`, which the tray stores before it
+/// enqueues the close and [`RiffApp`] loads in `ui()`'s native close block.
+///
+/// Note that OS-level Cmd+Q is NOT one of the two ambiguous cases, and only
+/// by luck: winit installs a default macOS app menu whose Quit calls
+/// `NSApplication::terminate:`, so Cmd+Q never reaches egui as a close at
+/// all. That guarantee is fragile rather than designed — a
+/// `with_default_menu(false)`, or any custom macOS menu, would route Cmd+Q
+/// into `WindowEvent::CloseRequested` instead, and Cmd+Q would then silently
+/// become a hide-to-tray whenever the preference is off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseIntent {
+    /// The OS asked to close the window (the macOS traffic-light red button).
+    /// The persisted "Quit on close" preference decides what this does.
+    WindowClose,
+    /// riff itself asked to quit — the tray's Quit item, which enqueues a
+    /// real `Close` so the whole shutdown path (eframe's save + destroy, then
+    /// `RuntimeLifecycle::shutdown`) runs exactly once. A quit that riff has
+    /// already committed is NEVER cancelled, whatever the preference says:
+    /// cancelling it would strand a running, playback-stopped process with a
+    /// dead tray menu and an unrecoverable window.
+    Quit,
+}
+
+/// Resolve a close request that reached eframe through the persisted
+/// Quit-on-close preference (split-close-paths / macos-native-title-bar
+/// issue 01) — the same applier the custom X's action resolves through, so
+/// close semantics keep one home.
+///
+/// A [`CloseIntent::WindowClose`] follows the preference. Off (the default),
+/// the close is cancelled for the frame — eframe quits unless that frame's
+/// viewport output carries [`egui::ViewportCommand::CancelClose`] — and the
+/// window hides through the frontend-local visibility channel, the exact
+/// gesture [`CUSTOM_TITLEBAR_CLOSE`] performs. On, the close passes through,
+/// proceeds, and the app quits.
+///
+/// A [`CloseIntent::Quit`] passes through in BOTH preference states, because
+/// the preference says what a *window* close should do and was never meant to
+/// veto a quit riff has already committed. That cell is the tray-Quit fix.
+///
+/// Returns the cancel command plus the hide message, or `None` when the close
+/// proceeds. Pure data on every platform — the macOS caller stays assertable
+/// from the Linux/Windows CI machines; only the caller is macOS-only.
+#[must_use]
+pub fn close_resolution(
+    intent: CloseIntent,
+    quit_on_close: bool,
+) -> Option<(egui::ViewportCommand, VisibilityMessage)> {
+    match (intent, quit_on_close) {
+        (_, true) | (CloseIntent::Quit, _) => None,
+        (CloseIntent::WindowClose, false) => {
+            Some((egui::ViewportCommand::CancelClose, CUSTOM_TITLEBAR_CLOSE))
+        }
+    }
+}
 
 /// Apply one [`crate::ui::chrome::TitleBarAction`] to app state and viewport
 /// commands (Issue 06). Minimize/maximize apply their viewport commands here;

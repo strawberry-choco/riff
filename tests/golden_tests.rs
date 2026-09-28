@@ -499,6 +499,10 @@ mod tests {
                 scan_status: None,
                 theme_dark: palette.dark,
                 active_nav: Some(riff_gui::ui::chrome::NavDestination::Library),
+                // The production chrome decision: goldens render the strip this platform
+                // ships — native traffic lights on macOS, custom caption controls elsewhere.
+                chrome: riff_gui::ui::chrome::chrome_mode(),
+                traffic_clearance: riff_gui::ui::chrome::traffic_light_clearance(None, 1.0),
             },
         );
     }
@@ -1188,6 +1192,10 @@ mod tests {
             scan_status: None,
             theme_dark: palette.dark,
             active_nav: Some(NavDestination::Library),
+            // The production chrome decision: goldens render the strip this platform
+            // ships — native traffic lights on macOS, custom caption controls elsewhere.
+            chrome: riff_gui::ui::chrome::chrome_mode(),
+            traffic_clearance: riff_gui::ui::chrome::traffic_light_clearance(None, 1.0),
         };
 
         egui::Panel::top("titlebar_search")
@@ -3160,6 +3168,10 @@ mod tests {
                         scan_status: Some("Scanning 812 tracks…"),
                         theme_dark: true,
                         active_nav: Some(riff_gui::ui::chrome::NavDestination::Library),
+                        // The production chrome decision: goldens render the strip this platform
+                        // ships — native traffic lights on macOS, custom caption controls elsewhere.
+                        chrome: riff_gui::ui::chrome::chrome_mode(),
+                        traffic_clearance: riff_gui::ui::chrome::traffic_light_clearance(None, 1.0),
                     },
                 );
             },
@@ -3182,6 +3194,10 @@ mod tests {
                         scan_status: None,
                         theme_dark: true,
                         active_nav: None,
+                        // The production chrome decision: goldens render the strip this platform
+                        // ships — native traffic lights on macOS, custom caption controls elsewhere.
+                        chrome: riff_gui::ui::chrome::chrome_mode(),
+                        traffic_clearance: riff_gui::ui::chrome::traffic_light_clearance(None, 1.0),
                     },
                 );
             },
@@ -3202,6 +3218,10 @@ mod tests {
                         scan_status: None,
                         theme_dark: true,
                         active_nav: Some(riff_gui::ui::chrome::NavDestination::Settings),
+                        // The production chrome decision: goldens render the strip this platform
+                        // ships — native traffic lights on macOS, custom caption controls elsewhere.
+                        chrome: riff_gui::ui::chrome::chrome_mode(),
+                        traffic_clearance: riff_gui::ui::chrome::traffic_light_clearance(None, 1.0),
                     },
                 );
             },

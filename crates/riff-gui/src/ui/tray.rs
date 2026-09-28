@@ -88,7 +88,13 @@ pub fn create_tray(
         let tray_channel = TrayIconEvent::receiver();
 
         loop {
-            if quit_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            // `Acquire` to pair with the `Release` store in the Quit arm below:
+            // everything the loop does after observing the flag — the
+            // `transport.stop()` already done, this break, the end of the
+            // process — must be ordered after the quit became visible to the
+            // app that reads it. The correctness argument rests on that
+            // store/load pair, never on a third-party crate's internal mutex.
+            if quit_flag.load(std::sync::atomic::Ordering::Acquire) {
                 break;
             }
 
@@ -115,14 +121,38 @@ pub fn create_tray(
                 } else if id == quit_id {
                     // Enqueue the real close and wake the loop: `send_viewport_cmd`
                     // only queues into the frame output (applied on the next
-                    // frame), so the repaint is what guarantees one runs. The
-                    // `quit_flag` store is only the tray loop's own break signal —
-                    // the actual quit is now eframe's close, handled uniformly
-                    // with OS close and a Linux X.
+                    // frame), so the repaint is what guarantees one runs.
+                    //
+                    // ORDER MATTERS — the flag is stored FIRST. A `Close` reaches
+                    // eframe as `ViewportEvent::Close`, which is bit-for-bit the
+                    // same event the macOS red traffic light produces (the enum
+                    // has one variant with no payload), so the app cannot tell
+                    // this quit from a window close by looking at the event; it
+                    // resolves the close against the "Quit on close" preference
+                    // and would cancel it at the default, turning Quit into
+                    // "hide to tray". This flag is the only thing that says
+                    // otherwise, so it must be set before the close is even
+                    // queued. The window that makes that necessary:
+                    //
+                    //   eframe reads `close_requested()` at the top of the frame,
+                    //   BEFORE `app.ui` runs;  →  this thread's `ctx.write()`
+                    //   (which enqueues the Close) blocks until egui's write lock
+                    //   is free, and `raw_input` is only rebuilt at the UI
+                    //   thread's end_pass;  →  the frame that then sees the
+                    //   close is a later one, whose `app.ui` loads the flag.
+                    //
+                    // Storing after `send_viewport_cmd` leaves a real window in
+                    // which `app.ui` reads the flag before it is set, and this
+                    // quit is cancelled like any other window close.
+                    //
+                    // `std::process::exit` is deliberately NOT used: it would
+                    // skip `RuntimeLifecycle::shutdown` (leaving the audio
+                    // engine, scanner, and workers unjoined) and eframe's
+                    // save + window-destroy path.
+                    quit_flag.store(true, std::sync::atomic::Ordering::Release);
                     transport.stop();
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     ctx.request_repaint();
-                    quit_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
 

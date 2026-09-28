@@ -30,7 +30,7 @@ One shared `SqliteStore` connection serves every store port view; both session g
 
 ## Shutdown
 
-`AppRuntime::spawn` returns `(AppRuntime, RuntimeLifecycle)`; `main.rs` builds the app from the first half and calls `lifecycle.shutdown()` once `eframe::run_native` has returned. Tray Quit is unchanged — it still sets `quit_flag` and closes the viewport, and the viewport closing is what ends the event loop.
+`AppRuntime::spawn` returns `(AppRuntime, RuntimeLifecycle)`; `main.rs` builds the app from the first half and calls `lifecycle.shutdown()` once `eframe::run_native` has returned. Tray Quit stops playback, enqueues the real viewport close (with a repaint, since that command only lands in the next frame's output), and raises `quit_flag` — which is the tray loop's own break signal, not the quit mechanism; the viewport closing is what ends the event loop.
 
 `shutdown` is idempotent (each handle is taken before it is joined, so a second call returns immediately) and runs in a fixed order:
 
@@ -97,7 +97,7 @@ The engine pushes decoded samples into the output adapter with a blocking write:
 
 ### The UI never blocks
 
-The main thread must return from each frame quickly. All heavy work — scanning, tag writing, metadata reading, image decoding — happens on worker threads. The UI only ever performs non-blocking polls on its incoming channels and short locked reads of the session structs.
+The main thread must return from each frame quickly. All heavy work — scanning, tag writing, metadata reading, image decoding — happens on worker threads. The UI only ever performs non-blocking polls on its incoming channels and short locked reads of the session structs. The one per-frame OS call it makes is macOS's traffic-light re-centring (`ui::traffic_lights::apply`, called from `RiffApp::logic`): in the steady state that reads two frames and compares two floats and writes nothing, and the writes it does make when the geometry has drifted are one container resize plus a per-button origin write, each followed by an `updateTrackingAreas()` — all on this thread's own window. It spawns no worker, owns no channel, and is joined by nothing, which is why the thread inventory above has no entry for it.
 
 ### No nested locking
 

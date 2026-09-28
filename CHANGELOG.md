@@ -1,0 +1,118 @@
+# Changelog
+
+All notable changes to riff are recorded in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## About the history before 0.2.0
+
+**Everything before 0.2.0 predates this file and is not in Keep a Changelog form.**
+The pre-release commit history is freeform — `add animation`, `improve ui`,
+`refactor`, and so on — with no conventional-commit prefixes, no pull-request
+numbers, and no changelog file to append to. Nothing has been retro-fitted: the
+per-commit detail exists only in the commit log, and reconstructing a
+per-release or per-PR changelog from it would mean inventing structure and
+attribution that the history does not contain.
+
+[Conventional Commits](https://www.conventionalcommits.org/) are adopted **going
+forward only**, starting with the next commit. From then on, commit messages
+follow the format, and each release's section here is written from the commits
+and pull requests between the previous tag and the new one.
+
+## [Unreleased]
+
+Nothing yet. The next set of changes collects here until the next tag.
+
+## [0.2.0]
+
+<!--
+  No date yet: 0.2.0 has not been released, so there is no honest date to print.
+  The tag does not exist until the release workflow runs. Replace this comment
+  with the release date when the tag is pushed, and repoint the `[0.2.0]` link
+  at the release page below.
+-->
+
+The first public release of riff: a desktop music player for a local collection,
+pre-1.0 and offline-only by design. It plays the audio files already on your
+disks, opens no network connection, and has no account, no telemetry, and no
+upload.
+
+### Added
+
+- **Multi-format playback** — MP3, AAC (M4A), Opus, FLAC, OGG Vorbis, and WAV,
+  decoded streaming, with play/pause/stop, seek, volume with mute, and a queue
+  supporting next/previous, shuffle, and a repeat mode (off / all / one).
+- **Gapless playback** — the next queue entry is decoded and pre-buffered ahead
+  of the track boundary, so consecutive tracks of the same format hand off
+  without a gap; a format change falls back to the ordinary path.
+- **ReplayGain normalization** — opt-in track-gain leveling from
+  `REPLAYGAIN_TRACK_GAIN` / `REPLAYGAIN_TRACK_PEAK` tags, peak-capped so a
+  boosting gain cannot clip.
+- **Library scanning** — recursive, incremental, on a background thread, with
+  a track's identity being its full file path. Multiple library paths can be
+  added, removed, and rescanned individually or all at once.
+- **Metadata extraction** — title, artist, album, album artist, genre, year, and
+  track number, read with `lofty`; albums group by *album artist*, so
+  compilations stay together.
+- **Cover art resolution** — embedded artwork first (ID3v2 APIC, FLAC/Vorbis
+  picture blocks, M4A `covr`), then a case-insensitive filesystem fallback
+  (`cover`, `folder`, `album`, `front`; JPEG or PNG). Decoding happens off the
+  UI thread, each display size is cached on disk as a thumbnail, and recent
+  textures are kept in a bounded in-RAM cache.
+- **Library search** — one search box (`Ctrl+K`) filtering Artists, Albums, All
+  Tracks, and Folders by artist, album artist, album, and title, matching
+  literally and case-insensitively.
+- **Library persistence** — the authoritative indexed collection lives in a
+  local SQLite store (`riff.sqlite3`), so a launch lands on a browsable library
+  instead of a re-walk of every drive. Scans commit in batches, so an
+  interrupted scan keeps what it already saved. A corrupt store is set aside
+  automatically and the app continues.
+- **Folder watching** — per-path opt-in, with a debounced rescan so dropping in
+  a whole album fires one scan rather than a dozen; added files appear, deleted
+  files are evicted, and an unwatchable path says so instead of failing
+  silently.
+- **Tag editing** — the detail panel's inline editor writes Title, Artist,
+  Album, Album Artist, Genre, Year, and Track Number back into the file and
+  updates the store without a rescan. An album readout edits its whole set of
+  tracks at once and reports "Saved N of M tracks" with the first failure reason.
+- **Custom playlists** — create, rename, delete, reorder, and add tracks from
+  any listing, deduplicated, with every mutation committed as one immediate
+  durable transaction. A track whose file has gone missing stays visible, is
+  shown as "(missing)", and is skipped on playback.
+- **Smart playlists** — discovery lists computed on the machine from your own
+  play history, stored as store queries. Nothing leaves the machine.
+- **Per-track play history** — play count, last played, and date added, kept in
+  the store alongside the tracks.
+- **Column browser navigation** — elastic columns following the selected facet
+  (Artists → Albums → Tracks, Genres → Artists → Albums → Tracks) with a
+  collapsible inspector that reads out the selection, and a
+  Folders view that mirrors the disk. Playing, queueing, and shuffling an
+  album, artist, or genre — and a track's own actions — live in that row's
+  right-click menu rather than in buttons on the inspector.
+- **Now Playing view** — large cover art, the full metadata readout, an in-view
+  seek slider, and a clickable up-next queue where a row promotes a track via
+  Play Next.
+- **Player control bar** — transport, a click-to-seek progress bar in `MM:SS`,
+  volume with a mute that restores the exact previous level, shuffle, repeat,
+  and a queue position indicator.
+- **Favorites** — a per-row heart that commits straight to the store and feeds
+  the corresponding smart list.
+- **System tray** on macOS and Windows — hide-to-tray on the custom titlebar
+  close with playback continuing, a tooltip showing the current track, and a
+  menu with Play/Pause, Next, Previous, Show Window, and Quit. Deliberately
+  absent on Linux, where closing the window quits.
+- **Native folder picker** on macOS and Windows (`rfd`); a validated
+  text-input picker with autocomplete and clear errors on Linux.
+- **Settings** — library paths and per-path watch state, ReplayGain, advanced
+  mode, high-contrast theme, and a "Clear Library" action guarded by a
+  confirmation dialog.
+- **Keyboard accessibility** — the whole UI is operable from the keyboard, with a
+  visible focus indicator and a persistent high-contrast theme.
+- **Progressive disclosure** — a default surface that stays minimal, with an
+  advanced mode revealing the power features.
+- **Embedded fonts and icons** — the Inter faces and Lucide icons are compiled
+  into the binary, so the executable needs no companion asset files.
+
+[Unreleased]: https://github.com/strawberry-choco/riff/commits/master
+[0.2.0]: https://github.com/strawberry-choco/riff/releases

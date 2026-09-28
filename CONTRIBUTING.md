@@ -6,7 +6,7 @@ This file is a front door, not a manual. The detail lives in [`docs/`](docs/READ
 
 ## Code of Conduct
 
-Be decent to each other. riff follows the [Contributor Covenant](https://www.contributor-covenant.org/version/2/1/code_of_conduct/): treat people here as colleagues, assume good faith, and accept that a maintainer may disagree with your approach. Harassment and exclusionary behavior are not tolerated. There is no local `CODE_OF_CONDUCT.md` yet, so the canonical covenant is the reference until one exists.
+Be decent to each other. riff follows the [Contributor Covenant](https://www.contributor-covenant.org/version/2/1/code_of_conduct/): treat people here as colleagues, assume good faith, and accept that a maintainer may disagree with your approach. Harassment and exclusionary behavior are not tolerated. The full covenant now lives in [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) at the repository root, with the contact method and how enforcement works in a single-maintainer project filled in.
 
 ## Prerequisites
 

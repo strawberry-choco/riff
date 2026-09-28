@@ -1,8 +1,16 @@
 # riff-gui — the frontend: egui UI, tray icon, native dialogs, fonts, and the
 # `riff` binary entry point.
 #
-# Owns egui/eframe (pinned 0.35 — see root Cargo.toml note on the 0.36
-# headless texture regression), egui_kittest, resvg, rfd, and tray-icon/muda.
+# Owns egui/eframe, egui_kittest, resvg, rfd, and tray-icon/muda.
+#
+# egui is pinned to 0.35 deliberately. 0.36 regressed headless texture
+# rendering: under kittest the golden snapshots silently lose every
+# user-loaded texture, because `ctx.load_texture` and the painter/image
+# widgets paint nothing while text and shapes still render. That partial
+# failure is what makes it easy to miss — the windowed app looks fine on
+# either version, and the damage lands entirely in the committed goldens.
+# Revisit only after checking the upstream fix status; do not bump the pin
+# to "catch up" and re-baseline the snapshots to make the diff go away.
 #
 # The binary is a thin composition over the backend's Composition Root
 # (`riff_backend::composition::AppRuntime::spawn`, backend-crate-split
@@ -16,10 +24,17 @@
 
 [package]
 name = "riff-gui"
-version = "0.2.0"
-edition = "2024"
-rust-version = "1.95"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The riff desktop music player: an offline-first egui app for playing a local music library."
+readme = "../../README.md"
+keywords = ["music-player", "audio", "egui", "desktop", "offline"]
+categories = ["multimedia", "gui"]
 
 [[bin]]
 name = "riff"
@@ -54,11 +69,5 @@ rfd = "0.17"
 [dev-dependencies]
 egui = "0.35"
 
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "allow", priority = -1 }
-needless_pass_by_value = "allow"
-module_name_repetitions = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-must_use_candidate = "allow"
+[lints]
+workspace = true

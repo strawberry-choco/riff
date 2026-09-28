@@ -6,7 +6,7 @@ riff is a Cargo workspace that plays local audio files (MP3, AAC, Opus, FLAC, OG
 
 ## How this documentation is organized
 
-The docs are split into four reader-facing buckets that follow how different readers approach the project, plus a fifth group for the agent workflow. This structure is loosely inspired by the [Diátaxis](https://diataxis.fr/) framework, adapted for a small desktop application: one axis separates *using* the product from *understanding* it, and the other separates *working on* it from *looking things up*.
+The docs are split into four reader-facing buckets that follow how different readers approach the project. This structure is loosely inspired by the [Diátaxis](https://diataxis.fr/) framework, adapted for a small desktop application: one axis separates *using* the product from *understanding* it, and the other separates *working on* it from *looking things up*.
 
 | Bucket | For | Question it answers |
 |---|---|---|
@@ -14,7 +14,6 @@ The docs are split into four reader-facing buckets that follow how different rea
 | [Technical](technical/architecture.md) | Maintainers and contributors | "How is it built and how does it work internally?" |
 | [Engineering](engineering/development-setup.md) | Contributors | "How do I build, change, and release it correctly?" |
 | [Reference](reference/glossary.md) | Everyone | "What does term X mean, and where does state Y live?" |
-| [Agent skills](agents/issue-tracker.md) | Coding agents working in this repository | "How do issues, domain docs, and triage labels work here?" |
 
 If you are new, start with [Product → Overview](product/overview.md). If you want to build or change riff, start with [Engineering → Development setup](engineering/development-setup.md) and read [Coding standards](engineering/coding-standards.md) before your first change.
 
@@ -72,21 +71,13 @@ How to work on riff correctly.
 - [Testing strategy](engineering/testing-strategy.md) — the per-crate suites and the workspace-root integration/golden suite, plus prioritized recommendations.
 - [Golden-image testing](engineering/golden-image-testing.md) — the snapshot-test harness for visual parity: authoring goldens, re-baselining, and reviewing image diffs.
 - [Access-violation flake](engineering/access-violation-flake.md) — the open `STATUS_ACCESS_VIOLATION` crash of the `riff-tests` binary: hypotheses ruled in and out, and the next move.
-- [Release and packaging](engineering/release-and-packaging.md) — the release profile and the manual release process today.
+- [Release and packaging](engineering/release-and-packaging.md) — the tag-triggered release pipeline in `.github/workflows/release.yml` (version guard, four-platform build matrix, artifact packaging, pre-release publish) and how to cut a release.
 
 ### Reference
 
 Quick lookup.
 
 - [Glossary](reference/glossary.md) — product and technical terms, alphabetized.
-
-### Agent skills
-
-How the engineering skills consume this repository.
-
-- [Domain docs](agents/domain.md) — reading `CONTEXT.md` and the ADRs, using the glossary's vocabulary, and surfacing ADR conflicts instead of overriding them.
-- [Issue tracker](agents/issue-tracker.md) — why issues and specs are local markdown under `.scratch/<feature-slug>/` rather than GitHub Issues, and the file conventions.
-- [Triage labels](agents/triage-labels.md) — the five role strings used verbatim as the `Status:` value in an issue file.
 
 ## Conventions
 

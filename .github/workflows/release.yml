@@ -1,0 +1,356 @@
+name: Release
+
+# Tag-triggered. Every release starts as `git push origin v<version>`, and the
+# tag is the single input: the artifact names and the release title are derived
+# from `github.ref_name` below, so no version string is ever written literally
+# into this file.
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Workflow default is read-only, matching ci.yml. The one exception is the
+# `release` job, which is the ONLY job here granted `contents: write`, and only
+# because `gh release create` needs it. Keeping the broader scope off the
+# default means the four-way `build` matrix — which compiles a full Cargo
+# dependency graph and runs its build scripts — cannot write to this repository
+# even if a dependency is compromised.
+permissions:
+  contents: read
+
+jobs:
+  # The tag/version guard lives HERE and not in ci.yml on purpose. ci.yml
+  # triggers only on pushes to `master` and on pull requests, so a tag-versus-
+  # version check in that workflow would never execute — it would be a guard
+  # that always passes because it never runs. This is the only workflow that
+  # fires on a tag, so this is the only place the check can do any work.
+  verify:
+    name: verify tag
+    # `needs: []` states that this job depends on nothing. It is the first thing
+    # the run does, so a mistyped tag fails in under a minute instead of after
+    # four full release builds.
+    needs: []
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # `cargo metadata` is not needed for the check, but the runner image's
+      # cargo version is not something this workflow should quietly depend on:
+      # the manifests are edition 2024, which older cargo cannot parse. Pin the
+      # same toolchain the build job installs, minus the lint components that
+      # only CI needs.
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: stable
+
+      - name: Check the tag against the workspace version
+        run: |
+          set -euo pipefail
+          # Read the version through `cargo metadata`, never by grepping a
+          # manifest. The version is single-sourced in `[workspace.package]`
+          # and every member says `version.workspace = true`, so no manifest
+          # contains a literal `version = "..."` any more: a grep-based guard
+          # would find nothing, pass vacuously, and let `v0.9.9` ship.
+          workspace_version="$(
+            cargo metadata --no-deps --format-version 1 \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])'
+          )"
+          tag="${GITHUB_REF_NAME}"
+          # Rule: the tag is `v` + the workspace version, optionally followed by
+          # a SemVer pre-release and/or build suffix (`vX.Y.Z`, `vX.Y.Z-rc.1`,
+          # `vX.Y.Z+20260928`, `vX.Y.Z-rc.1+20260928`, with X.Y.Z being whatever
+          # Cargo.toml says). The numeric core must match exactly. Allowing the
+          # suffix means a pre-1.0 release candidate can be cut without editing
+          # this guard; it is deliberately orthogonal to the GitHub pre-release
+          # MARKER, which the `release` job always sets regardless of the tag's
+          # shape.
+          core="${tag%%+*}"
+          core="${core%%-*}"
+          if [ "${core}" != "v${workspace_version}" ]; then
+            echo "::error::tag ${tag} does not match the workspace version ${workspace_version}"
+            echo "Fix the version in the root Cargo.toml [workspace.package] block, or retag as v${workspace_version}."
+            exit 1
+          fi
+          # The core matched, so this only rejects shapes that are not releases
+          # at all: `vfoo`, `v1.2`, `v1.2.3.4`, `vX.Y.Z-`, `vX.Y.Z extra`.
+          if ! printf '%s' "${tag}" \
+            | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "::error::tag ${tag} is not a release tag (expected v<major>.<minor>.<patch>[-prerelease][+build])"
+            exit 1
+          fi
+          echo "tag ${tag} matches workspace version ${workspace_version}"
+
+  # Build and package, but publish nothing. The publish step is a separate job
+  # because a matrix job that also creates the release has a race built into it:
+  # the first leg to finish creates the release and the other three fail with
+  # "release already exists". Here every leg can only ever produce an artifact,
+  # so the four legs cannot interfere with each other.
+  build:
+    name: build ${{ matrix.target }}
+    needs: [verify]
+    strategy:
+      # Not fail-fast: one broken leg should not cancel the other three, because
+      # the failure report is much more useful when every platform reports.
+      fail-fast: false
+      matrix:
+        include:
+          # Runner labels are pinned to currently-GA images, and that is a
+          # deliberate constraint rather than a preference. GitHub supports the
+          # latest two macOS releases and deprecates the rest: a deprecated
+          # image goes through announced brownouts and then disappears, and a
+          # missing label fails the leg outright. `release` needs ALL four
+          # legs, so one dead runner label blocks the entire release — there is
+          # no partial publish. `macos-13` has already been removed from
+          # actions/runner-images and `macos-14` is badged deprecated, so an
+          # earlier draft of this matrix could not have run at all.
+          #
+          # Do not "simplify" these back to `macos-latest` for both legs:
+          # `macos-latest` is arm64, so that would silently drop the Intel
+          # build while the artifact name still claimed `macos-x86_64`. Intel
+          # needs the explicit `macos-15-intel` label. Check the current table
+          # in actions/runner-images before bumping either.
+          - os: macos-15
+            target: macos-arm64
+          - os: macos-15-intel
+            target: macos-x86_64
+          - os: ubuntu-22.04
+            target: linux-x86_64
+          - os: windows-latest
+            target: windows-x86_64
+    # Each leg builds natively on its own runner; `matrix.target` is a naming
+    # slug, not a cargo `--target` triple, so no cross-compilation is involved.
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # eframe 0.35 (wgpu + winit x11/wayland + clipboard) and cpal 0.18 (ALSA)
+      # need these headers to COMPILE on Linux. tray-icon/muda/rfd are gated to
+      # non-Linux targets, so libgtk-3-dev is intentionally NOT required here.
+      # mesa-vulkan-drivers provides the lavapipe software Vulkan adapter that
+      # egui_kittest's wgpu renderer needs to run golden-image tests headless.
+      #
+      # Copied verbatim from ci.yml so the two lists cannot drift. It is a
+      # superset of what `cargo build --release -p riff-gui` alone needs on
+      # Linux (mesa-vulkan-drivers is for kittest's headless renderer, not for
+      # running riff); the same list is kept so a change to either is a visible
+      # edit in both files.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y \
+            pkg-config \
+            libasound2-dev \
+            libudev-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libssl-dev \
+            mesa-vulkan-drivers
+
+      # Successor to the archived actions-rs/toolchain, pinned to the same SHA
+      # as ci.yml. No `components:` here: rustfmt and clippy are CI's concern,
+      # and a release build wants nothing but the compiler.
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: stable
+
+      - name: Build
+        run: cargo build --release -p riff-gui
+
+      # There is no assets folder in these archives, and that is correct, not an
+      # oversight. The Inter faces are `include_bytes!`-ed and the Lucide SVGs
+      # are `include_str!`-ed by `crates/riff-gui/src/ui/fonts.rs` and
+      # `.../icons.rs`, so the executable carries its own fonts and icons. Each
+      # archive holds exactly one file — the binary — because the binary is the
+      # whole product.
+      - name: Package (macOS / Linux)
+        if: runner.os == 'Linux' || runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          archive="dist/riff-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
+          # -C target/release + a bare member name keeps the archive flat: one
+          # entry, `riff`, with no `target/release/` prefix around it.
+          tar -czf "${archive}" -C target/release riff
+          echo "packaged ${archive}"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          # The Windows binary is riff.exe, not riff — the same path as on Unix
+          # would silently package nothing.
+          $archive = "dist/riff-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          # Compress-Archive on a file path (not a directory) writes that one
+          # file at the archive root, which is what the release notes promise.
+          Compress-Archive -Path target/release/riff.exe -DestinationPath $archive
+          if (-not (Test-Path $archive)) { throw "archive not produced: $archive" }
+          Write-Host "packaged $archive"
+
+      # `if-no-files-found: error` is the backstop for the packaging step above
+      # silently producing nothing: an empty artifact would otherwise be
+      # uploaded, merged into the staging directory, and published as a
+      # 0-byte download.
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: riff-${{ github.ref_name }}-${{ matrix.target }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
+          path: ${{ runner.os == 'Windows' && 'dist/*.zip' || 'dist/*.tar.gz' }}
+          if-no-files-found: error
+
+  release:
+    name: publish pre-release
+    # `build` depends on `verify`, so a version mismatch already stopped the run
+    # before any of this is reached. The only thing between four finished builds
+    # and a published release is this one job.
+    needs: [build]
+    runs-on: ubuntu-latest
+    # The ONLY grant of write scope in this workflow, and the reason the
+    # workflow-level default above is `contents: read`. `gh release create` is
+    # the single write; nothing in the build matrix has it.
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # This job never checks the repository out, so `gh` has no git remote to
+      # infer the target repository from and would fail with "unable to
+      # determine base repository". Name the repository explicitly instead of
+      # paying for a full checkout to get it.
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          # Four artifacts, four distinct names, one flat staging directory.
+          # merge-multiple is correct here precisely because the names differ:
+          # without it each artifact lands in its own subdirectory and the
+          # asset paths in the `gh release create` step would have to be
+          # `release-assets/<name>/<file>`.
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes="release-notes.md"
+          {
+            # Only the title line interpolates. The caveat text below is passed
+            # as single-quoted arguments, so a future edit cannot accidentally
+            # leave an unexpanded `$`, a backtick command, or a stray version
+            # string in the published notes. (It is `printf '%s\n' arg arg...`
+            # rather than a here-doc on purpose: a here-doc's terminator would
+            # have to sit at column 0 of the script, which YAML block-scalar
+            # indentation cannot express without tab-tricks.)
+            printf '# riff %s\n\n' "${GITHUB_REF_NAME}"
+            printf '%s\n' \
+              'The first public release of riff.' \
+              '' \
+              'riff is pre-1.0, and it is offline-only by design: it plays the' \
+              'audio files already on your own disks, opens no network' \
+              'connection, and has no account, no telemetry, and no upload. Each' \
+              'artifact below is the compiled `riff` executable and nothing else' \
+              '— no installer, no code signature, and no `.app` bundle. Extract' \
+              'it, run it, point it at a folder of music.' \
+              '' \
+              '## Downloads' \
+              '' \
+              '| Platform | File |' \
+              '|---|---|' \
+              '| macOS, Apple silicon | `riff-<tag>-macos-arm64.tar.gz` |' \
+              '| macOS, Intel | `riff-<tag>-macos-x86_64.tar.gz` |' \
+              '| Linux, x86-64 | `riff-<tag>-linux-x86_64.tar.gz` |' \
+              '| Windows, x86-64 | `riff-<tag>-windows-x86_64.zip` |' \
+              '' \
+              '`<tag>` stands for this release tag, so every file name starts with' \
+              '`riff-` followed by it. Take the four downloads from this page' \
+              'rather than assembling the names yourself.' \
+              '' \
+              '## What each platform actually gives you' \
+              '' \
+              '**Windows — a zipped, bare `riff.exe`.** There is no installer,' \
+              'and the executable is unsigned, so SmartScreen warns the first' \
+              'time you open it: choose "More info", then "Run anyway". Wrapping' \
+              'this same unsigned binary in an NSIS installer would hit the' \
+              'identical wall; an installer buys a setup experience, not trust.' \
+              'Only a code-signing certificate buys trust, and riff does not have' \
+              'one.' \
+              '' \
+              '**macOS — a `tar.gz` of the bare `riff` executable, not a `.app`' \
+              'bundle.** Two consequences follow from there being no bundle: there' \
+              'is no Dock icon, and menu-bar focus is unreliable, so Cmd-Q and' \
+              'Cmd-Tab may not reach the app. Quit from the tray menu instead, or' \
+              'signal the process from a terminal. Gatekeeper also quarantines the' \
+              'downloaded file, so the first launch is blocked until you clear it' \
+              'once: right-click the extracted `riff`, choose Open, then Open' \
+              'again, or run' \
+              '' \
+              '    xattr -d com.apple.quarantine riff' \
+              '' \
+              '**Linux — a `tar.gz` of the `riff` executable,** dynamically linked' \
+              'against `libasound2` (ALSA). On Debian and Ubuntu:' \
+              '' \
+              '    sudo apt install libasound2' \
+              '' \
+              'There is no tray icon on Linux by design, so closing the window' \
+              'quits.' \
+              '' \
+              '## This is a pre-release' \
+              '' \
+              'It is published as a GitHub pre-release while riff is pre-1.0, and' \
+              'it is unsigned and un-packaged per platform, so expect the caveats' \
+              'above rather than a polished installer experience. Reports and' \
+              'feature requests:' \
+              '' \
+              'https://github.com/strawberry-choco/riff/issues'
+          } > "${notes}"
+          cat "${notes}"
+
+      - name: Create the GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The same four slugs the build matrix uses. This list is the
+          # contract: if a target is renamed in the matrix, it has to change
+          # here too, and the existence check below is what turns a stale list
+          # into a clear error instead of a release that is quietly missing a
+          # platform.
+          assets=()
+          for target in macos-arm64 macos-x86_64 linux-x86_64 windows-x86_64; do
+            if [ "${target}" = "windows-x86_64" ]; then
+              assets+=("release-assets/riff-${GITHUB_REF_NAME}-${target}.zip")
+            else
+              assets+=("release-assets/riff-${GITHUB_REF_NAME}-${target}.tar.gz")
+            fi
+          done
+          for asset in "${assets[@]}"; do
+            if [ ! -f "${asset}" ]; then
+              echo "::error::expected release asset is missing: ${asset}"
+              echo "The download step merged: $(ls -1 release-assets)"
+              exit 1
+            fi
+          done
+          # Always a pre-release, whatever the tag says: riff is pre-1.0 and
+          # the binaries are unsigned and un-packaged per platform. Promoting
+          # out of pre-release is a deliberate manual act, not a side effect of
+          # the tag.
+          gh release create "${GITHUB_REF_NAME}" \
+            --prerelease \
+            --title "riff ${GITHUB_REF_NAME}" \
+            --notes-file release-notes.md \
+            "${assets[@]}"

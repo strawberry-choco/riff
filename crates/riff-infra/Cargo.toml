@@ -13,10 +13,15 @@
 
 [package]
 name = "riff-infra"
-version = "0.2.0"
-edition = "2024"
-rust-version = "1.95"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Adapters for riff: the SQLite store, audio decoding and output, tag reading, and file watching."
+publish = false
 autotests = false
 
 [[test]]

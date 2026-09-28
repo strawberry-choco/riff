@@ -1,0 +1,66 @@
+# Dependabot keeps the native side of this tree current. riff wraps a lot of
+# code it does not own: symphonia and its codec adapters, cpal, wgpu (via
+# eframe), bundled SQLite, and the whole egui family. Decoders and image
+# parsers are the kind of dependency where a security fix is the reason to
+# move promptly, and nothing else would surface it. egui/eframe/egui_kittest
+# are deliberately held at 0.35 — 0.36 regressed headless texture rendering and
+# the golden-image snapshots lose every user-loaded texture — so those bumps
+# need a human to check the goldens, which is exactly what the comment on the
+# group below is for. Do not delete this file as noise.
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # The media, audio, storage, and filesystem adapters move together and
+    # tend to release in lockstep with their upstream ecosystem; a dozen
+    # separate PRs is noise nobody reviews carefully.
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "build"
+    groups:
+      native-media-and-audio:
+        patterns:
+          - "symphonia"
+          - "symphonia-adapter-libopus"
+          - "cpal"
+          - "ringbuf"
+          - "lofty"
+          - "image"
+          - "rusqlite"
+          - "walkdir"
+          - "notify"
+          - "notify-debouncer-full"
+      # egui, eframe, epi (egui_extras), and egui_kittest must agree on one
+      # version: a mixed set is not supported, and the golden-image snapshots
+      # are sensitive to any renderer change. Review the diff PNGs before
+      # merging a bump past 0.35.
+      egui-and-renderer:
+        patterns:
+          - "egui"
+          - "eframe"
+          - "epi"
+          - "egui_extras"
+          - "egui_kittest"
+          - "resvg"
+          - "winit"
+          - "wgpu"
+          - "color-eyre"
+
+  # CI pins its actions by commit SHA (the version is in a trailing comment),
+  # which is deliberate — a tag is mutable, a SHA is not. Dependabot updates
+  # the SHA pins and rewrites the trailing comment to the new version, so the
+  # pinned action never changes underneath a workflow without a PR asking for
+  # it.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns:
+          - "*"

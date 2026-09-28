@@ -21,8 +21,6 @@ target/
 # containing the author's home directory paths.
 .workbuddy/
 debug-output.txt
-# Added by code-review-graph
-.code-review-graph/
 
 # Golden-image diff artifacts (transient; see docs/engineering/golden-image-testing.md)
 tests/snapshots/**/*.diff.png

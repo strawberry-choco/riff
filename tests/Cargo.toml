@@ -1,5 +1,14 @@
 # Integration-test crate for the riff workspace (split layout).
 #
+# NOTE: this crate deliberately does NOT inherit `[lints] workspace = true`,
+# even though every other member does. Do not "fix" the apparent omission.
+# The workspace sets clippy's pedantic group, which targets library code;
+# this crate is fixtures, mocks and helpers, where pedantic fires on
+# intended shapes (multi-arming loops, 200-line test bodies, short local
+# bindings). Turning inheritance on here produces 198 clippy errors, all in
+# test scaffolding that is not shipped. `cargo clippy --all-targets` still
+# covers this crate through the six library crates it builds.
+#
 # Single integration-test crate rooted at tests/mod.rs (autotests = false,
 # one [[test]] target), organized into domain/app/infra/ui/golden/integration
 # suites with shared test_utils/mocks/integration_helpers.
@@ -7,19 +16,24 @@
 # Depends on every workspace crate by name (per-crate imports) so each
 # suite reaches the type it needs directly.
 #
-# Run:
-#   cargo test -p tests
-#   cargo test -p tests domain_tests
+# Run (the package is `riff-tests`, not the directory name `tests`):
+#   cargo test -p riff-tests
+#   cargo test -p riff-tests domain_tests
 #
 # See docs/engineering/testing-strategy.md and
 # docs/engineering/golden-image-testing.md.
 
 [package]
 name = "riff-tests"
-version = "0.2.0"
-edition = "2024"
-rust-version = "1.95"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Private integration-test crate for the riff workspace; not published."
+publish = false
 
 autotests = false
 

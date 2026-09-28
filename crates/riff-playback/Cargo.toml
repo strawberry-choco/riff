@@ -11,10 +11,15 @@
 
 [package]
 name = "riff-playback"
-version = "0.2.0"
-edition = "2024"
-rust-version = "1.95"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Playback domain for riff: the play queue, transport, gapless logic, and audio decoder interfaces."
+publish = false
 
 [dependencies]
 riff-persistence = { path = "../riff-persistence" }

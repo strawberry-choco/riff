@@ -31,6 +31,19 @@ members = [
 ]
 resolver = "2"
 
+# Single source of truth for the version, edition, MSRV and the identity fields
+# that every member inherits via `<key>.workspace = true`. Releases touch this
+# one block instead of seven manifests, so the crates can never disagree.
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+authors = ["strawberry-choco"]
+repository = "https://github.com/strawberry-choco/riff"
+homepage = "https://github.com/strawberry-choco/riff"
+documentation = "https://github.com/strawberry-choco/riff/tree/master/docs"
+
 # Workspace-level profiles and lints apply to every member.
 [profile.release]
 opt-level = 3

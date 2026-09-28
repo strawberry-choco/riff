@@ -44,8 +44,8 @@ path = "src/main.rs"
 riff-backend = { path = "../riff-backend" }
 
 # UI
-egui = "0.35"
-eframe = { version = "0.35", features = ["default", "persistence"] }
+egui = "0.36"
+eframe = { version = "0.36", features = ["default", "persistence"] }
 epi = { package = "egui_extras", version = "0.35", features = ["image"] }
 
 # Window-handle access for eframe's window-chrome metrics (the macOS
@@ -87,7 +87,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-egui = "0.35"
+egui = "0.36"
 
 [lints]
 workspace = true

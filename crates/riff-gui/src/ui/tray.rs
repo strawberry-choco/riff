@@ -17,11 +17,22 @@ use tray_icon::Icon;
 #[cfg(not(target_os = "linux"))]
 use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 
+// Everything below is reachable only from the non-Linux tray body, so it carries
+// the same gate as the muda/tray_icon imports above. Without it, Linux builds
+// keep these imports while compiling the tray itself out, and CI's `-D warnings`
+// turns the resulting `unused_imports` into a hard error — a failure that cannot
+// reproduce on a macOS or Windows dev machine.
+#[cfg(not(target_os = "linux"))]
 use crate::ui::window_visibility::{VisibilityMessage, VisibilityTx};
+#[cfg(not(target_os = "linux"))]
 use eframe::egui;
+#[cfg(not(target_os = "linux"))]
 use riff_backend::app::ChannelTransport;
+#[cfg(not(target_os = "linux"))]
 use riff_backend::app::MutexExt;
+#[cfg(not(target_os = "linux"))]
 use riff_backend::app::state::PlaybackSession;
+#[cfg(not(target_os = "linux"))]
 use riff_backend::app::transport::Transport;
 
 /// Create a system tray icon with playback controls.

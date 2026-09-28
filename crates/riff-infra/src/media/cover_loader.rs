@@ -139,12 +139,17 @@ const THUMBNAIL_JPEG_QUALITY: u8 = 90;
 /// `Err` only for pixels that do not fill the dimensions they claim, which is a
 /// broken `DecodedCover` rather than a cache failure.
 pub fn encode_thumbnail(cover: &DecodedCover) -> Result<EncodedThumbnail, LibraryError> {
-    let opaque = cover.rgba.chunks_exact(4).all(|pixel| pixel[3] == u8::MAX);
+    let opaque = cover
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .all(|pixel| pixel[3] == u8::MAX);
     let mut out = Cursor::new(Vec::new());
 
     if opaque {
         let mut rgb = Vec::with_capacity(cover.rgba.len() / 4 * 3);
-        for pixel in cover.rgba.chunks_exact(4) {
+        for pixel in cover.rgba.as_chunks::<4>().0 {
             rgb.extend_from_slice(&pixel[..3]);
         }
         let frame = image::RgbImage::from_raw(cover.width, cover.height, rgb).ok_or_else(|| {

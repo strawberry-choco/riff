@@ -15,8 +15,6 @@ use riff_backend::app::MutexExt;
 use riff_backend::app::state::{
     LibrarySession, LibraryStatus, PlaybackSession, ViewMode, WatchState,
 };
-#[cfg(target_os = "linux")]
-use riff_backend::app::store::SettingsStore;
 use riff_backend::app::store::{AUDIO_EXTENSIONS, FullScanSummary};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1831,6 +1829,13 @@ enum Preference {
     WatchChanges,
     SkipHidden,
     ReadEmbedded,
+    // Only ever constructed inside a `#[cfg(not(target_os = "linux"))]` block,
+    // because the tray quit menu item is what offers this preference. The
+    // variant itself must stay ungated: the `impl Preference` match arms below
+    // are compiled on every platform and would not be exhaustive without it. On
+    // Linux it is therefore read but never built, which is a `dead_code` error
+    // under CI's `-D warnings` and is invisible from a macOS or Windows machine.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     CloseQuitsApp,
 }
 

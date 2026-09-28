@@ -23,6 +23,7 @@
 
 use riff_backend::composition::AppRuntime;
 use riff_gui::ui::RiffApp;
+#[cfg(not(target_os = "linux"))]
 use riff_gui::ui::window_visibility::spawn_visibility_listener;
 
 fn main() {

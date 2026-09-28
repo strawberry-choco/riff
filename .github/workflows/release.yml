@@ -170,23 +170,11 @@ jobs:
       - name: Build
         run: cargo build --release -p riff-gui
 
-      # There is no assets folder in these archives, and that is correct, not an
-      # oversight. The Inter faces are `include_bytes!`-ed and the Lucide SVGs
-      # are `include_str!`-ed by `crates/riff-gui/src/ui/fonts.rs` and
-      # `.../icons.rs`, so the executable carries its own fonts and icons. Each
-      # archive holds exactly one file — the binary — because the binary is the
-      # whole product.
-      - name: Package (macOS / Linux)
-        if: runner.os == 'Linux' || runner.os == 'macOS'
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          archive="dist/riff-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
-          # -C target/release + a bare member name keeps the archive flat: one
-          # entry, `riff`, with no `target/release/` prefix around it.
-          tar -czf "${archive}" -C target/release riff
-          echo "packaged ${archive}"
-
+      # Nothing here is archived on Windows any more: the release asset IS the
+      # executable. GitHub release assets must be single files, but a bare
+      # `riff.exe` already is one, so the zip wrapper (and the unzip step it
+      # forced on every user) is gone. The `if-no-files-found: error` upload
+      # below is still the backstop for a packaging step that produced nothing.
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -195,22 +183,84 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           # The Windows binary is riff.exe, not riff — the same path as on Unix
           # would silently package nothing.
-          $archive = "dist/riff-${{ github.ref_name }}-${{ matrix.target }}.zip"
-          # Compress-Archive on a file path (not a directory) writes that one
-          # file at the archive root, which is what the release notes promise.
-          Compress-Archive -Path target/release/riff.exe -DestinationPath $archive
-          if (-not (Test-Path $archive)) { throw "archive not produced: $archive" }
-          Write-Host "packaged $archive"
+          Copy-Item target/release/riff.exe dist/riff-${{ github.ref_name }}-windows-x86_64.exe
+          if (-not (Test-Path "dist/riff-${{ github.ref_name }}-windows-x86_64.exe")) { throw "asset not produced: dist/riff-${{ github.ref_name }}-windows-x86_64.exe" }
+          Write-Host "packaged dist/riff-${{ github.ref_name }}-windows-x86_64.exe"
 
-      # `if-no-files-found: error` is the backstop for the packaging step above
+      # Linux keeps a tar.gz of the bare binary. The Inter faces are
+      # `include_bytes!`-ed and the Lucide SVGs are `include_str!`-ed by
+      # `crates/riff-gui/src/ui/fonts.rs` and `.../icons.rs`, so the executable
+      # carries its own fonts and icons — no assets folder is needed, and the
+      # binary is the whole product.
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          archive="dist/riff-${{ github.ref_name }}-linux-x86_64.tar.gz"
+          # -C target/release + a bare member name keeps the archive flat: one
+          # entry, `riff`, with no `target/release/` prefix around it.
+          tar -czf "${archive}" -C target/release riff
+          echo "packaged ${archive}"
+
+      # macOS ships a real .app bundle inside a .dmg: the bundle gets the brand
+      # icon (crates/riff-gui/assets/brand/riff.icns, the packaging copy of the
+      # mark that chrome.rs generates at runtime), a Dock icon, and the
+      # drag-to-Applications install gesture via the /Applications symlink.
+      # The bundle is ad-hoc signed (`codesign -s -`), which is what an arm64
+      # Mach-O needs to run at all; it is NOT identified with Apple, so
+      # Gatekeeper still quarantines the download (caveat in the release
+      # notes). hdiutil UDZO is the stock compressed read-only image format —
+      # no third-party tooling, no license concerns.
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          app="dist/riff.app"
+          mkdir -p "${app}/Contents/MacOS" "${app}/Contents/Resources"
+          cp target/release/riff "${app}/Contents/MacOS/riff"
+          cp crates/riff-gui/assets/brand/riff.icns "${app}/Contents/Resources/riff.icns"
+          version="${GITHUB_REF_NAME#v}"
+          cat > "${app}/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>riff</string>
+            <key>CFBundleDisplayName</key><string>riff</string>
+            <key>CFBundleExecutable</key><string>riff</string>
+            <key>CFBundleIdentifier</key><string>io.github.strawberry-choco.riff</string>
+            <key>CFBundleVersion</key><string>${version}</string>
+            <key>CFBundleShortVersionString</key><string>${version}</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleIconFile</key><string>riff</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          # Ad-hoc signature on the binary first, then the bundle (so the seal
+          # covers Info.plist and the resources). `-s -` needs no certificate.
+          codesign --force -s - "${app}/Contents/MacOS/riff"
+          codesign --force -s - "${app}"
+          # Standard dmg layout: the app plus an Applications symlink, so the
+          # Finder window reads "drag riff into Applications".
+          stage="$(mktemp -d)"
+          cp -R "${app}" "${stage}/"
+          ln -s /Applications "${stage}/Applications"
+          dmg="dist/riff-${{ github.ref_name }}-${{ matrix.target }}.dmg"
+          hdiutil create -volname "riff" -srcfolder "${stage}" -ov -format UDZO "${dmg}"
+          rm -rf "${stage}"
+          echo "packaged ${dmg}"
+
+      # `if-no-files-found: error` is the backstop for the packaging steps above
       # silently producing nothing: an empty artifact would otherwise be
       # uploaded, merged into the staging directory, and published as a
       # 0-byte download.
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: riff-${{ github.ref_name }}-${{ matrix.target }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
-          path: ${{ runner.os == 'Windows' && 'dist/*.zip' || 'dist/*.tar.gz' }}
+          name: riff-${{ github.ref_name }}-${{ matrix.target }}-${{ runner.os == 'macOS' && 'dmg' || runner.os == 'Windows' && 'exe' || 'tar.gz' }}
+          path: ${{ runner.os == 'macOS' && 'dist/*.dmg' || runner.os == 'Windows' && 'dist/*.exe' || 'dist/*.tar.gz' }}
           if-no-files-found: error
 
   release:
@@ -264,18 +314,18 @@ jobs:
               'riff is pre-1.0, and it is offline-only by design: it plays the' \
               'audio files already on your own disks, opens no network' \
               'connection, and has no account, no telemetry, and no upload. Each' \
-              'artifact below is the compiled `riff` executable and nothing else' \
-              '— no installer, no code signature, and no `.app` bundle. Extract' \
-              'it, run it, point it at a folder of music.' \
+              'artifact below carries the compiled `riff` executable and nothing' \
+              'else — no installer, no code signature. Point it at a folder of' \
+              'music.' \
               '' \
               '## Downloads' \
               '' \
               '| Platform | File |' \
               '|---|---|' \
-              '| macOS, Apple silicon | `riff-<tag>-macos-arm64.tar.gz` |' \
-              '| macOS, Intel | `riff-<tag>-macos-x86_64.tar.gz` |' \
+              '| macOS, Apple silicon | `riff-<tag>-macos-arm64.dmg` |' \
+              '| macOS, Intel | `riff-<tag>-macos-x86_64.dmg` |' \
               '| Linux, x86-64 | `riff-<tag>-linux-x86_64.tar.gz` |' \
-              '| Windows, x86-64 | `riff-<tag>-windows-x86_64.zip` |' \
+              '| Windows, x86-64 | `riff-<tag>-windows-x86_64.exe` |' \
               '' \
               '`<tag>` stands for this release tag, so every file name starts with' \
               '`riff-` followed by it. Take the four downloads from this page' \
@@ -283,24 +333,25 @@ jobs:
               '' \
               '## What each platform actually gives you' \
               '' \
-              '**Windows — a zipped, bare `riff.exe`.** There is no installer,' \
-              'and the executable is unsigned, so SmartScreen warns the first' \
-              'time you open it: choose "More info", then "Run anyway". Wrapping' \
-              'this same unsigned binary in an NSIS installer would hit the' \
-              'identical wall; an installer buys a setup experience, not trust.' \
-              'Only a code-signing certificate buys trust, and riff does not have' \
-              'one.' \
+              '**Windows — the bare `riff.exe`,** straight from the build, with' \
+              'no zip wrapper and no installer. The executable is unsigned, so' \
+              'SmartScreen warns the first time you open it: choose "More info",' \
+              'then "Run anyway". Wrapping this same unsigned binary in an NSIS' \
+              'installer would hit the identical wall; an installer buys a setup' \
+              'experience, not trust. Only a code-signing certificate buys' \
+              'trust, and riff does not have one.' \
               '' \
-              '**macOS — a `tar.gz` of the bare `riff` executable, not a `.app`' \
-              'bundle.** Two consequences follow from there being no bundle: there' \
-              'is no Dock icon, and menu-bar focus is unreliable, so Cmd-Q and' \
-              'Cmd-Tab may not reach the app. Quit from the tray menu instead, or' \
-              'signal the process from a terminal. Gatekeeper also quarantines the' \
-              'downloaded file, so the first launch is blocked until you clear it' \
-              'once: right-click the extracted `riff`, choose Open, then Open' \
-              'again, or run' \
+              '**macOS — a `.dmg` containing `riff.app`,** with the riff brand' \
+              'icon. Open the image and drag riff into Applications. The bundle' \
+              'is ad-hoc signed but NOT identified with Apple, so Gatekeeper' \
+              'quarantines the download and blocks the first launch. Clear it' \
+              'once with either of:' \
               '' \
-              '    xattr -d com.apple.quarantine riff' \
+              '    xattr -dr com.apple.quarantine /Applications/riff.app' \
+              '' \
+              'or System Settings → Privacy & Security → scroll to the blocked' \
+              'app → "Open Anyway". (The old right-click → Open bypass no longer' \
+              'works on macOS Sequoia and later.)' \
               '' \
               '**Linux — a `tar.gz` of the `riff` executable,** dynamically linked' \
               'against `libasound2` (ALSA). On Debian and Ubuntu:' \
@@ -312,10 +363,10 @@ jobs:
               '' \
               '## This is a pre-release' \
               '' \
-              'It is published as a GitHub pre-release while riff is pre-1.0, and' \
-              'it is unsigned and un-packaged per platform, so expect the caveats' \
-              'above rather than a polished installer experience. Reports and' \
-              'feature requests:' \
+              'It is published as a GitHub pre-release while riff is pre-1.0,' \
+              'and it is unsigned, so expect the caveats above rather than a' \
+              'polished, trust-signed install experience. Reports and feature' \
+              'requests:' \
               '' \
               'https://github.com/strawberry-choco/riff/issues'
           } > "${notes}"
@@ -332,11 +383,12 @@ jobs:
           # platform.
           assets=()
           for target in macos-arm64 macos-x86_64 linux-x86_64 windows-x86_64; do
-            if [ "${target}" = "windows-x86_64" ]; then
-              assets+=("release-assets/riff-${GITHUB_REF_NAME}-${target}.zip")
-            else
-              assets+=("release-assets/riff-${GITHUB_REF_NAME}-${target}.tar.gz")
-            fi
+            case "${target}" in
+              macos-*) ext="dmg" ;;
+              windows-*) ext="exe" ;;
+              *) ext="tar.gz" ;;
+            esac
+            assets+=("release-assets/riff-${GITHUB_REF_NAME}-${target}.${ext}")
           done
           for asset in "${assets[@]}"; do
             if [ ! -f "${asset}" ]; then
@@ -346,9 +398,9 @@ jobs:
             fi
           done
           # Always a pre-release, whatever the tag says: riff is pre-1.0 and
-          # the binaries are unsigned and un-packaged per platform. Promoting
-          # out of pre-release is a deliberate manual act, not a side effect of
-          # the tag.
+          # the binaries are unsigned — no identified Apple signature, no
+          # Windows Authenticode certificate. Promoting out of pre-release is
+          # a deliberate manual act, not a side effect of the tag.
           gh release create "${GITHUB_REF_NAME}" \
             --prerelease \
             --title "riff ${GITHUB_REF_NAME}" \

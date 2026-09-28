@@ -1,13 +1,16 @@
-//! The detail column (design-handoff issue 09): the middle pane of the
-//! three-pane explorer. A breadcrumb trail over the drilled path, the album
-//! header as a readout of the album's title over its `Artist · Year` line,
-//! and the album's track list: one shared 40px [`super::sidebar::tree_row`]
-//! per track — the same shape the All Tracks list speaks, favorite control
-//! included — with the `Plays · Time` cluster on the right.
+//! The detail column widget (design-handoff issue 09): what the elastic
+//! stage's Tracks column paints. A bare track list — one shared 40px
+//! [`super::sidebar::tree_row`] per track, the same shape the All Tracks
+//! list speaks, favorite control included — with the `Plays · Time` cluster
+//! on the right.
 //!
-//! A readout displays; it does not act. The header carries no buttons and no
-//! context menu anchor — the album's actions are reached from its row in the
-//! Albums column, so this column has no button surface of its own.
+//! The column states no identity of its own. The breadcrumb trail and the
+//! album header that used to open it are gone, and nothing took their place
+//! here: the album is already named on its selected row in the column that
+//! listed it, and again in the right inspector's readout, so a third copy of
+//! the title above the list repeated what two neighbouring surfaces already
+//! said. What is left in this column is the one surface that acts — track
+//! rows carry the favorite control and anchor the shared Track menu.
 //!
 //! # The Track menu, and this column's one accepted rough edge
 //!
@@ -49,21 +52,10 @@ use eframe::egui;
 use super::icons::IconCache;
 use super::theme::{self, Palette};
 
-/// One segment of the breadcrumb trail: the path from the browser column's
-/// section down to the entity now in the detail column (e.g. `Artists /
-/// Boards of Canada / Geogaddi`).
-#[derive(Debug, Clone)]
-pub struct Crumb {
-    pub label: String,
-}
-
 /// What the user did to the detail column this frame; `app.rs` applies
 /// these to the sessions and the store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetailAction {
-    /// A breadcrumb segment at level `index` was clicked (0 = the section
-    /// root): the caller climbs the selection path back to that level.
-    Crumb(usize),
     /// An entity row (an album under an artist, an artist under a genre)
     /// was clicked, by its key. The caller resolves the level from the
     /// current selection — the widget stays identity-agnostic.
@@ -90,18 +82,6 @@ pub enum DetailAction {
     /// The row's favorite control toggled the track's flag to `favorite`,
     /// by its id key.
     SetFavorite { key: String, favorite: bool },
-}
-
-/// The album header block: the album title over its muted artist · year
-/// line. A readout, with nothing to press: the album's playback actions live
-/// in the Albums column's row menu, so the header neither renders a button
-/// nor anchors a context menu.
-#[derive(Debug, Clone)]
-pub struct AlbumHeader {
-    pub title: String,
-    /// `"Artist · Year"`-style secondary line; `None` renders only the
-    /// title.
-    pub subtitle: Option<String>,
 }
 
 /// One row of the album track table: the display values the app resolved
@@ -142,13 +122,8 @@ pub type TrackMenuFactory<'a> = dyn Fn(&TrackRow) -> super::menu::TrackMenu<'a> 
 
 /// One frame of the detail column: what to render and how.
 pub struct DetailColumn<'a> {
-    /// The drilled path, root first, current level last.
-    pub breadcrumb: &'a [Crumb],
-    /// The album header block; `None` above the album level (artist and
-    /// genre detail render entity rows instead).
-    pub header: Option<&'a AlbumHeader>,
     /// The album's track list (the shared 40px track row, one per track);
-    /// empty above the album level.
+    /// empty when the selection has none.
     pub tracks: &'a [TrackRow],
     /// The entity rows below the album level: an artist's albums, or a
     /// genre's artists (the browser column's row shape, drilled down).
@@ -178,12 +153,10 @@ pub struct DetailColumn<'a> {
 }
 
 impl<'a> DetailColumn<'a> {
-    /// A breadcrumb-only frame: no header, no rows. The construction path
-    /// every level starts from.
+    /// An empty frame: no tracks, no rows, so the column paints nothing but
+    /// its empty state. The construction path every listing starts from.
     pub fn empty(empty_title: &'a str, empty_hint: &'a str) -> Self {
         Self {
-            breadcrumb: &[],
-            header: None,
             tracks: &[],
             rows: &[],
             track_menu: None,
@@ -218,13 +191,9 @@ pub fn show_detail_column_scrolled(
     scroll: Option<super::scroll_memory::ScrollControl>,
     actions: &mut Vec<DetailAction>,
 ) {
-    // Resolved before the fields move out of `column` below.
-    let has_content =
-        column.header.is_some() || !column.tracks.is_empty() || !column.rows.is_empty();
-    breadcrumb(ui, palette, column.breadcrumb, actions);
-    if let Some(header) = column.header {
-        album_header(ui, palette, header);
-    }
+    // Asked up front, because the fallback at the end of this function is what
+    // a column with neither tracks nor rows renders.
+    let has_content = !column.tracks.is_empty() || !column.rows.is_empty();
     if !column.tracks.is_empty() {
         track_list(
             ui,
@@ -242,42 +211,12 @@ pub fn show_detail_column_scrolled(
             actions.push(DetailAction::SelectRow(row.key.clone()));
         }
     }
-    // Nothing to render (no album selected yet, or a level with no entries):
-    // the column says so under its breadcrumb instead of going blank. Every
+    // Nothing to render (no album selected yet, or a selection with no
+    // tracks): the column says so at its top instead of going blank. Every
     // app call site passes copy for this case.
     if !has_content {
         super::browser::empty_state(ui, palette, column.empty_title, column.empty_hint);
     }
-}
-
-/// The album header: the title over the muted subtitle, and nothing else.
-/// It used to hang **Play all** and **Shuffle** off its right edge, painting
-/// through a shared [`super::button::Variant::Secondary`] painter that had no
-/// other reader; both the buttons and the painter are gone with them.
-///
-/// What replaces them is spacing, not a control. The 64px band and its
-/// vertical centring stay — they are what places the block and what the track
-/// list below is laid out against — but the horizontal gap that separated the
-/// block from the buttons goes with them, and the two lines that remain are
-/// one stack separated by the tightest step on the scale: a title and its own
-/// subtitle read as one thing, so the gap between them is now stated rather
-/// than inherited from the style.
-fn album_header(ui: &mut egui::Ui, palette: &Palette, header: &AlbumHeader) {
-    ui.allocate_ui(egui::vec2(ui.available_width(), 64.0), |ui| {
-        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = theme::SPACE_XS;
-                ui.heading(&header.title);
-                if let Some(subtitle) = &header.subtitle {
-                    ui.label(
-                        egui::RichText::new(subtitle)
-                            .text_style(egui::TextStyle::Small)
-                            .color(palette.ink_2),
-                    );
-                }
-            });
-        });
-    });
 }
 
 /// The album's track list: one shared 40px track row per track, the same
@@ -307,9 +246,10 @@ fn track_list(
     // these rows are virtualized, so a row-carried fill would stop at the last
     // rendered row and leave the column below it on the card plane. See
     // [`super::browser::show_browser_list`] for the same paint on the listing
-    // side. The cursor is already past the breadcrumb and the album header
-    // here, so the plane starts below them: the album's own block stays on the
-    // card and only the track rows move to the row plane.
+    // side. The rect now starts at the column's top edge — with the breadcrumb
+    // and the album header gone, nothing sits above the rows, so the plane runs
+    // the full column and the first row lines up with the neighbouring columns'
+    // first rows.
     ui.painter().rect_filled(
         egui::Rect::from_min_size(ui.cursor().min, ui.available_size()),
         0.0,
@@ -407,45 +347,4 @@ fn track_list(
             }
         },
     );
-}
-
-/// The breadcrumb trail: one button per earlier level (clicking one reports
-/// [`DetailAction::Crumb`] with its level), the current level as plain
-/// text — the listener is already there.
-fn breadcrumb(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    crumbs: &[Crumb],
-    actions: &mut Vec<DetailAction>,
-) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = theme::SPACE_XS;
-        let last = crumbs.len().saturating_sub(1);
-        for (i, crumb) in crumbs.iter().enumerate() {
-            if i > 0 {
-                ui.label(
-                    egui::RichText::new("/")
-                        .text_style(egui::TextStyle::Small)
-                        .color(palette.ink_3),
-                );
-            }
-            if i == last {
-                ui.label(
-                    egui::RichText::new(&crumb.label)
-                        .text_style(egui::TextStyle::Small)
-                        .color(palette.ink),
-                );
-            } else {
-                let button = egui::Button::new(
-                    egui::RichText::new(&crumb.label)
-                        .text_style(egui::TextStyle::Small)
-                        .color(palette.ink_2),
-                )
-                .frame(false);
-                if ui.add(button).clicked() {
-                    actions.push(DetailAction::Crumb(i));
-                }
-            }
-        }
-    });
 }

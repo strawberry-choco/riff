@@ -66,19 +66,6 @@ mod tests {
         (Box::new(store), views)
     }
 
-    /// Open a real store-backed library-mutations port at a fresh temp
-    /// location, exactly as the UI receives it: a boxed
-    /// `LibraryMutationStore`.
-    pub(super) fn boxed_library_store(dir: &tempfile::TempDir) -> Box<dyn LibraryMutationStore> {
-        let db_path = dir.path().join("riff.sqlite3");
-        let (changes_tx, _changes_rx) =
-            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
-        Box::new(
-            riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
-                .expect("opening a fresh store must work"),
-        )
-    }
-
     /// A `SessionViews` seam over the store already living at `dir`, for
     /// reading playlists the way the UI does.
     fn seam_views(dir: &tempfile::TempDir) -> riff_backend::app::views::SessionViews {
@@ -2725,7 +2712,6 @@ mod tests {
         let content = TitleBarContent {
             scan_status: None,
             theme_dark: true,
-            advanced_mode: false,
             // Library is the active destination in this fixture.
             active_nav: Some(chrome::NavDestination::Library),
         };
@@ -2783,10 +2769,6 @@ mod tests {
         harness.get_by_label("Now Playing").click();
         harness.run();
         assert!(harness.state().contains(&TitleBarAction::ToggleNowPlaying));
-
-        harness.get_by_label("Advanced: Off").click();
-        harness.run();
-        assert!(harness.state().contains(&TitleBarAction::ToggleAdvanced));
     }
 
     // --- Sidebar (design-handoff issue 07) --------------------------------------
@@ -9280,7 +9262,6 @@ mod titlebar_search_ui_tests {
 #[cfg(test)]
 mod browser_column_ui_tests {
     use super::*;
-    use crate::ui_tests::tests::boxed_library_store;
     use riff_gui::ui::browser::{BrowserAction, BrowserColumn, BrowserItem};
     use riff_gui::ui::icons::IconCache;
     use riff_gui::ui::theme::Palette;
@@ -9854,144 +9835,13 @@ mod browser_column_ui_tests {
     // session-glue seam (`apply_detail_action`, real store/transport mocks).
 
     #[test]
-    fn test_detail_column_renders_breadcrumb_and_climbs_one_level() {
-        use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::detail::{Crumb, DetailAction, DetailColumn, show_detail_column};
-
-        let palette = Palette::dark();
-        let mut cache = IconCache::new();
-        let crumbs = vec![
-            Crumb {
-                label: "Artists".to_string(),
-            },
-            Crumb {
-                label: "Boards of Canada".to_string(),
-            },
-        ];
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(420.0, 300.0))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<DetailAction>| {
-                    let column = DetailColumn {
-                        breadcrumb: &crumbs,
-                        ..DetailColumn::empty("No albums yet", "Nothing here.")
-                    };
-                    show_detail_column(ui, &mut cache, &palette, column, actions);
-                },
-                Vec::new(),
-            );
-        harness.run();
-
-        // The trail reads `Artists / Boards of Canada` — every segment of the
-        // path the listener took is visible.
-        assert!(
-            harness.query_by_label("Artists").is_some(),
-            "the breadcrumb's root segment renders"
-        );
-        assert!(
-            harness.query_by_label("Boards of Canada").is_some(),
-            "the breadcrumb's leaf segment renders"
-        );
-
-        // Clicking the root climbs back one level: the widget reports WHICH
-        // segment was clicked, `apply_detail_action` does the climbing.
-        harness.get_by_label("Artists").click();
-        harness.run();
-        assert_eq!(
-            harness.state(),
-            &vec![DetailAction::Crumb(0)],
-            "clicking a breadcrumb segment reports its level"
-        );
-    }
-
-    /// The album header is a readout: it names the album and its
-    /// `Artist · Year` line and offers nothing to press. The Album's own
-    /// actions are reached from its row in the Albums column, so the header
-    /// anchors no menu either. Asserted here at the pure widget seam, where
-    /// the detail column is the only thing in the frame: the two labels its
-    /// buttons used to wear are gone, and the header reports no action at
-    /// all.
-    #[test]
-    fn test_album_header_is_a_readout_with_no_buttons() {
-        use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::detail::{
-            AlbumHeader, Crumb, DetailAction, DetailColumn, show_detail_column,
-        };
-
-        let palette = Palette::dark();
-        let mut cache = IconCache::new();
-        let crumbs = vec![
-            Crumb {
-                label: "Artists".to_string(),
-            },
-            Crumb {
-                label: "Boards of Canada".to_string(),
-            },
-            Crumb {
-                label: "Geogaddi".to_string(),
-            },
-        ];
-        let header = AlbumHeader {
-            title: "Geogaddi".to_string(),
-            subtitle: Some("Boards of Canada \u{b7} 2002".to_string()),
-        };
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(420.0, 300.0))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<DetailAction>| {
-                    let column = DetailColumn {
-                        breadcrumb: &crumbs,
-                        header: Some(&header),
-                        ..DetailColumn::empty("", "")
-                    };
-                    show_detail_column(ui, &mut cache, &palette, column, actions);
-                },
-                Vec::new(),
-            );
-        harness.run();
-
-        // The album header names the album and its artist · year line. The
-        // title also appears in the breadcrumb's leaf, so both renderings
-        // must be there.
-        assert!(
-            harness.query_all_by_label("Geogaddi").count() >= 2,
-            "the album title renders in the breadcrumb and the header"
-        );
-        assert!(
-            harness.query_by_label("Boards of Canada · 2002").is_some(),
-            "the album header renders the artist · year subtitle"
-        );
-
-        // The two playback actions the header used to carry are gone, and
-        // nothing took their place.
-        for label in ["Play all", "Shuffle"] {
-            assert!(
-                harness.query_by_label(label).is_none(),
-                "the album header no longer offers '{label}'"
-            );
-        }
-        assert!(
-            harness.state().is_empty(),
-            "a header with no controls reports no action: {:?}",
-            harness.state()
-        );
-    }
-
-    #[test]
     fn test_track_list_renders_rows_and_reports_row_gestures() {
         use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::detail::{
-            Crumb, DetailAction, DetailColumn, TrackRow, show_detail_column,
-        };
+        use riff_gui::ui::detail::{DetailAction, DetailColumn, TrackRow, show_detail_column};
         use std::time::Duration;
 
         let palette = Palette::dark();
         let mut cache = IconCache::new();
-        let crumbs = vec![Crumb {
-            label: "Geogaddi".to_string(),
-        }];
         let tracks = vec![
             TrackRow {
                 key: "t1".to_string(),
@@ -10019,7 +9869,6 @@ mod browser_column_ui_tests {
             .build_ui_state(
                 |ui, actions: &mut Vec<DetailAction>| {
                     let column = DetailColumn {
-                        breadcrumb: &crumbs,
                         tracks: &tracks,
                         ..DetailColumn::empty("", "")
                     };
@@ -10030,7 +9879,7 @@ mod browser_column_ui_tests {
         harness.run();
 
         // Every track's title renders as its row's label — the shared 40px
-        // track row. The right-aligned album · plays · time cluster is
+        // track row. The right-aligned `plays · time` cluster is
         // painted text, so only the row labels are (kittest-)queryable here.
         assert!(
             harness.query_by_label("Magic Window").is_some()
@@ -10083,17 +9932,12 @@ mod browser_column_ui_tests {
     fn test_a_secondary_click_on_a_track_row_reports_its_key_with_the_menu() {
         use egui_kittest::kittest::Queryable;
         use riff_backend::domain::PlaylistId;
-        use riff_gui::ui::detail::{
-            Crumb, DetailAction, DetailColumn, TrackRow, show_detail_column,
-        };
+        use riff_gui::ui::detail::{DetailAction, DetailColumn, TrackRow, show_detail_column};
         use riff_gui::ui::menu::{TrackMenu, TrackMenuIntent};
         use std::time::Duration;
 
         let palette = Palette::dark();
         let mut cache = IconCache::new();
-        let crumbs = vec![Crumb {
-            label: "Geogaddi".to_string(),
-        }];
         // Far more rows than a 300px window shows, so most of them are culled
         // and the visible ones are materialized afresh every frame.
         let tracks: Vec<TrackRow> = (0..120u32)
@@ -10125,7 +9969,6 @@ mod browser_column_ui_tests {
                         remove_from_playlist: false,
                     };
                     let column = DetailColumn {
-                        breadcrumb: &crumbs,
                         tracks: &tracks,
                         track_menu: Some(&track_menu),
                         ..DetailColumn::empty("", "")
@@ -10475,18 +10318,10 @@ mod browser_column_ui_tests {
     fn test_artist_detail_lists_albums_that_drill_deeper() {
         use egui_kittest::kittest::Queryable;
         use riff_gui::ui::browser::BrowserItem;
-        use riff_gui::ui::detail::{Crumb, DetailAction, DetailColumn, show_detail_column};
+        use riff_gui::ui::detail::{DetailAction, DetailColumn, show_detail_column};
 
         let palette = Palette::dark();
         let mut cache = IconCache::new();
-        let crumbs = vec![
-            Crumb {
-                label: "Artists".to_string(),
-            },
-            Crumb {
-                label: "Boards of Canada".to_string(),
-            },
-        ];
         let albums = vec![BrowserItem {
             key: album_key("Boards of Canada", "Geogaddi"),
             label: "Geogaddi".to_string(),
@@ -10501,7 +10336,6 @@ mod browser_column_ui_tests {
             .build_ui_state(
                 |ui, actions: &mut Vec<DetailAction>| {
                     let column = DetailColumn {
-                        breadcrumb: &crumbs,
                         rows: &albums,
                         ..DetailColumn::empty("No albums yet", "Nothing here.")
                     };
@@ -10527,83 +10361,6 @@ mod browser_column_ui_tests {
                 "Geogaddi"
             ))],
             "clicking an album row reports its key; the app resolves the level"
-        );
-    }
-
-    #[test]
-    fn test_detail_crumb_truncates_the_path() {
-        use riff_backend::app::state::BrowserSelection;
-        use riff_gui::ui::app::{apply_detail_action, apply_drill_action};
-        use riff_gui::ui::detail::DetailAction;
-
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = boxed_library_store(&dir);
-        let mut library = LibrarySession::default();
-        let transport = crate::mocks::MockTransport::new();
-
-        // Album trail: Artists / Boards of Canada / Geogaddi.
-        library.library_section = LibrarySection::Artists;
-        apply_browser_action(
-            BrowserAction::Select("Boards of Canada".to_string()),
-            &mut library,
-        );
-        apply_drill_action(
-            LibrarySection::Artists,
-            1,
-            album_key("Boards of Canada", "Geogaddi"),
-            &mut library,
-        );
-        assert_eq!(
-            library.browser_path,
-            vec![
-                BrowserSelection::Artist("Boards of Canada".to_string()),
-                BrowserSelection::Album {
-                    artist: "Boards of Canada".to_string(),
-                    title: "Geogaddi".to_string(),
-                },
-            ],
-            "drilling selects the album at level 1 under the root artist"
-        );
-
-        // A crumb click at level 1 climbs back to the artist; the browser
-        // column highlights the artist row again.
-        apply_detail_action(
-            DetailAction::Crumb(1),
-            &mut library,
-            &transport,
-            store.as_mut(),
-        );
-        assert_eq!(
-            library.browser_path,
-            vec![BrowserSelection::Artist("Boards of Canada".to_string())],
-            "one climb up the album trail truncates the path to the artist"
-        );
-
-        // A crumb click at the root (level 0) empties the path: the browser
-        // column listing takes over again.
-        apply_detail_action(
-            DetailAction::Crumb(0),
-            &mut library,
-            &transport,
-            store.as_mut(),
-        );
-        assert!(
-            library.browser_path.is_empty(),
-            "climbing to the root clears the drill-down path"
-        );
-
-        // A crumb level at or past the current depth changes nothing.
-        library.browser_path = vec![BrowserSelection::Artist("Autechre".to_string())];
-        apply_detail_action(
-            DetailAction::Crumb(1),
-            &mut library,
-            &transport,
-            store.as_mut(),
-        );
-        assert_eq!(
-            library.browser_path,
-            vec![BrowserSelection::Artist("Autechre".to_string())],
-            "a crumb level at or past the current depth is inert"
         );
     }
 
@@ -12754,8 +12511,6 @@ mod browser_column_ui_tests {
             &s.library.search_query,
         );
         let column = riff_gui::ui::detail::DetailColumn {
-            breadcrumb: &content.breadcrumb,
-            header: content.header.as_ref(),
             tracks: &content.tracks,
             rows: &[],
             ..riff_gui::ui::detail::DetailColumn::empty("Nothing selected", "Pick a row.")
@@ -12922,21 +12677,10 @@ mod browser_column_ui_tests {
             .build_ui_state(render_detail_state_ui, state);
         harness.run();
 
-        // Album level: the breadcrumb trail reads the section root and one
-        // crumb per path entry, and the header + track list resolve from
-        // the store.
-        assert!(
-            harness.query_by_label("Artists").is_some()
-                && harness.query_by_label("Boards of Canada").is_some()
-                && harness.query_all_by_label("Geogaddi").count() >= 2,
-            "the breadcrumb and the header both name the album (trail + title)"
-        );
-        assert!(
-            harness
-                .query_by_label("Boards of Canada \u{b7} 2002")
-                .is_some(),
-            "the album header renders the artist \u{b7} year subtitle"
-        );
+        // Album level: the track list resolves from the store. The column
+        // states no identity of its own — the album is named on its selected
+        // row in the column that listed it, and again in the inspector's
+        // readout — so what the Tracks column shows here is the rows.
         assert!(
             harness.query_by_label("Magic Window").is_some()
                 && harness.query_by_label("Dawn Chorus").is_some(),
@@ -12951,9 +12695,9 @@ mod browser_column_ui_tests {
             "each row's favorite control reflects its stored flag"
         );
 
-        // Above the album level the Tracks column carries no header or track
-        // list — entity listings are their own columns now; only
-        // the breadcrumb trail renders.
+        // Above the album level the Tracks column has nothing to resolve —
+        // entity listings are their own columns now — so the column falls
+        // back to the app's no-selection copy rather than naming the level.
         harness.state_mut().library.browser_path =
             vec![BrowserSelection::Artist("Boards of Canada".to_string())];
         harness.run();
@@ -12962,8 +12706,8 @@ mod browser_column_ui_tests {
             "the artist level renders no track table"
         );
         assert!(
-            harness.query_by_label("Boards of Canada").is_some(),
-            "the artist level still renders the breadcrumb trail"
+            harness.query_by_label("Nothing selected").is_some(),
+            "the artist level shows the no-selection copy, not an identity of its own"
         );
 
         // Staleness: a favorite committed through the store (exactly what
@@ -12989,7 +12733,7 @@ mod browser_column_ui_tests {
         );
 
         // Genre drill: the same album's tracks resolve genre-scoped through
-        // the Genres section, with the genre's own breadcrumb root.
+        // the Genres section, three levels down the path.
         harness.state_mut().library.library_section = LibrarySection::Genres;
         harness.state_mut().library.browser_path = vec![
             BrowserSelection::Genre("Electronic".to_string()),
@@ -13000,11 +12744,6 @@ mod browser_column_ui_tests {
             },
         ];
         harness.run();
-        assert!(
-            harness.query_by_label("Genres").is_some()
-                && harness.query_by_label("Electronic").is_some(),
-            "the genre trail's breadcrumb names the genre section"
-        );
         assert!(
             harness.query_by_label("Magic Window").is_some()
                 && harness.query_by_label("Dawn Chorus").is_some(),
@@ -14492,7 +14231,7 @@ mod browser_column_ui_tests {
     fn walk_fixture() -> egui_kittest::Harness<'static, Vec<String>> {
         use riff_gui::ui::browser::BrowserColumn;
         use riff_gui::ui::chrome::{TitleBarContent, show_titlebar};
-        use riff_gui::ui::detail::{AlbumHeader, Crumb, DetailColumn, TrackRow};
+        use riff_gui::ui::detail::{DetailColumn, TrackRow};
         use riff_gui::ui::selection::SelectionPanel;
         use riff_gui::ui::theme::TITLEBAR_H;
         use std::time::Duration;
@@ -14502,18 +14241,6 @@ mod browser_column_ui_tests {
         let items = fixture_items();
         let mut query = "abc".to_string();
 
-        let crumbs = vec![
-            Crumb {
-                label: "Artists".to_string(),
-            },
-            Crumb {
-                label: "Boards of Canada".to_string(),
-            },
-        ];
-        let header = AlbumHeader {
-            title: "Geogaddi".to_string(),
-            subtitle: None,
-        };
         let tracks = vec![TrackRow {
             key: "t1".to_string(),
             title: "Magic Window".to_string(),
@@ -14590,8 +14317,6 @@ mod browser_column_ui_tests {
                         let mut detail_actions = Vec::new();
                         ui.allocate_ui(egui::vec2(600.0, 480.0), |ui| {
                             let column = DetailColumn {
-                                breadcrumb: &crumbs,
-                                header: Some(&header),
                                 tracks: &tracks,
                                 ..DetailColumn::empty("", "")
                             };
@@ -14623,18 +14348,18 @@ mod browser_column_ui_tests {
 
         // From there Tab walks every control of the three panes in the
         // app's creation order: the browser rows, then the detail column's
-        // crumb, its track row's favorite, and the track row itself. The
+        // track row's favorite control and the track row itself. The
         // selection panel contributes NO control at all: its action row and
         // its button-shaped header chip are gone, and what remains is labels
-        // and the tag rows' text — none of which can take focus. The album
-        // header contributes none either: it is a readout of the title and
-        // the `Artist · Year` line, with no button to land on.
+        // and the tag rows' text — none of which can take focus. The detail
+        // column contributes only those two: the breadcrumb trail and the
+        // album header that once sat above the rows are gone, so nothing else
+        // in it can take focus either.
         for label in [
             "Clear search",
             "Alpha",
             "Beta",
             "Gamma",
-            "Artists",
             "Add to Favorites",
             "Magic Window",
         ] {
@@ -14656,16 +14381,14 @@ mod browser_column_ui_tests {
         tab_until_search_focused(&mut harness);
 
         // Walk to the last widget of the detail column: the search's clear
-        // affordance, the three browser rows, then the detail column's crumb,
-        // favorite, and the track row. The selection panel has nothing
-        // focusable in it, so it does not appear in the chain, and neither
-        // does the album header.
+        // affordance, the three browser rows, then the detail column's
+        // favorite control and the track row. The selection panel has nothing
+        // focusable in it, so it does not appear in the chain.
         for _ in [
             "Clear search",
             "Alpha",
             "Beta",
             "Gamma",
-            "Artists",
             "Add to Favorites",
             "Magic Window",
         ] {
@@ -14680,14 +14403,7 @@ mod browser_column_ui_tests {
         // Shift+Tab reverses the chain one widget at a time — backwards
         // through the detail column, the browser rows, and the search's
         // clear affordance — and lands on the search.
-        for label in [
-            "Add to Favorites",
-            "Artists",
-            "Gamma",
-            "Beta",
-            "Alpha",
-            "Clear search",
-        ] {
+        for label in ["Add to Favorites", "Gamma", "Beta", "Alpha", "Clear search"] {
             harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
             harness.run();
             assert!(
@@ -14730,7 +14446,6 @@ mod browser_column_ui_tests {
             "Alpha",
             "Beta",
             "Gamma",
-            "Artists",
             "Add to Favorites",
             "Magic Window",
         ] {
@@ -16907,8 +16622,7 @@ mod whole_frame_tests {
             "a real secondary click on a real row opens the collection menu. \
              'Play Next' is the probe because that wording lives only in the two \
              menu renderers, and of those only this one is open in the frame: the \
-             player bar says 'Next track', the Tracks column's album header is a \
-             readout with no action of its own, and a Track's own menu is not open"
+             player bar says 'Next track' and a Track's own menu is not open"
         );
         let library = shell.library.lock_or_recover();
         assert_eq!(
@@ -17407,8 +17121,8 @@ mod whole_frame_tests {
         // (`resolve_inspector`'s Track case). It is not re-asserted here
         // because this harness cannot see it — the Detail Panel's kind chip and
         // title are `ui.label` text, and the eframe-backed harness exposes no
-        // label for those (the same reason the breadcrumb is unreachable by
-        // label here). The selection above is the fact this column controls.
+        // label for those. The selection above is the fact this column
+        // controls.
         assert_eq!(
             transport.recorded()[before..],
             Vec::<TransportIntent>::new(),
@@ -20012,10 +19726,9 @@ mod context_menu_ui_tests {
 
     /// Shuffle is a one-shot that *starts* the collection: it engages shuffle
     /// on the playback session and then plays the batch, and shuffle is still
-    /// engaged afterwards. That is exactly how the album header's Shuffle has
-    /// always behaved, and the intent is the same one the playlist, smart
-    /// playlist, and folder menus report — so the action means one thing
-    /// wherever it is offered.
+    /// engaged afterwards. The intent is the same one the album, playlist,
+    /// smart playlist, and folder menus report — so the action means one
+    /// thing wherever it is offered.
     #[test]
     fn test_shuffle_intent_engages_shuffle_then_plays_the_batch() {
         let transport = MockTransport::new();
@@ -20045,10 +19758,9 @@ mod context_menu_ui_tests {
         );
     }
 
-    /// An empty collection starts nothing — and, as on the album header, it does
-    /// not so much as turn shuffle on. The two go together: engaging shuffle is
-    /// the first half of starting a batch, so with no batch there is nothing to
-    /// do at all.
+    /// An empty collection starts nothing — and it does not so much as turn
+    /// shuffle on. The two go together: engaging shuffle is the first half of
+    /// starting a batch, so with no batch there is nothing to do at all.
     #[test]
     fn test_shuffle_intent_on_an_empty_collection_does_nothing_at_all() {
         let transport = MockTransport::new();

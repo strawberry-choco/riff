@@ -627,11 +627,12 @@ impl RiffApp {
     }
 
     /// The Tracks column (the stage's last column): the existing
-    /// `DetailColumn` shape — breadcrumb trail, album header, and the album's
-    /// track list. The header is a readout, so the column holds no action
-    /// surface of its own; the album's actions are reached from its row in
-    /// the Albums column. Entity listings are their own columns now, so the
-    /// widget receives no rows.
+    /// `DetailColumn` shape, a bare list of the selected album's tracks. It
+    /// opens with no readout of its own — the breadcrumb trail and the album
+    /// header it used to carry are gone — so which album the list belongs to
+    /// is read from the albums column's selected row and from the inspector,
+    /// not from anything painted in here. Entity listings are their own
+    /// columns now, so the widget receives no rows.
     ///
     /// The TRACKS are not readouts: each row carries the shared Track menu, so
     /// a Track's actions do not depend on which Column happens to be showing
@@ -719,8 +720,6 @@ impl RiffApp {
             &mut self.icons,
             &self.theme.active,
             crate::ui::detail::DetailColumn {
-                breadcrumb: &content.breadcrumb,
-                header: content.header.as_ref(),
                 tracks: &content.tracks,
                 rows: &[],
                 track_menu: Some(&track_menu),

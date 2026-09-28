@@ -47,8 +47,8 @@ mod tests {
     // --- Browser drill-down path (elastic column navigation) -------------------
     //
     // The ordered path of entity selections that replaces the single
-    // `browser_selection`: select-at truncates deeper entries, truncate/reset
-    // climb and clear, and `current_selection` reads the deepest entry.
+    // `browser_selection`: select-at truncates deeper entries, reset clears,
+    // and `current_selection` reads the deepest entry.
 
     #[test]
     fn test_browser_path_select_at_appends_at_each_level() {
@@ -118,6 +118,14 @@ mod tests {
             ],
             "re-selecting at a shallower level truncates the deeper entries"
         );
+        // The current selection follows the truncated path, not the one that
+        // was there before: the dropped album is no longer the deepest entry,
+        // and it is the deepest entry the Tracks column resolves.
+        assert_eq!(
+            state.current_selection(),
+            Some(&BrowserSelection::Artist("Boards of Canada".to_string())),
+            "the current selection is the truncated path's deepest entry"
+        );
 
         // Level 0 replaces the whole path.
         state.select_at(0, BrowserSelection::Genre("Ambient".to_string()));
@@ -126,45 +134,6 @@ mod tests {
             vec![BrowserSelection::Genre("Ambient".to_string())],
             "selecting at level 0 replaces the path"
         );
-    }
-
-    #[test]
-    fn test_browser_path_truncate_path_keeps_the_prefix() {
-        use riff_backend::app::state::BrowserSelection;
-
-        let mut state = LibrarySession::default();
-        state.select_at(0, BrowserSelection::Genre("Electronic".to_string()));
-        state.select_at(1, BrowserSelection::Artist("Autechre".to_string()));
-        state.select_at(
-            2,
-            BrowserSelection::Album {
-                artist: "Autechre".to_string(),
-                title: "Tri Repetae".to_string(),
-            },
-        );
-
-        // A breadcrumb climb to level 1 keeps the genre, drops the rest.
-        state.truncate_path(1);
-        assert_eq!(
-            state.browser_path,
-            vec![BrowserSelection::Genre("Electronic".to_string())],
-            "truncating to level 1 keeps only the prefix"
-        );
-        assert_eq!(
-            state.current_selection(),
-            Some(&BrowserSelection::Genre("Electronic".to_string()))
-        );
-
-        // Truncating past the current length changes nothing; to 0 empties.
-        state.truncate_path(10);
-        assert_eq!(
-            state.browser_path,
-            vec![BrowserSelection::Genre("Electronic".to_string())],
-            "truncating past the length is a no-op"
-        );
-        state.truncate_path(0);
-        assert!(state.browser_path.is_empty());
-        assert!(state.current_selection().is_none());
     }
 
     #[test]

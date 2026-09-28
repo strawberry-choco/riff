@@ -254,9 +254,12 @@ pub fn text_button_size(ui: &egui::Ui, palette: &Palette, label: &str, small: bo
 
 /// Paint the primary action's face: the accent bloom behind it, then the
 /// lit-from-above brand gradient over it. **The one authority for that paint** —
-/// [`Variant::Primary`] and the player bar's play FAB both come through here, as
-/// does the inspector's quick-action row, so a primary action cannot come to
-/// read differently from its neighbour because one of them rolled its own.
+/// [`Variant::Primary`] and the player bar's play FAB both come through here, so
+/// a primary action cannot come to read differently from its neighbour because
+/// one of them rolled its own. The inspector is no longer one of its callers:
+/// that panel is a readout, its action row is retired, and the only actions it
+/// still surfaces are the inline editor's own Save and Cancel — so if a third
+/// call site appears, it must route through here for the same reason.
 ///
 /// `radius` is the shape's corner radius ([`theme::RADIUS_MD`] for a text
 /// button, half the width for a circle). Paint-only: both passes are bounded by

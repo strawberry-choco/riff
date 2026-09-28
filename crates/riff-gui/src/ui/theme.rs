@@ -869,8 +869,6 @@ pub mod geometry {
         /// Art block height (design: the 268×200 cover block under the
         /// header).
         pub const ART_H: f32 = 200.0;
-        /// Height of the Play album button (design: the 32px action row).
-        pub const PLAY_H: f32 = 32.0;
     }
 
     /// The shell's size policy: the fixed 56/280/88 chrome plus the least

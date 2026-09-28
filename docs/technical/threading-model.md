@@ -59,7 +59,7 @@ All cross-thread messaging uses unbounded `crossbeam_channel` channels created i
 
 | Direction | Message type | Contents |
 |-----------|--------------|----------|
-| UI / tray -> audio engine | `PlaybackCommand` | `Play(TrackId)`, `Pause`, `Resume`, `Stop`, `Seek(Duration)`, `SetVolume(f32)`, `Next`, `Previous`, `PlayNext(TrackId)`, `AddToQueue(TrackId)`, `PlayPause`, `ToggleVisibility` |
+| UI / tray -> audio engine | `PlaybackCommand` | `Play(TrackId)`, `Pause`, `Resume`, `Stop`, `Seek(Duration)`, `SetVolume(f32)`, `Next`, `Previous`, `PlayNext(TrackId)`, `AddToQueue(TrackId)`, `AddMany(Vec<TrackId>)`, `PlayPause` |
 | Audio engine -> playback coordinator | `PlaybackUpdate` | `StateChanged(PlaybackState)`, `PositionChanged(PlaybackPosition)`, `TrackChanged(TrackId)`, `TrackEnded`, `Error(String)` |
 | Coordinator -> engine | `PlaybackCommand` | The `Play(next_id)` issued on auto-advance |
 | Playback Coordinator -> event inbox | `String` notice | A pre-formatted playback failure, stamped by BackendEvents with source and severity |

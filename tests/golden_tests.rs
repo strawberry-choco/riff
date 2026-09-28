@@ -1480,8 +1480,25 @@ mod tests {
     /// selection exists) at the inspector's width
     /// ([`riff_gui::ui::theme::INSPECTOR_WIDTH`], 300): the SELECTION
     /// header with its kind chip, the 268×200 placeholder art block, the
-    /// album title over its artist · year line, the Play album action, and
-    /// the details grid. Rendered without art so no texture load is
+    /// album title over its artist · year line, the seven tag rows, and the
+    /// details grid.
+    ///
+    /// The panel is a READOUT, and this baseline pins that: it holds no
+    /// action row. The Play album button and the 12 px gap that separated it
+    /// from the tag section are gone, the divider that divided them went with
+    /// it, and the space it occupied is the title block's own trailing space —
+    /// so what the five sections have between them is one
+    /// [`riff_gui::ui::theme::SPACE_LG`] at each boundary and nothing else,
+    /// and the header's kind chip is a plain label rather than the pressed-
+    /// looking pill it used to wear. The committed image's arithmetic records
+    /// the same removal: the 36 px button band and the chip row are the only
+    /// bands with no counterpart, and the 22 bands below them all re-seat by
+    /// the one 47 px the button plus its gap took up, the art block, heading
+    /// and subtitle among the three that do not move at all. Anyone auditing
+    /// this PNG should expect that button's absence to be intentional, not a
+    /// stale baseline.
+    ///
+    /// Rendered without art so no texture load is
     /// involved — the generated-colour placeholder path is pinned by the
     /// headless behavior test above.
     #[test]
@@ -1523,16 +1540,22 @@ mod tests {
         let panel = SelectionPanel {
             art: None,
             title: Some("Tomorrow's Harvest"),
+            kind: "Album",
             subtitle: Some("Boards of Canada \u{b7} 2013"),
             details: &details,
             tags: &tags,
             editor: None,
-            single: false,
-            // The golden pins the panel's single Play album action — the
-            // rendering the original fixed pane used; the inspector's Play /
-            // Add to Queue row (`queue: true`) is pinned by the
-            // `elastic_all_tracks_inspector_dark` composition below.
-            queue: false,
+            // The golden pins this panel as a pure readout: the SELECTION
+            // header and its kind chip, the placeholder art block, the title
+            // over its artist · year line, the seven tag rows and the details
+            // grid, and nothing that can be pressed. There is no action row
+            // to render and no `queue` prop to set — the two are retired
+            // (the actions moved to the collection context menu, which is a
+            // transient popup on its own layer and so is deliberately not
+            // captured here). The same readout under the elastic stage is
+            // pinned by the `elastic_all_tracks_inspector_dark` composition
+            // below; what that image adds is the stage's width allocation and
+            // the Tracks listing beside it, not a variant of this panel.
         };
         selection::show_selection_panel(ui, &mut cache, palette, panel, &mut Vec::new());
     }
@@ -1895,9 +1918,17 @@ mod tests {
     }
 
     /// The elastic stage's All Tracks composition: the flat Tracks listing
-    /// beside the collapsible inspector (the selection panel's Play / Add to
-    /// Queue variant) — one selected and one now-playing (idle) track row,
-    /// the inspector at [`riff_gui::ui::theme::INSPECTOR_WIDTH`].
+    /// beside the collapsible inspector — one selected and one now-playing
+    /// (idle) track row, and the inspector at
+    /// [`riff_gui::ui::theme::INSPECTOR_WIDTH`] showing a read-only Album
+    /// readout (art block, title, artist · year line, seven tag rows,
+    /// details grid) with no action row of any kind, exactly as
+    /// `selection_panel_dark` pins it standalone. The stage's width
+    /// allocation and the listing beside it are what this image adds; there
+    /// is no second panel variant to pin. Its diff is confined to the
+    /// inspector column (x 599–884) — the All Tracks rows are byte-untouched,
+    /// which is the check that the row-level menu work never reached into
+    /// this image.
     #[test]
     fn elastic_all_tracks_inspector_dark_matches_golden_baseline() {
         snapshot(
@@ -1970,9 +2001,11 @@ mod tests {
                 browser::show_browser_column(ui, &mut cache, palette, column, &mut Vec::new());
                 return;
             }
-            // Column 2 — the inspector: the selection panel's Play / Add
-            // to Queue variant inside the same 16px inset the app's
-            // `render_inspector` gives it, no art (no texture load).
+            // Column 2 — the inspector: the same read-only Album readout
+            // `draw_selection_panel` draws, in the same 16px inset the app's
+            // `render_inspector` gives it, no art (no texture load). It is the
+            // panel as it renders inside a stage, not a variant of it: no
+            // action row, because the panel has none to give.
             let details = [
                 SelectionDetail {
                     label: "Artist".to_string(),
@@ -1994,12 +2027,11 @@ mod tests {
                     let panel = SelectionPanel {
                         art: None,
                         title: Some("Tomorrow's Harvest"),
+                        kind: "Album",
                         subtitle: Some("Boards of Canada \u{b7} 2013"),
                         details: &details,
                         tags: &tags,
                         editor: None,
-                        single: false,
-                        queue: true,
                     };
                     selection::show_selection_panel(
                         ui,
@@ -2899,18 +2931,24 @@ mod tests {
                 InspectorVariant::Artist | InspectorVariant::Genre => Vec::new(),
                 _ => golden_tag_rows(single),
             };
+            // The header chip names what is being read out, so each of these
+            // baselines now pins its own kind rather than a hardcoded "Album".
+            let kind_name = match kind {
+                InspectorVariant::Artist => "Artist",
+                InspectorVariant::Genre => "Genre",
+                InspectorVariant::Track => "Track",
+            };
             egui::Frame::new()
                 .inner_margin(egui::Margin::same(16))
                 .show(ui, |ui| {
                     let panel = SelectionPanel {
                         art: None,
                         title: Some(title),
+                        kind: kind_name,
                         subtitle: Some(subtitle),
                         details: &details,
                         tags: &tags,
                         editor: None,
-                        single,
-                        queue: true,
                     };
                     selection::show_selection_panel(
                         ui,
@@ -3534,7 +3572,12 @@ mod tests {
         );
     }
 
-    /// The single-track readout: the primary action reads **Play**.
+    /// The compact single-TRACK readout: the per-track tag rows, the
+    /// "Artist · Album" subtitle, and a header chip that says **Track**. It is
+    /// a distinct composition from `selection_panel_dark` — different rows, not
+    /// just a different button — so it earns its own baseline, and with the
+    /// action row gone it is the baseline that pins a Track readout naming
+    /// itself a Track.
     #[test]
     fn selection_panel_single_dark_matches_golden_baseline() {
         snapshot(
@@ -3626,15 +3669,19 @@ mod tests {
             "Boards of Canada · 2013"
         };
         let tags = golden_tag_rows(single);
+        // `single` names the compact single-TRACK readout, not a button state:
+        // the per-track tag rows and the "· Geogaddi" subtitle are the shape.
+        // The chip follows from it, which is what keeps this baseline a
+        // distinct composition from its album sibling.
+        let kind_name = if single { "Track" } else { "Album" };
         let panel = SelectionPanel {
             art: art.as_ref(),
             title: Some(title),
+            kind: kind_name,
             subtitle: Some(subtitle),
             details: &details,
             tags: &tags,
             editor: None,
-            single,
-            queue: false,
         };
         selection::show_selection_panel(ui, &mut cache, palette, panel, &mut Vec::new());
     }

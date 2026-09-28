@@ -12,12 +12,24 @@ _Avoid_: page, stage, screen, tab
 One of the Library browse sections selectable from the sidebar; exactly one is active at a time, and each keeps its own Scroll Memory while the app runs.
 _Avoid_: view, tab, page
 
-**Drill Column**:
-A deeper list column revealed by selecting an entity in the browser path — an artist's Albums, a Genre's Artists, or a Genre artist's Albums. Selecting a different entity resets a Drill Column's scroll to the top.
-_Avoid_: subview, drill-down page
+**Artists Column**:
+A list column of Artists — the Artists Section's root list, or a Genre's Artists.
+_Avoid_: Drill Column, artist list, subview
+
+**Albums Column**:
+A list column of Albums — the Albums Section's root list, an artist's Albums, or a Genre artist's Albums.
+_Avoid_: Drill Column, album list, subview
+
+**Genres Column**:
+The Genres Section's root list of Genres. Selecting one reveals an Artists Column.
+_Avoid_: Drill Column, genre list, subview
+
+**Tracks Column**:
+The list column of an Album's Tracks, revealed by selecting that Album. The All Tracks Section shows its Tracks as a flat full-width list, not a Tracks Column.
+_Avoid_: Drill Column, track list, All Tracks
 
 **Scroll Memory**:
-The in-memory record of each Section's list scroll position, kept only while the app runs; restarting clears it. A Section's root list restores its position when the Section is reselected; a Drill Column resets on any selection or content change (search, sort, rescan).
+The in-memory record of each Section's list scroll position, kept only while the app runs; restarting clears it. A Section's root list restores its position when the Section is reselected; any deeper column resets on any selection or content change (search, sort, rescan).
 _Avoid_: scroll persistence, saved position
 
 **Now Playing**:
@@ -47,6 +59,10 @@ _Avoid_: backup, export
 **Track**:
 One audio file known to the Library, including its Metadata and play-history facts.
 _Avoid_: song, file
+
+**Favourite**:
+A Track's user-set starred flag, independent of its Metadata and of whether its file still exists.
+_Avoid_: like, star, rating, love
 
 **TrackId**:
 A Track's stable identity string, derived from its full file path; renaming or moving a file yields a new TrackId.
@@ -84,6 +100,10 @@ _Avoid_: saved search
 The transient ordered set of Tracks scheduled for playback; it is not part of persisted state.
 _Avoid_: Playlist
 
+**Add to Queue**:
+The user action that puts a Track — or every Track of an Album, Artist, or Genre — into the Playback Queue. One action, one name, whether it is one Track or many.
+_Avoid_: Append to Queue, append, enqueue
+
 **Queue Fill**:
 When playback starts on a Track while the Playback Queue is empty, the whole Library becomes the queue with that Track current.
 _Avoid_: auto-fill, auto-populate
@@ -117,7 +137,7 @@ The single read interface over all Session Projections; UI code asks it for read
 _Avoid_: projection manager, view cache
 
 **Listing Page**:
-A Section's or Drill Column's total and its visible window, read from the Application Store as one fact under one connection acquisition, so no committed write can interleave the two halves. Which generation a listing was read at is the Session Projection's concern, not the page's.
+A root list's or a deeper Column's total and its visible window, read from the Application Store as one fact under one connection acquisition, so no committed write can interleave the two halves. Which generation a listing was read at is the Session Projection's concern, not the page's.
 _Avoid_: page, query result, count row
 
 **Audio Engine**:

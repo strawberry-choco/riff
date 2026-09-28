@@ -19,6 +19,7 @@ use eframe::egui;
 use std::time::Duration;
 
 use super::icons::{Icon, IconCache};
+use super::menu::{FAVORITE_ADD_LABEL, FAVORITE_REMOVE_LABEL};
 use super::theme::geometry::sidebar::{
     EQ_BAR_COUNT, FAVORITE_COL_W, HEART_SIZE, ICON_GAP, INDENT_BASE, INDENT_SCALE, INDENT_STEP,
     MIN_LABEL_FREE_W, ROW_COVER, ROW_H,
@@ -499,6 +500,12 @@ fn paint_row_band(
 /// IS a favorite, muted when not, painted into the row's leading cell. It
 /// carries its own focus ring, so the keyboard can see where it is without
 /// moving the row's. Rows without a control paint nothing here.
+///
+/// The heart's two wordings are borrowed from `menu`, which owns them beside the
+/// rest of the action vocabulary: a Track's menu offers the Favourite as a
+/// second path to this same durable change, and the two surfaces must not
+/// spell it independently. This module is the composite and `menu` the
+/// primitive, so the borrow points the way the component layer requires.
 fn paint_favorite(
     ui: &egui::Ui,
     cache: &mut IconCache,
@@ -512,9 +519,9 @@ fn paint_favorite(
         return;
     };
     let (label, tint) = if favorite {
-        ("Remove from Favorites", palette.brand_primary)
+        (FAVORITE_REMOVE_LABEL, palette.brand_primary)
     } else {
-        ("Add to Favorites", palette.ink_3)
+        (FAVORITE_ADD_LABEL, palette.ink_3)
     };
     if let Some(ring) =
         theme::focus_ring_stroke(palette, ui.memory(|m| m.has_focus(heart_response.id)))

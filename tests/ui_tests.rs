@@ -7235,14 +7235,26 @@ mod tests {
     #[test]
     fn test_playlist_entry_rows_keep_click_and_context_menu_while_reorderable() {
         use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::app::{TrackMenuOpen, apply_track_menu_open};
 
+        /// What the row's menu reported each frame, and where the production
+        /// applier put it: the events the row reported, plus the selection the
+        /// report produced.
+        type RowFrame = (Vec<&'static str>, Option<TrackId>);
+
+        // The Track this row stands for. Spelled out here rather than read back
+        // off whatever the widget painted, because the identity the selection
+        // gets is the attach site's argument — the row is what it was attached
+        // to, not what it drew.
+        let row_track = TrackId("/music/b.mp3".to_string());
+        let attached = row_track.clone();
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(256.0, theme::geometry::sidebar::ROW_H * 2.0))
             .with_pixels_per_point(1.0)
             .build_ui_state(
-                move |ui, events: &mut Vec<&'static str>| {
+                move |ui, frame: &mut RowFrame| {
                     let outcome = sidebar::reorderable_row(
                         ui,
                         &mut cache,
@@ -7264,24 +7276,49 @@ mod tests {
                         },
                     );
                     if outcome.response.clicked() {
-                        events.push("clicked");
+                        frame.0.push("clicked");
                     }
                     // Stand-in for the shared track context menu: proves the
-                    // drag affordance did not swallow secondary clicks.
-                    outcome.response.context_menu(|ui| {
-                        let _ = ui.button("MenuProbe");
-                    });
+                    // drag affordance did not swallow secondary clicks. The
+                    // selection is then carried by the PRODUCTION applier, the
+                    // one the real attach site calls — the point being that a
+                    // right-click on a reorderable row is an ordinary row
+                    // right-click that happens to be draggable.
+                    let open = outcome
+                        .response
+                        .context_menu(|ui| {
+                            let _ = ui.button("MenuProbe");
+                        })
+                        .is_some();
+                    apply_track_menu_open(
+                        &attached,
+                        if open {
+                            TrackMenuOpen::Opened
+                        } else {
+                            TrackMenuOpen::NotOpened
+                        },
+                        &mut frame.1,
+                    );
                 },
-                Vec::new(),
+                (Vec::new(), None),
             );
         harness.run();
+        assert!(
+            harness.state().1.is_none(),
+            "painting the row selects nothing"
+        );
 
         // Plain clicks still select/play.
         harness.get_by_label("Beta").click();
         harness.run();
         assert!(
-            harness.state().contains(&"clicked"),
+            harness.state().0.contains(&"clicked"),
             "adding drag-and-drop must not break row clicks"
+        );
+        assert!(
+            harness.state().1.is_none(),
+            "and a plain click reaches the row's own selection path, not the menu's — \
+             so nothing here is the right-click's selection arriving early"
         );
 
         // Secondary clicks still open the context menu.
@@ -7290,6 +7327,13 @@ mod tests {
         assert!(
             harness.query_by_label("MenuProbe").is_some(),
             "the context menu opens on a reorderable row"
+        );
+        assert_eq!(
+            harness.state().1,
+            Some(row_track),
+            "and the right-click that reached it selected that row's Track, exactly as a \
+             right-click on any other Track row does: the drag handle underneath never \
+             swallowed the gesture"
         );
     }
 
@@ -9861,8 +9905,15 @@ mod browser_column_ui_tests {
         );
     }
 
+    /// The album header is a readout: it names the album and its
+    /// `Artist · Year` line and offers nothing to press. The Album's own
+    /// actions are reached from its row in the Albums column, so the header
+    /// anchors no menu either. Asserted here at the pure widget seam, where
+    /// the detail column is the only thing in the frame: the two labels its
+    /// buttons used to wear are gone, and the header reports no action at
+    /// all.
     #[test]
-    fn test_album_header_offers_play_all_and_shuffle() {
+    fn test_album_header_is_a_readout_with_no_buttons() {
         use egui_kittest::kittest::Queryable;
         use riff_gui::ui::detail::{
             AlbumHeader, Crumb, DetailAction, DetailColumn, show_detail_column,
@@ -9913,103 +9964,18 @@ mod browser_column_ui_tests {
             "the album header renders the artist · year subtitle"
         );
 
-        // Play all starts the album from the top; Shuffle starts it shuffled.
-        harness.get_by_label("Play all").click();
-        harness.run();
-        harness.get_by_label("Shuffle").click();
-        harness.run();
-        assert_eq!(
-            harness.state(),
-            &vec![DetailAction::PlayAll, DetailAction::Shuffle],
-            "the header's two playback actions report themselves"
-        );
-    }
-
-    #[test]
-    fn test_detail_play_all_and_shuffle_play_the_albums_tracks() {
-        use riff_gui::ui::app::apply_detail_action;
-        use riff_gui::ui::detail::DetailAction;
-
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = boxed_library_store(&dir);
-        let tracks = [
-            TrackId("a.mp3".to_string()),
-            TrackId("b.mp3".to_string()),
-            TrackId("c.mp3".to_string()),
-        ];
-        let mut library = LibrarySession::default();
-        let mut playback = PlaybackSession::default();
-        let transport = crate::mocks::MockTransport::new();
-
-        apply_detail_action(
-            DetailAction::PlayAll,
-            &mut library,
-            &mut playback,
-            &transport,
-            store.as_mut(),
-            &tracks,
-        );
-        assert_eq!(
-            transport.recorded(),
-            vec![crate::mocks::TransportIntent::PlayMany(
-                TrackId("a.mp3".to_string()),
-                vec![TrackId("b.mp3".to_string()), TrackId("c.mp3".to_string())]
-            )],
-            "Play all starts the album's first track with the rest queued behind it"
-        );
+        // The two playback actions the header used to carry are gone, and
+        // nothing took their place.
+        for label in ["Play all", "Shuffle"] {
+            assert!(
+                harness.query_by_label(label).is_none(),
+                "the album header no longer offers '{label}'"
+            );
+        }
         assert!(
-            !playback.queue.shuffle,
-            "Play all never flips the queue's shuffle state"
-        );
-
-        let transport = crate::mocks::MockTransport::new();
-        apply_detail_action(
-            DetailAction::Shuffle,
-            &mut library,
-            &mut playback,
-            &transport,
-            store.as_mut(),
-            &tracks,
-        );
-        assert_eq!(
-            transport.recorded(),
-            vec![crate::mocks::TransportIntent::PlayMany(
-                TrackId("a.mp3".to_string()),
-                vec![TrackId("b.mp3".to_string()), TrackId("c.mp3".to_string())]
-            )],
-            "Shuffle plays the same album batch — the queue's traversal shuffles"
-        );
-        assert!(
-            playback.queue.shuffle,
-            "Shuffle turns the queue's shuffle traversal on"
-        );
-
-        // An empty album has nothing to start: no intents, no flag changes.
-        let transport = crate::mocks::MockTransport::new();
-        playback.queue.set_shuffle(false);
-        apply_detail_action(
-            DetailAction::PlayAll,
-            &mut library,
-            &mut playback,
-            &transport,
-            store.as_mut(),
-            &[],
-        );
-        apply_detail_action(
-            DetailAction::Shuffle,
-            &mut library,
-            &mut playback,
-            &transport,
-            store.as_mut(),
-            &[],
-        );
-        assert!(
-            transport.recorded().is_empty(),
-            "an empty album starts nothing"
-        );
-        assert!(
-            !playback.queue.shuffle,
-            "an empty album never re-enables shuffle"
+            harness.state().is_empty(),
+            "a header with no controls reports no action: {:?}",
+            harness.state()
         );
     }
 
@@ -10094,6 +10060,269 @@ mod browser_column_ui_tests {
                 .state()
                 .contains(&DetailAction::PlayTrack("t1".to_string())),
             "double-clicking a row starts the track"
+        );
+    }
+
+    /// A Track row's right-click, at the widget seam: the Tracks Column's rows
+    /// open the shared Track menu and report the row's OWN key with whatever
+    /// was chosen from it.
+    ///
+    /// The fixture is long enough that the column really is VIRTUALIZED, and
+    /// the row that is right-clicked is neither the first nor the last. That is
+    /// the point: the popup is egui's transient one, keyed by the row's own
+    /// response identity, so there is no per-row open state and nothing to keep
+    /// in step with an index — and a list whose rows are recycled as it scrolls
+    /// is the only place a per-row or index-keyed menu could show itself. The
+    /// culled rows are asserted absent, so "virtualized" is a fact about this
+    /// frame rather than an assumption about the renderer.
+    ///
+    /// The report arrives on the frame the menu OPENS, with an empty intent
+    /// list, because opening is what moves the selection and choosing an item
+    /// is a separate event; the chosen intent then rides the same key.
+    #[test]
+    fn test_a_secondary_click_on_a_track_row_reports_its_key_with_the_menu() {
+        use egui_kittest::kittest::Queryable;
+        use riff_backend::domain::PlaylistId;
+        use riff_gui::ui::detail::{
+            Crumb, DetailAction, DetailColumn, TrackRow, show_detail_column,
+        };
+        use riff_gui::ui::menu::{TrackMenu, TrackMenuIntent};
+        use std::time::Duration;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let crumbs = vec![Crumb {
+            label: "Geogaddi".to_string(),
+        }];
+        // Far more rows than a 300px window shows, so most of them are culled
+        // and the visible ones are materialized afresh every frame.
+        let tracks: Vec<TrackRow> = (0..120u32)
+            .map(|i| TrackRow {
+                key: format!("t{i}"),
+                title: format!("Track {i:02}"),
+                plays: i % 5,
+                duration: (i % 3 == 0).then(|| Duration::from_secs(180 + u64::from(i))),
+                favorite: i % 2 == 0,
+                selected: false,
+                now_playing: false,
+            })
+            .collect();
+        // The playlist targets the host resolved up front, and NO removal: a
+        // Track in the Tracks Column is in no Playlist. The menu is handed over
+        // as the same per-row factory the app hands over, reading the row's own
+        // Favourite flag.
+        let playlists = [(PlaylistId::new("pl-1"), "Gym".to_string())];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(560.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, actions: &mut Vec<DetailAction>| {
+                    let track_menu = |row: &TrackRow| TrackMenu {
+                        playable: true,
+                        editable: true,
+                        favorite: row.favorite,
+                        playlists: &playlists,
+                        remove_from_playlist: false,
+                    };
+                    let column = DetailColumn {
+                        breadcrumb: &crumbs,
+                        tracks: &tracks,
+                        track_menu: Some(&track_menu),
+                        ..DetailColumn::empty("", "")
+                    };
+                    show_detail_column(ui, &mut cache, &palette, column, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+        assert!(
+            harness.state().is_empty(),
+            "painting the column reports no action at all"
+        );
+        assert!(
+            harness.query_by_label("Track 03").is_some()
+                && harness.query_by_label("Track 100").is_none(),
+            "the list really is virtualized: an on-screen row exists and a far-off one \
+             is culled, so the rows the widget does not create are rows it cannot \
+             have opened a menu on"
+        );
+
+        harness.get_by_label("Track 03").click_secondary();
+        harness.run();
+
+        assert_eq!(
+            harness.state().first(),
+            Some(&DetailAction::TrackMenu {
+                key: "t3".to_string(),
+                intents: Vec::new(),
+            }),
+            "opening the menu reports the RIGHT-CLICKED row's own key with no intent \
+             chosen yet — that report is what moves the selection"
+        );
+        // The Track menu, and the Track menu only. "Play Next" lives in both
+        // menu renderers, "Edit Tags" in the Track one only, and "Shuffle" is
+        // what the collection and whole-list menus have where the Track menu
+        // has "Edit Tags" — so those three together identify the menu without
+        // depending on a label the transport bar also wears. The removal is
+        // absent because a Track in this column is in no Playlist.
+        //
+        // The playlist target is probed with the label egui gives a submenu
+        // button INSIDE a menu, which appends its disclosure arrow: the bare
+        // wording is what a `MenuButton` wears at the top level, and the menu
+        // content seam pins that shape.
+        for present in ["Play Next", "Edit Tags", "Add to Playlist \u{23f5}"] {
+            assert!(
+                harness.query_by_label(present).is_some(),
+                "the Track menu is the one on screen — '{present}' is missing from it"
+            );
+        }
+        for absent in ["Shuffle", "Remove from Playlist"] {
+            assert!(
+                harness.query_by_label(absent).is_none(),
+                "the Track menu offers no '{absent}'"
+            );
+        }
+
+        harness.get_by_label("Play Next").click();
+        harness.run();
+        assert_eq!(
+            harness.state().last(),
+            Some(&DetailAction::TrackMenu {
+                key: "t3".to_string(),
+                intents: vec![TrackMenuIntent::PlayNext],
+            }),
+            "choosing an item rides the same key, so the host can both select the \
+             Track and act on it from one report"
+        );
+    }
+
+    /// The Tracks Column's Favourite item is a per-ROW fact, proved with two
+    /// rows of DIFFERENT Favourite state in one render.
+    ///
+    /// This is the seam that catches the mistake the column's shape invites: a
+    /// single column-wide menu would put one row's answer on every row, and every
+    /// other assertion here would still pass — the menu would open, it would be
+    /// the Track menu, it would report the right key. Only the LABEL would be
+    /// wrong, and only on whichever rows disagreed with the one answer.
+    ///
+    /// So the counting is the assertion. Both rows carry a heart, labelled by
+    /// what their own click will do, so before any right-click the column holds
+    /// exactly one "Add to Favorites" and one "Remove from Favorites". Right-
+    /// clicking a row's menu then ADDS one node: the item whose wording is the
+    /// OPPOSITE of that row's heart. Reading a count instead of "is this label
+    /// present" is what makes the claim unambiguous — the two surfaces wear the
+    /// same two strings, so presence alone could not say which menu was open.
+    #[test]
+    fn test_the_tracks_column_offers_each_row_its_own_favourite_wording() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::detail::{DetailColumn, TrackRow, show_detail_column};
+        use riff_gui::ui::menu::TrackMenu;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let row = |key: &str, title: &str, favorite: bool| TrackRow {
+            key: key.to_string(),
+            title: title.to_string(),
+            plays: 0,
+            duration: None,
+            favorite,
+            selected: false,
+            now_playing: false,
+        };
+        // One un-Favourited Track and one Favourited Track, side by side.
+        let tracks = vec![
+            row("plain", "Not A Favorite", false),
+            row("loved", "Loved", true),
+        ];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(560.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, actions: &mut Vec<riff_gui::ui::detail::DetailAction>| {
+                    // The host's per-row factory, reading the flag off the row it
+                    // is handed — the same shape `render_tracks_column` hands the
+                    // widget.
+                    let track_menu = |row: &TrackRow| TrackMenu {
+                        playable: true,
+                        editable: true,
+                        favorite: row.favorite,
+                        playlists: &[],
+                        remove_from_playlist: false,
+                    };
+                    let column = DetailColumn {
+                        tracks: &tracks,
+                        track_menu: Some(&track_menu),
+                        ..DetailColumn::empty("", "")
+                    };
+                    show_detail_column(ui, &mut cache, &palette, column, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+        // How many nodes wear each of the two wordings, heart and menu row
+        // together. Reading a count instead of "is this label present" is what
+        // makes the claim unambiguous: the heart and the menu item wear the same
+        // two strings, so presence alone could not say which menu was open.
+        fn count(
+            harness: &egui_kittest::Harness<'_, Vec<riff_gui::ui::detail::DetailAction>>,
+            label: &str,
+        ) -> usize {
+            harness.query_all_by_label(label).count()
+        }
+        assert_eq!(
+            (
+                count(&harness, "Add to Favorites"),
+                count(&harness, "Remove from Favorites")
+            ),
+            (1, 1),
+            "each row's heart is labelled by its own flag, so the two rows really are in \
+             the two different states"
+        );
+
+        // The un-Favourited row's menu says it will ADD one.
+        harness.get_by_label("Not A Favorite").click_secondary();
+        harness.run();
+        assert_eq!(
+            (
+                count(&harness, "Add to Favorites"),
+                count(&harness, "Remove from Favorites")
+            ),
+            (2, 1),
+            "right-clicking the un-Favourited row adds an 'Add to Favorites' item and \
+             nothing else — its menu says what ITS click will do"
+        );
+
+        // The Favourited row's menu says the opposite, with the other row still on
+        // screen and unchanged: the column does not settle for one answer per
+        // frame, it answers per row.
+        //
+        // Two secondary clicks, and the first is not redundant. An open context
+        // menu is a popup with the pointer: the click that would land on the other
+        // row is taken by the layer above it and only DISMISSES the open menu —
+        // which is visible in the counts below dropping to (1, 1) before the
+        // second click. Two clicks, one menu at a time, which is also how a
+        // listener moves from one row's menu to another's.
+        harness.get_by_label("Loved").click_secondary();
+        harness.run();
+        assert_eq!(
+            (
+                count(&harness, "Add to Favorites"),
+                count(&harness, "Remove from Favorites")
+            ),
+            (1, 1),
+            "the second right-click dismisses the open popup, taking its item with it — \
+             and no row's heart changed"
+        );
+        harness.get_by_label("Loved").click_secondary();
+        harness.run();
+        assert_eq!(
+            (
+                count(&harness, "Add to Favorites"),
+                count(&harness, "Remove from Favorites")
+            ),
+            (1, 2),
+            "right-clicking the Favourited row adds a 'Remove from Favorites' item — the \
+             same column, the other row still beside it, the opposite label"
         );
     }
 
@@ -10200,7 +10429,6 @@ mod browser_column_ui_tests {
         );
         let mut library_mutations: Box<dyn LibraryMutationStore> = Box::new(store.clone());
         let mut library = LibrarySession::default();
-        let mut playback = PlaybackSession::default();
         let transport = crate::mocks::MockTransport::new();
 
         // The row's control reports the flag's NEW value; applying it
@@ -10211,10 +10439,8 @@ mod browser_column_ui_tests {
                 favorite: true,
             },
             &mut library,
-            &mut playback,
             &transport,
             library_mutations.as_mut(),
-            &[],
         );
 
         // The Favorites smart list reflects the change with zero caller
@@ -10313,7 +10539,6 @@ mod browser_column_ui_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = boxed_library_store(&dir);
         let mut library = LibrarySession::default();
-        let mut playback = PlaybackSession::default();
         let transport = crate::mocks::MockTransport::new();
 
         // Album trail: Artists / Boards of Canada / Geogaddi.
@@ -10345,10 +10570,8 @@ mod browser_column_ui_tests {
         apply_detail_action(
             DetailAction::Crumb(1),
             &mut library,
-            &mut playback,
             &transport,
             store.as_mut(),
-            &[],
         );
         assert_eq!(
             library.browser_path,
@@ -10361,10 +10584,8 @@ mod browser_column_ui_tests {
         apply_detail_action(
             DetailAction::Crumb(0),
             &mut library,
-            &mut playback,
             &transport,
             store.as_mut(),
-            &[],
         );
         assert!(
             library.browser_path.is_empty(),
@@ -10376,10 +10597,8 @@ mod browser_column_ui_tests {
         apply_detail_action(
             DetailAction::Crumb(1),
             &mut library,
-            &mut playback,
             &transport,
             store.as_mut(),
-            &[],
         );
         assert_eq!(
             library.browser_path,
@@ -12041,191 +12260,11 @@ mod browser_column_ui_tests {
             "High Contrast re-picks no light glow strength of its own"
         );
     }
-
     /// A frame pixel as an egui color, for the distance comparisons.
     fn as_color(p: &image::Rgba<u8>) -> egui::Color32 {
         egui::Color32::from_rgb(p.0[0], p.0[1], p.0[2])
     }
 
-    /// Render the inspector's quick-action row — the primary play action beside
-    /// **Add to Queue** — and return the frame. Both buttons are primaries, so
-    /// whatever the test finds on one it must find on the other.
-    fn render_quick_actions() -> image::RgbaImage {
-        use riff_gui::ui::icons::IconCache;
-        use riff_gui::ui::selection::{SelectionPanel, TagDraft};
-        use riff_gui::ui::theme::Palette;
-        let palette = Palette::dark();
-        let mut cache = IconCache::new();
-        // Tall enough to reach the quick-action row: it sits below the 200px art
-        // block, and the panel body scrolls, so a short stage would clip it away.
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(300.0, 560.0))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                move |ui, _actions: &mut Vec<riff_gui::ui::selection::SelectionAction>| {
-                    let bg = ui.ctx().layer_painter(egui::LayerId::background());
-                    bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.background);
-                    riff_gui::ui::selection::show_selection_panel(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        SelectionPanel {
-                            art: None,
-                            title: Some("Music Has the Right to Children"),
-                            subtitle: Some("Boards of Canada · 1998"),
-                            details: &[],
-                            tags: &[],
-                            editor: None::<&mut TagDraft>,
-                            single: false,
-                            queue: true,
-                        },
-                        &mut Vec::new(),
-                    );
-                },
-                Vec::new(),
-            );
-        harness.run();
-        harness
-            .render()
-            .expect("the quick-action row must render headlessly")
-    }
-
-    /// **Add to Queue** sits in the same row as the primary play action, so the
-    /// two must be painted by the same authority — the lit-from-above face and
-    /// the accent bloom, not a flat brand fill beside a gradient. Before this
-    /// the row mixed the two, which is the defect: the assertion is that *both*
-    /// faces show vertical gradient variation *and* *both* sit on a glow, so a
-    /// row where only one is lit cannot pass.
-    #[test]
-    fn test_both_quick_actions_are_painted_as_primaries() {
-        use riff_gui::ui::theme::{BRAND_GRADIENT_BOTTOM, BRAND_GRADIENT_TOP};
-        let frame = render_quick_actions();
-
-        // A face is a set of COLUMNS that show more than one brand-ish colour
-        // down their height — which is precisely what a vertical gradient is and
-        // what a flat fill cannot be. Working in columns rather than rows means
-        // the label's glyphs cannot break the measurement, and the two faces are
-        // then the two horizontal clusters, separated by the row's gap.
-        //
-        // The tolerance is wide enough for the whole gradient between the two
-        // stops and narrow enough to exclude the bloom, which composites to
-        // about (49, 46, 43) and sits nowhere near either rung.
-        let is_brandish = |p: &image::Rgba<u8>| {
-            let near = |c: egui::Color32| {
-                p.0[0].abs_diff(c.r()) <= 24
-                    && p.0[1].abs_diff(c.g()) <= 24
-                    && p.0[2].abs_diff(c.b()) <= 24
-            };
-            near(BRAND_GRADIENT_TOP) || near(BRAND_GRADIENT_BOTTOM)
-        };
-        let gradient_columns: Vec<u32> = (0..frame.width())
-            .filter(|x| {
-                let mut seen: Vec<image::Rgba<u8>> = Vec::new();
-                for y in 0..frame.height() {
-                    let p = *frame.get_pixel(*x, y);
-                    if is_brandish(&p) && !seen.contains(&p) {
-                        seen.push(p);
-                    }
-                }
-                seen.len() >= 2
-            })
-            .collect();
-        assert!(
-            !gradient_columns.is_empty(),
-            "a gradient face shows more than one brand-ish colour down its height"
-        );
-
-        // Cluster the columns; the row's two buttons are two clusters.
-        let mut clusters: Vec<(u32, u32)> = Vec::new();
-        for x in gradient_columns {
-            match clusters.last_mut() {
-                Some(last) if x <= last.1 + 1 => last.1 = x,
-                _ => clusters.push((x, x)),
-            }
-        }
-        let faces: Vec<(u32, u32)> = clusters.into_iter().filter(|(a, b)| b - a >= 20).collect();
-        assert_eq!(
-            faces.len(),
-            2,
-            "both quick actions are lit faces, so two gradient clusters are present: {faces:?}"
-        );
-
-        // Each face independently: the colour at its top must be nearer the
-        // light stop than the colour at its bottom. Per face, so a row where
-        // only the first is lit fails on the second.
-        for (index, (left, right)) in faces.iter().enumerate() {
-            let mut rows: Vec<(u32, image::Rgba<u8>)> = Vec::new();
-            for y in 0..frame.height() {
-                // The modal brand-ish colour on this row within the face: the
-                // fill, ignoring whatever glyph lands on it.
-                let mut counts: std::collections::HashMap<[u8; 3], usize> =
-                    std::collections::HashMap::new();
-                for x in *left..=*right {
-                    let p = *frame.get_pixel(x, y);
-                    if is_brandish(&p) {
-                        *counts.entry([p.0[0], p.0[1], p.0[2]]).or_default() += 1;
-                    }
-                }
-                if let Some((c, _)) = counts.into_iter().max_by_key(|(_, n)| *n) {
-                    rows.push((y, image::Rgba([c[0], c[1], c[2], 255])));
-                }
-            }
-            let (top_y, top_c) = rows.first().copied().expect("a face has rows");
-            let (bottom_y, bottom_c) = rows.last().copied().expect("a face has rows");
-            assert_ne!(
-                top_c, bottom_c,
-                "quick action {index} is a flat fill, not a gradient \
-                 (top {top_c:?} at y={top_y} == bottom {bottom_c:?} at y={bottom_y})"
-            );
-            assert!(
-                color_distance(as_color(&top_c), BRAND_GRADIENT_TOP)
-                    < color_distance(as_color(&bottom_c), BRAND_GRADIENT_TOP),
-                "quick action {index} is lit from above: its top {top_c:?} is nearer \
-                 the light stop than its bottom {bottom_c:?}"
-            );
-        }
-    }
-
-    /// The quick-action row's face is painted before its button is added, so the
-    /// bloom can go down first — which means the row claims the button's rect
-    /// from the cursor before `add_sized` allocates it. That claim is only
-    /// correct while `add_sized` still lays the button out at the cursor, so
-    /// this holds the two together: a future layout change that moves the
-    /// button would light the wrong rect, and this fails instead.
-    #[test]
-    fn test_quick_action_claims_the_rect_its_button_actually_takes() {
-        use riff_gui::ui::theme::geometry::inspector::PLAY_H;
-        let claimed: std::rc::Rc<std::cell::RefCell<Vec<(egui::Rect, egui::Rect)>>> =
-            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        {
-            let sink = std::rc::Rc::clone(&claimed);
-            let mut harness = egui_kittest::Harness::builder()
-                .with_size(egui::vec2(300.0, 120.0))
-                .with_pixels_per_point(1.0)
-                .build_ui(move |ui| {
-                    ui.horizontal(|ui| {
-                        for i in 0..2 {
-                            let size = egui::vec2(140.0, PLAY_H);
-                            let rect = egui::Rect::from_min_size(ui.cursor().min, size);
-                            let button = egui::Button::new(egui::RichText::new("X"))
-                                .fill(riff_gui::ui::theme::TRANSPARENT);
-                            let response = ui.add_sized(size, button);
-                            sink.borrow_mut().push((rect, response.rect));
-                            let _ = i;
-                        }
-                    });
-                });
-            harness.run();
-        }
-        for (claim, taken) in claimed.borrow().iter() {
-            assert_eq!(
-                claim, taken,
-                "a button takes the rect claimed from the cursor"
-            );
-        }
-    }
-
-    /// Render one accent-tier text button over the card plane, at rest or
     /// hovered. `paint_text_button` takes `hovered` as an argument, so this
     /// observes the two states in one frame each without moving a pointer —
     /// the same technique the row-band test uses for its four states.
@@ -12976,14 +13015,14 @@ mod browser_column_ui_tests {
     // --- Inspector (the collapsible selection panel, handoff issue 10) ----------
     //
     // The elastic stage's rightmost column: a readout of the live selection
-    // (album / artist / genre / track) with Play album and Add to Queue.
+    // (album / artist / genre / track) and nothing that acts on it.
     // Tested at the same seams as the browser column (issue 08) and detail
     // column (issue 09): the pure widget seam
     // (`ui::selection::show_selection_panel`, headless kittest harness) and
     // the session-glue seam in `ui::app`.
 
     #[test]
-    fn test_selection_panel_renders_album_details_and_reports_play_album() {
+    fn test_selection_panel_renders_album_details_and_reports_nothing() {
         use egui_kittest::kittest::Queryable;
         use riff_gui::ui::selection::{
             SelectionAction, SelectionDetail, SelectionPanel, show_selection_panel,
@@ -13013,12 +13052,11 @@ mod browser_column_ui_tests {
                     let panel = SelectionPanel {
                         art: None,
                         title: Some("Tomorrow's Harvest"),
+                        kind: "Album",
                         subtitle: Some("Boards of Canada \u{b7} 2013"),
                         details: &details,
                         tags: &[],
                         editor: None,
-                        single: false,
-                        queue: false,
                     };
                     show_selection_panel(ui, &mut cache, &palette, panel, actions);
                 },
@@ -13059,13 +13097,21 @@ mod browser_column_ui_tests {
             );
         }
 
-        // The Play album action reports itself — `ui::app` starts the batch.
-        harness.get_by_label("Play album").click();
-        harness.run();
+        // The panel is a READOUT: it shows the resolved values and reports
+        // nothing. No play action, no queue action, and — the part that is easy
+        // to regress — no button at all anywhere in the panel, so there is no
+        // control-shaped thing to try pressing.
+        for gone in ["Play album", "Play", "Add to Queue", "Queue"] {
+            assert!(
+                harness.query_by_label(gone).is_none(),
+                "the readout offers no {gone} — an entity's actions live on its own \
+                 context menu"
+            );
+        }
         assert_eq!(
             harness.state(),
-            &vec![SelectionAction::PlayAlbum],
-            "the Play album button reports its action"
+            &Vec::<SelectionAction>::new(),
+            "and a frame that only paints the panel reports no action at all"
         );
     }
 
@@ -13100,12 +13146,11 @@ mod browser_column_ui_tests {
                     let panel = SelectionPanel {
                         art: None,
                         title: Some("Tomorrow's Harvest"),
+                        kind: "Album",
                         subtitle: Some("Boards of Canada \u{b7} 2013"),
                         details: &details,
                         tags: &[],
                         editor: None,
-                        single: false,
-                        queue: false,
                     };
                     show_selection_panel(ui, &mut cache, &palette, panel, actions);
                 },
@@ -13152,12 +13197,11 @@ mod browser_column_ui_tests {
                     let panel = SelectionPanel {
                         art: None,
                         title: None,
+                        kind: "Album",
                         subtitle: None,
                         details: &[],
                         tags: &[],
                         editor: None,
-                        single: false,
-                        queue: false,
                     };
                     show_selection_panel(ui, &mut cache, &palette, panel, actions);
                 },
@@ -13221,12 +13265,11 @@ mod browser_column_ui_tests {
                     let panel = SelectionPanel {
                         art: None,
                         title: Some("Some Album"),
+                        kind: "Album",
                         subtitle: Some("Some Artist \u{b7} 2013"),
                         details: &[],
                         tags: &tags,
                         editor: None,
-                        single: false,
-                        queue: false,
                     };
                     show_selection_panel(ui, &mut cache, &palette, panel, actions);
                 },
@@ -13315,12 +13358,11 @@ mod browser_column_ui_tests {
                     let panel = SelectionPanel {
                         art: None,
                         title: Some("Old Title"),
+                        kind: "Album",
                         subtitle: Some("Some Artist"),
                         details: &[],
                         tags: &tags,
                         editor: Some(&mut draft),
-                        single: true,
-                        queue: true,
                     };
                     show_selection_panel(ui, &mut cache, &palette, panel, actions);
                 },
@@ -13398,12 +13440,11 @@ mod browser_column_ui_tests {
                     let panel = SelectionPanel {
                         art: None,
                         title: Some("Old Title"),
+                        kind: "Album",
                         subtitle: Some("Some Artist"),
                         details: &[],
                         tags: &tags,
                         editor: Some(&mut draft),
-                        single: true,
-                        queue: true,
                     };
                     show_selection_panel(ui, &mut cache, &palette, panel, actions);
                 },
@@ -13472,12 +13513,11 @@ mod browser_column_ui_tests {
                     let panel = SelectionPanel {
                         art: None,
                         title: Some("Old Title"),
+                        kind: "Album",
                         subtitle: Some("Some Artist"),
                         details: &[],
                         tags: &tags,
                         editor: Some(&mut draft),
-                        single: true,
-                        queue: true,
                     };
                     show_selection_panel(ui, &mut cache, &palette, panel, actions);
                 },
@@ -13540,12 +13580,11 @@ mod browser_column_ui_tests {
                     let panel = SelectionPanel {
                         art: None,
                         title: Some("Shared Title"),
+                        kind: "Album",
                         subtitle: Some("Some Artist"),
                         details: &[],
                         tags: &tags,
                         editor: Some(&mut draft),
-                        single: false,
-                        queue: true,
                     };
                     show_selection_panel(ui, &mut cache, &palette, panel, actions);
                 },
@@ -13584,12 +13623,11 @@ mod browser_column_ui_tests {
                     let panel = SelectionPanel {
                         art: None,
                         title: Some("Panel Title"),
+                        kind: "Album",
                         subtitle: Some("Some Artist"),
                         details: &[],
                         tags: &tags,
                         editor: None,
-                        single: false,
-                        queue: false,
                     };
                     show_selection_panel(ui, &mut cache, &palette, panel, actions);
                 },
@@ -13608,67 +13646,16 @@ mod browser_column_ui_tests {
         );
     }
 
+    /// The header chip names the KIND of thing being read out. It used to be a
+    /// button with no click handler whose label was the hardcoded string
+    /// "Album", so a Track, an Artist and a Genre readout all announced
+    /// themselves as an Album — and each wore a button face, so it invited a
+    /// press that did nothing.
+    ///
+    /// Rendered in one pass: every kind at once, so a chip that names the wrong
+    /// one cannot pass by being the only thing checked.
     #[test]
-    fn test_selection_play_album_starts_the_albums_tracks() {
-        use riff_gui::ui::app::apply_selection_action;
-        use riff_gui::ui::selection::SelectionAction;
-
-        let tracks = [
-            TrackId("a.mp3".to_string()),
-            TrackId("b.mp3".to_string()),
-            TrackId("c.mp3".to_string()),
-        ];
-        let transport = crate::mocks::MockTransport::new();
-
-        apply_selection_action(SelectionAction::PlayAlbum, &transport, &tracks);
-        assert_eq!(
-            transport.recorded(),
-            vec![crate::mocks::TransportIntent::PlayMany(
-                TrackId("a.mp3".to_string()),
-                vec![TrackId("b.mp3".to_string()), TrackId("c.mp3".to_string())]
-            )],
-            "Play album starts the album's first track with the rest queued behind it"
-        );
-
-        // An album with no resolvable tracks starts nothing.
-        let transport = crate::mocks::MockTransport::new();
-        apply_selection_action(SelectionAction::PlayAlbum, &transport, &[]);
-        assert!(
-            transport.recorded().is_empty(),
-            "an album with no tracks starts nothing"
-        );
-    }
-
-    #[test]
-    fn test_selection_queue_appends_the_selections_tracks() {
-        use riff_gui::ui::app::apply_selection_action;
-        use riff_gui::ui::selection::SelectionAction;
-
-        let tracks = [
-            TrackId("a.mp3".to_string()),
-            TrackId("b.mp3".to_string()),
-            TrackId("c.mp3".to_string()),
-        ];
-        let transport = crate::mocks::MockTransport::new();
-        apply_selection_action(SelectionAction::Queue, &transport, &tracks);
-        assert_eq!(
-            transport.recorded(),
-            vec![
-                crate::mocks::TransportIntent::AddToQueue(TrackId("a.mp3".to_string())),
-                crate::mocks::TransportIntent::AddToQueue(TrackId("b.mp3".to_string())),
-                crate::mocks::TransportIntent::AddToQueue(TrackId("c.mp3".to_string())),
-            ],
-            "Add to Queue appends every track of the selection, in order"
-        );
-
-        // An empty selection queues nothing.
-        let transport = crate::mocks::MockTransport::new();
-        apply_selection_action(SelectionAction::Queue, &transport, &[]);
-        assert!(transport.recorded().is_empty(), "nothing to queue");
-    }
-
-    #[test]
-    fn test_selection_panel_reports_add_to_queue() {
+    fn test_the_header_chip_names_the_readouts_kind() {
         use egui_kittest::kittest::Queryable;
         use riff_gui::ui::selection::{SelectionAction, SelectionPanel, show_selection_panel};
 
@@ -13679,102 +13666,42 @@ mod browser_column_ui_tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<SelectionAction>| {
-                    let panel = SelectionPanel {
-                        art: None,
-                        title: Some("Tomorrow's Harvest"),
-                        subtitle: Some("Boards of Canada \u{b7} 2013"),
-                        details: &[],
-                        tags: &[],
-                        editor: None,
-                        single: false,
-                        queue: true,
-                    };
-                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                    for (kind, title) in [
+                        ("Album", "Geogaddi"),
+                        ("Artist", "Boards of Canada"),
+                        ("Genre", "IDM"),
+                        ("Track", "Music Is Math"),
+                    ] {
+                        let panel = SelectionPanel {
+                            art: None,
+                            title: Some(title),
+                            kind,
+                            subtitle: None,
+                            details: &[],
+                            tags: &[],
+                            editor: None,
+                        };
+                        show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                    }
                 },
                 Vec::new(),
             );
-        harness.run();
+        // `run_steps(2)` rather than `run()`: four scroll areas in one pass
+        // never settle, and a settled frame is all this reads.
+        harness.run_steps(2);
 
-        // The inspector's quick-action row offers both Play album and
-        // Add to Queue; each reports its own action.
-        assert!(
-            harness.query_by_label("Add to Queue").is_some(),
-            "the inspector renders the Add to Queue button"
-        );
-        harness.get_by_label("Add to Queue").click();
-        harness.get_by_label("Play album").click();
-        harness.run();
-        assert_eq!(
-            harness.state(),
-            &vec![SelectionAction::Queue, SelectionAction::PlayAlbum],
-            "each button in the quick-action row reports its action"
-        );
-    }
-
-    #[test]
-    fn test_track_readout_play_plays_just_that_one_track() {
-        use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::app::apply_selection_action;
-        use riff_gui::ui::selection::{SelectionAction, SelectionPanel, show_selection_panel};
-
-        let palette = Palette::dark();
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(320.0, 640.0))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<SelectionAction>| {
-                    let panel = SelectionPanel {
-                        art: None,
-                        title: Some("Magic Window"),
-                        subtitle: Some("Boards of Canada"),
-                        details: &[],
-                        tags: &[],
-                        editor: None,
-                        single: true,
-                        queue: true,
-                    };
-                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
-                },
-                Vec::new(),
+        for kind in ["Album", "Artist", "Genre", "Track"] {
+            assert!(
+                harness.query_by_label(kind).is_some(),
+                "the chip names the readout's kind, and a {kind} readout says {kind}"
             );
-        harness.run();
-
-        // A single-track readout's primary action reads Play (never Play
-        // album): the detail panel shows one track, so the button plays just
-        // that one.
-        assert!(
-            harness.query_by_label("Play").is_some(),
-            "the track readout's primary action is labeled Play"
-        );
-        assert!(
-            harness.query_by_label("Play album").is_none(),
-            "the track readout offers no Play album action"
-        );
-        harness.get_by_label("Play").click();
-        harness.run();
+        }
+        // The Track case is the one that was wrong: a Track readout is not an
+        // Album, and saying so was the defect.
         assert_eq!(
-            harness.state(),
-            &vec![SelectionAction::PlayAlbum],
-            "the track readout's Play reports the play action"
-        );
-
-        // The reported action starts exactly that one track — the batch the
-        // panel resolves for a track readout is the single track, so nothing
-        // queues behind it.
-        let transport = crate::mocks::MockTransport::new();
-        apply_selection_action(
-            SelectionAction::PlayAlbum,
-            &transport,
-            &[TrackId("t1.mp3".to_string())],
-        );
-        assert_eq!(
-            transport.recorded(),
-            vec![crate::mocks::TransportIntent::PlayMany(
-                TrackId("t1.mp3".to_string()),
-                vec![],
-            )],
-            "a track readout's Play starts only that track"
+            harness.query_all_by_label("Album").count(),
+            1,
+            "exactly ONE readout claims to be an Album: the Album one"
         );
     }
 
@@ -13828,7 +13755,8 @@ mod browser_column_ui_tests {
         assert_eq!(
             content.track_ids,
             vec![t1.id.clone(), _t2.id.clone()],
-            "the inspector carries the album's track batch for Play/Queue"
+            "the inspector resolves the album's track batch, the targets an album \
+             tag draft writes to"
         );
 
         // The details grid reads the store: artist, year, genre, the track
@@ -14529,45 +14457,6 @@ mod browser_column_ui_tests {
         );
     }
 
-    #[test]
-    fn test_play_album_activates_by_keyboard() {
-        use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::selection::{SelectionAction, SelectionPanel, show_selection_panel};
-
-        let palette = Palette::dark();
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(320.0, 640.0))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<SelectionAction>| {
-                    let panel = SelectionPanel {
-                        art: None,
-                        title: Some("Tomorrow's Harvest"),
-                        subtitle: Some("Boards of Canada \u{b7} 2013"),
-                        details: &[],
-                        tags: &[],
-                        editor: None,
-                        single: false,
-                        queue: false,
-                    };
-                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
-                },
-                Vec::new(),
-            );
-        harness.run();
-
-        harness.get_by_label("Play album").focus();
-        harness.run();
-        harness.key_press(egui::Key::Enter);
-        harness.run();
-        assert_eq!(
-            harness.state(),
-            &vec![SelectionAction::PlayAlbum],
-            "Enter on the focused Play album button starts the album"
-        );
-    }
-
     // --- Pane order & focus walk (design-handoff issue 16) ------------------
     //
     // egui walks focus in widget-creation order, so the composite fixture
@@ -14683,12 +14572,11 @@ mod browser_column_ui_tests {
                             let panel = SelectionPanel {
                                 art: None,
                                 title: Some("Tomorrow's Harvest"),
+                                kind: "Album",
                                 subtitle: None,
                                 details: &[],
                                 tags: &[],
                                 editor: None,
-                                single: false,
-                                queue: false,
                             };
                             riff_gui::ui::selection::show_selection_panel(
                                 ui,
@@ -14734,19 +14622,19 @@ mod browser_column_ui_tests {
         tab_until_search_focused(&mut harness);
 
         // From there Tab walks every control of the three panes in the
-        // app's creation order: the browser rows, then the selection
-        // panel's chip and Play album, then the detail column's crumbs,
-        // header actions, and track row.
+        // app's creation order: the browser rows, then the detail column's
+        // crumb, its track row's favorite, and the track row itself. The
+        // selection panel contributes NO control at all: its action row and
+        // its button-shaped header chip are gone, and what remains is labels
+        // and the tag rows' text — none of which can take focus. The album
+        // header contributes none either: it is a readout of the title and
+        // the `Artist · Year` line, with no button to land on.
         for label in [
             "Clear search",
             "Alpha",
             "Beta",
             "Gamma",
-            "Album",
-            "Play album",
             "Artists",
-            "Shuffle",
-            "Play all",
             "Add to Favorites",
             "Magic Window",
         ] {
@@ -14768,19 +14656,16 @@ mod browser_column_ui_tests {
         tab_until_search_focused(&mut harness);
 
         // Walk to the last widget of the detail column: the search's clear
-        // affordance, the three browser rows, the selection panel's chip
-        // and Play album, then the detail column's crumb, header actions,
-        // favorite, and the track row.
+        // affordance, the three browser rows, then the detail column's crumb,
+        // favorite, and the track row. The selection panel has nothing
+        // focusable in it, so it does not appear in the chain, and neither
+        // does the album header.
         for _ in [
             "Clear search",
             "Alpha",
             "Beta",
             "Gamma",
-            "Album",
-            "Play album",
             "Artists",
-            "Shuffle",
-            "Play all",
             "Add to Favorites",
             "Magic Window",
         ] {
@@ -14793,16 +14678,11 @@ mod browser_column_ui_tests {
         );
 
         // Shift+Tab reverses the chain one widget at a time — backwards
-        // through the detail column, the selection panel, the browser
-        // rows, and the search's clear affordance — and lands on the
-        // search.
+        // through the detail column, the browser rows, and the search's
+        // clear affordance — and lands on the search.
         for label in [
             "Add to Favorites",
-            "Play all",
-            "Shuffle",
             "Artists",
-            "Play album",
-            "Album",
             "Gamma",
             "Beta",
             "Alpha",
@@ -14850,11 +14730,7 @@ mod browser_column_ui_tests {
             "Alpha",
             "Beta",
             "Gamma",
-            "Album",
-            "Play album",
             "Artists",
-            "Shuffle",
-            "Play all",
             "Add to Favorites",
             "Magic Window",
         ] {
@@ -14907,7 +14783,7 @@ mod whole_frame_tests {
 
     use crate::mocks::{
         MockLibraryMutationStore, MockLibraryQueryStore, MockPlaylistStore, MockScans,
-        MockSettingsStore, MockTagEdits, MockTransport, SettingsCall,
+        MockSettingsStore, MockTagEdits, MockTransport, SettingsCall, TransportIntent,
     };
     use crate::test_utils::{create_test_track_with_metadata, float_close};
 
@@ -14944,6 +14820,18 @@ mod whole_frame_tests {
     /// control bar all render without collapsing to zero.
     const WINDOW: egui::Vec2 = egui::vec2(1280.0, 800.0);
 
+    /// kittest's own default clock: a quarter of a second per step. Every shell
+    /// but [`build_at_step`]'s caller takes it, so a step is a step everywhere
+    /// else in this suite.
+    const HARNESS_STEP: f32 = 0.25;
+
+    /// The step a DOUBLE-CLICK needs: short enough that the two presses land
+    /// inside egui's `max_double_click_delay`. [`HARNESS_STEP`] advances a
+    /// quarter of a second per queued event, so a click's press and release
+    /// alone span half a second — the two presses would never be close enough
+    /// in TIME, and no position would save them.
+    const FAST_STEP: f32 = 0.02;
+
     /// A shell plus the handles a test needs to observe what a frame did.
     struct Shell {
         /// The harness owns the app; `state_mut()` reaches it between frames.
@@ -14962,13 +14850,7 @@ mod whole_frame_tests {
         folder_covers: Arc<Mutex<Vec<(TrackId, RequestedSize)>>>,
     }
 
-    /// Build a shell from fully-specified ports.
-    ///
-    /// `build_eframe` runs the app's `logic`/`ui` for its own warm-up frames
-    /// (one to initialise AccessKit, one to settle), so by the time this
-    /// returns the app has already rendered — and `first_frame` hydration has
-    /// already happened. A test must therefore mutate state *after* the shell
-    /// exists and then `step()` once per frame it wants to observe.
+    /// Build a shell from fully-specified ports, on kittest's own default clock.
     fn build(
         transport: Box<dyn Transport>,
         scans: MockScans,
@@ -14977,6 +14859,43 @@ mod whole_frame_tests {
         playlist_store: Box<dyn PlaylistStore>,
         library_mutations: Box<dyn LibraryMutationStore>,
         views: SessionViews,
+    ) -> Shell {
+        build_at_step(
+            transport,
+            scans,
+            settings_store,
+            settings_calls,
+            playlist_store,
+            library_mutations,
+            views,
+            HARNESS_STEP,
+        )
+    }
+
+    /// [`build`] on a clock of the caller's choosing, for the gestures whose
+    /// TIMING is the thing under test rather than a frame count.
+    ///
+    /// `build_eframe` runs the app's `logic`/`ui` for its own warm-up frames
+    /// (one to initialise AccessKit, one to settle), so by the time this
+    /// returns the app has already rendered — and `first_frame` hydration has
+    /// already happened. A test must therefore mutate state *after* the shell
+    /// exists and then `step()` once per frame it wants to observe.
+    ///
+    /// The step is a real clock, not a frame count: `Harness::step` runs one
+    /// frame per queued input event and advances egui's time by `step_dt` each
+    /// time, so a gesture egui recognises by elapsed time — a double click, and
+    /// only a double click — needs a step short enough for its two presses to
+    /// land inside egui's `max_double_click_delay`.
+    #[expect(clippy::too_many_arguments, reason = "the shell's port kit")]
+    fn build_at_step(
+        transport: Box<dyn Transport>,
+        scans: MockScans,
+        settings_store: Box<dyn SettingsStore>,
+        settings_calls: Arc<Mutex<Vec<SettingsCall>>>,
+        playlist_store: Box<dyn PlaylistStore>,
+        library_mutations: Box<dyn LibraryMutationStore>,
+        views: SessionViews,
+        step_dt: f32,
     ) -> Shell {
         let playback = Arc::new(Mutex::new(PlaybackSession::default()));
         let library = Arc::new(Mutex::new(LibrarySession::default()));
@@ -14999,6 +14918,7 @@ mod whole_frame_tests {
 
         let harness = egui_kittest::Harness::builder()
             .with_size(WINDOW)
+            .with_step_dt(step_dt)
             .build_eframe(|cc| {
                 // The same font install `main.rs` performs, because the shell's
                 // named families (`riff-inter-semibold` and friends) are
@@ -15046,6 +14966,16 @@ mod whole_frame_tests {
     /// header batch contract). The library query port is a pre-configured
     /// mock standing in for the Application Store.
     fn recording_transport_shell(mock: MockLibraryQueryStore) -> (Shell, Arc<MockTransport>) {
+        recording_transport_shell_at_step(mock, HARNESS_STEP)
+    }
+
+    /// [`recording_transport_shell`] on a clock of the caller's choosing, for
+    /// the one gesture whose recognition is a matter of elapsed time rather
+    /// than frames.
+    fn recording_transport_shell_at_step(
+        mock: MockLibraryQueryStore,
+        step_dt: f32,
+    ) -> (Shell, Arc<MockTransport>) {
         let transport = Arc::new(MockTransport::new());
         #[derive(Clone)]
         struct SharedTransport(Arc<MockTransport>);
@@ -15083,6 +15013,9 @@ mod whole_frame_tests {
             fn add_to_queue(&self, track: riff_backend::domain::TrackId) {
                 self.0.add_to_queue(track);
             }
+            fn add_many(&self, tracks: Vec<riff_backend::domain::TrackId>) {
+                self.0.add_many(tracks);
+            }
             fn play_many(
                 &self,
                 first: riff_backend::domain::TrackId,
@@ -15102,7 +15035,7 @@ mod whole_frame_tests {
         }
 
         let settings_calls = Arc::new(Mutex::new(Vec::new()));
-        let shell = build(
+        let shell = build_at_step(
             Box::new(SharedTransport(Arc::clone(&transport))),
             MockScans::default(),
             Box::new(MockSettingsStore::with_shared_calls(Arc::clone(
@@ -15117,6 +15050,7 @@ mod whole_frame_tests {
                 StoreGeneration::new(),
                 StoreGeneration::new(),
             ),
+            step_dt,
         );
         (shell, transport)
     }
@@ -15200,6 +15134,49 @@ mod whole_frame_tests {
             .rect()
             .center()
             .y
+    }
+
+    /// One double click, delivered as the four events it is: a press and a
+    /// release, twice, at ONE position.
+    ///
+    /// The events are queued rather than taken from `Node::click` because
+    /// egui recognises a double click by two conditions at once — the two
+    /// presses close together in space AND in time — and each is easy to lose
+    /// here. In time, because `Harness::step` runs one frame per queued event
+    /// and advances egui's clock by the step each time, so the shell's step has
+    /// to be short (see [`build_at_step`]). In space, because the position is
+    /// captured once: the first click selects the row, which opens the Detail
+    /// Panel and narrows the column the row is in, so re-querying the row for
+    /// the second click would aim at a point the pointer had never been.
+    ///
+    /// The quiet frames first are egui's TRIPLE-click window, and they are the
+    /// third condition. egui classifies a release against the previous two
+    /// releases, so a click close enough in time and space to both of them is
+    /// counted as a triple — and a triple is not a double, whatever else is
+    /// true of it. A click this harness made earlier (opening a list from the
+    /// sidebar, say) is therefore one of the two neighbours the second release
+    /// is measured against, and the queue says nothing about how long ago that
+    /// was. Stepping past the window says "and then, a moment later", which is
+    /// what a listener double-clicking a row is.
+    fn double_click_at(
+        harness: &mut egui_kittest::Harness<'static, RiffApp>,
+        pos: egui::Pos2,
+        step_dt: f32,
+    ) {
+        /// egui's triple-click window: twice its double-click window.
+        const TRIPLE_WINDOW: f64 = 0.6;
+        for _ in 0..(TRIPLE_WINDOW / f64::from(step_dt)).ceil() as usize {
+            harness.step();
+        }
+        harness.hover_at(pos);
+        for pressed in [true, false, true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            });
+        }
     }
 
     /// The harness itself, on a bare mock shell. This is the canary: if the
@@ -15492,6 +15469,142 @@ mod whole_frame_tests {
                 .count(),
             1,
             "the tapped row re-renders with the committed flag"
+        );
+    }
+
+    /// The node labelled `label` inside `anchor`'s OWN container.
+    ///
+    /// The scoping is the point, not a convenience. Two things in the app
+    /// deliberately wear the same labels — a Track row's heart and the menu's
+    /// Favourite item, which is the whole point of the item being a second path
+    /// to the same action — so a flat `get_by_label` cannot say which of them it
+    /// found, and a test that clicked one while meaning the other would pass for
+    /// the wrong reason. Anchoring on a node that only ONE of them can be, and
+    /// walking to its parent, scopes the query to the thing under test: the
+    /// popup for a menu row, the row for a heart.
+    fn within<'a>(
+        anchor: egui_kittest::Node<'a>,
+        what: &str,
+        label: &'a str,
+    ) -> egui_kittest::Node<'a> {
+        use egui_kittest::kittest::NodeT;
+        anchor
+            .parent()
+            .unwrap_or_else(|| panic!("{what} is a container in the tree"))
+            .children_recursive()
+            .find(|node| node.accesskit_node().label().as_deref() == Some(label))
+            .unwrap_or_else(|| panic!("{what} holds no node labelled {label:?}"))
+    }
+
+    /// One row of an OPEN Track menu, located inside the popup.
+    ///
+    /// `anchor` names a row only the Track menu has: the "Add to Playlist"
+    /// submenu, which egui labels with a disclosure arrow because it is a submenu
+    /// INSIDE a menu. The popup is its parent, so the search that follows is
+    /// scoped to the menu and cannot reach a row's heart.
+    fn menu_item<'a>(shell: &'a Shell, anchor: &'a str, label: &'a str) -> egui_kittest::Node<'a> {
+        within(
+            shell.harness.get_by_label(anchor),
+            "the open Track menu",
+            label,
+        )
+    }
+
+    /// The menu's Favourite item, chosen for real in the real app, commits the
+    /// SAME durable flag the heart commits — and it survives a restart, so a
+    /// Favourite is one fact however it was set.
+    ///
+    /// Both paths are driven over the same Application Store, from the same
+    /// shell the heart's own durable test uses: one Track Favourited from its
+    /// menu, one from its heart, then the store is closed and reopened and both
+    /// flags are read back. That is the acceptance criterion stated as a fact
+    /// about the database rather than about two calls, and the menu's item is
+    /// reached through [`menu_item`] so the click lands in the menu and not on
+    /// the heart that wears the same words.
+    #[test]
+    fn test_favouriting_from_the_menu_and_the_heart_commit_the_same_durable_flag() {
+        use riff_backend::domain::SmartPlaylistKind;
+
+        /// The label egui gives the Track menu's "Add to Playlist" submenu once
+        /// it is rendered inside a menu: the wording plus a disclosure arrow.
+        const MENU_SUBMENU: &str = "Add to Playlist \u{23f5}";
+
+        let (mut shell, dir, _pid, store) = store_shell();
+        shell.harness.step();
+        let alpha = dir.path().join("one.mp3");
+        let beta = dir.path().join("two.mp3");
+
+        // --- from the menu ---
+        shell
+            .harness
+            .get_by_label("Artist - Alpha")
+            .click_secondary();
+        // Two settling frames before the item is located. A node is a rectangle
+        // captured from one frame, and the popup's own geometry is only settled
+        // on the frame after it opens: clicking a row captured from the opening
+        // frame aims at a rectangle the popup has since moved out of, and the
+        // click then lands beside the menu and only dismisses it — which looks
+        // exactly like an item that does nothing. (The Tracks Column menu test
+        // settles for the same reason.)
+        shell.harness.step();
+        shell.harness.step();
+        menu_item(&shell, MENU_SUBMENU, "Add to Favorites").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // --- from the heart, on the row beside it ---
+        //
+        // The heart of ONE named row, found inside that row's own container, so
+        // the two paths provably touched two different Tracks: a listing of three
+        // identical hearts would otherwise let the heart click land on whichever
+        // row the tree listed first, and this test would be asserting a pair
+        // without saying which pair.
+        within(
+            shell.harness.get_by_label("Artist - Beta"),
+            "Beta's row",
+            "Add to Favorites",
+        )
+        .click();
+        shell.harness.step();
+        shell.harness.step();
+
+        let favourited = |store: &riff_infra::store::SqliteStore| -> Vec<PathBuf> {
+            store
+                .smart_playlist(SmartPlaylistKind::Favorites, usize::MAX)
+                .expect("the Favorites smart list reads")
+                .iter()
+                .map(|t| t.file_path.clone())
+                .collect()
+        };
+        assert_eq!(
+            favourited(&store),
+            vec![alpha.clone(), beta.clone()],
+            "the menu's item and the heart committed the same flag to the same two Tracks — \
+             one each, and no Track committed twice"
+        );
+        assert_eq!(
+            shell
+                .harness
+                .query_all_by_label("Remove from Favorites")
+                .count(),
+            2,
+            "and both rows re-render with the committed flag, through the heart each row \
+             already wore"
+        );
+
+        // Durability: the same flags after the store is closed and reopened, which
+        // is the only thing that makes them a promise rather than a frame's state.
+        let db_path = dir.path().join("riff.sqlite3");
+        drop(shell);
+        drop(store);
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let reopened = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("reopening the store must work");
+        assert_eq!(
+            favourited(&reopened),
+            vec![alpha, beta],
+            "a Favourite set from the menu and one set from the heart both survive a restart"
         );
     }
 
@@ -15902,67 +16015,6 @@ mod whole_frame_tests {
         assert!(
             shell.harness.query_by_label("All genres").is_none(),
             "no genre chip row renders on the Albums root"
-        );
-    }
-
-    /// The Tracks column's Play all under a query starts exactly the shown
-    /// (filtered) rows — pinned through the recorded transport.
-    #[test]
-    fn test_album_header_play_all_starts_the_shown_filtered_rows() {
-        use riff_backend::app::state::{BrowserSelection, LibrarySection};
-
-        let (mut shell, transport) = recording_transport_shell(MockLibraryQueryStore {
-            albums: vec![album("Geogaddi", "Boards of Canada", 2002)],
-            album_tracks: vec![
-                track("g1.mp3", "Ready Let's Go"),
-                track("g2.mp3", "Music Is Math"),
-            ],
-            album_hit_tracks: vec![track("g2.mp3", "Music Is Math")],
-            matching_searches: vec!["math".to_string()],
-            ..Default::default()
-        });
-        {
-            let mut library = shell.library.lock_or_recover();
-            library.library_section = LibrarySection::Albums;
-            library.search_query = "math".to_string();
-            library.browser_path = vec![BrowserSelection::Album {
-                artist: "Boards of Canada".to_string(),
-                title: "Geogaddi".to_string(),
-            }];
-        }
-        shell.harness.step();
-
-        assert!(
-            shell.harness.query_by_label("Music Is Math").is_some(),
-            "the filtered Tracks column shows only the hit track"
-        );
-        assert!(
-            shell.harness.query_by_label("Ready Let's Go").is_none(),
-            "the filtered Tracks column hides the non-hit track"
-        );
-
-        shell.harness.get_by_label("Play all").click();
-        shell.harness.step();
-        shell.harness.step();
-
-        let intents = transport.recorded();
-        let batches: Vec<_> = intents
-            .iter()
-            .filter(|i| matches!(i, crate::mocks::TransportIntent::PlayMany(..)))
-            .collect();
-        assert_eq!(
-            batches.len(),
-            1,
-            "Play all emits exactly one batch: {intents:?}"
-        );
-        assert!(
-            matches!(
-                batches[0],
-                crate::mocks::TransportIntent::PlayMany(first, rest)
-                    if first == &riff_backend::domain::TrackId("g2.mp3".to_string())
-                        && rest.is_empty()
-            ),
-            "the batch starts the FIRST shown (filtered) row and nothing else: {intents:?}"
         );
     }
 
@@ -16707,6 +16759,47 @@ mod whole_frame_tests {
         }
     }
 
+    /// A library whose Albums root lists one real album with two real tracks, so
+    /// a row is right-clickable in a composed frame and its batch is observable.
+    ///
+    /// Note what the mock does NOT do: `album_tracks` ignores the album it is
+    /// asked for and serves this canned pair, so an album's batch in these
+    /// tests is "what was seeded" and not a per-album read. That is what makes
+    /// an entity row right-clickable here at all, and it is why genre-scoping
+    /// and per-key resolution are proved at the applier seam instead, where a
+    /// mock is cheap enough to seed per entity kind.
+    fn album_row_mock() -> MockLibraryQueryStore {
+        let geogaddi = riff_backend::domain::Album {
+            artist: "Boards of Canada".to_string(),
+            title: "Geogaddi".to_string(),
+            tracks: vec![TrackId("g1".to_string()), TrackId("g2".to_string())],
+            year: Some(2002),
+            genre: Some("IDM".to_string()),
+        };
+        MockLibraryQueryStore {
+            // The Albums root's listing is the paged flat window, so the ROOT
+            // needs `paged_albums`; `albums` is the per-artist table the album's
+            // own batch is read from. Both are seeded, because both are read.
+            paged_albums: vec![geogaddi.clone()],
+            albums: vec![geogaddi],
+            album_tracks: vec![
+                track("g1", "Music for Beat People"),
+                track("g2", "Iced Cooly"),
+            ],
+            genre_counts: vec![riff_backend::domain::GenreCount {
+                genre: "IDM".to_string(),
+                tracks: 2,
+            }],
+            library_counts: riff_backend::app::store::LibraryCounts {
+                tracks: 2,
+                artists: 1,
+                albums: 1,
+                genres: 1,
+            },
+            ..Default::default()
+        }
+    }
+
     /// Scroll the harness's visible list downward until `target` renders or
     /// the step budget runs out. The anchor re-probes rows every 10 slots,
     /// so one is always in the ~15-row visible window (the concurrent
@@ -16759,6 +16852,916 @@ mod whole_frame_tests {
             })
             .collect();
         mock
+    }
+
+    /// The composed assertion no other seam can make: a REAL secondary click on
+    /// a REAL entity row, in a real app over the real store seam, both opens
+    /// the menu and moves the session. The widget seam proves a menu opens and
+    /// reports; the applier seam proves a report is applied; only here do the
+    /// egui right-click gesture, the row's response, and the session state meet.
+    /// A suite without this would still pass if the row attached a left-click
+    /// only handler.
+    ///
+    /// The batch it acts on is "whatever you seeded", not a per-album read:
+    /// `MockLibraryQueryStore`'s `album_tracks` ignores its arguments and serves
+    /// the canned list, which is exactly what makes an entity row right-clickable
+    /// in a composed test at all. Genre-scoping is proved at the applier seam,
+    /// where it costs one mock instead of a second composed shell.
+    #[test]
+    fn test_a_secondary_click_on_an_album_row_opens_the_menu_and_moves_the_selection() {
+        use riff_backend::app::state::{BrowserSelection, LibrarySection};
+
+        let (mut shell, transport) = recording_transport_shell(album_row_mock());
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Albums;
+        }
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label("Geogaddi (Boards of Canada · 2002)")
+                .is_some(),
+            "the Albums root lists the seeded album"
+        );
+        {
+            let library = shell.library.lock_or_recover();
+            assert!(
+                library.browser_path.is_empty(),
+                "nothing is selected before the right-click"
+            );
+        }
+        // Baseline: the app's own first-frame hydration (a volume clamp) is not
+        // something the gesture caused, so the assertions below are about what
+        // the CLICK added to the record.
+        let before = transport.recorded().len();
+
+        shell
+            .harness
+            .get_by_label("Geogaddi (Boards of Canada · 2002)")
+            .click_secondary();
+        shell.harness.step();
+
+        assert!(
+            shell.harness.query_by_label("Play Next").is_some(),
+            "a real secondary click on a real row opens the collection menu. \
+             'Play Next' is the probe because that wording lives only in the two \
+             menu renderers, and of those only this one is open in the frame: the \
+             player bar says 'Next track', the Tracks column's album header is a \
+             readout with no action of its own, and a Track's own menu is not open"
+        );
+        let library = shell.library.lock_or_recover();
+        assert_eq!(
+            library.browser_path,
+            vec![BrowserSelection::Album {
+                artist: "Boards of Canada".to_string(),
+                title: "Geogaddi".to_string(),
+            }],
+            "and moves the browser path onto that Album, so the Detail Panel and the \
+             menu describe the same entity"
+        );
+        drop(library);
+        assert_eq!(
+            transport.recorded()[before..],
+            Vec::<TransportIntent>::new(),
+            "a right-click changes only the selection: the frame it happened in sent \
+             the transport nothing at all. The baseline is taken BEFORE the click \
+             because the app's first frame hydrates its volume, and this is about \
+             what the CLICK added, not about what the app ever sends"
+        );
+    }
+
+    /// The negative half of the same gesture, at the same seam: a right-click
+    /// that CHOOSES an item acts on the entity, as a batch, and the selection it
+    /// carried is still the right one. Play Next and Shuffle reach the transport
+    /// the same way and are pinned at the applier seam.
+    #[test]
+    fn test_choosing_an_item_on_an_entity_row_acts_on_the_batch_in_one_frame() {
+        use riff_backend::app::state::{BrowserSelection, LibrarySection};
+        use riff_backend::domain::TrackId;
+
+        let (mut shell, transport) = recording_transport_shell(album_row_mock());
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Albums;
+        }
+        shell.harness.step();
+        shell
+            .harness
+            .get_by_label("Geogaddi (Boards of Canada · 2002)")
+            .click_secondary();
+        shell.harness.step();
+        shell.harness.step();
+        let before = transport.recorded().len();
+        // "Add to Queue" is this collection menu's own item, and in this frame it
+        // is the only node wearing that label: the Detail Panel is a readout and
+        // carries no action buttons of its own, so nothing in the window's
+        // contents competes with the popup for the query.
+        // Getting this wrong is not a silent pass — the assertion below expects
+        // one AddMany, and a per-Track control would send a fan-out instead.
+        shell
+            .harness
+            .query_all_by_label("Add to Queue")
+            .last()
+            .expect("the open menu offers Add to Queue")
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+
+        assert_eq!(
+            &transport.recorded()[before..],
+            &[TransportIntent::AddMany(vec![
+                TrackId("g1".to_string()),
+                TrackId("g2".to_string()),
+            ])],
+            "the whole collection is queued as ONE batch in the frame the item was \
+             chosen — not a command per Track: {:?}",
+            transport.recorded()
+        );
+        let library = shell.library.lock_or_recover();
+        assert_eq!(
+            library.browser_path,
+            vec![BrowserSelection::Album {
+                artist: "Boards of Canada".to_string(),
+                title: "Geogaddi".to_string(),
+            }],
+            "and the row the menu was opened on is still the selection"
+        );
+    }
+
+    /// The negative twin, and the proof that the scope boundary is a boundary:
+    /// a playlist header carries the SAME four items and NONE of the selection
+    /// behaviour. Right-clicking it acts on the playlist and does not select,
+    /// open, or navigate anything — which is the whole reason entity rows were
+    /// scoped to rows rather than applied globally. Asserted on the session, in
+    /// a real frame, after a real secondary click: the path is still empty and
+    /// the stage is still the playlist it was showing.
+    #[test]
+    fn test_a_secondary_click_on_a_playlist_header_acts_without_selecting_it() {
+        use riff_backend::app::state::{BrowserSelection, ViewMode};
+
+        let (mut shell, _dir, _pid, _store) = store_shell();
+        shell.harness.step();
+        shell.harness.get_by_label("Gym").click();
+        shell.harness.step();
+
+        // The playlist is on screen and nothing else is selected.
+        {
+            let library = shell.library.lock_or_recover();
+            assert!(
+                library.browser_path.is_empty(),
+                "a playlist view selects no browser entity"
+            );
+        }
+
+        // The playlist VIEW's header, not the sidebar's row: both read "Gym", so
+        // the header is named by ROLE — a heading is a Label, the sidebar row is a
+        // Button. It is the header the whole-list menu rides on.
+        shell
+            .harness
+            .get_by_role_and_label(egui::accesskit::Role::Label, "Gym")
+            .click_secondary();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("Play Next").is_some(),
+            "the header's menu is the same four-item collection menu — 'Play Next' \
+             is the unambiguous probe, since the player bar says 'Next track' and \
+             nothing else in a playlist view offers it"
+        );
+        shell.harness.get_by_label("Play Next").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        let library = shell.library.lock_or_recover();
+        assert!(
+            library.browser_path.is_empty(),
+            "acting on a header did NOT select it: a header has no readout for a \
+             selection to stay consistent with"
+        );
+        assert!(
+            library.selected_track.is_none(),
+            "and it selected no Track either"
+        );
+        assert_eq!(
+            library.view_mode,
+            ViewMode::Library,
+            "and it did not navigate away from the view the listener was on"
+        );
+        drop(library);
+        assert!(
+            shell.harness.query_by_label("Artist - Alpha").is_some(),
+            "the playlist's own rows are still the ones on screen — the header was \
+             acted on, not opened"
+        );
+
+        // The negative twin of the twin: the same assertion shape on an ENTITY
+        // row, so a regression that taught HEADERS to select would break the
+        // assertions above, and one that taught ROWS to stop selecting would
+        // break this one. The two gestures differ in exactly this, which is what
+        // makes the boundary worth pinning.
+        let (mut shell, transport) = recording_transport_shell(album_row_mock());
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = riff_backend::app::state::LibrarySection::Albums;
+        }
+        shell.harness.step();
+        let before = transport.recorded().len();
+        shell
+            .harness
+            .get_by_label("Geogaddi (Boards of Canada · 2002)")
+            .click_secondary();
+        shell.harness.step();
+        let library = shell.library.lock_or_recover();
+        assert_eq!(
+            library.browser_path,
+            vec![BrowserSelection::Album {
+                artist: "Boards of Canada".to_string(),
+                title: "Geogaddi".to_string(),
+            }],
+            "an ENTITY row's right-click does select — the two gestures differ only \
+             in that, which is what makes the boundary worth pinning"
+        );
+        drop(library);
+        assert_eq!(
+            transport.recorded()[before..],
+            Vec::<TransportIntent>::new(),
+            "and an entity right-click still starts no playback, exactly as a \
+             header's does: the selection is the ONLY thing either gesture changes"
+        );
+    }
+
+    /// A Track row's right-click, at the one seam a real gesture can reach: a
+    /// REAL secondary click on a REAL row in the real flat list that both opens
+    /// the Track's menu and makes that Track the selection. The widget seam
+    /// proves a menu opens and reports; the applier seam proves a report is
+    /// applied; only here do the egui right-click gesture, the row's response,
+    /// and the session state meet. A suite without this would still pass if the
+    /// row attached a left-click-only handler.
+    ///
+    /// Search results are the SAME list under a query — the same rows through
+    /// the same renderer — so both surfaces are driven from one test on two
+    /// shells rather than from a second invented one. The two halves are on
+    /// separate shells so neither is reading a selection the other's still-open
+    /// popup could have written.
+    #[test]
+    fn test_a_secondary_click_on_a_track_row_opens_its_menu_and_selects_the_track() {
+        use riff_backend::app::state::LibrarySection;
+        use riff_backend::domain::TrackId;
+
+        let beta = TrackId("b.mp3".to_string());
+        let flat = || MockLibraryQueryStore {
+            flat: vec![track("a.mp3", "Alpha"), track("b.mp3", "Beta")],
+            search: vec![track("b.mp3", "Beta")],
+            matching_searches: vec!["bet".to_string()],
+            ..Default::default()
+        };
+
+        // ---- the unqueried All Tracks list ----
+        let (mut shell, transport) = recording_transport_shell(flat());
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::AllTracks;
+        }
+        shell.harness.step();
+        assert!(
+            shell.library.lock_or_recover().selected_track.is_none(),
+            "no Track is selected before the right-click"
+        );
+        // Baseline taken BEFORE the click: the app's first frame hydrates its
+        // volume, and this is about what the CLICK added to the record.
+        let before = transport.recorded().len();
+
+        shell
+            .harness
+            .get_by_label("Artist - Beta")
+            .click_secondary();
+        shell.harness.step();
+
+        assert!(
+            shell.harness.query_by_label("Play Next").is_some(),
+            "a real secondary click on a real row opens the Track's own menu. 'Play Next' \
+             is the probe because the player bar says 'Next track' and no other menu is \
+             open in this frame"
+        );
+        assert_eq!(
+            shell.library.lock_or_recover().selected_track,
+            Some(beta.clone()),
+            "and makes that Track the selection, so the Detail Panel describes the same \
+             Track the menu acts on"
+        );
+        assert_eq!(
+            transport.recorded()[before..],
+            Vec::<TransportIntent>::new(),
+            "a right-click is never a left-click: the frame it happened in sent the \
+             transport nothing at all"
+        );
+
+        // ---- the same list under a query: a search result ----
+        let (mut shell, transport) = recording_transport_shell(flat());
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::AllTracks;
+            library.search_query = "bet".to_string();
+        }
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("Artist - Alpha").is_none(),
+            "the query narrowed the list, so the row about to be clicked really is a \
+             search result and not the same row seen twice"
+        );
+        let before = transport.recorded().len();
+
+        shell
+            .harness
+            .get_by_label("Artist - Beta")
+            .click_secondary();
+        shell.harness.step();
+
+        assert!(
+            shell.harness.query_by_label("Play Next").is_some(),
+            "a search result is the same row under a query, and opens the same menu"
+        );
+        assert_eq!(
+            shell.library.lock_or_recover().selected_track,
+            Some(beta),
+            "and selects the same way, so search results are not a second-class \
+             right-click"
+        );
+        assert_eq!(
+            transport.recorded()[before..],
+            Vec::<TransportIntent>::new(),
+            "and a search result's right-click starts no playback either"
+        );
+    }
+
+    /// The other two Track rows, on the surfaces that are not a list. A Track
+    /// under a folder node and a Track in a Smart Playlist are right-clicked
+    /// through their own renderers and their own loops, and both must answer
+    /// exactly as the flat list does.
+    ///
+    /// Composed rather than assumed, and deliberately so: all four surfaces
+    /// reach one `attach_track_menu`, which proves the APPLIER is shared but
+    /// says nothing about whether each site handed that applier a response able
+    /// to sense a secondary click at all. Attaching a menu to a response that
+    /// only hovers is invisible until a right-click, and then the menu is simply
+    /// absent — the failure this file already documents for a list header. One
+    /// real click per surface is the only thing that rules it out.
+    #[test]
+    fn test_a_secondary_click_on_a_folders_and_a_smart_playlists_track_selects_it() {
+        use riff_backend::app::state::BrowseMode;
+        use riff_backend::domain::TrackId;
+
+        // ---- a Track under a folder node ----
+        let (mut shell, transport) = recording_transport_shell(MockLibraryQueryStore {
+            folder_has_audio: true,
+            folder_direct_tracks: vec![track("t1.mp3", "Ready Let's Go")],
+            ..Default::default()
+        });
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.browse_mode = BrowseMode::Folders;
+            library
+                .library_paths
+                .hydrate(&riff_backend::app::store::Settings {
+                    library_paths: vec![PathBuf::from("/music")],
+                    ..Default::default()
+                });
+        }
+        shell.harness.step();
+        // Folder nodes are collapsed by default, so the body — and the Tracks
+        // in it — only exist once the node is open.
+        shell.harness.get_by_label("music").click();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("0. Ready Let's Go").is_some(),
+            "the open folder node lists the Tracks directly in it"
+        );
+        let before = transport.recorded().len();
+
+        shell
+            .harness
+            .get_by_label("0. Ready Let's Go")
+            .click_secondary();
+        shell.harness.step();
+
+        assert!(
+            shell.harness.query_by_label("Play Next").is_some(),
+            "a right-click on a folder's own Track opens that Track's menu — not the \
+             folder's whole-list menu, which is what the node row above it carries"
+        );
+        assert_eq!(
+            shell.library.lock_or_recover().selected_track,
+            Some(TrackId("t1.mp3".to_string())),
+            "and selects the Track. The node itself stays a pure peek: right-clicking a \
+             Track inside a folder is a Track action, and browsing the Library Path is \
+             unaffected by it"
+        );
+        assert_eq!(
+            transport.recorded()[before..],
+            Vec::<TransportIntent>::new(),
+            "and still starts no playback"
+        );
+
+        // ---- a Track in a Smart Playlist ----
+        let (mut shell, transport) = recording_transport_shell(MockLibraryQueryStore {
+            smart: vec![track("s1.mp3", "Sunrise")],
+            smart_list_counts: vec![(riff_backend::domain::SmartPlaylistKind::RecentlyAdded, 1)],
+            ..Default::default()
+        });
+        shell.harness.step();
+        // Opened from the sidebar, as a listener does. The row's accessible
+        // label folds in its count, exactly as the sidebar paints it.
+        shell.harness.get_by_label("Recently Added (1)").click();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("Artist - Sunrise").is_some(),
+            "the Smart Playlist lists its generated Tracks"
+        );
+        let before = transport.recorded().len();
+
+        shell
+            .harness
+            .get_by_label("Artist - Sunrise")
+            .click_secondary();
+        shell.harness.step();
+
+        assert!(
+            shell.harness.query_by_label("Play Next").is_some(),
+            "a right-click on a Smart Playlist's Track opens that Track's menu — not the \
+             header's whole-list menu, which offers its own four"
+        );
+        assert_eq!(
+            shell.library.lock_or_recover().selected_track,
+            Some(TrackId("s1.mp3".to_string())),
+            "and selects that Track, exactly as the flat list and the folder's did"
+        );
+        assert_eq!(
+            transport.recorded()[before..],
+            Vec::<TransportIntent>::new(),
+            "and still starts no playback"
+        );
+    }
+
+    /// The one Track surface that had NO menu at all, proved at the only seam a
+    /// real gesture can reach: a REAL secondary click on a REAL row of the
+    /// Tracks Column, in the real app, both opens the Track's menu and makes
+    /// that Track the selection.
+    ///
+    /// This is new coverage for a surface that carried no menu, so it is the
+    /// assertion that cannot be made at either other seam. The widget seam
+    /// proves a row reports a menu; the applier seam proves a report is
+    /// applied. Neither says whether the Tracks Column's row handed the popup a
+    /// response able to sense a secondary click at all — and a row painted
+    /// through a custom painter is exactly the shape this file already records
+    /// as unable to open a menu. Attaching one to a hover-only response is
+    /// invisible until a listener right-clicks, and then the menu is simply
+    /// absent, which is how that bug shipped once already. Only a real click
+    /// rules it out.
+    #[test]
+    fn test_a_secondary_click_on_a_tracks_column_row_opens_the_track_menu_and_selects_the_track() {
+        use riff_backend::app::state::LibrarySection;
+        use riff_backend::domain::TrackId;
+
+        let (mut shell, transport) = recording_transport_shell(album_row_mock());
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Albums;
+        }
+        shell.harness.step();
+        // Drill the way a listener does: the album's row in the Albums column
+        // opens the Tracks column beside it.
+        shell
+            .harness
+            .get_by_label("Geogaddi (Boards of Canada \u{b7} 2002)")
+            .click();
+        shell.harness.step();
+        // Two frames past the click, as the drill tests do: the click's frame
+        // applies the path, the next one re-plans the stage and paints the
+        // Tracks column, and the frame after settles it.
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("Iced Cooly").is_some(),
+            "the album's own track rows render in the Tracks column; path={:?}",
+            shell.library.lock_or_recover().browser_path
+        );
+        assert!(
+            shell.library.lock_or_recover().selected_track.is_none(),
+            "and no Track is selected before the right-click"
+        );
+        // The album's two rows each carry a heart, and neither Track is a
+        // Favourite, so this counts HEARTS only — the baseline the menu's own
+        // Favourite item is measured against below.
+        let hearts = shell.harness.query_all_by_label("Add to Favorites").count();
+        assert_eq!(hearts, 2, "both rows carry a heart, both un-Favourited");
+        // Baseline taken BEFORE the click: the app's first frame hydrates its
+        // volume, and this is about what the CLICK added to the record.
+        let before = transport.recorded().len();
+
+        shell.harness.get_by_label("Iced Cooly").click_secondary();
+        shell.harness.step();
+
+        // The Favourite item is counted rather than probed for PRESENCE, because
+        // the row's heart wears the same label: one more "Add to Favorites" node
+        // is the menu's item and nothing else could be.
+        assert_eq!(
+            shell.harness.query_all_by_label("Add to Favorites").count(),
+            hearts + 1,
+            "and the Tracks Column's own menu carries the Favourite item, worded for the \
+             Track it belongs to"
+        );
+        // The FULL Track menu, identified by the rows no other surface in this
+        // frame owns. "Play" is NOT a probe — the transport bar wears that
+        // label — and "Add to Queue" is not either: the two menu renderers are
+        // the only places in the app that print it, the Detail Panel being a
+        // readout with no action buttons of its own. "Play Next" lives in those
+        // same two menu renderers, "Edit Tags" only in the Track one, and a
+        // collection or whole-list menu would answer "Shuffle" where the Track
+        // menu answers "Edit Tags". The playlist target is probed with the label
+        // egui gives a submenu button INSIDE a menu, which appends its
+        // disclosure arrow.
+        for label in ["Play Next", "Edit Tags", "Add to Playlist \u{23f5}"] {
+            assert!(
+                shell.harness.query_by_label(label).is_some(),
+                "a right-click on a Tracks column row opens the Track's own menu, and \
+                 '{label}' is missing from it"
+            );
+        }
+        for absent in ["Shuffle", "Remove from Playlist"] {
+            assert!(
+                shell.harness.query_by_label(absent).is_none(),
+                "and the menu is the TRACK menu, not a collection one: it offers no \
+                 '{absent}' — a Track in the Tracks Column is in no Playlist"
+            );
+        }
+        assert_eq!(
+            shell.library.lock_or_recover().selected_track,
+            Some(TrackId("g2".to_string())),
+            "and it makes that Track the selection, so the menu and the Detail Panel \
+             describe the same Track"
+        );
+        // The accepted rough edge rides on that selection, and its readout
+        // consequence is pinned where it can be observed: the pure resolver
+        // already has a test saying a Track selected in an album's Tracks
+        // column wins over the album in the drill path
+        // (`resolve_inspector`'s Track case). It is not re-asserted here
+        // because this harness cannot see it — the Detail Panel's kind chip and
+        // title are `ui.label` text, and the eframe-backed harness exposes no
+        // label for those (the same reason the breadcrumb is unreachable by
+        // label here). The selection above is the fact this column controls.
+        assert_eq!(
+            transport.recorded()[before..],
+            Vec::<TransportIntent>::new(),
+            "a right-click is never a left-click: the frame it happened in sent the \
+             transport nothing at all"
+        );
+
+        // And the item chosen from it produces the SAME effect a flat-list
+        // row's does — one dispatch, through the one applier, in the frame the
+        // item was chosen. "Play Next" is the probe precisely because it is
+        // the one menu row no button outside a menu wears: the transport bar
+        // says "Next track", and the Detail Panel — a readout with no action
+        // buttons — does not wear it at all.
+        //
+        // One settling frame first: the frame the menu OPENS both reports the
+        // open and moves the selection, and the popup's own geometry is only
+        // settled on the frame after it. Clicking a node captured from the
+        // opening frame aims at a rectangle the popup has since moved out of,
+        // and the click then lands outside the menu and dismisses it — which
+        // looks exactly like "the item does nothing".
+        shell.harness.step();
+        let before = transport.recorded().len();
+        shell.harness.get_by_label("Play Next").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        assert_eq!(
+            &transport.recorded()[before..],
+            &[TransportIntent::PlayNext(TrackId("g2".to_string()))],
+            "choosing an item on a Tracks column row acts on that Track exactly as \
+             choosing the same item on a flat-list row does, not through a second \
+             dispatch of its own: {:?}",
+            transport.recorded()
+        );
+    }
+
+    /// The three gestures a Tracks Column row already spoke, on the rows that
+    /// just gained a fourth. The menu is a new attach on the same response
+    /// those gestures are read off, so each is pinned from the outside — the
+    /// only place where "the menu quietly took the click" would show up as
+    /// something other than a missing report.
+    ///
+    /// A single click still selects and still starts no playback, and a double
+    /// click still selects AND plays. The pair is asserted together because
+    /// either alone would be ambiguous: a selection proof that let playback
+    /// through would pass for the wrong reason, and a playback proof on a row
+    /// that selected nothing would say nothing about the selection.
+    #[test]
+    fn test_a_tracks_column_row_still_selects_on_one_click_and_plays_on_two() {
+        use riff_backend::app::state::LibrarySection;
+        use riff_backend::domain::TrackId;
+
+        // ---- one click: selects, and nothing else ----
+        let (mut shell, transport) = recording_transport_shell(album_row_mock());
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Albums;
+        }
+        shell.harness.step();
+        shell
+            .harness
+            .get_by_label("Geogaddi (Boards of Canada \u{b7} 2002)")
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+        let before = transport.recorded().len();
+
+        shell.harness.get_by_label("Iced Cooly").click();
+        shell.harness.step();
+
+        assert_eq!(
+            shell.library.lock_or_recover().selected_track,
+            Some(TrackId("g2".to_string())),
+            "a single click on a Tracks column row still selects the Track"
+        );
+        assert_eq!(
+            transport.recorded()[before..],
+            Vec::<TransportIntent>::new(),
+            "and still starts no playback: the menu's attach did not turn the row's \
+             primary click into something else"
+        );
+
+        // ---- two clicks: selects AND plays ----
+        let (mut shell, transport) = recording_transport_shell_at_step(album_row_mock(), FAST_STEP);
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Albums;
+        }
+        shell.harness.step();
+        shell
+            .harness
+            .get_by_label("Geogaddi (Boards of Canada \u{b7} 2002)")
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+        let before = transport.recorded().len();
+
+        // The position is captured once, before the click, because the first
+        // click of a double-click is also a selection: it re-resolves the
+        // Detail Panel, and re-querying the row for the second click would aim
+        // at a point the pointer had never been. See [`double_click_at`].
+        let at = shell.harness.get_by_label("Iced Cooly").rect().center();
+        double_click_at(&mut shell.harness, at, FAST_STEP);
+        shell.harness.step();
+
+        let g2 = TrackId("g2".to_string());
+        assert_eq!(
+            shell.library.lock_or_recover().selected_track,
+            Some(g2.clone()),
+            "a double-click on a Tracks column row still selects the Track"
+        );
+        assert_eq!(
+            &transport.recorded()[before..],
+            &[TransportIntent::Play(g2)],
+            "and still plays it: one dispatch, from the click path and not from the \
+             menu. {:?}",
+            transport.recorded()
+        );
+    }
+
+    /// The heart on a Tracks Column row, on a real `SQLite` store, so
+    /// "Favouriting from this Column is unaffected" is a durable fact and not a
+    /// repainted label. The menu is a SECOND path to the same change (the
+    /// heart is the first, and issue 03 gives the menu a third), so the row
+    /// keeps its own control and this is what pins that.
+    #[test]
+    fn test_the_heart_on_a_tracks_column_row_still_commits_a_favourite_durably() {
+        use riff_backend::app::state::LibrarySection;
+        use riff_backend::domain::TrackId;
+
+        let (mut shell, dir, _pid, store) = store_shell();
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Albums;
+        }
+        shell.harness.step();
+        shell.harness.get_by_label("Album (Artist)").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("Alpha").is_some(),
+            "the album's tracks render in the Tracks column"
+        );
+        let alpha = TrackId(dir.path().join("one.mp3").to_string_lossy().into_owned());
+        // Every row carries a heart and the seeded album is entirely
+        // un-Favourited, so three nodes wear this label. The one on Alpha's OWN
+        // row is located by the row it shares a line with — a locator, not an
+        // assertion: the assertion below names the track, so clicking the
+        // wrong heart would fail loudly rather than quietly pass.
+        let alpha_y = shell.harness.get_by_label("Alpha").rect().center().y;
+        let heart = shell
+            .harness
+            .query_all_by_label("Add to Favorites")
+            .find(|node| float_close(node.rect().center().y, alpha_y))
+            .expect("Alpha's row carries its own heart");
+        heart.click();
+        shell.harness.step();
+
+        assert!(
+            store
+                .get_track(&alpha)
+                .expect("the query works")
+                .expect("the track is still known")
+                .favorite,
+            "the row's heart committed the flag through the store, from the Tracks \
+             column, durably"
+        );
+        // And the row paints the new state, which is the generation bump the
+        // committed mutation made on its own — the next frame's read, with no
+        // caller action.
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label("Remove from Favorites")
+                .is_some(),
+            "and the row's own control now offers to take the Favourite back"
+        );
+    }
+
+    /// The one Track row whose menu is deliberately reduced, and the reason it
+    /// still selects. A playlist entry whose file has gone missing offers
+    /// neither a playback action nor the tag editor, because it cannot play —
+    /// that reduction is a separate decision about what the menu CONTAINS, and it
+    /// is the Favourite item's condition too, so the reduced menu is pinned whole
+    /// rather than by absence. What the row IS is unchanged: a Track in a
+    /// playlist, with a readout to keep consistent, so its right-click selects
+    /// exactly as every other Track row's does.
+    ///
+    /// Both halves are asserted together because either alone would be
+    /// ambiguous — a selection proof that let the full menu through would pass
+    /// for the wrong reason, and a reduction proof on a row that selected
+    /// nothing would say nothing about the selection.
+    #[test]
+    fn test_a_right_click_on_a_missing_playlist_entry_selects_it_and_keeps_its_reduced_menu() {
+        use riff_backend::domain::TrackId;
+
+        let (mut shell, dir, _pid, mut store) = store_shell();
+        // The file goes, then a commit moves the generation so the open
+        // playlist's projection re-resolves and re-runs its read-time
+        // filesystem check — which is what turns a valid row into a missing
+        // one. The entry keeps its identity throughout: the track row is still
+        // in the store, only the file behind it is not.
+        std::fs::remove_file(dir.path().join("two.mp3")).expect("the scratch file goes");
+        store
+            .create_playlist("Scratch", &[])
+            .expect("the committing write moves the generation");
+
+        shell.harness.step();
+        shell.harness.get_by_label("Gym").click();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("two (missing)").is_some(),
+            "the entry whose file went missing is flagged rather than dropped"
+        );
+        assert!(
+            shell.library.lock_or_recover().selected_track.is_none(),
+            "and nothing is selected before the right-click"
+        );
+
+        shell
+            .harness
+            .get_by_label("two (missing)")
+            .click_secondary();
+        shell.harness.step();
+
+        // The reduced menu first: this Track cannot play, so it is offered no
+        // playback action and no tag editor. 'Play Next' is the probe because
+        // the player bar says 'Next track'.
+        assert!(
+            shell.harness.query_by_label("Play Next").is_none(),
+            "a Track whose file is gone still offers no playback action"
+        );
+        assert!(
+            shell.harness.query_by_label("Edit Tags").is_none(),
+            "nor the tag editor"
+        );
+        // The reduced menu is pinned WHOLE, from inside the open popup, because
+        // the other two entries in this playlist are valid and each wears a
+        // heart: a flat query for "Add to Favorites" would find THEIR controls
+        // and answer the wrong question. The exclusion being asked about is the
+        // Favourite item, and it is the same condition the other two are on —
+        // which is the heart's, since an entry whose file is gone is drawn as a
+        // flagged label with no heart on it.
+        use egui_kittest::kittest::NodeT;
+        let rows: Vec<String> = shell
+            .harness
+            .get_by_label("Remove from Playlist")
+            .parent()
+            .expect("the open menu is a popup in the tree")
+            .children_recursive()
+            .map(|node| node.accesskit_node().label().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(
+            rows,
+            vec!["Remove from Playlist"],
+            "the reduced menu is exactly the removal and nothing else — no playback, no tag \
+             editor, and no Favourite in either wording"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("Remove from Playlist")
+                .is_some(),
+            "but it can still be taken out of the Playlist, which is all it can do"
+        );
+        assert_eq!(
+            shell.library.lock_or_recover().selected_track,
+            Some(TrackId(
+                dir.path().join("two.mp3").to_string_lossy().into_owned()
+            )),
+            "and the row still selected: the readout describes the same Track the menu \
+             acts on, whatever the menu is willing to offer"
+        );
+    }
+
+    /// The gesture this change is most at risk of costing. A Track row's
+    /// double-click still selects AND plays, in the flat list and in a Smart
+    /// Playlist. Right-click selecting rides the menu's own report and touches
+    /// neither the click path nor the double-click path; this says so from the
+    /// outside, where the only thing that can.
+    #[test]
+    fn test_double_clicking_a_track_row_still_selects_and_plays_it() {
+        use riff_backend::app::state::LibrarySection;
+        use riff_backend::domain::{SmartPlaylistKind, TrackId};
+
+        let beta = TrackId("b.mp3".to_string());
+
+        // ---- the flat All Tracks list ----
+        let (mut shell, transport) = recording_transport_shell_at_step(
+            MockLibraryQueryStore {
+                flat: vec![track("a.mp3", "Alpha"), track("b.mp3", "Beta")],
+                ..Default::default()
+            },
+            FAST_STEP,
+        );
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::AllTracks;
+        }
+        shell.harness.step();
+        let before = transport.recorded().len();
+
+        let at = shell.harness.get_by_label("Artist - Beta").rect().center();
+        double_click_at(&mut shell.harness, at, FAST_STEP);
+        shell.harness.step();
+
+        assert_eq!(
+            shell.library.lock_or_recover().selected_track,
+            Some(beta.clone()),
+            "a double-click still selects the Track"
+        );
+        assert_eq!(
+            &transport.recorded()[before..],
+            &[TransportIntent::Play(beta.clone())],
+            "and still plays it: one dispatch, from the click path and not from the \
+             menu. {:?}",
+            transport.recorded()
+        );
+
+        // ---- a Smart Playlist ----
+        let (mut shell, transport) = recording_transport_shell_at_step(
+            MockLibraryQueryStore {
+                smart: vec![track("s1.mp3", "Sunrise")],
+                smart_list_counts: vec![(SmartPlaylistKind::RecentlyAdded, 1)],
+                ..Default::default()
+            },
+            FAST_STEP,
+        );
+        shell.harness.step();
+        shell.harness.get_by_label("Recently Added (1)").click();
+        shell.harness.step();
+        let before = transport.recorded().len();
+
+        let at = shell
+            .harness
+            .get_by_label("Artist - Sunrise")
+            .rect()
+            .center();
+        double_click_at(&mut shell.harness, at, FAST_STEP);
+        shell.harness.step();
+
+        let sunrise = TrackId("s1.mp3".to_string());
+        assert_eq!(
+            shell.library.lock_or_recover().selected_track,
+            Some(sunrise.clone()),
+            "a double-click in a Smart Playlist still selects the Track"
+        );
+        assert_eq!(
+            &transport.recorded()[before..],
+            &[TransportIntent::Play(sunrise)],
+            "and still plays it, exactly as the flat list's does"
+        );
     }
 
     #[test]
@@ -17415,20 +18418,34 @@ mod whole_frame_tests {
 // The production Track and list menus render through `ui::menu` and report
 // typed intents; every Transport, Playlist Store, selection, and Inline Tag
 // Editor effect happens afterwards, in the host's own mapping.
+//
+// Two reports and two appliers, kept apart on purpose. A menu that OPENS
+// reports its row's identity; an item CHOSEN from it reports the item. Right
+// click selecting (issue 04) rides the first — on the entity rows through
+// `apply_collection_menu`, on every Track row through `apply_track_menu_open` —
+// so a right-click that opens a menu and is then dismissed has still selected.
+// The second report is the item path, and it is unchanged by any of that.
 
 #[cfg(test)]
 mod context_menu_ui_tests {
-    use egui_kittest::kittest::Queryable;
-    use riff_backend::app::store::PlaylistStore;
+    use egui_kittest::kittest::{NodeT, Queryable};
+    use riff_backend::app::state::{
+        BrowserSelection, LibrarySection, LibrarySession, PlaybackSession,
+    };
+    use riff_backend::app::store::{LibraryMutationStore, PlaylistStore};
     use riff_backend::domain::{PlaylistId, TrackId};
     use riff_gui::ui::app::{
-        InlineTagEditor, TrackMenuEffects, apply_list_menu_intent, apply_track_menu_intent,
+        CollectionMenuEffects, InlineTagEditor, TrackMenuEffects, TrackMenuOpen,
+        apply_collection_menu, apply_list_menu_intent, apply_track_menu_intent,
+        apply_track_menu_open, entity_track_ids,
     };
     use riff_gui::ui::menu::{self, Item, ItemState, ListMenuIntent, TrackMenu, TrackMenuIntent};
     use riff_gui::ui::selection::DraftKind;
     use riff_gui::ui::theme::Palette;
 
-    use crate::mocks::{MockTagEdits, MockTransport, TransportIntent};
+    use crate::mocks::{
+        MockLibraryQueryStore, MockPlaylistStore, MockTagEdits, MockTransport, TransportIntent,
+    };
     use crate::test_utils::create_test_track_with_metadata;
 
     fn track(file: &str) -> riff_backend::domain::Track {
@@ -17475,6 +18492,47 @@ mod context_menu_ui_tests {
         std::mem::take(harness.state_mut())
     }
 
+    /// Render the collection menu and click `labels` in order, returning the
+    /// intents it emitted. The collection menu takes no props — an entity
+    /// always denotes a set of Tracks, so it has nothing to be told.
+    fn collection_menu_intents(clicks: &[&str]) -> Vec<ListMenuIntent> {
+        let palette = Palette::dark();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(240.0, 120.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, intents: &mut Vec<ListMenuIntent>| {
+                    menu::collection_menu(ui, &palette, intents);
+                },
+                Vec::new(),
+            );
+        harness.run();
+        for label in clicks {
+            harness.get_by_label(label).click();
+            harness.run();
+        }
+        std::mem::take(harness.state_mut())
+    }
+
+    /// The menu rows a renderer painted, in the accessibility tree's reading
+    /// order. Reading order is the menu's own sequence, not a pixel measurement.
+    fn menu_rows(render: impl Fn(&mut egui::Ui, &Palette) + 'static) -> Vec<String> {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(240.0, 200.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, _rows: &mut ()| {
+                    render(ui, &Palette::dark());
+                },
+                (),
+            );
+        harness.run();
+        harness
+            .query_all_by_role(egui::accesskit::Role::Button)
+            .map(|node| node.accesskit_node().label().unwrap_or_default().to_owned())
+            .collect()
+    }
+
     #[test]
     fn test_track_menu_reports_one_typed_intent_per_action() {
         let pid = PlaylistId::new("pl-1");
@@ -17482,6 +18540,7 @@ mod context_menu_ui_tests {
         let props = TrackMenu {
             playable: true,
             editable: true,
+            favorite: false,
             playlists: &options,
             remove_from_playlist: true,
         };
@@ -17514,7 +18573,17 @@ mod context_menu_ui_tests {
     }
 
     /// The menu's content policy is unchanged by the extraction: a Track whose
-    /// file is gone offers neither playback actions nor the tag editor.
+    /// file is gone offers neither playback actions nor the tag editor — and no
+    /// Favourite either, because the Favourite item sits inside the very same
+    /// `playable` branch. That is the heart's own gating read back: the heart is
+    /// painted into the row of a Track the store still resolves, and a
+    /// missing-file playlist entry is drawn as a struck-through `selectable_label`
+    /// with no heart on it at all (see `render_playlist_entry`). So the two
+    /// surfaces agree on which Tracks are Favouritable without either of them
+    /// naming the other's condition.
+    ///
+    /// Pinned whole rather than by absence, because "keeps only what it kept" is
+    /// the claim: one row, and that row is the removal.
     #[test]
     fn test_unplayable_track_menu_keeps_only_the_playlist_actions() {
         let pid = PlaylistId::new("pl-1");
@@ -17522,6 +18591,9 @@ mod context_menu_ui_tests {
         let props = TrackMenu {
             playable: false,
             editable: false,
+            // The flag is a real value here — the entry IS a Favourite in the
+            // store — and the menu still offers nothing to do about it.
+            favorite: true,
             playlists: &options,
             remove_from_playlist: true,
         };
@@ -17543,29 +18615,1056 @@ mod context_menu_ui_tests {
                 "a Track with no file offers no {absent}"
             );
         }
-        assert!(
-            harness.query_by_label("Remove from Playlist").is_some(),
-            "the entry is still there to take out"
+        for absent in ["Add to Favorites", "Remove from Favorites"] {
+            assert!(
+                harness.query_by_label(absent).is_none(),
+                "and no Favourite, in either wording: a missing-file entry's menu is not \
+                 offered one ({absent} is present)"
+            );
+        }
+        assert_eq!(
+            harness
+                .query_all_by_role(egui::accesskit::Role::Button)
+                .map(|node| node.accesskit_node().label().unwrap_or_default().to_owned())
+                .collect::<Vec<String>>(),
+            vec!["Remove from Playlist"],
+            "the entry is still there to take out, and that is the ONLY row it has"
         );
     }
 
+    /// The Favourite item, and the whole of its design in one render.
+    ///
+    /// The label flips on the Track's state, so BOTH wordings have to be right
+    /// in the SAME pass — which is why the Favourited fixture here is built by a
+    /// field set rather than by the module's `track(...)` helper: that helper is
+    /// `create_test_track_with_metadata`, which hardcodes `favorite: false`, so a
+    /// fixture taken from it could only ever have proved half the claim.
+    ///
+    /// Two menus, one pass, compared slice by slice: the second is the first
+    /// with ONE word changed, which is the whole design position — the condition
+    /// rides in the label, the row is in the same place, and nothing is marked.
+    /// The value each reports is then read by clicking, in a render of its own:
+    /// activating any row closes the menu (egui's own behaviour, and why every
+    /// other test here clicks one item per harness), so one harness cannot
+    /// answer for both.
     #[test]
-    fn test_list_menu_reports_its_three_intents() {
+    fn test_the_favourite_item_reads_one_way_on_each_state_in_the_same_render() {
+        let mut favourited = track("/music/loved.mp3");
+        favourited.favorite = true;
+        let plain = track("/music/plain.mp3");
+        assert_eq!(
+            (favourited.favorite, plain.favorite),
+            (true, false),
+            "the two fixtures really are the two different states the labels claim"
+        );
+        let options = [(PlaylistId::new("pl-1"), "Gym".to_string())];
+        let offered = options.clone();
+        let rows = menu_rows(move |ui, palette| {
+            let mut intents = Vec::new();
+            // Nothing about the render is per-harness: what decides the wording is
+            // the prop each menu was handed, so a renderer that ignored the flag
+            // would read the same on both menus here.
+            for favorite in [false, true] {
+                menu::track_menu(
+                    ui,
+                    palette,
+                    &TrackMenu {
+                        playable: true,
+                        editable: true,
+                        favorite,
+                        playlists: &offered,
+                        remove_from_playlist: false,
+                    },
+                    &mut intents,
+                );
+            }
+        });
+        let plain_rows: Vec<String> = rows[..6].to_vec();
+        let favourited_rows: Vec<String> = rows[6..].to_vec();
+        assert_eq!(
+            plain_rows,
+            vec![
+                "Play",
+                "Play Next",
+                "Add to Queue",
+                "Add to Playlist",
+                "Add to Favorites",
+                "Edit Tags"
+            ],
+            "a Track that is not a Favourite is offered the wording that adds one"
+        );
+        assert_eq!(
+            favourited_rows,
+            vec![
+                "Play",
+                "Play Next",
+                "Add to Queue",
+                "Add to Playlist",
+                "Remove from Favorites",
+                "Edit Tags"
+            ],
+            "and the Favourited one the opposite wording, in the SAME render, in the same \
+             place — the label carries the condition, so nothing is marked"
+        );
+
+        // Each menu reports the value the Track will END UP with, so the host
+        // commits exactly what the listener was told.
+        for (label, expected) in [
+            ("Add to Favorites", TrackMenuIntent::SetFavorite(true)),
+            ("Remove from Favorites", TrackMenuIntent::SetFavorite(false)),
+        ] {
+            let props = TrackMenu {
+                playable: true,
+                editable: true,
+                favorite: label == "Remove from Favorites",
+                playlists: &options,
+                remove_from_playlist: false,
+            };
+            assert_eq!(
+                track_menu_intents(&props, &[label]),
+                vec![expected],
+                "{label} reports the Favourite value the click will leave behind, \
+                 not the bare fact of a toggle"
+            );
+        }
+    }
+
+    /// The whole-list menu's four items, and the one typed intent each of them
+    /// reports. The first three carry the same words a Track's own menu uses for
+    /// the same three actions, so queueing is spelled one way whether it is one
+    /// Track or a whole collection.
+    #[test]
+    fn test_list_menu_reports_one_typed_intent_per_action() {
         assert_eq!(list_menu_intents(&["Play"]), vec![ListMenuIntent::Play]);
         assert_eq!(
             list_menu_intents(&["Play Next"]),
             vec![ListMenuIntent::PlayNext]
         );
         assert_eq!(
-            list_menu_intents(&["Append to Queue"]),
-            vec![ListMenuIntent::AppendToQueue]
+            list_menu_intents(&["Add to Queue"]),
+            vec![ListMenuIntent::AddToQueue]
         );
+        assert_eq!(
+            list_menu_intents(&["Shuffle"]),
+            vec![ListMenuIntent::Shuffle]
+        );
+        assert!(
+            list_menu_intents(&[]).is_empty(),
+            "rendering the menu reports no intent at all"
+        );
+    }
+
+    /// The order is part of the menu's contract, not an accident of how the
+    /// rows happen to be written: the accessibility tree reads Play, Play Next,
+    /// Add to Queue, Shuffle. Playlist headers, smart playlist headers, and
+    /// folder nodes all attach this one renderer, so the three surfaces offer
+    /// the same menu in the same sequence by construction.
+    #[test]
+    fn test_the_list_menu_carries_its_four_items_in_the_fixed_order() {
+        let palette = Palette::dark();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(240.0, 120.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, intents: &mut Vec<ListMenuIntent>| {
+                    menu::list_menu(ui, &palette, intents);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        let labels: Vec<String> = harness
+            .query_all_by_role(egui::accesskit::Role::Button)
+            .map(|node| node.accesskit_node().label().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["Play", "Play Next", "Add to Queue", "Shuffle"],
+            "the whole-list menu offers these four items, in this order, and nothing else"
+        );
+        assert!(
+            harness.query_by_label("Append to Queue").is_none(),
+            "the retired name is gone: one action has one name"
+        );
+    }
+
+    /// The collection menu — the one on an Album, Artist, or Genre row — is
+    /// content-identical to the whole-list menu, in the same order, because both
+    /// denote a set of Tracks. An entity always has tracks, so the menu takes
+    /// no props and offers no reduced state: the Track menu's `playable` and
+    /// `editable` flags have no meaning for a thing that is not a file.
+    #[test]
+    fn test_the_collection_menu_carries_the_same_four_items_in_the_fixed_order() {
+        assert_eq!(
+            menu_rows(|ui, palette| {
+                let mut intents = Vec::new();
+                menu::collection_menu(ui, palette, &mut intents);
+            }),
+            vec!["Play", "Play Next", "Add to Queue", "Shuffle"],
+            "the collection menu offers these four items, in this order, and nothing else"
+        );
+        assert_eq!(
+            collection_menu_intents(&["Play"]),
+            vec![ListMenuIntent::Play]
+        );
+        assert_eq!(
+            collection_menu_intents(&["Play Next"]),
+            vec![ListMenuIntent::PlayNext]
+        );
+        assert_eq!(
+            collection_menu_intents(&["Add to Queue"]),
+            vec![ListMenuIntent::AddToQueue]
+        );
+        assert_eq!(
+            collection_menu_intents(&["Shuffle"]),
+            vec![ListMenuIntent::Shuffle]
+        );
+        assert!(
+            collection_menu_intents(&[]).is_empty(),
+            "rendering the collection menu reports no intent at all"
+        );
+    }
+
+    /// The Track menu's own contents, pinned whole and in order, in both of the
+    /// shapes its host can ask for.
+    ///
+    /// A right-click selecting its row moves a selection ALONGSIDE this menu and
+    /// changes nothing inside it, so the exact rows are the preservation guard
+    /// for that claim: an effect that added an item, dropped one, reordered the
+    /// menu, or relabelled a row would be a change to what the Track menu IS
+    /// rather than to when it appears. Both shapes are pinned because the two
+    /// hosts differ in exactly one flag, and a change that respected one and not
+    /// the other would pass a single-case test.
+    ///
+    /// The Favourite item is in both lists, in one place, between "Add to
+    /// Playlist" and the removal: adding it moved NOTHING that was already here.
+    #[test]
+    fn test_the_track_menu_carries_its_items_in_the_fixed_order() {
+        // A row that is in no Playlist: the flat list, a search result, a Smart
+        // Playlist's Tracks, a folder node's Tracks, AND a Track in the Tracks
+        // Column all render this shape.
+        let no_playlists: [(PlaylistId, String); 0] = [];
+        let in_no_playlist = menu_rows(move |ui, palette| {
+            let mut intents = Vec::new();
+            menu::track_menu(
+                ui,
+                palette,
+                &TrackMenu {
+                    playable: true,
+                    editable: true,
+                    favorite: false,
+                    playlists: &no_playlists,
+                    remove_from_playlist: false,
+                },
+                &mut intents,
+            );
+        });
+        assert_eq!(
+            in_no_playlist,
+            vec![
+                "Play",
+                "Play Next",
+                "Add to Queue",
+                "Add to Playlist",
+                "Add to Favorites",
+                "Edit Tags",
+            ],
+            "a Track row's menu offers these six rows, in this order, and nothing else"
+        );
+
+        // A row that IS in a Playlist, which is the one extra row that host
+        // adds, and it goes between the two groups for the same reason it always
+        // did.
+        let with_playlist = [(PlaylistId::new("pl-1"), "Gym".to_string())];
+        assert_eq!(
+            menu_rows(move |ui, palette| {
+                let mut intents = Vec::new();
+                menu::track_menu(
+                    ui,
+                    palette,
+                    &TrackMenu {
+                        playable: true,
+                        editable: true,
+                        favorite: false,
+                        playlists: &with_playlist,
+                        remove_from_playlist: true,
+                    },
+                    &mut intents,
+                );
+            }),
+            vec![
+                "Play",
+                "Play Next",
+                "Add to Queue",
+                "Add to Playlist",
+                "Add to Favorites",
+                "Remove from Playlist",
+                "Edit Tags",
+            ],
+            "a playlist entry's menu is the same menu plus the removal, in the same place"
+        );
+
+        // The THIRD shape, and the one the Tracks Column hands the widget: a
+        // Track in no Playlist with the host's playlist targets on offer. It is
+        // the only combination the two cases above do not cover, and it is the
+        // one that keeps "Add to Playlist" — the column is not a playlist view
+        // and offers no removal, but a Track listed there is exactly as
+        // addable as one listed anywhere else.
+        //
+        // Asserted as an EQUALITY with the flat-list rows above rather than as
+        // a third restatement of them: "the same menu in both places" is the
+        // claim, and a comparison fails if either surface's wording moves
+        // independently of the other's — which a restatement of the expected
+        // list would not.
+        let targets = [(PlaylistId::new("pl-1"), "Gym".to_string())];
+        let in_the_tracks_column = menu_rows(move |ui, palette| {
+            let mut intents = Vec::new();
+            menu::track_menu(
+                ui,
+                palette,
+                &TrackMenu {
+                    playable: true,
+                    editable: true,
+                    favorite: false,
+                    playlists: &targets,
+                    remove_from_playlist: false,
+                },
+                &mut intents,
+            );
+        });
+        assert_eq!(
+            in_the_tracks_column, in_no_playlist,
+            "a Track in the Tracks Column is offered exactly the menu a Track gets in \
+             any other Column — same rows, same order, no removal"
+        );
+    }
+
+    /// The Track menu and the collection menu read as one menu: the first three
+    /// rows are the same words in the same order, and what the collection adds
+    /// on top of that shared prefix is Shuffle. Written as a comparison of two
+    /// rendered menus rather than a restatement of either, so it fails if either
+    /// menu's wording moves independently of the other.
+    #[test]
+    fn test_the_collection_menu_shares_a_three_item_prefix_with_the_track_menu() {
+        let track_options: [(PlaylistId, String); 0] = [];
+        let track_rows = menu_rows(move |ui, palette| {
+            let mut intents = Vec::new();
+            menu::track_menu(
+                ui,
+                palette,
+                &TrackMenu {
+                    playable: true,
+                    editable: true,
+                    favorite: false,
+                    playlists: &track_options,
+                    remove_from_playlist: false,
+                },
+                &mut intents,
+            );
+        });
+        let collection_rows = menu_rows(|ui, palette| {
+            let mut intents = Vec::new();
+            menu::collection_menu(ui, palette, &mut intents);
+        });
+
+        assert_eq!(
+            &collection_rows[..3],
+            &track_rows[..3],
+            "Play, Play Next, Add to Queue are the same rows the Track menu opens with, \
+             in the same order — one menu, one set of words"
+        );
+        assert_eq!(
+            collection_rows[3..],
+            ["Shuffle"],
+            "Shuffle is exactly what the collection adds to the shared prefix"
+        );
+    }
+
+    /// The three Track-only items are absent from the collection menu, and each
+    /// for its own reason: an entity has no tags of its own to edit, and a
+    /// collection is not a single Track to add to or take out of a Playlist.
+    /// Offering any of them would be offering an action that cannot apply.
+    #[test]
+    fn test_no_entity_menu_offers_a_track_only_action() {
+        let rows = menu_rows(|ui, palette| {
+            let mut intents = Vec::new();
+            menu::collection_menu(ui, palette, &mut intents);
+        });
+        for absent in ["Edit Tags", "Add to Playlist", "Remove from Playlist"] {
+            assert!(
+                !rows.iter().any(|row| row == absent),
+                "an Album, Artist, or Genre menu offers no {absent}"
+            );
+        }
+    }
+
+    /// The row-level popup owner. A secondary click on an entity row reports
+    /// the row's own key together with whatever the menu collected — and
+    /// reports the pair on the frame the menu OPENS, with an empty intent list,
+    /// because opening the menu is what moves the selection, not choosing an
+    /// item from it. The key travelling with the intents is what lets the host
+    /// select and act without a pointer.
+    ///
+    /// The popup is egui's own transient one, keyed by the row's response
+    /// identity: there is no per-row open state here, and the row is
+    /// materialized only because it was on screen, so a virtualized listing
+    /// needs nothing extra to keep this correct.
+    #[test]
+    fn test_a_secondary_click_on_an_entity_row_reports_its_key_with_the_menu() {
+        let palette = Palette::dark();
+        let mut cache = riff_gui::ui::icons::IconCache::new();
+        let items = [riff_gui::ui::browser::BrowserItem {
+            key: "Boards of Canada\u{1f}Geogaddi".to_string(),
+            label: "Geogaddi".to_string(),
+            detail: Some("Boards of Canada \u{b7} 2002".to_string()),
+            thumbnail: None,
+            selected: false,
+            now_playing: false,
+        }];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<riff_gui::ui::browser::BrowserAction>| {
+                    let mut fixture_item =
+                        |i: usize| -> Option<riff_gui::ui::browser::BrowserItem> {
+                            items.get(i).cloned()
+                        };
+                    let column = riff_gui::ui::browser::BrowserColumn {
+                        sort_desc: false,
+                        show_sort: false,
+                        total: items.len(),
+                        item: &mut fixture_item,
+                        virtualize: false,
+                        empty_title: "",
+                        empty_hint: "",
+                    };
+                    riff_gui::ui::browser::show_browser_column(
+                        ui, &mut cache, &palette, column, actions,
+                    );
+                },
+                Vec::new(),
+            );
+        harness.run();
+        assert!(
+            harness.state().is_empty(),
+            "painting a column reports no action at all"
+        );
+
+        let key = "Boards of Canada\u{1f}Geogaddi".to_string();
+        harness
+            .get_by_label("Geogaddi (Boards of Canada \u{b7} 2002)")
+            .click_secondary();
+        harness.run();
+
+        assert_eq!(
+            harness.state().first(),
+            Some(&riff_gui::ui::browser::BrowserAction::ContextMenu {
+                key: key.clone(),
+                intents: Vec::new(),
+            }),
+            "opening the menu reports the row's own key with no intent chosen yet — \
+             that report is what moves the selection"
+        );
+        assert!(
+            harness.query_by_label("Shuffle").is_some(),
+            "and the collection menu is the one on screen"
+        );
+
+        harness.get_by_label("Shuffle").click();
+        harness.run();
+        assert_eq!(
+            harness.state().last(),
+            Some(&riff_gui::ui::browser::BrowserAction::ContextMenu {
+                key,
+                intents: vec![ListMenuIntent::Shuffle],
+            }),
+            "choosing an item rides the same key, so the host can both select the \
+             row and act on it from one report"
+        );
+    }
+
+    /// A left click stays a plain selection: right-click selecting must not have
+    /// turned the ordinary gesture into a menu report.
+    #[test]
+    fn test_a_left_click_on_an_entity_row_still_reports_only_a_selection() {
+        let palette = Palette::dark();
+        let mut cache = riff_gui::ui::icons::IconCache::new();
+        let items = [riff_gui::ui::browser::BrowserItem {
+            key: "jazz".to_string(),
+            label: "Jazz".to_string(),
+            detail: None,
+            thumbnail: None,
+            selected: false,
+            now_playing: false,
+        }];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<riff_gui::ui::browser::BrowserAction>| {
+                    let mut fixture_item =
+                        |i: usize| -> Option<riff_gui::ui::browser::BrowserItem> {
+                            items.get(i).cloned()
+                        };
+                    let column = riff_gui::ui::browser::BrowserColumn {
+                        sort_desc: false,
+                        show_sort: false,
+                        total: items.len(),
+                        item: &mut fixture_item,
+                        virtualize: false,
+                        empty_title: "",
+                        empty_hint: "",
+                    };
+                    riff_gui::ui::browser::show_browser_column(
+                        ui, &mut cache, &palette, column, actions,
+                    );
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        harness.get_by_label("Jazz").click();
+        harness.run();
+        assert_eq!(
+            std::mem::take(harness.state_mut()),
+            vec![riff_gui::ui::browser::BrowserAction::Select(
+                "jazz".to_string()
+            )],
+            "a primary click reports the selection and nothing else — no menu report"
+        );
+    }
+
+    // --- The host's half: a collection's selection + its batch ---------------
+    //
+    // The selection an entity row's right-click causes is CARRIED as an effect
+    // of opening the menu, alongside the menu's other effects, rather than
+    // being read back off the click. Everything below therefore drives the
+    // applier with a key and a list of intents and no pointer in sight: the row
+    // was clicked a long way from here, and everything the click caused is
+    // spelled out in the two values.
+
+    /// A `SessionViews` over a canned library whose entity queries are seeded
+    /// far enough to resolve an Album, an Artist, and a Genre to distinct
+    /// batches.
+    fn entity_views() -> riff_backend::app::views::SessionViews {
+        use riff_backend::app::store::StoreGeneration;
+        use riff_backend::domain::{Album, Artist, GenreCount};
+
+        let mock = MockLibraryQueryStore {
+            albums: vec![Album {
+                artist: "Boards of Canada".to_string(),
+                title: "Geogaddi".to_string(),
+                tracks: vec![TrackId("g1".to_string()), TrackId("g2".to_string())],
+                year: Some(2002),
+                genre: Some("IDM".to_string()),
+            }],
+            album_tracks: vec![
+                crate::test_utils::create_test_track_with_metadata(
+                    "g1",
+                    "/music/g1.mp3",
+                    "Boards of Canada",
+                    "Music for",
+                    "Geogaddi",
+                ),
+                crate::test_utils::create_test_track_with_metadata(
+                    "g2",
+                    "/music/g2.mp3",
+                    "Boards of Canada",
+                    "Iced Cooly",
+                    "Geogaddi",
+                ),
+            ],
+            artists: vec![Artist {
+                name: "Boards of Canada".to_string(),
+                albums: vec!["Geogaddi".to_string()],
+            }],
+            genre_counts: vec![GenreCount {
+                genre: "IDM".to_string(),
+                tracks: 2,
+            }],
+            genre_artists: vec![Artist {
+                name: "Boards of Canada".to_string(),
+                albums: vec!["Geogaddi".to_string()],
+            }],
+            genre_albums: vec![Album {
+                artist: "Boards of Canada".to_string(),
+                title: "Geogaddi".to_string(),
+                tracks: vec![TrackId("g1".to_string())],
+                year: Some(2002),
+                genre: Some("IDM".to_string()),
+            }],
+            genre_album_tracks: vec![crate::test_utils::create_test_track_with_metadata(
+                "g1",
+                "/music/g1.mp3",
+                "Boards of Canada",
+                "Music for",
+                "Geogaddi",
+            )],
+            ..Default::default()
+        };
+        riff_backend::app::views::SessionViews::new(
+            Box::new(mock),
+            Box::new(MockPlaylistStore::default()),
+            StoreGeneration::new(),
+            StoreGeneration::new(),
+        )
+    }
+
+    /// The batch each kind of entity denotes, resolved from the row's key. The
+    /// three answers are deliberately different shapes: an Album is one album's
+    /// tracks, an Artist is every track across its albums, and a Genre is the
+    /// tracks CARRYING that genre — which is not the same set, and is the whole
+    /// reason a genre's batch cannot be reached by filtering the library's.
+    #[test]
+    fn test_an_entitys_batch_is_resolved_from_its_row_key() {
+        let mut views = entity_views();
+        let album_key = "Boards of Canada\u{1f}Geogaddi";
+
+        assert_eq!(
+            entity_track_ids(album_key, LibrarySection::Albums, 0, &mut views),
+            vec![TrackId("g1".to_string()), TrackId("g2".to_string())],
+            "an Album row resolves to that album's tracks"
+        );
+        assert_eq!(
+            entity_track_ids("Boards of Canada", LibrarySection::Artists, 0, &mut views),
+            vec![TrackId("g1".to_string()), TrackId("g2".to_string())],
+            "an Artist row resolves to every track across its albums"
+        );
+        assert_eq!(
+            entity_track_ids("IDM", LibrarySection::Genres, 0, &mut views),
+            vec![TrackId("g1".to_string())],
+            "a Genre row resolves to the tracks carrying THAT genre — the \
+             genre-scoped walk, not the artist's or the album's full track list"
+        );
+        assert_eq!(
+            entity_track_ids("Krautrock", LibrarySection::Genres, 0, &mut views),
+            Vec::<TrackId>::new(),
+            "a genre the read model no longer carries resolves to nothing"
+        );
+    }
+
+    /// Opening an entity row's menu selects it — and selecting it is ALL it
+    /// does. A right-click that chooses no item leaves the menu on screen, and
+    /// the readout must already agree with it; it must not start playback, it
+    /// must not queue anything, and it must not touch shuffle.
+    ///
+    /// No pointer appears in this test: the selection arrives as an effect, in
+    /// the same report the menu's intents would have.
+    #[test]
+    fn test_opening_a_collection_menu_selects_the_entity_and_nothing_else() {
+        let transport = MockTransport::new();
+        let mut playback = PlaybackSession::default();
+        let mut library = LibrarySession {
+            library_section: LibrarySection::Albums,
+            ..Default::default()
+        };
+        let mut views = entity_views();
+
+        apply_collection_menu(
+            "Boards of Canada\u{1f}Geogaddi",
+            &[],
+            LibrarySection::Albums,
+            0,
+            CollectionMenuEffects {
+                library: &mut library,
+                playback: &mut playback,
+                transport: &transport,
+                views: &mut views,
+            },
+        );
+
+        assert_eq!(
+            library.browser_path,
+            vec![BrowserSelection::Album {
+                artist: "Boards of Canada".to_string(),
+                title: "Geogaddi".to_string(),
+            }],
+            "the report moved the browser path onto the right-clicked Album, so the \
+             Detail Panel describes the entity the menu is open on"
+        );
+        assert!(
+            transport.recorded().is_empty(),
+            "a right-click starts no playback: the transport saw nothing"
+        );
+        assert!(
+            !playback.queue.shuffle,
+            "and it does not so much as touch shuffle"
+        );
+    }
+
+    /// Each of the four items reaches the transport as the same batch it reaches
+    /// from a playlist header, a smart playlist header, or a folder node — the
+    /// one intent vocabulary, one applier, one effect per item. And every one of
+    /// them selects the row it was opened on, because that is what opening the
+    /// menu means.
+    #[test]
+    fn test_a_collection_menu_intent_batches_and_selects_in_one_report() {
+        let ids = [TrackId("g1".to_string()), TrackId("g2".to_string())];
+        let cases: [(ListMenuIntent, Vec<TransportIntent>, bool); 4] = [
+            (
+                ListMenuIntent::Play,
+                vec![TransportIntent::PlayMany(
+                    ids[0].clone(),
+                    vec![ids[1].clone()],
+                )],
+                false,
+            ),
+            (
+                ListMenuIntent::PlayNext,
+                vec![
+                    TransportIntent::PlayNext(ids[1].clone()),
+                    TransportIntent::PlayNext(ids[0].clone()),
+                ],
+                false,
+            ),
+            (
+                ListMenuIntent::AddToQueue,
+                vec![TransportIntent::AddMany(vec![
+                    ids[0].clone(),
+                    ids[1].clone(),
+                ])],
+                false,
+            ),
+            (
+                ListMenuIntent::Shuffle,
+                vec![TransportIntent::PlayMany(
+                    ids[0].clone(),
+                    vec![ids[1].clone()],
+                )],
+                true,
+            ),
+        ];
+
+        for (intent, expected_dispatch, shuffle_after) in cases {
+            let transport = MockTransport::new();
+            let mut playback = PlaybackSession::default();
+            let mut library = LibrarySession {
+                library_section: LibrarySection::Albums,
+                ..Default::default()
+            };
+            let mut views = entity_views();
+
+            apply_collection_menu(
+                "Boards of Canada\u{1f}Geogaddi",
+                &[intent],
+                LibrarySection::Albums,
+                0,
+                CollectionMenuEffects {
+                    library: &mut library,
+                    playback: &mut playback,
+                    transport: &transport,
+                    views: &mut views,
+                },
+            );
+
+            assert_eq!(
+                transport.recorded(),
+                expected_dispatch,
+                "{intent:?} reaches the transport as a batch, never a command per Track"
+            );
+            assert_eq!(
+                playback.queue.shuffle, shuffle_after,
+                "{intent:?} leaves shuffle engaged: {shuffle_after}"
+            );
+            assert_eq!(
+                library.browser_path,
+                vec![BrowserSelection::Album {
+                    artist: "Boards of Canada".to_string(),
+                    title: "Geogaddi".to_string(),
+                }],
+                "{intent:?} selected the row the menu was opened on"
+            );
+        }
+    }
+
+    /// A drill column's row is an Album one level down, and its key means
+    /// something the root's key of the same section does not. The selection
+    /// lands at the row's own level, and the batch is the album's — so a right
+    /// click deep in the Genres drill reads as the same kind of act as one at
+    /// the top of the Artists root.
+    ///
+    /// The parent is seeded first, because a drill column only ever renders
+    /// below a selection the listener already made — the dispatch site reads
+    /// `browser_path.first()` to know which column to plan. `select_at`
+    /// TRUNCATES to the row's level and then pushes, so the depth is what keeps
+    /// the entries above it, not something it can invent.
+    #[test]
+    fn test_a_drill_rows_collection_menu_selects_at_its_own_level() {
+        let transport = MockTransport::new();
+        let mut playback = PlaybackSession::default();
+        let mut library = LibrarySession {
+            browser_path: vec![BrowserSelection::Artist("Boards of Canada".to_string())],
+            ..Default::default()
+        };
+        let mut views = entity_views();
+
+        apply_collection_menu(
+            "Boards of Canada\u{1f}Geogaddi",
+            &[ListMenuIntent::Play],
+            LibrarySection::Artists,
+            1,
+            CollectionMenuEffects {
+                library: &mut library,
+                playback: &mut playback,
+                transport: &transport,
+                views: &mut views,
+            },
+        );
+
+        assert_eq!(
+            library.browser_path,
+            vec![
+                BrowserSelection::Artist("Boards of Canada".to_string()),
+                BrowserSelection::Album {
+                    artist: "Boards of Canada".to_string(),
+                    title: "Geogaddi".to_string(),
+                },
+            ],
+            "the path keeps the parent the listener drilled through and the \
+             right-clicked Album lands at the row's own level"
+        );
+        assert_eq!(
+            transport.recorded(),
+            vec![TransportIntent::PlayMany(
+                TrackId("g1".to_string()),
+                vec![TrackId("g2".to_string())],
+            )],
+            "a drill row's batch is its entity's, resolved from its key"
+        );
+    }
+
+    /// A key that names nothing the read model still carries — a stale row, or a
+    /// row whose section does not denote a set of Tracks at all — selects
+    /// nothing and plays nothing. The All Tracks listing has no entity rows, and
+    /// it must not grow a menu that acts on an empty key.
+    #[test]
+    fn test_a_key_naming_no_entity_acts_on_nothing() {
+        let transport = MockTransport::new();
+        let mut playback = PlaybackSession::default();
+        let mut library = LibrarySession::default();
+        let mut views = entity_views();
+
+        apply_collection_menu(
+            "a.mp3",
+            &[ListMenuIntent::Play, ListMenuIntent::Shuffle],
+            LibrarySection::AllTracks,
+            0,
+            CollectionMenuEffects {
+                library: &mut library,
+                playback: &mut playback,
+                transport: &transport,
+                views: &mut views,
+            },
+        );
+
+        assert!(
+            library.browser_path.is_empty(),
+            "no browser selection is invented for a section with no entity rows"
+        );
+        assert!(
+            transport.recorded().is_empty(),
+            "and the transport sees nothing at all"
+        );
+        assert!(
+            !playback.queue.shuffle,
+            "shuffle is never so much as engaged"
+        );
+    }
+
+    /// The one predicate every scroll guard asks. A right-click moves the
+    /// selection exactly as a click does, so it must reset the listing's scroll
+    /// exactly as a click does; anything that is not a row selection must not.
+    /// Pinning the answers here is what makes the guard impossible to widen by
+    /// accident: a new selection-carrying variant that nobody declared in this
+    /// function is a test failure, not a silently stale guard.
+    #[test]
+    fn test_only_row_selecting_actions_reset_a_listings_scroll() {
+        use riff_gui::ui::browser::BrowserAction;
+
+        assert!(
+            BrowserAction::Select("a".to_string()).selects_a_row(),
+            "a click selects"
+        );
+        assert!(
+            BrowserAction::ContextMenu {
+                key: "a".to_string(),
+                intents: Vec::new(),
+            }
+            .selects_a_row(),
+            "opening a row's menu selects, which is the whole point of the guard: a \
+             right-click that moved the selection but not the scroll would leave the \
+             list pointing at the wrong place"
+        );
+        assert!(
+            BrowserAction::ContextMenu {
+                key: "a".to_string(),
+                intents: vec![ListMenuIntent::Play],
+            }
+            .selects_a_row(),
+            "and a report that also carries a chosen item still selected the row — the \
+             choice does not cancel the selection the open already made"
+        );
+        assert!(
+            !BrowserAction::ToggleSort.selects_a_row(),
+            "the sort control selects nothing"
+        );
+    }
+
+    // --- The host's half: opening a Track's menu moves the selection ---------
+    //
+    // A Track row's right-click opens that Track's menu AND makes it the
+    // selected Track, so the menu acts on the same Track the Detail Panel
+    // shows. The selection rides as an effect of the menu OPENING — a separate
+    // and earlier report from the items the listener chooses from it — so
+    // everything below drives it with no pointer in sight: the row was clicked
+    // a long way from here, and all the click caused is spelled out in the two
+    // values the applier takes.
+    //
+    // A Track row is the deliberate opposite of a header here, in exactly one
+    // respect and no other: a header has no readout for a selection to stay
+    // consistent with, a row does.
+
+    /// Opening a Track's menu selects that Track, and selecting it is ALL it
+    /// does. A right-click that opens the menu and is then dismissed chose
+    /// nothing, and must still have selected — which is the whole reason the
+    /// effect hangs off the popup's own report and not off an item choice.
+    #[test]
+    fn test_opening_a_track_menu_selects_that_track_and_nothing_else() {
+        let (_dir, store, pid) = seeded_store();
+        let transport = MockTransport::new();
+        let mut selected = None;
+        let editor = InlineTagEditor::new(Box::new(MockTagEdits));
+        let item = track("/music/a.mp3");
+
+        apply_track_menu_open(&item.id, TrackMenuOpen::Opened, &mut selected);
+
+        assert_eq!(
+            selected,
+            Some(item.id.clone()),
+            "the report moved the selection onto the Track the menu was opened on, so the \
+             Detail Panel and the menu describe the same Track"
+        );
+        assert!(
+            transport.recorded().is_empty(),
+            "a right-click is never a left-click: the transport saw nothing"
+        );
+        assert!(
+            editor.draft().is_none(),
+            "and it does not so much as open the Inline Tag Editor"
+        );
+        assert_eq!(
+            store
+                .load_playlist_entries(&pid)
+                .expect("the entries read")
+                .len(),
+            0,
+            "or write a playlist entry"
+        );
+    }
+
+    /// The negative twin, and the half that makes the test above mean anything:
+    /// a frame that merely PAINTED a Track row reports no open and reaches
+    /// nothing at all — not the selection it would have written, and not the
+    /// one already there. A list of Track rows spends most of its frames in
+    /// exactly this state, so it is the case that has to leave the readout
+    /// alone.
+    #[test]
+    fn test_a_frame_that_painted_a_track_menu_moves_nothing() {
+        let (_dir, store, pid) = seeded_store();
+        let transport = MockTransport::new();
+        let editor = InlineTagEditor::new(Box::new(MockTagEdits));
+        let item = track("/music/a.mp3");
+        let already = track("/music/b.mp3");
+        let mut selected = None;
+
+        apply_track_menu_open(&item.id, TrackMenuOpen::NotOpened, &mut selected);
+        assert!(
+            selected.is_none(),
+            "nothing was selected before, and a row that merely rendered selects nothing"
+        );
+
+        selected = Some(already.id.clone());
+        apply_track_menu_open(&item.id, TrackMenuOpen::NotOpened, &mut selected);
+        assert_eq!(
+            selected,
+            Some(already.id),
+            "and it does not clear a selection that is already there either — the report \
+             moves the selection, it never owns it"
+        );
+        assert!(
+            transport.recorded().is_empty(),
+            "no transport command either way"
+        );
+        assert!(editor.draft().is_none(), "and no tag draft");
+        assert_eq!(
+            store
+                .load_playlist_entries(&pid)
+                .expect("the entries read")
+                .len(),
+            0,
+            "and no playlist entry"
+        );
+    }
+
+    /// The variants [`ItemState`] declares, in declaration order, read from the
+    /// enum's own source.
+    ///
+    /// A sweep, because the claim is about the SHAPE of a type and nothing in the
+    /// app constrains that shape: no code matches exhaustively on `ItemState`, so
+    /// a `Checked` variant would compile, would paint, and would pass every test
+    /// that exercises the three states that exist. The spec's "no checked or
+    /// ticked state" is a promise about the enum, so it is read off the enum.
+    fn item_state_variants() -> Vec<String> {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("crates")
+                .join("riff-gui")
+                .join("src")
+                .join("ui")
+                .join("menu.rs"),
+        )
+        .expect("menu.rs must be readable");
+        let body = source
+            .split_once("pub enum ItemState {")
+            .expect("ItemState is declared in menu.rs")
+            .1
+            .split_once("\n}")
+            .expect("ItemState's body is closed by a brace on its own line")
+            .0;
+        body.lines()
+            .map(str::trim)
+            .filter(|line| {
+                // A variant is a bare, documented identifier: no attributes, no
+                // braces, no type annotation.
+                !line.is_empty()
+                    && !line.starts_with("//")
+                    && !line.starts_with('#')
+                    && !line.contains(['{', '}', ':', ';', '='])
+            })
+            .map(|variant| variant.trim_end_matches(',').to_owned())
+            .collect()
     }
 
     /// Enabled, disabled, and destructive rows come from one owner: a disabled
     /// row answers no click, and only the destructive row carries the error ink.
+    ///
+    /// The vocabulary count below is the second half of this test and the reason
+    /// the Favourite item needed no new state: a menu condition is said with a
+    /// word or with ink, and a tick would have needed a FOURTH variant to live in.
+    /// It is counted from the enum's own source because the count is not
+    /// observable any other way from outside — nothing matches exhaustively on
+    /// [`ItemState`], so a fourth variant would compile, paint, and pass every
+    /// other test in this file.
     #[test]
     fn test_menu_item_states_share_one_treatment() {
+        assert_eq!(
+            item_state_variants(),
+            vec!["Normal", "Destructive", "Disabled"],
+            "the menu's item state is still exactly these three — a Favourite is announced \
+             by its LABEL, so nothing marked was needed and no Checked arrived"
+        );
         let palette = Palette::dark();
         let render = |state: ItemState| {
             egui_kittest::Harness::builder()
@@ -17708,10 +19807,17 @@ mod context_menu_ui_tests {
     /// Wire the host slots one menu intent answers to. A fresh call reborrows
     /// everything, so a test can apply an intent, drop the host, and read the
     /// store back.
+    ///
+    /// This is a MIRROR of the two assembly sites in `app.rs`
+    /// (`attach_track_menu` and the Tracks column), field for field — the two
+    /// stores above all, because a Favourite commits through the library store
+    /// and a playlist entry through the playlist one, and a mirror that dropped
+    /// a field would go on testing a host the app does not have.
     fn host<'a>(
         item: &'a riff_backend::domain::Track,
         pid: Option<&'a PlaylistId>,
         store: &'a mut riff_infra::store::SqliteStore,
+        library_mutations: &'a mut dyn LibraryMutationStore,
         transport: &'a MockTransport,
         selected: &'a mut Option<TrackId>,
         editor: &'a mut InlineTagEditor,
@@ -17723,6 +19829,7 @@ mod context_menu_ui_tests {
             remove_from_playlist: pid,
             transport,
             playlist_store,
+            library_mutations,
             selected_track: selected,
             tag_editor: editor,
         }
@@ -17731,6 +19838,11 @@ mod context_menu_ui_tests {
     #[test]
     fn test_playlist_intents_commit_only_when_emitted() {
         let (_dir, mut store, pid) = seeded_store();
+        // The library mutations port is a SECOND handle to the same store, the
+        // way the composition root wires the two ports: one object, two
+        // sections. A test that Favourited through a recording fake instead
+        // would prove the arm, not the durability.
+        let mut mutations = store.clone();
         let transport = MockTransport::new();
         let mut selected = None;
         let mut editor = InlineTagEditor::new(Box::new(MockTagEdits));
@@ -17753,6 +19865,7 @@ mod context_menu_ui_tests {
                 &item,
                 Some(&pid),
                 &mut store,
+                &mut mutations,
                 &transport,
                 &mut selected,
                 &mut editor,
@@ -17770,6 +19883,7 @@ mod context_menu_ui_tests {
                 &item,
                 Some(&pid),
                 &mut store,
+                &mut mutations,
                 &transport,
                 &mut selected,
                 &mut editor,
@@ -17783,9 +19897,79 @@ mod context_menu_ui_tests {
         );
     }
 
+    /// The Favourite item's dispatch: it commits the flag the menu REPORTED,
+    /// through the library mutation port, and touches nothing else.
+    ///
+    /// The port is the existing recording fake and the recorder is its existing
+    /// `favorites()`, so what is asserted is the port-observed effect: the exact
+    /// `(id, value)` pair, in call order. Both directions are driven, because the
+    /// menu carries a VALUE and not a toggle — a bare-toggle dispatch would pass
+    /// the `true` case and fail the `false` one, which is why both are here.
+    #[test]
+    fn test_the_favourite_intent_commits_the_reported_value_and_nothing_else() {
+        use crate::mocks::MockLibraryMutationStore;
+
+        let (_dir, mut store, pid) = seeded_store();
+        let transport = MockTransport::new();
+        let mut selected = None;
+        let mut editor = InlineTagEditor::new(Box::new(MockTagEdits));
+        let mut mutations = MockLibraryMutationStore::new();
+        let item = track("/music/a.mp3");
+
+        assert!(
+            mutations.favorites().is_empty(),
+            "a Track menu that is only painted writes no flag"
+        );
+
+        for reported in [true, false] {
+            {
+                let mut slots = host(
+                    &item,
+                    Some(&pid),
+                    &mut store,
+                    &mut mutations,
+                    &transport,
+                    &mut selected,
+                    &mut editor,
+                );
+                apply_track_menu_intent(TrackMenuIntent::SetFavorite(reported), &mut slots);
+            }
+            assert_eq!(
+                mutations.favorites().last(),
+                Some(&(item.id.clone(), reported)),
+                "SetFavorite({reported}) committed exactly that value for that Track"
+            );
+            assert!(
+                transport.recorded().is_empty(),
+                "a Favourite is a library fact: it starts nothing and queues nothing"
+            );
+            assert!(editor.draft().is_none(), "and it opens no tag draft");
+            assert!(
+                selected.is_none(),
+                "and it moves no selection — the menu's OPENING already did that, and the \
+                 item is a separate event"
+            );
+        }
+        assert_eq!(
+            mutations.favorites(),
+            vec![(item.id.clone(), true), (item.id.clone(), false)],
+            "both directions went through the one port method, in the order they were \
+             applied, and nothing was written between them"
+        );
+        assert_eq!(
+            store
+                .load_playlist_entries(&pid)
+                .expect("the entries read")
+                .len(),
+            0,
+            "and no playlist entry was written: the two stores stay separate"
+        );
+    }
+
     #[test]
     fn test_edit_tags_intent_opens_the_detail_editor_and_nothing_else() {
         let (_dir, mut store, pid) = seeded_store();
+        let mut mutations = store.clone();
         let transport = MockTransport::new();
         let mut selected = None;
         let mut editor = InlineTagEditor::new(Box::new(MockTagEdits));
@@ -17796,6 +19980,7 @@ mod context_menu_ui_tests {
                 &item,
                 Some(&pid),
                 &mut store,
+                &mut mutations,
                 &transport,
                 &mut selected,
                 &mut editor,
@@ -17825,9 +20010,164 @@ mod context_menu_ui_tests {
         );
     }
 
+    /// Shuffle is a one-shot that *starts* the collection: it engages shuffle
+    /// on the playback session and then plays the batch, and shuffle is still
+    /// engaged afterwards. That is exactly how the album header's Shuffle has
+    /// always behaved, and the intent is the same one the playlist, smart
+    /// playlist, and folder menus report — so the action means one thing
+    /// wherever it is offered.
+    #[test]
+    fn test_shuffle_intent_engages_shuffle_then_plays_the_batch() {
+        let transport = MockTransport::new();
+        let mut playback = PlaybackSession::default();
+        let ids: Vec<TrackId> = ["/music/a.mp3", "/music/b.mp3", "/music/c.mp3"]
+            .iter()
+            .map(|p| track(p).id)
+            .collect();
+        assert!(
+            !playback.queue.shuffle,
+            "shuffle is off before the intent is applied"
+        );
+
+        apply_list_menu_intent(ListMenuIntent::Shuffle, &ids, &transport, &mut playback);
+
+        assert!(
+            playback.queue.shuffle,
+            "the one-shot leaves shuffle engaged afterwards, as it always has"
+        );
+        assert_eq!(
+            transport.recorded(),
+            vec![TransportIntent::PlayMany(
+                ids[0].clone(),
+                vec![ids[1].clone(), ids[2].clone()],
+            )],
+            "the batch is one dispatch behind the shuffle flag, not a command per Track"
+        );
+    }
+
+    /// An empty collection starts nothing — and, as on the album header, it does
+    /// not so much as turn shuffle on. The two go together: engaging shuffle is
+    /// the first half of starting a batch, so with no batch there is nothing to
+    /// do at all.
+    #[test]
+    fn test_shuffle_intent_on_an_empty_collection_does_nothing_at_all() {
+        let transport = MockTransport::new();
+        let mut playback = PlaybackSession::default();
+
+        apply_list_menu_intent(ListMenuIntent::Shuffle, &[], &transport, &mut playback);
+
+        assert!(
+            !playback.queue.shuffle,
+            "an empty list never re-enables shuffle"
+        );
+        assert!(
+            transport.recorded().is_empty(),
+            "and sends nothing to the transport"
+        );
+    }
+
+    /// The tracer: a menu that is only *drawn* reaches nothing, and the click
+    /// that follows reaches exactly the effect of the row it landed on. This
+    /// test exists to join the two seams — a real `list_menu` rendering in
+    /// isolation, then the host's dispatch loop over whatever it reported —
+    /// because the property worth protecting is that the join is thin. A menu
+    /// can be painted on any number of frames without a Track starting to play,
+    /// and the frame it is finally clicked on does the work of the one item
+    /// chosen and nothing else.
+    ///
+    /// The expected effects are written out as the dispatch the transport port
+    /// should observe and the session state the click should leave, so the
+    /// assertions read as a contract rather than as a transcript of whichever
+    /// arm happens to run.
+    #[test]
+    fn test_a_painted_list_menu_reaches_the_transport_only_through_a_click() {
+        let ids: Vec<TrackId> = ["/music/a.mp3", "/music/b.mp3"]
+            .iter()
+            .map(|p| track(p).id)
+            .collect();
+
+        // A painted frame: the menu's whole dispatch loop, fed the intents a
+        // frame that only drew the menu reported.
+        let paint_only = MockTransport::new();
+        let mut untouched = PlaybackSession::default();
+        for intent in list_menu_intents(&[]) {
+            apply_list_menu_intent(intent, &ids, &paint_only, &mut untouched);
+        }
+        assert!(
+            paint_only.recorded().is_empty(),
+            "painting the menu sends nothing to the transport"
+        );
+        assert!(
+            !untouched.queue.shuffle,
+            "and leaves the session's shuffle exactly as it found it"
+        );
+
+        // Then the four rows, each clicked on its own, each reaching its own
+        // effect: the exact dispatch the transport sees, and whether shuffle
+        // is engaged afterwards.
+        let cases: [(&str, Vec<TransportIntent>, bool); 4] = [
+            (
+                "Play",
+                vec![TransportIntent::PlayMany(
+                    ids[0].clone(),
+                    vec![ids[1].clone()],
+                )],
+                false,
+            ),
+            (
+                "Play Next",
+                vec![
+                    TransportIntent::PlayNext(ids[1].clone()),
+                    TransportIntent::PlayNext(ids[0].clone()),
+                ],
+                false,
+            ),
+            (
+                "Add to Queue",
+                vec![TransportIntent::AddMany(vec![
+                    ids[0].clone(),
+                    ids[1].clone(),
+                ])],
+                false,
+            ),
+            (
+                "Shuffle",
+                vec![TransportIntent::PlayMany(
+                    ids[0].clone(),
+                    vec![ids[1].clone()],
+                )],
+                true,
+            ),
+        ];
+
+        for (label, expected_dispatch, shuffle_after) in cases {
+            let transport = MockTransport::new();
+            let mut playback = PlaybackSession::default();
+
+            let intents = list_menu_intents(&[label]);
+            assert_eq!(
+                intents.len(),
+                1,
+                "one click on {label} reports exactly one intent"
+            );
+            apply_list_menu_intent(intents[0], &ids, &transport, &mut playback);
+
+            assert_eq!(
+                transport.recorded(),
+                expected_dispatch,
+                "{label} reaches the transport as exactly this, and nothing more"
+            );
+            assert_eq!(
+                playback.queue.shuffle, shuffle_after,
+                "{label} leaves shuffle engaged: {shuffle_after}"
+            );
+        }
+    }
+
     #[test]
     fn test_playback_intents_reach_the_transport_only_when_emitted() {
         let (_dir, mut store, _pid) = seeded_store();
+        let mut mutations = store.clone();
         let transport = MockTransport::new();
         let mut selected = None;
         let mut editor = InlineTagEditor::new(Box::new(MockTagEdits));
@@ -17838,6 +20178,7 @@ mod context_menu_ui_tests {
                 &item,
                 None,
                 &mut store,
+                &mut mutations,
                 &transport,
                 &mut selected,
                 &mut editor,
@@ -17863,34 +20204,42 @@ mod context_menu_ui_tests {
 
         let second = track("/music/b.mp3");
         let ids = vec![item.id.clone(), second.id.clone()];
-        apply_list_menu_intent(ListMenuIntent::Play, &ids, &transport);
+        let mut playback = PlaybackSession::default();
+        apply_list_menu_intent(ListMenuIntent::Play, &ids, &transport, &mut playback);
         assert_eq!(
             &transport.recorded()[3..],
-            &[
-                TransportIntent::Play(item.id.clone()),
-                TransportIntent::AddToQueue(second.id.clone()),
-            ],
-            "the list's Play keeps its current shape: the first Track, then the rest"
+            &[TransportIntent::PlayMany(
+                item.id.clone(),
+                vec![second.id.clone()],
+            )],
+            "the list's Play is the shared batch-play helper: one dispatch, \
+             never a command per Track"
         );
 
-        apply_list_menu_intent(ListMenuIntent::PlayNext, &ids, &transport);
+        apply_list_menu_intent(ListMenuIntent::PlayNext, &ids, &transport, &mut playback);
         assert_eq!(
-            &transport.recorded()[5..],
+            &transport.recorded()[4..],
             &[
                 TransportIntent::PlayNext(second.id.clone()),
                 TransportIntent::PlayNext(item.id.clone()),
             ],
-            "Play Next preserves the current reverse-order sends so the list lands in order"
+            "Play Next inserts the whole list ahead of the current Track, and \
+             the reverse-order sends are what make it land in order"
         );
 
-        apply_list_menu_intent(ListMenuIntent::AppendToQueue, &ids, &transport);
+        apply_list_menu_intent(ListMenuIntent::AddToQueue, &ids, &transport, &mut playback);
         assert_eq!(
-            &transport.recorded()[7..],
-            &[
-                TransportIntent::AddToQueue(item.id.clone()),
-                TransportIntent::AddToQueue(second.id.clone()),
-            ],
-            "Append to Queue adds the whole list at the end, in order"
+            &transport.recorded()[6..],
+            &[TransportIntent::AddMany(vec![
+                item.id.clone(),
+                second.id.clone(),
+            ])],
+            "Add to Queue appends the whole list as ONE batch, in order — the queue \
+             mutates once, and nothing starts playing"
+        );
+        assert!(
+            !playback.queue.shuffle,
+            "none of Play, Play Next, or Add to Queue so much as touches shuffle"
         );
     }
 
@@ -17904,6 +20253,7 @@ mod context_menu_ui_tests {
         let props = TrackMenu {
             playable: true,
             editable: true,
+            favorite: false,
             playlists: &options,
             remove_from_playlist: false,
         };
@@ -18978,6 +21328,7 @@ mod press_feedback_tests {
 mod component_boundary_tests {
     use eframe::egui;
     use riff_backend::app::Transport;
+    use riff_backend::app::state::PlaybackSession;
     use riff_backend::domain::TrackId;
     use std::path::{Path, PathBuf};
 
@@ -19159,8 +21510,12 @@ mod component_boundary_tests {
         let _entry: Option<riff_gui::ui::now_playing::UpNextEntry> = None;
 
         // The host-adapter paths the suite drives menus and prompts through.
-        let _intent: fn(riff_gui::ui::menu::ListMenuIntent, &[TrackId], &dyn Transport) =
-            riff_gui::ui::app::apply_list_menu_intent;
+        let _intent: fn(
+            riff_gui::ui::menu::ListMenuIntent,
+            &[TrackId],
+            &dyn Transport,
+            &mut PlaybackSession,
+        ) = riff_gui::ui::app::apply_list_menu_intent;
         let _duration: fn(std::time::Duration) -> String = riff_gui::ui::app::format_duration;
         let _expand: fn(&str) -> std::path::PathBuf = riff_gui::ui::settings::expand_tilde;
     }

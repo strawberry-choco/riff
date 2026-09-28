@@ -38,8 +38,13 @@ pub enum PlaybackCommand {
     PlayNext(riff_persistence::track::TrackId),
     AddToQueue(riff_persistence::track::TrackId),
     /// Append a batch of tracks in one command, so the queue mutates once
-    /// under one lock (folder "play all" enqueues N tracks without N lock
-    /// round-trips and N shuffle regenerations).
+    /// under one lock (a collection's enqueue costs one lock round-trip and one
+    /// shuffle regeneration, not one per Track).
+    ///
+    /// It stands alone as often as it accompanies a `Play`: `play_many` sends
+    /// the two together because playing a collection starts its first Track,
+    /// while `add_many` sends only this, because queueing a collection leaves
+    /// the current Track playing.
     AddMany(Vec<riff_persistence::track::TrackId>),
     PlayPause,
 }

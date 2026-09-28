@@ -5,6 +5,11 @@
 //! deepest path entity (album > artist > genre) — and hides completely when
 //! nothing is selected. Click-to-lock only: no hover behavior.
 //!
+//! A READOUT, not a control panel: it displays art, title, subtitle, the
+//! readout's kind, tag rows, and the details grid, and its one way inward is a
+//! tag row opening the Inline Tag Editor. It offers no playback or queueing
+//! action — those belong to the selection's own context menu.
+//!
 //! Child module of `ui::app` so the pane methods keep direct access to
 //! [`RiffApp`]'s fields, exactly like the methods they sit beside.
 
@@ -14,17 +19,29 @@ use std::path::PathBuf;
 use riff_backend::app::state::LibrarySession;
 
 use super::super::selection;
-use super::{
-    COVER_CARD, InspectorKind, RiffApp, apply_selection_action, request_cover_intent,
-    resolve_inspector,
-};
+use super::{COVER_CARD, InspectorKind, RiffApp, request_cover_intent, resolve_inspector};
+
+/// The readout KIND's display name, for the header chip. The widget seam takes
+/// the name rather than the kind so it never has to know the app's own type —
+/// and so the chip cannot be right about the readout by accident, because the
+/// caller has to name all four cases.
+fn kind_label(kind: InspectorKind) -> &'static str {
+    match kind {
+        InspectorKind::Album => "Album",
+        InspectorKind::Artist => "Artist",
+        InspectorKind::Genre => "Genre",
+        InspectorKind::Track => "Track",
+    }
+}
 
 impl RiffApp {
     /// The inspector column: whatever the session has selected, resolved
     /// through the Session Views seam — art requested through the selection's
-    /// cover track, the details grid, and the Play / Add to Queue actions
-    /// over the selection's track batch. The stage gates visibility: this
-    /// method only runs when [`resolve_inspector`] resolved a readout.
+    /// cover track, the details grid, and the tag rows the listener can click
+    /// their way into. A READOUT: it displays the selection and offers no
+    /// playback or queueing action, because those live on the selection's own
+    /// context menu. The stage gates visibility: this method only runs when
+    /// [`resolve_inspector`] resolved a readout.
     pub(super) fn render_inspector(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
         let content = resolve_inspector(&mut self.views, library);
         // The draft never outlives its selection: the controller discards a
@@ -60,6 +77,11 @@ impl RiffApp {
             art: art.as_ref(),
             title: content.title.as_deref(),
             subtitle: content.subtitle.as_deref(),
+            // The header chip names what is being read out, so the readout can
+            // never introduce itself as an Album it is not. The name is resolved
+            // here because this is where the readout's kind is known; the widget
+            // seam only ever sees a string.
+            kind: kind_label(content.kind),
             details: &content.details,
             tags: &content.tags,
             // The editor renders only while a draft is open for this exact
@@ -67,12 +89,6 @@ impl RiffApp {
             // that album (ticket 03) — which the controller's reconcile
             // just enforced.
             editor: self.tag_editor.draft_mut(),
-            // A track readout plays just that one track (the primary action
-            // reads **Play**); entity readouts play their whole batch.
-            single: content.kind == InspectorKind::Track,
-            // The inspector always offers the quick-action row: Play and
-            // Add to Queue.
-            queue: true,
         };
         // The panel's 16px inset, as the fixed pane had — the art block and
         // readout sit clear of the column edge. The intents bubble OUT of the
@@ -94,9 +110,6 @@ impl RiffApp {
             .inner;
         for action in actions {
             match action {
-                selection::SelectionAction::PlayAlbum | selection::SelectionAction::Queue => {
-                    apply_selection_action(action, self.transport.as_ref(), &content.track_ids);
-                }
                 // The Save bar's intents belong to the editor flow: the
                 // controller owns the draft and the request.
                 selection::SelectionAction::SaveTagEdit => self.tag_editor.save(),
@@ -104,6 +117,8 @@ impl RiffApp {
                 // A tag row click opens the per-selection draft — a Track
                 // draft on a track readout, an Album batch draft on an album
                 // readout — resolved through the same Session Views source.
+                // This is the panel's ONE way inward; there is no other arm,
+                // because there is no longer anything else it can report.
                 selection::SelectionAction::StartEdit => {
                     if self.tag_editor.draft().is_none() {
                         self.open_inline_draft(&content);

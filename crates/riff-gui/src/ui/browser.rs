@@ -51,9 +51,35 @@ struct RowText {
 pub enum BrowserAction {
     /// A row or tile was selected, by its [`BrowserItem::key`].
     Select(String),
+    /// A right-click opened this row's collection menu. The row's own
+    /// [`BrowserItem::key`] travels with the report, so the host can select
+    /// the row AND act on it from this one value — and `intents` may well be
+    /// empty, because OPENING the menu is what moves the selection, not
+    /// choosing an item from it.
+    ContextMenu {
+        /// The row's key: the same identity a [`BrowserAction::Select`] carries.
+        key: String,
+        /// Whatever the listener chose before the menu closed, in click order.
+        intents: Vec<super::menu::ListMenuIntent>,
+    },
     /// The A–Z sort control was clicked; the caller flips the session's
     /// sort direction.
     ToggleSort,
+}
+
+impl BrowserAction {
+    /// Whether this action MOVES the row selection, and so should reset the
+    /// listing's scroll.
+    ///
+    /// This is the one predicate the section roots and the drill columns ask, so
+    /// a new selection-carrying variant has exactly one place to be declared and
+    /// the guard cannot be left answering for a variant that has since started
+    /// selecting — which is exactly how a right-click-selects change would
+    /// otherwise leave the list scrolled while the selection moved.
+    #[must_use]
+    pub fn selects_a_row(&self) -> bool {
+        matches!(self, Self::Select(_) | Self::ContextMenu { .. })
+    }
 }
 
 /// One frame of the browser column: what to render and how.
@@ -285,7 +311,26 @@ fn show_browser_list(
             } else {
                 let response = browser_row(ui, cache, palette, &item);
                 if response.clicked() {
-                    actions.push(BrowserAction::Select(item.key));
+                    actions.push(BrowserAction::Select(item.key.clone()));
+                }
+                // The row's collection menu. egui's transient popup, keyed by
+                // this row's own response identity: no per-row open state, and
+                // nothing to keep in step with an index, so virtualizing the
+                // listing changes nothing about it. Reported on the frame the
+                // menu OPENS, with an empty intent list — the host selects the
+                // row off that report, and an item chosen later arrives on the
+                // same report with the key still attached.
+                let mut intents = Vec::new();
+                if response
+                    .context_menu(|ui| {
+                        super::menu::collection_menu(ui, palette, &mut intents);
+                    })
+                    .is_some()
+                {
+                    actions.push(BrowserAction::ContextMenu {
+                        key: item.key.clone(),
+                        intents,
+                    });
                 }
             }
             y += h;

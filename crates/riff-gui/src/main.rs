@@ -6,15 +6,25 @@
 // closure — the only place the egui context exists, and the tray needs a
 // clone of it on its own thread to wake a sleeping event loop — before the
 // first frame runs.
+//
+// Stops a console window flashing on Windows release builds; it also detaches
+// stderr, so `tracing_subscriber::fmt::init()` below is a no-op from the user's
+// point of view — intended, not a regression. Debug builds keep the console
+// (`not(debug_assertions)`), so logs stay visible.
+//
+// This has to be an INNER (crate-level) attribute with a leading `!`.
+// `windows_subsystem` is a crate-level setting, so writing it as an outer
+// attribute on `fn main` applies it to the function instead, which newer rustc
+// rejects outright with `unused_attributes` and a non-zero exit — the release
+// build never links. The `cfg_attr` only fires in release, so `cargo check`
+// and `cargo clippy` run in debug and never see it; a green local gate is not
+// evidence that this attribute is well-formed.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use riff_backend::composition::AppRuntime;
 use riff_gui::ui::RiffApp;
 use riff_gui::ui::window_visibility::spawn_visibility_listener;
 
-// stops a console window flashing on Windows release builds; it also
-// detaches stderr, so `tracing_subscriber::fmt::init()` below is a no-op
-// from the user's point of view — intended, not a regression. Debug builds
-// keep the console (`not(debug_assertions)`), so logs stay visible.
-#[cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 fn main() {
     color_eyre::install().expect("failed to install color_eyre");
     tracing_subscriber::fmt::init();

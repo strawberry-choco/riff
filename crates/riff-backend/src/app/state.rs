@@ -204,12 +204,6 @@ impl LibrarySession {
         self.browser_path.last()
     }
 
-    /// Keep only the first `level` entries of the drill-down path (a
-    /// breadcrumb climb); `level` past the current length changes nothing.
-    pub fn truncate_path(&mut self, level: usize) {
-        self.browser_path.truncate(level);
-    }
-
     /// Clear the drill-down path entirely (a section or browse-mode switch
     /// starts navigation over at the root listing).
     pub fn reset_browser_path(&mut self) {

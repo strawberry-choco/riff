@@ -7,9 +7,9 @@
 //! drawn after it sit on top and win clicks over their slice of the strip.
 //!
 //! Since Issue 06 the titlebar is also the shell's top chrome: the former
-//! top-bar content (scan status, theme / advanced / view toggles) is merged
-//! into the same 56px strip, nav routes to exactly one visible View, and a
-//! token-derived minimum window size keeps the fixed chrome from collapsing.
+//! top-bar content (scan status, theme / view toggles) is merged into the same
+//! 56px strip, nav routes to exactly one visible View, and a token-derived
+//! minimum window size keeps the fixed chrome from collapsing.
 //!
 //! Headless seams (tested in `tests/ui_tests.rs`): the launch viewport
 //! configuration, the control→action contract, the drag-region gesture
@@ -164,8 +164,6 @@ pub struct TitleBarContent<'a> {
     pub scan_status: Option<&'a str>,
     /// Whether the dark palette is active (drives the theme glyph).
     pub theme_dark: bool,
-    /// Progressive-disclosure flag (REQ-UI-006) reflected by the toggle.
-    pub advanced_mode: bool,
     /// Which nav destination is active; `None` while Now Playing replaces
     /// the view (then the Now Playing control carries the active tint).
     pub active_nav: Option<NavDestination>,
@@ -178,8 +176,6 @@ pub struct TitleBarContent<'a> {
 pub enum TitleBarAction {
     /// Flip between the light and dark palettes.
     ToggleTheme,
-    /// Flip progressive disclosure (REQ-UI-006).
-    ToggleAdvanced,
     /// Open/close Now Playing over the active view.
     ToggleNowPlaying,
     /// Route to the Settings view.
@@ -196,7 +192,7 @@ pub enum TitleBarAction {
 
 /// Draw the shell titlebar inside its panel: background, wordmark, scan
 /// status, the global search field, the drag region, and the control cluster
-/// at the right edge (theme / Now Playing / Settings / Advanced toggles plus
+/// at the right edge (theme / Now Playing / Settings toggles plus
 /// minimize/close).
 ///
 /// Must run inside a top panel of exactly [`crate::ui::theme::TITLEBAR_H`]
@@ -288,7 +284,7 @@ pub fn show_titlebar(
     // over their slice of the strip.
     let minimize_left = draw_caption_controls(ui, cache, palette, rect, actions);
 
-    // Nav controls (theme / Now Playing / Settings / Advanced toggles) at the
+    // Nav controls (theme / Now Playing / Settings toggles) at the
     // right edge, Windows order, ending one gap left of the caption pair.
     // Drawn after the drag region so they take priority over it.
     let nav_rect = egui::Rect::from_min_max(
@@ -464,8 +460,8 @@ fn window_control_button(
     super::button::finish_icon_button(ui, palette, &button, label)
 }
 
-/// The right-edge nav-control cluster: theme / Now Playing / Settings /
-/// Advanced toggles. The minimize/close caption pair is drawn by
+/// The right-edge nav-control cluster: theme / Now Playing / Settings
+/// toggles. The minimize/close caption pair is drawn by
 /// [`show_titlebar`] itself, flush to the window corner. Runs inside a
 /// right-to-left scope covering the strip left of that pair; observed actions
 /// append to `actions`.
@@ -478,22 +474,6 @@ fn show_titlebar_controls(
 ) {
     ui.spacing_mut().item_spacing.x = theme::SPACE_XS;
     ui.visuals_mut().button_frame = false;
-
-    let advanced_label = if content.advanced_mode {
-        "Advanced: On"
-    } else {
-        "Advanced: Off"
-    };
-    if ui
-        .button(advanced_label)
-        .on_hover_text(
-            "Reveals power features: tag editing, smart playlists, \
-             and extra transport controls (stop, repeat).",
-        )
-        .clicked()
-    {
-        actions.push(TitleBarAction::ToggleAdvanced);
-    }
 
     let settings_tint = if content.active_nav == Some(NavDestination::Settings) {
         palette.brand_primary

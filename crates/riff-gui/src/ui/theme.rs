@@ -460,7 +460,8 @@ pub const SPACE_XS: f32 = 4.0;
 pub const SPACE_SM: f32 = 6.0;
 /// 8 px — the default gap between sibling controls in a row.
 pub const SPACE_MD: f32 = 8.0;
-/// 12 px — controls that read as one group: caption buttons, breadcrumbs.
+/// 12 px — the gap at a BOUNDARY between grouped regions (the inspector's
+/// sections).
 pub const SPACE_LG: f32 = 12.0;
 /// 16 px — a heading above the content it names.
 pub const SPACE_XL: f32 = 16.0;

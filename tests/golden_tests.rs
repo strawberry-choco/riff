@@ -498,7 +498,6 @@ mod tests {
             riff_gui::ui::chrome::TitleBarContent {
                 scan_status: None,
                 theme_dark: palette.dark,
-                advanced_mode: false,
                 active_nav: Some(riff_gui::ui::chrome::NavDestination::Library),
             },
         );
@@ -1188,7 +1187,6 @@ mod tests {
         let content = TitleBarContent {
             scan_status: None,
             theme_dark: palette.dark,
-            advanced_mode: false,
             active_nav: Some(NavDestination::Library),
         };
 
@@ -1275,13 +1273,14 @@ mod tests {
     }
 
     /// The detail column (the explorer's Tracks widget — the elastic stage's
-    /// last column, which absorbs the remaining width) at album level: the
-    /// breadcrumb trail, the album header with its subtitle, and the
-    /// `# / Title / Plays / Time` track table — one favorite, one selected,
-    /// one now-playing (idle, so nothing animates). 480 is a representative
-    /// absorbing width for the last column; the harness is wide enough that
-    /// the Time column clears the right edge — a clipped golden would bake
-    /// truncation into the baseline.
+    /// last column, which absorbs the remaining width) at album level: a bare
+    /// track list, one shared 40px row per track with the `Plays · Time`
+    /// cluster on the right — one favorite, one selected, one now-playing
+    /// (idle, so nothing animates). The column states no identity of its own,
+    /// so this image is the track list and nothing else. 480 is a
+    /// representative absorbing width for the last column; the harness is wide
+    /// enough that the Time cluster clears the right edge — a clipped golden
+    /// would bake truncation into the baseline.
     #[test]
     fn detail_column_dark_matches_golden_baseline() {
         snapshot(
@@ -1293,7 +1292,7 @@ mod tests {
     }
 
     fn draw_detail_column(ui: &mut egui::Ui, palette: &Palette) {
-        use riff_gui::ui::detail::{self, Crumb, DetailColumn};
+        use riff_gui::ui::detail::{self, DetailColumn};
         use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::theme::SURFACE_BG;
 
@@ -1303,25 +1302,8 @@ mod tests {
 
         let mut cache = IconCache::new();
 
-        let crumbs = [
-            Crumb {
-                label: "Artists".to_string(),
-            },
-            Crumb {
-                label: "Boards of Canada".to_string(),
-            },
-            Crumb {
-                label: "Geogaddi".to_string(),
-            },
-        ];
-        let header = detail::AlbumHeader {
-            title: "Geogaddi".to_string(),
-            subtitle: Some("Boards of Canada \u{b7} 2002".to_string()),
-        };
         let tracks = geogaddi_tracks();
         let column = DetailColumn {
-            breadcrumb: &crumbs,
-            header: Some(&header),
             tracks: &tracks,
             ..DetailColumn::empty("", "")
         };
@@ -1602,8 +1584,7 @@ mod tests {
     /// The elastic stage's Artists drill-down composition: the three list
     /// columns the stage sizes side by side — the Artists root (A–Z sort,
     /// artist rows) · the artist's Albums column (list rows, no sort) · the
-    /// Tracks column (breadcrumb
-    /// `Artists / Boards of Canada / Geogaddi`, album header, track table).
+    /// Tracks column (the selected album's track table).
     #[test]
     fn elastic_artists_drilled_dark_matches_golden_baseline() {
         snapshot(
@@ -1616,7 +1597,7 @@ mod tests {
 
     fn draw_elastic_artists_drilled(ui: &mut egui::Ui, palette: &Palette) {
         use riff_gui::ui::browser::{self, BrowserColumn, BrowserItem};
-        use riff_gui::ui::detail::{self, Crumb, DetailColumn};
+        use riff_gui::ui::detail::{self, DetailColumn};
         use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::theme::SURFACE_BG;
 
@@ -1701,26 +1682,9 @@ mod tests {
                 browser::show_browser_column(ui, &mut cache, palette, column, &mut Vec::new());
                 return;
             }
-            // Column 3 — the Tracks column: breadcrumb, header, track table.
-            let crumbs = [
-                Crumb {
-                    label: "Artists".to_string(),
-                },
-                Crumb {
-                    label: "Boards of Canada".to_string(),
-                },
-                Crumb {
-                    label: "Geogaddi".to_string(),
-                },
-            ];
-            let header = detail::AlbumHeader {
-                title: "Geogaddi".to_string(),
-                subtitle: Some("Boards of Canada \u{b7} 2002".to_string()),
-            };
+            // Column 3 — the Tracks column: the selected album's track table.
             let tracks = geogaddi_tracks();
             let column = DetailColumn {
-                breadcrumb: &crumbs,
-                header: Some(&header),
                 tracks: &tracks,
                 ..DetailColumn::empty("", "")
             };
@@ -1731,7 +1695,7 @@ mod tests {
     /// The elastic stage's Genres drill-down composition: the four list
     /// columns the stage sizes side by side — the Genres root · the
     /// artists-in-genre column · the albums-in-genre column · the Tracks
-    /// column (breadcrumb `Genres / Electronic / Autechre / Tri Repetae`).
+    /// column (the selected album's track table).
     #[test]
     fn elastic_genres_drilled_dark_matches_golden_baseline() {
         snapshot(
@@ -1744,7 +1708,7 @@ mod tests {
 
     fn draw_elastic_genres_drilled(ui: &mut egui::Ui, palette: &Palette) {
         use riff_gui::ui::browser::{self, BrowserColumn, BrowserItem};
-        use riff_gui::ui::detail::{self, Crumb, DetailColumn, TrackRow};
+        use riff_gui::ui::detail::{self, DetailColumn, TrackRow};
         use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::theme::SURFACE_BG;
 
@@ -1850,25 +1814,7 @@ mod tests {
                 browser::show_browser_column(ui, &mut cache, palette, column, &mut Vec::new());
                 return;
             }
-            // Column 4 — the Tracks column: breadcrumb, header, track table.
-            let crumbs = [
-                Crumb {
-                    label: "Genres".to_string(),
-                },
-                Crumb {
-                    label: "Electronic".to_string(),
-                },
-                Crumb {
-                    label: "Autechre".to_string(),
-                },
-                Crumb {
-                    label: "Tri Repetae".to_string(),
-                },
-            ];
-            let header = detail::AlbumHeader {
-                title: "Tri Repetae".to_string(),
-                subtitle: Some("Autechre \u{b7} 1995".to_string()),
-            };
+            // Column 4 — the Tracks column: the selected album's track table.
             let tracks = [
                 TrackRow {
                     key: "g1".to_string(),
@@ -1908,8 +1854,6 @@ mod tests {
                 },
             ];
             let column = DetailColumn {
-                breadcrumb: &crumbs,
-                header: Some(&header),
                 tracks: &tracks,
                 ..DetailColumn::empty("", "")
             };
@@ -2598,7 +2542,7 @@ mod tests {
 
     fn draw_elastic_albums_drilled(ui: &mut egui::Ui, palette: &Palette) {
         use riff_gui::ui::browser::{self, BrowserColumn, BrowserItem};
-        use riff_gui::ui::detail::{self, Crumb, DetailColumn};
+        use riff_gui::ui::detail::{self, DetailColumn};
         use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::theme::SURFACE_BG;
 
@@ -2643,22 +2587,8 @@ mod tests {
                 browser::show_browser_column(ui, &mut cache, palette, column, &mut Vec::new());
                 return;
             }
-            let crumbs = [
-                Crumb {
-                    label: "Albums".to_string(),
-                },
-                Crumb {
-                    label: "Geogaddi".to_string(),
-                },
-            ];
-            let header = detail::AlbumHeader {
-                title: "Geogaddi".to_string(),
-                subtitle: Some("Boards of Canada · 2002".to_string()),
-            };
             let tracks = geogaddi_tracks();
             let column = DetailColumn {
-                breadcrumb: &crumbs,
-                header: Some(&header),
                 tracks: &tracks,
                 ..DetailColumn::empty("", "")
             };
@@ -2679,7 +2609,7 @@ mod tests {
 
     fn draw_elastic_genres_deep(ui: &mut egui::Ui, palette: &Palette) {
         use riff_gui::ui::browser::{self, BrowserColumn, BrowserItem};
-        use riff_gui::ui::detail::{self, Crumb, DetailColumn, TrackRow};
+        use riff_gui::ui::detail::{self, DetailColumn, TrackRow};
         use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::theme::SURFACE_BG;
 
@@ -2727,24 +2657,6 @@ mod tests {
                 browser::show_browser_column(ui, &mut cache, palette, column, &mut Vec::new());
                 return;
             }
-            let crumbs = [
-                Crumb {
-                    label: "Genres".to_string(),
-                },
-                Crumb {
-                    label: "Electronic".to_string(),
-                },
-                Crumb {
-                    label: "Autechre".to_string(),
-                },
-                Crumb {
-                    label: "Tri Repetae".to_string(),
-                },
-            ];
-            let header = detail::AlbumHeader {
-                title: "Tri Repetae".to_string(),
-                subtitle: Some("Autechre · 1995".to_string()),
-            };
             let tracks = [
                 TrackRow {
                     key: "g1".to_string(),
@@ -2775,8 +2687,6 @@ mod tests {
                 },
             ];
             let column = DetailColumn {
-                breadcrumb: &crumbs,
-                header: Some(&header),
                 tracks: &tracks,
                 ..DetailColumn::empty("", "")
             };
@@ -3249,7 +3159,6 @@ mod tests {
                     riff_gui::ui::chrome::TitleBarContent {
                         scan_status: Some("Scanning 812 tracks…"),
                         theme_dark: true,
-                        advanced_mode: false,
                         active_nav: Some(riff_gui::ui::chrome::NavDestination::Library),
                     },
                 );
@@ -3272,7 +3181,6 @@ mod tests {
                     riff_gui::ui::chrome::TitleBarContent {
                         scan_status: None,
                         theme_dark: true,
-                        advanced_mode: false,
                         active_nav: None,
                     },
                 );
@@ -3293,7 +3201,6 @@ mod tests {
                     riff_gui::ui::chrome::TitleBarContent {
                         scan_status: None,
                         theme_dark: true,
-                        advanced_mode: false,
                         active_nav: Some(riff_gui::ui::chrome::NavDestination::Settings),
                     },
                 );
@@ -3599,17 +3506,6 @@ mod tests {
         );
     }
 
-    /// A listing without an album header (the breadcrumb-only shape).
-    #[test]
-    fn detail_column_no_header_dark_matches_golden_baseline() {
-        snapshot(
-            "detail_column_no_header_dark",
-            egui::vec2(480.0, 420.0),
-            Palette::dark(),
-            draw_detail_column_no_header,
-        );
-    }
-
     fn draw_selection_panel_with(
         ui: &mut egui::Ui,
         palette: &Palette,
@@ -3698,29 +3594,6 @@ mod tests {
         // The app's own no-selection copy, as `app/browser_pane.rs` passes it.
         let mut cache = IconCache::new();
         let column = DetailColumn::empty("Nothing here yet", "This selection has nothing to show.");
-        detail::show_detail_column(ui, &mut cache, palette, column, &mut Vec::new());
-    }
-
-    fn draw_detail_column_no_header(ui: &mut egui::Ui, palette: &Palette) {
-        use riff_gui::ui::detail::{self, Crumb, DetailColumn};
-        use riff_gui::ui::icons::IconCache;
-        use riff_gui::ui::theme::SURFACE_BG;
-
-        // Full-canvas background (determinism rule).
-        let background = ui.ctx().layer_painter(egui::LayerId::background());
-        background.rect_filled(ui.ctx().content_rect(), 0.0, SURFACE_BG);
-
-        let mut cache = IconCache::new();
-        let crumbs = [Crumb {
-            label: "Recently Played".to_string(),
-        }];
-        let tracks = geogaddi_tracks();
-        let column = DetailColumn {
-            breadcrumb: &crumbs,
-            header: None,
-            tracks: &tracks,
-            ..DetailColumn::empty("", "")
-        };
         detail::show_detail_column(ui, &mut cache, palette, column, &mut Vec::new());
     }
 

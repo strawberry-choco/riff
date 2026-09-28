@@ -945,7 +945,6 @@ impl eframe::App for RiffApp {
                 let content = crate::ui::chrome::TitleBarContent {
                     scan_status: scan_status.as_deref(),
                     theme_dark: self.theme.dark,
-                    advanced_mode: library.ui_flags.advanced_mode,
                     active_nav: crate::ui::chrome::NavDestination::active(
                         library.view_mode,
                         library.browse_mode,
@@ -1070,9 +1069,6 @@ fn apply_titlebar_action(
     use crate::ui::chrome::{NavDestination, TitleBarAction as Action, WindowControl};
     match action {
         Action::ToggleTheme => theme.dark = !theme.dark,
-        Action::ToggleAdvanced => {
-            library.ui_flags.advanced_mode = !library.ui_flags.advanced_mode;
-        }
         Action::ToggleNowPlaying => {
             // Now Playing replaces the active view; leaving it returns to the
             // Library view (resolved navigation gap).
@@ -1280,9 +1276,6 @@ pub fn apply_detail_action(
         reason = "each no-op arm carries its own reason for being unreachable here"
     )]
     match action {
-        // A breadcrumb segment at level `i` climbs the drill-down path back
-        // to that level: level 0 empties the path (the section root).
-        Action::Crumb(index) => library.truncate_path(index),
         // Entity rows no longer render inside the detail column — they are
         // their own columns in the elastic stage — so this action cannot
         // fire from the app. The widget seam keeps the variant for its
@@ -1351,15 +1344,13 @@ fn play_album_batch(album_tracks: &[TrackId], transport: &dyn Transport) {
 /// generation, so scans and tag edits can never leave stale rows.
 #[derive(Default)]
 pub struct DetailContent {
-    pub breadcrumb: Vec<crate::ui::detail::Crumb>,
-    pub header: Option<crate::ui::detail::AlbumHeader>,
     pub tracks: Vec<crate::ui::detail::TrackRow>,
 }
 
 /// The kinds of list column the elastic stage renders for
 /// [`BrowseMode::Library`] sections. Entity listings below the album level
 /// are their own columns now; the Tracks column is the existing
-/// `DetailColumn` shape (breadcrumb + album header + track table).
+/// `DetailColumn` shape, a bare track list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnKind {
     /// The section's root entity listing (Artists / Albums / Genres).
@@ -1375,7 +1366,7 @@ pub enum ColumnKind {
     /// A single-list stage's full-width listing: search results, an opened
     /// playlist or smart list, or the folder tree.
     Single,
-    /// The Tracks column: breadcrumb, album header, and track table.
+    /// The Tracks column: the selected album's track list, and nothing else.
     Tracks,
 }
 
@@ -1433,10 +1424,13 @@ pub fn column_plan(section: LibrarySection, path: &[BrowserSelection]) -> Vec<Co
 }
 
 /// Resolve what the Tracks column renders for the current drill-down path:
-/// the breadcrumb trail (section root, then one crumb per path entry), and
-/// on the album level the album header plus its track list — genre-scoped
-/// in the Genres section. Entity listings below the album level are their
-/// own columns in the stage, so this resolver carries no rows.
+/// the album's track list, genre-scoped in the Genres section — and nothing
+/// else. The breadcrumb trail and the album header this column used to open
+/// with are gone, and the album's name is resolved here no more: the column
+/// that listed it already says which album is selected, and so does the
+/// inspector, so a third copy said it again. Entity listings below the album
+/// level are their own columns in the stage, so this resolver carries no
+/// rows either.
 ///
 /// Under a query the album drill shows only the album's hit tracks — a
 /// name-hit album (its own artist/title matched) opens its full track list
@@ -1448,39 +1442,10 @@ pub fn resolve_detail_content(
 ) -> DetailContent {
     use riff_backend::app::state::BrowserSelection;
 
-    let root = match library.library_section {
-        LibrarySection::Genres => "Genres",
-        LibrarySection::Albums => "Albums",
-        _ => "Artists",
-    };
-    let mut content = DetailContent {
-        breadcrumb: vec![crate::ui::detail::Crumb {
-            label: root.to_string(),
-        }],
-        ..DetailContent::default()
-    };
-    for entry in &library.browser_path {
-        let label = match entry {
-            BrowserSelection::Artist(name) => name.clone(),
-            BrowserSelection::Genre(genre) => genre.clone(),
-            BrowserSelection::Album { title, .. } => title.clone(),
-        };
-        content.breadcrumb.push(crate::ui::detail::Crumb { label });
-    }
+    let mut content = DetailContent::default();
     let Some(BrowserSelection::Album { artist, title }) = library.current_selection() else {
         return content;
     };
-    // The album's year comes from its entry in the artist's album table
-    // (the store derives it from the first-added track).
-    let year = views
-        .artist_albums(artist)
-        .iter()
-        .find(|album| &album.title == title)
-        .and_then(|album| album.year);
-    content.header = Some(crate::ui::detail::AlbumHeader {
-        title: title.clone(),
-        subtitle: Some(year.map_or_else(|| artist.clone(), |y| format!("{artist} \u{b7} {y}"))),
-    });
     let genre = match library.library_section {
         LibrarySection::Genres => library.browser_path.first().and_then(|entry| match entry {
             BrowserSelection::Genre(genre) => Some(genre.clone()),
@@ -1726,7 +1691,8 @@ fn album_inspector(views: &mut SessionViews, artist: &str, title: &str) -> Inspe
         return InspectorContent::default();
     }
     // The album's year and genre come from its entry in the artist's album
-    // table (the same source the detail column's header uses).
+    // table (the same year the albums column prints on its `Artist · Year`
+    // detail line).
     let albums = views.artist_albums(artist);
     let album = albums.iter().find(|album| album.title == title);
     let mut details = vec![

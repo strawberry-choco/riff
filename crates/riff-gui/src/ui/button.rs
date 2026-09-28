@@ -183,7 +183,9 @@ pub enum Variant {
     /// error hue. Distinct from [`Variant::Secondary`] because not every
     /// secondary action is tinted — the neutral ones say so by being Secondary.
     Accent,
-    /// Frameless text action that reveals a hover wash (breadcrumb crumbs).
+    /// Frameless text action that reveals a hover wash, with no resting face.
+    /// The crumb buttons it was first drawn for are gone, so nothing in the app
+    /// constructs this variant today.
     Ghost,
     /// Bordered neutral action (the Settings header Back control).
     Caption,

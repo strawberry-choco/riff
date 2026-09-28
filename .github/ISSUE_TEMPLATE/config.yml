@@ -1,0 +1,17 @@
+# Chooser for the issue tracker. With blank issues disabled, GitHub sends
+# everyone to /issues/new/choose, so a new issue starts as a bug report, a
+# feature request, or a deliberate choice not to file one.
+blank_issues_enabled: false
+
+contact_links:
+  # Security reports must not land in the public queue. This opens a private
+  # advisory instead: see SECURITY.md for why that matters for a player that
+  # parses untrusted media files.
+  - name: Report a security vulnerability
+    url: https://github.com/strawberry-choco/riff/security/advisories/new
+    about: Opens a private advisory that only the maintainer can read. Use this instead of a public issue for anything that parses untrusted media — a bug in a decoder, the tag writer, or cover-image decoding, or anything that touches your files in an unexpected way.
+  # Absolute URL rather than a repo-relative path: it has to resolve on the
+  # chooser page regardless of which branch is the default.
+  - name: Before opening an issue, read the contribution guide
+    url: https://github.com/strawberry-choco/riff/blob/master/docs/engineering/contributing.md
+    about: The architecture rules, the lint configuration, and the anti-patterns that are specifically watched for in review. Worth reading before filing a bug or a proposal — the answer is often already documented.

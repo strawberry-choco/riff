@@ -290,44 +290,203 @@ fn test_store_scan_writes_rust_lowercased_entity_search_keys() {
     assert_eq!(title_lower, "балеты", "Rust-lowercased album title");
 }
 
+/// A checksum mismatch is an integrity signal, not corruption: the store
+/// opened, answered, and disagreed with this build about what its own schema
+/// history is. It is answered by refusing to open, so the file the user
+/// already has is exactly the file they are left with.
+///
+/// Driven through the real open path on a real file — opened, tampered,
+/// closed, re-opened — because the migration-apply path on an already-open
+/// store never reaches the open decision at all and so cannot observe what a
+/// user gets.
 #[test]
 fn test_store_checksum_tamper_is_fatal() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
 
+    // A populated store, closed again: the real user's starting point.
+    {
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("fresh store must open and migrate");
+        store
+            .apply_scan_batch(&[
+                library_track("m:\\lib\\a.mp3", "A", None, "One", None),
+                library_track("m:\\lib\\b.mp3", "B", None, "One", None),
+            ])
+            .expect("batch applies");
+    }
+
+    // Simulate a tampered bookkeeping row: the recorded checksum no longer
+    // matches what this build derives from that migration's own SQL.
+    {
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+        let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("reopening the populated store must work");
+        store
+            .with_connection(|conn| {
+                conn.execute("UPDATE schema_migrations SET checksum = 'deadbeef'", [])
+            })
+            .expect("tampering with the checksum must work");
+    }
+    let before = std::fs::read(&db_path).expect("the tampered store file must be readable");
+
+    // Reopen exactly as a user relaunching the app does.
     let (changes_tx, _changes_rx) =
         crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
-    // Simulate a corrupted/tampered bookkeeping row: the recorded
-    // checksum no longer matches the embedded migration.
-    store
-        .with_connection(|conn| {
-            conn.execute("UPDATE schema_migrations SET checksum = 'deadbeef'", [])
-        })
-        .expect("tampering with the checksum must work");
-
-    let err = store
-        .apply_migrations()
-        .expect_err("checksum mismatch must be a fatal startup error");
+    let Err(err) = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx) else {
+        panic!("a checksum mismatch must refuse to open, but open succeeded");
+    };
+    let message = err.to_string();
     assert!(
-        err.to_string().contains("tampered"),
-        "error must clearly name the checksum tamper: {err}"
+        message.contains("tampered"),
+        "error must clearly name the checksum tamper: {message}"
+    );
+    assert!(
+        message.contains("refused to open"),
+        "error must say the store was not opened, not that it was rebuilt: {message}"
     );
 
-    // Nothing partially applied: the bookkeeping row is untouched.
-    let rows: i64 = store
-        .with_connection(|conn| {
-            conn.query_row(
+    // No rename-aside: an integrity signal never empties the store the way
+    // corruption recovery does.
+    let entries: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let asides: Vec<&String> = entries
+        .iter()
+        .filter(|name| name.starts_with("riff.sqlite3."))
+        .collect();
+    assert!(
+        asides.is_empty(),
+        "a checksum mismatch must leave the store file alone, not rename it aside: {entries:?}"
+    );
+
+    // And the file is byte-for-byte what it was: no new empty store built
+    // over the top of it, and the tampered bookkeeping row still there.
+    assert_eq!(
+        std::fs::read(&db_path).expect("the store file must still be readable"),
+        before,
+        "a refused open must leave the store file exactly as it was"
+    );
+    let tampered: i64 =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("the untouched store must still be a readable database")
+            .query_row(
                 "SELECT COUNT(*) FROM schema_migrations WHERE checksum = 'deadbeef'",
                 [],
                 |row| row.get(0),
             )
+            .expect("the tampered bookkeeping row must still be there");
+    assert_eq!(
+        tampered, 15,
+        "the store's own migration rows are untouched: nothing re-applied, nothing replaced"
+    );
+}
+
+/// Every recorded checksum is a fact of its own migration's SQL. The store
+/// records the digest this build derives from a migration's SQL text, so the
+/// two can only ever agree, and an edited migration changes what the store
+/// expects.
+///
+/// This is the assertion whose absence let a hand-typed digest of the literal
+/// string `"test"` ship as migration 1's checksum: nothing ever compared a
+/// recorded value against the SQL it was supposed to describe.
+#[test]
+fn test_store_records_each_migrations_own_derived_checksum() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+        .expect("fresh store must open and migrate");
+
+    let recorded: Vec<(i64, String)> = store
+        .with_connection(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT version, checksum FROM schema_migrations ORDER BY version")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect()
         })
         .expect("reading schema_migrations must work");
+
+    let migrations = riff_infra::store::sqlite::embedded_migrations();
     assert_eq!(
-        rows, 15,
-        "all shipped migration rows must exist, none re-applied"
+        recorded.len(),
+        migrations.len(),
+        "every embedded migration records a checksum, and no others do"
     );
+
+    for ((version, checksum), migration) in recorded.iter().zip(migrations) {
+        assert_eq!(
+            *version, migration.version,
+            "recorded versions are the embedded ones, in order"
+        );
+        assert_eq!(
+            checksum,
+            &test_derived_digest(migration.sql),
+            "migration {version} ({}) must record the digest of its OWN sql, not a typed literal",
+            migration.name
+        );
+        assert_eq!(
+            &migration.checksum(),
+            checksum,
+            "the adapter's own derivation of migration {version} ({}) agrees",
+            migration.name
+        );
+        assert!(
+            checksum.len() == 64
+                && checksum
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "migration {version} ({}) must record 64 lowercase hex characters, got {checksum:?}",
+            migration.name
+        );
+    }
+
+    let distinct: std::collections::HashSet<&String> = recorded.iter().map(|(_, c)| c).collect();
+    assert_eq!(
+        distinct.len(),
+        recorded.len(),
+        "no two migrations may share a digest — a repeated one is a copied one"
+    );
+}
+
+/// The test's own implementation of the normalisation the adapter documents
+/// (`CRLF`/`CR` to `LF`, trailing whitespace stripped from every line, leading
+/// and trailing blank lines dropped, exactly one trailing newline), hashed with
+/// `SHA-256` and encoded as lowercase hex. Written out here rather than called
+/// so the assertion pins the rule instead of running the production function
+/// against itself.
+fn test_derived_digest(sql: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let unified = sql.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<&str> = unified.split('\n').map(str::trim_end).collect();
+    let first = lines
+        .iter()
+        .position(|line| !line.is_empty())
+        .unwrap_or(lines.len());
+    let last = lines
+        .iter()
+        .rposition(|line| !line.is_empty())
+        .map_or(first, |index| index + 1);
+    let mut normalized = lines[first..last].join("\n");
+    normalized.push('\n');
+
+    let digest = Sha256::digest(normalized.as_bytes());
+    digest
+        .iter()
+        .flat_map(|byte| [HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 0x0f)]])
+        .map(char::from)
+        .collect()
 }
 
 #[test]

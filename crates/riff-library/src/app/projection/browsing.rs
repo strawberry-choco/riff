@@ -1,26 +1,30 @@
 //! The artist/album browsing Session Projection (ADR 0002).
 
 use crate::app::store::{GenerationCache, StoreError, StoreGeneration};
-use crate::domain::{Album, Artist, Track};
+use crate::domain::{Album, Track};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// The three lazily-filled levels of the browsing hierarchy.
+/// The two lazily-filled levels of the browsing hierarchy.
 #[derive(Default, Clone)]
 struct BrowsingLevels {
-    artists: Option<Arc<[Artist]>>,
     albums: HashMap<String, Arc<[Album]>>,
     tracks: HashMap<(String, String), Arc<[Track]>>,
 }
 
 /// Session Projection for the artist/album browsing views (ADR 0002).
 ///
-/// Caches the artist list plus per-artist album lists and per-album track
-/// lists, each fetched from the store only when missing at the current
-/// generation. A generation bump (a committed store mutation) drops every
-/// level at once so a frame never mixes rows from two generations; each
-/// level then refetches lazily as its view expands again. Loader errors
-/// propagate and leave the cache untouched — the next call retries.
+/// Caches per-artist album lists and per-album track lists, each fetched
+/// from the store only when missing at the current generation. A generation
+/// bump (a committed store mutation) drops every level at once so a frame
+/// never mixes rows from two generations; each level then refetches lazily
+/// as its view expands again. Loader errors propagate and leave the cache
+/// untouched — the next call retries.
+///
+/// The Artists *listing* is not here: it is a paged browse root, so it
+/// rides the windowed projection in `windowed_list` like every other
+/// paged-listing read. This module holds what browsing reaches *past* a
+/// listing — one artist's albums, one album's tracks.
 ///
 /// Unlike the windowed `TrackListProjection` this is not windowed: browsing
 /// is hierarchical, so each query returns one artist's or one album's worth
@@ -49,26 +53,6 @@ impl BrowsingProjection {
         Self {
             cache: GenerationCache::new(generation),
         }
-    }
-
-    /// Every artist name-ascending, cached per generation. Fresh frames
-    /// hand out an `Arc` clone of the cached list — no per-frame copy.
-    ///
-    /// # Errors
-    /// Propagates loader failures without touching the cache.
-    pub fn artists(
-        &mut self,
-        loader: &mut dyn FnMut() -> Result<Vec<Artist>, StoreError>,
-    ) -> Result<Arc<[Artist]>, StoreError> {
-        self.cache.level(
-            &(),
-            |levels| levels.artists.clone(),
-            || loader().map(Arc::from),
-            |levels, answer| {
-                levels.artists = Some(Arc::clone(&answer));
-                answer
-            },
-        )
     }
 
     /// One artist's albums in canonical order, cached per generation.

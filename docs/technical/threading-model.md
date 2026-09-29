@@ -26,7 +26,7 @@ The audio engine thread is the heart of playback. It is a single long-lived loop
 
 `AppRuntime::spawn` opens the Application Store first — open/migration failures are returned to the caller, never silently tolerated — and then wires everything: the playback and library sessions, the command and update channels, the event inbox, and the store port views.
 
-One shared `SqliteStore` connection serves every store port view; both session generations (library and playlist) bump inside the store's mutation impls, and the `StoreChanged` stream feeds the event inbox. The UI's `Box<dyn Transport>` and the tray's transport are both `ChannelTransport`s wired with the same shared recorder closure, so every dispatched command is reported onto one observable event inbox before being forwarded to the engine's command channel. The scan service, watcher manager, tag-edit service, and cover service are constructed over the real adapters here, and their worker threads are owned by the returned `RuntimeLifecycle`. The frontend then receives everything it renders with as one `AppRuntime` value.
+One shared `SqliteStore` connection serves every store port view; both session generations (library and playlist) bump inside the store's mutation impls, and the `StoreChanged` stream feeds the event inbox. The UI's `Box<dyn Transport>` and the tray's transport are both `ChannelTransport`s over the same command channel, so a dispatch is one send straight to the engine — dispatches are not events, and nothing reports them onto the event inbox. The scan service, watcher manager, tag-edit service, and cover service are constructed over the real adapters here, and their worker threads are owned by the returned `RuntimeLifecycle`. The frontend then receives everything it renders with as one `AppRuntime` value. The store's Settings are hydrated here too, after the watcher and the transports exist: a restored Library Path has its watcher started and the audio engine starts at the restored volume before `spawn` returns.
 
 ## Shutdown
 
@@ -79,7 +79,7 @@ A small set of values is shared between threads behind `Arc<Mutex<_>>`:
 - **`Arc<Mutex<PlaybackSession>>`** — the playback half of the session state: queue, playback state, current position, volume, mute. Read by the engine, mutated by the Playback Coordinator, read by the tray and UI.
 - **`Arc<Mutex<LibrarySession>>`** — the library half: selection, views, search, library paths and statuses, scan status, watch states. Owned by the frontend's rendering loop and the library services.
 - **`Arc<Mutex<BackendEvents>>`** — the event inbox; both transports record onto it and the UI drains it.
-- **`Arc<Mutex<Option<WatcherManager>>>`** — shared between the filesystem-event forwarder and the UI, which reconfigures watch states through it.
+- **`Arc<Mutex<Option<WatcherManager>>>`** — shared between the filesystem-event forwarder, the App Runtime, which starts the restored watch states at launch, and the UI, which reconfigures watch states through it.
 
 The two session mutexes are independent: code must never hold one while acquiring the other. The audio ring buffer between the decode loop and the cpal callback is a lock-free SPSC ring (`ringbuf`) inside `CpalAudioOutput` (`riff-infra`) and is not part of the application surface.
 

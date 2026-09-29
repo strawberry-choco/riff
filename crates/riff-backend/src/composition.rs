@@ -10,6 +10,11 @@
 //! [`RuntimeLifecycle`] owns the worker threads and the levers that end
 //! them, so the process that spawns the workers is also the process that
 //! joins them. The frontend becomes a thin composition over both.
+//!
+//! The runtime is also where the Application Store's Settings land: the
+//! restored Library Paths have their watchers started and the audio engine
+//! starts at the restored volume before this function returns, so neither
+//! waits on the frontend drawing a frame.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,6 +44,7 @@ use riff_playback::infra::ports::DecoderFactory;
 
 use crate::app::MutexExt;
 use crate::app::events::BackendEvents;
+use crate::app::preferences::Preferences;
 use crate::app::state::{LibrarySession, PlaybackSession};
 use crate::app::tag_edit_service::TagEditService;
 use crate::app::views::SessionViews;
@@ -62,6 +68,11 @@ pub struct AppRuntime {
     pub ui_transport: Box<dyn Transport>,
     /// The tray's command transport — same event inbox, same command channel.
     pub tray_transport: ChannelTransport,
+    /// The Settings round-trip, already hydrated: the sessions carry the
+    /// stored Settings and the restored Library Paths are being watched by
+    /// the time `spawn` returns. The frontend diff-commits through this
+    /// handle at frame end; it never hydrates.
+    pub preferences: Preferences,
     /// The Library Scan front-end handle (boxed into the UI; cloned by the
     /// watcher manager, which is already wired inside `spawn`).
     pub scans: ScanService,
@@ -244,14 +255,12 @@ impl AppRuntime {
             changes_rx,
         ) = open_application_store(store_path)?;
 
-        // The single shared event inbox: both transports — the UI's and the
-        // tray's — are recording `ChannelTransport`s over the same command
-        // channel and the same recorder closure, so dispatched commands land
-        // on one observable surface. The store's `StoreChanged` stream is the
-        // inbox's second input. Playback errors surface as typed notices
-        // (issue 01 seam fix): the coordinator sends pre-formatted messages
-        // over this channel and `BackendEvents` stamps them with playback
-        // source + error severity.
+        // The UI's `Box<dyn Transport>` and the tray's transport are
+        // `ChannelTransport`s over the same command channel; a dispatch is one
+        // send. The inbox's inputs are the store's `StoreChanged` stream and
+        // playback errors, which surface as typed notices (issue 01 seam fix):
+        // the coordinator sends pre-formatted messages over that channel and
+        // `BackendEvents` stamps them with playback source + error severity.
         let backend_events = Arc::new(Mutex::new(BackendEvents::default()));
         let (notice_tx, notice_rx) = unbounded::<String>();
         {
@@ -362,22 +371,33 @@ impl AppRuntime {
             Arc::clone(&cover_stop),
         );
 
-        // The UI's `Box<dyn Transport>` and the tray's transport are
-        // `ChannelTransport`s wired with the same shared recorder, so every
-        // UI and tray intent is recorded synchronously onto the shared
-        // event inbox before it is forwarded to the engine's command
-        // channel.
-        let recorder = {
-            let backend_events = backend_events.clone();
-            move |cmd: &riff_playback::domain::PlaybackCommand| {
-                backend_events.lock_or_recover().record_command(cmd.clone());
-            }
-        };
-        let ui_transport: Box<dyn Transport> = Box::new(ChannelTransport::new_recording(
-            ui_cmd_tx,
-            Box::new(recorder.clone()),
-        ));
-        let tray_transport = ChannelTransport::new_recording(tray_cmd_tx, Box::new(recorder));
+        // The UI's `Box<dyn Transport>` and the tray's transport are plain
+        // `ChannelTransport`s over the same command channel: every UI and tray
+        // intent is one send to the engine, with no inbox lock on the path.
+        let ui_transport: Box<dyn Transport> = Box::new(ChannelTransport::new(ui_cmd_tx));
+        let tray_transport = ChannelTransport::new(tray_cmd_tx);
+
+        // The Settings round-trip is hydrated HERE, and not on a frame, for
+        // one reason: it is the last thing in the composition that needs
+        // something built above it, and the two halves it lands are exactly
+        // those two things.
+        //
+        // The volume half needs a Transport to dispatch its restored
+        // `SetVolume` through, so the engine starts at the persisted level
+        // while the runtime is still being assembled rather than after a
+        // window opens. The Library Path half needs the watcher manager, so a
+        // root the user enabled watching on is being followed by the time this
+        // function returns — watching is a property of the running
+        // application, not of whether a frame has been drawn. Splitting the two
+        // halves across here and the frontend would hand the seam back to the
+        // caller, which is the leak this placement exists to close.
+        let preferences = Preferences::hydrate(
+            &playback,
+            &library,
+            &settings_store,
+            ui_transport.as_ref(),
+            &watcher_manager,
+        );
 
         let quit_flag = Arc::new(AtomicBool::new(false));
 
@@ -387,6 +407,7 @@ impl AppRuntime {
             backend_events,
             ui_transport,
             tray_transport,
+            preferences,
             scans,
             watcher_manager: Arc::clone(&watcher_manager),
             quit_flag,

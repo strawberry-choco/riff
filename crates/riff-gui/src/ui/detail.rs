@@ -30,8 +30,12 @@
 //!
 //! What the menu reports is that it OPENED, and opening is what makes the
 //! Track the selection — the same report every other Track row's menu makes
-//! ([`DetailAction::TrackMenu`]), answered by the same two appliers the host
-//! already runs for every other Track row. That report is also where this
+//! ([`super::menu::TrackMenuReport`]), answered by the same per-app Track-menu
+//! host every other Track row reaches. It travels in its own channel
+//! ([`DetailReport::TrackMenu`]) rather than as a [`DetailAction`], because
+//! answering it needs the Playlist Store and the Inline Tag Editor, which the
+//! host holds and this column's applier does not: a separate report type makes
+//! that structural instead of a no-op arm. That report is also where this
 //! column's one accepted rough edge comes from, so it is written out here
 //! rather than left to be rediscovered as a bug:
 //!
@@ -52,8 +56,13 @@ use eframe::egui;
 use super::icons::IconCache;
 use super::theme::{self, Palette};
 
-/// What the user did to the detail column this frame; `app.rs` applies
-/// these to the sessions and the store.
+/// What the user did to the detail column this frame that `app.rs` answers
+/// through [`apply_detail_action`](crate::ui::app::apply_detail_action): the
+/// reports that move a selection, start a Track, and commit a Favourite.
+///
+/// A Track row's **menu** report is deliberately not one of these — it is a
+/// [`DetailReport::TrackMenu`], answered by the per-app Track-menu host. See
+/// [`DetailReport`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetailAction {
     /// An entity row (an album under an artist, an artist under a genre)
@@ -65,20 +74,6 @@ pub enum DetailAction {
     SelectTrack(String),
     /// A track-table row asked to start playing, by its id key.
     PlayTrack(String),
-    /// A right-click opened this track row's Track menu, carrying the row's
-    /// [`crate::riff_backend::domain::TrackId`] key and whatever was chosen
-    /// from the menu in click order.
-    ///
-    /// The counterpart of [`crate::ui::browser::BrowserAction::ContextMenu`],
-    /// and it arrives on the frame the menu OPENS — with `intents` empty,
-    /// because OPENING is what moves the selection and CHOOSING is a separate
-    /// event. The key travels with the report so the host can select the Track
-    /// AND act on it from one value; a right-click that opens a menu and is
-    /// then dismissed chose nothing and has still selected.
-    TrackMenu {
-        key: String,
-        intents: Vec<super::menu::TrackMenuIntent>,
-    },
     /// The row's favorite control toggled the track's flag to `favorite`,
     /// by its id key.
     SetFavorite { key: String, favorite: bool },
@@ -86,6 +81,27 @@ pub enum DetailAction {
     /// caller owns the session state and re-sorts the rows it hands over;
     /// the widget only reports the choice.
     TrackSortSelected(riff_backend::app::state::TrackSort),
+}
+
+/// Everything the detail column reported this frame, in the order it happened.
+///
+/// One channel, two kinds, because the two kinds are answered by two different
+/// owners and must not be confused for each other: a [`DetailAction`] goes to
+/// the detail-action applier, and a [`super::menu::TrackMenuReport`] goes to
+/// the per-app Track-menu host. Keeping them in one `Vec` preserves the order
+/// the user acted in, which a pair of separate channels would not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetailReport {
+    /// A report the detail-action applier answers.
+    Action(DetailAction),
+    /// A Track row's menu report, for the per-app Track-menu host.
+    TrackMenu(super::menu::TrackMenuReport),
+}
+
+impl From<DetailAction> for DetailReport {
+    fn from(action: DetailAction) -> Self {
+        Self::Action(action)
+    }
 }
 
 /// One row of the album track table: the display values the app resolved
@@ -179,7 +195,7 @@ impl<'a> DetailColumn<'a> {
     }
 }
 
-/// Render the detail column and append observed [`DetailAction`]s. No
+/// Render the detail column and append what it observed to `reports`. No
 /// scroll memory: the track list keeps its own positional state (the seam's
 /// plain rendering path — goldens and widget tests).
 pub fn show_detail_column(
@@ -187,9 +203,9 @@ pub fn show_detail_column(
     cache: &mut IconCache,
     palette: &Palette,
     column: DetailColumn<'_>,
-    actions: &mut Vec<DetailAction>,
+    reports: &mut Vec<DetailReport>,
 ) {
-    show_detail_column_scrolled(ui, cache, palette, column, None, actions);
+    show_detail_column_scrolled(ui, cache, palette, column, None, reports);
 }
 
 /// The app's render path: like [`show_detail_column`], but the track list's
@@ -202,7 +218,7 @@ pub fn show_detail_column_scrolled(
     palette: &Palette,
     column: DetailColumn<'_>,
     scroll: Option<super::scroll_memory::ScrollControl>,
-    actions: &mut Vec<DetailAction>,
+    reports: &mut Vec<DetailReport>,
 ) {
     // Asked up front, because the fallback at the end of this function is what
     // a column with neither tracks nor rows renders.
@@ -214,7 +230,7 @@ pub fn show_detail_column_scrolled(
         // something to reorder — an empty listing hides it, like every other
         // column's sort control.
         if let Some(chosen) = super::browser::track_sort_row(ui, palette, sort) {
-            actions.push(DetailAction::TrackSortSelected(chosen));
+            reports.push(DetailAction::TrackSortSelected(chosen).into());
         }
     }
     if !column.tracks.is_empty() {
@@ -225,13 +241,13 @@ pub fn show_detail_column_scrolled(
             scroll,
             column.tracks,
             column.track_menu,
-            actions,
+            reports,
         );
     }
     for row in column.rows {
         let response = super::browser::detail_entity_row(ui, cache, palette, row);
         if response.clicked() {
-            actions.push(DetailAction::SelectRow(row.key.clone()));
+            reports.push(DetailAction::SelectRow(row.key.clone()).into());
         }
     }
     // Nothing to render (no album selected yet, or a selection with no
@@ -250,7 +266,7 @@ pub fn show_detail_column_scrolled(
 /// right-click opens the shared Track menu — the same gestures every track
 /// listing speaks. A row's favorite toggle lands here as
 /// [`DetailAction::SetFavorite`], carrying the flag's NEW value, and its menu
-/// as [`DetailAction::TrackMenu`], carrying the row's key.
+/// as a [`DetailReport::TrackMenu`], carrying the row's key.
 ///
 /// The menu is BUILT PER ROW from the factory the host handed over, because one
 /// of its props — the row's Favourite flag — is a fact about this row and not
@@ -263,7 +279,7 @@ fn track_list(
     scroll: Option<super::scroll_memory::ScrollControl>,
     tracks: &[TrackRow],
     track_menu: Option<&TrackMenuFactory<'_>>,
-    actions: &mut Vec<DetailAction>,
+    reports: &mut Vec<DetailReport>,
 ) {
     // The track list is a field, painted by the list rather than by each row:
     // these rows are virtualized, so a row-carried fill would stop at the last
@@ -324,17 +340,20 @@ fn track_list(
                     },
                 );
                 if row.response.clicked() {
-                    actions.push(DetailAction::SelectTrack(track.key.clone()));
+                    reports.push(DetailAction::SelectTrack(track.key.clone()).into());
                 }
                 if row.response.double_clicked() {
-                    actions.push(DetailAction::SelectTrack(track.key.clone()));
-                    actions.push(DetailAction::PlayTrack(track.key.clone()));
+                    reports.push(DetailAction::SelectTrack(track.key.clone()).into());
+                    reports.push(DetailAction::PlayTrack(track.key.clone()).into());
                 }
                 if let Some(favorite) = row.favorite_toggled {
-                    actions.push(DetailAction::SetFavorite {
-                        key: track.key.clone(),
-                        favorite,
-                    });
+                    reports.push(
+                        DetailAction::SetFavorite {
+                            key: track.key.clone(),
+                            favorite,
+                        }
+                        .into(),
+                    );
                 }
                 // The row's Track menu, from the shared menu module, so a
                 // Track's actions do not depend on which Column is showing it.
@@ -360,11 +379,13 @@ fn track_list(
                         // Reported on the frame the menu OPENS, with an empty
                         // intent list: the host selects the Track off that
                         // report, and an item chosen later arrives on the same
-                        // report with the key still attached.
-                        actions.push(DetailAction::TrackMenu {
+                        // report with the key still attached. It is the HOST's
+                        // channel, not the detail applier's — answering it needs
+                        // handles this column does not hold.
+                        reports.push(DetailReport::TrackMenu(super::menu::TrackMenuReport {
                             key: track.key.clone(),
                             intents,
-                        });
+                        }));
                     }
                 }
             }

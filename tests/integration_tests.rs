@@ -695,8 +695,7 @@ mod composition_root_tests {
             "committed tracks in SessionViews",
             || {
                 (rt.session_views
-                    .track_list("", riff_backend::app::state::TrackSort::default(), 0)
-                    .total
+                    .track_count("", riff_backend::app::state::TrackSort::default())
                     == 2)
                     .then_some(())
             },
@@ -712,6 +711,56 @@ mod composition_root_tests {
                     .any(|ev| matches!(ev, BackendEvent::LibraryChanged { .. }))
                     .then_some(())
             },
+        );
+    }
+
+    /// A Library Path's Watch State is honoured on the restore edge: a relaunch
+    /// over a store that recorded `Enabled` has that root being watched by the
+    /// time `spawn` returns — no frame drawn, no window open, and the real
+    /// `notify` watcher rather than a stand-in.
+    ///
+    /// `Enabled` is only reachable by a `start_watching` that succeeded, so
+    /// this asserts the watcher is running and not merely that a row was read.
+    #[test]
+    fn test_a_relaunched_watched_library_path_is_watched_before_any_frame_is_drawn() {
+        use riff_backend::app::state::WatchState;
+        use riff_backend::app::store::SettingsStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let music = dir.path().join("music");
+        std::fs::create_dir_all(&music).unwrap();
+
+        // The previous run's store: the user watched this folder, so its
+        // Watch State row says so.
+        {
+            let (changes_tx, _changes_rx) = crossbeam_channel::unbounded();
+            let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+                .expect("scratch store must open");
+            let mut settings: Box<dyn SettingsStore> = Box::new(store);
+            settings
+                .save_library_paths(std::slice::from_ref(&music))
+                .expect("the Library Path row must save");
+            settings
+                .save_watch_states(&std::collections::HashMap::from([(
+                    music.clone(),
+                    WatchState::Enabled,
+                )]))
+                .expect("the Watch State row must save");
+        }
+
+        let (rt, lifecycle) =
+            AppRuntime::spawn(&db_path).expect("runtime must spawn over the store just written");
+        let _lifecycle = LifecycleGuard(lifecycle);
+
+        assert_eq!(
+            rt.library
+                .lock_or_recover()
+                .library_paths
+                .watch_state(&music),
+            WatchState::Enabled,
+            "the restored Watch State is a live verdict, and the runtime reached it without \
+             any frame being drawn"
         );
     }
 
@@ -790,8 +839,7 @@ mod composition_root_tests {
         );
         assert_eq!(
             rt.session_views
-                .track_list("", riff_backend::app::state::TrackSort::default(), 0)
-                .total,
+                .track_count("", riff_backend::app::state::TrackSort::default()),
             counts.tracks,
             "the store stays consistent after a shutdown that raced a scan: the sidebar count \
              and the track list must still agree"

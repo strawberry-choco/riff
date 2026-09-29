@@ -1080,10 +1080,11 @@ pub mod mocks {
 
     /// Which [`LibraryQueryStore`] query a [`MockLibraryQueryStore`]
     /// recorded. Arguments are kept so assertions can pin both call counts
-    /// and the exact query shapes the Session Views seam issues. One
-    /// Listing Page read records exactly one entry: its total and its window
-    /// come from a single store read, so the recording names that read with
-    /// its own arguments (ADR 0002's 2026-09-22 amendment).
+    /// and the exact query shapes the Session Views seam issues. A paged
+    /// listing is recorded **twice** when a surface asks for both halves: a
+    /// count read and a row read reach the same `*_page` port method, told
+    /// apart by the `limit` each carried (0 for a count, a whole window for
+    /// rows).
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum LibraryQueryCall {
         GetTrack(TrackId),
@@ -1130,15 +1131,22 @@ pub mod mocks {
     /// Which [`LibraryQueryStore`] query fails while listed in
     /// [`MockLibraryQueryStore::failing`].
     ///
-    /// A Listing Page read is one store read, but it still composes the two
-    /// halves it replaced (a total and a window), so a page read is gated by
-    /// the `*Count` and `*Window` switches it grew from: either one makes
-    /// that single page read return `Err`.
+    /// A paged listing is read as **two** store reads, not one: the seam
+    /// asks for a listing's total on its own (`*_count`, which reaches the
+    /// port asking for zero rows) and for one row at a time on its own
+    /// (`*_window`, which asks for a whole window). Each pair of variants
+    /// gates one of them, told apart by the limit the read carried, so a
+    /// test can fail a listing's count while its rows still serve, or the
+    /// reverse.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum FailingQuery {
         GetTrack,
         TracksWindow,
+        TracksCount,
+        SearchWindow,
+        SearchCount,
         AllArtists,
+        ArtistAlbums,
         SmartPlaylist,
         TrackIdsInFolderTree,
         GenreCounts,
@@ -1307,10 +1315,11 @@ pub mod mocks {
             self.calls.lock().unwrap().clone()
         }
 
-        /// Every bounded-window Listing Page read as its `(offset, limit)`
-        /// pair — flat, search, and paged-browse listings alike — in call
-        /// order. One entry per store read: the pair names the window that
-        /// single page fetch served.
+        /// Every bounded-window **row** read as its `(offset, limit)` pair —
+        /// flat, search, and paged-browse listings alike — in call order.
+        /// One entry per store read, and a listing's count read is *not* one:
+        /// it asks for zero rows, so it is reported by [`Self::count_calls`]
+        /// instead.
         #[must_use]
         pub fn window_calls(&self) -> Vec<(usize, usize)> {
             self.calls
@@ -1325,7 +1334,34 @@ pub mod mocks {
                     | LibraryQueryCall::GenresPage(_, offset, limit)
                     | LibraryQueryCall::ArtistsInGenrePage(_, _, offset, limit)
                     | LibraryQueryCall::ArtistAlbumsInGenrePage(_, _, _, offset, limit) => {
-                        Some((*offset, *limit))
+                        (*limit > 0).then_some((*offset, *limit))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Every listing **count** read, in call order. A count read reaches
+        /// the same page-read port call as a row read but asks for zero
+        /// rows, which is what tells the two apart here and what
+        /// `FailingQuery::*Count` gates.
+        #[must_use]
+        pub fn count_calls(&self) -> Vec<(usize, usize)> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|call| match call {
+                    LibraryQueryCall::TracksPage(_, offset, limit)
+                    | LibraryQueryCall::SearchPage(_, _, offset, limit)
+                    | LibraryQueryCall::HitAlbumsPage(_, offset, limit)
+                    | LibraryQueryCall::HitArtistsPage(_, offset, limit)
+                    | LibraryQueryCall::ArtistsPage(_, offset, limit)
+                    | LibraryQueryCall::AlbumsPage(_, offset, limit)
+                    | LibraryQueryCall::GenresPage(_, offset, limit)
+                    | LibraryQueryCall::ArtistsInGenrePage(_, _, offset, limit)
+                    | LibraryQueryCall::ArtistAlbumsInGenrePage(_, _, _, offset, limit) => {
+                        (*limit == 0).then_some((*offset, *limit))
                     }
                     _ => None,
                 })
@@ -1361,13 +1397,27 @@ pub mod mocks {
             self.calls.lock().unwrap().push(call);
         }
 
+        /// Whether a paged-listing read of `limit` rows should fail.
+        ///
+        /// The seam reads a listing as two store reads, told apart by the
+        /// limit each carried: a count read asks for zero rows, a row read
+        /// for a whole window. So `window` gates the row read, `count` gates
+        /// the count read, and a test can fail one while the other serves.
+        fn page_fails(&self, window: FailingQuery, count: FailingQuery, limit: usize) -> bool {
+            if limit == 0 {
+                self.failing.contains(&count)
+            } else {
+                self.failing.contains(&window)
+            }
+        }
+
         /// Whether `query` counts as a match against the canned search rows.
         fn search_matches(&self, query: &str) -> bool {
             self.matching_searches.is_empty() || self.matching_searches.iter().any(|q| q == query)
         }
 
         /// Slice `rows` into one bounded window with the direction applied —
-        /// the shared backing of the paged browse Listing Page reads
+        /// the shared backing of the paged browse listing reads
         /// (artists, albums, genres, and the genre drill-downs all serve
         /// their canned list).
         fn window_rows<T: Clone>(
@@ -1405,7 +1455,7 @@ pub mod mocks {
             limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
             self.record(LibraryQueryCall::TracksPage(order, offset, limit));
-            if self.failing.contains(&FailingQuery::TracksWindow) {
+            if self.page_fails(FailingQuery::TracksWindow, FailingQuery::TracksCount, limit) {
                 return Err(StoreError::InvalidOperation("loader boom".to_string()));
             }
             let total = self.flat.len();
@@ -1439,6 +1489,9 @@ pub mod mocks {
                 offset,
                 limit,
             ));
+            if self.page_fails(FailingQuery::SearchWindow, FailingQuery::SearchCount, limit) {
+                return Err(StoreError::InvalidOperation("search boom".to_string()));
+            }
             if !self.search_matches(query) {
                 return Ok(riff_persistence::store::Page::new(0, Vec::new()));
             }
@@ -1463,6 +1516,9 @@ pub mod mocks {
 
         fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, StoreError> {
             self.record(LibraryQueryCall::ArtistAlbums(artist.to_string()));
+            if self.failing.contains(&FailingQuery::ArtistAlbums) {
+                return Err(StoreError::InvalidOperation("albums boom".to_string()));
+            }
             Ok(self.albums.clone())
         }
 
@@ -1598,12 +1654,7 @@ pub mod mocks {
                 offset,
                 limit,
             ));
-            if self.failing.contains(&FailingQuery::HitAlbumsCount) {
-                return Err(StoreError::InvalidOperation(
-                    "hit albums count boom".to_string(),
-                ));
-            }
-            if self.failing.contains(&FailingQuery::HitAlbums) {
+            if self.page_fails(FailingQuery::HitAlbums, FailingQuery::HitAlbumsCount, limit) {
                 return Err(StoreError::InvalidOperation("hit albums boom".to_string()));
             }
             if !self.search_matches(query) {
@@ -1631,12 +1682,11 @@ pub mod mocks {
                 offset,
                 limit,
             ));
-            if self.failing.contains(&FailingQuery::HitArtistsCount) {
-                return Err(StoreError::InvalidOperation(
-                    "hit artists count boom".to_string(),
-                ));
-            }
-            if self.failing.contains(&FailingQuery::HitArtists) {
+            if self.page_fails(
+                FailingQuery::HitArtists,
+                FailingQuery::HitArtistsCount,
+                limit,
+            ) {
                 return Err(StoreError::InvalidOperation("hit artists boom".to_string()));
             }
             if !self.search_matches(query) {
@@ -1798,14 +1848,13 @@ pub mod mocks {
             limit: usize,
         ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
             self.record(LibraryQueryCall::ArtistsPage(direction, offset, limit));
-            if self.failing.contains(&FailingQuery::ArtistsCount) {
+            if self.page_fails(
+                FailingQuery::ArtistsWindow,
+                FailingQuery::ArtistsCount,
+                limit,
+            ) {
                 return Err(StoreError::InvalidOperation(
-                    "artists count boom".to_string(),
-                ));
-            }
-            if self.failing.contains(&FailingQuery::ArtistsWindow) {
-                return Err(StoreError::InvalidOperation(
-                    "artists window boom".to_string(),
+                    "artists listing boom".to_string(),
                 ));
             }
             let total = self.artists.len();
@@ -1820,14 +1869,9 @@ pub mod mocks {
             limit: usize,
         ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
             self.record(LibraryQueryCall::AlbumsPage(direction, offset, limit));
-            if self.failing.contains(&FailingQuery::AlbumsCount) {
+            if self.page_fails(FailingQuery::AlbumsWindow, FailingQuery::AlbumsCount, limit) {
                 return Err(StoreError::InvalidOperation(
-                    "albums count boom".to_string(),
-                ));
-            }
-            if self.failing.contains(&FailingQuery::AlbumsWindow) {
-                return Err(StoreError::InvalidOperation(
-                    "albums window boom".to_string(),
+                    "albums listing boom".to_string(),
                 ));
             }
             let total = self.paged_albums.len();
@@ -1842,14 +1886,9 @@ pub mod mocks {
             limit: usize,
         ) -> Result<riff_persistence::store::Page<GenreCount>, StoreError> {
             self.record(LibraryQueryCall::GenresPage(direction, offset, limit));
-            if self.failing.contains(&FailingQuery::GenresCount) {
+            if self.page_fails(FailingQuery::GenresWindow, FailingQuery::GenresCount, limit) {
                 return Err(StoreError::InvalidOperation(
-                    "genres count boom".to_string(),
-                ));
-            }
-            if self.failing.contains(&FailingQuery::GenresWindow) {
-                return Err(StoreError::InvalidOperation(
-                    "genres window boom".to_string(),
+                    "genres listing boom".to_string(),
                 ));
             }
             let total = self.paged_genres.len();
@@ -1870,14 +1909,13 @@ pub mod mocks {
                 offset,
                 limit,
             ));
-            if self.failing.contains(&FailingQuery::ArtistsInGenreCount) {
+            if self.page_fails(
+                FailingQuery::ArtistsInGenreWindow,
+                FailingQuery::ArtistsInGenreCount,
+                limit,
+            ) {
                 return Err(StoreError::InvalidOperation(
-                    "genre artists count boom".to_string(),
-                ));
-            }
-            if self.failing.contains(&FailingQuery::ArtistsInGenreWindow) {
-                return Err(StoreError::InvalidOperation(
-                    "genre artists window boom".to_string(),
+                    "genre artists listing boom".to_string(),
                 ));
             }
             let total = self.genre_artists.len();
@@ -1900,20 +1938,13 @@ pub mod mocks {
                 offset,
                 limit,
             ));
-            if self
-                .failing
-                .contains(&FailingQuery::ArtistAlbumsInGenreCount)
-            {
+            if self.page_fails(
+                FailingQuery::ArtistAlbumsInGenreWindow,
+                FailingQuery::ArtistAlbumsInGenreCount,
+                limit,
+            ) {
                 return Err(StoreError::InvalidOperation(
-                    "genre album count boom".to_string(),
-                ));
-            }
-            if self
-                .failing
-                .contains(&FailingQuery::ArtistAlbumsInGenreWindow)
-            {
-                return Err(StoreError::InvalidOperation(
-                    "genre album window boom".to_string(),
+                    "genre album listing boom".to_string(),
                 ));
             }
             let total = self.genre_albums.len();

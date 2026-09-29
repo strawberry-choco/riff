@@ -2,15 +2,16 @@
 //! frontend.
 //!
 //! The frontend holds exactly one shared `Arc<Mutex<BackendEvents>>`. Two
-//! inputs land on the inbox — dispatched `PlaybackCommand`s (recorded by the
-//! transports wired at the Composition Root) and the Application Store's
-//! `StoreChanged` stream (subscribed at spawn) — plus the coordinator's
-//! playback-error notices, stamped with source and severity on drain.
+//! inputs land on the inbox — the Application Store's `StoreChanged` stream
+//! (subscribed at spawn) and the coordinator's playback-error notices, stamped
+//! with source and severity on drain.
 //!
 //! # Invariants
 //!
-//! - The frontend never constructs raw [`crate::domain::PlaybackCommand`]s;
-//!   every dispatched command arrives here recorded by a transport.
+//! - Every variant here has a reader outside this module. A dispatched
+//!   [`crate::domain::PlaybackCommand`] is not one of them: the Transport
+//!   forwards straight to the Audio Engine, and the commands themselves are
+//!   read from the session, not from this inbox.
 //! - The inbox holds no session handles; both sessions stay backend-side.
 //! - Draining never loses a store change: Library generations coalesce to
 //!   the latest, playlist generations forward one event per bump.
@@ -20,7 +21,6 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::app::store::StoreChanged;
-use crate::domain::PlaybackCommand;
 
 // ---------------------------------------------------------------------------
 // Event types (one enum the frontend drains)
@@ -61,8 +61,6 @@ pub struct NoticePayload {
 /// recorded follow-up of its own, not something this module does.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BackendEvent {
-    /// A playback command as dispatched through a transport.
-    CommandApplied(PlaybackCommand),
     /// A notice stamped with source and severity on drain.
     TypedNotice(NoticePayload),
     /// Library generation moved (coalesced to about four emissions/sec).
@@ -110,14 +108,6 @@ impl Default for BackendEvents {
 impl BackendEvents {
     /// Coalesce window for [`BackendEvent::LibraryChanged`]: ~4 emissions/sec.
     pub const COALESCE_WINDOW: Duration = Duration::from_millis(250);
-
-    /// Record one dispatched playback command onto the inbox. Transport
-    /// adapters wired at the Composition Root call this synchronously on
-    /// every dispatch path (mouse, keyboard, tray) before the command is
-    /// forwarded to the Audio Engine.
-    pub fn record_command(&mut self, cmd: PlaybackCommand) {
-        self.events.push_back(BackendEvent::CommandApplied(cmd));
-    }
 
     // --- Event inbox -----------------------------------------------------
 
@@ -210,17 +200,6 @@ mod issue04_events {
     use crossbeam_channel::unbounded;
 
     use super::{BackendEvent, BackendEvents, StoreChanged};
-
-    #[test]
-    fn recorded_commands_surface_as_command_applied() {
-        let mut f = BackendEvents::default();
-        f.record_command(crate::domain::PlaybackCommand::Play(
-            crate::domain::TrackId("a.mp3".to_string()),
-        ));
-        let evs = f.events();
-        assert_eq!(evs.len(), 1);
-        assert!(matches!(evs[0], BackendEvent::CommandApplied(_)));
-    }
 
     #[test]
     fn library_change_events_are_coalesced() {

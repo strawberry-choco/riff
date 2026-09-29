@@ -2,11 +2,17 @@
 //!
 //! A preference change is durable by construction, never by call-site
 //! discipline: [`Preferences::hydrate`] loads the Application Store's
-//! Settings into the two sessions once at startup and seeds the
+//! Settings into the two sessions once at launch and seeds the
 //! last-committed snapshot, and [`Preferences::commit_if_changed`] runs at
 //! frame end and saves exactly when the sessions have drifted from that
 //! snapshot. There is no per-handler persist call to forget — a handler only
 //! mutates a session, and the next frame-end commit lands it in the store.
+//!
+//! Hydration is the Composition Root's work, not a frame's: the App Runtime
+//! calls it while it is still composing, so the restored Library Paths are
+//! being watched before the frontend exists and the engine starts at the
+//! restored volume before a window opens. The handle this returns rides on
+//! the runtime; the frontend only diff-commits.
 //!
 //! Scalars only: Library Paths and Watch States are structural preferences
 //! with their own single mutation sites (`save_library_paths` /
@@ -25,27 +31,38 @@ use riff_playback::app::transport::Transport;
 use crate::app::MutexExt;
 use crate::app::state::{LibrarySession, ScanPrefs};
 use crate::app::store::{Settings, SettingsStore};
+use crate::app::watcher_manager::WatcherManager;
 use crate::domain::RepeatMode;
 
 /// The stored side of the scalar Settings round-trip: hydrate once at
-/// startup, diff-commit at frame end.
+/// launch, diff-commit at frame end.
 #[derive(Default)]
 pub struct Preferences {
     last_committed: ScalarSettings,
 }
 
 impl Preferences {
-    /// First frame: hydrate both sessions from the Application Store and
-    /// seed `last_committed` so the first diff-commit is a no-op.
+    /// Launch: hydrate both sessions from the Application Store and seed
+    /// `last_committed` so the first diff-commit is a no-op.
     ///
     /// The transport receives one `SetVolume` command built from the
     /// restored (effective) volume, so the engine starts at the persisted
     /// level even before the user touches anything.
+    ///
+    /// The watcher cell is the shared `Option<WatcherManager>` handle, not a
+    /// `&mut` into it, and it is locked INSIDE the library guard rather than
+    /// by the caller. That is the only ordering that is safe: the frontend's
+    /// own watch handlers hold the library session and then take the watcher
+    /// cell, so a caller that held the cell across this call would invert
+    /// that order and invite a deadlock. The three locks are taken in
+    /// sequence — playback, then library, then watcher — never two sessions
+    /// at once.
     pub fn hydrate(
         playback: &Arc<Mutex<PlaybackSession>>,
         library: &Arc<Mutex<LibrarySession>>,
         store: &dyn SettingsStore,
         transport: &dyn Transport,
+        watcher: &Arc<Mutex<Option<WatcherManager>>>,
     ) -> Self {
         let settings = match store.load_settings() {
             Ok(settings) => settings,
@@ -68,15 +85,20 @@ impl Preferences {
             // Restore the player-bar toggles so shuffle/repeat survive restarts.
             session.queue.shuffle = settings.scalars.shuffle;
             session.queue.repeat = repeat_mode_from_store_code(settings.scalars.repeat_mode);
-            // Route through the transport so a SetVolume command always goes
-            // out on the first frame and the engine starts at the restored
+            // Route through the transport so a SetVolume command goes out as
+            // the runtime is composed and the engine starts at the restored
             // effective (mute-aware) volume.
             let restored = settings.scalars.volume.unwrap_or(session.current_volume);
             transport.set_volume(&mut session, restored);
         }
         {
             let mut session = library.lock_or_recover();
-            session.library_paths.hydrate(&settings);
+            // The restore edge of the Library Path fact-set: the recorded
+            // Watch States are acted on, so the watchers a user enabled are
+            // running with the runtime rather than after the first frame.
+            session
+                .library_paths
+                .hydrate(&settings, &mut watcher.lock_or_recover());
 
             session.ui_flags.advanced_mode = settings.scalars.advanced_mode;
             session.ui_flags.high_contrast = settings.scalars.high_contrast;

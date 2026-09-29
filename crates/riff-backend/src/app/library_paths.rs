@@ -7,11 +7,17 @@
 //! holds one [`LibraryPaths`] value; nothing outside this module can update
 //! three of the five and leave the rest disagreeing.
 //!
+//! Both edges of that fact-set are owned here, one operation each:
+//! [`LibraryPaths::retire`] gives all five up in the order that leaves the
+//! least harmful state after a crash, and [`LibraryPaths::hydrate`] takes
+//! them back — a restored Watch State is acted on, so a root the user asked
+//! to follow is followed again at launch rather than merely reported as
+//! followed.
+//!
 //! Persistence follows the fact-set rather than the other way round: every
-//! mutation that has a durable half commits it here, in the order that leaves
-//! the least harmful state after a crash. Reading the store back is
-//! [`LibraryPaths::hydrate`], which `Preferences` calls on the Settings
-//! round-trip.
+//! mutation that has a durable half commits it here. Reading the store back
+//! is the restore edge, which `Preferences` calls on the Settings round-trip
+//! the Composition Root performs once at launch.
 //!
 //! What this module does **not** own: the watcher's lifecycle. Turning it into
 //! a request-channel worker with a real shutdown is a recorded follow-up; here
@@ -90,6 +96,7 @@ impl LibraryPaths {
 
     /// Retire a root, and with it all five of its facts: the list entry, the
     /// Readiness slot, the Watch State, the live watcher, and the store rows.
+    /// The other edge of that fact-set is [`Self::hydrate`].
     ///
     /// The two settings writes happen in this order — paths, then Watch
     /// States — so the state a crash can leave is "a Watch State with no
@@ -170,10 +177,25 @@ impl LibraryPaths {
         }
     }
 
-    /// Seed the fact-set from the Settings loaded at launch: roots present on
-    /// disk start `Idle`, ones that left disk while the app was closed are
-    /// reported `Unavailable`, and the stored Watch choices are restored.
-    pub fn hydrate(&mut self, loaded: &Settings) {
+    /// The restore edge, and the mirror of [`Self::retire`]: seed the
+    /// fact-set from the Settings loaded at launch. Roots present on disk
+    /// start `Idle`, ones that left disk while the app was closed are
+    /// reported `Unavailable`, and every registered root's recorded Watch
+    /// State is **asked for again** rather than copied in.
+    ///
+    /// The recorded Watch State is the user's standing choice, not a
+    /// diagnostic to replay: `Enabled` starts the root's watcher, and
+    /// `Warning` is retried, because a Warning is a verdict about a
+    /// condition that may have been fixed while the app was closed. Either
+    /// way the session lands the verdict THIS attempt produced, so the
+    /// Settings View is never reporting a stale one. `Disabled` starts
+    /// nothing and is not even asked to drop anything — at launch no
+    /// watcher is running yet.
+    ///
+    /// Nothing is written back. The Application Store's row is the recorded
+    /// choice; the fresh verdict is live session state, and re-recording a
+    /// diagnostic on every launch would turn a Warning into a habit.
+    pub fn hydrate(&mut self, loaded: &Settings, watcher: &mut Option<WatcherManager>) {
         if !loaded.library_paths.is_empty() {
             for path in &loaded.library_paths {
                 let status = if path.exists() {
@@ -185,7 +207,17 @@ impl LibraryPaths {
             }
             self.paths.clone_from(&loaded.library_paths);
         }
-        self.watch_states.clone_from(&loaded.watch_states);
+        for root in &self.paths {
+            let recorded = loaded.watch_states.get(root);
+            let wants_watching =
+                matches!(recorded, Some(WatchState::Enabled | WatchState::Warning(_)));
+            let state = if wants_watching {
+                Self::drive_watch(root, true, watcher)
+            } else {
+                WatchState::Disabled
+            };
+            self.watch_states.insert(root.clone(), state);
+        }
     }
 
     /// Ask the watcher for one root and turn its answer into a Watch State.

@@ -413,6 +413,32 @@ pub fn playlist_items(
     }
 }
 
+/// A Track row's menu report: the Track the right-click landed on, and what was
+/// chosen from it in click order.
+///
+/// It lives here, beside [`TrackMenu`] and [`TrackMenuIntent`], because it is a
+/// report about a *Track menu* and nothing else — which is exactly why it is
+/// NOT a variant of the detail column's own action type. That applier answers
+/// selection, playback and a Favourite; answering a Track menu needs the
+/// Playlist Store and the Inline Tag Editor, which are the per-app
+/// [`TrackMenuHost`](crate::ui::app::TrackMenuHost)'s to hold. A separate
+/// report type makes that a fact the compiler enforces instead of a fact a
+/// comment asserts and a no-op arm has to cover.
+///
+/// The counterpart of [`crate::ui::browser::BrowserAction::ContextMenu`], and it
+/// arrives on the frame the menu OPENS — with `intents` empty, because opening
+/// is what moves the selection and choosing is a separate event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackMenuReport {
+    /// The row's [`TrackId`](riff_backend::domain::TrackId), as its key string:
+    /// the identity the selection becomes and every intent acts on.
+    pub key: String,
+    /// Whatever was chosen from the menu, in click order. Empty on the frame it
+    /// opened, and a right-click that opened a menu and was then dismissed
+    /// chose nothing and has still selected.
+    pub intents: Vec<TrackMenuIntent>,
+}
+
 /// The rows every set-of-Tracks menu offers, in the one order they are offered
 /// in everywhere, appending one [`ListMenuIntent`] per activation.
 ///

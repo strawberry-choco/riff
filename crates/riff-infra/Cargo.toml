@@ -55,6 +55,10 @@ walkdir = "2"
 # SQLite Application Store
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 
+# Content digest over each migration's own SQL, so a migration's expected
+# checksum is derived from its SQL rather than typed beside it.
+sha2 = "0.10"
+
 # Logging
 tracing = "0.1"
 

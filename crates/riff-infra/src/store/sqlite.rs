@@ -3,8 +3,16 @@
 //! riff's single authoritative persistent state lives in one embedded `SQLite`
 //! database. This module owns opening the database file, configuring the
 //! connection for durability, and running the embedded, checksummed migration
-//! set. Open or migrate failures are fatal startup errors surfaced as clear
-//! [`StoreError`]s rather than silent fallbacks.
+//! set. Each migration's expected checksum is *derived from that migration's
+//! own SQL text* (see [`Migration::checksum`]), so editing a shipped migration
+//! changes what an already-migrated store is expected to have recorded instead
+//! of diverging silently — and there is no literal anywhere to mistype.
+//!
+//! Open failures are split into two answers. An **integrity signal** (a store
+//! whose recorded migration state is not this build's) refuses to open and
+//! leaves the file exactly as it was; a genuinely **corrupt** store is renamed
+//! aside and rebuilt fresh. Both surface as clear [`StoreError`]s rather than
+//! silent fallbacks.
 
 use crossbeam_channel::Sender;
 use riff_persistence::errors::StoreError;
@@ -25,79 +33,86 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// A migration is an ordered schema step with a stable identity and content
 /// checksum so accidental edits are detected instead of silently applied.
-struct Migration {
-    version: i64,
-    name: &'static str,
-    sql: &'static str,
+#[derive(Clone, Copy)]
+pub struct Migration {
+    /// The monotone schema version recorded in `schema_migrations`.
+    pub version: i64,
+    /// The migration's stable name, recorded beside its version.
+    pub name: &'static str,
+    /// The SQL this migration applies: the sole source of its checksum.
+    pub sql: &'static str,
 }
 
-/// SHA-256 of each migration's `sql` bytes, computed once at compile time.
-static MIGRATION_CHECKSUMS: &[(&str, &str)] = &[
-    (
-        "001_initial_schema",
-        "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-    ),
-    (
-        "002_settings_typed_tables",
-        "8417f823d5bcbf7ddbbf8d7a70764a09a36735f94f5c7046b9c51c31379054f7",
-    ),
-    (
-        "003_playlists",
-        "8d7aa79437cb4e297ccb3c0b2b7602fa2573c9bbd3ddeeb7b00c10cf321e5983",
-    ),
-    (
-        "004_library_collection",
-        "15b0d88e8583d3744ac23193b63a387784053bc42f885c53cdb93ff8321bc778",
-    ),
-    (
-        "005_playback_prefs",
-        "64cb710aa547f4fd5bdf57aacbc65f5444a7f256fc71b018f45eed80f0ca3a7c",
-    ),
-    (
-        "006_track_favorites",
-        "e19647f102d120af1640cb5bcd5475762eff791a244f94b40736a37955574652",
-    ),
-    (
-        "007_browser_layout",
-        "b862ca731be1c0c6f033537c462688cf9838dbc0c456f8992217769fd7e2c431",
-    ),
-    (
-        "008_library_scan_prefs",
-        "4f0d61c2b1a3e2f8c9d5e7a6b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5",
-    ),
-    (
-        "009_smart_lists_collapsed",
-        "c922ef2496e210e5a7c8aed8c43e0c027dfa55fe330801d6f5d88683984113ee",
-    ),
-    (
-        "010_drop_missing_artwork_strategy",
-        "276a52aa96ff1fa936a47b702bcfb923c971a9f6803fdd6b26ea270adbf7ca1a",
-    ),
-    (
-        "011_entity_search_keys",
-        "232d8e913877cee84852267eff8439eb997ce604532045002d97eb0346a275d0",
-    ),
-    (
-        "012_retire_browser_layout",
-        "e16b4b364a79921478f3e5d05f8a08514b51f43a5f290e31c8161b4ac0788242",
-    ),
-    (
-        "013_close_quits_app",
-        "f76b7e506cea0cf0dcc5fb0dcd398186792a05eae79b7591920584438d58bb89",
-    ),
-    (
-        "014_replaygain_album_gain",
-        "44703303f56d4be702069ab22c4d629eb3d078e95b1d4fbfe71bd8642c89df25",
-    ),
-    (
-        "015_metadata_version",
-        "e55453ab1b9032cb6d7890fcd6b204d5032976e29f9bd6100f3a4dae957b63de",
-    ),
-];
+impl Migration {
+    /// This migration's content checksum: lowercase hex `SHA-256` of its own
+    /// [`sql`](Self::sql), after the normalisation `normalize_migration_sql`
+    /// documents. Derived, never typed, so there is nowhere left to write a
+    /// placeholder.
+    #[must_use]
+    pub fn checksum(&self) -> String {
+        migration_checksum(self.sql)
+    }
+}
 
-/// Embedded, ordered, checksummed migrations. Append-only once shipped:
-/// editing an entry (or its checksum) makes already-migrated stores fail to
-/// open with a clear error instead of silently diverging.
+/// The embedded migration set: the ordered schema history this build carries,
+/// and the facts every `schema_migrations` row is checked against. Exposed
+/// read-only so the adapter's own store suite can assert that each recorded
+/// checksum really is the digest of the SQL it belongs to — the same way
+/// [`SqliteStore::with_connection`] exposes the connection for tests.
+#[must_use]
+pub fn embedded_migrations() -> &'static [Migration] {
+    MIGRATIONS
+}
+
+/// Normalise a migration's SQL before it is hashed, so the digest is a fact
+/// about the SQL rather than about the platform it was checked out on:
+///
+/// 1. `CRLF` and lone `CR` line endings become `LF` (a Windows checkout must
+///    not re-derive every digest in the set).
+/// 2. Trailing whitespace is stripped from every line (a re-indented
+///    continuation, or an editor that trims, must not either).
+/// 3. Leading and trailing blank lines are dropped, and exactly one trailing
+///    `LF` is appended, so a multi-line literal and a `concat!` of the same
+///    statements hash alike.
+///
+/// Leading whitespace is deliberately preserved: re-indenting a migration *is*
+/// an edit to a shipped migration, and the guard is here to see edits.
+fn normalize_migration_sql(sql: &str) -> String {
+    let unified = sql.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<&str> = unified.split('\n').map(str::trim_end).collect();
+    let first = lines
+        .iter()
+        .position(|line| !line.is_empty())
+        .unwrap_or(lines.len());
+    let last = lines
+        .iter()
+        .rposition(|line| !line.is_empty())
+        .map_or(first, |index| index + 1);
+    let mut normalized = lines[first..last].join("\n");
+    normalized.push('\n');
+    normalized
+}
+
+/// A migration's expected digest: `SHA-256` over its normalised SQL text,
+/// encoded as lowercase hexadecimal, two characters per byte, most-significant
+/// nibble first — 64 characters for `SHA-256`.
+fn migration_checksum(sql: &str) -> String {
+    use sha2::Digest as _;
+
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    sha2::Sha256::digest(normalize_migration_sql(sql).as_bytes())
+        .iter()
+        .flat_map(|byte| [HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 0x0f)]])
+        .map(char::from)
+        .collect()
+}
+
+/// Embedded, ordered, checksummed migrations. Append-only once shipped: a
+/// migration's checksum is derived from its own `sql`, so editing a shipped
+/// entry changes what an already-migrated store is expected to have recorded,
+/// and that store refuses to open with a clear error instead of silently
+/// diverging. Nothing here is typed twice, so a digest cannot be edited
+/// without also editing the SQL it describes.
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -427,6 +442,33 @@ fn rename_aside(path: &std::path::Path) -> Result<(), StoreError> {
     })
 }
 
+/// Why an open attempt failed, decided where the recovery decision is made.
+///
+/// The distinction is the whole point: an integrity signal and an unreadable
+/// file call for opposite answers, and one generic error cannot carry both.
+enum OpenFailure {
+    /// The file opened and answered, but its recorded migration state is not
+    /// the one this build derives from the embedded SQL. The database is
+    /// perfectly readable — only this binary's expectations reject it — so it
+    /// is answered by refusing to open. Rename-aside here would throw away a
+    /// store that is intact, in silence, on the strength of a disagreement
+    /// about bookkeeping.
+    Integrity(StoreError),
+    /// The bytes at the store path no longer form a database riff can read.
+    /// Answered by the rename-aside-and-rebuild recovery path.
+    Corruption(StoreError),
+}
+
+impl OpenFailure {
+    /// The store error this failure surfaces as. Both are fatal to a user, and
+    /// the recovery decision has already been made by then.
+    fn into_store_error(self) -> StoreError {
+        match self {
+            Self::Integrity(err) | Self::Corruption(err) => err,
+        }
+    }
+}
+
 /// The shared `SQLite` connection backing the `Application Store`.
 ///
 /// A cheaply clonable handle: every clone shares the one mutex-guarded
@@ -451,13 +493,31 @@ impl SqliteStore {
     /// [`StoreChanged`] notifications beside each generation bump
     /// (emit-beside-bump, issue 04). Clones share the sender; a dropped
     /// receiver simply suppresses future notifications.
+    ///
+    /// # Errors
+    /// An actually-corrupt store is recovered by renaming it aside and
+    /// opening a fresh one; only a failure of that recovery is returned. An
+    /// **integrity signal** — a store whose recorded migration state is not
+    /// the one this build derives from the embedded SQL — is returned as a
+    /// fatal error with the file left exactly as it was: no rename-aside, no
+    /// fresh store, nothing thrown away over a bookkeeping disagreement.
     pub fn open_and_migrate(
         path: &std::path::Path,
         changes_tx: Sender<StoreChanged>,
     ) -> Result<Self, StoreError> {
         match Self::try_open_and_migrate(path, changes_tx.clone()) {
             Ok(store) => Ok(store),
-            Err(failure) => Self::recover_from_failure(path, failure, changes_tx),
+            // The file is readable; only this build's expectations reject it.
+            Err(failure @ OpenFailure::Integrity(_)) => {
+                tracing::error!(
+                    "Application Store at {} was not opened; the file was left untouched",
+                    path.display()
+                );
+                Err(failure.into_store_error())
+            }
+            Err(OpenFailure::Corruption(failure)) => {
+                Self::recover_from_failure(path, failure, changes_tx)
+            }
         }
     }
 
@@ -466,7 +526,7 @@ impl SqliteStore {
     fn open_writable_and_migrate(
         path: &std::path::Path,
         changes_tx: Sender<StoreChanged>,
-    ) -> Result<Self, StoreError> {
+    ) -> Result<Self, OpenFailure> {
         // SQLite creates a missing database file but never its parent
         // directory, and on a first launch — or after the data directory has
         // been removed by hand — nothing else brings that directory into
@@ -474,27 +534,28 @@ impl SqliteStore {
         // missing Store starts fresh.
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent).map_err(|e| {
-                StoreError::InvalidOperation(format!(
+                OpenFailure::Corruption(StoreError::InvalidOperation(format!(
                     "failed to create the Application Store directory at {}: {e}",
                     parent.display()
-                ))
+                )))
             })?;
         }
         let conn = Connection::open(path).map_err(|e| {
-            StoreError::InvalidOperation(format!(
+            OpenFailure::Corruption(StoreError::InvalidOperation(format!(
                 "failed to open Application Store at {}: {e}",
                 path.display()
-            ))
+            )))
         })?;
         Self::configure_and_migrate(conn, changes_tx)
     }
 
-    /// Best-effort open without recovery; the error carries the exact stage
-    /// (open, integrity check, or migration) that failed.
+    /// Best-effort open without recovery; the failure carries both the exact
+    /// stage (open, integrity check, or migration) that failed and what that
+    /// stage means: an integrity signal, or a store that no longer opens.
     fn try_open_and_migrate(
         path: &std::path::Path,
         changes_tx: Sender<StoreChanged>,
-    ) -> Result<Self, StoreError> {
+    ) -> Result<Self, OpenFailure> {
         // WAL recovery requires write access to the `-shm`/`-wal` siblings;
         // a corrupt database must not get the chance to trigger SQLite's own
         // recovery before we can set the broken files aside, so the first
@@ -514,22 +575,28 @@ impl SqliteStore {
                         // connection and normal migrations.
                         return Self::open_writable_and_migrate(path, changes_tx);
                     }
-                    return Err(StoreError::InvalidOperation(format!(
-                        "Application Store at {} failed integrity check: {result}",
-                        path.display()
+                    return Err(OpenFailure::Corruption(StoreError::InvalidOperation(
+                        format!(
+                            "Application Store at {} failed integrity check: {result}",
+                            path.display()
+                        ),
                     )));
                 }
                 // quick_check itself errored (e.g. unreadable schema):
                 // treat as corrupt and fail through the recovery path.
-                Err(StoreError::InvalidOperation(format!(
-                    "Application Store at {} failed integrity check (quick_check error)",
-                    path.display()
+                Err(OpenFailure::Corruption(StoreError::InvalidOperation(
+                    format!(
+                        "Application Store at {} failed integrity check (quick_check error)",
+                        path.display()
+                    ),
                 )))
             }
-            Err(open_err) if path.exists() => Err(StoreError::InvalidOperation(format!(
-                "Application Store at {} failed integrity check: {open_err}",
-                path.display()
-            ))),
+            Err(open_err) if path.exists() => Err(OpenFailure::Corruption(
+                StoreError::InvalidOperation(format!(
+                    "Application Store at {} failed integrity check: {open_err}",
+                    path.display()
+                )),
+            )),
             Err(_missing_file) => {
                 // A missing file is a normal fresh start; any other state is
                 // handled by the arms above.
@@ -538,11 +605,14 @@ impl SqliteStore {
         }
     }
 
-    /// Automatic corruption recovery: when opening, checking, or migrating
-    /// the store fails, the database file and its `-wal`/`-shm` siblings are
+    /// Automatic corruption recovery: when the store cannot be opened, read,
+    /// or migrated, the database file and its `-wal`/`-shm` siblings are
     /// renamed aside (Unix-nanosecond suffixed, preserved for recovery tools)
     /// and a fresh store is created. Only a failure of the recovery itself is
     /// a fatal startup error.
+    ///
+    /// Reached only for [`OpenFailure::Corruption`]: an integrity signal is
+    /// answered by refusing to open, so nothing here ever sees one.
     fn recover_from_failure(
         path: &std::path::Path,
         failure: StoreError,
@@ -572,19 +642,20 @@ impl SqliteStore {
         match Self::try_open_and_migrate(path, changes_tx) {
             Ok(store) => Ok(store),
             Err(recovery_failure) => Err(StoreError::InvalidOperation(format!(
-                "fatal: Application Store at {} could not be recovered after {}: {recovery_failure}",
+                "fatal: Application Store at {} could not be recovered after {}: {}",
                 path.display(),
-                failure
+                failure,
+                recovery_failure.into_store_error()
             ))),
         }
     }
 
     /// Apply every pending migration to the already-open store. Idempotent:
-    /// applied versions are verified against their embedded checksum and
-    /// skipped, pending ones are applied exactly once.
+    /// applied versions are verified against the digest derived from their own
+    /// SQL and skipped, pending ones are applied exactly once.
     pub fn apply_migrations(&mut self) -> Result<(), StoreError> {
         let conn = self.conn.lock_or_recover();
-        Self::run_migrations(&conn)
+        Self::run_migrations(&conn).map_err(OpenFailure::into_store_error)
     }
 
     /// Run `f` with the underlying connection, locking it for the duration
@@ -642,8 +713,8 @@ impl SqliteStore {
     fn configure_and_migrate(
         mut conn: Connection,
         changes: Sender<StoreChanged>,
-    ) -> Result<Self, StoreError> {
-        Self::configure_connection(&mut conn)?;
+    ) -> Result<Self, OpenFailure> {
+        Self::configure_connection(&mut conn).map_err(OpenFailure::Corruption)?;
         Self::run_migrations(&conn)?;
         Ok(Self {
             conn: std::sync::Arc::new(std::sync::Mutex::new(conn)),
@@ -692,7 +763,12 @@ impl SqliteStore {
     /// order. Each migration commits atomically with its bookkeeping row;
     /// any failure rolls back that migration completely (nothing partially
     /// applies) and aborts startup.
-    fn run_migrations(conn: &Connection) -> Result<(), StoreError> {
+    ///
+    /// A recorded checksum that is not the digest of its own migration's SQL
+    /// is an [`OpenFailure::Integrity`] signal, not corruption: the database
+    /// is intact and the disagreement is about bookkeeping, so the caller
+    /// refuses to open rather than rebuilding.
+    fn run_migrations(conn: &Connection) -> Result<(), OpenFailure> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_migrations (
                 version INTEGER PRIMARY KEY,
@@ -702,19 +778,15 @@ impl SqliteStore {
              );",
         )
         .map_err(|e| {
-            StoreError::InvalidOperation(format!("failed to prepare schema_migrations table: {e}"))
+            OpenFailure::Corruption(StoreError::InvalidOperation(format!(
+                "failed to prepare schema_migrations table: {e}"
+            )))
         })?;
 
         for migration in MIGRATIONS {
-            // A migration without a recorded checksum is a programming
-            // error caught before it can corrupt a user store.
-            let expected_checksum = MIGRATION_CHECKSUMS
-                .iter()
-                .find(|(name, _)| *name == migration.name)
-                .map_or_else(
-                    || unreachable!("every migration must have a recorded checksum"),
-                    |(_, checksum)| *checksum,
-                );
+            // Derived from this migration's own SQL, so there is no list to
+            // fall out of step with the statements it claims to describe.
+            let expected_checksum = migration.checksum();
             let already_applied: Option<String> = conn
                 .query_row(
                     "SELECT checksum FROM schema_migrations WHERE version = ?1",
@@ -727,41 +799,52 @@ impl SqliteStore {
                     other => Err(other),
                 })
                 .map_err(|e| {
-                    StoreError::InvalidOperation(format!(
+                    OpenFailure::Corruption(StoreError::InvalidOperation(format!(
                         "failed to read migration state for version {}: {e}",
                         migration.version
-                    ))
+                    )))
                 })?;
             if let Some(recorded) = already_applied {
                 if recorded != expected_checksum {
-                    return Err(StoreError::InvalidOperation(format!(
-                        "migration {} ({}) has been tampered with: recorded checksum does not match the embedded migration",
-                        migration.version, migration.name
+                    return Err(OpenFailure::Integrity(StoreError::InvalidOperation(
+                        format!(
+                            "fatal: the Application Store refused to open because migration {} ({}) \
+                             has been tampered with: the checksum it recorded ({recorded}) is not \
+                             the digest this build derives from that migration's own SQL \
+                             ({expected_checksum}). The file was left exactly as it was; delete it \
+                             (or move it aside) and relaunch to start from a fresh Application Store",
+                            migration.version, migration.name
+                        ),
                     )));
                 }
                 continue;
             }
 
-            conn.execute_batch(&format!(
+            conn.execute_batch(
                 "BEGIN;
                  CREATE TABLE IF NOT EXISTS schema_migrations (
                     version INTEGER PRIMARY KEY,
                     checksum TEXT NOT NULL,
                     name TEXT NOT NULL UNIQUE,
                     applied_at INTEGER NOT NULL
-                 );
-                 INSERT INTO schema_migrations(version, checksum, name, applied_at)
-                 VALUES ({}, '{}', '{}', 0);",
-                migration.version, expected_checksum, migration.name
-            ))
+                 );",
+            )
+            .and_then(|()| {
+                conn.execute(
+                    "INSERT INTO schema_migrations(version, checksum, name, applied_at)
+                     VALUES (?1, ?2, ?3, 0)",
+                    rusqlite::params![migration.version, expected_checksum, migration.name],
+                )
+                .map(|_| ())
+            })
             .and_then(|()| conn.execute_batch(migration.sql))
             .and_then(|()| conn.execute_batch("COMMIT;"))
             .map_err(|e| {
                 let _ = conn.execute_batch("ROLLBACK;");
-                StoreError::InvalidOperation(format!(
+                OpenFailure::Corruption(StoreError::InvalidOperation(format!(
                     "failed to apply migration {} ({}): {e}",
                     migration.version, migration.name
-                ))
+                )))
             })?;
         }
         Ok(())

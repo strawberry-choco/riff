@@ -95,48 +95,19 @@ pub trait Transport: Send {
 /// sends over the UI's command channel. All methods are infallible — a send
 /// only fails when the engine channel is closed, which is logged and then
 /// dropped (the former `let _ = send(..)` semantics).
-///
-/// The optional recorder (see [`ChannelTransport::new_recording`]) is the
-/// adapter's observability hook: when wired at the composition root, every
-/// dispatched command is reported to the backend's event inbox before it is
-/// forwarded, so mouse, keyboard, and tray paths all land on one observable
-/// surface.
-/// The adapter's observability hook: reports every dispatched command
-/// synchronously before it is forwarded (see
-/// [`ChannelTransport::new_recording`]).
-pub type DispatchRecorder = dyn Fn(&PlaybackCommand) + Send + Sync;
-
 pub struct ChannelTransport {
     cmd_tx: Sender<PlaybackCommand>,
-    recorder: Option<Box<DispatchRecorder>>,
 }
 
 impl ChannelTransport {
-    /// Create a new transport wrapping the given command channel. Nothing
-    /// is recorded; observability is opt-in via [`Self::new_recording`].
+    /// Create a new transport wrapping the given command channel. A dispatch
+    /// is one send: nothing is observed, cloned, or recorded on the way to
+    /// the Audio Engine.
     pub fn new(cmd_tx: Sender<PlaybackCommand>) -> Self {
-        Self {
-            cmd_tx,
-            recorder: None,
-        }
-    }
-
-    /// Create a recording transport: every dispatched command is reported
-    /// through `recorder` synchronously before the command is forwarded.
-    /// The composition root passes a closure that pushes the command onto
-    /// the shared backend event inbox, keeping this crate decoupled from
-    /// the backend's concrete event type.
-    pub fn new_recording(cmd_tx: Sender<PlaybackCommand>, recorder: Box<DispatchRecorder>) -> Self {
-        Self {
-            cmd_tx,
-            recorder: Some(recorder),
-        }
+        Self { cmd_tx }
     }
 
     fn send(&self, cmd: PlaybackCommand) {
-        if let Some(recorder) = &self.recorder {
-            recorder(&cmd);
-        }
         let _ = self.cmd_tx.send(cmd);
     }
 }
@@ -417,38 +388,5 @@ mod tests {
             "queueing a batch sends nothing else — and in particular no Play, which \
              is the one thing that must not happen here: the current Track plays on"
         );
-    }
-
-    #[test]
-    fn new_recording_reports_every_dispatched_command() {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink_for_recorder = std::sync::Arc::clone(&sink);
-        let recorder = Box::new(move |cmd: &PlaybackCommand| {
-            sink_for_recorder.lock().unwrap().push(format!("{cmd:?}"));
-        });
-        let t = ChannelTransport::new_recording(tx, recorder);
-        let mut session = crate::app::state::PlaybackSession::default();
-
-        t.play(id("a"));
-        t.set_volume(&mut session, 0.5);
-
-        let seen = sink.lock().unwrap();
-        assert_eq!(seen.len(), 2, "every dispatch is recorded");
-        assert!(
-            seen[0].starts_with("Play("),
-            "the play command is recorded first"
-        );
-        assert!(seen[1].starts_with("SetVolume("), "then the volume command");
-        assert_eq!(rx.try_recv().ok(), Some(PlaybackCommand::Play(id("a"))));
-    }
-
-    #[test]
-    fn plain_new_records_nothing() {
-        let (t, _rx) = transport();
-        let mut session = crate::app::state::PlaybackSession::default();
-        // Compiles and runs without a recorder; observability is opt-in.
-        t.play_pause(&session);
-        t.set_volume(&mut session, 0.5);
     }
 }

@@ -101,3 +101,48 @@ Both are corrected here rather than left as descriptions of an intention.
   of this change is a **use-site collapse, not an interface collapse**. If the two-counter
   case ever spreads, growing `level` is a decision to be
   recorded, not a refactor to be performed.
+
+## Amendment (2026-09-29)
+
+The decision above stands. The **Listing Page is no longer what crosses this seam**, and
+two of this record's amendments described it as though it were.
+
+- **The seam answers "give me row *i*", and the count is a second read.** Every paged
+  listing — the flat All Tracks list, the search results, the hit-album and hit-artist
+  roots, the three browse roots, the two genre drill-downs — is now read through a pair of
+  methods on `SessionViews`: `*_count` for the listing's total and `*_row` for one row at
+  an index. They are **two reads, not one bundled answer**, because bundling them is what
+  put a page cell in the caller's hands. `WindowedListProjection` (`windowed_list.rs`) now
+  owns the whole paged-listing protocol — the window a row is fetched in, the refetch that
+  fires only when the row leaves the window already in hand, the reuse of held rows, and
+  the total beside them, all at one generation — so no caller holds a window, decides when
+  to refetch, or subtracts a window start. That arithmetic was previously written once per
+  paged read in the seam and re-derived in every render site, which is why an off-by-one
+  there was a rendering bug only a golden image could catch, weeks later, for no visible
+  reason. It is now a seam test failure.
+- **"There is no gap for a torn count" is no longer a claim about the seam, and the
+  `*_page` methods stay anyway.** A count and a window are two store reads now, so a
+  committed write *can* land between them. What replaced the old guarantee is two
+  narrower, honest ones: both reads are stamped at the same generation, so a header that
+  reports a count and a column that draws rows are never reading across a committed write
+  within one frame; and each read keeps its **last good** answer on failure, so a header
+  never blanks over rows still on screen. The store's `Page<T>` and its nine `*_page` port
+  methods are unchanged and still read a total and a window under one connection
+  acquisition — a seam count read simply reaches one of them asking for **zero** rows, so
+  the total costs no window and nothing is fetched and thrown away. `Page<T>` has left
+  `CONTEXT.md`'s vocabulary and stays in the glossary and the architecture reference as the
+  store adapter's own read shape.
+- **Six reads with no production caller are gone**, with the tests that existed only to
+  assert them: `search_has_matches`, `hit_albums_in_genre`, `hit_artists_in_genre`,
+  `hit_genre_counts`, the unbounded `artists`, and `resolve_track` (which had no caller at
+  all, not even a test). The two genre-scoped hit list reads were the only callers of the
+  seam's window-reassembly loop, so deleting them is what removed it; their store-port
+  counterparts are now the only remaining `LibraryQueryStore` methods with no production
+  caller, which is a port-narrowing that needs the `riff-infra` adapter and is not part of
+  this change. The projection levels behind the deleted reads went with them —
+  `BrowsingProjection::artists` and `HitProjection::genre_albums`/`genre_artists`.
+- **The per-projection module layout is unchanged.** `windowed_list.rs` gained two methods
+  and lost two; it did not become one keyed-level declaration, which would contradict the
+  2026-09-06 amendment's per-projection rule. The two scoped hit reads that remain are
+  scoped — they answer about one album's rows — so their signatures advertise no window
+  and none is performed.

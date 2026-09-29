@@ -2,12 +2,17 @@
 //! [`PlaybackUpdate`]s.
 //!
 //! A deep module behind the port seams ([`AudioDecoder`] via a
-//! [`DecoderFactory`], [`AudioOutput`], [`LibraryQueryStore`]): it owns
+//! [`DecoderFactory`], [`AudioOutput`], [`PlaybackLibrary`]): it owns
 //! decode scheduling with backpressure, output startup, `ReplayGain`
-//! resolution, Queue Fill, command re-dispatch, and the gapless
+//! resolution, command re-dispatch, and the gapless
 //! pre-decode/handoff machinery — everything else is private implementation.
-//! It decides nothing about queue order: **Continuation** answers both the
-//! Queue Fill and the skip, and the engine performs the load.
+//!
+//! It decides nothing about queue order. The *when* of a **Queue Fill** and of
+//! the once-only idle auto-play is one shared operation, [`PlaybackStart`],
+//! which every Playback Command that can start or grow the Playback Queue goes
+//! through; the *what* — which Tracks a fill puts in the queue, which is
+//! current, and what follows a skip — is **Continuation**'s answer. The engine
+//! asks its Library port for one Track at a time and performs the load.
 //!
 //! Threading: the module exposes only the blocking [`AudioEngine::run`];
 //! the Composition Root is the sole thread spawner and runs it on the
@@ -20,9 +25,11 @@
 use crate::app::state::{PlaybackSession, replaygain_factor};
 use crate::domain::continuation::{Continuation, Trigger};
 use crate::domain::{PlaybackCommand, PlaybackPosition, PlaybackState, PlaybackUpdate};
-use crate::infra::ports::{AudioDecoder, AudioFormatInfo, AudioOutput, DecoderFactory};
+use crate::infra::ports::{
+    AudioDecoder, AudioFormatInfo, AudioOutput, DecoderFactory, PlaybackLibrary, PlaybackStart,
+    QueueStart,
+};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
-use riff_persistence::store::LibraryQueryStore;
 use riff_persistence::sync::MutexExt;
 use riff_persistence::track::TrackId;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,12 +59,18 @@ const COMMAND_POLL: Duration = Duration::from_millis(10);
 pub struct AudioEngine {
     cmd_rx: Receiver<PlaybackCommand>,
     /// A handle back onto the command channel, so queue-navigation commands
-    /// (Next/Previous, idle auto-play after PlayNext/AddToQueue) can
-    /// re-dispatch a full `Play` instead of duplicating its stream-restart
-    /// logic inline.
+    /// (Next/Previous) and the idle auto-play re-dispatch a full `Play` instead
+    /// of duplicating its stream-restart logic inline. The *when* of that
+    /// re-dispatch is [`PlaybackStart`]'s, not the arm's.
     cmd_tx: Sender<PlaybackCommand>,
     update_tx: Sender<PlaybackUpdate>,
-    query: Box<dyn LibraryQueryStore + Send>,
+    /// The Library, narrowed to the Track lookups the engine's loads make.
+    library: Arc<dyn PlaybackLibrary + Send>,
+    /// The one shared operation for *when* playback starts — the **Queue
+    /// Fill** trigger and the once-only idle auto-play. It is a field rather
+    /// than a method so the rule is decidable without an audio port, a decoder
+    /// factory, or a running loop.
+    start: PlaybackStart,
     decoder_factory: DecoderFactory,
     output: Box<dyn AudioOutput + Send>,
     session: Arc<Mutex<PlaybackSession>>,
@@ -80,17 +93,19 @@ impl AudioEngine {
         cmd_rx: Receiver<PlaybackCommand>,
         cmd_tx: Sender<PlaybackCommand>,
         update_tx: Sender<PlaybackUpdate>,
-        query: Box<dyn LibraryQueryStore + Send>,
+        library: Box<dyn PlaybackLibrary + Send>,
         decoder_factory: DecoderFactory,
         output: Box<dyn AudioOutput + Send>,
         session: Arc<Mutex<PlaybackSession>>,
         stop: Arc<AtomicBool>,
     ) -> Self {
+        let library: Arc<dyn PlaybackLibrary + Send> = Arc::from(library);
         Self {
             cmd_rx,
+            start: PlaybackStart::new(Arc::clone(&session), cmd_tx.clone(), Arc::clone(&library)),
             cmd_tx,
             update_tx,
-            query,
+            library,
             decoder_factory,
             output,
             session,
@@ -142,22 +157,16 @@ impl AudioEngine {
             if let Some(cmd) = cmd {
                 match cmd {
                     PlaybackCommand::Play(id) => {
-                        // **Queue Fill**: playing into an empty queue loads the
-                        // whole Library from the store, and *Continuation*
-                        // decides which track is current and in what order —
-                        // the store's own order (`ORDER BY path`) is the
-                        // contract. Shuffle is queue *mode*, not order, and
-                        // stays a caller-side reset.
-                        {
-                            let mut session = self.session.lock_or_recover();
-                            if session.queue.tracks.is_empty()
-                                && let Ok(all_ids) = self.query.all_track_ids()
-                                && !all_ids.is_empty()
-                            {
-                                Continuation::fill(&mut session.queue, all_ids, &id);
-                                session.queue.set_shuffle(false);
-                            }
-                        }
+                        // The Playback Queue is empty, so the Library becomes
+                        // it: the *when* of a **Queue Fill** is the shared
+                        // operation's, and Continuation owns the *what*. This
+                        // command is the load itself, so it re-dispatches
+                        // nothing — that half of the rule belongs to a
+                        // queue-mutating command, not to this one.
+                        self.start.enqueue_and_start_if_idle(
+                            QueueStart::Fill { wanted: &id },
+                            current_track_id.as_ref(),
+                        );
 
                         // A dispatch of the already-current track (the
                         // coordinator's auto-Play after a handoff TrackEnded)
@@ -181,7 +190,7 @@ impl AudioEngine {
                         pre_decode_state = PreDecodeState::default();
 
                         // Load track metadata
-                        let track = self.query.get_track(&id);
+                        let track = self.library.get_track(&id);
                         let Ok(Some(track)) = track else {
                             let _ = self
                                 .update_tx
@@ -258,7 +267,7 @@ impl AudioEngine {
                                 // audio is not replayed.
                                 if let Some(decoder) = primary_decoder.as_mut()
                                     && let Some(ref id) = current_track_id
-                                    && let Ok(Some(track)) = self.query.get_track(id)
+                                    && let Ok(Some(track)) = self.library.get_track(id)
                                     && decoder.init(&track.file_path).is_ok()
                                 {
                                     let _ = decoder.seek(position);
@@ -325,45 +334,27 @@ impl AudioEngine {
                     ),
 
                     PlaybackCommand::PlayNext(id) => {
-                        // Queue manipulation lives here in the engine: the
-                        // session queue is the one traversal state, and the
-                        // coordinator only hears about what happened.
-                        let idle = {
-                            let mut session = self.session.lock_or_recover();
-                            session.queue.insert_next(id.clone());
-                            current_track_id.is_none()
-                        };
-                        if idle {
-                            let _ = self.cmd_tx.send(PlaybackCommand::Play(id));
-                        }
+                        self.start.enqueue_and_start_if_idle(
+                            QueueStart::Next { id: &id },
+                            current_track_id.as_ref(),
+                        );
                     }
 
                     PlaybackCommand::AddToQueue(id) => {
-                        let idle = {
-                            let mut session = self.session.lock_or_recover();
-                            session.queue.append(id.clone());
-                            current_track_id.is_none()
-                        };
-                        if idle {
-                            let _ = self.cmd_tx.send(PlaybackCommand::Play(id));
-                        }
+                        self.start.enqueue_and_start_if_idle(
+                            QueueStart::Append { id: &id },
+                            current_track_id.as_ref(),
+                        );
                     }
 
                     PlaybackCommand::AddMany(ids) => {
-                        // One lock, one queue mutation for the whole batch
-                        // (folder "play all" enqueues N tracks without N
-                        // shuffle regenerations). Same idle-auto-play
-                        // contract as AddToQueue: the first id starts
-                        // playback when idle.
-                        let first = ids.first().cloned();
-                        let idle = {
-                            let mut session = self.session.lock_or_recover();
-                            session.queue.append_many(ids);
-                            current_track_id.is_none()
-                        };
-                        if idle && let Some(first) = first {
-                            let _ = self.cmd_tx.send(PlaybackCommand::Play(first));
-                        }
+                        // One write, one lock, one shuffle regeneration for the
+                        // whole batch (folder "play all" enqueues N tracks), and
+                        // the same idle auto-play as every other queue mutation.
+                        self.start.enqueue_and_start_if_idle(
+                            QueueStart::AppendMany { ids: &ids },
+                            current_track_id.as_ref(),
+                        );
                     }
 
                     PlaybackCommand::PlayPause => {
@@ -454,7 +445,7 @@ impl AudioEngine {
                                 session.queue.upcoming(1).first().map(|id| (*id).clone())
                             };
                             if let Some(next_id) = successor_id
-                                && let Ok(Some(next_track)) = self.query.get_track(&next_id)
+                                && let Ok(Some(next_track)) = self.library.get_track(&next_id)
                             {
                                 let mut successor = (self.decoder_factory)();
                                 if let Ok(format) = successor.init(&next_track.file_path)
@@ -635,4 +626,286 @@ struct PreDecodeState {
     format_compatible: bool,
     has_successor: bool,
     next_track_id: Option<TrackId>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossbeam_channel::unbounded;
+    use riff_persistence::errors::StoreError;
+    use riff_persistence::track::{Track, TrackMetadata};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn id(path: &str) -> TrackId {
+        TrackId(path.to_string())
+    }
+
+    /// Nothing is currently playing — the one fact the idle auto-play reads.
+    fn idle() -> Option<&'static TrackId> {
+        None
+    }
+
+    fn track(path: &str) -> Track {
+        Track {
+            id: id(path),
+            file_path: PathBuf::from(path),
+            metadata: TrackMetadata::default(),
+            duration: None,
+            sample_rate: None,
+            channels: None,
+            play_count: 0,
+            last_played: None,
+            date_added: None,
+            favorite: false,
+            search_text: String::new(),
+        }
+    }
+
+    /// The Library as playback reads it: the narrowed port's two reads over a
+    /// canned map, and nothing else — no listing window, no count, no
+    /// artist/album/genre/folder read, because the engine asks for none. The
+    /// rule never resolves a Track (the load does), but the port it is built on
+    /// genuinely offers the lookup, so the fake implements that port rather than
+    /// a trait narrowed to suit this test.
+    struct FakeLibrary {
+        tracks: HashMap<TrackId, Track>,
+    }
+
+    impl FakeLibrary {
+        fn holding(paths: &[&str]) -> Self {
+            Self {
+                tracks: paths.iter().map(|path| (id(path), track(path))).collect(),
+            }
+        }
+    }
+
+    impl PlaybackLibrary for FakeLibrary {
+        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
+            Ok(self.tracks.get(id).cloned())
+        }
+
+        /// The Application Store's canonical flat order (ADR 0003): every id
+        /// path-ascending, which the fill takes verbatim.
+        fn library_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
+            let mut ids: Vec<TrackId> = self.tracks.keys().cloned().collect();
+            ids.sort_by(|a, b| a.0.cmp(&b.0));
+            Ok(ids)
+        }
+    }
+
+    /// The shared operation over the three facts it reads — the session, the
+    /// engine's command channel, the Library port — and nothing else: no
+    /// decoder, no output, no spawned thread. The *when* playback starts is a
+    /// decision, not a decode, so it is driven directly rather than through
+    /// the engine loop's audio ports.
+    struct Fixture {
+        start: PlaybackStart,
+        session: Arc<Mutex<PlaybackSession>>,
+        /// Everything the operation re-dispatched into the engine's own
+        /// command channel: the "exactly once" evidence.
+        commands: Receiver<PlaybackCommand>,
+    }
+
+    fn fixture(paths: &[&str]) -> Fixture {
+        let (cmd_tx, commands) = unbounded();
+        let session = Arc::new(Mutex::new(PlaybackSession::default()));
+        let start = PlaybackStart::new(
+            Arc::clone(&session),
+            cmd_tx,
+            Arc::new(FakeLibrary::holding(paths)),
+        );
+        Fixture {
+            start,
+            session,
+            commands,
+        }
+    }
+
+    /// The **Queue Fill**'s *when*, and Continuation's *what*: an empty queue
+    /// plus a `Play` means the whole Library becomes the queue, in the store's
+    /// own order, with the wanted Track current. The engine is the load here,
+    /// so nothing is re-dispatched.
+    #[test]
+    fn an_empty_queue_is_filled_from_the_library_with_the_wanted_track_current() {
+        let f = fixture(&["music/a.wav", "music/b.wav", "music/c.wav"]);
+        f.session.lock_or_recover().queue.set_shuffle(true);
+        let wanted = id("music/b.wav");
+
+        f.start
+            .enqueue_and_start_if_idle(QueueStart::Fill { wanted: &wanted }, idle());
+
+        let session = f.session.lock_or_recover();
+        assert_eq!(
+            session.queue.tracks,
+            vec![id("music/a.wav"), id("music/b.wav"), id("music/c.wav")],
+            "the whole Library becomes the queue, in the store's own order"
+        );
+        assert_eq!(
+            session.queue.current_index,
+            Some(1),
+            "Continuation makes the wanted Track current at its slot in that order"
+        );
+        assert!(
+            !session.queue.shuffle,
+            "replacing the queue resets shuffle — a mode write, not an ordering one"
+        );
+        drop(session);
+        assert!(
+            f.commands.try_recv().is_err(),
+            "the caller is the load itself, so nothing is re-dispatched"
+        );
+    }
+
+    /// The same trigger answered "no": a **Queue Fill** is a *when*, and a
+    /// Playback Queue that already holds Tracks is not that when. Nothing is
+    /// filled and, because the fill's shuffle reset belongs to the fill, the
+    /// queue's mode is left alone too.
+    #[test]
+    fn a_loaded_queue_is_not_filled() {
+        let f = fixture(&["music/a.wav", "music/b.wav"]);
+        {
+            let mut session = f.session.lock_or_recover();
+            session.queue.set_shuffle(true);
+            session.queue.append(id("music/a.wav"));
+        }
+        let wanted = id("music/b.wav");
+
+        f.start
+            .enqueue_and_start_if_idle(QueueStart::Fill { wanted: &wanted }, idle());
+
+        let session = f.session.lock_or_recover();
+        assert_eq!(
+            session.queue.tracks,
+            vec![id("music/a.wav")],
+            "the queue the caller found is left exactly as it was"
+        );
+        assert!(
+            session.queue.shuffle,
+            "and so is its mode — the reset belongs to the fill, not to Play"
+        );
+        assert_eq!(session.queue.current_index, Some(0));
+    }
+
+    /// An empty Library is not a fill either: there is nothing to put in the
+    /// queue, so nothing is current — the same answer Continuation gives for a
+    /// Track the store did not return.
+    #[test]
+    fn an_empty_library_leaves_the_queue_empty_and_nothing_current() {
+        let f = fixture(&[]);
+        let wanted = id("music/gone.wav");
+
+        f.start
+            .enqueue_and_start_if_idle(QueueStart::Fill { wanted: &wanted }, idle());
+
+        let session = f.session.lock_or_recover();
+        assert!(
+            session.queue.tracks.is_empty(),
+            "an empty Library fills nothing"
+        );
+        assert_eq!(session.queue.current_index, None);
+    }
+
+    /// The idle auto-play half of the same operation, driven the way a
+    /// queue-mutating Playback Command drives it: the batch lands in the queue
+    /// under one lock, and because nothing is currently playing the first of
+    /// it starts — **exactly once**.
+    #[test]
+    fn an_idle_queue_mutation_starts_the_first_track_exactly_once() {
+        let f = fixture(&[]);
+        let batch = vec![id("music/a.wav"), id("music/b.wav")];
+
+        f.start
+            .enqueue_and_start_if_idle(QueueStart::AppendMany { ids: &batch }, idle());
+
+        assert_eq!(
+            f.commands.try_recv().ok(),
+            Some(PlaybackCommand::Play(id("music/a.wav"))),
+            "nothing is currently playing, so the first of the batch starts"
+        );
+        assert!(
+            f.commands.try_recv().is_err(),
+            "exactly once — a second dispatch would restart the Track"
+        );
+        assert_eq!(
+            f.session.lock_or_recover().queue.tracks,
+            batch,
+            "the batch is queued under the same lock"
+        );
+    }
+
+    /// The other half of idleness: something IS currently playing, so the same
+    /// mutation queues without interrupting it. This is what **Add to Queue**
+    /// means, and it is why the rule cannot be "always start".
+    #[test]
+    fn a_queue_mutation_while_something_plays_starts_nothing() {
+        let f = fixture(&[]);
+        let playing = id("music/playing.wav");
+        let queued = id("music/a.wav");
+
+        f.start
+            .enqueue_and_start_if_idle(QueueStart::Append { id: &queued }, Some(&playing));
+
+        assert!(
+            f.commands.try_recv().is_err(),
+            "the current Track plays straight through the queue mutation"
+        );
+        assert_eq!(
+            f.session.lock_or_recover().queue.tracks,
+            vec![queued],
+            "and the queue still grew"
+        );
+    }
+
+    /// **Add to Queue** as the UI sends it: one Track appended behind what is
+    /// already queued, and nothing started while a Track is playing.
+    #[test]
+    fn add_to_queue_appends_behind_the_queue_without_starting_it() {
+        let f = fixture(&[]);
+        {
+            let mut session = f.session.lock_or_recover();
+            session.queue.append(id("music/a.wav"));
+            session.queue.current_index = Some(0);
+        }
+        let playing = id("music/a.wav");
+        let queued = id("music/b.wav");
+
+        f.start
+            .enqueue_and_start_if_idle(QueueStart::Append { id: &queued }, Some(&playing));
+
+        assert_eq!(
+            f.session.lock_or_recover().queue.tracks,
+            vec![id("music/a.wav"), queued]
+        );
+        assert!(f.commands.try_recv().is_err());
+    }
+
+    /// A fourth queue-mutating Playback Command would be one [`QueueStart`]
+    /// variant plus one line at its arm — the rule itself is not restated.
+    /// This is the shape that line has.
+    #[test]
+    fn a_play_next_command_queues_behind_the_current_track() {
+        let f = fixture(&[]);
+        {
+            let mut session = f.session.lock_or_recover();
+            session.queue.append(id("music/a.wav"));
+            session.queue.append(id("music/c.wav"));
+            session.queue.current_index = Some(0);
+        }
+        let next = id("music/b.wav");
+
+        f.start
+            .enqueue_and_start_if_idle(QueueStart::Next { id: &next }, idle());
+
+        assert_eq!(
+            f.session.lock_or_recover().queue.tracks,
+            vec![id("music/a.wav"), id("music/b.wav"), id("music/c.wav")],
+            "queued to play next, after the current Track"
+        );
+        assert_eq!(
+            f.commands.try_recv().ok(),
+            Some(PlaybackCommand::Play(next)),
+            "and started, because nothing was playing"
+        );
+    }
 }

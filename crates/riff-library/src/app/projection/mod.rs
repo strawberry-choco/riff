@@ -32,5 +32,5 @@ pub use playlists::{PlaylistEntryRow, PlaylistProjection, PlaylistView};
 pub use smart::SmartPlaylistsProjection;
 pub use windowed_list::{
     BrowseList, BrowseProjectionKey, HitListProjection, ProjectionKey, TrackListProjection,
-    WINDOW_SIZE, WindowedListProjection,
+    WindowedListProjection,
 };

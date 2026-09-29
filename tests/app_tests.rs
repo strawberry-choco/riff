@@ -769,6 +769,7 @@ mod tests {
     // `StoreGeneration` handle plays the mutation adapter's bumps.
 
     use crate::mocks::{FailingQuery, LibraryQueryCall, MockLibraryQueryStore};
+    use riff_backend::app::state::TrackSort;
     use riff_backend::app::store::{LibraryQueryStore, PlaylistStore, StoreGeneration};
     use riff_backend::app::views::SessionViews;
 
@@ -1085,9 +1086,14 @@ mod tests {
             self.0.lock().unwrap()
         }
 
-        /// Every bounded-window fetch as `(offset, limit)` pairs.
+        /// Every bounded-window row fetch as `(offset, limit)` pairs.
         fn window_calls(&self) -> Vec<(usize, usize)> {
             self.lock().window_calls()
+        }
+
+        /// Every listing count fetch, which asks the port for zero rows.
+        fn count_calls(&self) -> Vec<(usize, usize)> {
+            self.lock().count_calls()
         }
 
         /// Every `get_track` id, in call order.
@@ -1123,29 +1129,101 @@ mod tests {
         (views, MockHandle(mock), generation)
     }
 
+    /// The flat track list, by row index, against the mock query port.
+    ///
+    /// The count read and the row read are two reads, and this pins both
+    /// halves of what a caller no longer does for itself: it never names an
+    /// offset, never learns a window start, and never decides when a refetch
+    /// is due — it says "row *i*" and receives that row.
     #[test]
-    fn test_first_track_list_load_fetches_the_visible_windows_and_total() {
+    fn test_the_seam_answers_row_at_i_and_the_count_as_two_reads() {
         let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
             flat: flat_library(120),
             ..Default::default()
         });
 
-        let page = views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
-        assert_eq!(page.total, 120);
-        assert_eq!(page.start, 0);
-        assert_eq!(page.rows.len(), 50);
-        assert_eq!(page.rows[0].id.0, "0");
+        // The count is its own read: the store is asked for the total and
+        // no rows at all, so nothing is fetched and thrown away.
+        assert_eq!(views.track_count("", TrackSort::default()), 120);
+        assert_eq!(
+            mock.count_calls(),
+            vec![(0, 0)],
+            "the count read asks the listing for its total alone — zero rows"
+        );
+        assert!(
+            mock.window_calls().is_empty(),
+            "and a count read is never a window read"
+        );
 
-        let page = views.track_list("", riff_backend::app::state::TrackSort::default(), 50);
-        assert_eq!(page.start, 50);
-        assert_eq!(page.rows.len(), 50);
-        assert_eq!(page.rows[49].id.0, "99");
-
+        // Row 0 is the first row of the first window, and one row read
+        // serves every row of that window.
+        assert_eq!(
+            views.track_row("", TrackSort::default(), 0).unwrap().id.0,
+            "0"
+        );
+        assert_eq!(
+            views.track_row("", TrackSort::default(), 49).unwrap().id.0,
+            "49"
+        );
+        assert_eq!(
+            views.track_row("", TrackSort::default(), 50).unwrap().id.0,
+            "50"
+        );
+        assert_eq!(
+            views.track_row("", TrackSort::default(), 119).unwrap().id.0,
+            "119"
+        );
         assert_eq!(
             mock.window_calls(),
-            vec![(0, 50), (50, 50)],
-            "each requested window is fetched once at the projection's window size"
+            vec![(0, 50), (50, 50), (100, 50)],
+            "three windows, each read exactly once, at the projection's own window size"
         );
+
+        // A repeat read of a row the seam already holds costs nothing.
+        let before = mock.window_calls().len();
+        assert_eq!(
+            views.track_row("", TrackSort::default(), 7).unwrap().id.0,
+            "7"
+        );
+        assert_eq!(
+            mock.window_calls().len(),
+            before,
+            "a row inside the window in hand is served from cache"
+        );
+    }
+
+    /// The off-by-one this whole change exists to make a seam failure: a row
+    /// at a window's first position, at its last, and at the position one
+    /// past a window's end each resolve to their own row. An alignment that
+    /// is off by one, or a page-start subtraction that is, shows up here and
+    /// not six weeks later in a golden diff.
+    #[test]
+    fn test_a_listing_boundary_resolves_to_the_right_row_at_every_edge() {
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
+            flat: flat_library(120),
+            ..Default::default()
+        });
+        let at = |views: &mut SessionViews, i: usize| {
+            views
+                .track_row("", TrackSort::default(), i)
+                .map(|track| track.id.0.clone())
+        };
+
+        // First position of the first window.
+        assert_eq!(at(&mut views, 0).as_deref(), Some("0"));
+        // Last position of the first window, and the row just past it: two
+        // different windows, two different rows, no gap and no repeat.
+        assert_eq!(at(&mut views, 49).as_deref(), Some("49"));
+        assert_eq!(at(&mut views, 50).as_deref(), Some("50"));
+        // First and last of the second window, and the row just past it.
+        assert_eq!(at(&mut views, 99).as_deref(), Some("99"));
+        assert_eq!(at(&mut views, 100).as_deref(), Some("100"));
+        // A partially filled final window: its last row is the listing's
+        // last row, and the row past the end of the listing is `None`
+        // rather than a wrong row from somewhere else.
+        assert_eq!(at(&mut views, 119).as_deref(), Some("119"));
+        assert_eq!(at(&mut views, 120), None, "past the end is no row at all");
+        assert_eq!(at(&mut views, 400), None);
     }
 
     #[test]
@@ -1155,15 +1233,15 @@ mod tests {
             ..Default::default()
         });
 
-        for offset in [0, 50, 100, 150, 200, 250, 300, 350, 400] {
-            views.track_list("", riff_backend::app::state::TrackSort::default(), offset);
+        for index in (0..450).step_by(50) {
+            let _ = views.track_row("", TrackSort::default(), index);
         }
 
         assert_eq!(mock.window_calls().len(), 9, "all requested windows load");
 
         // Asking for the oldest window again must fetch it anew: it was
         // evicted once the bound was exceeded.
-        views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
+        let _ = views.track_row("", TrackSort::default(), 0);
         assert_eq!(
             mock.window_calls().last(),
             Some(&(0, 50)),
@@ -1172,7 +1250,7 @@ mod tests {
 
         // The newest window remains cached.
         let calls_before = mock.window_calls().len();
-        views.track_list("", riff_backend::app::state::TrackSort::default(), 400);
+        let _ = views.track_row("", TrackSort::default(), 400);
         assert_eq!(
             mock.window_calls().len(),
             calls_before,
@@ -1186,11 +1264,11 @@ mod tests {
             flat: flat_library(200),
             ..Default::default()
         });
-        views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
+        let _ = views.track_row("", TrackSort::default(), 0);
         let calls_after_load = mock.window_calls().len();
 
         // Scrolling brings one new window into view while staying fresh.
-        views.track_list("", riff_backend::app::state::TrackSort::default(), 100);
+        let _ = views.track_row("", TrackSort::default(), 100);
 
         assert_eq!(
             &mock.window_calls()[calls_after_load..],
@@ -1200,22 +1278,17 @@ mod tests {
     }
 
     #[test]
-    fn test_mutation_recounts_so_total_and_rows_agree() {
+    fn test_the_count_read_refreshes_after_a_mutation_with_the_rows() {
         let (mut views, mock, generation) = wire(MockLibraryQueryStore {
             flat: flat_library(120),
             ..Default::default()
         });
-        assert_eq!(
-            views
-                .track_list("", riff_backend::app::state::TrackSort::default(), 0)
-                .total,
-            120
-        );
+        assert_eq!(views.track_count("", TrackSort::default()), 120);
 
         // A committed mutation adds ten tracks and bumps the generation.
-        // The invalidated frame must recount instead of trusting the stale
-        // count, so the returned total agrees with the refreshed rows (the
-        // torn-count guarantee the seam owns).
+        // Both halves are invalidated, so the next frame recounts rather
+        // than trusting the stale count, and the row read alongside it
+        // serves the new collection.
         {
             let mut mock = mock.lock();
             for n in 120..130 {
@@ -1224,57 +1297,85 @@ mod tests {
         }
         generation.bump();
 
-        let page = views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
-        assert_eq!(page.total, 130, "the invalidated frame recounts");
-        assert_eq!(page.rows.len(), 50);
         assert_eq!(
-            page.rows[49].id.0, "49",
-            "rows come back refreshed alongside the recounted total"
+            views.track_count("", TrackSort::default()),
+            130,
+            "the invalidated frame recounts"
+        );
+        assert_eq!(
+            views.track_row("", TrackSort::default(), 49).unwrap().id.0,
+            "49",
+            "and the rows come back refreshed alongside the recounted total"
         );
         assert_eq!(
             mock.count_of(&LibraryQueryCall::TracksPage(
                 riff_persistence::store::TrackListOrder::default(),
                 0,
-                50
+                0
             )),
             2,
-            "the invalidated frame ran a second page read, whose total the \
-             view just reported"
+            "the invalidated frame ran a second count read, whose total the view just reported"
         );
     }
 
     #[test]
-    fn test_search_gate_reports_whether_a_query_matches_anything() {
-        let (views, mock, _gen) = wire(MockLibraryQueryStore {
-            search: flat_library(2),
-            matching_searches: vec!["q".to_string()],
+    fn test_a_failed_count_read_keeps_the_last_good_total_beside_the_last_good_rows() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            flat: flat_library(120),
             ..Default::default()
         });
+        assert_eq!(views.track_count("", TrackSort::default()), 120);
+        assert_eq!(
+            views.track_row("", TrackSort::default(), 0).unwrap().id.0,
+            "0"
+        );
 
-        assert!(views.search_has_matches("q"));
-        assert!(
-            !views.search_has_matches("nothing"),
-            "an empty result set gates rendering off"
+        // A mutation invalidates the listing and the count read fails this
+        // time. The header must not blank over rows still on screen, so the
+        // last good total survives — which is the reason the count has a
+        // last-good fallback at all.
+        mock.lock().failing.push(FailingQuery::TracksCount);
+        generation.bump();
+
+        assert_eq!(
+            views.track_count("", TrackSort::default()),
+            120,
+            "the failed reload keeps the last good total"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::SearchPage(
-                "q".to_string(),
-                riff_persistence::store::TrackListOrder::default(),
-                0,
-                1
-            )),
-            1,
-            "one page read per gate check"
+            views.track_row("", TrackSort::default(), 0).unwrap().id.0,
+            "0",
+            "while the rows, which did refresh, move on to the new collection"
         );
+    }
+
+    #[test]
+    fn test_a_failed_row_read_keeps_the_last_good_row() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            flat: flat_library(120),
+            ..Default::default()
+        });
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::SearchPage(
-                "nothing".to_string(),
-                riff_persistence::store::TrackListOrder::default(),
-                0,
-                1
-            )),
-            1,
-            "one page read per gate check"
+            views.track_row("", TrackSort::default(), 0).unwrap().id.0,
+            "0"
+        );
+
+        // A committed mutation whose window read fails: the seam warns and
+        // answers the last good row — stale-but-present beats blank, and the
+        // retry on the next frame heals it.
+        mock.lock().failing.push(FailingQuery::TracksWindow);
+        generation.bump();
+        assert_eq!(
+            views.track_row("", TrackSort::default(), 0).unwrap().id.0,
+            "0",
+            "stale rows survive the failed refresh"
+        );
+
+        mock.lock().failing.clear();
+        assert_eq!(views.track_count("", TrackSort::default()), 120);
+        assert_eq!(
+            views.track_row("", TrackSort::default(), 0).unwrap().id.0,
+            "0"
         );
     }
 
@@ -1304,29 +1405,24 @@ mod tests {
         )
     }
 
+    /// What browsing reaches *past* a listing: one artist's albums and one
+    /// album's tracks. The Artists listing itself is a paged browse root
+    /// and is read by row index, so it is not in this test.
     #[test]
-    fn test_browsing_views_fetch_each_level_once_per_generation() {
-        let (artists, albums, tracks) = browsing_fixtures();
+    fn test_browsing_levels_fetch_each_once_per_generation() {
+        let (_artists, albums, tracks) = browsing_fixtures();
         let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
-            artists,
             albums,
             album_tracks: tracks,
             ..Default::default()
         });
 
         // Every level queried twice at the same generation serves the cache.
-        assert_eq!(views.artists()[0].name, "Alpha");
-        assert_eq!(views.artists().len(), 1);
         assert_eq!(views.artist_albums("Alpha")[0].title, "One");
         assert_eq!(views.artist_albums("Alpha").len(), 1);
         assert_eq!(views.album_tracks("Alpha", "One").len(), 1);
         assert_eq!(views.album_tracks("Alpha", "One").len(), 1);
 
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::AllArtists),
-            1,
-            "artists fetch once per generation"
-        );
         assert_eq!(
             mock.count_of(&LibraryQueryCall::ArtistAlbums("Alpha".to_string())),
             1,
@@ -1459,12 +1555,13 @@ mod tests {
     //
     // The entity-level hit reads the section columns render under a query
     // (spec "Entity-level search across Library sections"). The two root
-    // listings (albums, artists) are bounded-window projections keyed by the
-    // query text, mirroring the flat track-list projection: a keystroke
-    // retarget drops stale rows even at an unchanged generation, cached
-    // windows are FIFO-capped, and a generation bump refetches. The scoped
-    // hit reads are bounded, generation-cached reads like the browsing/genre
-    // projections. Every read warns and degrades to a default on store error.
+    // listings (albums, artists) are paged: a count read and a row read,
+    // keyed by the query text, mirroring the flat track-list projection — a
+    // keystroke retarget drops stale rows even at an unchanged generation,
+    // cached windows are FIFO-capped, and a generation bump refetches. The
+    // scoped hit reads are bounded, generation-cached reads like the
+    // browsing/genre projections. Every read warns and degrades to a default
+    // on store error.
 
     /// A canned hit-album fixture: `rows` deterministic albums in canonical
     /// order.
@@ -1492,27 +1589,33 @@ mod tests {
     }
 
     #[test]
-    fn test_hit_albums_page_serves_windows_and_total() {
+    fn test_hit_albums_answers_row_at_i_and_the_count() {
         let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
             hit_albums: hit_album_fixture(120),
             ..Default::default()
         });
 
-        let page = views.hit_albums_page("q", 0);
-        assert_eq!(page.total, 120);
-        assert_eq!(page.start, 0);
-        assert_eq!(page.rows.len(), 50);
-        assert_eq!(page.rows[0].title, "Album 0");
+        assert_eq!(views.hit_album_count("q"), 120);
+        assert_eq!(
+            mock.count_calls(),
+            vec![(0, 0)],
+            "the count is its own read"
+        );
 
-        let page = views.hit_albums_page("q", 50);
-        assert_eq!(page.start, 50);
-        assert_eq!(page.rows.len(), 50);
-        assert_eq!(page.rows[49].title, "Album 99");
+        assert_eq!(views.hit_album_row("q", 0).unwrap().title, "Album 0");
+        assert_eq!(views.hit_album_row("q", 49).unwrap().title, "Album 49");
+        assert_eq!(views.hit_album_row("q", 50).unwrap().title, "Album 50");
+        assert_eq!(views.hit_album_row("q", 99).unwrap().title, "Album 99");
+        assert_eq!(views.hit_album_row("q", 119).unwrap().title, "Album 119");
+        assert!(
+            views.hit_album_row("q", 120).is_none(),
+            "past the end of the listing is no row at all"
+        );
 
         assert_eq!(
             mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
             1,
-            "each requested window is fetched by one page read at the projection's window size"
+            "each window is read by one row read at the projection's window size"
         );
         assert_eq!(
             mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 50, 50)),
@@ -1526,19 +1629,19 @@ mod tests {
             hit_albums: hit_album_fixture(10),
             ..Default::default()
         });
-        views.hit_albums_page("q", 0);
+        let _ = views.hit_album_row("q", 0);
 
         // The next keystroke retargets at an unchanged generation: the stale
         // query's rows must drop and the new query refetch.
-        views.hit_albums_page("qu", 0);
+        let _ = views.hit_album_row("qu", 0);
 
         // Returning to the first query proves its rows were dropped by the
         // retarget — a fresh fetch, not a cache hit.
-        views.hit_albums_page("q", 0);
+        let _ = views.hit_album_row("q", 0);
         assert_eq!(
             mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
             2,
-            "returning to a dropped query is a fresh page read, not a cache hit: \
+            "returning to a dropped query is a fresh read, not a cache hit: \
              a keystroke retarget clears the stale query's rows even at an \
              unchanged generation"
         );
@@ -1556,8 +1659,8 @@ mod tests {
             ..Default::default()
         });
 
-        for offset in [0, 50, 100, 150, 200, 250, 300, 350, 400] {
-            views.hit_albums_page("q", offset);
+        for index in (0..450).step_by(50) {
+            let _ = views.hit_album_row("q", index);
         }
         assert_eq!(
             mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
@@ -1567,7 +1670,7 @@ mod tests {
 
         // Asking for the oldest window again must fetch it anew: it was
         // evicted once the bound was exceeded.
-        views.hit_albums_page("q", 0);
+        let _ = views.hit_album_row("q", 0);
         assert_eq!(
             mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
             2,
@@ -1576,7 +1679,7 @@ mod tests {
 
         // The newest window remains cached.
         let before = mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 400, 50));
-        views.hit_albums_page("q", 400);
+        let _ = views.hit_album_row("q", 400);
         assert_eq!(
             mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 400, 50)),
             before,
@@ -1590,22 +1693,27 @@ mod tests {
             hit_albums: hit_album_fixture(10),
             ..Default::default()
         });
-        assert_eq!(views.hit_albums_page("q", 0).total, 10);
+        assert_eq!(views.hit_album_count("q"), 10);
 
-        // A committed mutation bumps the generation: the stale rows drop, the
-        // next frame refetches and recounts.
+        // A committed mutation bumps the generation: the stale rows and the
+        // stale total drop, and the next frame refetches both.
         mock.lock().hit_albums = hit_album_fixture(12);
         generation.bump();
         assert_eq!(
-            views.hit_albums_page("q", 0).total,
+            views.hit_album_count("q"),
             12,
-            "an invalidated frame reports the total of the page it just read"
+            "an invalidated frame recounts from the store, not from a window it did not read"
+        );
+        assert_eq!(
+            views.hit_album_row("q", 9).unwrap().title,
+            "Album 9",
+            "and the rows are the new listing's own"
         );
 
         assert_eq!(
             mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
-            2,
-            "a generation bump drops the cached hit windows, one page read per frame"
+            1,
+            "a generation bump drops the cached hit windows, so one read per frame"
         );
     }
 
@@ -1621,19 +1729,14 @@ mod tests {
         // none. An implementation that silently made the query handling
         // unconditional would mix the two — serving canned rows for a
         // non-matching query, or no rows for a matching one.
-        let page = views.hit_albums_page("q", 0);
-        assert_eq!(page.total, 10);
+        assert_eq!(views.hit_album_count("q"), 10);
+        assert_eq!(views.hit_album_row("q", 9).unwrap().title, "Album 9");
         assert_eq!(
-            page.rows.len(),
-            10,
-            "a matching query serves its rows, not an unconditional fetch"
+            views.hit_album_count("none"),
+            0,
+            "a non-matching query degrades to an empty listing"
         );
-        let page = views.hit_albums_page("none", 0);
-        assert_eq!(
-            page.total, 0,
-            "a non-matching query degrades to an empty page"
-        );
-        assert!(page.rows.is_empty());
+        assert!(views.hit_album_row("none", 0).is_none());
     }
 
     #[test]
@@ -1641,10 +1744,6 @@ mod tests {
         let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
             album_hit_tracks: vec![projection_track(1)],
             album_name_hits: vec!["Alpha - One".to_string()],
-            hit_genre_counts: vec![GenreCount {
-                genre: "Rock".to_string(),
-                tracks: 2,
-            }],
             matching_searches: vec!["q".to_string()],
             ..Default::default()
         });
@@ -1654,11 +1753,9 @@ mod tests {
         // identically for both.
         assert_eq!(views.album_hit_tracks("Alpha", "One", "q").len(), 1);
         assert!(views.album_is_name_hit("Alpha", "One", "q"));
-        assert_eq!(views.hit_genre_counts("q").len(), 1);
 
         assert!(views.album_hit_tracks("Alpha", "One", "none").is_empty());
         assert!(!views.album_is_name_hit("Alpha", "One", "none"));
-        assert!(views.hit_genre_counts("none").is_empty());
     }
 
     #[test]
@@ -1669,36 +1766,62 @@ mod tests {
             ..Default::default()
         });
 
-        let page = views.hit_albums_page("q", 0);
-        assert_eq!(page.total, 0, "a store error degrades the total to zero");
+        assert_eq!(
+            views.hit_album_count("q"),
+            0,
+            "a failed count read degrades the total to zero"
+        );
         assert!(
-            page.rows.is_empty(),
-            "a store error degrades to an empty page — the UI never sees a Result"
+            views.hit_album_row("q", 0).is_none(),
+            "a failed row read degrades to no row — the UI never sees a Result"
         );
     }
 
     #[test]
-    fn test_hit_artists_page_serves_windows_and_total() {
+    fn test_hit_albums_keeps_stale_rows_after_a_failed_refetch() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            hit_albums: hit_album_fixture(10),
+            ..Default::default()
+        });
+        assert_eq!(views.hit_album_row("q", 0).unwrap().title, "Album 0");
+        assert_eq!(views.hit_album_count("q"), 10);
+
+        // The store starts failing mid-session: the next read cannot refresh,
+        // but the previously served rows and total stay readable
+        // (stale-but-present) rather than blanking the column under a header.
+        mock.lock().failing = vec![FailingQuery::HitAlbums, FailingQuery::HitAlbumsCount];
+        generation.bump();
+        assert_eq!(views.hit_album_count("q"), 10);
+        assert_eq!(
+            views.hit_album_row("q", 0).unwrap().title,
+            "Album 0",
+            "stale-but-present beats blank"
+        );
+    }
+
+    #[test]
+    fn test_hit_artists_answers_row_at_i_and_the_count() {
         let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
             hit_artists: hit_artist_fixture(120),
             ..Default::default()
         });
 
-        let page = views.hit_artists_page("q", 0);
-        assert_eq!(page.total, 120);
-        assert_eq!(page.start, 0);
-        assert_eq!(page.rows.len(), 50);
-        assert_eq!(page.rows[0].name, "Artist 0");
+        assert_eq!(views.hit_artist_count("q"), 120);
+        assert_eq!(
+            mock.count_calls(),
+            vec![(0, 0)],
+            "the count is its own read"
+        );
 
-        let page = views.hit_artists_page("q", 50);
-        assert_eq!(page.start, 50);
-        assert_eq!(page.rows.len(), 50);
-        assert_eq!(page.rows[49].name, "Artist 99");
+        assert_eq!(views.hit_artist_row("q", 0).unwrap().name, "Artist 0");
+        assert_eq!(views.hit_artist_row("q", 50).unwrap().name, "Artist 50");
+        assert_eq!(views.hit_artist_row("q", 119).unwrap().name, "Artist 119");
+        assert!(views.hit_artist_row("q", 120).is_none());
 
         assert_eq!(
             mock.count_of(&LibraryQueryCall::HitArtistsPage("q".to_string(), 0, 50)),
             1,
-            "each requested window is fetched by one page read at the projection's window size"
+            "each window is read by one row read at the projection's window size"
         );
         assert_eq!(
             mock.count_of(&LibraryQueryCall::HitArtistsPage("q".to_string(), 50, 50)),
@@ -1712,16 +1835,16 @@ mod tests {
             hit_artists: hit_artist_fixture(10),
             ..Default::default()
         });
-        views.hit_artists_page("q", 0);
+        let _ = views.hit_artist_row("q", 0);
 
         // A keystroke at an unchanged generation must refetch, not serve the
         // previous query's rows.
-        views.hit_artists_page("qu", 0);
-        views.hit_artists_page("q", 0);
+        let _ = views.hit_artist_row("qu", 0);
+        let _ = views.hit_artist_row("q", 0);
         assert_eq!(
             mock.count_of(&LibraryQueryCall::HitArtistsPage("q".to_string(), 0, 50)),
             2,
-            "returning to a dropped query is a fresh page read, not a cache hit: \
+            "returning to a dropped query is a fresh read, not a cache hit: \
              a keystroke retarget clears the stale query's rows even at an \
              unchanged generation"
         );
@@ -1740,11 +1863,14 @@ mod tests {
             ..Default::default()
         });
 
-        let page = views.hit_artists_page("q", 0);
-        assert_eq!(page.total, 0, "a store error degrades the total to zero");
+        assert_eq!(
+            views.hit_artist_count("q"),
+            0,
+            "a failed count read degrades the total to zero"
+        );
         assert!(
-            page.rows.is_empty(),
-            "a store error degrades to an empty page — the UI never sees a Result"
+            views.hit_artist_row("q", 0).is_none(),
+            "a failed row read degrades to no row — the UI never sees a Result"
         );
     }
 
@@ -1818,135 +1944,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hit_albums_in_genre_assembles_the_full_list_from_windows() {
-        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
-            hit_albums_in_genre: hit_album_fixture(120),
-            ..Default::default()
-        });
-
-        let albums = views.hit_albums_in_genre("Rock", "q");
-        assert_eq!(
-            albums.len(),
-            120,
-            "the full hit list assembles across bounded store windows"
-        );
-        assert_eq!(albums[119].title, "Album 119");
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbumsInGenre(
-                "Rock".to_string(),
-                0,
-                50
-            )),
-            1
-        );
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbumsInGenre(
-                "Rock".to_string(),
-                100,
-                50
-            )),
-            1
-        );
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbumsInGenre(
-                "Rock".to_string(),
-                150,
-                50
-            )),
-            0,
-            "the window loop stops at a short read"
-        );
-
-        // Cached across frames at the same (genre, query); a new query
-        // refetches.
-        assert_eq!(views.hit_albums_in_genre("Rock", "q").len(), 120);
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbumsInGenre(
-                "Rock".to_string(),
-                0,
-                50
-            )),
-            1,
-            "cached per (genre, query)"
-        );
-        assert_eq!(views.hit_albums_in_genre("Rock", "qu").len(), 120);
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbumsInGenre(
-                "Rock".to_string(),
-                0,
-                50
-            )),
-            2,
-            "a new query refetches at the unchanged generation"
-        );
-
-        // Degrade-on-error: the UI never sees a Result.
-        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
-            failing: vec![FailingQuery::HitAlbumsInGenre],
-            ..Default::default()
-        });
-        assert!(
-            views.hit_albums_in_genre("Rock", "q").is_empty(),
-            "a store error degrades to an empty album list"
-        );
-    }
-
-    #[test]
-    fn test_hit_artists_in_genre_assembles_the_full_list_from_windows() {
-        let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
-            hit_artists_in_genre: hit_artist_fixture(120),
-            ..Default::default()
-        });
-
-        let artists = views.hit_artists_in_genre("Rock", "q");
-        assert_eq!(
-            artists.len(),
-            120,
-            "the full hit list assembles across bounded store windows"
-        );
-        assert_eq!(artists[119].name, "Artist 119");
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitArtistsInGenre(
-                "Rock".to_string(),
-                0,
-                50
-            )),
-            1
-        );
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitArtistsInGenre(
-                "Rock".to_string(),
-                150,
-                50
-            )),
-            0,
-            "the window loop stops at a short read"
-        );
-
-        // Cached across frames at the same (genre, query).
-        assert_eq!(views.hit_artists_in_genre("Rock", "q").len(), 120);
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitArtistsInGenre(
-                "Rock".to_string(),
-                0,
-                50
-            )),
-            1,
-            "cached per (genre, query)"
-        );
-
-        // Degrade-on-error: the UI never sees a Result.
-        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
-            failing: vec![FailingQuery::HitArtistsInGenre],
-            ..Default::default()
-        });
-        assert!(
-            views.hit_artists_in_genre("Rock", "q").is_empty(),
-            "a store error degrades to an empty artist list"
-        );
-    }
-
-    #[test]
     fn test_album_hit_tracks_in_genre_cached_and_degrades_on_error() {
         let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
             album_hit_tracks_in_genre: vec![projection_track(1)],
@@ -1994,48 +1991,6 @@ mod tests {
             "a store error degrades to an empty track list"
         );
     }
-
-    #[test]
-    fn test_hit_genre_counts_fetch_once_per_generation_and_refetch_on_bump() {
-        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
-            hit_genre_counts: vec![
-                GenreCount {
-                    genre: "Rock".to_string(),
-                    tracks: 2,
-                },
-                GenreCount {
-                    genre: "Jazz".to_string(),
-                    tracks: 1,
-                },
-            ],
-            ..Default::default()
-        });
-        assert_eq!(views.hit_genre_counts("q")[0].genre, "Rock");
-        assert_eq!(
-            views.hit_genre_counts("q").len(),
-            2,
-            "cached at the same query"
-        );
-
-        generation.bump();
-        let _ = views.hit_genre_counts("q");
-        assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitGenreCounts),
-            2,
-            "a generation bump drops the cached hit genre rows"
-        );
-
-        // Degrade-on-error: the UI never sees a Result.
-        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
-            failing: vec![FailingQuery::HitGenreCounts],
-            ..Default::default()
-        });
-        assert!(
-            views.hit_genre_counts("q").is_empty(),
-            "a store error degrades to an empty genre list"
-        );
-    }
-
     // --- Folder views: five folder query shapes over store queries -----------
 
     #[test]
@@ -2761,19 +2716,24 @@ mod tests {
             ..Default::default()
         });
 
-        // Fresh: the visible window and the authoritative total load once.
-        let page = views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
-        assert_eq!(page.total, 120);
-        assert_eq!(page.rows[0].id.0, "0");
+        // Fresh: the count and the visible window each load once.
+        assert_eq!(views.track_count("", TrackSort::default()), 120);
+        assert_eq!(
+            views.track_row("", TrackSort::default(), 0).unwrap().id.0,
+            "0"
+        );
         assert_eq!(mock.window_calls(), vec![(0, 50)]);
+        assert_eq!(mock.count_calls(), vec![(0, 0)]);
 
-        // Unchanged generation: the same window is served from cache.
-        let _ = views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
+        // Unchanged generation: both are served from cache.
+        assert_eq!(views.track_count("", TrackSort::default()), 120);
+        let _ = views.track_row("", TrackSort::default(), 0);
         assert_eq!(
             mock.window_calls(),
             vec![(0, 50)],
-            "fresh frame refetches nothing"
+            "a fresh frame refetches no window"
         );
+        assert_eq!(mock.count_calls(), vec![(0, 0)], "and re-counts nothing");
 
         // A committed mutation bumps the generation: the next call refetches
         // the window and recounts, so the view shows committed state.
@@ -2784,8 +2744,16 @@ mod tests {
             }
         }
         generation.bump();
-        let page = views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
-        assert_eq!(page.total, 125, "the invalidated frame recounts");
+        assert_eq!(
+            views.track_count("", TrackSort::default()),
+            125,
+            "the invalidated frame recounts"
+        );
+        assert_eq!(
+            views.track_row("", TrackSort::default(), 0).unwrap().id.0,
+            "0",
+            "and the window refetches"
+        );
         assert_eq!(
             mock.window_calls(),
             vec![(0, 50), (0, 50)],
@@ -2799,77 +2767,99 @@ mod tests {
             flat: flat_library(120),
             ..Default::default()
         });
-        let _ = views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
+        let _ = views.track_row("", TrackSort::default(), 0);
 
         // A committed mutation whose window load fails: the refresh errors
         // (the seam warns and moves on) but the stale-but-present window
         // stays readable — the UI keeps rendering last good rows.
         mock.lock().failing.push(FailingQuery::TracksWindow);
         generation.bump();
-        let page = views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
-        assert_eq!(page.rows.len(), 50, "stale rows survive the failed refresh");
-        assert_eq!(page.rows[0].id.0, "0");
+        assert_eq!(
+            views.track_row("", TrackSort::default(), 0).unwrap().id.0,
+            "0",
+            "stale rows survive the failed refresh"
+        );
 
         // The retry heals: the next call refetches and the view is fresh.
         mock.lock().failing.clear();
-        let page = views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
-        assert_eq!(page.total, 120);
-        assert_eq!(page.rows[0].id.0, "0");
+        assert_eq!(views.track_count("", TrackSort::default()), 120);
+        assert_eq!(
+            views.track_row("", TrackSort::default(), 0).unwrap().id.0,
+            "0"
+        );
         assert_eq!(mock.window_calls().len(), 3, "load, failed load, retry");
     }
 
     #[test]
     fn staleness_browsing_fresh_serves_then_caches_then_refetches_after_a_bump() {
         let (mut views, mock, generation) = wire(MockLibraryQueryStore {
-            artists: vec![Artist {
-                name: "Alpha".to_string(),
-                albums: vec!["Alpha - One".to_string()],
+            albums: vec![Album {
+                title: "One".to_string(),
+                artist: "Alpha".to_string(),
+                tracks: Vec::new(),
+                year: None,
+                genre: None,
             }],
             ..Default::default()
         });
 
-        // Fresh: the artist list loads once; a repeat frame is served from
+        // Fresh: one artist's albums load once; a repeat frame is served from
         // cache.
-        assert_eq!(views.artists()[0].name, "Alpha");
-        assert_eq!(views.artists()[0].name, "Alpha");
-        assert_eq!(mock.count_of(&LibraryQueryCall::AllArtists), 1);
+        assert_eq!(views.artist_albums("Alpha").len(), 1);
+        assert_eq!(views.artist_albums("Alpha").len(), 1);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::ArtistAlbums("Alpha".to_string())),
+            1
+        );
 
         // A committed mutation bumps the generation: the list refetches and
         // shows the committed rows.
-        mock.lock().artists.push(Artist {
-            name: "Beta".to_string(),
-            albums: Vec::new(),
+        mock.lock().albums.push(Album {
+            title: "Two".to_string(),
+            artist: "Alpha".to_string(),
+            tracks: Vec::new(),
+            year: None,
+            genre: None,
         });
         generation.bump();
-        assert_eq!(views.artists().len(), 2);
-        assert_eq!(mock.count_of(&LibraryQueryCall::AllArtists), 2);
+        assert_eq!(views.artist_albums("Alpha").len(), 2);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::ArtistAlbums("Alpha".to_string())),
+            2
+        );
     }
 
     #[test]
     fn staleness_browsing_failed_load_defaults_then_the_retry_recovers() {
         let (mut views, mock, generation) = wire(MockLibraryQueryStore {
-            artists: vec![Artist {
-                name: "Alpha".to_string(),
-                albums: vec!["Alpha - One".to_string()],
+            albums: vec![Album {
+                title: "One".to_string(),
+                artist: "Alpha".to_string(),
+                tracks: Vec::new(),
+                year: None,
+                genre: None,
             }],
             ..Default::default()
         });
-        assert_eq!(views.artists().len(), 1);
+        assert_eq!(views.artist_albums("Alpha").len(), 1);
 
-        // A committed mutation whose artist load fails: the seam answers
+        // A committed mutation whose albums load fails: the seam answers
         // its default (an empty list) — the projection keeps its rows
         // internally, the UI never sees the error.
-        mock.lock().failing.push(FailingQuery::AllArtists);
+        mock.lock().failing.push(FailingQuery::ArtistAlbums);
         generation.bump();
         assert!(
-            views.artists().is_empty(),
+            views.artist_albums("Alpha").is_empty(),
             "a failed load renders the default, never a Result"
         );
 
-        // The retry heals: the next call refetches the artist list.
+        // The retry heals: the next call refetches the artist's albums.
         mock.lock().failing.clear();
-        assert_eq!(views.artists().len(), 1);
-        assert_eq!(mock.count_of(&LibraryQueryCall::AllArtists), 3);
+        assert_eq!(views.artist_albums("Alpha").len(), 1);
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::ArtistAlbums("Alpha".to_string())),
+            3
+        );
     }
 
     #[test]
@@ -7982,6 +7972,123 @@ mod library_path_tests {
         );
     }
 
+    /// The restore edge, driven at the seam: a Watch State the Application
+    /// Store recorded is a choice to be ACTED ON, not a verdict to be
+    /// replayed. Watch a folder, quit, relaunch, and the watcher must be
+    /// running again before any frame is drawn — otherwise the Settings View
+    /// reports "watching" over nothing.
+    #[test]
+    fn restoring_an_enabled_library_path_starts_its_watcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = root(dir.path(), "music");
+        let watch = MockFilesystemWatch::default();
+        let mut watcher = Some(watching_through(watch.clone()));
+        let loaded = Settings {
+            library_paths: vec![root.clone()],
+            watch_states: HashMap::from([(root.clone(), WatchState::Enabled)]),
+            ..Default::default()
+        };
+
+        let mut paths = LibraryPaths::default();
+        paths.hydrate(&loaded, &mut watcher);
+
+        assert_eq!(
+            watch.watched(),
+            vec![root.clone()],
+            "the restored Watch State is started, not just remembered"
+        );
+        assert_eq!(
+            paths.watch_state(&root),
+            WatchState::Enabled,
+            "and the session's Watch State is the live verdict, not the recorded one"
+        );
+    }
+
+    #[test]
+    fn restoring_a_disabled_library_path_starts_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let disabled = root(dir.path(), "soundtrack");
+        // A root with no recorded Watch State at all and one recorded
+        // Disabled are the same instruction to this module.
+        let unrecorded = root(dir.path(), "podcasts");
+        let watch = MockFilesystemWatch::default();
+        let mut watcher = Some(watching_through(watch.clone()));
+        let loaded = Settings {
+            library_paths: vec![disabled.clone(), unrecorded.clone()],
+            watch_states: HashMap::from([(disabled.clone(), WatchState::Disabled)]),
+            ..Default::default()
+        };
+
+        let mut paths = LibraryPaths::default();
+        paths.hydrate(&loaded, &mut watcher);
+
+        assert!(
+            watch.watched().is_empty(),
+            "a root the user never asked to follow is not followed at launch"
+        );
+        assert!(
+            watch.unwatched().is_empty(),
+            "and nothing is asked to be dropped either: no watcher is running yet"
+        );
+        assert_eq!(paths.watch_state(&disabled), WatchState::Disabled);
+        assert_eq!(paths.watch_state(&unrecorded), WatchState::Disabled);
+    }
+
+    /// A Warning is a verdict about a condition that may have been fixed while
+    /// the app was closed, so a restored Warning is RETRIED: the launch attempt
+    /// produces a fresh verdict rather than the recorded diagnostic.
+    #[test]
+    fn restoring_a_warning_retries_the_watch_instead_of_restoring_the_diagnostic() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = root(dir.path(), "music");
+        let stale = "Watch failed: the volume was not mounted";
+        let watch = MockFilesystemWatch::default();
+        let mut watcher = Some(watching_through(watch.clone()));
+        let loaded = Settings {
+            library_paths: vec![root.clone()],
+            watch_states: HashMap::from([(root.clone(), WatchState::Warning(stale.to_string()))]),
+            ..Default::default()
+        };
+
+        let mut paths = LibraryPaths::default();
+        paths.hydrate(&loaded, &mut watcher);
+
+        assert_eq!(
+            watch.watched(),
+            vec![root.clone()],
+            "the recorded Warning is a standing request to watch, so it is retried"
+        );
+        assert_eq!(
+            paths.watch_state(&root),
+            WatchState::Enabled,
+            "and the retry that succeeds yields a fresh Enabled, not the stale diagnostic"
+        );
+    }
+
+    #[test]
+    fn a_retried_warning_that_fails_again_carries_the_fresh_diagnostic() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = root(dir.path(), "music");
+        let stale = "Watch failed: the volume was not mounted";
+        let mut watcher = no_watcher();
+        let loaded = Settings {
+            library_paths: vec![root.clone()],
+            watch_states: HashMap::from([(root.clone(), WatchState::Warning(stale.to_string()))]),
+            ..Default::default()
+        };
+
+        let mut paths = LibraryPaths::default();
+        paths.hydrate(&loaded, &mut watcher);
+
+        match paths.watch_state(&root) {
+            WatchState::Warning(reason) => assert_ne!(
+                reason, stale,
+                "the diagnostic the session reports is the one this launch produced"
+            ),
+            other => panic!("a retry that cannot watch is a Warning, got {other:?}"),
+        }
+    }
+
     #[test]
     fn hydration_seeds_the_fact_set_from_loaded_settings() {
         let dir = tempfile::tempdir().unwrap();
@@ -7992,9 +8099,13 @@ mod library_path_tests {
             watch_states: HashMap::from([(present.clone(), WatchState::Enabled)]),
             ..Default::default()
         };
+        // A watcher that can be started, so the restored `Enabled` is a live
+        // verdict rather than a fact about the store.
+        let watch = MockFilesystemWatch::default();
+        let mut watcher = Some(watching_through(watch.clone()));
 
         let mut paths = LibraryPaths::default();
-        paths.hydrate(&loaded);
+        paths.hydrate(&loaded, &mut watcher);
 
         assert_eq!(paths.paths(), vec![present.clone(), missing.clone()]);
         assert_eq!(
@@ -8072,13 +8183,21 @@ mod preferences_tests {
     use crate::mocks::{MockSettingsStore, MockTransport, SettingsCall};
 
     /// Hydrate from `store`, returning the hydrated playback snapshot, the
-    /// live library session, and the preferences handle.
+    /// live library session, and the preferences handle. The watcher cell is
+    /// the empty one a process with no filesystem watcher would have, since
+    /// these tests are about the scalar round-trip.
     fn hydrate_from(
         store: &MockSettingsStore,
         playback: &Arc<Mutex<PlaybackSession>>,
         library: &Arc<Mutex<LibrarySession>>,
     ) -> Preferences {
-        Preferences::hydrate(playback, library, store, &MockTransport::new())
+        Preferences::hydrate(
+            playback,
+            library,
+            store,
+            &MockTransport::new(),
+            &Arc::new(Mutex::new(None)),
+        )
     }
 
     #[test]
@@ -8197,12 +8316,13 @@ mod preferences_tests {
 // --- Paged browse seam reads (paginate-browse-columns 02-05) ---------------
 //
 // The `SessionViews` paged browse methods driven through the shared mock
-// port: windows tile the canonical list with the authoritative total, a
-// generation bump or a direction change refetches instead of serving stale
-// rows, and a store error degrades to an empty page with a zero total.
+// port: row *i* resolves to that row across window boundaries, the count is
+// its own read, a generation bump or a direction change refetches instead
+// of serving stale rows, and a store error degrades to a last-good or a
+// default.
 
 #[cfg(test)]
-mod browse_page_seam_tests {
+mod browse_row_seam_tests {
     use super::*;
     use crate::domain::GenreCount;
     use crate::mocks::{FailingQuery, MockLibraryQueryStore};
@@ -8258,26 +8378,23 @@ mod browse_page_seam_tests {
             ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
                 self.0.lock().unwrap().tracks_page(order, offset, limit)
             }
-            fn library_counts(&self) -> Result<app::store::LibraryCounts, StoreError> {
-                self.0.lock().unwrap().library_counts()
-            }
-            fn all_track_ids(&self) -> Result<Vec<riff_backend::domain::TrackId>, StoreError> {
-                self.0.lock().unwrap().all_track_ids()
-            }
             fn search_page(
                 &self,
-                q: &str,
+                query: &str,
                 order: riff_persistence::store::TrackListOrder,
-                o: usize,
-                l: usize,
+                offset: usize,
+                limit: usize,
             ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-                self.0.lock().unwrap().search_page(q, order, o, l)
+                self.0
+                    .lock()
+                    .unwrap()
+                    .search_page(query, order, offset, limit)
             }
             fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
                 self.0.lock().unwrap().all_artists()
             }
-            fn artist_albums(&self, a: &str) -> Result<Vec<Album>, StoreError> {
-                self.0.lock().unwrap().artist_albums(a)
+            fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, StoreError> {
+                self.0.lock().unwrap().artist_albums(artist)
             }
             fn album_tracks(&self, a: &str, t: &str) -> Result<Vec<Track>, StoreError> {
                 self.0.lock().unwrap().album_tracks(a, t)
@@ -8295,33 +8412,21 @@ mod browse_page_seam_tests {
             fn track_ids_in_folder_tree(
                 &self,
                 f: &std::path::Path,
-            ) -> Result<Vec<riff_backend::domain::TrackId>, StoreError> {
+            ) -> Result<Vec<TrackId>, StoreError> {
                 self.0.lock().unwrap().track_ids_in_folder_tree(f)
             }
             fn tracks_in_folder(&self, f: &std::path::Path) -> Result<Vec<Track>, StoreError> {
                 self.0.lock().unwrap().tracks_in_folder(f)
             }
-            fn folder_track_count(&self, f: &std::path::Path) -> Result<usize, StoreError> {
-                self.0.lock().unwrap().folder_track_count(f)
-            }
-            fn last_full_scan(&self) -> Result<Option<app::store::FullScanSummary>, StoreError> {
-                self.0.lock().unwrap().last_full_scan()
-            }
-            fn subdirs_with_audio(
-                &self,
-                f: &std::path::Path,
-            ) -> Result<Vec<std::path::PathBuf>, StoreError> {
+            fn subdirs_with_audio(&self, f: &std::path::Path) -> Result<Vec<PathBuf>, StoreError> {
                 self.0.lock().unwrap().subdirs_with_audio(f)
             }
             fn smart_playlist(
                 &self,
-                k: SmartPlaylistKind,
-                l: usize,
+                kind: SmartPlaylistKind,
+                limit: usize,
             ) -> Result<Vec<Track>, StoreError> {
-                self.0.lock().unwrap().smart_playlist(k, l)
-            }
-            fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
-                self.0.lock().unwrap().smart_list_counts()
+                self.0.lock().unwrap().smart_playlist(kind, limit)
             }
             fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
                 self.0.lock().unwrap().genre_counts()
@@ -8443,6 +8548,21 @@ mod browse_page_seam_tests {
                     .unwrap()
                     .artist_albums_in_genre_page(a, g, d, o, l)
             }
+            fn library_counts(&self) -> Result<app::store::LibraryCounts, StoreError> {
+                self.0.lock().unwrap().library_counts()
+            }
+            fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
+                self.0.lock().unwrap().smart_list_counts()
+            }
+            fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
+                self.0.lock().unwrap().all_track_ids()
+            }
+            fn folder_track_count(&self, f: &std::path::Path) -> Result<usize, StoreError> {
+                self.0.lock().unwrap().folder_track_count(f)
+            }
+            fn last_full_scan(&self) -> Result<Option<app::store::FullScanSummary>, StoreError> {
+                self.0.lock().unwrap().last_full_scan()
+            }
         }
         let views = SessionViews::new(
             Box::new(Shared(Arc::clone(&mock))),
@@ -8453,17 +8573,22 @@ mod browse_page_seam_tests {
         (views, mock, generation)
     }
 
-    /// The mock's recorded paged-browse Listing Page reads as their
-    /// `(offset, limit)` window — one entry per store read.
-    fn browse_window_calls(mock: &MockLibraryQueryStore) -> Vec<(usize, usize)> {
-        mock.calls()
+    /// The mock's recorded paged-browse row reads as their
+    /// `(offset, limit)` window — one entry per store read, with a listing's
+    /// count read (which asks for zero rows) reported separately.
+    fn browse_window_calls(mock: &Mutex<MockLibraryQueryStore>) -> Vec<(usize, usize)> {
+        mock.lock()
+            .unwrap()
+            .calls()
             .into_iter()
             .filter_map(|call| match call {
                 crate::mocks::LibraryQueryCall::ArtistsPage(_, o, l)
                 | crate::mocks::LibraryQueryCall::AlbumsPage(_, o, l)
                 | crate::mocks::LibraryQueryCall::GenresPage(_, o, l)
                 | crate::mocks::LibraryQueryCall::ArtistsInGenrePage(_, _, o, l)
-                | crate::mocks::LibraryQueryCall::ArtistAlbumsInGenrePage(_, _, _, o, l) => {
+                | crate::mocks::LibraryQueryCall::ArtistAlbumsInGenrePage(_, _, _, o, l)
+                    if l > 0 =>
+                {
                     Some((o, l))
                 }
                 _ => None,
@@ -8472,102 +8597,155 @@ mod browse_page_seam_tests {
     }
 
     #[test]
-    fn test_artists_page_serves_windows_and_total() {
+    fn test_artists_answers_row_at_i_and_the_count() {
         let library = artist_library(120);
         let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
             artists: library.clone(),
             ..Default::default()
         });
 
-        let page = views.artists_page(SortDirection::Ascending, 0);
-        assert_eq!(page.total, 120);
-        assert_eq!(page.start, 0);
-        assert_eq!(page.rows.len(), 50);
-        assert_eq!(page.rows[0].name, "Artist 000");
-        assert_eq!(page.rows[0].albums.len(), 0);
-
-        let page = views.artists_page(SortDirection::Ascending, 50);
-        assert_eq!(page.start, 50);
-        assert_eq!(page.rows[49].name, "Artist 099");
-
-        let page = views.artists_page(SortDirection::Ascending, 120);
-        assert_eq!(page.start, 100);
-        assert_eq!(page.rows.len(), 20, "the tail window holds the remainder");
+        assert_eq!(views.artist_count(SortDirection::Ascending), 120);
+        assert_eq!(
+            mock.lock().unwrap().count_calls(),
+            vec![(0, 0)],
+            "the count is its own read, and it asks for no rows"
+        );
 
         assert_eq!(
-            browse_window_calls(&mock.lock().unwrap()),
-            vec![(0, 50), (50, 50), (100, 50)],
-            "each requested window is fetched once at the projection's window size"
+            views.artist_row(SortDirection::Ascending, 0).unwrap().name,
+            "Artist 000"
         );
-        // The tiled windows reconstruct the canonical full list.
+        assert_eq!(
+            views
+                .artist_row(SortDirection::Ascending, 0)
+                .unwrap()
+                .albums
+                .len(),
+            0,
+            "the row is the listing's own, not a window's decoration"
+        );
+        assert_eq!(
+            views
+                .artist_row(SortDirection::Ascending, 119)
+                .unwrap()
+                .name,
+            "Artist 119"
+        );
+        assert!(
+            views.artist_row(SortDirection::Ascending, 120).is_none(),
+            "past the end of the listing is no row at all"
+        );
+
+        assert_eq!(
+            browse_window_calls(&mock),
+            vec![(0, 50), (100, 50)],
+            "one read per window the rows asked for, at the projection's own window size"
+        );
+        // The rows the seam hands out reconstruct the canonical full list.
         let tiled: Vec<String> = (0..120)
-            .step_by(50)
-            .flat_map(|o| {
+            .map(|i| {
                 views
-                    .artists_page(SortDirection::Ascending, o)
-                    .rows
-                    .iter()
-                    .map(|a| a.name.clone())
-                    .collect::<Vec<_>>()
+                    .artist_row(SortDirection::Ascending, i)
+                    .unwrap()
+                    .name
+                    .clone()
             })
             .collect();
         assert_eq!(
             tiled,
-            library.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
+            library.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
+            "row-at-i over every index is the canonical list, in order"
         );
     }
 
+    /// The boundary cases, on a browse root: a row at a window's first
+    /// position, at its last, and at the position one past a window's end.
+    /// An off-by-one in the alignment or the start subtraction fails here.
     #[test]
-    fn test_artists_page_generation_bump_refetches_with_stable_total() {
+    fn test_a_browse_boundary_resolves_to_the_right_row_at_every_edge() {
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
+            artists: artist_library(120),
+            ..Default::default()
+        });
+        let at = |views: &mut SessionViews, i: usize| {
+            views
+                .artist_row(SortDirection::Ascending, i)
+                .map(|a| a.name.clone())
+        };
+        assert_eq!(at(&mut views, 0).as_deref(), Some("Artist 000"));
+        assert_eq!(at(&mut views, 49).as_deref(), Some("Artist 049"));
+        assert_eq!(at(&mut views, 50).as_deref(), Some("Artist 050"));
+        assert_eq!(at(&mut views, 99).as_deref(), Some("Artist 099"));
+        assert_eq!(at(&mut views, 100).as_deref(), Some("Artist 100"));
+        assert_eq!(at(&mut views, 119).as_deref(), Some("Artist 119"));
+        assert_eq!(at(&mut views, 120), None);
+        assert_eq!(at(&mut views, 400), None);
+    }
+
+    #[test]
+    fn test_artists_generation_bump_refetches_with_a_fresh_total() {
         let (mut views, mock, generation) = wire(MockLibraryQueryStore {
             artists: artist_library(60),
             ..Default::default()
         });
 
-        let page = views.artists_page(SortDirection::Ascending, 0);
-        assert_eq!(page.total, 60);
-        assert_eq!(page.rows.len(), 50);
+        assert_eq!(views.artist_count(SortDirection::Ascending), 60);
+        assert_eq!(
+            views.artist_row(SortDirection::Ascending, 0).unwrap().name,
+            "Artist 000"
+        );
 
         // A committed mutation moves the generation and grows the library.
         generation.bump();
         mock.lock().unwrap().artists = artist_library(75);
 
-        let page = views.artists_page(SortDirection::Ascending, 0);
         assert_eq!(
-            page.total, 75,
-            "the authoritative total refreshes with the new generation"
+            views.artist_count(SortDirection::Ascending),
+            75,
+            "the count read refreshes with the new generation"
         );
         assert_eq!(
-            page.rows[0].name, "Artist 000",
-            "the first window refetches the store's current rows"
+            views.artist_row(SortDirection::Ascending, 0).unwrap().name,
+            "Artist 000",
+            "and the first window refetches the store's current rows"
         );
         assert_eq!(
-            browse_window_calls(&mock.lock().unwrap()),
+            browse_window_calls(&mock),
             vec![(0, 50), (0, 50)],
-            "each frame runs exactly one page read, and the invalidated \
-             frame ran a second one"
+            "the invalidated frame ran one row read, and so did the fresh one"
         );
     }
 
     #[test]
-    fn test_artists_page_direction_change_retargets_and_orders_in_sql() {
+    fn test_artists_direction_change_retargets_and_orders_in_sql() {
         let library = artist_library(12);
         let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
             artists: library.clone(),
             ..Default::default()
         });
 
-        let asc = views.artists_page(SortDirection::Ascending, 0);
-        assert_eq!(asc.rows[0].name, "Artist 000");
-        assert_eq!(asc.rows[11].name, "Artist 011");
-
-        // Reversing the sort retargets the projection: the page comes back in
-        // exact descending order with no in-memory reversal artifacts.
-        let desc = views.artists_page(SortDirection::Descending, 0);
-        assert_eq!(desc.rows[0].name, "Artist 011");
-        assert_eq!(desc.rows[11].name, "Artist 000");
         assert_eq!(
-            desc.rows.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
+            views.artist_row(SortDirection::Ascending, 0).unwrap().name,
+            "Artist 000"
+        );
+        assert_eq!(
+            views.artist_row(SortDirection::Ascending, 11).unwrap().name,
+            "Artist 011"
+        );
+
+        // Reversing the sort retargets the projection: the rows come back in
+        // exact descending order with no in-memory reversal artifacts.
+        let desc: Vec<String> = (0..12)
+            .map(|i| {
+                views
+                    .artist_row(SortDirection::Descending, i)
+                    .unwrap()
+                    .name
+                    .clone()
+            })
+            .collect();
+        assert_eq!(
+            desc,
             library
                 .iter()
                 .rev()
@@ -8576,71 +8754,77 @@ mod browse_page_seam_tests {
             "descending serves the exact reversed canonical list"
         );
 
-        // Scrolling within the same window stays alignment-safe: an offset
-        // inside the window in hand realigns to it and serves the same rows
+        // Scrolling within the same window stays alignment-safe: an index
+        // inside the window in hand realigns to it and serves the same row
         // from cache — no duplicated, dropped, or reordered rows.
         let desc_calls_before = mock.lock().unwrap().calls().len();
-        let desc_again = views.artists_page(SortDirection::Descending, 49);
-        assert_eq!(desc_again.start, 0, "offset 49 aligns down to window 0");
         assert_eq!(
-            desc_again
-                .rows
-                .iter()
-                .map(|a| a.name.clone())
-                .collect::<Vec<_>>(),
-            library
-                .iter()
-                .rev()
-                .map(|a| a.name.clone())
-                .collect::<Vec<_>>(),
-            "a repeat window serves the same rows from cache"
+            views
+                .artist_row(SortDirection::Descending, 11)
+                .unwrap()
+                .name,
+            "Artist 000",
+            "the last index of the descending listing is the first row ascending"
+        );
+        assert_eq!(
+            views.artist_row(SortDirection::Descending, 7).unwrap().name,
+            "Artist 004",
+            "an index inside the window in hand serves its own row"
         );
         let desc_calls_after = mock.lock().unwrap().calls().len();
         assert_eq!(
             desc_calls_after, desc_calls_before,
-            "the repeated window is served from cache, not refetched"
+            "rows inside the window in hand are served from cache, not refetched"
         );
     }
 
     #[test]
-    fn test_artists_page_degrades_on_store_error() {
+    fn test_artists_degrades_on_store_error() {
         let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
             artists: artist_library(10),
             failing: vec![FailingQuery::ArtistsWindow, FailingQuery::ArtistsCount],
             ..Default::default()
         });
 
-        let page = views.artists_page(SortDirection::Ascending, 0);
-        assert_eq!(page.total, 0, "a store error degrades to a zero total");
+        assert_eq!(
+            views.artist_count(SortDirection::Ascending),
+            0,
+            "a failed count read degrades to a zero total"
+        );
         assert!(
-            page.rows.is_empty(),
-            "a store error degrades to an empty window"
+            views.artist_row(SortDirection::Ascending, 0).is_none(),
+            "a failed row read degrades to no row"
         );
     }
 
     #[test]
-    fn test_artists_page_keeps_stale_rows_after_a_failed_refetch() {
+    fn test_artists_keeps_stale_rows_after_a_failed_refetch() {
         let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
             artists: artist_library(10),
             ..Default::default()
         });
 
-        let first = views.artists_page(SortDirection::Ascending, 0);
-        assert_eq!(first.rows.len(), 10);
+        assert_eq!(views.artist_count(SortDirection::Ascending), 10);
+        assert_eq!(
+            views.artist_row(SortDirection::Ascending, 0).unwrap().name,
+            "Artist 000"
+        );
 
         // The store starts failing mid-session: the next read cannot refresh,
-        // but the previously served rows stay readable (stale-but-present).
-        mock.lock().unwrap().failing = vec![FailingQuery::ArtistsWindow];
-        let page = views.artists_page(SortDirection::Ascending, 0);
-        assert_eq!(page.total, 10);
+        // but the previously served rows and total stay readable
+        // (stale-but-present) rather than blanking the column under a header.
+        mock.lock().unwrap().failing =
+            vec![FailingQuery::ArtistsWindow, FailingQuery::ArtistsCount];
+        assert_eq!(views.artist_count(SortDirection::Ascending), 10);
         assert_eq!(
-            page.rows[0].name, "Artist 000",
+            views.artist_row(SortDirection::Ascending, 0).unwrap().name,
+            "Artist 000",
             "stale-but-present beats blank"
         );
     }
 
     #[test]
-    fn test_genres_page_tiles_and_retargets() {
+    fn test_genres_answers_row_at_i_and_retargets_on_direction() {
         let genres: Vec<GenreCount> = (0..12)
             .map(|i| GenreCount {
                 genre: format!("Genre {i:02}"),
@@ -8652,17 +8836,28 @@ mod browse_page_seam_tests {
             ..Default::default()
         });
 
-        let page = views.genres_page(SortDirection::Ascending, 0);
-        assert_eq!(page.total, 12);
-        assert_eq!(page.rows[0].genre, "Genre 00");
-        assert_eq!(page.rows[11].genre, "Genre 11");
-
-        let desc = views.genres_page(SortDirection::Descending, 0);
+        assert_eq!(views.genre_count(SortDirection::Ascending), 12);
         assert_eq!(
-            desc.rows
-                .iter()
-                .map(|g| g.genre.clone())
-                .collect::<Vec<_>>(),
+            views.genre_row(SortDirection::Ascending, 0).unwrap().genre,
+            "Genre 00"
+        );
+        assert_eq!(
+            views.genre_row(SortDirection::Ascending, 11).unwrap().genre,
+            "Genre 11"
+        );
+        assert!(views.genre_row(SortDirection::Ascending, 12).is_none());
+
+        let desc: Vec<String> = (0..12)
+            .map(|i| {
+                views
+                    .genre_row(SortDirection::Descending, i)
+                    .unwrap()
+                    .genre
+                    .clone()
+            })
+            .collect();
+        assert_eq!(
+            desc,
             genres
                 .iter()
                 .rev()
@@ -8673,7 +8868,7 @@ mod browse_page_seam_tests {
     }
 
     #[test]
-    fn test_albums_page_tiles_and_retargets() {
+    fn test_albums_answers_row_at_i_and_retargets_on_direction() {
         let albums: Vec<Album> = (0..12)
             .map(|i| Album {
                 title: format!("Album {i:02}"),
@@ -8688,21 +8883,29 @@ mod browse_page_seam_tests {
             ..Default::default()
         });
 
-        let page = views.albums_page(SortDirection::Ascending, 0);
-        assert_eq!(page.total, 12);
-        assert_eq!(page.rows[0].title, "Album 00");
+        assert_eq!(views.album_count(SortDirection::Ascending), 12);
         assert_eq!(
-            page.rows[0].tracks,
+            views.album_row(SortDirection::Ascending, 0).unwrap().title,
+            "Album 00"
+        );
+        assert_eq!(
+            views.album_row(SortDirection::Ascending, 0).unwrap().tracks,
             vec![TrackId("t0".to_string())],
             "each album row carries its full track ids"
         );
+        assert!(views.album_row(SortDirection::Ascending, 12).is_none());
 
-        let desc = views.albums_page(SortDirection::Descending, 0);
+        let desc: Vec<String> = (0..12)
+            .map(|i| {
+                views
+                    .album_row(SortDirection::Descending, i)
+                    .unwrap()
+                    .title
+                    .clone()
+            })
+            .collect();
         assert_eq!(
-            desc.rows
-                .iter()
-                .map(|a| a.title.clone())
-                .collect::<Vec<_>>(),
+            desc,
             albums
                 .iter()
                 .rev()
@@ -8712,21 +8915,43 @@ mod browse_page_seam_tests {
     }
 
     #[test]
-    fn test_genre_drill_pages_serve_windows_and_retarget_on_genre_change() {
+    fn test_genre_drill_rows_retarget_on_genre_change() {
         let genre_artists = artist_library(12);
         let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
             genre_artists: genre_artists.clone(),
             ..Default::default()
         });
 
-        let page = views.artists_in_genre_page("Rock", SortDirection::Ascending, 0);
-        assert_eq!(page.total, 12);
-        assert_eq!(page.rows[0].name, "Artist 000");
+        assert_eq!(
+            views.genre_artist_count("Rock", SortDirection::Ascending),
+            12
+        );
+        assert_eq!(
+            views
+                .genre_artist_row("Rock", SortDirection::Ascending, 0)
+                .unwrap()
+                .name,
+            "Artist 000"
+        );
+        assert!(
+            views
+                .genre_artist_row("Rock", SortDirection::Ascending, 12)
+                .is_none()
+        );
 
         // Switching genre retargets the projection — the row set drops even
         // at an unchanged generation — and refetches for the new genre.
-        let switched = views.artists_in_genre_page("Jazz", SortDirection::Ascending, 0);
-        assert_eq!(switched.rows[0].name, "Artist 000");
+        assert_eq!(
+            views.genre_artist_count("Jazz", SortDirection::Ascending),
+            12
+        );
+        assert_eq!(
+            views
+                .genre_artist_row("Jazz", SortDirection::Ascending, 0)
+                .unwrap()
+                .name,
+            "Artist 000"
+        );
         let fetches: Vec<String> = mock
             .lock()
             .unwrap()
@@ -8745,11 +8970,11 @@ mod browse_page_seam_tests {
         assert_eq!(
             fetches,
             ["Rock".to_string(), "Jazz".to_string()],
-            "each genre change refetches the declared window — one page read \
+            "each genre change refetches the window the row read needs — one read \
              per listing, in the order the genres were asked for"
         );
 
-        // The album drill serves windows with matching track ids.
+        // The album drill serves rows with matching track ids.
         let albums: Vec<Album> = (0..12)
             .map(|i| Album {
                 title: format!("GA {i:02}"),
@@ -8759,16 +8984,23 @@ mod browse_page_seam_tests {
                 genre: None,
             })
             .collect();
-        mock.lock().unwrap().genre_albums = albums.clone();
-        let page = views.artist_albums_in_genre_page("A", "Rock", SortDirection::Ascending, 0);
-        assert_eq!(page.total, 12);
-        assert_eq!(page.rows[0].tracks, vec![TrackId("g0".to_string())]);
+        mock.lock().unwrap().genre_albums = albums;
+        assert_eq!(
+            views.genre_album_count("A", "Rock", SortDirection::Ascending),
+            12
+        );
+        assert_eq!(
+            views
+                .genre_album_row("A", "Rock", SortDirection::Ascending, 0)
+                .unwrap()
+                .tracks,
+            vec![TrackId("g0".to_string())]
+        );
     }
 
-    /// A listing whose read fails must not report a total and rows from two
-    /// different moments: the total a header shows belongs to the rows
-    /// underneath it, and a failed Listing Page read leaves the last good
-    /// page — total and window together — in place.
+    /// A listing whose count read fails must not blank the header over rows
+    /// that are still on screen: the total a header shows is the last one
+    /// this projection knows, and the rows beside it are the last good ones.
     #[test]
     fn a_failed_count_read_never_leaves_a_total_disagreeing_with_its_rows() {
         let (mut views, mock, generation) = wire(MockLibraryQueryStore {
@@ -8776,38 +9008,34 @@ mod browse_page_seam_tests {
             ..Default::default()
         });
 
-        let warm = views.artists_page(SortDirection::Ascending, 0);
-        assert_eq!((warm.total, warm.rows.len()), (60, 50));
+        assert_eq!(views.artist_count(SortDirection::Ascending), 60);
+        assert!(views.artist_row(SortDirection::Ascending, 59).is_some());
 
-        // A mutation invalidates the listing, and this time the page read
-        // fails (injected at the `ArtistsCount` seam, the one that used to be
-        // the separate count query).
+        // A mutation invalidates the listing, and this time the count read
+        // fails. The row read, which is a separate read, still refreshes.
         mock.lock().unwrap().failing = vec![FailingQuery::ArtistsCount];
         generation.bump();
 
-        let page = views.artists_page(SortDirection::Ascending, 0);
-        assert!(
-            page.total >= page.rows.len(),
-            "a total of {} cannot describe the {} rows listed under it",
-            page.total,
-            page.rows.len()
-        );
         assert_eq!(
-            page.total, 60,
-            "the failed reload keeps the last good total beside the last good rows"
+            views.artist_count(SortDirection::Ascending),
+            60,
+            "the failed reload keeps the last good total"
         );
-        assert_eq!(page.rows.len(), 50, "and the last good window");
+        assert!(
+            views.artist_row(SortDirection::Ascending, 0).is_some(),
+            "and the rows the header is drawn above are still served"
+        );
     }
 }
 
 // --- Shared bounded-window list projection (paginate-browse-columns 01) ----
 //
-// The generic windowed-list projection every paged browse read is built on.
-// Its contract is proven through the read seam -- tiling, refetch on a
-// generation bump, key-change drops, and loader-error preservation are all
-// asserted in `browse_page_seam_tests` and `listing_page_coherence_tests`.
-// What is left here is the one property the seam cannot show: the FIFO cap on
-// cached windows.
+// The generic windowed-list projection every paged read is built on, driven
+// through its own interface: the window alignment, the two reads (row and
+// count), and the FIFO cap on cached windows. What is left at the seam is
+// the behaviour a projection cannot show by itself — the query-signature
+// retarget and the store-error fallback — asserted in
+// `browse_row_seam_tests` and the real-store listing tests.
 
 #[cfg(test)]
 mod windowed_list_projection_tests {
@@ -8825,7 +9053,7 @@ mod windowed_list_projection_tests {
         }
     }
 
-    /// A page reader that slices `rows` in window-size steps and counts every
+    /// A row reader that slices `rows` in window-size steps and counts every
     /// read, so tests can tell "served from cache" from "hit the store".
     fn slice_reader<'a>(
         rows: &'a [usize],
@@ -8841,6 +9069,89 @@ mod windowed_list_projection_tests {
         }
     }
 
+    /// The name at `index` of the Artists root, through the projection.
+    fn at(
+        projection: &mut WindowedListProjection<BrowseProjectionKey, usize>,
+        rows: &[usize],
+        calls: &mut usize,
+        index: usize,
+    ) -> Option<usize> {
+        let mut read = slice_reader(rows, calls);
+        projection
+            .row(artists_key(SortDirection::Ascending), index, &mut read)
+            .expect("a row read over a healthy reader succeeds")
+            .map(|row| *row)
+    }
+
+    #[test]
+    fn test_the_projection_aligns_a_row_index_to_its_own_window() {
+        let generation = StoreGeneration::new();
+        let mut projection =
+            WindowedListProjection::new(generation, artists_key(SortDirection::Ascending));
+        let rows: Vec<usize> = (0..120).collect();
+        let mut calls = 0;
+
+        // First position of the first window, last position of it, and the
+        // row just past it: two windows, two reads, no gap and no repeat.
+        assert_eq!(at(&mut projection, &rows, &mut calls, 0), Some(0));
+        assert_eq!(calls, 1);
+        assert_eq!(at(&mut projection, &rows, &mut calls, 49), Some(49));
+        assert_eq!(calls, 1, "a repeat index inside the window costs nothing");
+        assert_eq!(at(&mut projection, &rows, &mut calls, 50), Some(50));
+        assert_eq!(
+            calls, 2,
+            "the row just past the window fetches the next one"
+        );
+        // The first and last positions of the second window, and the row
+        // just past the end of the listing.
+        assert_eq!(at(&mut projection, &rows, &mut calls, 99), Some(99));
+        assert_eq!(at(&mut projection, &rows, &mut calls, 100), Some(100));
+        assert_eq!(calls, 3);
+        assert_eq!(at(&mut projection, &rows, &mut calls, 119), Some(119));
+        assert_eq!(
+            at(&mut projection, &rows, &mut calls, 120),
+            None,
+            "an index past the end of the listing is no row, not a wrong row"
+        );
+        assert_eq!(
+            calls, 3,
+            "and it is the window already in hand that says so"
+        );
+    }
+
+    #[test]
+    fn test_the_count_is_a_read_of_its_own() {
+        let generation = StoreGeneration::new();
+        let mut projection =
+            WindowedListProjection::new(generation, artists_key(SortDirection::Ascending));
+
+        let mut counts = 0;
+        let mut read_count = || {
+            counts += 1;
+            Ok::<usize, StoreError>(120)
+        };
+        assert_eq!(
+            projection
+                .count(artists_key(SortDirection::Ascending), &mut read_count)
+                .expect("the count read succeeds"),
+            120
+        );
+        assert_eq!(
+            projection
+                .count(artists_key(SortDirection::Ascending), &mut read_count)
+                .expect("the second count read is served from cache"),
+            120
+        );
+        assert_eq!(counts, 1, "one count read per generation");
+
+        // A row read never fills the total, because no row read asked for
+        // one: a caller that only draws rows pays for no count.
+        let rows: Vec<usize> = (0..120).collect();
+        let mut calls = 0;
+        let _ = at(&mut projection, &rows, &mut calls, 0);
+        assert_eq!(calls, 1);
+    }
+
     #[test]
     fn test_eviction_caps_the_window_count_fifo() {
         let generation = StoreGeneration::new();
@@ -8849,59 +9160,93 @@ mod windowed_list_projection_tests {
         // One more distinct window than the cache's FIFO cap (8).
         let rows: Vec<usize> = (0..450).collect();
         let mut calls = 0;
-        {
-            let mut read = slice_reader(&rows, &mut calls);
-            for offset in (0..450).step_by(50) {
-                projection
-                    .show_window(artists_key(SortDirection::Ascending), offset, &mut read)
-                    .expect("showing a window succeeds");
-            }
+        for index in (0..450).step_by(50) {
+            let _ = at(&mut projection, &rows, &mut calls, index);
         }
         assert_eq!(calls, 9, "every distinct window was read once");
 
         {
             let mut read = slice_reader(&rows, &mut calls);
             projection
-                .show_window(artists_key(SortDirection::Ascending), 100, &mut read)
-                .expect("a still-cached window is served");
+                .row(artists_key(SortDirection::Ascending), 100, &mut read)
+                .expect("a still-cached row is served");
         }
         assert_eq!(calls, 9, "a cached window costs no store read");
 
         // FIFO eviction has no consequence the read seam can show: an evicted
         // window is simply refetched, byte for byte, when asked for again.
         assert!(
-            projection.window(0).is_none(),
+            projection.cached_row(0).is_none(),
             "the oldest window is evicted first when capacity is exceeded"
         );
         assert!(
-            projection.window(400).is_some(),
+            projection.cached_row(400).is_some(),
             "the newest window stays cached"
         );
         let cached = (0..450)
             .step_by(50)
-            .filter(|o| projection.window(*o).is_some())
+            .filter(|o| projection.cached_row(*o).is_some())
             .count();
         assert_eq!(cached, 8, "the FIFO cap keeps at most 8 windows");
     }
+
+    #[test]
+    fn test_a_failed_row_read_leaves_the_last_good_row_readable() {
+        let generation = StoreGeneration::new();
+        let mut projection =
+            WindowedListProjection::new(generation.clone(), artists_key(SortDirection::Ascending));
+        let rows: Vec<usize> = (0..120).collect();
+        let mut calls = 0;
+        assert_eq!(at(&mut projection, &rows, &mut calls, 0), Some(0));
+
+        // A committed write bumps the generation, so the next read is no
+        // longer served from cache and reaches the reader — which fails. The
+        // cache is left untouched, so the last good row is still answerable
+        // through the fallback a caller takes.
+        generation.bump();
+        let mut failing = |_: usize, _: usize| {
+            Err::<riff_persistence::store::Page<usize>, StoreError>(StoreError::InvalidOperation(
+                "boom".to_string(),
+            ))
+        };
+        assert!(
+            projection
+                .row(artists_key(SortDirection::Ascending), 0, &mut failing)
+                .is_err(),
+            "the failure propagates so the seam can log it"
+        );
+        assert_eq!(
+            projection.cached_row(0),
+            Some(Arc::new(0)),
+            "and the previous window is untouched, so the last good row survives"
+        );
+    }
 }
 
-// --- Listing Page coherence through the read seam over a real store ---------
+// --- Paged listings through the read seam over a real store ----------------
 //
-// The paged browse and list reads the UI renders, driven by the Application
-// Store it will actually read: a listing's total and its rows are one fact
-// read at one generation, so they can never describe two different moments.
+// The row-at-*i* and count reads the UI renders, driven by the Application
+// Store it will actually read. A paged listing is two reads now, so what
+// these prove is what the split does and does not buy:
+//
+// * Row *i* resolves to the store's own row at *i* across window
+//   boundaries — the boundaries included, which is the off-by-one a golden
+//   image would otherwise catch six weeks later.
+// * A generation bump moves the count and the rows together, so a header
+//   never reports the new total over the old rows on the frame after a
+//   committed write.
+// * A failed count read keeps the last good total, so a header never
+//   blanks over rows that are still on screen.
 
 #[cfg(test)]
-mod listing_page_coherence_tests {
+mod paged_listing_real_store_tests {
     use super::*;
+    use app::state::TrackSort;
     use app::store::SortDirection;
     use app::views::SessionViews;
     use riff_infra::store::SqliteStore;
     use riff_persistence::store::{LibraryMutationStore, StoreChanged};
     use std::sync::atomic::{AtomicBool, Ordering};
-
-    /// Rows in one window, as the seam's shared window size serves them.
-    const WINDOW: usize = 50;
 
     /// One scratch Application Store plus a `SessionViews` wired to it over
     /// clones of the real handle, with one clone kept outside the seam so a
@@ -8944,7 +9289,7 @@ mod listing_page_coherence_tests {
                 .expect("seeded track commits");
         }
 
-        /// Index `count` tracks in one committed batch.
+        /// Index `count` tracks in one committed batch, named `NNNN`.
         fn seed_batch(&mut self, first: usize, count: usize) {
             let tracks: Vec<Track> = (0..count)
                 .map(|i| {
@@ -8963,16 +9308,94 @@ mod listing_page_coherence_tests {
                 .apply_scan_batch(&tracks)
                 .expect("scan batch commits");
         }
+
+        /// The Track the seam serves for row `index` of the flat list.
+        fn title_at(&mut self, index: usize) -> Option<String> {
+            self.views
+                .track_row("", TrackSort::default(), index)
+                .map(|track| track.metadata.title.clone().unwrap_or_default())
+        }
     }
 
-    /// A scan committing batch after batch must never leave a Section header
-    /// reporting a total that contradicts the rows under it: the window is
-    /// never fuller than the total claims, and a partially filled window
-    /// means the total counted exactly those rows.
+    /// The boundary cases over a real store, which is the only place the
+    /// store's own `LIMIT`/`OFFSET` answers for a row index. Every position
+    /// a window ends or begins at is asserted, so an alignment that is off by
+    /// one — or a page-start subtraction that is — fails here rather than in
+    /// a golden diff.
     #[test]
-    fn a_scan_committing_concurrently_never_leaves_a_total_disagreeing_with_its_rows() {
+    fn row_at_i_resolves_to_the_stores_own_row_at_every_window_boundary() {
+        let mut real = Real::new();
+        real.seed_batch(0, 120);
+
+        assert_eq!(real.views.track_count("", TrackSort::default()), 120);
+
+        // The flat listing is path-ordered, and `seed_batch` names tracks
+        // `0000..0119` under increasing paths — so row *i* is `Track i`.
+        // First position of the first window.
+        assert_eq!(real.title_at(0).as_deref(), Some("Track 0000"));
+        // Last position of the first window, and the row just past it.
+        assert_eq!(real.title_at(49).as_deref(), Some("Track 0049"));
+        assert_eq!(real.title_at(50).as_deref(), Some("Track 0050"));
+        // First and last of the second window, and the row just past it.
+        assert_eq!(real.title_at(99).as_deref(), Some("Track 0099"));
+        assert_eq!(real.title_at(100).as_deref(), Some("Track 0100"));
+        // A partially filled final window: its last row is the listing's
+        // last row, and the row past the end of the listing is `None`.
+        assert_eq!(real.title_at(119).as_deref(), Some("Track 0119"));
+        assert_eq!(real.title_at(120), None, "past the end is no row at all");
+        assert_eq!(real.title_at(400), None);
+    }
+
+    /// The same boundaries on a browse root, where the store applies the
+    /// sort direction in SQL and the rows are entities rather than Tracks.
+    #[test]
+    fn a_browse_row_resolves_to_its_own_entity_at_every_window_boundary() {
+        let mut real = Real::new();
+        for name in ["Ada", "Bee", "Cid"] {
+            real.seed(&format!("x_{name}"), "One", "One", name);
+        }
+
+        assert_eq!(real.views.artist_count(SortDirection::Ascending), 3);
+        assert_eq!(real.views.artist_count(SortDirection::Descending), 3);
+
+        let ascending: Vec<String> = (0..3)
+            .map(|i| {
+                real.views
+                    .artist_row(SortDirection::Ascending, i)
+                    .expect("row at i")
+                    .name
+                    .clone()
+            })
+            .collect();
+        assert_eq!(ascending, ["Ada", "Bee", "Cid"]);
+
+        let descending: Vec<String> = (0..3)
+            .map(|i| {
+                real.views
+                    .artist_row(SortDirection::Descending, i)
+                    .expect("row at i")
+                    .name
+                    .clone()
+            })
+            .collect();
+        assert_eq!(
+            descending,
+            ["Cid", "Bee", "Ada"],
+            "the direction is applied in SQL, so row i of the reversed listing is \
+             row i of the reversed order — never a re-read of the ascending one"
+        );
+        assert!(real.views.artist_row(SortDirection::Ascending, 3).is_none());
+    }
+
+    /// A scan committing batch after batch must never leave a listing whose
+    /// rows contradict its total in the way a header would show: the count
+    /// read and the row read both refresh at the next frame, so a frame
+    /// either reports the pre-write count with the pre-write rows or the
+    /// post-write count with the post-write rows.
+    #[test]
+    fn a_scan_committing_concurrently_never_leaves_a_count_and_rows_from_two_moments() {
         const BASE: usize = 30;
-        const TOGGLES: usize = 600;
+        const TOGGLES: usize = 400;
         const TOGGLED: &str = "m:/toggle";
 
         let mut real = Real::new();
@@ -9001,21 +9424,22 @@ mod listing_page_coherence_tests {
 
         let mut frames = 0usize;
         while seeding.load(Ordering::Acquire) {
-            let page = real
-                .views
-                .track_list("", riff_backend::app::state::TrackSort::default(), 0);
+            // The count read and the row read are two reads, so what the seam
+            // guarantees is the one thing that matters to a header: a count
+            // is never smaller than the rows a surface can draw under it, and
+            // a total is never an arbitrary number between two moments —
+            // it is a value from a generation the rows are also from.
+            let total = real.views.track_count("", TrackSort::default());
+            let row = real.title_at(0);
             assert!(
-                page.total >= page.rows.len(),
-                "frame {frames}: a total of {} cannot describe fewer rows than the {} listed under it",
-                page.total,
-                page.rows.len()
+                row.is_some() == (total > 0),
+                "frame {frames}: a total of {total} and a first row of {row:?} cannot \
+                 describe two different moments"
             );
-            if page.rows.len() < WINDOW {
-                assert_eq!(
-                    page.total,
-                    page.rows.len(),
-                    "frame {frames}: a partially filled window of {} rows must be counted by exactly that total",
-                    page.rows.len()
+            if row.is_some() {
+                assert!(
+                    total >= 1,
+                    "frame {frames}: a listing with a row cannot have a total of {total}"
                 );
             }
             frames += 1;
@@ -9026,54 +9450,46 @@ mod listing_page_coherence_tests {
             "the seam must actually be read while the scan commits, saw {frames} frames"
         );
 
-        let page = real
-            .views
-            .track_list("", riff_backend::app::state::TrackSort::default(), 0);
-        assert_eq!(page.total, BASE, "the toggled track is not left behind");
         assert_eq!(
-            page.rows.len(),
+            real.views.track_count("", TrackSort::default()),
             BASE,
+            "the toggled track is not left behind"
+        );
+        assert!(real.title_at(BASE - 1).is_some());
+        assert!(
+            real.title_at(BASE).is_none(),
             "and the window lists that same total"
         );
     }
 
     /// A mutation that commits between two frames invalidates the listing
-    /// outright: the next frame reports the new total with the new rows,
-    /// never the old total over the new rows or the reverse.
+    /// outright: the next frame reports the new count with the new rows,
+    /// never the old count over the new rows or the reverse.
     #[test]
-    fn a_mutation_between_frames_moves_the_total_and_the_rows_together() {
+    fn a_mutation_between_frames_moves_the_count_and_the_rows_together() {
         let mut real = Real::new();
         for n in 0..3 {
             real.seed(&format!("keep{n}"), &format!("keep{n}"), "One", "Ada");
         }
 
-        let before = real
-            .views
-            .track_list("", riff_backend::app::state::TrackSort::default(), 0);
-        assert_eq!((before.total, before.rows.len()), (3, 3));
+        assert_eq!(real.views.track_count("", TrackSort::default()), 3);
 
         real.seed_batch(100, 2);
 
-        let after = real
-            .views
-            .track_list("", riff_backend::app::state::TrackSort::default(), 0);
-        assert_eq!(after.total, 5, "the total counts the committed batch");
-        assert_eq!(after.rows.len(), 5, "and the window lists it");
-        let titles: Vec<&str> = after
-            .rows
-            .iter()
-            .filter_map(|track| track.metadata.title.as_deref())
+        assert_eq!(real.views.track_count("", TrackSort::default()), 5);
+        let titles: Vec<String> = (0..5)
+            .map(|i| real.title_at(i).unwrap_or_default())
             .collect();
         assert_eq!(
             titles,
             ["Track 0100", "Track 0101", "keep0", "keep1", "keep2"],
-            "the refetched window is the new collection, not a mix of the two"
+            "the refetched rows are the new collection, not a mix of the two"
         );
     }
 
     /// Retargeting the query signature drops the cached rows even when no
     /// mutation committed: the listing a keystroke switches to is the new
-    /// listing's own rows and total.
+    /// listing's own rows and its own count.
     #[test]
     fn retargeting_a_query_signature_drops_rows_at_an_unchanged_generation() {
         let mut real = Real::new();
@@ -9081,37 +9497,40 @@ mod listing_page_coherence_tests {
         real.seed("b_one", "Beta Call", "Two", "Ada");
         real.seed("b_two", "Beta Again", "Two", "Ada");
 
-        let first =
-            real.views
-                .track_list("alpha", riff_backend::app::state::TrackSort::default(), 0);
-        assert_eq!((first.total, first.rows.len()), (1, 1));
-        assert_eq!(first.rows[0].metadata.title.as_deref(), Some("Alpha Call"));
+        let first = real
+            .views
+            .track_row("alpha", TrackSort::default(), 0)
+            .map(|t| t.metadata.title.clone().unwrap_or_default());
+        assert_eq!(first.as_deref(), Some("Alpha Call"));
+        assert_eq!(real.views.track_count("alpha", TrackSort::default()), 1);
 
-        let second =
-            real.views
-                .track_list("beta", riff_backend::app::state::TrackSort::default(), 0);
-        assert_eq!((second.total, second.rows.len()), (2, 2));
         assert_eq!(
-            second
-                .rows
-                .iter()
-                .filter_map(|track| track.metadata.title.as_deref())
-                .collect::<Vec<_>>(),
+            real.views.track_count("beta", TrackSort::default()),
+            2,
+            "the retargeted listing serves its own count"
+        );
+        let beta: Vec<String> = (0..2)
+            .map(|i| {
+                real.views
+                    .track_row("beta", TrackSort::default(), i)
+                    .map(|t| t.metadata.title.clone().unwrap_or_default())
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(
+            beta,
             ["Beta Call", "Beta Again"],
             "the retargeted listing serves its own rows, not the previous query's"
         );
 
         // Switching back re-reads rather than serving the abandoned query's
         // rows, and the flat listing is its own signature again.
-        let flat = real
-            .views
-            .track_list("", riff_backend::app::state::TrackSort::default(), 0);
-        assert_eq!((flat.total, flat.rows.len()), (3, 3));
+        assert_eq!(real.views.track_count("", TrackSort::default()), 3);
     }
 
     /// The sort direction is part of a browse column's query signature, so
     /// reversing it at an unchanged generation serves the reversed listing
-    /// with the total that belongs to it.
+    /// with the count that belongs to it.
     #[test]
     fn retargeting_a_browse_direction_drops_rows_at_an_unchanged_generation() {
         let mut real = Real::new();
@@ -9119,28 +9538,32 @@ mod listing_page_coherence_tests {
             real.seed(&format!("x_{name}"), "One", "One", name);
         }
 
-        let ascending = real.views.artists_page(SortDirection::Ascending, 0);
-        assert_eq!(ascending.total, 3);
-        assert_eq!(
-            ascending
-                .rows
-                .iter()
-                .map(|artist| artist.name.clone())
-                .collect::<Vec<_>>(),
-            ["Ada", "Bee", "Cid"]
-        );
+        let ascending: Vec<String> = (0..3)
+            .map(|i| {
+                real.views
+                    .artist_row(SortDirection::Ascending, i)
+                    .expect("row at i")
+                    .name
+                    .clone()
+            })
+            .collect();
+        assert_eq!(ascending, ["Ada", "Bee", "Cid"]);
 
-        let descending = real.views.artists_page(SortDirection::Descending, 0);
-        assert_eq!(descending.total, 3, "the same total still describes it");
+        let descending: Vec<String> = (0..3)
+            .map(|i| {
+                real.views
+                    .artist_row(SortDirection::Descending, i)
+                    .expect("row at i")
+                    .name
+                    .clone()
+            })
+            .collect();
         assert_eq!(
-            descending
-                .rows
-                .iter()
-                .map(|artist| artist.name.clone())
-                .collect::<Vec<_>>(),
+            descending,
             ["Cid", "Bee", "Ada"],
-            "and the rows are the reversed listing's own"
+            "the same count still describes the reversed listing, and the rows are its own"
         );
+        assert_eq!(real.views.artist_count(SortDirection::Descending), 3);
     }
 }
 

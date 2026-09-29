@@ -87,3 +87,17 @@ cargo build --release -p riff-gui          # release build (LTO, stripped)
 ## Domain docs
 
 Single-context: `CONTEXT.md` and `docs/adr/` at the repo root.
+
+## Agent skills
+
+### Issue tracker
+
+Local markdown: issues and specs live as files under `.scratch/` (gitignored). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles, recorded as a `Status:` line in each issue file. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+single-context. See `docs/agents/domain.md`.

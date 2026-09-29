@@ -33,6 +33,32 @@ The single durable change per `TagEditRequest` (ADR 0006) is unchanged; a batch 
 - **Chosen**: inline seven-field editor on both readouts, aggregation rules above, batch save through one request per Track.
 - **Duration as an aggregated tag row (rejected)**: it is derived, not editable; a multi-Track Album would render `(different)` nearly always, which is noise.
 
+## Amendment (2026-09-29) — one door, and who owns it
+
+The decision stands. Two claims it makes about the editor's *entry* are now
+backed by a named owner rather than by a routing convention.
+
+- **The editor has one door, and the Track-menu host is it.** This record said
+  the context-menu item "becomes an entry point into the inline editor (select
+  the Track and focus the editor)". That is now true of *every* surface: a
+  Track row's "Edit Tags" item is answered by the per-app Track-menu host
+  (`app/track_menu.rs`), which selects the Track and opens the same per-selection
+  draft through the same `InlineTagEditor` controller the Detail Panel's tag rows
+  open. The Detail Panel's own path is unchanged and stays where it is — the
+  readout's tag rows — so the two are the same opening reached two ways, not two
+  editors. Unifying them into one call site was out of scope for the change that
+  made the host: the Detail Panel's rows are a *rendered readout* that happens to
+  be editable, while the menu item is a *gesture answer*, and collapsing them
+  would have coupled the readout's rendering to the Track-menu dispatch for no
+  behavioural gain.
+- **The Inline Tag Editor is one of the host's owned handles**, which is what let
+  the Tracks Column stop intercepting. The Tracks Column's menu report used to be
+  caught by that column and dispatched by hand, because the detail-action applier
+  held neither the Playlist Store nor this editor — and "Edit Tags" needs the
+  editor. Moving the handle into the host is what removed the intercept; the
+  intent was not dropped to make room for it, and a whole-frame test drives it
+  from a real Tracks Column row.
+
 ## Consequences
 
 - `TagEditState` and the `prompts.rs::tag_edit_modal` widget are deleted; the tag editor moves into the Detail Panel and is owned by the rendered selection (TrackId / Album identity), with a per-selection draft.

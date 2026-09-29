@@ -3,6 +3,7 @@ pub mod artwork;
 pub mod browser;
 pub mod button;
 pub mod chrome;
+pub mod column;
 pub mod cover_placeholder;
 pub mod detail;
 pub mod empty_state;

@@ -101,11 +101,10 @@ as-built truth:
   bullet originally named a `FacadeTransport` type said to be defined beside
   `ChannelTransport` and the `Transport` trait. No such symbol exists anywhere in the
   workspace, and none ever did: `riff-backend`'s Composition Root wires `ChannelTransport`
-  around the shared sessions directly in `riff-backend/src/composition.rs`, using the
-  optional dispatch-recorder hook (`ChannelTransport::new_recording`) to report commands
-  to the Backend Events inbox. The distinction this bullet was drawing — that the
-  facade-facing transport sits in the playback capability rather than in the facade
-  crate — is correct and is how it was built; only the type name was wrong.
+  around the shared sessions directly in `riff-backend/src/composition.rs`. The distinction
+  this bullet was drawing — that the facade-facing transport sits in the playback capability
+  rather than in the facade crate — is correct and is how it was built; only the type name
+  was wrong.
 - **The `riff-backend` re-export surface serves the test suite as well as the
   frontend.** Historical `riff_backend::…` import paths resolve for both consumers;
   the workspace-root test crate imports through it.

@@ -29,8 +29,12 @@ The list column of an Album's Tracks, revealed by selecting that Album. The All 
 _Avoid_: Drill Column, track list, All Tracks
 
 **Scroll Memory**:
-The in-memory record of each Section's list scroll position, kept only while the app runs; restarting clears it. A Section's root list restores its position when the Section is reselected; any deeper column resets on any selection or content change (search, sort, rescan).
+The in-memory record of each Section's list scroll position, kept only while the app runs; restarting clears it. A Section's root list restores its position when the Section is reselected; any deeper column resets on any selection or content change (search, sort, rescan). Which list a record belongs to is the owning Column's own fact, never something a gesture supplies: an action that moves the selection resets **the Column it happened in**, so a Column cannot leave its own scroll stale and no Column can reset a neighbour's.
 _Avoid_: scroll persistence, saved position
+
+**Column Identity**:
+What one entity-Column is, declared once where it renders: its **Section**, the **depth** its rows select at, and the **Scroll Memory slot** it owns. It is stated as data and is then never supplied again — a click, a right-click and a sort flip all read the one value, and the scroll bookkeeping reads the same one, so a Column's list and its reset behaviour cannot come to disagree. There are exactly two shapes, a Section root and a deeper Column, and what differs between two Columns of one shape is a value rather than a block of code.
+_Avoid_: column config, per-action section, drill level argument
 
 **Now Playing**:
 A presentation mode that temporarily replaces the active View with the current Track's details; closing it always returns to the Library View.
@@ -117,11 +121,11 @@ The module that owns the Settings round-trip — hydrating Settings into the ses
 _Avoid_: settings sync, persist helper
 
 **Library Path**:
-A root folder the Library is discovered from, registered by the user. It is one fact-set, not a string: the path, its Readiness, its Watch State, its running filesystem watcher, and its rows in the Application Store. Retiring a Library Path retires all five.
+A root folder the Library is discovered from, registered by the user. It is one fact-set, not a string: the path, its Readiness, its Watch State, its running filesystem watcher, and its rows in the Application Store. One operation owns each edge: retiring a Library Path retires all five, and restoring one takes them back — the restored Watch State is acted on rather than copied in, so Enabled starts its watcher, Disabled starts nothing, and a Warning is retried so the verdict is the current one. The App Runtime restores them at launch, so a Library Path the user enabled watching on is watched before any frame is drawn.
 _Avoid_: root, directory, watched folder
 
 **Watch State**:
-The persisted watcher choice for a Library Path: Disabled, Enabled, or Warning carrying a diagnostic message.
+The persisted watcher choice for a Library Path: Disabled, Enabled, or Warning carrying a diagnostic message. A Warning is a recorded failed attempt, retried at every launch, so it never outlives the condition that caused it.
 _Avoid_: watcher status
 
 **Readiness**:
@@ -129,19 +133,15 @@ The per-Library-Path health shown as a status dot in Settings: whether the path 
 _Avoid_: watch status, Ready state
 
 **Session Projection**:
-A bounded in-memory view of Application Store query results used while rendering the UI; it is never authoritative.
+A bounded in-memory view of Application Store query results used while rendering the UI; it is never authoritative. A listing is read as two of its own — a row by its index, and the listing's total — and the projection owns what makes those two cheap: the window a row is fetched in, the refetch, and the reuse of rows it already holds.
 _Avoid_: cache, AppState snapshot
 
 **SessionViews**:
-The single read interface over all Session Projections; UI code asks it for ready-to-render data and never touches the generation counter, loader wiring, staleness handling, or store-error fallbacks itself.
+The single read interface over all Session Projections; UI code asks it for ready-to-render data and never touches the generation counter, loader wiring, staleness handling, or store-error fallbacks itself. For a paged listing it answers two questions in two reads — row *i* of the listing, and how many rows it has — so no caller holds a window's rows or derives a position inside one.
 _Avoid_: projection manager, view cache
 
-**Listing Page**:
-A root list's or a deeper Column's total and its visible window, read from the Application Store as one fact under one connection acquisition, so no committed write can interleave the two halves. Which generation a listing was read at is the Session Projection's concern, not the page's.
-_Avoid_: page, query result, count row
-
 **Audio Engine**:
-The module that turns Playback Commands into decoded audio and Playback Updates, owning decode scheduling, output startup, and gapless handoff. It decides nothing about queue order: the Queue Fill and both skips are answered by **Continuation**, and the engine only performs the load.
+The module that turns Playback Commands into decoded audio and Playback Updates, owning decode scheduling, output startup, and gapless handoff. It decides nothing about queue order: the Queue Fill's content and both skips are answered by **Continuation**, and the engine only performs the load. What the engine does own is the *when* — that an empty Playback Queue triggers a Queue Fill, and that idleness (nothing is currently playing) starts playback exactly once — and it is one operation every Playback Command that can start or grow the Playback Queue goes through.
 _Avoid_: playback thread, sound server
 
 **Transport**:
@@ -153,7 +153,7 @@ The module that applies Playback Updates to session state: it commits play histo
 _Avoid_: update processor, track-end handler
 
 **Continuation**:
-The answer to what plays next, given a playback event or a manual skip — which Track, or that nothing follows. It is the same question whether the trigger was a Track ending or a listener pressing Next, and one module in the Playback capability answers it, moving the Playback Queue to that answer. Which Tracks a **Queue Fill** puts in the queue and which is current, and what is current when a caller has already chosen the Track, are the same question asked of that module too.
+The answer to what plays next, given a playback event or a manual skip — which Track, or that nothing follows. It is the same question whether the trigger was a Track ending or a listener pressing Next, and one module in the Playback capability answers it, moving the Playback Queue to that answer. Which Tracks a **Queue Fill** puts in the queue and which is current, and what is current when a caller has already chosen the Track, are the same question asked of that module too. It answers from what it is handed: no store, no thread, no channel and no IO reach it, and *when* a fill or an idle auto-play happens is the **Audio Engine**'s decision, not this module's.
 _Avoid_: auto-advance, next-track logic, skip handling
 
 **Library Scan**:
@@ -165,8 +165,12 @@ The rightmost selection readout showing the currently selected entity or Track �
 _Avoid_: inspector, selection panel, readout column
 
 **Inline Tag Editor**:
-The tag editing surface that lives inside the Detail Panel, replacing the retired Edit Tags modal. It renders one row per editable Metadata field; editing happens in place and saving commits through the Tag Edit service.
-_Avoid_: edit dialog, tag modal
+The tag editing surface that lives inside the Detail Panel, replacing the retired Edit Tags modal. It renders one row per editable Metadata field; editing happens in place and saving commits through the Tag Edit service. It has exactly **one door**: the **Track-menu host** opens it, from whichever surface the gesture came from, and the Detail Panel's tag rows open the same draft through the same controller. A Track row's "Edit Tags" item is therefore not a second way in — it is that one opening, reached from a row.
+_Avoid_: edit dialog, tag modal, second tag editor
+
+**Track-menu host**:
+The one place a right-click on a Track becomes an effect, and the answer to only two questions: *a right-click happened on this Track*, and *this item was chosen*. It owns the handles a Track's actions need — the Playback Queue's Transport, the Application Store's Playlist and Library sections, the Inline Tag Editor, and the selection slot — so every Track-row surface answers a right-click identically by naming a Track and its row's context, and nothing else. There is one per app: the handle set is declared once, so a fifth Track-row surface cannot wire a different one. A Track menu is not a second way to dispatch: a surface paints the menu and hands the host what it reported.
+_Avoid_: effects bag, track menu effects, per-row menu context
 
 **Tag Aggregation**:
 In an Album readout, the way one tag row summarizes that field across every Track of the Album: all Tracks share the value → the value itself; the values differ → the orange `(different)` state; no Track carries the value → the grey `(none)` state. Tag rows on a single-Track readout show that Track's value directly.

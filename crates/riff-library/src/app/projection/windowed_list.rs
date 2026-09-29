@@ -20,7 +20,9 @@
 //! with their key and row types; their former duplicated module bodies are
 //! deleted.
 
-use crate::app::store::{GenerationCache, Page, SortDirection, StoreError, StoreGeneration};
+use crate::app::store::{
+    GenerationCache, Page, SortDirection, StoreError, StoreGeneration, TrackListOrder,
+};
 use crate::domain::Track;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -41,14 +43,17 @@ pub(crate) const MAX_CACHED_WINDOWS: usize = 8;
 
 /// The query signature a track-list projection was created (or retargeted)
 /// for. A key change invalidates cached rows even at an unchanged
-/// generation.
+/// generation — including the order changing, since the order is part of
+/// what the store serves (the sort control's `ORDER BY`, not an in-memory
+/// reversal).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionKey {
-    /// The flat all-tracks list.
-    Flat,
+    /// The flat all-tracks list, in the given order.
+    Flat(TrackListOrder),
     /// Case-insensitive substring search over title/artist/album/album
-    /// artist; the payload is the raw query text.
-    Search(String),
+    /// artist; the first payload is the raw query text, the second the
+    /// listing order.
+    Search(String, TrackListOrder),
 }
 
 /// Which bounded browse listing a projection serves, plus the sort

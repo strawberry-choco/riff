@@ -132,7 +132,10 @@ mod tests {
         );
         assert!(!scans.is_scanning(&root), "the scan ended");
         assert_eq!(
-            queries.tracks_page(0, 10).unwrap().total(),
+            queries
+                .tracks_page(riff_persistence::store::TrackListOrder::default(), 0, 10)
+                .unwrap()
+                .total(),
             3,
             "every discovered file committed durably"
         );
@@ -690,7 +693,13 @@ mod composition_root_tests {
         poll_until(
             Duration::from_secs(10),
             "committed tracks in SessionViews",
-            || (rt.session_views.track_list("", 0).total == 2).then_some(()),
+            || {
+                (rt.session_views
+                    .track_list("", riff_backend::app::state::TrackSort::default(), 0)
+                    .total
+                    == 2)
+                    .then_some(())
+            },
         );
         poll_until(
             Duration::from_secs(10),
@@ -780,7 +789,9 @@ mod composition_root_tests {
             counts.tracks
         );
         assert_eq!(
-            rt.session_views.track_list("", 0).total,
+            rt.session_views
+                .track_list("", riff_backend::app::state::TrackSort::default(), 0)
+                .total,
             counts.tracks,
             "the store stays consistent after a shutdown that raced a scan: the sidebar count \
              and the track list must still agree"

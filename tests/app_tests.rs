@@ -800,10 +800,11 @@ mod tests {
 
         fn tracks_page(
             &self,
+            order: riff_persistence::store::TrackListOrder,
             offset: usize,
             limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            self.0.lock().unwrap().tracks_page(offset, limit)
+            self.0.lock().unwrap().tracks_page(order, offset, limit)
         }
 
         fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
@@ -817,10 +818,14 @@ mod tests {
         fn search_page(
             &self,
             query: &str,
+            order: riff_persistence::store::TrackListOrder,
             offset: usize,
             limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            self.0.lock().unwrap().search_page(query, offset, limit)
+            self.0
+                .lock()
+                .unwrap()
+                .search_page(query, order, offset, limit)
         }
 
         fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
@@ -1125,13 +1130,13 @@ mod tests {
             ..Default::default()
         });
 
-        let page = views.track_list("", 0);
+        let page = views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
         assert_eq!(page.total, 120);
         assert_eq!(page.start, 0);
         assert_eq!(page.rows.len(), 50);
         assert_eq!(page.rows[0].id.0, "0");
 
-        let page = views.track_list("", 50);
+        let page = views.track_list("", riff_backend::app::state::TrackSort::default(), 50);
         assert_eq!(page.start, 50);
         assert_eq!(page.rows.len(), 50);
         assert_eq!(page.rows[49].id.0, "99");
@@ -1151,14 +1156,14 @@ mod tests {
         });
 
         for offset in [0, 50, 100, 150, 200, 250, 300, 350, 400] {
-            views.track_list("", offset);
+            views.track_list("", riff_backend::app::state::TrackSort::default(), offset);
         }
 
         assert_eq!(mock.window_calls().len(), 9, "all requested windows load");
 
         // Asking for the oldest window again must fetch it anew: it was
         // evicted once the bound was exceeded.
-        views.track_list("", 0);
+        views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
         assert_eq!(
             mock.window_calls().last(),
             Some(&(0, 50)),
@@ -1167,7 +1172,7 @@ mod tests {
 
         // The newest window remains cached.
         let calls_before = mock.window_calls().len();
-        views.track_list("", 400);
+        views.track_list("", riff_backend::app::state::TrackSort::default(), 400);
         assert_eq!(
             mock.window_calls().len(),
             calls_before,
@@ -1181,11 +1186,11 @@ mod tests {
             flat: flat_library(200),
             ..Default::default()
         });
-        views.track_list("", 0);
+        views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
         let calls_after_load = mock.window_calls().len();
 
         // Scrolling brings one new window into view while staying fresh.
-        views.track_list("", 100);
+        views.track_list("", riff_backend::app::state::TrackSort::default(), 100);
 
         assert_eq!(
             &mock.window_calls()[calls_after_load..],
@@ -1200,7 +1205,12 @@ mod tests {
             flat: flat_library(120),
             ..Default::default()
         });
-        assert_eq!(views.track_list("", 0).total, 120);
+        assert_eq!(
+            views
+                .track_list("", riff_backend::app::state::TrackSort::default(), 0)
+                .total,
+            120
+        );
 
         // A committed mutation adds ten tracks and bumps the generation.
         // The invalidated frame must recount instead of trusting the stale
@@ -1214,7 +1224,7 @@ mod tests {
         }
         generation.bump();
 
-        let page = views.track_list("", 0);
+        let page = views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
         assert_eq!(page.total, 130, "the invalidated frame recounts");
         assert_eq!(page.rows.len(), 50);
         assert_eq!(
@@ -1222,7 +1232,11 @@ mod tests {
             "rows come back refreshed alongside the recounted total"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::TracksPage(0, 50)),
+            mock.count_of(&LibraryQueryCall::TracksPage(
+                riff_persistence::store::TrackListOrder::default(),
+                0,
+                50
+            )),
             2,
             "the invalidated frame ran a second page read, whose total the \
              view just reported"
@@ -1243,12 +1257,22 @@ mod tests {
             "an empty result set gates rendering off"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::SearchPage("q".to_string(), 0, 1)),
+            mock.count_of(&LibraryQueryCall::SearchPage(
+                "q".to_string(),
+                riff_persistence::store::TrackListOrder::default(),
+                0,
+                1
+            )),
             1,
             "one page read per gate check"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::SearchPage("nothing".to_string(), 0, 1)),
+            mock.count_of(&LibraryQueryCall::SearchPage(
+                "nothing".to_string(),
+                riff_persistence::store::TrackListOrder::default(),
+                0,
+                1
+            )),
             1,
             "one page read per gate check"
         );
@@ -2738,13 +2762,13 @@ mod tests {
         });
 
         // Fresh: the visible window and the authoritative total load once.
-        let page = views.track_list("", 0);
+        let page = views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
         assert_eq!(page.total, 120);
         assert_eq!(page.rows[0].id.0, "0");
         assert_eq!(mock.window_calls(), vec![(0, 50)]);
 
         // Unchanged generation: the same window is served from cache.
-        let _ = views.track_list("", 0);
+        let _ = views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
         assert_eq!(
             mock.window_calls(),
             vec![(0, 50)],
@@ -2760,7 +2784,7 @@ mod tests {
             }
         }
         generation.bump();
-        let page = views.track_list("", 0);
+        let page = views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
         assert_eq!(page.total, 125, "the invalidated frame recounts");
         assert_eq!(
             mock.window_calls(),
@@ -2775,20 +2799,20 @@ mod tests {
             flat: flat_library(120),
             ..Default::default()
         });
-        let _ = views.track_list("", 0);
+        let _ = views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
 
         // A committed mutation whose window load fails: the refresh errors
         // (the seam warns and moves on) but the stale-but-present window
         // stays readable — the UI keeps rendering last good rows.
         mock.lock().failing.push(FailingQuery::TracksWindow);
         generation.bump();
-        let page = views.track_list("", 0);
+        let page = views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
         assert_eq!(page.rows.len(), 50, "stale rows survive the failed refresh");
         assert_eq!(page.rows[0].id.0, "0");
 
         // The retry heals: the next call refetches and the view is fresh.
         mock.lock().failing.clear();
-        let page = views.track_list("", 0);
+        let page = views.track_list("", riff_backend::app::state::TrackSort::default(), 0);
         assert_eq!(page.total, 120);
         assert_eq!(page.rows[0].id.0, "0");
         assert_eq!(mock.window_calls().len(), 3, "load, failed load, retry");
@@ -3368,7 +3392,11 @@ mod scan_service_tests {
         /// the query port.
         fn track_count(&self) -> usize {
             self.queries
-                .tracks_page(0, usize::MAX)
+                .tracks_page(
+                    riff_persistence::store::TrackListOrder::default(),
+                    0,
+                    usize::MAX,
+                )
                 .expect("page reads")
                 .total()
         }
@@ -3449,6 +3477,7 @@ mod scan_service_tests {
 
         fn tracks_page(
             &self,
+            _order: riff_persistence::store::TrackListOrder,
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
@@ -3466,6 +3495,7 @@ mod scan_service_tests {
         fn search_page(
             &self,
             _query: &str,
+            _order: riff_persistence::store::TrackListOrder,
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
@@ -4347,6 +4377,7 @@ mod audio_engine_tests {
 
         fn tracks_page(
             &self,
+            _order: riff_persistence::store::TrackListOrder,
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
@@ -4378,6 +4409,7 @@ mod audio_engine_tests {
         fn search_page(
             &self,
             _query: &str,
+            _order: riff_persistence::store::TrackListOrder,
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
@@ -5175,6 +5207,7 @@ mod tag_edit_service_tests {
 
         fn tracks_page(
             &self,
+            _order: riff_persistence::store::TrackListOrder,
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
@@ -5192,6 +5225,7 @@ mod tag_edit_service_tests {
         fn search_page(
             &self,
             _query: &str,
+            _order: riff_persistence::store::TrackListOrder,
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
@@ -8218,10 +8252,11 @@ mod browse_page_seam_tests {
             }
             fn tracks_page(
                 &self,
+                order: riff_persistence::store::TrackListOrder,
                 offset: usize,
                 limit: usize,
             ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-                self.0.lock().unwrap().tracks_page(offset, limit)
+                self.0.lock().unwrap().tracks_page(order, offset, limit)
             }
             fn library_counts(&self) -> Result<app::store::LibraryCounts, StoreError> {
                 self.0.lock().unwrap().library_counts()
@@ -8232,10 +8267,11 @@ mod browse_page_seam_tests {
             fn search_page(
                 &self,
                 q: &str,
+                order: riff_persistence::store::TrackListOrder,
                 o: usize,
                 l: usize,
             ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-                self.0.lock().unwrap().search_page(q, o, l)
+                self.0.lock().unwrap().search_page(q, order, o, l)
             }
             fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
                 self.0.lock().unwrap().all_artists()
@@ -8965,7 +9001,9 @@ mod listing_page_coherence_tests {
 
         let mut frames = 0usize;
         while seeding.load(Ordering::Acquire) {
-            let page = real.views.track_list("", 0);
+            let page = real
+                .views
+                .track_list("", riff_backend::app::state::TrackSort::default(), 0);
             assert!(
                 page.total >= page.rows.len(),
                 "frame {frames}: a total of {} cannot describe fewer rows than the {} listed under it",
@@ -8988,7 +9026,9 @@ mod listing_page_coherence_tests {
             "the seam must actually be read while the scan commits, saw {frames} frames"
         );
 
-        let page = real.views.track_list("", 0);
+        let page = real
+            .views
+            .track_list("", riff_backend::app::state::TrackSort::default(), 0);
         assert_eq!(page.total, BASE, "the toggled track is not left behind");
         assert_eq!(
             page.rows.len(),
@@ -9007,12 +9047,16 @@ mod listing_page_coherence_tests {
             real.seed(&format!("keep{n}"), &format!("keep{n}"), "One", "Ada");
         }
 
-        let before = real.views.track_list("", 0);
+        let before = real
+            .views
+            .track_list("", riff_backend::app::state::TrackSort::default(), 0);
         assert_eq!((before.total, before.rows.len()), (3, 3));
 
         real.seed_batch(100, 2);
 
-        let after = real.views.track_list("", 0);
+        let after = real
+            .views
+            .track_list("", riff_backend::app::state::TrackSort::default(), 0);
         assert_eq!(after.total, 5, "the total counts the committed batch");
         assert_eq!(after.rows.len(), 5, "and the window lists it");
         let titles: Vec<&str> = after
@@ -9037,11 +9081,15 @@ mod listing_page_coherence_tests {
         real.seed("b_one", "Beta Call", "Two", "Ada");
         real.seed("b_two", "Beta Again", "Two", "Ada");
 
-        let first = real.views.track_list("alpha", 0);
+        let first =
+            real.views
+                .track_list("alpha", riff_backend::app::state::TrackSort::default(), 0);
         assert_eq!((first.total, first.rows.len()), (1, 1));
         assert_eq!(first.rows[0].metadata.title.as_deref(), Some("Alpha Call"));
 
-        let second = real.views.track_list("beta", 0);
+        let second =
+            real.views
+                .track_list("beta", riff_backend::app::state::TrackSort::default(), 0);
         assert_eq!((second.total, second.rows.len()), (2, 2));
         assert_eq!(
             second
@@ -9055,7 +9103,9 @@ mod listing_page_coherence_tests {
 
         // Switching back re-reads rather than serving the abandoned query's
         // rows, and the flat listing is its own signature again.
-        let flat = real.views.track_list("", 0);
+        let flat = real
+            .views
+            .track_list("", riff_backend::app::state::TrackSort::default(), 0);
         assert_eq!((flat.total, flat.rows.len()), (3, 3));
     }
 

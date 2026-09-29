@@ -734,7 +734,9 @@ mod tests {
         assert_eq!(playlists.len(), 1, "playlists read back as usual");
         assert_eq!(playlists[0].name, "Keep Me");
         assert_eq!(
-            views.track_list("", 0).total,
+            views
+                .track_list("", riff_backend::app::state::TrackSort::default(), 0)
+                .total,
             0,
             "the wiped collection reads empty through the seam"
         );
@@ -10270,6 +10272,66 @@ mod browser_column_ui_tests {
         );
     }
 
+    /// The track listings' sort control, at the widget seam: the button names
+    /// the order in force, and choosing a row from its popup reports that
+    /// order for the session to apply.
+    #[test]
+    fn test_detail_column_track_sort_control_reports_the_chosen_order() {
+        use egui_kittest::kittest::Queryable;
+        use riff_backend::app::state::TrackSort;
+        use riff_gui::ui::detail::{DetailAction, DetailColumn, TrackRow, show_detail_column};
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let tracks = vec![TrackRow {
+            key: "t1".to_string(),
+            title: "Magic Window".to_string(),
+            plays: 0,
+            duration: None,
+            favorite: false,
+            selected: false,
+            now_playing: false,
+        }];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(560.0, 300.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, actions: &mut Vec<DetailAction>| {
+                    let column = DetailColumn {
+                        tracks: &tracks,
+                        sort: Some(TrackSort::NumberAsc),
+                        ..DetailColumn::empty("", "")
+                    };
+                    show_detail_column(ui, &mut cache, &palette, column, actions);
+                },
+                Vec::new(),
+            );
+        harness.run();
+
+        // The button names the order in force, for the pointer and the
+        // accessibility tree alike.
+        assert!(
+            harness
+                .query_by_label("Sort order: Track No. \u{2191}")
+                .is_some(),
+            "the sort button names the canonical order while it is active"
+        );
+
+        // Choosing a row from the popup reports that order.
+        harness
+            .get_by_label("Sort order: Track No. \u{2191}")
+            .click();
+        harness.run();
+        harness.get_by_label("Title A\u{2013}Z").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&DetailAction::TrackSortSelected(TrackSort::TitleAsc)),
+            "choosing a row from the sort popup reports the chosen order"
+        );
+    }
+
     /// A Track row's right-click, at the widget seam: the Tracks Column's rows
     /// open the shared Track menu and report the row's OWN key with whatever
     /// was chosen from it.
@@ -16272,10 +16334,11 @@ mod whole_frame_tests {
         }
         fn tracks_page(
             &self,
+            order: riff_persistence::store::TrackListOrder,
             offset: usize,
             limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            self.0.lock().unwrap().tracks_page(offset, limit)
+            self.0.lock().unwrap().tracks_page(order, offset, limit)
         }
         fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
             self.0.lock().unwrap().library_counts()
@@ -16286,10 +16349,14 @@ mod whole_frame_tests {
         fn search_page(
             &self,
             query: &str,
+            order: riff_persistence::store::TrackListOrder,
             offset: usize,
             limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            self.0.lock().unwrap().search_page(query, offset, limit)
+            self.0
+                .lock()
+                .unwrap()
+                .search_page(query, order, offset, limit)
         }
         fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
             self.0.lock().unwrap().all_artists()

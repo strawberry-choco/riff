@@ -523,6 +523,40 @@ pub enum SortDirection {
     Descending,
 }
 
+/// The explicit order of a flat track-listing read ([`Self::tracks_page`] /
+/// [`Self::search_page`]): the canonical path order and its reversal, or the
+/// title A–Z / Z–A order the listing's sort control offers. The order lands
+/// in the query's `ORDER BY` — page offsets stay aligned when it changes,
+/// and no in-memory copy of a window is ever reversed (the same contract
+/// [`SortDirection`] gives the browse reads).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TrackListOrder {
+    /// Path-ascending: the flat list's canonical order (ADR 0003).
+    #[default]
+    PathAsc,
+    /// Path-descending: the exact reversal, applied in SQL.
+    PathDesc,
+    /// Title A–Z, case-insensitive (`COLLATE NOCASE`), path as the tiebreak.
+    TitleAsc,
+    /// Title Z–A, case-insensitive, path as the tiebreak.
+    TitleDesc,
+}
+
+impl TrackListOrder {
+    /// The `ORDER BY` clause this order compiles to. One house for the four
+    /// spellings, so the listing window and any future count read cannot
+    /// disagree.
+    #[must_use]
+    pub fn order_by(self) -> &'static str {
+        match self {
+            Self::PathAsc => "path ASC",
+            Self::PathDesc => "path DESC",
+            Self::TitleAsc => "title COLLATE NOCASE ASC, path ASC",
+            Self::TitleDesc => "title COLLATE NOCASE DESC, path DESC",
+        }
+    }
+}
+
 /// A Section's or Drill Column's total and its visible window, read as one
 /// fact.
 ///
@@ -572,7 +606,8 @@ impl<T> Page<T> {
 ///
 /// Flat-list and search reads are bounded windows (ADR 0003): callers fetch
 /// only the visible row range plus a total count, ordered deterministically
-/// by track path ascending. Search parity with the former in-memory
+/// by the `TrackListOrder` the read names (path-ascending by default).
+/// Search parity with the former in-memory
 /// implementation is guaranteed by storing a derived Rust-lowercased
 /// search-text column at write time and lowercasing the query in Rust here;
 /// matching is literal substring (no wildcard semantics).
@@ -607,9 +642,15 @@ pub trait LibraryQueryStore {
     fn metadata_version(&self) -> Result<u32, StoreError>;
 
     /// The flat library list's Listing Page at `offset`: the total number of
-    /// stored Tracks and one window of `limit` rows, path-ascending, read as
-    /// one fact under a single connection acquisition.
-    fn tracks_page(&self, offset: usize, limit: usize) -> Result<Page<Track>, StoreError>;
+    /// stored Tracks and one window of `limit` rows, in `order`, read as one
+    /// fact under a single connection acquisition. The default order
+    /// ([`TrackListOrder::PathAsc`]) is the canonical flat ordering.
+    fn tracks_page(
+        &self,
+        order: TrackListOrder,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Page<Track>, StoreError>;
 
     /// The Library-count totals — tracks, artists, albums, genres — in ONE
     /// query (design-handoff issue 05), so the sidebar-counts read model
@@ -632,11 +673,12 @@ pub trait LibraryQueryStore {
     fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError>;
 
     /// The search listing's Listing Page for `query` at `offset`: the match
-    /// total and one window of `limit` rows, path-ascending, read as one fact
+    /// total and one window of `limit` rows, in `order`, read as one fact
     /// under a single connection acquisition.
     fn search_page(
         &self,
         query: &str,
+        order: TrackListOrder,
         offset: usize,
         limit: usize,
     ) -> Result<Page<Track>, StoreError>;

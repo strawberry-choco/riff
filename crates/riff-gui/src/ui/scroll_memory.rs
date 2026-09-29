@@ -3,7 +3,7 @@
 //! Each of the four Library Sections — All Tracks, Artists, Albums, Genres —
 //! remembers its own root-list scroll position for as long as the app runs.
 //! A Section slot records a scroll offset plus a content fingerprint — the
-//! search query, the A–Z / Z–A sort direction, and the library generation at
+//! search query, the sort key, and the library generation at
 //! the moment the offset was saved. Restoring a slot whose fingerprint no
 //! longer matches resets to the top instead of restoring a stale offset. The
 //! fingerprint is the module's own: a site passes the query and the sort it is
@@ -79,20 +79,25 @@ fn section_salt(section: LibrarySection) -> &'static str {
 }
 
 /// The content identity a Section slot's offset was captured against: the
-/// search query, the sort direction, and the library generation at the moment
-/// the offset was saved (issue 06).
+/// search query, the sort key, and the library generation at the moment the
+/// offset was saved (issue 06).
 ///
 /// Private on purpose. A render site passes the ingredients it already holds —
-/// the query and the sort — and the generation is the module's own observation
-/// of the drained event inbox, so nothing outside can build, compare, or
-/// mis-time a fingerprint. The constraint that the offset a frame starts from
-/// and the offset it records must be "the same value" is gone because the
-/// [`SectionVisit`] token carries the identity from one call to the other, and
-/// no caller holds one to mismatch.
+/// the query and the sort key — and the generation is the module's own
+/// observation of the drained event inbox, so nothing outside can build,
+/// compare, or mis-time a fingerprint. The sort key is a small integer the
+/// site derives from whatever sort state it renders (`bool::from(desc)` for
+/// the entity columns, `TrackSort::as_sort_key` for the track listings), so
+/// any two sort modes of one section are different content identities and a
+/// sort change resets the slot instead of restoring a stale offset. The
+/// constraint that the offset a frame starts from and the offset it records
+/// must be "the same value" is gone because the [`SectionVisit`] token
+/// carries the identity from one call to the other, and no caller holds one
+/// to mismatch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContentFingerprint {
     query: String,
-    sort_desc: bool,
+    sort_key: u8,
     library_generation: u64,
 }
 
@@ -243,11 +248,11 @@ impl ScrollMemory {
         &mut self,
         section: LibrarySection,
         query: &str,
-        sort_desc: bool,
+        sort_key: u8,
     ) -> (ScrollControl, SectionVisit) {
         let fingerprint = ContentFingerprint {
             query: query.to_owned(),
-            sort_desc,
+            sort_key,
             library_generation: self.library_generation,
         };
         let start = match &self.slots[slot_index(section)] {
@@ -291,6 +296,16 @@ impl ScrollMemory {
             salt: slot.salt(),
             start,
         }
+    }
+
+    /// Force one drill/Tracks-column slot back to the top on the next frame —
+    /// the scroll counterpart of a sort flip. A drill slot's egui state
+    /// cannot see the session's sort (the control lives above the list), so
+    /// the render site reports the change here and the module makes the next
+    /// [`Self::begin_drill`] hand out a reset. One-shot: the frame after the
+    /// reset behaves as if nothing happened.
+    pub fn reset_drill_scroll(&mut self, slot: DrillSlot) {
+        self.drill_epochs[slot as usize] = self.selection_epoch.saturating_add(1);
     }
 
     /// Note that a selection happened in this slot. The module decides whether

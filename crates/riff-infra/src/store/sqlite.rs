@@ -12,7 +12,7 @@ use riff_persistence::playlist::{Playlist, PlaylistId};
 use riff_persistence::store::{
     FullScanSummary, LOST_GEMS_THRESHOLD, LibraryCounts, LibraryMutationStore, LibraryQueryStore,
     Page, PlaylistEntry, PlaylistStore, ScalarSettings, Settings, SettingsStore, SortDirection,
-    StoreChanged, StoreGeneration, StoreMigrations, WatchState,
+    StoreChanged, StoreGeneration, StoreMigrations, TrackListOrder, WatchState,
 };
 use riff_persistence::sync::MutexExt;
 use riff_persistence::track::{
@@ -1654,10 +1654,15 @@ impl LibraryQueryStore for SqliteStore {
         Ok(u32::try_from(stored).unwrap_or(u32::MAX))
     }
 
-    fn tracks_page(&self, offset: usize, limit: usize) -> Result<Page<Track>, StoreError> {
+    fn tracks_page(
+        &self,
+        order: TrackListOrder,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Page<Track>, StoreError> {
         self.read_page(|conn| {
             let total = Self::track_count_on(conn)?;
-            let rows = Self::tracks_window_on(conn, offset, limit)?;
+            let rows = Self::tracks_window_on(conn, order, offset, limit)?;
             Ok((total, rows))
         })
     }
@@ -1676,12 +1681,13 @@ impl LibraryQueryStore for SqliteStore {
     fn search_page(
         &self,
         query: &str,
+        order: TrackListOrder,
         offset: usize,
         limit: usize,
     ) -> Result<Page<Track>, StoreError> {
         self.read_page(|conn| {
             let total = Self::search_count_on(conn, query)?;
-            let rows = Self::search_window_on(conn, query, offset, limit)?;
+            let rows = Self::search_window_on(conn, query, order, offset, limit)?;
             Ok((total, rows))
         })
     }
@@ -2641,15 +2647,18 @@ impl SqliteStore {
         .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
     }
 
-    /// One path-ascending window on an already-held connection. A Listing
-    /// Page calls this instead of [`LibraryQueryStore::tracks_window`].
+    /// One window on an already-held connection, in `order`'s `ORDER BY`. A
+    /// Listing Page calls this instead of a public method — the connection
+    /// lock is not reentrant.
     fn tracks_window_on(
         conn: &Connection,
+        order: TrackListOrder,
         offset: usize,
         limit: usize,
     ) -> rusqlite::Result<Vec<Track>> {
         let mut stmt = conn.prepare_cached(&format!(
-            "SELECT {TRACK_COLUMNS} FROM tracks ORDER BY path ASC LIMIT ?1 OFFSET ?2"
+            "SELECT {TRACK_COLUMNS} FROM tracks ORDER BY {} LIMIT ?1 OFFSET ?2",
+            order.order_by()
         ))?;
         let rows = stmt.query_map(
             rusqlite::params![
@@ -2707,10 +2716,12 @@ impl SqliteStore {
         .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
     }
 
-    /// One path-ascending search window on an already-held connection.
+    /// One search window on an already-held connection, in `order`'s
+    /// `ORDER BY`.
     fn search_window_on(
         conn: &Connection,
         query: &str,
+        order: TrackListOrder,
         offset: usize,
         limit: usize,
     ) -> rusqlite::Result<Vec<Track>> {
@@ -2718,7 +2729,8 @@ impl SqliteStore {
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT {TRACK_COLUMNS} FROM tracks
              WHERE instr(search_text, ?1) > 0
-             ORDER BY path ASC LIMIT ?2 OFFSET ?3"
+             ORDER BY {} LIMIT ?2 OFFSET ?3",
+            order.order_by()
         ))?;
         let rows = stmt.query_map(
             rusqlite::params![

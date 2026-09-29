@@ -13,7 +13,7 @@ use riff_backend::domain::{Album, Artist, GenreCount, PlaylistId, SmartPlaylistK
 use std::path::PathBuf;
 
 use riff_backend::app::state::{
-    BrowseMode, BrowserSelection, LibrarySection, LibrarySession, PlaybackSession,
+    BrowseMode, BrowserSelection, LibrarySection, LibrarySession, PlaybackSession, TrackSort,
 };
 
 use super::super::browser;
@@ -151,7 +151,12 @@ impl RiffApp {
                     return;
                 };
                 let artist = artist.clone();
-                let albums = self.artist_drill_albums(&artist, query);
+                let mut albums = self.artist_drill_albums(&artist, query);
+                // The drill column's rows are the name-keyed albums the store
+                // served in canonical order; the drill sort re-orders the
+                // display copy here (the paged genre drills land their
+                // direction in the store's ORDER BY instead).
+                sort_albums_by_title(&mut albums, library.drill_sort_desc);
                 let (empty_title, empty_hint): (&str, String) = if query.is_empty() {
                     (
                         "No albums yet",
@@ -219,8 +224,8 @@ impl RiffApp {
     }
 
     /// One albums drill column (Artists level 1 and Genres level 2 share the
-    /// same row shape): a `BrowserColumn` (always list, no sort, no genre
-    /// chips) over `albums`, with the album row's cover thumbnail, `Artist ·
+    /// same row shape): a `BrowserColumn` (always list, no genre chips) over
+    /// `albums` — already sorted by the caller per the drill sort — with the album row's cover thumbnail, `Artist ·
     /// Year` detail line, and `(album artist, title)` composite key.
     /// Highlighting reads `library.browser_path[level]`; a row selection
     /// lands at that level via [`apply_drill_action`], and so does a
@@ -291,8 +296,8 @@ impl RiffApp {
             })
         };
         let column = browser::BrowserColumn {
-            sort_desc: false,
-            show_sort: false,
+            sort_desc: library.drill_sort_desc,
+            show_sort: true,
             total,
             item: &mut item,
             virtualize: false,
@@ -344,7 +349,15 @@ impl RiffApp {
                         },
                     );
                 }
-                browser::BrowserAction::ToggleSort => {}
+                browser::BrowserAction::ToggleSort => {
+                    // The drill columns share one direction, mirroring the
+                    // roots' shared `browser_sort_desc`; a flip is content
+                    // identity the column's egui state cannot see, so its
+                    // scroll resets too.
+                    library.drill_sort_desc = !library.drill_sort_desc;
+                    self.scroll_memory
+                        .reset_drill_scroll(crate::ui::scroll_memory::DrillSlot::ArtistAlbums);
+                }
             }
         }
     }
@@ -375,19 +388,25 @@ impl RiffApp {
         let in_flight = &mut self.cover_in_flight;
         let in_flight_keys = &mut self.cover_in_flight_keys;
         let ctx = ui.ctx().clone();
+        // The drill sort's direction is part of the paged read's query
+        // signature — the store applies it in SQL so page offsets stay
+        // aligned when it flips (no in-memory reversal of an ascending copy).
+        let direction = if library.drill_sort_desc {
+            SortDirection::Descending
+        } else {
+            SortDirection::Ascending
+        };
         // One window in hand (paginate-browse-columns issue 05): opening a
         // large genre reads only the visible artists, so a common genre like
         // "Rock" no longer loads every artist that touches it at once.
-        let total = views
-            .artists_in_genre_page(genre, SortDirection::Ascending, 0)
-            .total;
+        let total = views.artists_in_genre_page(genre, direction, 0).total;
         let mut browse_page: Option<riff_backend::app::views::HitPage<Artist>> = None;
         let mut item = |i: usize| -> Option<browser::BrowserItem> {
             if browse_page
                 .as_ref()
                 .is_none_or(|p| p.start + p.rows.len() <= i)
             {
-                browse_page = Some(views.artists_in_genre_page(genre, SortDirection::Ascending, i));
+                browse_page = Some(views.artists_in_genre_page(genre, direction, i));
             }
             let page = browse_page.as_ref()?;
             let artist = page.rows.get(i - page.start)?;
@@ -435,8 +454,8 @@ impl RiffApp {
             })
         };
         let column = browser::BrowserColumn {
-            sort_desc: false,
-            show_sort: false,
+            sort_desc: library.drill_sort_desc,
+            show_sort: true,
             total,
             item: &mut item,
             virtualize: false,
@@ -481,7 +500,12 @@ impl RiffApp {
                         },
                     );
                 }
-                browser::BrowserAction::ToggleSort => {}
+                browser::BrowserAction::ToggleSort => {
+                    // One shared drill direction — see the ArtistAlbums arm.
+                    library.drill_sort_desc = !library.drill_sort_desc;
+                    self.scroll_memory
+                        .reset_drill_scroll(crate::ui::scroll_memory::DrillSlot::GenreArtists);
+                }
             }
         }
     }
@@ -516,8 +540,16 @@ impl RiffApp {
         let in_flight = &mut self.cover_in_flight;
         let in_flight_keys = &mut self.cover_in_flight_keys;
         let ctx = ui.ctx().clone();
+        // The drill sort's direction is part of the paged read's query
+        // signature — the store applies it in SQL so page offsets stay
+        // aligned when it flips (no in-memory reversal of an ascending copy).
+        let direction = if library.drill_sort_desc {
+            SortDirection::Descending
+        } else {
+            SortDirection::Ascending
+        };
         let total = views
-            .artist_albums_in_genre_page(artist, genre, SortDirection::Ascending, 0)
+            .artist_albums_in_genre_page(artist, genre, direction, 0)
             .total;
         let mut browse_page: Option<riff_backend::app::views::HitPage<Album>> = None;
         let mut item = |i: usize| -> Option<browser::BrowserItem> {
@@ -525,12 +557,7 @@ impl RiffApp {
                 .as_ref()
                 .is_none_or(|p| p.start + p.rows.len() <= i)
             {
-                browse_page = Some(views.artist_albums_in_genre_page(
-                    artist,
-                    genre,
-                    SortDirection::Ascending,
-                    i,
-                ));
+                browse_page = Some(views.artist_albums_in_genre_page(artist, genre, direction, i));
             }
             let page = browse_page.as_ref()?;
             let album = page.rows.get(i - page.start)?;
@@ -575,8 +602,8 @@ impl RiffApp {
             })
         };
         let column = browser::BrowserColumn {
-            sort_desc: false,
-            show_sort: false,
+            sort_desc: library.drill_sort_desc,
+            show_sort: true,
             total,
             item: &mut item,
             virtualize: false,
@@ -621,7 +648,12 @@ impl RiffApp {
                         },
                     );
                 }
-                browser::BrowserAction::ToggleSort => {}
+                browser::BrowserAction::ToggleSort => {
+                    // One shared drill direction — see the ArtistAlbums arm.
+                    library.drill_sort_desc = !library.drill_sort_desc;
+                    self.scroll_memory
+                        .reset_drill_scroll(crate::ui::scroll_memory::DrillSlot::GenreArtistAlbums);
+                }
             }
         }
     }
@@ -665,6 +697,13 @@ impl RiffApp {
         query: &str,
     ) {
         let content = resolve_detail_content(&mut self.views, library, query);
+        // The rows arrive in the store's canonical album-track order; the
+        // session's track sort re-orders the display copy here — the widget
+        // formats, it never re-orders. A reversal is the exact reverse of the
+        // canonical order; the title modes compare case-insensitively, ties
+        // keeping the canonical order.
+        let mut tracks = content.tracks;
+        sort_track_rows(&mut tracks, library.track_sort);
         let (empty_title, empty_hint): (&str, String) = if query.is_empty() {
             (
                 "Nothing here yet",
@@ -720,11 +759,12 @@ impl RiffApp {
             &mut self.icons,
             &self.theme.active,
             crate::ui::detail::DetailColumn {
-                tracks: &content.tracks,
+                tracks: &tracks,
                 rows: &[],
                 track_menu: Some(&track_menu),
                 empty_title,
                 empty_hint: &empty_hint,
+                sort: Some(library.track_sort),
             },
             Some(control),
             &mut actions,
@@ -737,6 +777,21 @@ impl RiffApp {
             // must not have — two surfaces that answer a right-click
             // "similarly" rather than identically.
             match action {
+                crate::ui::detail::DetailAction::TrackSortSelected(_) => {
+                    // The sort change is content identity the Tracks column's
+                    // egui scroll state cannot see — the control lives above
+                    // the list — so the slot is forced back to the top, then
+                    // the session write goes through the same applier as
+                    // every other report.
+                    self.scroll_memory
+                        .reset_drill_scroll(crate::ui::scroll_memory::DrillSlot::TracksColumn);
+                    apply_detail_action(
+                        action,
+                        library,
+                        self.transport.as_ref(),
+                        self.library_mutations.as_mut(),
+                    );
+                }
                 crate::ui::detail::DetailAction::TrackMenu { key, intents } => {
                     let track_id = TrackId(key);
                     // OPENING is what selects, whether or not anything was
@@ -917,7 +972,7 @@ impl RiffApp {
         let (control, visit) = self.scroll_memory.begin_section(
             riff_backend::app::state::LibrarySection::Artists,
             query,
-            sort_desc,
+            u8::from(sort_desc),
         );
         let actual = browser::show_browser_column_scrolled(
             ui,
@@ -1133,7 +1188,7 @@ impl RiffApp {
         let (control, visit) = self.scroll_memory.begin_section(
             riff_backend::app::state::LibrarySection::Albums,
             query,
-            sort_desc,
+            u8::from(sort_desc),
         );
         let actual = browser::show_browser_column_scrolled(
             ui,
@@ -1246,7 +1301,7 @@ impl RiffApp {
         let (control, visit) = self.scroll_memory.begin_section(
             riff_backend::app::state::LibrarySection::Genres,
             query,
-            sort_desc,
+            u8::from(sort_desc),
         );
         let actual = browser::show_browser_column_scrolled(
             ui,
@@ -1295,4 +1350,32 @@ impl RiffApp {
 /// hit albums.
 fn artist_name_hits(artist: &str, query: &str) -> bool {
     !query.is_empty() && artist.to_lowercase().contains(&query.to_lowercase())
+}
+
+/// Sort a track listing's display copy in place per `sort`. `NumberAsc` is
+/// the canonical order the store served — the no-op anchor; `NumberDesc` is
+/// its exact reversal. The title modes compare the display title
+/// case-insensitively, and being stable sorts, ties keep the canonical
+/// order.
+pub(super) fn sort_track_rows(rows: &mut [crate::ui::detail::TrackRow], sort: TrackSort) {
+    match sort {
+        TrackSort::NumberAsc => {}
+        TrackSort::NumberDesc => rows.reverse(),
+        TrackSort::TitleAsc => rows.sort_by_key(|row| row.title.to_lowercase()),
+        TrackSort::TitleDesc => {
+            rows.sort_by_key(|row| std::cmp::Reverse(row.title.to_lowercase()));
+        }
+    }
+}
+
+/// Sort an album drill's display copy in place per the drill sort's
+/// direction: title A–Z (case-insensitive, stable, so ties keep the store's
+/// canonical order) or its Z–A reverse — the same reversed-comparator shape
+/// the paged genre drills land in SQL.
+pub(super) fn sort_albums_by_title(albums: &mut [riff_backend::domain::Album], desc: bool) {
+    if desc {
+        albums.sort_by_key(|album| std::cmp::Reverse(album.title.to_lowercase()));
+    } else {
+        albums.sort_by_key(|album| album.title.to_lowercase());
+    }
 }

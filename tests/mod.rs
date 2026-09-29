@@ -1087,9 +1087,14 @@ pub mod mocks {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum LibraryQueryCall {
         GetTrack(TrackId),
-        TracksPage(usize, usize),
+        TracksPage(riff_persistence::store::TrackListOrder, usize, usize),
         AllTrackIds,
-        SearchPage(String, usize, usize),
+        SearchPage(
+            String,
+            riff_persistence::store::TrackListOrder,
+            usize,
+            usize,
+        ),
         AllArtists,
         ArtistAlbums(String),
         AlbumTracks(String, String),
@@ -1313,8 +1318,8 @@ pub mod mocks {
                 .unwrap()
                 .iter()
                 .filter_map(|call| match call {
-                    LibraryQueryCall::TracksPage(offset, limit)
-                    | LibraryQueryCall::SearchPage(_, offset, limit)
+                    LibraryQueryCall::TracksPage(_, offset, limit)
+                    | LibraryQueryCall::SearchPage(_, _, offset, limit)
                     | LibraryQueryCall::ArtistsPage(_, offset, limit)
                     | LibraryQueryCall::AlbumsPage(_, offset, limit)
                     | LibraryQueryCall::GenresPage(_, offset, limit)
@@ -1395,10 +1400,11 @@ pub mod mocks {
 
         fn tracks_page(
             &self,
+            order: riff_persistence::store::TrackListOrder,
             offset: usize,
             limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            self.record(LibraryQueryCall::TracksPage(offset, limit));
+            self.record(LibraryQueryCall::TracksPage(order, offset, limit));
             if self.failing.contains(&FailingQuery::TracksWindow) {
                 return Err(StoreError::InvalidOperation("loader boom".to_string()));
             }
@@ -1423,11 +1429,13 @@ pub mod mocks {
         fn search_page(
             &self,
             query: &str,
+            order: riff_persistence::store::TrackListOrder,
             offset: usize,
             limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
             self.record(LibraryQueryCall::SearchPage(
                 query.to_string(),
+                order,
                 offset,
                 limit,
             ));

@@ -12,6 +12,8 @@
 
 use eframe::egui;
 
+use riff_backend::app::state::TrackSort;
+
 use super::icons::IconCache;
 use super::theme::geometry::browser::{
     HEADER_H, MIN_TEXT_W, ROW_H, TEXT_GAP, TEXT_INSET_Y, TEXT_RIGHT_PAD, THUMB_SIZE, THUMB_TEXT_GAP,
@@ -86,9 +88,11 @@ impl BrowserAction {
 pub struct BrowserColumn<'a> {
     /// `true` when the A–Z sort is flipped to Z–A (drives the sort button).
     pub sort_desc: bool,
-    /// Whether this variant shows the A–Z sort control at all — only the
-    /// variants the sort can actually order (artists, albums, genres) do;
-    /// paged track listings keep their canonical store order.
+    /// Whether this variant shows the A–Z sort control at all — the entity
+    /// variants the sort can actually order do (the section roots, except
+    /// under a search query where hit order is canonical; and the drill
+    /// columns, whose paged reads take the direction). Paged track listings
+    /// are not entity columns: their sort lives on the track sort control.
     pub show_sort: bool,
     /// Total row count; `item` is consulted only for the visible window.
     pub total: usize,
@@ -137,9 +141,10 @@ pub fn show_browser_column_scrolled(
     scroll: Option<super::scroll_memory::ScrollControl>,
     actions: &mut Vec<BrowserAction>,
 ) -> f32 {
-    // Header first, even for empty sections: the sort control stays
-    // visible so the listing can always be re-ordered.
-    if column.show_sort && sort_button(ui, palette, column.sort_desc) {
+    // The sort control only orders entries, so an empty listing hides it —
+    // the empty state alone explains the column, and a control with nothing
+    // to reorder is noise.
+    if column.show_sort && column.total > 0 && sort_button(ui, palette, column.sort_desc) {
         actions.push(BrowserAction::ToggleSort);
     }
     if column.total == 0 {
@@ -201,6 +206,27 @@ fn sort_button(ui: &mut egui::Ui, palette: &Palette, sort_desc: bool) -> bool {
             response
                 .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
             response.clicked()
+        })
+        .inner
+    })
+    .inner
+}
+
+/// The track listings' sort control, laid out as a full-width header row at
+/// the column's top-right — the same slot the A–Z toggle occupies on the
+/// entity columns. [`super::menu::track_sort_control`] paints the button and
+/// its popup; this wrapper only reserves the row so call sites that are not
+/// a [`BrowserColumn`] (the Tracks column, the flat All Tracks list) get the
+/// identical header geometry. Returns the newly chosen sort mode, if any.
+pub fn track_sort_row(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    current: TrackSort,
+) -> Option<TrackSort> {
+    ui.allocate_ui(egui::vec2(ui.available_width(), HEADER_H), |ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
+            super::menu::track_sort_control(ui, palette, current)
         })
         .inner
     })

@@ -52,7 +52,7 @@ mod tests {
     use riff_gui::ui::fonts::{self, INTER_FACES};
     use riff_library::app::traits::{DecodedCover, RequestedSize};
     use riff_persistence::errors::StoreError;
-    use riff_persistence::store::{Page, PlaylistEntry};
+    use riff_persistence::store::{Page, PlaylistEntry, TrackListOrder};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -373,8 +373,13 @@ mod tests {
             self.inner.metadata_version()
         }
 
-        fn tracks_page(&self, offset: usize, limit: usize) -> Result<Page<Track>, StoreError> {
-            self.inner.tracks_page(offset, limit)
+        fn tracks_page(
+            &self,
+            order: TrackListOrder,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Page<Track>, StoreError> {
+            self.inner.tracks_page(order, offset, limit)
         }
 
         fn library_counts(&self) -> Result<riff_persistence::store::LibraryCounts, StoreError> {
@@ -388,10 +393,11 @@ mod tests {
         fn search_page(
             &self,
             query: &str,
+            order: TrackListOrder,
             offset: usize,
             limit: usize,
         ) -> Result<Page<Track>, StoreError> {
-            self.inner.search_page(query, offset, limit)
+            self.inner.search_page(query, order, offset, limit)
         }
 
         fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {

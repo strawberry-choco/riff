@@ -50,6 +50,7 @@
 use eframe::egui;
 
 use super::theme::Palette;
+use riff_backend::app::state::TrackSort;
 use riff_backend::domain::PlaylistId;
 
 /// The one explanation the "Edit Tags" entry point carries — what saving a
@@ -162,6 +163,94 @@ pub fn section(ui: &mut egui::Ui, palette: &Palette, heading: &str) {
 /// A nested group — the menu's disclosure affordance.
 pub fn submenu(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
     ui.menu_button(label, add);
+}
+
+// --- The track-listing sort control -------------------------------------------------
+
+/// The short label the sort button paints for each mode — the active order,
+/// read at a glance, the same vocabulary the popup's rows speak.
+fn track_sort_button_label(sort: TrackSort) -> &'static str {
+    match sort {
+        TrackSort::NumberAsc => "# \u{2191}",
+        TrackSort::NumberDesc => "# \u{2193}",
+        TrackSort::TitleAsc => "A\u{2013}Z",
+        TrackSort::TitleDesc => "Z\u{2013}A",
+    }
+}
+
+/// The popup row for each mode — what the click selects.
+fn track_sort_item_label(sort: TrackSort) -> &'static str {
+    match sort {
+        TrackSort::NumberAsc => "Track No. \u{2191}",
+        TrackSort::NumberDesc => "Track No. \u{2193}",
+        TrackSort::TitleAsc => "Title A\u{2013}Z",
+        TrackSort::TitleDesc => "Title Z\u{2013}A",
+    }
+}
+
+/// Every track listing's sort control, in listing order: the four modes a
+/// track listing can take, offered by one small ghost button that opens a
+/// popup menu on click — the same button shape the entity columns' A–Z / Z–A
+/// toggle paints, with a menu instead of a toggle because there are four
+/// modes to move between, not two. The button names the order in force; the
+/// rows name what a click selects, and the current one is present to be read
+/// (`Disabled`, marked "(current)") rather than clicked again. Returns the
+/// newly chosen mode, if any — the caller owns the session state.
+///
+/// A track listing's canonical order differs by surface (track number within
+/// an album, playlist order, path order in the flat list), which is why the
+/// two canonical rows say "Track No." and not a per-surface fact: the button
+/// is one widget, and the session's [`TrackSort`] is what the host resolves
+/// the label's promise against.
+pub fn track_sort_control(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    current: TrackSort,
+) -> Option<TrackSort> {
+    let label = track_sort_button_label(current);
+    let button = egui::Button::new(
+        egui::RichText::new(label)
+            .text_style(egui::TextStyle::Small)
+            .color(palette.ink_2),
+    )
+    .fill(palette.surface_2)
+    .corner_radius(super::theme::RADIUS_SM);
+    let response = ui
+        .add(button)
+        .on_hover_text("Change how this list is ordered");
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            true,
+            format!("Sort order: {}", track_sort_item_label(current)),
+        )
+    });
+
+    let mut chosen = None;
+    egui::Popup::menu(&response).show(|ui| {
+        for sort in [
+            TrackSort::NumberAsc,
+            TrackSort::NumberDesc,
+            TrackSort::TitleAsc,
+            TrackSort::TitleDesc,
+        ] {
+            let active = sort == current;
+            if active {
+                let marked = concat_current(track_sort_item_label(sort));
+                let _ = item(ui, palette, &Item::disabled(&marked));
+            } else if item(ui, palette, &Item::new(track_sort_item_label(sort))) {
+                chosen = Some(sort);
+            }
+        }
+    });
+    chosen
+}
+
+/// The active row's static label plus its "(current)" mark. The labels are
+/// `'static`, so the marked form has to be composed — one `format!` per
+/// open frame, never per row of any list.
+fn concat_current(label: &'static str) -> String {
+    format!("{label} (current)")
 }
 
 // --- The typed intents ------------------------------------------------------------

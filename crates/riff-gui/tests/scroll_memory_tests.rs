@@ -24,10 +24,10 @@ fn visit_section(
     memory: &mut ScrollMemory,
     section: LibrarySection,
     query: &str,
-    sort_desc: bool,
+    sort_key: u8,
     actual_offset: f32,
 ) -> Option<f32> {
-    let (control, visit) = memory.begin_section(section, query, sort_desc);
+    let (control, visit) = memory.begin_section(section, query, sort_key);
     let start = control.start;
     memory.end_section(visit, actual_offset);
     start
@@ -42,24 +42,24 @@ fn a_section_root_restores_its_own_slot_and_leaves_another_section_at_the_top() 
 
     // Scroll the Artists root deep, then the Genres root shallow.
     assert_eq!(
-        visit_section(&mut memory, LibrarySection::Artists, "", false, 1_200.0),
+        visit_section(&mut memory, LibrarySection::Artists, "", 0, 1_200.0),
         Some(0.0),
         "a Section with nothing saved starts at the top"
     );
     assert_eq!(
-        visit_section(&mut memory, LibrarySection::Genres, "", false, 400.0),
+        visit_section(&mut memory, LibrarySection::Genres, "", 0, 400.0),
         Some(0.0),
         "and so does the next Section — no slot is shared"
     );
 
     // Reselecting each Section restores its own offset, not the other's.
     assert_eq!(
-        visit_section(&mut memory, LibrarySection::Artists, "", false, 1_200.0),
+        visit_section(&mut memory, LibrarySection::Artists, "", 0, 1_200.0),
         Some(1_200.0),
         "Artists returns exactly where it was left"
     );
     assert_eq!(
-        visit_section(&mut memory, LibrarySection::Genres, "", false, 400.0),
+        visit_section(&mut memory, LibrarySection::Genres, "", 0, 400.0),
         Some(400.0),
         "Genres remembers its own, shallower place"
     );
@@ -71,35 +71,29 @@ fn a_content_change_resets_only_the_list_whose_content_moved() {
     // new content, so the offset is not the listener's place any more.
     let mut memory = ScrollMemory::default();
 
-    visit_section(&mut memory, LibrarySection::Albums, "", false, 900.0);
+    visit_section(&mut memory, LibrarySection::Albums, "", 0, 900.0);
 
     assert_eq!(
         memory
-            .begin_section(LibrarySection::Albums, "geo", false)
+            .begin_section(LibrarySection::Albums, "geo", 0)
             .0
             .start,
         Some(0.0),
         "a different query resets to the top rather than restoring a stale offset"
     );
     assert_eq!(
-        memory
-            .begin_section(LibrarySection::Albums, "", true)
-            .0
-            .start,
+        memory.begin_section(LibrarySection::Albums, "", 1).0.start,
         Some(0.0),
         "and so does a different sort direction"
     );
     assert_eq!(
-        memory
-            .begin_section(LibrarySection::Albums, "", false)
-            .0
-            .start,
+        memory.begin_section(LibrarySection::Albums, "", 0).0.start,
         Some(900.0),
         "still remembered for the content it was saved under"
     );
     assert_eq!(
         memory
-            .begin_section(LibrarySection::Artists, "geo", false)
+            .begin_section(LibrarySection::Artists, "geo", 0)
             .0
             .start,
         Some(0.0),
@@ -114,21 +108,21 @@ fn a_recorded_section_keeps_the_content_it_was_saved_under() {
     // token carries it from one to the other.
     let mut memory = ScrollMemory::default();
 
-    let (control, visit) = memory.begin_section(LibrarySection::AllTracks, "one", false);
+    let (control, visit) = memory.begin_section(LibrarySection::AllTracks, "one", 0);
     assert_eq!(control.start, Some(0.0));
     memory.end_section(visit, 640.0);
 
     // The offset recorded under query "one" must not resurface under "two".
     assert_eq!(
         memory
-            .begin_section(LibrarySection::AllTracks, "two", false)
+            .begin_section(LibrarySection::AllTracks, "two", 0)
             .0
             .start,
         Some(0.0)
     );
     assert_eq!(
         memory
-            .begin_section(LibrarySection::AllTracks, "one", false)
+            .begin_section(LibrarySection::AllTracks, "one", 0)
             .0
             .start,
         Some(640.0)
@@ -141,28 +135,22 @@ fn a_committed_library_change_stales_every_saved_offset() {
     // rescan that commits rows resets the lists whose content moved — and a
     // Section that re-renders after the change records under the new one.
     let mut memory = ScrollMemory::default();
-    visit_section(&mut memory, LibrarySection::Genres, "", false, 700.0);
+    visit_section(&mut memory, LibrarySection::Genres, "", 0, 700.0);
 
     memory.note_backend_events(&[BackendEvent::LibraryChanged { generation: 1 }]);
 
     assert_eq!(
-        memory
-            .begin_section(LibrarySection::Genres, "", false)
-            .0
-            .start,
+        memory.begin_section(LibrarySection::Genres, "", 0).0.start,
         Some(0.0),
         "the saved offset belongs to the pre-scan listing"
     );
     assert_eq!(
-        visit_section(&mut memory, LibrarySection::Genres, "", false, 300.0),
+        visit_section(&mut memory, LibrarySection::Genres, "", 0, 300.0),
         Some(0.0),
         "the reset frame renders from the top"
     );
     assert_eq!(
-        memory
-            .begin_section(LibrarySection::Genres, "", false)
-            .0
-            .start,
+        memory.begin_section(LibrarySection::Genres, "", 0).0.start,
         Some(300.0),
         "and the offset is remembered again under the post-scan identity"
     );
@@ -173,16 +161,13 @@ fn an_empty_event_batch_leaves_saved_offsets_current() {
     // Only a Library generation move goes stale; draining a frame with nothing
     // in it must not cost the listener their place.
     let mut memory = ScrollMemory::default();
-    visit_section(&mut memory, LibrarySection::Artists, "", false, 800.0);
+    visit_section(&mut memory, LibrarySection::Artists, "", 0, 800.0);
 
     memory.note_backend_events(&[]);
     memory.note_backend_events(&[BackendEvent::PlaylistsChanged { generation: 1 }]);
 
     assert_eq!(
-        memory
-            .begin_section(LibrarySection::Artists, "", false)
-            .0
-            .start,
+        memory.begin_section(LibrarySection::Artists, "", 0).0.start,
         Some(800.0),
         "an unrelated event does not reset a Section"
     );
@@ -289,8 +274,8 @@ fn each_slot_keys_eguis_state_by_its_own_identity() {
     // salts are per slot rather than positional.
     let mut memory = ScrollMemory::default();
 
-    let artists = memory.begin_section(LibrarySection::Artists, "", false).0;
-    let albums = memory.begin_section(LibrarySection::Albums, "", false).0;
+    let artists = memory.begin_section(LibrarySection::Artists, "", 0).0;
+    let albums = memory.begin_section(LibrarySection::Albums, "", 0).0;
     let drill = memory.begin_drill(DrillSlot::ArtistAlbums);
     let tracks = memory.begin_drill(DrillSlot::TracksColumn);
 
@@ -306,4 +291,39 @@ fn each_slot_keys_eguis_state_by_its_own_identity() {
             "{salt} identifies exactly one slot"
         );
     }
+}
+
+#[test]
+fn a_sort_flip_forces_one_top_reset_for_its_own_drill_slot() {
+    // The scroll counterpart of a sort change: a drill slot's egui state
+    // cannot see the session's sort (the control lives above the list), so
+    // the render site reports the flip and the module makes the next
+    // begin_drill hand out a reset — once, and only for the slot that
+    // flipped.
+    let mut memory = ScrollMemory::default();
+
+    // Between changes the column's scroll is egui's own (no start offset).
+    memory.begin_drill(DrillSlot::ArtistAlbums);
+    assert_eq!(
+        memory.begin_drill(DrillSlot::ArtistAlbums).start,
+        None,
+        "a drill column keeps egui's state between selection changes"
+    );
+
+    memory.reset_drill_scroll(DrillSlot::ArtistAlbums);
+    assert_eq!(
+        memory.begin_drill(DrillSlot::ArtistAlbums).start,
+        Some(0.0),
+        "the flipped slot resets to the top"
+    );
+    assert_eq!(
+        memory.begin_drill(DrillSlot::ArtistAlbums).start,
+        None,
+        "the reset is one-shot: the frame after behaves as if nothing happened"
+    );
+    assert_eq!(
+        memory.begin_drill(DrillSlot::TracksColumn).start,
+        None,
+        "and no other slot is disturbed"
+    );
 }

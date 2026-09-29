@@ -1493,6 +1493,32 @@ pub fn apply_detail_action(
                 tracing::warn!("Failed to commit the favorite flag for {key}: {e}");
             }
         }
+        // The track listings' shared sort state. The scroll side of the change
+        // belongs to the render site that owns the Scroll Memory slot, so the
+        // site that can receive this report resets its own slot.
+        Action::TrackSortSelected(sort) => {
+            library.track_sort = sort;
+        }
+    }
+}
+
+/// Sort borrowed track refs in place per `sort` — the `&Track` variant of
+/// `browser_pane`'s `sort_track_rows`, for the listings that render straight
+/// from a resolved track list (smart lists). The canonical order is the
+/// no-op anchor; the title modes compare the display title
+/// case-insensitively, and being stable sorts, ties keep the canonical
+/// order.
+fn sort_track_refs(rows: &mut [&Track], sort: riff_backend::app::state::TrackSort) {
+    use riff_backend::app::state::TrackSort;
+    match sort {
+        TrackSort::NumberAsc => {}
+        TrackSort::NumberDesc => rows.reverse(),
+        TrackSort::TitleAsc => {
+            rows.sort_by_key(|t| t.metadata.display_title(&t.file_path).to_lowercase());
+        }
+        TrackSort::TitleDesc => rows.sort_by_key(|t| {
+            std::cmp::Reverse(t.metadata.display_title(&t.file_path).to_lowercase())
+        }),
     }
 }
 
@@ -2800,7 +2826,7 @@ impl RiffApp {
         let current_track = playback.queue.current_track().cloned();
 
         // Anchor read: sizes the row range with the authoritative total.
-        let first_page = self.views.track_list(query, 0);
+        let first_page = self.views.track_list(query, library.track_sort, 0);
 
         // ---- Scroll Memory (scroll-memory spec, issue 01) ----
         // The All Tracks flat list is the first Section slot: it declares its
@@ -2811,7 +2837,7 @@ impl RiffApp {
         let (control, visit) = self.scroll_memory.begin_section(
             riff_backend::app::state::LibrarySection::AllTracks,
             query,
-            false,
+            library.track_sort.as_sort_key(),
         );
         if first_page.total == 0 {
             // Query-aware empty copy: the flat list explains a filtered-to-
@@ -2830,6 +2856,19 @@ impl RiffApp {
             crate::ui::browser::empty_state(ui, &self.theme.active, emp_title, &emp_hint);
             self.scroll_memory.end_section(visit, 0.0);
             return;
+        }
+
+        // The track sort control, in the same top-right header slot the
+        // entity columns' A–Z toggle occupies. Only rendered while there is
+        // something to reorder — an empty listing hides it, like every other
+        // column's sort control.
+        if let Some(sort) =
+            crate::ui::browser::track_sort_row(ui, &self.theme.active, library.track_sort)
+        {
+            library.track_sort = sort;
+            // The sort is part of the content fingerprint above, so the next
+            // frame's begin_section resets the scroll without extra
+            // bookkeeping here.
         }
 
         // `.animated(false)`: this list is driven by a `ScrollControl`, so it
@@ -2854,7 +2893,7 @@ impl RiffApp {
                     // Refetch only when the row leaves the page in hand; the
                     // seam serves repeat windows from cache.
                     if page.as_ref().is_none_or(|p| p.start + p.rows.len() <= i) {
-                        page = Some(self.views.track_list(query, i));
+                        page = Some(self.views.track_list(query, library.track_sort, i));
                     }
                     let page = page.as_ref().expect("page fetched above");
                     if let Some(track) = page.rows.get(i - page.start) {
@@ -2897,10 +2936,23 @@ impl RiffApp {
         let current_track = playback.queue.current_track().cloned();
 
         // Header: name + count, clearly read-only (no edit/delete affordances),
-        // with whole-list actions mirroring the album/folder header menu.
+        // with whole-list actions mirroring the album/folder header menu. The
+        // sort control rides the header's right edge, like the other single
+        // listings' — hidden while the list is empty (nothing to reorder).
         let header = ui.horizontal(|ui| {
             ui.heading(kind.display_name());
             ui.weak(format!("({} tracks, read-only)", tracks.len()));
+            if !tracks.is_empty() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(sort) = crate::ui::menu::track_sort_control(
+                        ui,
+                        &self.theme.active,
+                        library.track_sort,
+                    ) {
+                        library.track_sort = sort;
+                    }
+                });
+            }
         });
         if !tracks.is_empty() {
             let tids: Vec<TrackId> = tracks.iter().map(|t| t.id.clone()).collect();
@@ -2921,13 +2973,20 @@ impl RiffApp {
             return;
         }
 
+        // The listing renders the session's track sort over the computed
+        // order — borrowed refs, so no per-frame copy of the tracks; the
+        // canonical order is the no-op anchor and the title modes compare
+        // case-insensitively, ties keeping the computed order.
+        let mut rows: Vec<&Track> = tracks.iter().collect();
+        sort_track_refs(&mut rows, library.track_sort);
+
         egui::ScrollArea::vertical().show_rows(
             ui,
             theme::geometry::sidebar::ROW_H,
-            tracks.len(),
+            rows.len(),
             |ui, row_range| {
                 for i in row_range {
-                    if let Some(track) = tracks.get(i) {
+                    if let Some(track) = rows.get(i).copied() {
                         self.render_track_row(
                             ui,
                             library,
@@ -3115,6 +3174,8 @@ impl RiffApp {
         playback: &mut PlaybackSession,
         playlist_id: &PlaylistId,
     ) {
+        use riff_backend::app::state::TrackSort;
+
         let playlists = self.views.playlists();
         let Some(playlist) = playlists.iter().find(|p| &p.id == playlist_id) else {
             ui.label("Playlist not found");
@@ -3136,10 +3197,23 @@ impl RiffApp {
         let valid_ids = view.valid_ids;
 
         // Header: name + count, with whole-list actions (valid tracks only),
-        // mirroring the smart-playlist header menu.
+        // mirroring the smart-playlist header menu. The sort control rides the
+        // header's right edge — hidden while the list is empty (nothing to
+        // reorder).
         let header = ui.horizontal(|ui| {
             ui.heading(playlist_name);
             ui.weak(format!("({track_count} tracks)"));
+            if track_count > 0 {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(sort) = crate::ui::menu::track_sort_control(
+                        ui,
+                        &self.theme.active,
+                        library.track_sort,
+                    ) {
+                        library.track_sort = sort;
+                    }
+                });
+            }
         });
         if !valid_ids.is_empty() {
             show_list_context_menu(
@@ -3160,15 +3234,46 @@ impl RiffApp {
             return;
         }
 
+        // The listing renders the session's track sort over the playlist's
+        // order: `sorted` maps each display position to its CANONICAL entry
+        // index, so identity, menus, and removal keep addressing the playlist
+        // the store knows. Reordering is the canonical order's own gesture —
+        // a drag-and-drop on a sorted view would persist positions read off
+        // the wrong order — so while sorted the rows render plain and the
+        // canonical index still travels with each row.
+        let sorted = match library.track_sort {
+            TrackSort::NumberAsc => (0..entries.len()).collect::<Vec<_>>(),
+            TrackSort::NumberDesc => (0..entries.len()).rev().collect(),
+            TrackSort::TitleAsc | TrackSort::TitleDesc => {
+                let desc = library.track_sort == TrackSort::TitleDesc;
+                let key = |i: usize| {
+                    entries[i].1.as_ref().map_or_else(
+                        || entries[i].0.0.to_lowercase(),
+                        |t| t.metadata.display_title(&t.file_path).to_lowercase(),
+                    )
+                };
+                let mut order: Vec<usize> = (0..entries.len()).collect();
+                if desc {
+                    order.sort_by_key(|&i| std::cmp::Reverse(key(i)));
+                } else {
+                    order.sort_by_key(|&i| key(i));
+                }
+                order
+            }
+        };
+        let reorderable = library.track_sort == TrackSort::NumberAsc;
+
         // One row per entry: the store-resolved track (if any) plus the
         // final playability verdict (Library-known AND file exists on disk).
         egui::ScrollArea::vertical().show_rows(
             ui,
             theme::geometry::sidebar::ROW_H,
-            entries.len(),
+            sorted.len(),
             |ui, row_range| {
                 for i in row_range {
-                    if let Some(entry) = entries.get(i) {
+                    if let Some(&canonical) = sorted.get(i)
+                        && let Some(entry) = entries.get(canonical)
+                    {
                         self.render_playlist_entry(
                             ui,
                             library,
@@ -3176,7 +3281,8 @@ impl RiffApp {
                             playlist_id,
                             entry,
                             current_track.as_ref(),
-                            i,
+                            canonical,
+                            reorderable,
                         );
                     }
                 }
@@ -3208,6 +3314,7 @@ impl RiffApp {
         entry: &(TrackId, Option<Track>, bool),
         current_track: Option<&TrackId>,
         index: usize,
+        reorderable: bool,
     ) {
         use std::path::PathBuf;
         let (tid, track, valid) = entry;
@@ -3220,6 +3327,7 @@ impl RiffApp {
                 current_track,
                 playlist_id,
                 index,
+                reorderable,
             );
             return;
         }
@@ -3250,7 +3358,9 @@ impl RiffApp {
     /// drag-and-drop support ([`sidebar::reorderable_row`]). Releasing a row
     /// on another persists the new order through the [`PlaylistStore`] port
     /// via [`commit_playlist_reorder`] (ADR 0002); clicks and double-clicks
-    /// behave exactly as before.
+    /// behave exactly as before. `reorderable: false` (the sorted views —
+    /// a drag would persist positions read off the wrong order) renders the
+    /// identical row shape without the drag wrapper, via [`sidebar::tree_row`].
     ///
     /// The row's drag hit-area sits UNDERNEATH the row's own response, and
     /// [`sidebar::reorderable_row`] documents why the ordering cannot be the
@@ -3271,6 +3381,7 @@ impl RiffApp {
         current_track: Option<&TrackId>,
         playlist_id: &PlaylistId,
         index: usize,
+        reorderable: bool,
     ) {
         use crate::ui::sidebar::{self, TreeRow};
 
@@ -3288,28 +3399,37 @@ impl RiffApp {
                 .id(),
         );
 
-        let outcome = sidebar::reorderable_row(
-            ui,
-            &mut self.icons,
-            &self.theme.active,
-            egui::Id::new(("riff_playlist_entry", &playlist_id.0, index)),
-            index,
-            TreeRow {
-                indent_level: 0,
-                icon: None,
-                cover,
-                label: &label,
-                count: None,
-                meta: None,
-                favorite: Some(track.favorite),
-                selected: is_selected,
-                now_playing: is_current,
-                playing: is_current && playing,
-                art_slot: false,
-            },
-        );
-        let favorite_toggled = outcome.favorite_toggled;
-        let response = outcome.response;
+        let row = TreeRow {
+            indent_level: 0,
+            icon: None,
+            cover,
+            label: &label,
+            count: None,
+            meta: None,
+            favorite: Some(track.favorite),
+            selected: is_selected,
+            now_playing: is_current,
+            playing: is_current && playing,
+            art_slot: false,
+        };
+        let (response, favorite_toggled, drop_from) = if reorderable {
+            let outcome = sidebar::reorderable_row(
+                ui,
+                &mut self.icons,
+                &self.theme.active,
+                egui::Id::new(("riff_playlist_entry", &playlist_id.0, index)),
+                index,
+                row,
+            );
+            (
+                outcome.response,
+                outcome.favorite_toggled,
+                outcome.drop_from,
+            )
+        } else {
+            let outcome = sidebar::tree_row(ui, &mut self.icons, &self.theme.active, row);
+            (outcome.response, outcome.favorite_toggled, None)
+        };
         if response.clicked() {
             library.selected_track = Some(track.id.clone());
         }
@@ -3320,7 +3440,7 @@ impl RiffApp {
         if let Some(favorite) = favorite_toggled {
             self.commit_track_favorite(&track.id, favorite);
         }
-        if let Some(from) = outcome.drop_from {
+        if let Some(from) = drop_from {
             // One immediate durable transaction; the committed mutation
             // bumps the playlist generation, so the seam's next read serves
             // the new order with zero caller action (ADR 0002).

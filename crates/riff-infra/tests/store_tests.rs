@@ -1321,7 +1321,7 @@ fn test_store_playlist_entries_report_library_validity_via_left_join() {
 
 // --- Application Store: Library collection (ticket 05) ---------------------
 
-use riff_persistence::store::{LibraryMutationStore, LibraryQueryStore};
+use riff_persistence::store::{LibraryMutationStore, LibraryQueryStore, TrackListOrder};
 use std::time::Duration;
 
 /// Build a Track fixture with full metadata control (compilation cases need
@@ -1369,7 +1369,7 @@ fn library_track(
 /// The flat library listing's window, from its Listing Page.
 fn tracks_window(store: &SqliteStore, offset: usize, limit: usize) -> Vec<Track> {
     store
-        .tracks_page(offset, limit)
+        .tracks_page(TrackListOrder::default(), offset, limit)
         .expect("tracks page reads")
         .rows()
         .to_vec()
@@ -1377,13 +1377,16 @@ fn tracks_window(store: &SqliteStore, offset: usize, limit: usize) -> Vec<Track>
 
 /// The flat library listing's total, from its Listing Page.
 fn track_count(store: &SqliteStore) -> usize {
-    store.tracks_page(0, 1).expect("tracks page reads").total()
+    store
+        .tracks_page(TrackListOrder::default(), 0, 1)
+        .expect("tracks page reads")
+        .total()
 }
 
 /// The search listing's window, from its Listing Page.
 fn search_window(store: &SqliteStore, query: &str, offset: usize, limit: usize) -> Vec<Track> {
     store
-        .search_page(query, offset, limit)
+        .search_page(query, TrackListOrder::default(), offset, limit)
         .expect("search page reads")
         .rows()
         .to_vec()
@@ -1392,7 +1395,7 @@ fn search_window(store: &SqliteStore, query: &str, offset: usize, limit: usize) 
 /// The search listing's total, from its Listing Page.
 fn search_count(store: &SqliteStore, query: &str) -> usize {
     store
-        .search_page(query, 0, 1)
+        .search_page(query, TrackListOrder::default(), 0, 1)
         .expect("search page reads")
         .total()
 }
@@ -1832,6 +1835,64 @@ fn test_flat_list_windows_are_path_ordered_and_bounded() {
     assert!(
         tracks_window(&store, 100, 5).is_empty(),
         "offset past the end yields an empty window"
+    );
+}
+
+#[test]
+fn test_flat_list_orders_land_in_sql_per_track_list_order() {
+    use riff_persistence::store::TrackListOrder as Order;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+
+    // Path order deliberately disagrees with title order, and titles carry
+    // a case trap: NOCASE folding must rank 'b' beside 'A', while byte-wise
+    // ordering would not.
+    let batch: Vec<Track> = [
+        ("m:\\2.mp3", "b-side"),
+        ("m:\\1.mp3", "Anchor"),
+        ("m:\\3.mp3", "Cascade"),
+    ]
+    .iter()
+    .map(|(p, t)| library_track(p, t, Some("Artist"), "Album", None))
+    .collect();
+    store.apply_scan_batch(&batch).expect("batch applies");
+
+    let ordered = |order: TrackListOrder| {
+        store
+            .tracks_page(order, 0, 10)
+            .expect("tracks page reads")
+            .rows()
+            .iter()
+            .map(|t| t.metadata.title.clone().unwrap())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        ordered(Order::PathAsc),
+        ["Anchor", "b-side", "Cascade"],
+        "path-ascending is the canonical flat order (path order, not title order)"
+    );
+    assert_eq!(
+        ordered(Order::PathDesc),
+        ["Cascade", "b-side", "Anchor"],
+        "path-descending is the exact SQL reversal"
+    );
+    // NOCASE folds 'b' before 'C', where byte-wise order would not — the
+    // asc list is therefore distinct from both the path order and a BINARY
+    // title order, which is the trap the fixture sets.
+    assert_eq!(
+        ordered(Order::TitleAsc),
+        ["Anchor", "b-side", "Cascade"],
+        "title order is case-insensitive, path as the tiebreak"
+    );
+    assert_eq!(
+        ordered(Order::TitleDesc),
+        ["Cascade", "b-side", "Anchor"],
+        "title-descending is the exact SQL reversal, path as the tiebreak"
     );
 }
 
@@ -6166,7 +6227,7 @@ fn a_page_read_never_mixes_generations_with_a_concurrent_writer() {
     let mut reads = 0usize;
     while writing.load(std::sync::atomic::Ordering::Acquire) {
         let page = reader
-            .tracks_page(0, WINDOW)
+            .tracks_page(TrackListOrder::default(), 0, WINDOW)
             .expect("page read must succeed");
         assert_eq!(
             page.rows().len(),
@@ -6186,7 +6247,9 @@ fn a_page_read_never_mixes_generations_with_a_concurrent_writer() {
 
     // Settled: with the writer joined its count is known, so the window is
     // asked wide enough that the capped form above is the strong one.
-    let page = reader.tracks_page(0, written + 1).unwrap();
+    let page = reader
+        .tracks_page(TrackListOrder::default(), 0, written + 1)
+        .unwrap();
     assert_eq!(page.total(), written, "the writer's batches all committed");
     assert_eq!(page.rows().len(), written, "and every one is listed");
 }

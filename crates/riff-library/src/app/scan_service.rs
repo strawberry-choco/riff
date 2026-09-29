@@ -483,6 +483,7 @@ mod tests {
 
         fn tracks_page(
             &self,
+            _order: crate::app::store::TrackListOrder,
             _offset: usize,
             _limit: usize,
         ) -> Result<crate::app::store::Page<Track>, StoreError> {
@@ -497,6 +498,7 @@ mod tests {
         fn search_page(
             &self,
             _query: &str,
+            _order: crate::app::store::TrackListOrder,
             _offset: usize,
             _limit: usize,
         ) -> Result<crate::app::store::Page<Track>, StoreError> {

@@ -93,6 +93,37 @@ impl Default for ScanPrefs {
 /// the library-side session types (`LibrarySession`, `ViewMode`, `UiFlags`).
 pub use riff_playback::app::state::{PlaybackSession, replaygain_factor};
 
+/// The sort mode of a track listing — the Tracks column, All Tracks, a user
+/// playlist, or a smart list. The default is each listing's canonical order:
+/// track-number ascending within an album, playlist order for a playlist,
+/// path order for the flat list. `TrackSort::as_sort_key` feeds the Scroll
+/// Memory's content fingerprint, so the discriminants are part of its
+/// contract.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum TrackSort {
+    /// The listing's canonical order, ascending.
+    #[default]
+    NumberAsc = 0,
+    /// The canonical order reversed.
+    NumberDesc = 1,
+    /// Title A–Z (case-insensitive; ties keep the canonical order).
+    TitleAsc = 2,
+    /// Title Z–A (case-insensitive; ties keep the canonical order).
+    TitleDesc = 3,
+}
+
+impl TrackSort {
+    /// The Scroll Memory fingerprint key for this mode: two listings render
+    /// the same content identity only when this value matches, so a sort
+    /// change resets the remembered scroll instead of restoring a stale
+    /// offset.
+    #[must_use]
+    pub fn as_sort_key(self) -> u8 {
+        self as u8
+    }
+}
+
 /// The Library Session: everything that is not playback — selection, views,
 /// search, the registered [`LibraryPaths`] and their readiness and watch
 /// states, scan status, browse mode, and UI flags. Lives behind its own
@@ -112,8 +143,21 @@ pub struct LibrarySession {
     pub selected_folder: Option<PathBuf>,
     /// `true` when the browser column's A–Z sort is flipped to Z–A (issue
     /// 08). Session state, not persisted — the design pins no default past
-    /// A–Z.
+    /// A–Z. Shared by the section root columns (Artists, Albums, Genres),
+    /// exactly like the one sort control they render.
     pub browser_sort_desc: bool,
+    /// `true` when the browser's drill columns' A–Z sort is flipped to Z–A.
+    /// Session state, not persisted, and shared across the drill columns
+    /// (an artist's Albums, a Genre's Artists, a Genre artist's Albums) the
+    /// same way [`Self::browser_sort_desc`] is shared across the roots —
+    /// every drill column's rows are name-keyed, so one direction answers
+    /// for all of them.
+    pub drill_sort_desc: bool,
+    /// The track listings' sort mode (the Tracks column, All Tracks, user
+    /// playlists, smart lists). Session state, not persisted; the default is
+    /// each listing's canonical order. One mode answers for every track
+    /// listing, like the one shared direction the entity columns share.
+    pub track_sort: TrackSort,
     /// The ordered drill-down path of entity selections (issue 08), deepest
     /// entry last: what the detail column (issue 09) resolves from the
     /// current (deepest) selection. Selecting at a level truncates any
@@ -177,6 +221,8 @@ impl Default for LibrarySession {
             library_section: LibrarySection::default(),
             selected_folder: None,
             browser_sort_desc: false,
+            drill_sort_desc: false,
+            track_sort: TrackSort::default(),
             browser_path: Vec::new(),
             queue_open: false,
             ui_flags: UiFlags::default(),

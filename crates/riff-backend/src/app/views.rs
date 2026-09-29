@@ -31,8 +31,9 @@ use crate::app::projection::{
 // projection module itself is private, so UI code imports these from here.
 use crate::app::errors::StoreError;
 pub use crate::app::projection::{PlaylistEntryRow, PlaylistView};
+use crate::app::state::TrackSort;
 use crate::app::store::{
-    LibraryCounts, LibraryQueryStore, PlaylistStore, SortDirection, StoreGeneration,
+    LibraryCounts, LibraryQueryStore, PlaylistStore, SortDirection, StoreGeneration, TrackListOrder,
 };
 use crate::domain::{
     Album, Artist, GenreCount, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
@@ -185,7 +186,10 @@ impl SessionViews {
     ) -> Self {
         // The projections observe the session counters internally from here
         // on: no per-call epoch crosses the seam again.
-        let tracks = TrackListProjection::new(generation.clone(), ProjectionKey::Flat);
+        let tracks = TrackListProjection::new(
+            generation.clone(),
+            ProjectionKey::Flat(TrackListOrder::default()),
+        );
         let hit_albums = HitListProjection::new(generation.clone(), String::new());
         let hit_artists = HitListProjection::new(generation.clone(), String::new());
         let artists_pages = WindowedListProjection::new(
@@ -264,25 +268,33 @@ impl SessionViews {
     /// search results (`query` non-empty), together with the authoritative
     /// total row count.
     ///
-    /// `offset` is any row index inside the wanted window; it is aligned down
-    /// to the projection's window size internally. The first invalidated call
-    /// reads one Listing Page; fresh calls serve everything from cache. The
-    /// total and the rows come from that one read, so they can never describe
-    /// two different generations, and a failed read leaves the last good page
-    /// on screen.
-    pub fn track_list(&mut self, query: &str, offset: usize) -> TrackListPage {
+    /// `sort` is the listing order the UI's sort control selected; it is
+    /// part of the query signature, so changing it retargets the projection
+    /// exactly like a keystroke does. `offset` is any row index inside the
+    /// wanted window; it is aligned down to the projection's window size
+    /// internally. The first invalidated call reads one Listing Page; fresh
+    /// calls serve everything from cache. The total and the rows come from
+    /// that one read, so they can never describe two different generations,
+    /// and a failed read leaves the last good page on screen.
+    pub fn track_list(&mut self, query: &str, sort: TrackSort, offset: usize) -> TrackListPage {
+        let order = match sort {
+            TrackSort::NumberAsc => TrackListOrder::PathAsc,
+            TrackSort::NumberDesc => TrackListOrder::PathDesc,
+            TrackSort::TitleAsc => TrackListOrder::TitleAsc,
+            TrackSort::TitleDesc => TrackListOrder::TitleDesc,
+        };
         let key = if query.is_empty() {
-            ProjectionKey::Flat
+            ProjectionKey::Flat(order)
         } else {
-            ProjectionKey::Search(query.to_string())
+            ProjectionKey::Search(query.to_string(), order)
         };
         let window_start = offset - (offset % WINDOW_SIZE);
 
         if let Err(e) = self.tracks.show_window(key, window_start, &mut |o, l| {
             if query.is_empty() {
-                self.queries.tracks_page(o, l)
+                self.queries.tracks_page(order, o, l)
             } else {
-                self.queries.search_page(query, o, l)
+                self.queries.search_page(query, order, o, l)
             }
         }) {
             tracing::warn!(
@@ -302,7 +314,7 @@ impl SessionViews {
     /// asking for one row still reports the listing's full count.
     pub fn search_has_matches(&self, query: &str) -> bool {
         self.queries
-            .search_page(query, 0, 1)
+            .search_page(query, TrackListOrder::default(), 0, 1)
             .is_ok_and(|page| page.total() > 0)
     }
 

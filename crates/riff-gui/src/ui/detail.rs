@@ -82,6 +82,10 @@ pub enum DetailAction {
     /// The row's favorite control toggled the track's flag to `favorite`,
     /// by its id key.
     SetFavorite { key: String, favorite: bool },
+    /// The track sort control chose `sort` as the listing's new order. The
+    /// caller owns the session state and re-sorts the rows it hands over;
+    /// the widget only reports the choice.
+    TrackSortSelected(riff_backend::app::state::TrackSort),
 }
 
 /// One row of the album track table: the display values the app resolved
@@ -150,6 +154,14 @@ pub struct DetailColumn<'a> {
     pub empty_title: &'a str,
     /// Friendly empty-state hint when there is nothing to render.
     pub empty_hint: &'a str,
+    /// The listing's sort mode, when the host offers the sort control at all:
+    /// `Some` renders the track sort button above the list (only while the
+    /// listing has tracks) and reports choices through
+    /// [`DetailAction::TrackSortSelected`]; `None` is the plain rendering
+    /// path (the widget tests that render bare columns). The rows themselves
+    /// are sorted by the host before they arrive — the widget formats, it
+    /// never re-orders.
+    pub sort: Option<riff_backend::app::state::TrackSort>,
 }
 
 impl<'a> DetailColumn<'a> {
@@ -162,6 +174,7 @@ impl<'a> DetailColumn<'a> {
             track_menu: None,
             empty_title,
             empty_hint,
+            sort: None,
         }
     }
 }
@@ -194,6 +207,16 @@ pub fn show_detail_column_scrolled(
     // Asked up front, because the fallback at the end of this function is what
     // a column with neither tracks nor rows renders.
     let has_content = !column.tracks.is_empty() || !column.rows.is_empty();
+    if let Some(sort) = column.sort
+        && !column.tracks.is_empty()
+    {
+        // The sort control rides above the list, but only while there is
+        // something to reorder — an empty listing hides it, like every other
+        // column's sort control.
+        if let Some(chosen) = super::browser::track_sort_row(ui, palette, sort) {
+            actions.push(DetailAction::TrackSortSelected(chosen));
+        }
+    }
     if !column.tracks.is_empty() {
         track_list(
             ui,

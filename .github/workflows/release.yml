@@ -342,16 +342,40 @@ jobs:
               'trust, and riff does not have one.' \
               '' \
               '**macOS — a `.dmg` containing `riff.app`,** with the riff brand' \
-              'icon. Open the image and drag riff into Applications. The bundle' \
-              'is ad-hoc signed but NOT identified with Apple, so Gatekeeper' \
-              'quarantines the download and blocks the first launch. Clear it' \
-              'once with either of:' \
+              'icon. The bundle is ad-hoc signed but NOT identified with Apple,' \
+              'so Gatekeeper quarantines the download and blocks the first' \
+              'launch. There is one extra step, and doing it BEFORE opening the' \
+              'image is the easy way — it needs no password and no permission:' \
+              '' \
+              '    xattr -d com.apple.quarantine ~/Downloads/riff-*.dmg' \
+              '' \
+              'Run it on the file you actually downloaded, then open the image,' \
+              'drag riff into Applications, and launch it. Do that first and it' \
+              'just runs. (If the command complains — "no matches found" or' \
+              '"No such xattr" — there was nothing left to clear, which is' \
+              'harmless: the usual cause is a different download folder, or' \
+              'running it twice.)' \
+              '' \
+              'The reason order matters: the quarantine attribute is not on the' \
+              'app inside the image, it is copied onto the app when you drag it' \
+              'out. Clearing it on the image first means the app never picks it' \
+              'up at all.' \
+              '' \
+              'Already dragged it out? Then clear it where it landed instead:' \
               '' \
               '    xattr -dr com.apple.quarantine /Applications/riff.app' \
               '' \
-              'or System Settings → Privacy & Security → scroll to the blocked' \
-              'app → "Open Anyway". (The old right-click → Open bypass no longer' \
-              'works on macOS Sequoia and later.)' \
+              'That needs no time limit and clears either of the two warnings' \
+              'macOS shows, but writing to /Applications may ask for your' \
+              'password.' \
+              '' \
+              'If you would rather not use Terminal at all: launch riff and let' \
+              'it fail, THEN go to System Settings → Privacy & Security → scroll' \
+              'to the blocked app → "Open Anyway". The order is not optional —' \
+              'that button only exists for about an hour after a blocked launch,' \
+              'and it is not there at all if you open System Settings first.' \
+              '(The old right-click → Open bypass no longer works on macOS' \
+              'Sequoia and later.)' \
               '' \
               '**Linux — a `tar.gz` of the `riff` executable,** dynamically linked' \
               'against `libasound2` (ALSA). On Debian and Ubuntu:' \

@@ -25,11 +25,23 @@
 //! Playing's text glyph into the shared tile is a visible design change, which
 //! this extraction may not make silently (it moves no golden).
 //!
+//! ## The other half of the Cover Cache
+//!
+//! This module is the View half: the texture map, its LRU order, and the byte
+//! budget that bounds them. The decision half lives beside it in
+//! [`crate::ui::cover_cache`] and holds no picture. The two meet here and
+//! nowhere else — [`store_cover_texture`] files an arrival, and
+//! [`lookup_cover_texture`] resolves one — and both take the [`CoverCache`]
+//! because this map has exactly one writer, so it is the only thing that can
+//! report which arrivals its own bounds dropped. That report is what keeps the
+//! halves from drifting apart (see [`CoverCache::forget`]).
+//!
 //! Pure paint: reads [`Palette`] tokens (ADR 0004), mutates nothing, and
 //! renders headlessly in `tests/ui_tests.rs` / `tests/golden_tests.rs`.
 
 use eframe::egui;
 
+use crate::ui::cover_cache::{CoverArrival, CoverCache};
 use crate::ui::icons;
 use crate::ui::theme::{self, Palette};
 use riff_backend::app::cover_service::{COVER_CACHE_CAP, lru_insert};
@@ -95,7 +107,8 @@ fn texture_bytes(texture: &egui::TextureHandle) -> u64 {
     (width as u64) * (height as u64) * 4
 }
 
-/// Evict from the LRU tail until the map is inside [`COVER_TEXTURE_BYTE_BUDGET`].
+/// Evict from the LRU tail until the map is inside [`COVER_TEXTURE_BYTE_BUDGET`],
+/// and report the arrivals it dropped.
 ///
 /// The shared placeholder tile is excluded from the accounting *and* skipped as a
 /// victim. It is one tile drawn scaled into every box, so charging it a
@@ -106,10 +119,15 @@ fn texture_bytes(texture: &egui::TextureHandle) -> u64 {
 /// `TextureHandle` is refcounted, so this is the map's own cost and no more: a
 /// handle still in use by a live frame outlives its entry, and the bytes are
 /// freed when the last clone drops rather than when eviction names the entry.
+///
+/// The returned keys go to [`CoverCache::forget`]: an arrival the View no longer
+/// holds must be askable again, or the row behind it waits for an answer nobody
+/// is going to send.
+#[must_use]
 pub fn enforce_texture_byte_budget<S: std::hash::BuildHasher>(
     textures: &mut std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
     lru_keys: &mut Vec<CoverCacheKey>,
-) {
+) -> Vec<CoverCacheKey> {
     let placeholder = placeholder_cache_key();
     let mut total: u64 = textures
         .iter()
@@ -117,6 +135,7 @@ pub fn enforce_texture_byte_budget<S: std::hash::BuildHasher>(
         .map(|(_, texture)| texture_bytes(texture))
         .sum();
 
+    let mut evicted = Vec::new();
     while total > COVER_TEXTURE_BYTE_BUDGET {
         let Some(victim) = lru_keys.iter().find(|key| **key != placeholder).cloned() else {
             break; // only the tile is left, and it is exempt
@@ -126,7 +145,9 @@ pub fn enforce_texture_byte_budget<S: std::hash::BuildHasher>(
         }
         textures.remove(&victim);
         lru_keys.retain(|key| key != &victim);
+        evicted.push(victim);
     }
+    evicted
 }
 
 /// How many outstanding Cover requests the frame remembers, and nothing more.
@@ -137,6 +158,9 @@ pub fn enforce_texture_byte_budget<S: std::hash::BuildHasher>(
 /// bounds a set of `(identity, box)` markers that live only until the answer
 /// arrives, so it is sized for a burst rather than a working set: a whole screen of
 /// rows at all three boxes, with room for the scroll that triggered them.
+///
+/// The set it bounds is the Cover Cache's, in [`crate::ui::cover_cache`]; it stays
+/// here beside the key space both are indexed by, and the cache is what applies it.
 pub const COVER_IN_FLIGHT_CAP: usize = 512;
 
 // --- The shared placeholder tile ------------------------------------------------
@@ -193,6 +217,38 @@ pub fn placeholder_image(palette: &Palette) -> egui::ColorImage {
     image
 }
 
+/// File one arrival from the Cover Cache as a texture: the rgba→texture
+/// conversion is the egui-bound work that stays on the main thread (the texture
+/// boundary, ADR 0006). The decode itself happened on the cover worker thread
+/// behind the port, so a frame can never block on it; dedup and negative
+/// caching live behind the service seam, so artless results never reach here.
+///
+/// The count cap and the byte budget both bound this map, and both run on every
+/// insertion. Whatever they drop is reported to the Cover Cache, because the
+/// key the entry was written under is only an *arrival* while the entry is
+/// really here.
+pub fn store_cover_texture<S: std::hash::BuildHasher>(
+    cache: &mut CoverCache,
+    ctx: &egui::Context,
+    textures: &mut std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
+    lru_keys: &mut Vec<CoverCacheKey>,
+    arrival: CoverArrival,
+) {
+    let CoverArrival { key, cover } = arrival;
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(
+        [cover.width as usize, cover.height as usize],
+        &cover.rgba,
+    );
+    let texture = ctx.load_texture(&key.0, color_image, egui::TextureOptions::default());
+    textures.insert(key.clone(), texture);
+    let mut evicted = lru_insert(lru_keys, key, COVER_CACHE_CAP);
+    for old in &evicted {
+        textures.remove(old);
+    }
+    evicted.extend(enforce_texture_byte_budget(textures, lru_keys));
+    cache.forget(evicted);
+}
+
 /// Resolve one item's cover texture through the shared cache: the real
 /// cover under the plain key when one is cached, otherwise the shared
 /// placeholder tile (created once on a full miss, then cached), evicting
@@ -200,7 +256,12 @@ pub fn placeholder_image(palette: &Palette) -> egui::ColorImage {
 /// tile's well and glyph colours. The return is handed to the render
 /// sites' `Option<TextureHandle>` seams, which keep their pre-texture
 /// fallbacks for the not-yet-rendered window.
+///
+/// The tile is one entry, so inserting it can be what pushes a real cover out
+/// of the map — which is why this takes the Cover Cache and reports the
+/// victims rather than leaving it to believe in an entry that is gone.
 pub fn lookup_cover_texture<S: std::hash::BuildHasher>(
+    cache: &mut CoverCache,
     textures: &mut std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
     lru_keys: &mut Vec<CoverCacheKey>,
     ctx: &egui::Context,
@@ -224,10 +285,12 @@ pub fn lookup_cover_texture<S: std::hash::BuildHasher>(
         egui::TextureOptions::default(),
     );
     textures.insert(placeholder.clone(), texture.clone());
-    for old in lru_insert(lru_keys, placeholder, COVER_CACHE_CAP) {
-        textures.remove(&old);
+    let mut evicted = lru_insert(lru_keys, placeholder, COVER_CACHE_CAP);
+    for old in &evicted {
+        textures.remove(old);
     }
-    enforce_texture_byte_budget(textures, lru_keys);
+    evicted.extend(enforce_texture_byte_budget(textures, lru_keys));
+    cache.forget(evicted);
     texture
 }
 

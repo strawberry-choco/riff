@@ -247,31 +247,6 @@ mod tests {
     // exercised through its ports in the `audio_engine_tests` module below.
 
     #[test]
-    fn test_gapless_formats_compatible_same_rate_and_channels() {
-        assert!(formats_gapless_compatible(44_100, 2, 44_100, 2));
-        assert!(formats_gapless_compatible(48_000, 2, 48_000, 2));
-        assert!(formats_gapless_compatible(96_000, 1, 96_000, 1));
-    }
-
-    #[test]
-    fn test_gapless_formats_different_rate_is_incompatible() {
-        // The canonical mismatch: 44.1 kHz followed by 48 kHz.
-        assert!(!formats_gapless_compatible(44_100, 2, 48_000, 2));
-        assert!(!formats_gapless_compatible(48_000, 2, 44_100, 2));
-    }
-
-    #[test]
-    fn test_gapless_formats_different_channels_is_incompatible() {
-        assert!(!formats_gapless_compatible(44_100, 2, 44_100, 1));
-        assert!(!formats_gapless_compatible(48_000, 1, 48_000, 6));
-    }
-
-    #[test]
-    fn test_gapless_formats_rate_and_channels_both_differ() {
-        assert!(!formats_gapless_compatible(44_100, 2, 48_000, 1));
-    }
-
-    #[test]
     fn test_gapless_elapsed_from_samples_exact_math() {
         // 1 s of stereo 44.1 kHz = 88_200 interleaved samples.
         assert_eq!(
@@ -4258,10 +4233,10 @@ mod scan_service_tests {
 //
 // The extracted engine (`src/app/audio_engine.rs`) is exercised through its
 // ports only: a scripted [`MockAudioDecoder`] factory, the recording
-// [`MockAudioOutput`], and an in-memory `LibraryQueryStore` fake. A helper
-// thread runs `AudioEngine::new(..).run()` over unbounded crossbeam channels;
-// every receive uses a timeout so a wedged engine fails an assertion instead
-// of hanging CI.
+// [`MockAudioOutput`], and a two-method [`PlaybackLibrary`] fake standing in
+// for the Application Store. A helper thread runs `AudioEngine::new(..).run()`
+// over unbounded crossbeam channels; every receive uses a timeout so a wedged
+// engine fails an assertion instead of hanging CI.
 //
 // The shared-handle adapters below exist because the engine takes ownership
 // of its ports: they delegate every call to the real mocks behind a mutex so
@@ -4272,10 +4247,8 @@ mod audio_engine_tests {
     use crossbeam_channel::{Receiver, unbounded};
     use riff_backend::app::audio_engine::AudioEngine;
     use riff_backend::app::errors::StoreError;
-    use riff_backend::app::store::LibraryQueryStore;
-    use riff_playback::infra::ports::{AudioFormatInfo, DecoderFactory};
-    use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    use riff_playback::infra::ports::{AudioFormatInfo, DecoderFactory, PlaybackLibrary};
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
@@ -4349,256 +4322,41 @@ mod audio_engine_tests {
         })
     }
 
-    /// In-memory [`LibraryQueryStore`] fake serving a canned track map. The
-    /// engine only ever calls `get_track` and `all_track_ids`; the remaining
-    /// queries return empty results.
-    struct FakeLibraryStore {
-        tracks: HashMap<TrackId, Track>,
+    /// The Library as the Audio Engine reads it: the narrowed
+    /// [`PlaybackLibrary`] port over a canned Track list, and nothing else — no
+    /// listing window, no count, no artist/album/genre/folder read, because the
+    /// engine asks for none. Two methods stand in for a two-method port, which
+    /// is the whole point of the narrowing: satisfied through a blanket
+    /// `impl<T: LibraryQueryStore> PlaybackLibrary for T`, this fake would have
+    /// to implement all 35 store queries to drive the engine at all (ADR 0012).
+    ///
+    /// The ids come back in the order the fixture wrote them. The Application
+    /// Store's own canonical path-ascending order is deliberately *not*
+    /// re-derived here: it is the store's contract (ADR 0003) and it is pinned
+    /// against real `SQLite` by
+    /// `riff-infra/tests/store_tests.rs::test_all_track_ids_are_canonically_path_ordered`.
+    /// What these tests are about is what the engine does with the list it is
+    /// handed, not where that order came from.
+    struct FakeLibrary {
+        tracks: Vec<Track>,
     }
 
-    impl LibraryQueryStore for FakeLibraryStore {
+    impl FakeLibrary {
+        /// The Library as given, in the order it was given.
+        fn holding<'a>(tracks: impl IntoIterator<Item = &'a Track>) -> Self {
+            Self {
+                tracks: tracks.into_iter().cloned().collect(),
+            }
+        }
+    }
+
+    impl PlaybackLibrary for FakeLibrary {
         fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
-            Ok(self.tracks.get(id).cloned())
+            Ok(self.tracks.iter().find(|t| &t.id == id).cloned())
         }
 
-        fn metadata_version(&self) -> Result<u32, StoreError> {
-            Ok(riff_persistence::track::METADATA_VERSION)
-        }
-
-        fn tracks_page(
-            &self,
-            _order: riff_persistence::store::TrackListOrder,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            Ok(riff_persistence::store::Page::new(
-                self.tracks.len(),
-                Vec::new(),
-            ))
-        }
-
-        fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
-            Ok(riff_backend::app::store::LibraryCounts {
-                tracks: self.tracks.len(),
-                ..riff_backend::app::store::LibraryCounts::default()
-            })
-        }
-
-        fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
-            // Mirrors the Application Store's contract: `SELECT path FROM
-            // tracks ORDER BY path ASC` (pinned against real SQLite by
-            // `test_all_track_ids_are_canonically_path_ordered`). A TrackId is
-            // that path, so sorting by it is the same order — the fill's
-            // ordering test in the domain suite is what pins that the arbiter
-            // takes this list verbatim.
-            let mut ids: Vec<TrackId> = self.tracks.keys().cloned().collect();
-            ids.sort_by(|a, b| a.0.cmp(&b.0));
-            Ok(ids)
-        }
-
-        fn search_page(
-            &self,
-            _query: &str,
-            _order: riff_persistence::store::TrackListOrder,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artist_albums(&self, _artist: &str) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn album_tracks(
-            &self,
-            _album_artist: &str,
-            _album_title: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn folder_has_audio(&self, _folder: &Path) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn folder_has_search_match(
-            &self,
-            _folder: &Path,
-            _query: &str,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn track_ids_in_folder_tree(&self, _folder: &Path) -> Result<Vec<TrackId>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn tracks_in_folder(&self, _folder: &Path) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn folder_track_count(&self, _folder: &Path) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn last_full_scan(
-            &self,
-        ) -> Result<Option<riff_backend::app::store::FullScanSummary>, StoreError> {
-            Ok(None)
-        }
-
-        fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn smart_playlist(
-            &self,
-            _kind: SmartPlaylistKind,
-            _limit: usize,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn genre_counts(&self) -> Result<Vec<crate::domain::GenreCount>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artists_in_genre(&self, _genre: &str) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artist_albums_in_genre(
-            &self,
-            _artist: &str,
-            _genre: &str,
-        ) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn album_tracks_in_genre(
-            &self,
-            _album_artist: &str,
-            _album_title: &str,
-            _genre: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn hit_albums_page(
-            &self,
-            _query: &str,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn hit_artists_page(
-            &self,
-            _query: &str,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn album_hit_tracks(&self, _a: &str, _t: &str, _q: &str) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn album_is_name_hit(&self, _a: &str, _t: &str, _q: &str) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn hit_albums_in_genre(
-            &self,
-            _g: &str,
-            _q: &str,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn hit_artists_in_genre(
-            &self,
-            _g: &str,
-            _q: &str,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn album_hit_tracks_in_genre(
-            &self,
-            _a: &str,
-            _t: &str,
-            _g: &str,
-            _q: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn hit_genre_counts(&self, _q: &str) -> Result<Vec<crate::domain::GenreCount>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artists_page(
-            &self,
-            _direction: SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn albums_page(
-            &self,
-            _direction: SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn genres_page(
-            &self,
-            _direction: SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<crate::domain::GenreCount>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn artists_in_genre_page(
-            &self,
-            _genre: &str,
-            _direction: SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn artist_albums_in_genre_page(
-            &self,
-            _artist: &str,
-            _genre: &str,
-            _direction: SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
+        fn library_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
+            Ok(self.tracks.iter().map(|t| t.id.clone()).collect())
         }
     }
 
@@ -4617,7 +4375,7 @@ mod audio_engine_tests {
     /// own thread, ports boxed inside the closure) over mock ports.
     fn spawn_engine(
         state: Arc<Mutex<PlaybackSession>>,
-        library: FakeLibraryStore,
+        library: FakeLibrary,
         primary_script: Vec<Vec<f32>>,
         successor_script: Vec<Vec<f32>>,
         source: ScriptedSource,
@@ -4723,16 +4481,17 @@ mod audio_engine_tests {
 
     /// Pre-populate the queue so Queue Fill never fires, and register the
     /// matching canned library entries.
-    fn queued_state_and_library(paths: &[&str]) -> (Arc<Mutex<PlaybackSession>>, FakeLibraryStore) {
+    fn queued_state_and_library(paths: &[&str]) -> (Arc<Mutex<PlaybackSession>>, FakeLibrary) {
         let mut state = PlaybackSession::default();
-        let mut tracks = HashMap::new();
-        for path in paths {
-            let track = crate::test_utils::create_test_track(path, path);
+        let tracks: Vec<Track> = paths
+            .iter()
+            .map(|path| crate::test_utils::create_test_track(path, path))
+            .collect();
+        for track in &tracks {
             state.queue.append(track.id.clone());
-            tracks.insert(track.id.clone(), track);
         }
         state.queue.current_index = Some(0);
-        (Arc::new(Mutex::new(state)), FakeLibraryStore { tracks })
+        (Arc::new(Mutex::new(state)), FakeLibrary::holding(&tracks))
     }
 
     // --- Red 1 tests -----------------------------------------------------------
@@ -4806,20 +4565,23 @@ mod audio_engine_tests {
     }
 
     /// Regression (Queue Fill restoration): playing into an EMPTY queue
-    /// loads the whole Library from the store in canonical order and resets
+    /// loads the whole Library from the store's own list and resets
     /// shuffle — so the UI resolves the current track and Next/Previous and
     /// auto-advance have a queue to walk. The mock decodes instantly, so the
     /// asserted state is read after the whole deterministic event chain
     /// (play b → EOF → auto-advance c → EOF → stop) has drained.
+    ///
+    /// The list is the fake's, written in ascending path order and taken
+    /// verbatim; the store's own canonical ordering is not re-derived here (see
+    /// [`FakeLibrary`]).
     #[test]
     fn engine_play_into_empty_queue_fills_from_store() {
         let state = Arc::new(Mutex::new(PlaybackSession::default()));
-        let mut tracks = HashMap::new();
-        for path in ["music/a.wav", "music/b.wav", "music/c.wav"] {
-            let track = crate::test_utils::create_test_track(path, path);
-            tracks.insert(track.id.clone(), track);
-        }
-        let library = FakeLibraryStore { tracks };
+        let tracks: Vec<Track> = ["music/a.wav", "music/b.wav", "music/c.wav"]
+            .iter()
+            .map(|path| crate::test_utils::create_test_track(path, path))
+            .collect();
+        let library = FakeLibrary::holding(&tracks);
 
         let script = vec![batch(2_400), batch(2_400)];
         let source = source_with_duration(Some(Duration::from_secs(1)));
@@ -5776,7 +5538,7 @@ mod tag_edit_service_tests {
 // so a wedged worker fails an assertion instead of hanging CI.
 //
 // The counting port fakes below are local to this module (precedent:
-// `FakeLibraryStore` in the audio-engine tests) because the shared mocks in
+// `FakeLibrary` in the audio-engine tests) because the shared mocks in
 // `tests/mod.rs` carry no call counters; the counters are what prove the
 // dedup/negative-cache discipline actually suppressed disk I/O.
 mod cover_service_tests {

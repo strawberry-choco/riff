@@ -801,7 +801,7 @@ pub fn show_queue_panel(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
-    entries: &[super::up_next::UpNextEntry],
+    entries: &[super::sidebar::UpNextEntry],
     actions: &mut Vec<PlayerBarAction>,
 ) {
     let list_h = (entries.len() as f32 * ROW_H).min(QUEUE_PANEL_MAX_LIST_H);
@@ -856,7 +856,7 @@ pub fn show_queue_panel(
                                             continue;
                                         };
                                         let response =
-                                            super::up_next::up_next_row(ui, cache, palette, entry);
+                                            super::sidebar::up_next_row(ui, cache, palette, entry);
                                         if response.clicked() {
                                             actions
                                                 .push(PlayerBarAction::PlayNext(entry.id.clone()));

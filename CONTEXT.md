@@ -80,6 +80,10 @@ _Avoid_: thumbnail, artwork, art, image, album art
 A Cover reduced to a fixed pixel box for display in the UI. Derived, display-only, and never a source for a larger size.
 _Avoid_: cover, artwork, icon, texture
 
+**Cover Cache**:
+What the application knows about a Cover — which are wanted, at which size, which are in flight, and which have arrived. It holds no picture: a Cover becomes a Thumbnail in the View, and the View owns that. The two are separate facts and neither answers for the other.
+_Avoid_: texture cache, cover LRU, image cache, Thumbnail cache
+
 **Artist**:
 A grouping of Albums credited to one Album Artist name.
 _Avoid_: performer, contributor
@@ -183,6 +187,10 @@ _Avoid_: multi-edit, bulk write
 **Tag Edit**:
 The user action of editing a Track's Metadata through the Inline Tag Editor; saving commits the file tags and the Store facts as one durable change, and a failure is reported inline with the reason.
 _Avoid_: metadata editor, tag writer
+
+**Frame**:
+One pass of the read-decide-draw cycle: the backend's events are drained, the services are polled, what the user did is applied, and the View is handed what to draw. Its order is part of what it is — a fact filled in after the compose is a frame late — so the Frame is one module with one interface, not a sequence of steps threaded through the render path.
+_Avoid_: tick, update loop, render pass, frame callback
 
 **App Runtime**:
 The composed application the Composition Root spawns: shared sessions, Application Store ports, service front ends, and worker threads wired in one place. It owns the worker threads' whole lifecycle — they start with it and shut down through it, never outliving it.

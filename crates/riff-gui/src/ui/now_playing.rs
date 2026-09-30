@@ -38,11 +38,11 @@ pub const UP_NEXT_LIMIT: usize = 5;
 
 // --- Content & actions ------------------------------------------------------------
 
-/// The Up Next entry model and its label builder now live in the neutral
-/// [`super::up_next`] module (shared with the player bar's queue sheet). They
-/// are re-exported here so the app's historical `now_playing::` paths keep
-/// resolving.
-pub use super::up_next::{UpNextEntry, up_next_entries};
+/// The Up Next entry model and its label builder now live on the neutral
+/// [`super::sidebar`] row primitive (shared with the player bar's queue
+/// sheet). They are re-exported here so the app's historical `now_playing::`
+/// paths keep resolving.
+pub use super::sidebar::{UpNextEntry, up_next_entries};
 
 /// What the user did to the Now Playing stage this frame. The app applies
 /// these through its state/command paths so every effect stays testable
@@ -156,8 +156,9 @@ pub fn show_now_playing(
 
     // Resolve the design type scale through the CURRENT style: naming a
     // weight family directly would panic in the golden harness's first frame
-    // (see `segmented_nav` / `empty_state_hero`). The title is `text-3xl` on
-    // the Heading (semibold) family — the mockup's single 3xl usage.
+    // (see `segmented_nav` / `empty_state::empty_state`). The title is
+    // `text-3xl` on the Heading (semibold) family — the mockup's single 3xl
+    // usage.
     let title_font = styled_font(ui, egui::TextStyle::Heading, theme::TEXT_3XL);
     let body_font = styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM);
     let xs_font = styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS);
@@ -418,7 +419,7 @@ fn up_next_section(
                         let Some(entry) = content.up_next.get(i) else {
                             continue;
                         };
-                        let response = super::up_next::up_next_row(ui, cache, palette, entry);
+                        let response = sidebar::up_next_row(ui, cache, palette, entry);
                         if response.clicked() {
                             actions.push(NowPlayingAction::PlayNext(entry.id.clone()));
                         }

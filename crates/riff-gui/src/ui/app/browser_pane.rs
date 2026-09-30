@@ -36,7 +36,6 @@
 
 use eframe::egui;
 use riff_backend::domain::{Album, PlaylistId, SmartPlaylistKind, TrackId};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use riff_backend::app::state::{
@@ -48,7 +47,7 @@ use super::super::column::ColumnIdentity;
 use super::super::scroll_memory::DrillSlot;
 use super::{
     COVER_THUMB, CollectionMenuEffects, ColumnKind, RiffApp, apply_collection_menu,
-    apply_detail_action, apply_entity_selection, column_plan, request_cover_intent,
+    apply_detail_action, apply_entity_selection, column_plan, cover_texture_for,
     resolve_detail_content, resolve_inspector, smart_list_openable,
 };
 
@@ -280,10 +279,9 @@ impl RiffApp {
         let palette = self.theme.active;
         let mut actions: Vec<browser::BrowserAction> = Vec::new();
         let covers = &self.covers;
+        let cover_cache = &mut self.cover_cache;
         let textures = &mut self.cover_textures;
         let lru_keys = &mut self.cover_lru_keys;
-        let in_flight = &mut self.cover_in_flight;
-        let in_flight_keys = &mut self.cover_in_flight_keys;
         let ctx = ui.ctx().clone();
         let total = albums.len();
         let mut item = |i: usize| -> Option<browser::BrowserItem> {
@@ -292,21 +290,14 @@ impl RiffApp {
             // same flow the root columns use; a full miss resolves the
             // music-icon placeholder tile.
             let thumbnail = album.tracks.first().map(|tid| {
-                request_cover_intent(
-                    textures,
-                    in_flight,
-                    in_flight_keys,
+                cover_texture_for(
+                    cover_cache,
                     covers.as_ref(),
-                    tid.clone(),
-                    PathBuf::from(&tid.0),
-                    COVER_THUMB,
-                );
-                crate::ui::artwork::lookup_cover_texture(
                     textures,
                     lru_keys,
                     &ctx,
                     &palette,
-                    &tid.0,
+                    tid,
                     COVER_THUMB,
                 )
             });
@@ -380,10 +371,9 @@ impl RiffApp {
         let mut actions: Vec<browser::BrowserAction> = Vec::new();
         let views = &mut self.views;
         let covers = &self.covers;
+        let cover_cache = &mut self.cover_cache;
         let textures = &mut self.cover_textures;
         let lru_keys = &mut self.cover_lru_keys;
-        let in_flight = &mut self.cover_in_flight;
-        let in_flight_keys = &mut self.cover_in_flight_keys;
         let ctx = ui.ctx().clone();
         // The drill sort's direction is part of the listing's query
         // signature — the store applies it in SQL, so a row index names the
@@ -414,21 +404,14 @@ impl RiffApp {
                 .first()
                 .and_then(|album| album.tracks.first())
                 .map(|tid| {
-                    request_cover_intent(
-                        textures,
-                        in_flight,
-                        in_flight_keys,
+                    cover_texture_for(
+                        cover_cache,
                         covers.as_ref(),
-                        tid.clone(),
-                        PathBuf::from(&tid.0),
-                        COVER_THUMB,
-                    );
-                    crate::ui::artwork::lookup_cover_texture(
                         textures,
                         lru_keys,
                         &ctx,
                         &palette,
-                        &tid.0,
+                        tid,
                         COVER_THUMB,
                     )
                 });
@@ -497,10 +480,9 @@ impl RiffApp {
         let mut actions: Vec<browser::BrowserAction> = Vec::new();
         let views = &mut self.views;
         let covers = &self.covers;
+        let cover_cache = &mut self.cover_cache;
         let textures = &mut self.cover_textures;
         let lru_keys = &mut self.cover_lru_keys;
-        let in_flight = &mut self.cover_in_flight;
-        let in_flight_keys = &mut self.cover_in_flight_keys;
         let ctx = ui.ctx().clone();
         // The drill sort's direction is part of the listing's query
         // signature — the store applies it in SQL, so a row index names the
@@ -518,21 +500,14 @@ impl RiffApp {
             // same flow the root columns use; a full miss resolves the
             // music-icon placeholder tile.
             let thumbnail = album.tracks.first().map(|tid| {
-                request_cover_intent(
-                    textures,
-                    in_flight,
-                    in_flight_keys,
+                cover_texture_for(
+                    cover_cache,
                     covers.as_ref(),
-                    tid.clone(),
-                    PathBuf::from(&tid.0),
-                    COVER_THUMB,
-                );
-                crate::ui::artwork::lookup_cover_texture(
                     textures,
                     lru_keys,
                     &ctx,
                     &palette,
-                    &tid.0,
+                    tid,
                     COVER_THUMB,
                 )
             });
@@ -804,10 +779,9 @@ impl RiffApp {
         let mut actions: Vec<browser::BrowserAction> = Vec::new();
         let views = &mut self.views;
         let covers = &self.covers;
+        let cover_cache = &mut self.cover_cache;
         let textures = &mut self.cover_textures;
         let lru_keys = &mut self.cover_lru_keys;
-        let in_flight = &mut self.cover_in_flight;
-        let in_flight_keys = &mut self.cover_in_flight_keys;
         let ctx = ui.ctx().clone();
         // The count read, taken before the closure borrows `views` mutably:
         // its own store read, the value to size the row range with.
@@ -836,22 +810,15 @@ impl RiffApp {
                 1 => "1 album".to_string(),
                 n => format!("{n} albums"),
             };
-            let thumbnail = views.artist_first_track(&name).map(|tid| {
-                request_cover_intent(
-                    textures,
-                    in_flight,
-                    in_flight_keys,
+            let thumbnail = views.artist_first_track(&name).as_ref().map(|tid| {
+                cover_texture_for(
+                    cover_cache,
                     covers.as_ref(),
-                    tid.clone(),
-                    PathBuf::from(&tid.0),
-                    COVER_THUMB,
-                );
-                crate::ui::artwork::lookup_cover_texture(
                     textures,
                     lru_keys,
                     &ctx,
                     &palette,
-                    &tid.0,
+                    tid,
                     COVER_THUMB,
                 )
             });
@@ -930,10 +897,6 @@ impl RiffApp {
     /// artist/title or by any member track. The genre chip filter is not
     /// part of this column (issue 04 keeps search display-independent): no
     /// genre chips render, and the listing is never genre-filtered.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the root renderer's query path (hit rows) stays in one function"
-    )]
     fn render_albums_browser(
         &mut self,
         ui: &mut egui::Ui,
@@ -967,10 +930,9 @@ impl RiffApp {
         let mut actions: Vec<browser::BrowserAction> = Vec::new();
         let views = &mut self.views;
         let covers = &self.covers;
+        let cover_cache = &mut self.cover_cache;
         let textures = &mut self.cover_textures;
         let lru_keys = &mut self.cover_lru_keys;
-        let in_flight = &mut self.cover_in_flight;
-        let in_flight_keys = &mut self.cover_in_flight_keys;
         let ctx = ui.ctx().clone();
         // The count read, taken before the closure borrows `views` mutably:
         // its own store read, the value to size the row range with.
@@ -995,21 +957,14 @@ impl RiffApp {
                 .tracks
                 .first()
                 .map(|tid| {
-                    request_cover_intent(
-                        textures,
-                        in_flight,
-                        in_flight_keys,
+                    cover_texture_for(
+                        cover_cache,
                         covers.as_ref(),
-                        tid.clone(),
-                        PathBuf::from(&tid.0),
-                        COVER_THUMB,
-                    );
-                    crate::ui::artwork::lookup_cover_texture(
                         textures,
                         lru_keys,
                         &ctx,
                         &palette,
-                        &tid.0,
+                        tid,
                         COVER_THUMB,
                     )
                     .into()

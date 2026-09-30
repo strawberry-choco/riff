@@ -44,8 +44,8 @@ pub use riff_infra;
 pub use riff_backend::app::MutexExt;
 pub use riff_backend::app::gapless::{
     GaplessConditions, QueueConditions, duration_from_frames, elapsed_from_samples,
-    formats_gapless_compatible, frames_from_duration, is_gapless_eligible, pre_buffer_cap,
-    repeat_one_handoff_eligible, samples_from_duration,
+    frames_from_duration, is_gapless_eligible, pre_buffer_cap, repeat_one_handoff_eligible,
+    samples_from_duration,
 };
 pub use riff_backend::app::state::{
     LibrarySession, LibraryStatus, PlaybackQueue, PlaybackSession, WatchState, replaygain_factor,
@@ -388,10 +388,6 @@ pub mod mocks {
 
         fn set_volume(&mut self, volume: f32) {
             self.state.lock().unwrap().volumes.push(volume);
-        }
-
-        fn latency(&self) -> u32 {
-            0
         }
     }
 
@@ -866,16 +862,57 @@ pub mod mocks {
         }
     }
 
-    /// Empty [`PlaylistStore`] fake standing in for the Playlists section
-    /// of the Application Store in `SessionViews` seam tests that exercise
-    /// Library-side views: every read serves an empty result and every
-    /// mutation reports "nothing changed". The playlist projection's own
-    /// behavior is pinned against real `SQLite` scratch stores in the app
-    /// tests, not against this stub.
-    #[derive(Default)]
+    /// [`PlaylistStore`] fake standing in for the Playlists section of the
+    /// Application Store. Reads serve whatever `playlists` / `entries` were
+    /// seeded with (empty by default, which is the state most seam tests want)
+    /// and every mutation reports "nothing changed". The playlist
+    /// projection's own behavior is pinned against real `SQLite` scratch stores
+    /// in the app tests, not against this stub.
+    #[derive(Clone, Default)]
     pub struct MockPlaylistStore {
         /// When set, every read fails with an `InvalidOperation` error.
         pub fail_loads: bool,
+        /// Rows `load_playlists` serves, in the order given.
+        pub playlists: Vec<Playlist>,
+        /// Rows `load_playlist_entries` serves, keyed by playlist id.
+        pub entries:
+            std::collections::HashMap<PlaylistId, Vec<riff_backend::app::store::PlaylistEntry>>,
+    }
+
+    impl MockPlaylistStore {
+        /// A store seeded with `playlists`, each carrying `tracks` as its
+        /// entry list. The sidebar's playlist rows and the playlist stage both
+        /// read through this one store, so seeding it is what makes a playlist
+        /// visible in the real composition.
+        #[must_use]
+        pub fn with_playlists(playlists: Vec<(PlaylistId, String, Vec<TrackId>)>) -> Self {
+            let mut entries = std::collections::HashMap::new();
+            let mut rows = Vec::new();
+            for (id, name, tracks) in playlists {
+                rows.push(Playlist {
+                    id: id.clone(),
+                    name,
+                    tracks: tracks.clone(),
+                    created: None,
+                });
+                entries.insert(
+                    id,
+                    tracks
+                        .into_iter()
+                        .map(|id| riff_backend::app::store::PlaylistEntry {
+                            id,
+                            track: None,
+                            valid: true,
+                        })
+                        .collect(),
+                );
+            }
+            Self {
+                playlists: rows,
+                entries,
+                ..Self::default()
+            }
+        }
     }
 
     impl PlaylistStore for MockPlaylistStore {
@@ -883,17 +920,17 @@ pub mod mocks {
             if self.fail_loads {
                 return Err(StoreError::InvalidOperation("playlists boom".to_string()));
             }
-            Ok(Vec::new())
+            Ok(self.playlists.clone())
         }
 
         fn load_playlist_entries(
             &self,
-            _id: &PlaylistId,
+            id: &PlaylistId,
         ) -> Result<Vec<riff_backend::app::store::PlaylistEntry>, StoreError> {
             if self.fail_loads {
                 return Err(StoreError::InvalidOperation("entries boom".to_string()));
             }
-            Ok(Vec::new())
+            Ok(self.entries.get(id).cloned().unwrap_or_default())
         }
 
         fn create_playlist(
@@ -1253,8 +1290,21 @@ pub mod mocks {
         pub folder_tree_ids: Vec<TrackId>,
         /// Tracks served by `tracks_in_folder`.
         pub folder_direct_tracks: Vec<Track>,
-        /// Children served by `subdirs_with_audio`.
+        /// Children served by `subdirs_with_audio` for any folder. A flat
+        /// list answers the same children to every node, which is fine for a
+        /// one-level tree and INFINITE for a deeper one — the app recurses
+        /// into whatever `subdirs_with_audio` returns, so seed
+        /// `folder_children_by_dir` for a tree with depth.
         pub folder_children: Vec<PathBuf>,
+        /// Children served by `subdirs_with_audio`, keyed by the folder asked
+        /// about. Consulted first, with `folder_children` as the fallback, so a
+        /// fixture that needs a finite multi-level tree says which directories
+        /// sit under which.
+        pub folder_children_by_dir: std::collections::HashMap<PathBuf, Vec<PathBuf>>,
+        /// Direct track rows served by `tracks_in_folder`, keyed by folder, for
+        /// the same reason: one shared list repeats the same rows at every
+        /// level of a tree.
+        pub tracks_by_dir: std::collections::HashMap<PathBuf, Vec<Track>>,
 
         // --- failure injection -------------------------------------------------
         /// Queries that fail while listed here.
@@ -1302,6 +1352,8 @@ pub mod mocks {
                 folder_tree_ids: Vec::new(),
                 folder_direct_tracks: Vec::new(),
                 folder_children: Vec::new(),
+                folder_children_by_dir: std::collections::HashMap::new(),
+                tracks_by_dir: std::collections::HashMap::new(),
                 failing: Vec::new(),
                 calls: Mutex::new(Vec::new()),
             }
@@ -1557,7 +1609,11 @@ pub mod mocks {
 
         fn tracks_in_folder(&self, folder: &Path) -> Result<Vec<Track>, StoreError> {
             self.record(LibraryQueryCall::TracksInFolder(folder.to_path_buf()));
-            Ok(self.folder_direct_tracks.clone())
+            Ok(self
+                .tracks_by_dir
+                .get(folder)
+                .cloned()
+                .unwrap_or_else(|| self.folder_direct_tracks.clone()))
         }
 
         fn folder_track_count(&self, folder: &Path) -> Result<usize, StoreError> {
@@ -1580,7 +1636,11 @@ pub mod mocks {
 
         fn subdirs_with_audio(&self, folder: &Path) -> Result<Vec<PathBuf>, StoreError> {
             self.record(LibraryQueryCall::SubdirsWithAudio(folder.to_path_buf()));
-            Ok(self.folder_children.clone())
+            Ok(self
+                .folder_children_by_dir
+                .get(folder)
+                .cloned()
+                .unwrap_or_else(|| self.folder_children.clone()))
         }
 
         fn smart_playlist(
@@ -1998,6 +2058,66 @@ pub mod mocks {
     /// a cover. `request` discards; `poll` always returns an empty Vec.
     #[derive(Default)]
     pub struct MockCovers;
+
+    /// [`Covers`] fake that answers every request with deterministic RGBA
+    /// pixels, so a composed golden can show a real cover through the real
+    /// arrival path (`CoverCache::settle` → `artwork::store_cover_texture` →
+    /// the next frame's `lookup_cover_texture`).
+    ///
+    /// Determinism contract: the pixels are a pure function of the requested
+    /// box and the identity's own bytes, so the same request renders the same
+    /// art on every machine and every run. Two flat bands plus a diagonal ramp
+    /// rather than a smooth gradient — enough distinct pixels that a dropped
+    /// or mis-sized texture cannot pass for a correct one, and cheap enough to
+    /// generate for a whole library's worth of rows.
+    #[derive(Default)]
+    pub struct StubCovers {
+        /// One queued answer per request, oldest first.
+        pub pending: Mutex<Vec<(TrackId, RequestedSize)>>,
+    }
+
+    impl StubCovers {
+        /// The pixel answer for one identity at one box. Public so a test can
+        /// assert against the same function the fake serves.
+        #[must_use]
+        pub fn cover_for(identity: &str, size: RequestedSize) -> DecodedCover {
+            let (w, h) = (size.width as usize, size.height as usize);
+            let seed = identity
+                .bytes()
+                .fold(0x9e37_79b9_u32, |acc, b| acc.rotate_left(5) ^ u32::from(b));
+            let top = [seed & 0xff, (seed >> 8) & 0xff, (seed >> 16) & 0xff];
+            let bottom = [255 - top[0] / 2, 255 - top[1] / 2, 255 - top[2] / 2];
+            let mut rgba = Vec::with_capacity(w * h * 4);
+            for y in 0..h {
+                let t = if h > 1 {
+                    y as f32 / (h - 1) as f32
+                } else {
+                    0.0
+                };
+                let band = [
+                    (top[0] as f32 * (1.0 - t) + bottom[0] as f32 * t) as u8,
+                    (top[1] as f32 * (1.0 - t) + bottom[1] as f32 * t) as u8,
+                    (top[2] as f32 * (1.0 - t) + bottom[2] as f32 * t) as u8,
+                ];
+                for x in 0..w {
+                    // A single bright diagonal keeps the image from being two
+                    // flat bands, which a solid-fill bug could reproduce.
+                    let on_diagonal = (x + y) % 7 < 2;
+                    let px = if on_diagonal {
+                        [255 - band[0], 255 - band[1], 255 - band[2]]
+                    } else {
+                        band
+                    };
+                    rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+                }
+            }
+            DecodedCover {
+                rgba,
+                width: size.width,
+                height: size.height,
+            }
+        }
+    }
 }
 
 // --- Minimal trait impls for the no-op UI test mocks -----------------------
@@ -2052,6 +2172,48 @@ impl riff_library::app::cover_service::Covers for crate::mocks::MockCovers {
     fn clear_cache(&self) {}
 
     fn poll_cache_clear(&self) -> Option<riff_library::app::cover_service::ClearCacheOutcome> {
+        None
+    }
+}
+
+impl riff_library::app::cover_service::Covers for crate::mocks::StubCovers {
+    fn request(
+        &self,
+        track_id: riff_backend::domain::TrackId,
+        _path: std::path::PathBuf,
+        size: riff_library::app::traits::RequestedSize,
+    ) {
+        crate::mocks::lock_cell(&self.pending).push((track_id, size));
+    }
+
+    fn request_folder(
+        &self,
+        folder: &std::path::Path,
+        size: riff_library::app::traits::RequestedSize,
+    ) {
+        crate::mocks::lock_cell(&self.pending)
+            .push((riff_backend::domain::TrackId::from_path(folder), size));
+    }
+
+    fn poll(
+        &self,
+    ) -> Vec<(
+        riff_backend::domain::TrackId,
+        riff_library::app::traits::RequestedSize,
+        Option<riff_backend::app::traits::DecodedCover>,
+    )> {
+        std::mem::take(&mut *crate::mocks::lock_cell(&self.pending))
+            .into_iter()
+            .map(|(track_id, size)| {
+                let cover = crate::mocks::StubCovers::cover_for(&track_id.0, size);
+                (track_id, size, Some(cover))
+            })
+            .collect()
+    }
+
+    fn clear_cache(&self) {}
+
+    fn poll_cache_clear(&self) -> Option<riff_backend::app::cover_service::ClearCacheOutcome> {
         None
     }
 }

@@ -115,24 +115,19 @@ pub struct BrowserColumn<'a> {
     pub empty_hint: &'a str,
 }
 
-/// Render the browser column and append observed [`BrowserAction`]s. No
-/// scroll memory: the column keys egui's state by the shared positional salt
-/// (the seam's plain rendering path — goldens and widget tests).
-pub fn show_browser_column(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    column: BrowserColumn<'_>,
-    actions: &mut Vec<BrowserAction>,
-) {
-    show_browser_column_scrolled(ui, cache, palette, column, None, actions);
-}
-
-/// The app's per-Section render path: like [`show_browser_column`], but the
-/// list's `ScrollArea` takes a [`ScrollControl`] — the stable per-slot salt
-/// plus the offset to start at. Returns the actual vertical scroll offset
-/// after the frame (0 when nothing scrolled), so the Scroll Memory can
-/// record it back and stay the single source of truth between frames.
+/// Render the browser column and append observed [`BrowserAction`]s.
+///
+/// One entry point, not two. This used to be a `None`-passing pass-through
+/// beside the real one, and the pass-through had **zero production callers** —
+/// every test that used it was a test that had bypassed the composition the
+/// function exists to serve. A test that wants this column now passes `None`
+/// here, exactly as the app passes `Some(control)`, so the two cannot drift.
+///
+/// With a `Some(control)` the list's `ScrollArea` takes a [`ScrollControl`] —
+/// the stable per-slot salt plus the offset to start at — and the actual
+/// vertical scroll offset after the frame is returned (0 when nothing scrolled),
+/// so the Scroll Memory can record it back and stay the single source of truth
+/// between frames.
 pub fn show_browser_column_scrolled(
     ui: &mut egui::Ui,
     cache: &mut IconCache,

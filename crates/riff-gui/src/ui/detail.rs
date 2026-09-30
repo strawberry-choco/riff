@@ -195,23 +195,13 @@ impl<'a> DetailColumn<'a> {
     }
 }
 
-/// Render the detail column and append what it observed to `reports`. No
-/// scroll memory: the track list keeps its own positional state (the seam's
-/// plain rendering path — goldens and widget tests).
-pub fn show_detail_column(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    column: DetailColumn<'_>,
-    reports: &mut Vec<DetailReport>,
-) {
-    show_detail_column_scrolled(ui, cache, palette, column, None, reports);
-}
-
-/// The app's render path: like [`show_detail_column`], but the track list's
-/// `ScrollArea` takes a [`ScrollControl`] so the Tracks column resets to the
-/// top on a selection change (the Scroll Memory holds no Tracks-column
-/// offset). See [`super::scroll_memory`].
+/// Render the detail column and append what it observed to `reports`.
+///
+/// One entry point, not two. This used to be a `None`-passing pass-through
+/// beside the real one, and the pass-through had **zero production callers** —
+/// every test that used it was a test that had bypassed the composition the
+/// function exists to serve. A test that wants this column now passes `None`
+/// here, exactly as the app passes `Some(control)`, so the two cannot drift.
 pub fn show_detail_column_scrolled(
     ui: &mut egui::Ui,
     cache: &mut IconCache,

@@ -15,20 +15,6 @@ use std::time::Duration;
 
 pub use crate::domain::playback::{duration_from_frames, frames_from_duration};
 
-/// Gapless handoff keeps the same cpal stream running across the track
-/// boundary, so it requires the current and next track to share the exact
-/// same effective sample rate and channel count. Any mismatch means the
-/// existing gapped path (stop → reinitialize → restart) must run instead.
-#[must_use]
-pub fn formats_gapless_compatible(
-    cur_rate: u32,
-    cur_ch: u16,
-    next_rate: u32,
-    next_ch: u16,
-) -> bool {
-    cur_rate == next_rate && cur_ch == next_ch
-}
-
 /// Queue-derived conditions affecting gapless eligibility, grouped so the
 /// decision inputs stay cohesive.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -154,13 +140,6 @@ mod tests {
     fn zero_rate_clamped() {
         let d = duration_from_frames(100, 0);
         assert_eq!(d, Duration::from_secs(100));
-    }
-
-    #[test]
-    fn gapless_compatible_same_format() {
-        assert!(formats_gapless_compatible(48000, 2, 48000, 2));
-        assert!(!formats_gapless_compatible(48000, 2, 44100, 2));
-        assert!(!formats_gapless_compatible(48000, 2, 48000, 1));
     }
 
     #[test]

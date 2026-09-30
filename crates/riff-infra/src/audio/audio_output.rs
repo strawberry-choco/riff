@@ -416,11 +416,6 @@ impl riff_playback::infra::ports::AudioOutput for CpalAudioOutput {
     fn set_volume(&mut self, volume: f32) {
         self.set_volume(volume);
     }
-
-    fn latency(&self) -> u32 {
-        // Approximate the buffered latency in frames from the ring fill level.
-        u32::try_from(self.buffer_len() / usize::from(self.channels.max(1))).unwrap_or(u32::MAX)
-    }
 }
 
 /// Build a `StreamConfig` that tries to match the requested sample rate and

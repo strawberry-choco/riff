@@ -29,7 +29,7 @@ use riff_infra::filesystem::{AudioFileScanner, FilesystemWatcher};
 use riff_infra::media::{
     FileThumbnailCache, ImageCoverLoader, LoftyMetadataReader, LoftyMetadataWriter,
 };
-use riff_infra::store::SqliteStore;
+use riff_infra::store::{SqliteStore, StorePlaybackLibrary};
 use riff_persistence::errors::StoreError;
 use riff_persistence::store::{LibraryMutationStore, PlaylistStore, ScanOptions, SettingsStore};
 use riff_persistence::thumbnail::ThumbnailCache;
@@ -565,7 +565,11 @@ fn run_engine_thread(
         cmd_rx,
         cmd_tx,
         update_tx,
-        Box::new(library_queries),
+        // The engine reads the Library through its own two-query port, so the
+        // store is wrapped to fit rather than coerced: the port's narrowing is
+        // the adapter's (ADR 0012), and this is the one production site that
+        // constructs it.
+        Box::new(StorePlaybackLibrary::new(library_queries)),
         decoder_factory,
         Box::new(CpalAudioOutput::new()),
         state,

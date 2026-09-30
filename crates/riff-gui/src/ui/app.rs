@@ -10,9 +10,10 @@ pub use track_menu::{TrackMenuHost, TrackMenuOpen, TrackMenuSubject};
 
 use crate::ui::chrome::TitleBarAction;
 use crate::ui::column::ColumnIdentity;
-use crate::ui::now_playing::{NowPlayingAction, UpNextEntry};
+use crate::ui::now_playing::NowPlayingAction;
 use crate::ui::playerbar::PlayerBarAction;
 use crate::ui::settings::SettingsSection;
+use crate::ui::sidebar::UpNextEntry;
 use crate::ui::theme::{self, Palette};
 // Ungated, unlike the visibility *channel* fields: `CUSTOM_TITLEBAR_CLOSE` is
 // compiled on every platform (it is the pure data `close_resolution` hands
@@ -22,6 +23,20 @@ use crate::ui::theme::{self, Palette};
 // const unnameable there.
 use crate::ui::window_visibility::VisibilityMessage;
 use eframe::egui;
+// The Frame (ui-frame-deepening issue 04) owns the frame's order: its
+// decision half, the three panel reports, and the six-field write-back. This
+// file draws what those decisions hand it and enacts what the frame decided.
+use crate::ui::frame::{
+    ControlBarReport, Frame, FrameInput, FrameOutput, FrameParts, FrameViewport, SidebarAction,
+    SidebarReport, StageReport, TitlebarReport,
+};
+// The Frame's own public appliers keep their historical `ui::app::` paths
+// resolving, so the test suite that has asserted them since before the Frame
+// existed needed no editing.
+pub use crate::ui::frame::TitleKey;
+pub use crate::ui::frame::{
+    apply_backend_events, apply_now_playing_action, apply_player_bar_action,
+};
 use riff_backend::app::MutexExt;
 use riff_backend::app::Transport;
 pub use riff_backend::app::cover_service::{
@@ -38,10 +53,9 @@ pub use crate::ui::artwork::{
 pub use crate::ui::stage::column_widths;
 use riff_backend::app::events::BackendEvents;
 use riff_backend::app::preferences::Preferences;
-use riff_backend::app::scan_service::{ScanOutcome, Scans};
+use riff_backend::app::scan_service::Scans;
 use riff_backend::app::state::{
-    BrowseMode, BrowserSelection, LibrarySection, LibrarySession, LibraryStatus, PlaybackSession,
-    ViewMode,
+    BrowseMode, BrowserSelection, LibrarySection, LibrarySession, PlaybackSession, ViewMode,
 };
 use riff_backend::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
 use riff_backend::app::tag_edit_service::TagEdits;
@@ -60,16 +74,18 @@ use std::sync::atomic::AtomicBool;
 /// Theme selection state: the light/dark choice plus the (dark, high-contrast)
 /// combination last installed on the egui context, so the token style is
 /// applied once at init and re-applied only when the user switches (Issue 01).
-pub(crate) struct ThemeState {
+pub struct ThemeState {
     /// `true` = dark (mockup palette), `false` = light (derived per ADR 0004).
-    dark: bool,
+    /// Written by the Frame's titlebar action applier and read by the theme
+    /// step and the titlebar's content, so it is visible to `ui::frame`.
+    pub dark: bool,
     /// The resolved palette currently installed on the context (Issue 03):
     /// view code reads its semantic slots instead of hardcoding colors, so
     /// every themed surface follows the active palette (ADR 0004).
-    pub(crate) active: theme::Palette,
+    pub active: theme::Palette,
     /// The `(dark, high_contrast)` pair currently installed on the context,
     /// or `None` before the first install.
-    last_applied: Option<(bool, bool)>,
+    pub last_applied: Option<(bool, bool)>,
 }
 
 /// `"Artist - Title"` for one track — flat list, search, playlists, window
@@ -97,6 +113,78 @@ fn label_numbered(track: &Track) -> String {
 /// so neither surface builds the strings twice.
 type NowPlayingLabels = (Option<Arc<str>>, Option<Arc<str>>);
 
+/// The state one interactive Track row needs that cannot stay behind
+/// `&mut self` across [`sidebar::tree_row`], which borrows the icon cache
+/// mutably — the very borrow that forced the state to be threaded parameter by
+/// parameter through three render sites with seven to nine of them.
+///
+/// This bundle is the ownership shape that removes the threading: it is built
+/// once per listing and handed down, so a row site reads four arguments instead
+/// of nine and the "which session does a row write to" question has one answer.
+/// Precedent: `PlaylistPromptSlots`, `CollectionMenuEffects`, `TrackMenuHost`.
+///
+/// `library` is the one mutable field, and deliberately so: the row's clicks
+/// write selection straight into the session, and threading that back through a
+/// return value would be the same defect wearing a hat.
+pub struct TrackRowContext<'a> {
+    /// The library session: a click selects, a right-click's opening selects,
+    /// and the context menu's own effects land on the same slot.
+    pub library: &'a mut LibrarySession,
+    /// The playback snapshot, for the playing-row indicator.
+    pub playback: &'a PlaybackSession,
+    /// The playing Track's id, if any.
+    pub current_track: Option<&'a TrackId>,
+    /// The playlist this listing is, with the row's CANONICAL index — the
+    /// drag-reorder gesture's coordinates. `None` for every listing that is not
+    /// a user playlist's.
+    pub reorder: Option<PlaylistSlot<'a>>,
+}
+
+/// One playlist entry's position: which playlist, which canonical index, and
+/// whether the listing's current sort allows dragging at all (it does not: a
+/// drag would persist positions read off the wrong order).
+pub struct PlaylistSlot<'a> {
+    /// The playlist whose entries these are.
+    pub playlist_id: &'a PlaylistId,
+    /// The entry's index in the playlist's CANONICAL order.
+    pub index: usize,
+    /// Whether the drag-and-drop wrapper is on.
+    pub reorderable: bool,
+}
+
+/// One track row's own presentation: the Track it denotes and how it reads.
+///
+/// Split from [`TrackRowContext`] because this part is *data about the row* and
+/// that part is *state about the listing* — the same distinction that keeps
+/// `BrowserColumn` and `DetailColumn` from becoming one wide struct.
+pub struct TrackRowSpec<'a> {
+    /// The Track the row denotes.
+    pub track: &'a Track,
+    /// The painted label; callers keep their display formats ("Artist - Title",
+    /// "01. Title").
+    pub label: &'a str,
+    /// The indent scale level.
+    pub indent_level: usize,
+}
+
+/// What the sidebar's LIBRARY section looks like this frame: the one counts
+/// read every nav row's live count comes from, and which rows highlight because
+/// their browser variant is the one actually on screen.
+///
+/// Read once, resolved once, and handed to the row pass whole — the same
+/// "resolve, then paint" shape [`TrackRowSpec`] gives the track rows, and the
+/// same reason: the row pass should not be able to re-derive "is this section
+/// live?" four times and get it wrong once.
+pub struct LibraryNav<'a> {
+    /// The counts read model, cached per store generation (handoff issue 05).
+    pub counts: &'a riff_backend::app::views::SidebarCounts,
+    /// A section row highlights only while its browser variant is on screen:
+    /// the Library view, the Library browse mode, no list opened over it.
+    pub library_section_live: bool,
+    /// The Folders row's own liveness: the Library view in Folders mode.
+    pub folder_section_live: bool,
+}
+
 /// Transient UI prompt/focus flags are genuinely two-state; the fourth bool
 /// only exists on Linux (`settings_show_input`), which is where the lint fires.
 #[allow(clippy::struct_excessive_bools)]
@@ -116,16 +204,16 @@ pub struct RiffApp {
     /// clone of the same shareable service.
     pub(crate) scans: Box<dyn Scans>,
     cover_textures: std::collections::HashMap<CoverCacheKey, egui::TextureHandle>,
+    /// The View half's LRU order for `cover_textures` — the map is one bound and
+    /// this is how the other finds its victims.
     cover_lru_keys: Vec<CoverCacheKey>,
-    /// Cover requests this frame has sent and not yet been answered, keyed exactly
-    /// as the texture map is. Without it every repaint of a row whose art has not
-    /// landed re-enqueues a request onto an unbounded channel — invisible when the
-    /// answer comes back in one heartbeat, and a real allocation plus a `PathBuf`
-    /// and `String` clone per frame per row when it does not.
-    cover_in_flight: std::collections::HashSet<CoverCacheKey>,
-    /// The LRU order of [`Self::cover_in_flight`], kept beside it the same way
-    /// `cover_lru_keys` tracks `cover_textures`.
-    cover_in_flight_keys: Vec<CoverCacheKey>,
+    /// The Cover Cache: what the application knows about a Cover — which are
+    /// wanted, at which size, which are in flight, and which have arrived. It
+    /// holds no picture, so the texture map above and this are separate facts
+    /// that neither answers for the other; the two meet only through the
+    /// `crate::ui::artwork` write and read paths, which report what the map's
+    /// own bounds dropped.
+    cover_cache: crate::ui::cover_cache::CoverCache,
     /// The Cover Service front end (ADR 0006): sends resolve intent and
     /// yields drained results; dedup and the negative cache live behind it.
     covers: Box<dyn Covers>,
@@ -309,8 +397,7 @@ impl RiffApp {
             scans,
             cover_textures: std::collections::HashMap::new(),
             cover_lru_keys: Vec::new(),
-            cover_in_flight: std::collections::HashSet::new(),
-            cover_in_flight_keys: Vec::new(),
+            cover_cache: crate::ui::cover_cache::CoverCache::new(),
             covers,
             tag_editor: InlineTagEditor::new(tag_edits),
             smart_playlist_view: None,
@@ -449,96 +536,41 @@ impl RiffApp {
         (app, visibility_tx)
     }
 
-    /// Apply the active theme to the context (REQ-UI-007, Issue 01). The
-    /// palette is resolved from the token module — dark (mockup) or light
-    /// (derived per ADR 0004), with High Contrast as a token-set variant over
-    /// the base — and installed globally. Installation happens once at init
-    /// and again only when the selection changes, not every frame. The
-    /// resolved palette is kept on [`ThemeState`] so view code can style
-    /// itself from the active tokens (Issue 03).
-    fn apply_theme(&mut self, ctx: &egui::Context, high_contrast: bool) {
-        let dark = self.theme.dark;
-        if self.theme.last_applied == Some((dark, high_contrast)) {
+    /// Apply the active theme to the context (REQ-UI-007, Issue 01).
+    ///
+    /// The *decision* half — resolve the palette, notice the flip, install the
+    /// resolved palette on [`ThemeState`] — belongs to the Frame (step 2 of
+    /// `Frame::advance`); this is the one act the draw half performs on its
+    /// answer: pushing it onto the egui context. Installation happens once at
+    /// init and again only when the selection changes, not every frame.
+    ///
+    /// The palette-family flip invalidates the shared placeholder tile: its
+    /// well and glyph colours were derived for the old family's tokens, so it
+    /// re-renders under the new one on its next lookup. The eviction is
+    /// View-half work (it touches the texture map), so the Frame decides it and
+    /// this performs it — in the frame's order, before any row looks a cover up.
+    fn enact_theme_palette(&mut self, ctx: &egui::Context, out: &mut FrameOutput) {
+        let Some(palette) = out.palette.take() else {
             return;
-        }
-
-        let palette = theme::resolve(dark, high_contrast);
+        };
         theme::install(ctx, &palette);
-        // A palette-family flip invalidates the placeholder tile: its well
-        // and glyph colours were derived for the old family's tokens, so it
-        // re-renders under the new one on its next lookup.
-        if self.theme.active.dark != palette.dark {
+        if out.evict_generated {
             crate::ui::artwork::evict_generated(&mut self.cover_textures, &mut self.cover_lru_keys);
         }
-        self.theme.active = palette;
-        self.theme.last_applied = Some((dark, high_contrast));
     }
 
-    /// Send cover intent for one track to the Cover Service. The only
-    /// UI-side check left is the texture cache (the texture LRU is
-    /// UI-owned per the texture boundary); request deduplication and the
-    /// negative cache live behind the service seam.
+    /// Send cover intent for one track to the Cover Service. The Cover Cache
+    /// owns the whole decision — the composite key, the marker set, and
+    /// whether a request is due at all — so this reaches the service only
+    /// through it; request deduplication and the negative cache live behind
+    /// the service seam.
     fn request_cover(&mut self, track_id: &TrackId, file_path: &Path, size: RequestedSize) {
-        request_cover_intent(
-            &self.cover_textures,
-            &mut self.cover_in_flight,
-            &mut self.cover_in_flight_keys,
+        self.cover_cache.want_track(
             self.covers.as_ref(),
             track_id.clone(),
             file_path.to_path_buf(),
             size,
         );
-    }
-
-    /// Drain polled Library Scan outcomes from the service and report each
-    /// root's Readiness through the [`LibraryPaths`] slot, exactly as before
-    /// the extraction — the scan worker writes *through* the module instead of
-    /// reaching into the session — plus the titlebar scan-status line. The
-    /// service NEVER touches `LibrarySession` (ADR 0006). The watcher observes
-    /// a scan's end itself via `is_scanning`, so no relay fires here anymore.
-    fn poll_library_updates(&mut self, library: &mut LibrarySession) {
-        use riff_backend::app::events::NoticeSeverity;
-        for outcome in self.scans.poll() {
-            match outcome {
-                ScanOutcome::Progress { path, files_found } => {
-                    library
-                        .library_paths
-                        .report_readiness(&path, LibraryStatus::Scanning { files_found });
-                    self.feedback
-                        .set_scan(format!("{files_found} files"), NoticeSeverity::Info);
-                }
-                ScanOutcome::Complete { path, total_files } => {
-                    library
-                        .library_paths
-                        .report_readiness(&path, LibraryStatus::Scanned(total_files));
-                    self.feedback.set_scan(
-                        format!("Scan complete: {total_files} tracks"),
-                        NoticeSeverity::Info,
-                    );
-                    // Scan batches already committed through the store as
-                    // they progressed; nothing whole-file remains to save.
-                }
-                ScanOutcome::Failed { path, reason } => {
-                    library
-                        .library_paths
-                        .report_readiness(&path, LibraryStatus::Idle);
-                    // A failed scan carries an Error severity and a Rescan
-                    // recovery intent through to the paint boundary.
-                    self.feedback.put(crate::ui::feedback::Feedback {
-                        severity: NoticeSeverity::Error,
-                        source: riff_backend::app::events::NoticeSource::Scan,
-                        message: format!("Error: {reason}"),
-                        recovery: Some(crate::ui::feedback::Recovery::Rescan),
-                    });
-                }
-            }
-        }
-    }
-
-    fn poll_watchers(&self) {
-        if let Some(ref mut mgr) = *self.watcher_manager.lock_or_recover() {
-            mgr.poll();
-        }
     }
 
     /// Drop the shared placeholder tile from the texture cache. For
@@ -549,14 +581,14 @@ impl RiffApp {
         // The markers go with them. A row that asked under the old policy has an
         // outstanding request whose answer is about to be wrong for the new one, and
         // leaving it marked would suppress the re-ask that the eviction above exists
-        // to cause.
-        self.cover_in_flight.clear();
-        self.cover_in_flight_keys.clear();
+        // to cause. The arrivals stay: the tile was never one of them, and the
+        // covers that really landed are still the covers.
+        self.cover_cache.forget_in_flight();
     }
 
     /// Begin a Thumbnail-cache clear for `ui::settings`, the sibling of
     /// [`Self::evict_generated_covers`] in the same pane. The wipe runs on the cover
-    /// worker and [`Self::poll_cache_clear_outcome`] reports it once it settles, so
+    /// worker and the Frame's step-4 drain reports it once it settles, so
     /// the frame only ever says "clearing" and never waits.
     pub(crate) fn request_thumbnail_cache_clear(&mut self) {
         if request_cache_clear(self.covers.as_ref(), &mut self.clear_cache_in_flight) {
@@ -565,61 +597,6 @@ impl RiffApp {
                 riff_backend::app::events::NoticeSeverity::Info,
             );
         }
-    }
-
-    /// Drain the settled outcome of a Thumbnail-cache clear and report it on the
-    /// status line the rest of the Library pane already uses. A cache that cannot
-    /// be cleared is an inconvenience, not a data-loss event, so this is one line
-    /// in the feedback board — never a modal.
-    /// Drain every background service's outstanding results into the feedback
-    /// board, in the order the status line is later composed from it. The three
-    /// drains are one step because their sequence relative to
-    /// `feedback.display_message()` is load-bearing: a slot filled after the
-    /// compose is a frame late.
-    fn drain_background_outcomes(&mut self, library: &mut LibrarySession) {
-        self.poll_library_updates(library);
-        self.tag_editor.poll_outcomes(&mut self.feedback);
-        self.poll_cache_clear_outcome();
-    }
-
-    fn poll_cache_clear_outcome(&mut self) {
-        let Some(outcome) = settle_cache_clear(
-            self.covers.as_ref(),
-            &mut self.clear_cache_in_flight,
-            &mut self.cover_textures,
-            &mut self.cover_lru_keys,
-        ) else {
-            return;
-        };
-        match outcome {
-            ClearCacheOutcome::Cleared => {
-                self.feedback.set_library(
-                    "Thumbnail cache cleared. Covers rebuild as you browse.".to_string(),
-                    riff_backend::app::events::NoticeSeverity::Info,
-                );
-            }
-            ClearCacheOutcome::Failed { reason } => {
-                tracing::warn!("Failed to clear the Thumbnail cache: {reason}");
-                self.feedback.set_library(
-                    "Failed to clear the Thumbnail cache \u{2014} nothing was changed.".to_string(),
-                    riff_backend::app::events::NoticeSeverity::Error,
-                );
-            }
-        }
-    }
-
-    /// Consume polled cover results into the UI texture cache: rgba→texture
-    /// conversion is the egui-bound work that stays on the main thread;
-    /// every other caching concern lives in the service.
-    fn update_cover_cache(&mut self, ctx: &egui::Context) {
-        cache_polled_covers(
-            self.covers.as_ref(),
-            &mut self.cover_textures,
-            &mut self.cover_lru_keys,
-            &mut self.cover_in_flight,
-            &mut self.cover_in_flight_keys,
-            ctx,
-        );
     }
 
     /// Open the per-selection draft for the resolved readout: a Track draft
@@ -668,6 +645,7 @@ impl RiffApp {
     ) -> egui::TextureHandle {
         let palette = self.theme.active;
         crate::ui::artwork::lookup_cover_texture(
+            &mut self.cover_cache,
             &mut self.cover_textures,
             &mut self.cover_lru_keys,
             ctx,
@@ -775,24 +753,16 @@ impl RiffApp {
     /// One library-list track row (Issue 07): a 40px tree row with the
     /// animated equalizer indicator on the now-playing row, click/double-click
     /// handling, and the shared context menu.
-    fn render_track_row(
-        &mut self,
-        ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-        playback: &PlaybackSession,
-        track: &Track,
-        current_track: Option<&TrackId>,
-        remove_from_playlist: Option<&PlaylistId>,
-    ) {
+    fn render_track_row(&mut self, ui: &mut egui::Ui, track: &Track, ctx: TrackRowContext<'_>) {
+        let label = label_artist_title(track);
         self.interactive_track_row(
             ui,
-            library,
-            playback,
-            track,
-            current_track,
-            remove_from_playlist,
-            &label_artist_title(track),
-            0,
+            TrackRowSpec {
+                track,
+                label: &label,
+                indent_level: 0,
+            },
+            ctx,
         );
     }
 
@@ -806,19 +776,28 @@ impl RiffApp {
     /// menu describing the same Track. The right-click is not a weaker click:
     /// it never reaches the transport, and the row's drag affordance is not its
     /// business.
-    #[allow(clippy::too_many_arguments)]
     fn interactive_track_row(
         &mut self,
         ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-        playback: &PlaybackSession,
-        track: &Track,
-        current_track: Option<&TrackId>,
-        remove_from_playlist: Option<&PlaylistId>,
-        label: &str,
-        indent_level: usize,
+        spec: TrackRowSpec<'_>,
+        ctx: TrackRowContext<'_>,
     ) {
         use crate::ui::sidebar::{self, TreeRow};
+        // The nine-argument form this replaced needed no `too_many_arguments`
+        // allowance because the threading it took was never the point — see
+        // `TrackRowContext`.
+        let TrackRowSpec {
+            track,
+            label,
+            indent_level,
+        } = spec;
+        let TrackRowContext {
+            library,
+            playback,
+            current_track,
+            reorder,
+        } = ctx;
+        let remove_from_playlist = reorder.map(|slot| slot.playlist_id);
         let is_selected = library.selected_track.as_ref() == Some(&track.id);
         let is_current = current_track == Some(&track.id);
         let playing = playback.playback_state == PlaybackState::Playing;
@@ -873,90 +852,325 @@ impl RiffApp {
         );
     }
 
-    /// Apply the frame's titlebar actions. Close is resolved here rather than
-    /// in [`apply_titlebar_action`], because this method owns `self`: on
-    /// macOS/Windows the custom X follows the persisted "Quit on close"
-    /// preference — by default it hides through the frontend-local
-    /// [`VisibilityMessage(false)`] visibility channel (applied by `logic()`
-    /// one frame later), and only when the preference is on does it send a
-    /// real `Close`. On Linux there is no tray, so the X always really closes.
+    /// Read this frame's egui-owned facts into a [`FrameInput`].
     ///
-    /// This is NOT where a macOS close is resolved, and it must not become
-    /// one: the native branch's window controls are the system's traffic
-    /// lights, and `chrome.rs` never calls `draw_caption_controls` on
-    /// `ChromeMode::NativeTrafficLights` (the caption code is `cfg`'d out
-    /// there), so `TitleBarAction::Close` is unreachable on macOS — the red
-    /// button's close is resolved by [`close_resolution`] in `ui()`'s native
-    /// block instead. Unifying these two paths would reintroduce the
-    /// tray-Quit cancellation bug, because this one resolves a `Close` through
-    /// the preference alone and cannot see the quit intent.
-    fn apply_titlebar_actions(&mut self, ctx: &egui::Context, library: &mut LibrarySession) {
-        for action in self.titlebar_actions.drain(..) {
-            if action == TitleBarAction::Close {
-                #[cfg(not(target_os = "linux"))]
-                {
-                    if library.ui_flags.close_quits_app {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    } else {
-                        let _ = self.visibility_tx.send(CUSTOM_TITLEBAR_CLOSE);
-                    }
+    /// The one place the draw half reaches into egui on the Frame's behalf, and
+    /// it only *reads*: a viewport flag, two key presses, and the window
+    /// metric the native chrome branch lays out against. Everything else the
+    /// frame decides is decided from these, which is what keeps
+    /// `ui::frame` free of any egui type at all.
+    fn read_frame_input(ui: &egui::Ui, frame: &eframe::Frame) -> FrameInput {
+        let ctx = ui.ctx();
+        // Order matters and mirrors the pre-frame code exactly: the "no widget
+        // owns the keyboard" test short-circuits BEFORE the key is consumed,
+        // so a Space a text field wanted is left for the field.
+        let toggle_playback = !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space));
+        FrameInput {
+            native_close_requested: ctx.input(|i| i.viewport().close_requested()),
+            viewport_maximized: ctx.input(|i| i.viewport().maximized.unwrap_or(false)),
+            search_focus_requested: ctx
+                .input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::K)),
+            toggle_playback,
+            traffic_lights_width: crate::ui::chrome::measured_traffic_lights_width(frame),
+            zoom_factor: ctx.zoom_factor(),
+        }
+    }
+
+    /// Borrow this frame's state out into a [`Frame`].
+    ///
+    /// One bundle of disjoint field borrows rather than a `&mut RiffApp`, so
+    /// the frame can be driven with no application at all — which is why
+    /// `tests/frame_tests.rs` needs no kittest harness and no eleven-argument
+    /// constructor. It is built once per slot (see `ui()`), which is what lets
+    /// the draw half keep its own `&mut self` between the Frame's steps.
+    #[allow(clippy::too_many_arguments)]
+    fn frame<'a>(
+        &'a mut self,
+        playback: &'a mut PlaybackSession,
+        library: &'a mut LibrarySession,
+    ) -> Frame<'a> {
+        Frame::new(
+            FrameParts {
+                theme: &mut self.theme,
+                feedback: &mut self.feedback,
+                scroll_memory: &mut self.scroll_memory,
+                views: &mut self.views,
+                backend_events: &self.backend_events,
+                transport: self.transport.as_ref(),
+                scans: self.scans.as_ref(),
+                tag_edits: &mut self.tag_editor,
+                covers: self.covers.as_ref(),
+                cover_cache: &mut self.cover_cache,
+                watchers: &self.watcher_manager,
+                prefs: &mut self.prefs,
+                settings_store: self.settings_store.as_mut(),
+                playlist_store: self.playlist_store.as_mut(),
+                clear_cache_in_flight: &mut self.clear_cache_in_flight,
+                global_search_focus: &mut self.global_search_focus,
+                title_key: &mut self.last_title_key,
+                playlist_view: &mut self.playlist_view,
+                smart_playlist_view: &mut self.smart_playlist_view,
+                playlist_rename: &mut self.playlist_rename,
+                playlist_create_name: &mut self.playlist_create_name,
+                playback_live: &self.playback,
+                #[cfg(target_os = "macos")]
+                quit_flag: &self.quit_flag,
+            },
+            playback,
+            library,
+        )
+    }
+
+    /// Enact the head half's egui-bound leaves, in the Frame's order.
+    ///
+    /// Everything here was *decided* by `Frame::advance` and is performed here
+    /// only because it is egui-shaped: install the palette, flush the texture
+    /// map a settled Thumbnail-cache clear emptied, upload the frame's Cover
+    /// arrivals, and answer the native close request.
+    ///
+    /// The flush runs before the uploads on purpose — the order the pre-split
+    /// frame ran. At clear-confirm time every visible row would re-request
+    /// while the wipe was still queued behind those very requests, rebuilding
+    /// the entries the user had just asked to delete; settled is the moment the
+    /// disk is genuinely empty, so it is the moment the screen can be emptied
+    /// with it. A `Failed` clear leaves every texture in place, because nothing
+    /// was removed and so nothing has to be re-derived.
+    fn enact_frame_head(&mut self, ctx: &egui::Context, out: &mut FrameOutput) {
+        self.enact_theme_palette(ctx, out);
+        if let Some(outcome) = out.cache_clear.clone() {
+            flush_cleared_cache(&outcome, &mut self.cover_textures, &mut self.cover_lru_keys);
+        }
+        for arrival in out.cover_arrivals.drain(..) {
+            crate::ui::artwork::store_cover_texture(
+                &mut self.cover_cache,
+                ctx,
+                &mut self.cover_textures,
+                &mut self.cover_lru_keys,
+                arrival,
+            );
+        }
+        #[cfg(target_os = "macos")]
+        if out.cancels_native_close() {
+            // eframe quits unless the frame that reported the close carries
+            // the cancel, so this cannot be deferred to `enact_frame_tail`.
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            let _ = self.visibility_tx.send(CUSTOM_TITLEBAR_CLOSE);
+        }
+    }
+
+    /// Enact the tail half's egui-bound leaves: the window title, the tray
+    /// tooltip, the hide gesture, and the end-of-frame repaint tick.
+    ///
+    /// The tick keeps visible frames responsive (seek readouts, the playing
+    /// row). A window hidden to the tray schedules no repaints — the tray wakes
+    /// the loop on demand — so it is gated on `window_hidden`: without the gate,
+    /// egui keeps re-requesting repaints forever on a window it still believes
+    /// is visible (eframe 0.35 keeps calling `ui` for a hidden window). Linux
+    /// has no hidden state, so it keeps the unconditional tick.
+    fn enact_frame_tail(&mut self, ctx: &egui::Context, out: &mut FrameOutput) {
+        for command in out.viewport.drain(..) {
+            let command = match command {
+                FrameViewport::Minimize => {
+                    crate::ui::chrome::WindowControl::Minimize.viewport_command()
                 }
-                #[cfg(target_os = "linux")]
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            } else {
-                apply_titlebar_action(action, ctx, library, &mut self.theme);
+                FrameViewport::Maximized(value) => egui::ViewportCommand::Maximized(value),
+                FrameViewport::Close => egui::ViewportCommand::Close,
+                FrameViewport::CancelClose => egui::ViewportCommand::CancelClose,
+                FrameViewport::Title(title) => egui::ViewportCommand::Title(title),
+            };
+            ctx.send_viewport_cmd(command);
+        }
+        if out.pick_folder {
+            // The platform folder picker: an OS dialog, performed here because
+            // it is not a decision. Nothing left in this frame reads the
+            // registered root, so it rides the tail with the viewport commands.
+            let library_arc = self.library.clone();
+            let mut guard = library_arc.lock_or_recover();
+            self.add_library_via_platform_picker(&mut guard);
+        }
+        if out.hide_window {
+            // The custom titlebar X is the only hide gesture on macOS/Windows,
+            // and it hides through this same channel rather than sending a
+            // `Close` — with the close-to-tray veto gone, any close that
+            // reaches eframe quits.
+            #[cfg(not(target_os = "linux"))]
+            let _ = self.visibility_tx.send(CUSTOM_TITLEBAR_CLOSE);
+        }
+        // The tooltip is compared against the last push first, so a steady-state
+        // frame sends nothing and formats nothing (REQ-SI-001): the identity is
+        // what changed, not the text.
+        #[cfg(not(target_os = "linux"))]
+        if let Some(tooltip) = out.tray_tooltip.take()
+            && self.last_tray_tooltip != tooltip
+        {
+            if let Some(ref tray) = self.tray_icon {
+                crate::ui::tray::update_tooltip(tray, &tooltip);
             }
+            self.last_tray_tooltip = tooltip;
         }
+        #[cfg(target_os = "linux")]
+        {
+            let _ = out.tray_tooltip.take();
+        }
+        #[cfg(not(target_os = "linux"))]
+        if !self.window_hidden {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        #[cfg(target_os = "linux")]
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 
-    /// Resolve the macOS native close request (the red traffic light) for the
-    /// frame `ui()` is building, and act on it.
+    /// Draw the top 56px strip and report what the user did on it.
     ///
-    /// Called as the first thing `ui()` does, because eframe reads
-    /// `close_requested()` at the top of the frame and quits unless THAT
-    /// frame's viewport output carries [`egui::ViewportCommand::CancelClose`]
-    /// — so the decision cannot be deferred, and nothing else in the frame may
-    /// get to queue a competing close first.
+    /// The frameless titlebar (issue 04, ADR 0005) merged with the former top
+    /// bar — wordmark, scan status, the theme/Now Playing/Settings/Advanced
+    /// controls, and the custom minimize/close buttons over a full-width drag
+    /// region. Content in, actions out: the search field edits a scratch buffer
+    /// and the query rides back in the report, and the Ctrl+K focus request is
+    /// consumed by [`Frame::apply_titlebar`] rather than cleared here.
     ///
-    /// The event carries no provenance (see [`CloseIntent`]): the tray's Quit
-    /// enqueues the same `Close` the red light produces. The quit flag is the
-    /// one fact that separates them, and the tray stores it before enqueueing —
-    /// see the ordering note in `tray.rs`. The load is `Acquire` to pair with
-    /// that `Release` store; the correctness argument rests on that pair, not
-    /// on any third-party crate's internal mutex.
-    ///
-    /// A no-op when eframe reported no close request, and on Windows/Linux
-    /// (not compiled) — their frameless OS close always quits.
-    #[cfg(target_os = "macos")]
-    fn resolve_native_close(&mut self, ui: &egui::Ui, library: &LibrarySession) {
-        if !ui.input(|i| i.viewport().close_requested()) {
-            return;
-        }
-        let intent = if self.quit_flag.load(std::sync::atomic::Ordering::Acquire) {
-            CloseIntent::Quit
-        } else {
-            CloseIntent::WindowClose
+    /// `scan_status` is the string the Frame composed at step 5, one line above
+    /// every panel — so a slot filled after the compose really would be a frame
+    /// late, which is what the headless order test pins.
+    fn draw_titlebar(
+        &mut self,
+        ui: &mut egui::Ui,
+        input: &FrameInput,
+        playback: &mut PlaybackSession,
+        library: &mut LibrarySession,
+        out: &mut FrameOutput,
+    ) {
+        let scan_status = library.scan_status.clone();
+        let mut report = TitlebarReport {
+            // The viewport's maximized flag is egui-owned and the Frame cannot
+            // read it, so it rides the report: the draw half reads, the Frame
+            // decides what `ToggleMaximize` means.
+            maximized: input.viewport_maximized,
+            search_query: library.search_query.clone(),
+            ..TitlebarReport::default()
         };
-        if let Some((cancel, hide)) = close_resolution(intent, library.ui_flags.close_quits_app) {
-            ui.ctx().send_viewport_cmd(cancel);
-            let _ = self.visibility_tx.send(hide);
-        }
+        egui::Panel::top("titlebar")
+            .exact_size(theme::TITLEBAR_H)
+            .frame(egui::Frame::NONE.fill(self.theme.active.surface))
+            .show(ui, |ui| {
+                let content = crate::ui::chrome::TitleBarContent {
+                    scan_status: scan_status.as_deref(),
+                    theme_dark: self.theme.dark,
+                    active_nav: crate::ui::chrome::NavDestination::active(
+                        library.view_mode,
+                        library.browse_mode,
+                    ),
+                    // The chrome-mode decision, consumed here so the launch
+                    // viewport and this renderer cannot drift apart. The
+                    // clearance is measured from the window where eframe can
+                    // measure it (macOS); the ignored-elsewhere value is the
+                    // documented fallback.
+                    chrome: crate::ui::chrome::chrome_mode(),
+                    traffic_clearance: crate::ui::chrome::traffic_light_clearance(
+                        input.traffic_lights_width,
+                        input.zoom_factor,
+                    ),
+                };
+                self.titlebar_actions.clear();
+                let search_response = crate::ui::chrome::show_titlebar(
+                    ui,
+                    &mut self.icons,
+                    &self.theme.active,
+                    &content,
+                    &mut report.search_query,
+                    &mut self.titlebar_actions,
+                );
+                // Ctrl+K landed: focus the titlebar search field this frame.
+                if self.global_search_focus {
+                    search_response.request_focus();
+                    report.focus_search = true;
+                }
+            });
+        report.actions = std::mem::take(&mut self.titlebar_actions);
+        self.frame(playback, library).apply_titlebar(out, &report);
     }
 
-    /// Drain every pending [`BackendEvents::events`] for this frame.
+    /// Draw the left 280px column and report what the user did on it.
     ///
-    /// Called at the start of the frame so any dispatch recorded by the tray
-    /// thread or by a transport between frames is observable before the UI
-    /// renders. The frontend renders from the real engine updates on the
-    /// playback session; this seam's events are the observability surface
-    /// that proves every dispatch path (mouse/keyboard/tray) flows through
-    /// one recorded Transport.
-    pub fn drain_backend_events(&self) -> Vec<riff_backend::app::events::BackendEvent> {
-        use std::sync::PoisonError;
-        self.backend_events
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .events()
+    /// The library browser (search, Library/Folders nav, playlists). Shared
+    /// chrome per the mockup — present on every view; only the main stage
+    /// switches. The restyled content (issue 07) keeps a 12px inset from the
+    /// panel edge, and the panel carries the surface token itself rather than
+    /// inheriting a default.
+    ///
+    /// The panel mutates NOTHING: every nav click, every smart-list row, every
+    /// playlist row and every prompt resolution is a [`SidebarAction`], and
+    /// [`Frame::apply_sidebar`] is the only writer of the library session.
+    fn draw_sidebar(
+        &mut self,
+        ui: &mut egui::Ui,
+        playback: &mut PlaybackSession,
+        library: &mut LibrarySession,
+        out: &mut FrameOutput,
+    ) {
+        egui::Panel::left("sidebar")
+            .exact_size(theme::SIDEBAR_W)
+            .resizable(false)
+            .frame(
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::same(12))
+                    .fill(self.theme.active.surface),
+            )
+            .show(ui, |ui| {
+                self.render_library_sidebar(ui, playback, library, out);
+            });
+    }
+
+    /// Draw the bottom 88px strip and report what the user did on it.
+    ///
+    /// Transport + progress + volume at the exact 88px playerbar token height,
+    /// plus the queue sheet above its right edge while the bar's queue button
+    /// has it open. Both report through the same action drain, and
+    /// [`Frame::apply_control_bar`] is the only applier.
+    fn draw_control_bar(
+        &mut self,
+        ui: &mut egui::Ui,
+        playback: &mut PlaybackSession,
+        library: &mut LibrarySession,
+        out: &mut FrameOutput,
+    ) {
+        let report = self.render_control_bar(ui, library, playback);
+        self.frame(playback, library)
+            .apply_control_bar(out, &report);
+    }
+
+    /// Draw the main stage and report what the user did on it.
+    ///
+    /// Exactly one View visible at a time. The Library and Settings stages
+    /// answer through their own appliers (they are Views, and the Settings
+    /// modal owns watcher and store effects the Frame has no business
+    /// knowing); the Now Playing stage's actions travel back in the report.
+    fn draw_stage(
+        &mut self,
+        ui: &mut egui::Ui,
+        playback: &mut PlaybackSession,
+        library: &mut LibrarySession,
+        out: &mut FrameOutput,
+    ) {
+        let mut report = StageReport::default();
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(self.theme.active.background))
+            .show(ui, |ui| match library.view_mode {
+                ViewMode::Library => {
+                    // The elastic column stage (elastic-column spec): the
+                    // section-driven column sequence plus the collapsible
+                    // inspector replace the fixed three-pane explorer.
+                    self.render_elastic_stage(ui, library, playback);
+                }
+                ViewMode::NowPlaying => {
+                    self.show_now_playing_view(ui, playback, &mut report);
+                }
+                ViewMode::Settings => {
+                    self.show_settings_view(ui, library, playback);
+                }
+            });
+        self.frame(playback, library).apply_stage(out, &report);
     }
 }
 
@@ -971,7 +1185,7 @@ impl eframe::App for RiffApp {
     /// Windows/Linux the frameless OS close (Alt+F4, taskbar Close) and the
     /// tray Quit both pass through untouched. On macOS that is no longer quite
     /// the whole story — the red traffic light's close IS resolved against the
-    /// "Quit on close" preference, in `ui()`'s native block, so that a window
+    /// "Quit on close" preference, as the Frame's first step, so that a window
     /// close can still hide to the tray. What survives unchanged on every
     /// platform is the rule that stops the resolver from eating a quit: a
     /// riff-initiated quit is identified by the shared quit flag and is never
@@ -1011,185 +1225,60 @@ impl eframe::App for RiffApp {
         crate::ui::traffic_lights::apply(frame);
     }
 
+    /// One frame. The driver, not the sequence: the ORDER lives in
+    /// [`crate::ui::frame`], which states it, owns it, and asserts it headlessly
+    /// (`crates/riff-gui/tests/frame_tests.rs`). What is left here is the part
+    /// that genuinely is egui — reading this frame's input facts, drawing four
+    /// panels, and enacting the decisions the Frame handed back — plus the two
+    /// guards, whose shapes are load-bearing:
+    ///
+    /// * Both `Arc`s are cloned BEFORE locking: the guards borrow the clones,
+    ///   so the whole frame can still call `self.<method>(...)` — exactly how
+    ///   the pre-split frame loop handled `self.state`.
+    /// * Playback is snapshotted (lock → clone → drop) and the library guard is
+    ///   taken live. The engine and coordinator write playback state on their
+    ///   own threads, so the frame renders from a plain clone and
+    ///   [`Frame::finish`] writes back only the UI-owned fields — a whole
+    ///   session replace would clobber engine-written position and traversal
+    ///   index. The library session is UI-owned, so its guard is held for the
+    ///   whole frame, and the frame-end Preferences commit sees it.
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        // Clone both Arcs BEFORE locking: the guards borrow `self`, and the
-        // whole frame below calls `self.<method>(...)` — exactly how the
-        // pre-split frame loop handled `self.state`.
         let playback_arc = self.playback.clone();
         let library_arc = self.library.clone();
 
-        // Snapshot playback first (lock → clone → drop), then take the
-        // library guard. The engine and coordinator write playback state on
-        // their own threads, so the frame renders from a plain clone and
-        // writes back only the UI-owned fields at frame end — a whole
-        // session replace here would clobber engine-written position and
-        // traversal index. The library session is UI-owned, so its guard is
-        // held live for the whole frame.
         let mut playback = playback_arc.lock_or_recover().clone();
         let mut library = library_arc.lock_or_recover();
 
-        // Native close request (macOS traffic lights) — resolved first, in the
-        // very frame eframe reported it in, because eframe quits unless THAT
-        // frame's output carries the cancel. See `resolve_native_close`.
-        #[cfg(target_os = "macos")]
-        self.resolve_native_close(ui, &library);
+        let input = Self::read_frame_input(ui, frame);
 
-        // Apply the active theme (REQ-UI-007 accessibility). A persisted
-        // high-contrast choice is already in the session — the runtime
-        // hydrated it before this app existed — so it takes effect on the very
-        // first frame. High Contrast is a variant over the active light/dark
-        // palette.
-        self.apply_theme(ui.ctx(), library.ui_flags.high_contrast);
-
-        // Drain the backend event inbox: route playback-error typed notices
-        // to the status line (issue 01 seam fix) — the coordinator no longer
-        // writes the library session's status slot directly — and fold any
-        // Library-generation move into the Scroll Memory, so a committed
-        // rescan turns every Section slot's fingerprint stale.
-        let events = self.drain_backend_events();
-        self.scroll_memory.note_backend_events(&events);
-        apply_backend_events(events, &mut self.feedback);
-
-        self.drain_background_outcomes(&mut library);
-        // Compose the titlebar status line from the independent source slots,
-        // so a Library Scan update cannot erase a live playback error or a Tag
-        // Edit outcome (issue 11). The composed message feeds the existing
-        // `scan_status` line — same placement, same copy.
-        library.scan_status = self.feedback.display_message();
-        self.update_cover_cache(ui.ctx());
-        self.poll_watchers();
-
-        handle_keyboard_shortcuts(
-            ui.ctx(),
-            &playback,
-            &mut self.global_search_focus,
-            self.transport.as_ref(),
-        );
-
-        // Update window title and tray tooltip (REQ-SI-001). Both are
-        // compared against the last-pushed identity first and only rebuilt
-        // when the playing track moves; the tooltip shows "Artist - Title"
-        // for the current track, else "riff".
-        self.update_window_title(ui.ctx(), &playback);
+        // Steps 1-9: the native close, the theme, the event inbox, the three
+        // background services, the status-line compose, the covers, the
+        // watcher, the keyboard, and the OS title. Then the egui-bound leaves
+        // they decided on, in the same order — before any panel draws, because
+        // the rows resolve cover textures as they paint and the widgets need
+        // the palette installed.
+        let mut output = self.frame(&mut playback, &mut library).advance(&input);
+        self.enact_frame_head(ui.ctx(), &mut output);
 
         // --- SHELL (Issue 06): unified Panel API at exact token dimensions ---
         //
-        // Top 56px strip: the frameless titlebar (issue 04, ADR 0005)
-        // merged with the former top bar — wordmark, scan status, the
-        // theme/Now Playing/Settings/Advanced controls, and the custom
-        // minimize/close buttons over a full-width drag region.
-        let scan_status = library.scan_status.clone();
-        egui::Panel::top("titlebar")
-            .exact_size(theme::TITLEBAR_H)
-            .frame(egui::Frame::NONE.fill(self.theme.active.surface))
-            .show(ui, |ui| {
-                let content = crate::ui::chrome::TitleBarContent {
-                    scan_status: scan_status.as_deref(),
-                    theme_dark: self.theme.dark,
-                    active_nav: crate::ui::chrome::NavDestination::active(
-                        library.view_mode,
-                        library.browse_mode,
-                    ),
-                    // The chrome-mode decision, consumed here so the launch
-                    // viewport and this renderer cannot drift apart. The
-                    // clearance is measured from the window where eframe can
-                    // measure it (macOS); the ignored-elsewhere value is the
-                    // documented fallback.
-                    chrome: crate::ui::chrome::chrome_mode(),
-                    traffic_clearance: crate::ui::chrome::traffic_light_clearance(
-                        crate::ui::chrome::measured_traffic_lights_width(frame),
-                        ui.ctx().zoom_factor(),
-                    ),
-                };
-                self.titlebar_actions.clear();
-                let search_response = crate::ui::chrome::show_titlebar(
-                    ui,
-                    &mut self.icons,
-                    &self.theme.active,
-                    &content,
-                    &mut library.search_query,
-                    &mut self.titlebar_actions,
-                );
-                // Ctrl+K landed: focus the titlebar search field this frame.
-                if self.global_search_focus {
-                    search_response.request_focus();
-                    self.global_search_focus = false;
-                }
-                self.apply_titlebar_actions(ui.ctx(), &mut library);
-            });
-
-        // Left 280px column: the library browser (search, Library/Folders
-        // nav, playlists). Shared chrome per the mockup — present on every
-        // view; only the main stage switches. The restyled content (issue 07)
-        // keeps a 12px inset from the panel edge, and the panel carries the
-        // surface token itself rather than inheriting a default.
-        egui::Panel::left("sidebar")
-            .exact_size(theme::SIDEBAR_W)
-            .resizable(false)
-            .frame(
-                egui::Frame::new()
-                    .inner_margin(egui::Margin::same(12))
-                    .fill(self.theme.active.surface),
-            )
-            .show(ui, |ui| {
-                self.render_library_sidebar(ui, &mut library);
-            });
-
-        // Bottom 88px strip: transport + progress + volume.
-        self.render_control_bar(ui, &mut library, &mut playback);
-
+        // Four slots, and the Frame answers each report at its own slot: the
+        // titlebar's before the sidebar highlights the navigation it changed,
+        // the control bar's before the stage picks the view it switched. That
+        // is why these are four statements and not one loop.
+        self.draw_titlebar(ui, &input, &mut playback, &mut library, &mut output);
+        self.draw_sidebar(ui, &mut playback, &mut library, &mut output);
+        self.draw_control_bar(ui, &mut playback, &mut library, &mut output);
         // --- MAIN STAGE: exactly one View visible at a time ---
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(self.theme.active.background))
-            .show(ui, |ui| match library.view_mode {
-                ViewMode::Library => {
-                    // The elastic column stage (elastic-column spec): the
-                    // section-driven column sequence plus the collapsible
-                    // inspector replace the fixed three-pane explorer.
-                    self.render_elastic_stage(ui, &mut library, &mut playback);
-                }
-                ViewMode::NowPlaying => self.show_now_playing_view(ui, &mut library, &playback),
-                ViewMode::Settings => {
-                    self.show_settings_view(ui, &mut library, &mut playback);
-                }
-            });
+        self.draw_stage(ui, &mut playback, &mut library, &mut output);
 
-        // --- WRITE BACK: the library guard is still live here, so the
-        // frame-end Preferences commit sees the frame's playback snapshot
-        // (volume, mute, replay-gain, shuffle, repeat) together with the
-        // library session's preference fields, and lands any drift in the
-        // store — durability by construction, no per-handler call sites.
-        // Then the guard is dropped and only the UI-owned playback fields
-        // are written back: the engine and coordinator own `playback_state`,
-        // `current_position`, and the queue's traversal state, so a
-        // whole-session replace here would clobber their work between
-        // frames.
-        self.prefs
-            .commit_if_changed(&playback, &library, self.settings_store.as_mut());
+        // Step 14: the write-back, with one owner. The library guard is still
+        // live, so the Preferences commit sees the frame's playback snapshot
+        // together with the library session's preference fields.
+        self.frame(&mut playback, &mut library).finish();
         drop(library);
-        {
-            let mut live = self.playback.lock_or_recover();
-            live.current_volume = playback.current_volume;
-            live.muted = playback.muted;
-            live.replaygain_enabled = playback.replaygain_enabled;
-            live.queue.set_shuffle(playback.queue.shuffle);
-            live.queue.repeat = playback.queue.repeat;
-        }
-        // The end-of-frame tick keeps visible frames responsive (seek
-        // readouts, the playing row). A window hidden to the tray schedules no
-        // repaints — the tray wakes the loop on demand — so gate it on
-        // `window_hidden`: without the gate, egui keeps re-requesting repaints
-        // forever on a window it still believes is visible (eframe 0.35 keeps
-        // calling `ui` for a hidden window). Linux has no hidden state, so it
-        // keeps the unconditional tick.
-        #[cfg(not(target_os = "linux"))]
-        if !self.window_hidden {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(100));
-        }
-        #[cfg(target_os = "linux")]
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(100));
+
+        self.enact_frame_tail(ui.ctx(), &mut output);
     }
 }
 
@@ -1216,7 +1305,8 @@ pub const CUSTOM_TITLEBAR_CLOSE: VisibilityMessage = VisibilityMessage(false);
 /// There is no in-band way to tell the two apart at the point riff decides,
 /// so the app consults a fact it already knows instead: the app-wide
 /// `quit_flag` from `AppRuntime::spawn`, which the tray stores before it
-/// enqueues the close and [`RiffApp`] loads in `ui()`'s native close block.
+/// enqueues the close and [`crate::ui::frame::Frame`] loads as the first
+/// decision of the frame it lands in.
 ///
 /// Note that OS-level Cmd+Q is NOT one of the two ambiguous cases, and only
 /// by luck: winit installs a default macOS app menu whose Quit calls
@@ -1271,44 +1361,14 @@ pub fn close_resolution(
     }
 }
 
-/// Apply one [`crate::ui::chrome::TitleBarAction`] to app state and viewport
-/// commands (Issue 06). Minimize/maximize apply their viewport commands here;
-/// Close is handled by the caller (`ui()`), which owns the visibility channel
-/// the custom X's hide travels on (macOS/Windows) or sends the real close
-/// (Linux). Preference changes are session writes only — the frame-end
-/// `Preferences` commit persists them.
-fn apply_titlebar_action(
-    action: crate::ui::chrome::TitleBarAction,
-    ctx: &egui::Context,
-    library: &mut LibrarySession,
-    theme: &mut ThemeState,
-) {
-    use crate::ui::chrome::{NavDestination, TitleBarAction as Action, WindowControl};
-    match action {
-        Action::ToggleTheme => theme.dark = !theme.dark,
-        Action::ToggleNowPlaying => {
-            // Now Playing replaces the active view; leaving it returns to the
-            // Library view (resolved navigation gap).
-            library.view_mode = match library.view_mode {
-                ViewMode::Library | ViewMode::Settings => ViewMode::NowPlaying,
-                ViewMode::NowPlaying => ViewMode::Library,
-            };
-        }
-        Action::GoSettings => {
-            NavDestination::Settings.apply(&mut library.view_mode, &mut library.browse_mode);
-        }
-        Action::Minimize => ctx.send_viewport_cmd(WindowControl::Minimize.viewport_command()),
-        Action::ToggleMaximize => {
-            let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-        }
-        // Close is deliberately not handled here: the caller (`ui()`'s action
-        // drain) resolves it first — hide via the visibility channel on
-        // macOS/Windows, real close on Linux — so it can never reach this
-        // match. The arm exists to keep the match exhaustive.
-        Action::Close => {}
-    }
-}
+// `apply_titlebar_action` is gone with the frame's own applier: it needed a
+// `Context` for two viewport commands and read the maximized flag off egui's
+// input, so none of it could be asserted headlessly. `Frame::apply_titlebar`
+// is the same match in the Frame's own vocabulary — `Minimize` and
+// `ToggleMaximize` become [`FrameViewport`] intents, and the Close arm that
+// used to be a deliberate no-op here is the one that now resolves the
+// preference (hide through the visibility channel on macOS/Windows, really
+// close on Linux), because the Frame owns the report rather than a `Context`.
 
 // `apply_browser_action` is gone, and with it the `ContextMenu { .. } => {}`
 // no-op arm it carried. That arm existed because the section roots routed the
@@ -2076,26 +2136,6 @@ fn last_played_label(tracks: &[riff_backend::domain::Track]) -> String {
     )
 }
 
-/// Apply one [`crate::ui::now_playing::NowPlayingAction`] (Issue 10). Close
-/// ALWAYS lands on the Library View: Now Playing is a mode that replaces the
-/// active View (resolved navigation gaps), so there is no prior view to
-/// restore — closing from anywhere returns to the Library. Transport actions
-/// pass straight through to the Transport port; seek targets re-clamp
-/// against the live track duration exactly like the playerbar's.
-pub fn apply_now_playing_action(
-    action: crate::ui::now_playing::NowPlayingAction,
-    library: &mut LibrarySession,
-    playback: &PlaybackSession,
-    transport: &dyn Transport,
-) {
-    use crate::ui::now_playing::NowPlayingAction as Action;
-    match action {
-        Action::Close => library.view_mode = ViewMode::Library,
-        Action::PlayNext(track_id) => transport.play_next(track_id),
-        Action::Seek(duration) => transport.seek(playback, duration.as_secs_f32()),
-    }
-}
-
 /// The transient playlist-prompt slots the sidebar's playlist rows act on,
 /// grouped so [`apply_playlist_row_action`] stays readable. They live on
 /// [`RiffApp`] between frames; this borrow bundle is built per frame.
@@ -2227,64 +2267,6 @@ pub fn commit_playlist_reorder(
     }
 }
 
-/// Apply one restyled player-bar action (Issue 08) through the SAME engine
-/// intents and state paths the pre-restyle controls used. Transport actions
-/// pass straight through to the Transport port; the port's mutators complete
-/// the intent on the session themselves — `set_volume` clamps and stores the
-/// slider value, `toggle_mute` flips the flag, `toggle_shuffle`/
-/// `toggle_repeat` flip the queue state — and send the engine exactly what
-/// it needs, so a muted app never emits sound. Seek targets re-clamp against
-/// the live track duration inside the adapter. Preference changes are
-/// session writes only — the frame-end `Preferences` commit persists them.
-pub fn apply_player_bar_action(
-    action: crate::ui::playerbar::PlayerBarAction,
-    library: &mut LibrarySession,
-    playback: &mut PlaybackSession,
-    transport: &dyn Transport,
-) {
-    use crate::ui::playerbar::PlayerBarAction as Action;
-    match action {
-        Action::Previous => transport.previous(),
-        Action::Pause => transport.pause(),
-        Action::Resume => transport.resume(),
-        Action::PlaySelected => {
-            // Pre-restyle behavior: with nothing selected, play does nothing.
-            if let Some(selected) = library.selected_track.clone() {
-                transport.play(selected);
-            }
-        }
-        Action::Next => transport.next(),
-        Action::Stop => transport.stop(),
-        Action::Seek(target) => transport.seek(playback, target.as_secs_f32()),
-        Action::SetVolume(volume) => {
-            // While muted the slider still edits current_volume, but the
-            // engine keeps receiving 0 until unmuted.
-            transport.set_volume(playback, volume);
-        }
-        Action::ToggleMute => {
-            // Muting never moves the volume slider — it only zeroes the
-            // effective volume sent to the engine; unmuting restores it.
-            transport.toggle_mute(playback);
-        }
-        Action::ToggleShuffle => transport.toggle_shuffle(playback),
-        Action::ToggleRepeat => transport.toggle_repeat(playback),
-        Action::ToggleQueue => {
-            // The queue panel is session state, not persisted (issue 13).
-            library.queue_open = !library.queue_open;
-        }
-        Action::ToggleExpanded => {
-            // The enlarged player view IS the Now Playing mode (issue 13):
-            // same routing as the titlebar's Now Playing toggle, and purely
-            // view state — playback keeps running untouched.
-            library.view_mode = match library.view_mode {
-                ViewMode::Library | ViewMode::Settings => ViewMode::NowPlaying,
-                ViewMode::NowPlaying => ViewMode::Library,
-            };
-        }
-        Action::PlayNext(track_id) => transport.play_next(track_id),
-    }
-}
-
 /// Global keyboard shortcuts: Ctrl+K focuses the global search (issue 06),
 /// and Space toggles playback. Public so the shortcut contract is testable
 /// headlessly (precedent: [`Preferences::hydrate`]).
@@ -2294,96 +2276,35 @@ pub fn handle_keyboard_shortcuts(
     global_search_focus: &mut bool,
     transport: &dyn Transport,
 ) {
-    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::K)) {
-        *global_search_focus = true;
-    }
-    if !ctx.egui_wants_keyboard_input()
-        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
-    {
-        let playing = playback.playback_state == PlaybackState::Playing;
-        if playing {
-            transport.pause();
-        } else {
-            transport.resume();
-        }
-    }
-}
-
-/// Push the window title and tray tooltip for the current track (REQ-SI-001).
-/// Both derive from one identity — the current `TrackId` — which is compared
-/// against the last push FIRST: steady-state frames send no viewport command
-/// and format nothing. The key exists to avoid repeating OS viewport
-/// commands, not for staleness; the current Track resolves through the
-/// Session Views seam over the store's `get_track` query — never the
-/// in-memory mirror.
-/// Last identity pushed to the window title / tray tooltip. `Unset`
-/// distinguishes "nothing pushed yet" from "pushed while nothing plays" so
-/// the very first frame always pushes once.
-#[derive(Default)]
-enum TitleKey {
-    #[default]
-    Unset,
-    Set(Option<TrackId>),
+    // The "no widget owns the keyboard" test short-circuits BEFORE the key is
+    // consumed, so a Space a text field wanted is left for the field — the same
+    // order `RiffApp::read_frame_input` reads them in.
+    let toggle_playback = !ctx.egui_wants_keyboard_input()
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space));
+    crate::ui::frame::apply_keyboard(
+        ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::K)),
+        toggle_playback,
+        playback,
+        global_search_focus,
+        transport,
+    );
 }
 
 impl RiffApp {
-    fn update_window_title(&mut self, ctx: &egui::Context, playback: &PlaybackSession) {
-        self.views
-            .sync_playback(&playback.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
-        let current_id = self.views.playback_current().map(|t| &t.id);
-        let unchanged = match &self.last_title_key {
-            TitleKey::Set(id) => id.as_ref() == current_id,
-            TitleKey::Unset => false,
-        };
-        if unchanged {
-            return;
-        }
-
-        // Cold path: the playing track moved — both strings are rebuilt and
-        // pushed exactly once per identity change.
-        let (tooltip, title) = match self.views.playback_current() {
-            Some(track) => {
-                let tooltip = format!(
-                    "{} - {}",
-                    track.metadata.display_artist(),
-                    track.metadata.display_title(&track.file_path)
-                );
-                let title = format!("{tooltip} \u{2014} riff");
-                (tooltip, title)
-            }
-            None => ("riff".to_owned(), "riff".to_owned()),
-        };
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
-        self.last_title_key = TitleKey::Set(current_id.cloned());
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            if self.last_tray_tooltip != tooltip {
-                if let Some(ref tray) = self.tray_icon {
-                    crate::ui::tray::update_tooltip(tray, &tooltip);
-                }
-                self.last_tray_tooltip = tooltip;
-            }
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let _ = tooltip;
-        }
-    }
-
     /// Bottom shell strip (Issues 06 + 08): transport, seek row, and volume
     /// at the exact 88px playerbar token height, drawn by the restyled
-    /// playerbar widgets. Every reported [`crate::ui::playerbar::
-    /// PlayerBarAction`] routes through [`apply_player_bar_action`], so each
-    /// control still emits its engine command. Also stashes this frame's
-    /// `(title, meta_line)` handout in [`Self::now_playing_labels`] for the
-    /// Now Playing stage.
+    /// playerbar widgets, plus the queue sheet above its right edge. Content
+    /// in, actions out: the panel reads the sessions and **reports**; the Frame's
+    /// [`Frame::apply_control_bar`] is the only applier, so each control still
+    /// emits its engine command and the panel itself mutates no session state.
+    /// Also stashes this frame's `(title, meta_line)` handout in
+    /// [`Self::now_playing_labels`] for the Now Playing stage.
     fn render_control_bar(
         &mut self,
         ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-        playback: &mut PlaybackSession,
-    ) {
+        library: &LibrarySession,
+        playback: &PlaybackSession,
+    ) -> ControlBarReport {
         // Cover for the current track, served from the LRU texture cache;
         // misses enqueue a background resolve exactly like the other views.
         // The current Track comes from the Session Views seam over the
@@ -2460,7 +2381,7 @@ impl RiffApp {
         if library.queue_open {
             self.views
                 .sync_playback(&playback.queue, crate::ui::playerbar::QUEUE_PANEL_LIMIT);
-            let up_next = crate::ui::now_playing::up_next_entries(
+            let up_next = crate::ui::sidebar::up_next_entries(
                 self.views.playback_up_next(),
                 crate::ui::playerbar::QUEUE_PANEL_LIMIT,
             );
@@ -2472,10 +2393,10 @@ impl RiffApp {
                 &mut self.playerbar_actions,
             );
         }
-        for action in self.playerbar_actions.drain(..) {
-            apply_player_bar_action(action, library, playback, self.transport.as_ref());
-        }
         self.now_playing_labels = (title, meta_line);
+        ControlBarReport {
+            actions: std::mem::take(&mut self.playerbar_actions),
+        }
     }
 }
 
@@ -2486,11 +2407,31 @@ impl RiffApp {
     /// live count from the counts read model, with the Add-folder /
     /// "Last scan X ago" footer pinned to the panel's bottom. Draws inside
     /// the shell's fixed-width sidebar panel, which is shared chrome present
-    /// on every view; only the main stage switches. Every nav click lands on
-    /// the library view (clearing any active search) so exactly one browser
-    /// variant is visible after it — the variant itself renders in the
-    /// browser column pane (issue 08), not here.
-    fn render_library_sidebar(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
+    /// on every view; only the main stage switches. Every nav click reports a
+    /// [`SidebarAction`] that lands on the library view (clearing any active
+    /// search) so exactly one browser variant is visible after it — the variant
+    /// itself renders in the browser column pane (issue 08), not here.
+    ///
+    /// The panel mutates no session state at all: it reads the library session
+    /// and the frontend's transient playlist slots, and every click becomes a
+    /// report the Frame answers.
+    ///
+    /// **Why the panel applies its own reports** rather than returning one:
+    /// each sub-section reads what the one above it decided. The SMART LISTS
+    /// chevron folds the rows drawn *below* it away; the Playlists "+" opens
+    /// the prompt drawn *below* it; a prompt's confirmation moves a row's
+    /// highlight drawn *below* it. Answering once at the end of the panel would
+    /// make every one of those land a frame late, which is a behaviour change
+    /// and not a refactor. So the sidebar has four *sub-slots*, each answered
+    /// where the pre-split frame answered it — and the Frame stays the only
+    /// writer either way.
+    fn render_library_sidebar(
+        &mut self,
+        ui: &mut egui::Ui,
+        playback: &mut PlaybackSession,
+        library: &mut LibrarySession,
+        out: &mut FrameOutput,
+    ) {
         // One counts read per frame: every nav row's live count comes from
         // the counts read model (handoff issue 05), cached per store
         // generation so scans and playlist edits update it by the next frame.
@@ -2508,33 +2449,70 @@ impl RiffApp {
             library.view_mode == ViewMode::Library && library.browse_mode == BrowseMode::Folders;
 
         // --- LIBRARY ---------------------------------------------------------
+        let mut section = SidebarReport::default();
         self.render_library_rows(
             ui,
             library,
-            &counts,
-            library_section_live,
-            folder_section_live,
+            LibraryNav {
+                counts: &counts,
+                library_section_live,
+                folder_section_live,
+            },
+            &mut section,
         );
+        self.apply_sidebar_slot(playback, library, out, &section);
         ui.add_space(8.0);
 
         // --- SMART LISTS -------------------------------------------------------
         // Four core lists are always visible (no Advanced gate); Never Played
         // and Lost Gems relocate behind Advanced mode (relocated, not
         // deleted — handoff issue 07 / open decision 2).
-        self.render_smart_list_rows(ui, library, &counts);
+        let mut section = SidebarReport::default();
+        self.render_smart_lists_header(ui, library.ui_flags.smart_lists_collapsed, &mut section);
+        self.apply_sidebar_slot(playback, library, out, &section);
+        let mut section = SidebarReport::default();
+        self.render_smart_list_rows(
+            ui,
+            library,
+            library.ui_flags.smart_lists_collapsed,
+            &counts,
+            &mut section,
+        );
+        self.apply_sidebar_slot(playback, library, out, &section);
 
         // --- PLAYLISTS ---------------------------------------------------------
         // User playlists (Task 4.2): named, editable lists persisted in the
         // Application Store, with their existing create/rename/delete/reorder
         // flows. Always visible.
-        self.render_playlists_section(ui, library);
+        let mut header = SidebarReport::default();
+        self.render_playlists_header(ui, &mut header);
+        self.apply_sidebar_slot(playback, library, out, &header);
+        let mut prompts = SidebarReport::default();
+        self.render_playlist_rows(ui, &mut prompts);
+        self.apply_sidebar_slot(playback, library, out, &prompts);
 
         // --- FOOTER (pinned to the panel's bottom) ------------------------------
+        let mut section = SidebarReport::default();
         egui::Panel::bottom("sidebar_footer")
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
-                self.render_sidebar_footer(ui, library);
+                self.render_sidebar_footer(ui, &mut section);
             });
+        self.apply_sidebar_slot(playback, library, out, &section);
+    }
+
+    /// Answer one sidebar sub-section's report, at that sub-section's slot.
+    ///
+    /// The whole of "the Frame is the only writer of the library session", in
+    /// one line: the panel pushes facts and this is where they land.
+    fn apply_sidebar_slot(
+        &mut self,
+        playback: &mut PlaybackSession,
+        library: &mut LibrarySession,
+        out: &mut FrameOutput,
+        report: &SidebarReport,
+    ) {
+        self.frame(playback, library).apply_sidebar(out, report);
     }
 
     /// The LIBRARY section's five rows (design-handoff issue 07): All Tracks,
@@ -2544,13 +2522,17 @@ impl RiffApp {
     fn render_library_rows(
         &mut self,
         ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-        counts: &riff_backend::app::views::SidebarCounts,
-        library_section_live: bool,
-        folder_section_live: bool,
+        library: &LibrarySession,
+        nav: LibraryNav<'_>,
+        report: &mut SidebarReport,
     ) {
         use crate::ui::sidebar::{self, TreeRow};
 
+        let LibraryNav {
+            counts,
+            library_section_live,
+            folder_section_live,
+        } = nav;
         let palette = self.theme.active;
         sidebar::section_header(ui, &palette, "Library");
         let library_rows: [(LibrarySection, &str, crate::ui::icons::Icon, usize); 4] = [
@@ -2599,15 +2581,7 @@ impl RiffApp {
                 },
             );
             if row.response.clicked() {
-                library.view_mode = ViewMode::Library;
-                library.browse_mode = BrowseMode::Library;
-                library.library_section = section;
-                // Section (or browse-mode) navigation resets the drill-down
-                // path: the new section starts at its root listing.
-                library.reset_browser_path();
-                library.search_query.clear();
-                self.smart_playlist_view = None;
-                self.playlist_view = None;
+                report.push(SidebarAction::Navigate { section });
             }
         }
         // Folders is the one LIBRARY row that switches browse mode instead of
@@ -2631,37 +2605,29 @@ impl RiffApp {
             },
         );
         if folders_row.response.clicked() {
-            library.view_mode = ViewMode::Library;
-            library.browse_mode = BrowseMode::Folders;
-            // A browse-mode switch resets the drill-down path along with the
-            // section change.
-            library.reset_browser_path();
-            library.search_query.clear();
-            self.smart_playlist_view = None;
-            self.playlist_view = None;
+            report.push(SidebarAction::NavigateFolders);
         }
     }
 
-    /// The SMART LISTS section's rows (design-handoff issue 07): the four
-    /// core lists always, Never Played / Lost Gems behind Advanced mode.
-    /// Clicking one opens it over the library view. The section header is
-    /// clickable: a chevron pinned to the header's right edge (the same
-    /// slot the Playlists "+" button uses) folds the section away, and the
-    /// collapsed state is a persisted UI flag
-    /// (`UiFlags::smart_lists_collapsed`) restored on launch through the
-    /// scalar settings round-trip.
-    fn render_smart_list_rows(
+    /// The SMART LISTS section's header (design-handoff issue 07): the
+    /// clickable chevron pinned to its right edge (the same slot the Playlists
+    /// "+" button uses) folds the section away. The collapsed state is a
+    /// persisted UI flag (`UiFlags::smart_lists_collapsed`) restored on launch
+    /// through the scalar settings round-trip.
+    ///
+    /// Its OWN slot, in [`Self::render_library_sidebar`] and not inside the row
+    /// pass: the chevron's fold has to land BEFORE the rows below are gated on
+    /// the folded flag, exactly where the pre-split frame applied it.
+    fn render_smart_lists_header(
         &mut self,
         ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-        counts: &riff_backend::app::views::SidebarCounts,
+        collapsed: bool,
+        report: &mut SidebarReport,
     ) {
         use crate::ui::icons::Icon;
-        use crate::ui::sidebar::{self, TreeRow};
+        use crate::ui::sidebar;
 
         let palette = self.theme.active;
-        let collapsed = library.ui_flags.smart_lists_collapsed;
-
         ui.horizontal(|ui| {
             sidebar::section_header(ui, &palette, "Smart Lists")
                 .on_hover_text("Auto-generated, read-only lists built from your play history.");
@@ -2698,16 +2664,27 @@ impl RiffApp {
                     egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label)
                 });
                 if response.clicked() {
-                    library.ui_flags.smart_lists_collapsed = !collapsed;
-                    // Folding the section away also closes any smart list it
-                    // opened: with the rows gone there is no other way back
-                    // to that view.
-                    self.smart_playlist_view = None;
+                    report.push(SidebarAction::ToggleSmartListsCollapsed);
                 }
                 response.on_hover_text(label);
             });
         });
+    }
 
+    /// The SMART LISTS section's rows (design-handoff issue 07): the four core
+    /// lists always, Never Played / Lost Gems behind Advanced mode. Clicking one
+    /// opens it over the library view.
+    fn render_smart_list_rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &LibrarySession,
+        collapsed: bool,
+        counts: &riff_backend::app::views::SidebarCounts,
+        report: &mut SidebarReport,
+    ) {
+        use crate::ui::sidebar::{self, TreeRow};
+
+        let palette = self.theme.active;
         if collapsed {
             return;
         }
@@ -2739,14 +2716,7 @@ impl RiffApp {
                 },
             );
             if row.response.clicked() {
-                library.view_mode = ViewMode::Library;
-                library.browse_mode = BrowseMode::Library;
-                // Opening a smart list leaves the browser's drill-down path
-                // behind: the listing replaces the column stage.
-                library.reset_browser_path();
-                library.search_query.clear();
-                self.smart_playlist_view = Some(kind);
-                self.playlist_view = None;
+                report.push(SidebarAction::OpenSmartList(kind));
             }
         }
     }
@@ -2755,7 +2725,7 @@ impl RiffApp {
     /// last-scan read model (issue 05) formatted by
     /// [`sidebar::format_last_scan_ago`]; Add folder routes through the
     /// EXISTING add-library-path flow.
-    fn render_sidebar_footer(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
+    fn render_sidebar_footer(&mut self, ui: &mut egui::Ui, report: &mut SidebarReport) {
         use crate::ui::sidebar;
 
         let stamp = self.views.last_scan().map(|scan| {
@@ -2763,24 +2733,11 @@ impl RiffApp {
             format!("Last scan {}", sidebar::format_last_scan_ago(elapsed))
         });
         if sidebar::sidebar_footer(ui, &mut self.icons, &self.theme.active, stamp.as_deref()) {
-            self.add_folder_from_sidebar(library);
-        }
-    }
-
-    /// Add a library root from the sidebar footer: the native folder picker
-    /// everywhere except Linux, where the text-input row renders beneath the
-    /// Settings stage — so the footer lands there before opening it.
-    fn add_folder_from_sidebar(&mut self, library: &mut LibrarySession) {
-        #[cfg(target_os = "linux")]
-        {
-            crate::ui::chrome::NavDestination::Settings
-                .apply(&mut library.view_mode, &mut library.browse_mode);
-            self.settings_show_input = true;
-            self.settings_path_error = None;
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            self.add_library_via_platform_picker(library);
+            // The native folder picker is an OS dialog, not a decision, so the
+            // Frame decides that one was asked for and the draw half performs
+            // it (on Linux it is a view change, which the Frame applies itself
+            // so this frame's stage already draws the input row).
+            report.push(SidebarAction::AddFolderRequested);
         }
     }
 
@@ -2884,11 +2841,13 @@ impl RiffApp {
                     };
                     self.render_track_row(
                         ui,
-                        library,
-                        playback,
                         &track,
-                        current_track.as_ref(),
-                        None,
+                        TrackRowContext {
+                            library,
+                            playback,
+                            current_track: current_track.as_ref(),
+                            reorder: None,
+                        },
                     );
                 }
             },
@@ -2973,11 +2932,13 @@ impl RiffApp {
                     if let Some(track) = rows.get(i).copied() {
                         self.render_track_row(
                             ui,
-                            library,
-                            playback,
                             track,
-                            current_track.as_ref(),
-                            None,
+                            TrackRowContext {
+                                library,
+                                playback,
+                                current_track: current_track.as_ref(),
+                                reorder: None,
+                            },
                         );
                     }
                 }
@@ -2991,7 +2952,7 @@ impl RiffApp {
     /// create and rename prompts. Every mutation commits through the
     /// [`PlaylistStore`] port as one immediate durable transaction; reads
     /// come from the seam's playlist projection.
-    fn render_playlists_section(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
+    fn render_playlists_header(&mut self, ui: &mut egui::Ui, report: &mut SidebarReport) {
         use crate::ui::icons::Icon;
         use crate::ui::sidebar;
 
@@ -3014,13 +2975,19 @@ impl RiffApp {
                     "New Playlist",
                     false,
                 ) {
-                    self.playlist_create_name = Some(String::new());
-                    self.playlist_rename = None;
+                    report.push(SidebarAction::NewPlaylist);
                 }
             });
         });
+    }
 
-        self.render_playlist_create_prompt(ui);
+    /// The playlist rows themselves, with the create prompt above them.
+    fn render_playlist_rows(&mut self, ui: &mut egui::Ui, report: &mut SidebarReport) {
+        use crate::ui::sidebar;
+
+        let palette = self.theme.active;
+
+        self.render_playlist_create_prompt(ui, report);
 
         // --- Playlist rows (open / hover-reveal rename / delete) ---
         //
@@ -3054,67 +3021,43 @@ impl RiffApp {
                 )
             };
             if let Some(action) = action {
-                let id = playlists[index].id.clone();
-                apply_playlist_row_action(
+                report.push(SidebarAction::PlaylistRow {
+                    id: playlists[index].id.clone(),
                     action,
-                    &id,
-                    self.playlist_store.as_mut(),
-                    &mut self.views,
-                    PlaylistPromptSlots {
-                        view: &mut self.playlist_view,
-                        smart_view: &mut self.smart_playlist_view,
-                        rename: &mut self.playlist_rename,
-                        create_name: &mut self.playlist_create_name,
-                    },
-                );
-                // The section is shared chrome on every view: opening a
-                // playlist lands on the library view so its listing is on
-                // screen, and clears any search filter over the results.
-                if action == crate::ui::sidebar::PlaylistRowAction::Open {
-                    library.view_mode = ViewMode::Library;
-                    library.browse_mode = BrowseMode::Library;
-                    // Opening a playlist leaves the browser's drill-down path
-                    // behind: the listing replaces the column stage.
-                    library.reset_browser_path();
-                    library.search_query.clear();
-                }
+                });
             }
 
-            self.render_playlist_rename_prompt(ui, &playlists[index].id);
+            self.render_playlist_rename_prompt(ui, &playlists[index].id, report);
         }
     }
 
     /// The inline "New Playlist" name prompt while it is open.
-    fn render_playlist_create_prompt(&mut self, ui: &mut egui::Ui) {
+    ///
+    /// Draws the draft it is handed and reports how the prompt resolved; the
+    /// trim-and-commit store flow belongs to the Frame, which is the only
+    /// writer of the prompt slot and of the playlist store here.
+    fn render_playlist_create_prompt(&mut self, ui: &mut egui::Ui, report: &mut SidebarReport) {
         let Some(draft) = self.playlist_create_name.as_mut() else {
             return;
         };
         // The pure widget seam (golden-image gap audit P1-7) reports the
         // outcome; the store flow below is unchanged.
-        let outcome = crate::ui::prompts::playlist_create_prompt(ui, draft);
-        let confirm = outcome == Some(crate::ui::prompts::PromptOutcome::Confirm);
-        let cancel = outcome == Some(crate::ui::prompts::PromptOutcome::Cancel);
-        if confirm {
-            let name = self.playlist_create_name.take().unwrap_or_default();
-            let name = name.trim().to_string();
-            if !name.is_empty() {
-                match self.playlist_store.create_playlist(&name, &[]) {
-                    Ok(id) => {
-                        // The committed create bumps the playlist generation;
-                        // the seam's next read lists the new playlist.
-                        self.playlist_view = Some(id);
-                    }
-                    Err(e) => tracing::warn!("Failed to create playlist: {e}"),
-                }
-            }
-        } else if cancel {
-            self.playlist_create_name = None;
+        if let Some(outcome) = crate::ui::prompts::playlist_create_prompt(ui, draft) {
+            report.push(SidebarAction::PlaylistCreate(outcome));
         }
     }
 
     /// The inline rename prompt for one playlist while it is open. Addressed
     /// by playlist id so fresh frames never clone it.
-    fn render_playlist_rename_prompt(&mut self, ui: &mut egui::Ui, pid: &PlaylistId) {
+    ///
+    /// Draws the draft and reports how it resolved; the trim-and-commit store
+    /// flow is the Frame's, at the sidebar's slot.
+    fn render_playlist_rename_prompt(
+        &mut self,
+        ui: &mut egui::Ui,
+        pid: &PlaylistId,
+        report: &mut SidebarReport,
+    ) {
         let renaming = self
             .playlist_rename
             .as_ref()
@@ -3127,18 +3070,11 @@ impl RiffApp {
         };
         // The pure widget seam (golden-image gap audit P1-7), same shape as
         // the create prompt.
-        let outcome = crate::ui::prompts::playlist_rename_prompt(ui, draft);
-        let confirm = outcome == Some(crate::ui::prompts::PromptOutcome::Confirm);
-        let cancel = outcome == Some(crate::ui::prompts::PromptOutcome::Cancel);
-        if confirm {
-            if let Some((rid, draft)) = self.playlist_rename.take() {
-                // Same Store flow as before the restyle: trim, rename as one
-                // durable transaction. The seam's next read reflects the new
-                // name on its own (ADR 0002).
-                commit_playlist_rename(self.playlist_store.as_mut(), &rid, &draft);
-            }
-        } else if cancel {
-            self.playlist_rename = None;
+        if let Some(outcome) = crate::ui::prompts::playlist_rename_prompt(ui, draft) {
+            report.push(SidebarAction::PlaylistRename {
+                id: pid.clone(),
+                outcome,
+            });
         }
     }
 
@@ -3260,13 +3196,17 @@ impl RiffApp {
                     {
                         self.render_playlist_entry(
                             ui,
-                            library,
-                            playback,
-                            playlist_id,
                             entry,
-                            current_track.as_ref(),
-                            canonical,
-                            reorderable,
+                            TrackRowContext {
+                                library,
+                                playback,
+                                current_track: current_track.as_ref(),
+                                reorder: Some(PlaylistSlot {
+                                    playlist_id,
+                                    index: canonical,
+                                    reorderable,
+                                }),
+                            },
                         );
                     }
                 }
@@ -3288,33 +3228,23 @@ impl RiffApp {
     /// the same Track either way. The entry's identity survives the file: only
     /// the file went, so the store still resolves the Track and the readout is
     /// real.
-    #[allow(clippy::too_many_arguments)]
     fn render_playlist_entry(
         &mut self,
         ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-        playback: &PlaybackSession,
-        playlist_id: &PlaylistId,
         entry: &(TrackId, Option<Track>, bool),
-        current_track: Option<&TrackId>,
-        index: usize,
-        reorderable: bool,
+        ctx: TrackRowContext<'_>,
     ) {
         use std::path::PathBuf;
         let (tid, track, valid) = entry;
         if *valid && let Some(t) = track {
-            self.render_reorderable_playlist_row(
-                ui,
-                library,
-                playback,
-                t,
-                current_track,
-                playlist_id,
-                index,
-                reorderable,
-            );
+            self.render_reorderable_playlist_row(ui, t, ctx);
             return;
         }
+        let playlist_id = ctx
+            .reorder
+            .expect("a playlist entry's listing always states its playlist")
+            .playlist_id;
+        let library = ctx.library;
 
         // Invalid entry: file moved or deleted. Flag it and exclude it from
         // playback; removal stays possible.
@@ -3361,20 +3291,26 @@ impl RiffApp {
     /// Track row — and why it begins no drag. Reordering is the row's own
     /// gesture and the menu's is the right button; neither is the other's
     /// business.
-    #[allow(clippy::too_many_arguments)]
     fn render_reorderable_playlist_row(
         &mut self,
         ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-        playback: &PlaybackSession,
         track: &Track,
-        current_track: Option<&TrackId>,
-        playlist_id: &PlaylistId,
-        index: usize,
-        reorderable: bool,
+        ctx: TrackRowContext<'_>,
     ) {
         use crate::ui::sidebar::{self, TreeRow};
 
+        let TrackRowContext {
+            library,
+            playback,
+            current_track,
+            reorder,
+        } = ctx;
+        let slot = reorder.expect("a playlist listing's rows always state their canonical slot");
+        let PlaylistSlot {
+            playlist_id,
+            index,
+            reorderable,
+        } = slot;
         let is_selected = library.selected_track.as_ref() == Some(&track.id);
         let is_current = current_track == Some(&track.id);
         let playing = playback.playback_state == PlaybackState::Playing;
@@ -3453,14 +3389,15 @@ impl RiffApp {
     /// extra-large radius and brand glow, the 3xl title, the meta line, the
     /// in-view seek row, and the Up Next queue rows in Playback Queue order.
     /// Draws through the pure widget seam in
-    /// [`crate::ui::now_playing::show_now_playing`]; every reported action
-    /// routes through [`apply_now_playing_action`], so Close always lands on
-    /// the Library View and the transport still emits engine commands.
+    /// [`crate::ui::now_playing::show_now_playing`] and *reports* every action
+    /// into `report`, so Close still always lands on the Library View and the
+    /// transport still emits engine commands — but only because the Frame's
+    /// stage slot asks for it.
     fn show_now_playing_view(
         &mut self,
         ui: &mut egui::Ui,
-        library: &mut LibrarySession,
         playback: &PlaybackSession,
+        report: &mut StageReport,
     ) {
         // The title and meta lines ride the bar's once-per-frame handout.
         let (title, meta_line) = self.now_playing_labels.clone();
@@ -3501,7 +3438,7 @@ impl RiffApp {
             .playback_current()
             .and_then(|track| crate::ui::now_playing::metadata_details(&track.metadata))
             .map(Arc::from);
-        let up_next: Arc<[UpNextEntry]> = crate::ui::now_playing::up_next_entries(
+        let up_next: Arc<[UpNextEntry]> = crate::ui::sidebar::up_next_entries(
             self.views.playback_up_next(),
             crate::ui::now_playing::UP_NEXT_LIMIT,
         )
@@ -3526,9 +3463,9 @@ impl RiffApp {
             &mut self.stage_readouts,
             &mut self.now_playing_actions,
         );
-        for action in self.now_playing_actions.drain(..) {
-            apply_now_playing_action(action, library, playback, self.transport.as_ref());
-        }
+        // Reported, not applied: `Frame::apply_stage` is the only applier, at
+        // the stage's slot in the frame's order.
+        report.actions.append(&mut self.now_playing_actions);
     }
 
     fn render_folder_tree(
@@ -3621,11 +3558,10 @@ impl RiffApp {
         // The folder's own cover, if it has one, fills the row's leading art
         // slot and the glyph goes away — art replaces it rather than sitting
         // beside it, so an uncovered row keeps today's geometry exactly.
-        let cover = folder_cover_intent(
-            &self.cover_textures,
-            &mut self.cover_in_flight,
-            &mut self.cover_in_flight_keys,
+        let cover = folder_cover_texture(
+            &mut self.cover_cache,
             self.covers.as_ref(),
+            &self.cover_textures,
             path,
             COVER_THUMB,
         );
@@ -3683,13 +3619,17 @@ impl RiffApp {
                 let label = label_numbered(track);
                 self.interactive_track_row(
                     ui,
-                    library,
-                    playback,
-                    track,
-                    current_track.as_ref(),
-                    None,
-                    &label,
-                    level + 1,
+                    TrackRowSpec {
+                        track,
+                        label: &label,
+                        indent_level: level + 1,
+                    },
+                    TrackRowContext {
+                        library,
+                        playback,
+                        current_track: current_track.as_ref(),
+                        reorder: None,
+                    },
                 );
             }
         });
@@ -3730,139 +3670,61 @@ impl RiffApp {
     }
 }
 
-/// The UI's whole remaining cover responsibility (ADR 0006): ask the Cover
-/// Service for art unless that track at that exact box is already in the
-/// UI-owned cache. Free function so tests drive the exact production path
-/// without a window.
+/// Where the two halves of the Cover Cache meet for a Track row: the cache
+/// decides whether this `(identity, box)` needs a request, and the View half
+/// answers with the texture to paint — the real Cover, or the shared
+/// placeholder tile on a full miss. The one place a row needs both, so a render
+/// site asks for a cover texture rather than assembling the decision out of
+/// fields it has no business knowing.
 ///
-/// The cache check is made here rather than by the caller because the key it
-/// checks is the same composite the cache is written under: a track cached at
-/// hero size is still a miss at thumbnail size.
-pub fn request_cover_intent<S: std::hash::BuildHasher>(
-    textures: &std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
-    in_flight: &mut std::collections::HashSet<CoverCacheKey, S>,
-    in_flight_keys: &mut Vec<CoverCacheKey>,
+/// A free function so the browser columns' per-row closures can reach it: those
+/// closures already hold a mutable borrow of the session Views, so `&mut self`
+/// is not available to them, and the handles they were re-splatting — the
+/// marker set, the marker set's LRU order — are now inside the cache.
+#[allow(clippy::too_many_arguments)]
+pub fn cover_texture_for<S: std::hash::BuildHasher>(
+    cache: &mut crate::ui::cover_cache::CoverCache,
     covers: &dyn Covers,
-    track_id: TrackId,
-    path: PathBuf,
+    textures: &mut std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
+    lru_keys: &mut Vec<CoverCacheKey>,
+    ctx: &egui::Context,
+    palette: &Palette,
+    track_id: &TrackId,
     size: RequestedSize,
-) {
-    let key = cover_cache_key(&track_id.0, size);
-    if textures.contains_key(&key) || in_flight.contains(&key) {
-        return;
-    }
-    mark_in_flight(in_flight, in_flight_keys, key);
-    covers.request(track_id, path, size);
-}
-
-/// Record that a `(identity, box)` has an outstanding request, keeping the marker
-/// set bounded by the same LRU discipline as the texture map.
-///
-/// The marker is dropped by [`cache_polled_covers`] when the answer arrives, so
-/// overflowing the cap can only ever forget a *recent* ask — and the cost of
-/// forgetting is one re-request, not a wrong image. Both structures are updated
-/// together because a key left in the list but not the set would be re-marked
-/// forever, and one left in the set but not the list could never be evicted.
-fn mark_in_flight<S: std::hash::BuildHasher>(
-    in_flight: &mut std::collections::HashSet<CoverCacheKey, S>,
-    in_flight_keys: &mut Vec<CoverCacheKey>,
-    key: CoverCacheKey,
-) {
-    for evicted in lru_insert(in_flight_keys, key.clone(), COVER_IN_FLIGHT_CAP) {
-        in_flight.remove(&evicted);
-    }
-    in_flight.insert(key);
+) -> egui::TextureHandle {
+    cache.want_track(covers, track_id.clone(), PathBuf::from(&track_id.0), size);
+    crate::ui::artwork::lookup_cover_texture(
+        cache,
+        textures,
+        lru_keys,
+        ctx,
+        palette,
+        &track_id.0,
+        size,
+    )
 }
 
 /// The Folders tree's half of the same responsibility (ADR 0006): a folder row
 /// wants the cover art of the directory it *is*, and gets it in place of the
-/// folder glyph. Free function like [`request_cover_intent`] so tests drive the
-/// production path without a window.
+/// folder glyph. The Cover Cache answers whether that art has arrived; the View
+/// half holds the texture for it. A miss — first ask, answer outstanding, or a
+/// directory with no cover of its own — is `None`, which is what keeps the row's
+/// glyph for this frame, and it does **not** fall back to the generated
+/// music-note placeholder the artless track rows get: a folder with no cover of
+/// its own is an ordinary folder, not an artless album.
 ///
-/// A cache hit is the texture to paint; a miss sends the request and answers
-/// `None`, which is what keeps the row's glyph for this frame. The miss does
-/// **not** fall back to the generated music-note placeholder the artless track
-/// rows get — a folder with no cover of its own is an ordinary folder, not an
-/// artless album.
-///
-/// The identity is the directory path, and the service files the decoded result
-/// under exactly that key, so [`cache_polled_covers`] delivers folder art with
-/// no further plumbing.
-pub fn folder_cover_intent<S: std::hash::BuildHasher>(
-    textures: &std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
-    in_flight: &mut std::collections::HashSet<CoverCacheKey, S>,
-    in_flight_keys: &mut Vec<CoverCacheKey>,
+/// Which is why this is not [`cover_texture_for`]: a folder row has to be told
+/// art exists before it decides between the two, while a Track row paints the
+/// placeholder until real pixels land and asks for neither.
+pub fn folder_cover_texture<S: std::hash::BuildHasher>(
+    cache: &mut crate::ui::cover_cache::CoverCache,
     covers: &dyn Covers,
+    textures: &std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
     folder: &Path,
     size: RequestedSize,
 ) -> Option<egui::TextureId> {
-    let identity = folder.to_string_lossy().to_string();
-    let key = cover_cache_key(&identity, size);
-    if let Some(texture) = textures.get(&key) {
-        return Some(texture.id());
-    }
-    if !in_flight.contains(&key) {
-        mark_in_flight(in_flight, in_flight_keys, key);
-        covers.request_folder(folder, size);
-    }
-    None
-}
-
-/// Apply drained backend events to the structured feedback board (issue 11).
-/// Playback errors arrive as typed notices stamped with playback source and
-/// error severity; each is folded into its source's persistent slot so it
-/// survives alongside — not overwritten by — Library Scan progress. Other event
-/// kinds carry no UI feedback yet.
-pub fn apply_backend_events(
-    events: Vec<riff_backend::app::events::BackendEvent>,
-    feedback: &mut crate::ui::feedback::FeedbackBoard,
-) {
-    use crate::ui::feedback::Feedback;
-    use riff_backend::app::events::BackendEvent;
-    for event in events {
-        if let BackendEvent::TypedNotice(payload) = event {
-            feedback.put(Feedback::from_notice(&payload, None));
-        }
-    }
-}
-
-/// Consume polled cover results into the UI texture cache: wrapping already
-/// decoded pixels and uploading is the egui-bound work that stays on the main
-/// thread (the texture boundary, ADR 0006). The decode itself happened on the
-/// cover worker thread behind the port, so a frame can never block on it;
-/// dedup and negative caching live behind the service seam, so artless
-/// results are simply dropped here.
-pub fn cache_polled_covers<S: std::hash::BuildHasher>(
-    covers: &dyn Covers,
-    textures: &mut std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
-    lru_keys: &mut Vec<CoverCacheKey>,
-    in_flight: &mut std::collections::HashSet<CoverCacheKey, S>,
-    in_flight_keys: &mut Vec<CoverCacheKey>,
-    ctx: &egui::Context,
-) {
-    for (track_id, size, cover) in covers.poll() {
-        // Every delivered answer is terminal, `None` included: an artless row that
-        // kept its marker would never ask again, and a row whose art appears later
-        // would stay blank for the session. Cleared before the `continue` below for
-        // exactly that reason.
-        let key = cover_cache_key(&track_id.0, size);
-        in_flight.remove(&key);
-        in_flight_keys.retain(|existing| existing != &key);
-
-        let Some(cover) = cover else {
-            continue; // artless: the service negative-caches it
-        };
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(
-            [cover.width as usize, cover.height as usize],
-            &cover.rgba,
-        );
-        let texture = ctx.load_texture(&track_id.0, color_image, egui::TextureOptions::default());
-        textures.insert(key.clone(), texture);
-        for old in lru_insert(lru_keys, key, COVER_CACHE_CAP) {
-            textures.remove(&old);
-        }
-        crate::ui::artwork::enforce_texture_byte_budget(textures, lru_keys);
-    }
+    let key = cache.want_folder(covers, folder, size)?;
+    textures.get(&key).map(egui::TextureHandle::id)
 }
 
 /// Ask the Cover worker to delete every cached Thumbnail, and record that one is
@@ -3878,30 +3740,31 @@ pub fn request_cache_clear(covers: &dyn Covers, in_flight: &mut bool) -> bool {
     true
 }
 
-/// Drain the settled outcome of a Thumbnail-cache clear, and flush the texture map
-/// with it.
+/// Flush the View half's texture map for a Thumbnail-cache clear the worker has
+/// settled, as [`crate::ui::frame::FrameOutput::cache_clear`] reports it.
 ///
-/// The flush happens here rather than when the button was pressed, and the order
-/// matters: at confirm time every visible row would re-request while the wipe was
-/// still queued behind those very requests, rebuilding the entries the user had
-/// just asked to delete. Settled is the moment the disk is genuinely empty, so it
-/// is the moment the screen can be emptied with it. A `Failed` clear leaves every
-/// texture in place — nothing was removed, so nothing has to be re-derived.
-pub fn settle_cache_clear<S: std::hash::BuildHasher>(
-    covers: &dyn Covers,
-    in_flight: &mut bool,
+/// **Why this is the draw half's and not the Frame's:** the map holds
+/// `egui::TextureHandle`s, and `FrameOutput` names no egui type — that
+/// discipline is the whole point of the frame's interface. The Frame polls the
+/// service, clears the in-flight flag, forgets the Cover Cache's arrivals and
+/// writes the status line, all of it egui-free; the flush is the one act left,
+/// and it happens at the Frame's slot either way.
+///
+/// The flush happens on SETTLED rather than when the button was pressed, and
+/// that ordering matters: at confirm time every visible row would re-request
+/// while the wipe was still queued behind those very requests, rebuilding the
+/// entries the user had just asked to delete. Settled is the moment the disk is
+/// genuinely empty, so it is the moment the screen can be emptied with it. A
+/// `Failed` clear leaves every texture in place — nothing was removed, so
+/// nothing has to be re-derived.
+pub fn flush_cleared_cache<S: std::hash::BuildHasher>(
+    outcome: &ClearCacheOutcome,
     textures: &mut std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
     lru_keys: &mut Vec<CoverCacheKey>,
-) -> Option<ClearCacheOutcome> {
-    if !*in_flight {
-        return None;
-    }
-    let outcome = covers.poll_cache_clear()?;
-    *in_flight = false;
-    if outcome == ClearCacheOutcome::Cleared {
+) {
+    if *outcome == ClearCacheOutcome::Cleared {
         crate::ui::artwork::evict_all_covers(textures, lru_keys);
     }
-    Some(outcome)
 }
 
 /// Play a folder: start its first track and queue the rest as ONE batch

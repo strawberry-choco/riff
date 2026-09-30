@@ -1,9 +1,11 @@
 //! Port traits for playback infrastructure.
 //!
-//! Infrastructure implementations (symphonia decoder, cpal output) live in
-//! `riff-infra` and implement these traits. This module also carries the
-//! Audio Engine's narrowed Library read port ([`PlaybackLibrary`]) and the
-//! rule that decides *when* playback starts ([`PlaybackStart`]).
+//! Infrastructure implementations (symphonia decoder, cpal output, and
+//! `StorePlaybackLibrary` — the Application Store narrowed to
+//! [`PlaybackLibrary`]) live in `riff-infra` and implement these traits. This
+//! module also carries the Audio Engine's narrowed Library read port
+//! ([`PlaybackLibrary`]) and the rule that decides *when* playback starts
+//! ([`PlaybackStart`]).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,12 +14,12 @@ use crate::app::state::PlaybackSession;
 use crate::domain::PlaybackCommand;
 use crate::domain::continuation::Continuation;
 use riff_persistence::errors::StoreError;
-use riff_persistence::store::LibraryQueryStore;
 use riff_persistence::sync::MutexExt;
 use riff_persistence::track::{Track, TrackId};
 
 /// The Audio Engine's Library read port, narrowed from the whole
-/// [`LibraryQueryStore`] to the two reads playback actually makes.
+/// [`LibraryQueryStore`](riff_persistence::store::LibraryQueryStore) to the two
+/// reads playback actually makes.
 ///
 /// * [`Self::get_track`] — the one Track behind a `TrackId`: the load, a
 ///   resume's re-open, and the gapless pre-decode;
@@ -28,6 +30,19 @@ use riff_persistence::track::{Track, TrackId};
 /// Nothing else: no listing window, no count, no artist/album/genre read, no
 /// folder query, no smart playlist. The engine decides nothing about the
 /// Library's shape, so its dependency on the Library says so.
+///
+/// **The narrowing is the adapter's, not the call site's.** The port has a real
+/// implementation on each side of the seam: `StorePlaybackLibrary`
+/// (`riff-infra`, wrapping the Application Store) in production, and a
+/// two-method fake wherever the engine is driven without audio. It is
+/// deliberately *not* `impl<T: LibraryQueryStore> PlaybackLibrary for T`
+/// (ADR 0012). A blanket impl admits the store by implication — tidy at the
+/// Composition Root — but it is a hypothetical seam: the narrowing becomes
+/// observable only from inside this crate, and because it is the *only* way to
+/// satisfy the port, every fake of the engine's dependency inherits all 35
+/// `LibraryQueryStore` methods to exercise these two. A review should not
+/// re-add one as an ergonomic convenience; it silently converts a real seam
+/// back into a notional one.
 pub trait PlaybackLibrary {
     /// The Library's `Track` for `id`, or `None` when unknown. The Application
     /// Store is the sole authority for track metadata — there is no in-memory
@@ -38,20 +53,6 @@ pub trait PlaybackLibrary {
     /// ordering. A **Queue Fill** takes this list *verbatim*: the order is the
     /// store's contract, not the engine's, so nothing here re-sorts it.
     fn library_track_ids(&self) -> Result<Vec<TrackId>, StoreError>;
-}
-
-/// Every [`LibraryQueryStore`] *is* a [`PlaybackLibrary`], so the Composition
-/// Root's `Box::new(SqliteStore)` coerces to the engine's port unchanged: the
-/// narrowing is in what the engine may call, not in what the adapter
-/// implements.
-impl<T: LibraryQueryStore> PlaybackLibrary for T {
-    fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
-        LibraryQueryStore::get_track(self, id)
-    }
-
-    fn library_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
-        LibraryQueryStore::all_track_ids(self)
-    }
 }
 
 /// What a Playback Command is starting, as data. The rule that answers it lives
@@ -238,7 +239,4 @@ pub trait AudioOutput: Send {
     /// sample-scaling step. Default no-op so mocks need not implement it;
     /// `1.0` means no adjustment.
     fn set_replaygain(&mut self, _factor: f32) {}
-
-    /// Get the current output latency (frames).
-    fn latency(&self) -> u32;
 }

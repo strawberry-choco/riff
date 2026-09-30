@@ -14,12 +14,11 @@
 //! [`RiffApp`]'s fields, exactly like the methods they sit beside.
 
 use eframe::egui;
-use std::path::PathBuf;
 
 use riff_backend::app::state::LibrarySession;
 
 use super::super::selection;
-use super::{COVER_CARD, InspectorKind, RiffApp, request_cover_intent, resolve_inspector};
+use super::{COVER_CARD, InspectorKind, RiffApp, cover_texture_for, resolve_inspector};
 
 /// The readout KIND's display name, for the header chip. The widget seam takes
 /// the name rather than the kind so it never has to know the app's own type —
@@ -52,24 +51,18 @@ impl RiffApp {
         self.tag_editor.reconcile(&content);
         let art = content.art_track.as_ref().map(|tid| {
             // The cover intent goes through the selection's cover track —
-            // same flow the browser column's thumbnails use; the texture
-            // comes from the UI LRU, and a full miss resolves the shared
-            // music-icon placeholder tile.
-            request_cover_intent(
-                &self.cover_textures,
-                &mut self.cover_in_flight,
-                &mut self.cover_in_flight_keys,
+            // same flow the browser column's thumbnails use; the Cover Cache
+            // decides whether a request is due and the View half answers with
+            // the texture, which on a full miss is the shared music-icon
+            // placeholder tile.
+            cover_texture_for(
+                &mut self.cover_cache,
                 self.covers.as_ref(),
-                tid.clone(),
-                PathBuf::from(&tid.0),
-                COVER_CARD,
-            );
-            crate::ui::artwork::lookup_cover_texture(
                 &mut self.cover_textures,
                 &mut self.cover_lru_keys,
                 ui.ctx(),
                 &self.theme.active,
-                &tid.0,
+                tid,
                 COVER_CARD,
             )
         });

@@ -1039,7 +1039,7 @@ mod tests {
 
     #[test]
     fn test_placeholder_tile_is_shared_across_identities() {
-        use riff_gui::ui::cover_placeholder::lookup_cover_texture;
+        use riff_gui::ui::artwork::lookup_cover_texture;
         use riff_gui::ui::theme::Palette;
         use riff_library::app::traits::RequestedSize;
 
@@ -1053,7 +1053,9 @@ mod tests {
 
         // The removed colour block was the only per-identity input, so two
         // artless items resolve to one shared cached tile.
+        let mut cache = riff_gui::ui::cover_cache::CoverCache::new();
         let a = lookup_cover_texture(
+            &mut cache,
             &mut textures,
             &mut lru_keys,
             &ctx,
@@ -1062,6 +1064,7 @@ mod tests {
             thumb,
         );
         let b = lookup_cover_texture(
+            &mut cache,
             &mut textures,
             &mut lru_keys,
             &ctx,
@@ -1078,6 +1081,7 @@ mod tests {
             height: 512,
         };
         let c = lookup_cover_texture(
+            &mut cache,
             &mut textures,
             &mut lru_keys,
             &ctx,
@@ -1093,7 +1097,7 @@ mod tests {
 
     #[test]
     fn test_placeholder_tile_follows_the_palette_family() {
-        use riff_gui::ui::cover_placeholder::placeholder_image;
+        use riff_gui::ui::artwork::placeholder_image;
         use riff_gui::ui::theme::Palette;
 
         // The derivation answers to the active palette: the well and glyph
@@ -1130,7 +1134,7 @@ mod tests {
     #[test]
     fn test_lookup_caches_the_shared_placeholder_tile_on_a_full_miss() {
         use riff_gui::ui::app::cover_cache_key;
-        use riff_gui::ui::cover_placeholder::{
+        use riff_gui::ui::artwork::{
             lookup_cover_texture, placeholder_cache_key, placeholder_image,
         };
         use riff_gui::ui::theme::Palette;
@@ -1146,7 +1150,9 @@ mod tests {
         };
         let tile_key = placeholder_cache_key();
 
+        let mut cache = riff_gui::ui::cover_cache::CoverCache::new();
         let tile = lookup_cover_texture(
+            &mut cache,
             &mut textures,
             &mut lru_keys,
             &ctx,
@@ -1187,6 +1193,7 @@ mod tests {
 
         // ...and repeat lookups reuse it instead of regenerating.
         let again = lookup_cover_texture(
+            &mut cache,
             &mut textures,
             &mut lru_keys,
             &ctx,
@@ -1200,7 +1207,7 @@ mod tests {
     #[test]
     fn test_real_art_wins_over_the_placeholder_tile() {
         use riff_gui::ui::app::cover_cache_key;
-        use riff_gui::ui::cover_placeholder::lookup_cover_texture;
+        use riff_gui::ui::artwork::lookup_cover_texture;
         use riff_gui::ui::theme::Palette;
         use riff_library::app::traits::RequestedSize;
 
@@ -1214,7 +1221,9 @@ mod tests {
         };
 
         // The tile is cached first (the artless window)...
+        let mut cache = riff_gui::ui::cover_cache::CoverCache::new();
         let _ = lookup_cover_texture(
+            &mut cache,
             &mut textures,
             &mut lru_keys,
             &ctx,
@@ -1230,6 +1239,7 @@ mod tests {
         lru_keys.push(cover_cache_key(identity, size));
 
         let resolved = lookup_cover_texture(
+            &mut cache,
             &mut textures,
             &mut lru_keys,
             &ctx,
@@ -1245,6 +1255,7 @@ mod tests {
             height: 512,
         };
         let other_size = lookup_cover_texture(
+            &mut cache,
             &mut textures,
             &mut lru_keys,
             &ctx,
@@ -1261,9 +1272,7 @@ mod tests {
     #[test]
     fn test_evict_generated_removes_only_the_placeholder_tile() {
         use riff_gui::ui::app::cover_cache_key;
-        use riff_gui::ui::cover_placeholder::{
-            evict_generated, lookup_cover_texture, placeholder_cache_key,
-        };
+        use riff_gui::ui::artwork::{evict_generated, lookup_cover_texture, placeholder_cache_key};
         use riff_gui::ui::theme::Palette;
         use riff_library::app::traits::RequestedSize;
 
@@ -1275,7 +1284,9 @@ mod tests {
             height: 56,
         };
 
+        let mut cache = riff_gui::ui::cover_cache::CoverCache::new();
         let _ = lookup_cover_texture(
+            &mut cache,
             &mut textures,
             &mut lru_keys,
             &ctx,
@@ -1469,10 +1480,10 @@ mod tests {
         );
     }
 
-    /// The cycle guard: `ui::cover_placeholder` used to `use crate::ui::app::…`
-    /// for the very cache-key space the app module imported the placeholder
-    /// back from. `ui::artwork` owns that key space now, so no sibling module
-    /// reaches into `ui::app` for it.
+    /// The cycle guard: the placeholder tile used to live in a sibling module
+    /// that `use`d `crate::ui::app::…` for the very cache-key space the app
+    /// module imported the placeholder back from. `ui::artwork` owns that key
+    /// space now, so no sibling module reaches into `ui::app` for it.
     #[test]
     fn test_no_ui_module_imports_the_artwork_key_space_from_the_app_module() {
         const ARTWORK_KEY_SPACE: [&str; 5] = [
@@ -5168,16 +5179,16 @@ mod tests {
         );
     }
 
-    // --- Library stage empty-state hero (Issue 09) -------------------------------
+    // --- Library stage empty-state hero tokens (Issue 09) ------------------------
     //
-    // Independent sources of truth: the issue checklist plus the mockup's
-    // index.html main-stage section — a 160px disc circle (`w-40 h-40`) with
-    // an 80px glyph (`w-20 h-20`), `mb-6`/`mb-1` copy gaps inside a `p-8`
-    // stage, verbatim hero copy — and its `.riff-disc-glow` rule
-    // (`box-shadow: 0 0 60px -20px brand@15%`), approximated with layered
-    // translucent fills because egui has no blur.
-
-    use riff_gui::ui::library;
+    // The empty-state hero widget that painted these is gone (the stage's
+    // empty state moved to `empty_state.rs` and the leftover module is
+    // deleted), but its geometry and glow tokens stay in the design system's
+    // store, so what they pinned is pinned here against the token values
+    // themselves: the mockup's 160px disc circle (`w-40 h-40`) with an 80px
+    // glyph (`w-20 h-20`), `mb-6`/`mb-1` copy gaps inside a `p-8` stage, and
+    // the `.riff-disc-glow` rule (`box-shadow: 0 0 60px -20px brand@15%`),
+    // approximated with layered translucent fills because egui has no blur.
 
     #[test]
     fn test_library_hero_dimensions_match_the_mockup_stage() {
@@ -5189,15 +5200,6 @@ mod tests {
         assert!((hero::TITLE_GAP - 24.0).abs() < f32::EPSILON);
         assert!((hero::SUBTITLE_GAP - 4.0).abs() < f32::EPSILON);
         assert!((hero::STAGE_INSET - 32.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn test_library_hero_copy_matches_the_mockup_verbatim() {
-        assert_eq!(library::HERO_TITLE, "Select a track to view details");
-        assert_eq!(
-            library::HERO_SUBTITLE,
-            "Your library is ready. Choose something from the sidebar."
-        );
     }
 
     #[test]
@@ -5377,25 +5379,24 @@ mod tests {
         assert!(now_playing::up_next_entries(&[], 5).is_empty());
     }
 
-    /// The neutral `up_next` module is the single owner of the Up Next entry
-    /// model and label builder: `now_playing`'s historical path is a re-export
-    /// of it, not a second copy. This guards against the two surfaces
-    /// (Now Playing and the queue sheet) silently diverging back into owning
-    /// their own row data — the coupling ticket 05 removed.
+    /// `sidebar` is the single owner of the Up Next entry model and label
+    /// builder: `now_playing`'s historical path is a re-export of it, not a
+    /// second copy. This guards against the two surfaces (Now Playing and the
+    /// queue sheet) silently diverging back into owning their own row data —
+    /// the coupling ticket 05 removed.
     #[test]
     fn test_up_next_model_has_one_owner_shared_by_both_surfaces() {
-        use riff_gui::ui::up_next;
         let window = up_next_window_fixture();
 
-        let neutral = up_next::up_next_entries(&window, 5);
+        let neutral = sidebar::up_next_entries(&window, 5);
         let via_now_playing = now_playing::up_next_entries(&window, 5);
         assert_eq!(
             neutral, via_now_playing,
-            "the re-exported `now_playing::` path and the neutral `up_next::` \
-             path build identical rows — one owner, not two copies"
+            "the re-exported `now_playing::` path and the `sidebar::` path build \
+             identical rows — one owner, not two copies"
         );
         // The entry type is literally the same type across both paths.
-        let _: &up_next::UpNextEntry = &via_now_playing[0];
+        let _: &sidebar::UpNextEntry = &via_now_playing[0];
     }
 
     #[test]
@@ -7996,9 +7997,16 @@ mod settings_scalar_handler_tests {
 // The UI no longer owns worker threads or channel protocols (ADR 0006): it
 // submits intent and polls outcomes through the boxed `TagEdits`/`Covers`
 // handles. These tests drive the exact production code paths — the render-free
-// inline Tag Edit controller, `request_cover_intent`, and `cache_polled_covers`
-// that the RiffApp delegates to — over recording fakes, with no threads and
-// no disk I/O.
+// inline Tag Edit controller, and the View half of the Cover Cache that
+// RiffApp delegates to — over recording fakes, with no threads and no disk
+// I/O.
+//
+// The Cover Cache's *decision* half needs no `egui::Context` and has no reason
+// to be asserted from here, so its four assertions — the request key, the
+// in-flight dedup, a hero arrival being a miss for a thumbnail, and the settle
+// path — live at `crates/riff-gui/tests/cover_cache_tests.rs` instead. What
+// stays here is what genuinely needs a Context: the texture upload, the count
+// cap, and the byte budget.
 #[cfg(test)]
 mod background_service_ui_tests {
     use super::*;
@@ -8006,13 +8014,15 @@ mod background_service_ui_tests {
     use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
     use riff_gui::ui::app::CoverCacheKey;
     use riff_gui::ui::app::{
-        COVER_CACHE_CAP, COVER_HERO, COVER_IN_FLIGHT_CAP, COVER_TEXTURE_BYTE_BUDGET,
-        InlineTagEditor, InspectorContent, InspectorKind, cache_polled_covers, cover_cache_key,
-        folder_cover_intent, request_cache_clear, request_cover_intent, settle_cache_clear,
+        COVER_CACHE_CAP, COVER_HERO, COVER_TEXTURE_BYTE_BUDGET, InlineTagEditor, InspectorContent,
+        InspectorKind, cover_cache_key, flush_cleared_cache, folder_cover_texture,
+        request_cache_clear,
     };
+    use riff_gui::ui::artwork::store_cover_texture;
+    use riff_gui::ui::cover_cache::CoverCache;
     use riff_gui::ui::selection::{TagField, TagRow, TagRowState};
     use riff_library::app::traits::{DecodedCover, RequestedSize};
-    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::collections::{HashMap, VecDeque};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -8169,10 +8179,11 @@ mod background_service_ui_tests {
         assert_eq!(covers.clear_calls(), 1);
 
         // Nothing has settled: the wipe runs on the worker, so this frame must keep
-        // painting the covers it already has rather than blanking on a promise.
-        assert!(
-            settle_cache_clear(&covers, &mut in_flight, &mut textures, &mut lru_keys).is_none()
-        );
+        // painting the covers it already has rather than blanking on a promise. The
+        // Frame's step-4 drain is what notices the settlement now — and it reports
+        // the outcome rather than touching the map, which is why the flush below is
+        // the draw half's one egui-bound act (see `flush_cleared_cache`).
+        assert_eq!(covers.poll_cache_clear(), None);
         assert_eq!(
             textures.len(),
             4,
@@ -8180,10 +8191,8 @@ mod background_service_ui_tests {
         );
 
         covers.serve_clear(ClearCacheOutcome::Cleared);
-        assert_eq!(
-            settle_cache_clear(&covers, &mut in_flight, &mut textures, &mut lru_keys),
-            Some(ClearCacheOutcome::Cleared)
-        );
+        let settled = covers.poll_cache_clear().expect("the wipe settled");
+        flush_cleared_cache(&settled, &mut textures, &mut lru_keys);
         assert!(
             textures.is_empty(),
             "every texture is gone, so the next repaint shows placeholders and the rows re-request"
@@ -8192,20 +8201,9 @@ mod background_service_ui_tests {
             lru_keys.is_empty(),
             "and nothing is left in the LRU order either"
         );
-        assert!(
-            !in_flight,
-            "settled, so a later press is allowed to start a fresh clear"
-        );
 
         // Once settled, the frame stops asking the service at all.
-        assert!(
-            settle_cache_clear(&covers, &mut in_flight, &mut textures, &mut lru_keys).is_none()
-        );
-        covers.serve_clear(ClearCacheOutcome::Cleared);
-        assert!(
-            settle_cache_clear(&covers, &mut in_flight, &mut textures, &mut lru_keys).is_none(),
-            "an outcome is not drained into a clear nobody asked for"
-        );
+        assert_eq!(covers.poll_cache_clear(), None);
     }
 
     /// A cache that could not be cleared has left its rungs on disk, so the screen
@@ -8225,15 +8223,16 @@ mod background_service_ui_tests {
             reason: "read-only volume".to_string(),
         });
 
+        let settled = covers.poll_cache_clear().expect("the wipe settled");
         assert_eq!(
-            settle_cache_clear(&covers, &mut in_flight, &mut textures, &mut lru_keys),
-            Some(ClearCacheOutcome::Failed {
+            settled,
+            ClearCacheOutcome::Failed {
                 reason: "read-only volume".to_string()
-            }),
+            },
             "the reason reaches the caller so the status line can say it"
         );
+        flush_cleared_cache(&settled, &mut textures, &mut lru_keys);
         assert_eq!(textures.len(), 3, "a failed clear removes nothing");
-        assert!(!in_flight);
     }
 
     /// One clear at a time, the way the Tag Edit controller holds one outstanding
@@ -8251,9 +8250,14 @@ mod background_service_ui_tests {
         assert_eq!(covers.clear_calls(), 1);
 
         covers.serve_clear(ClearCacheOutcome::Cleared);
-        let mut textures = HashMap::new();
-        let mut lru_keys = Vec::new();
-        settle_cache_clear(&covers, &mut in_flight, &mut textures, &mut lru_keys);
+        assert!(
+            covers.poll_cache_clear().is_some(),
+            "the Frame's drain settles the outstanding wipe"
+        );
+        // The flag is the Frame's to clear (step 4 of `Frame::advance`), which is
+        // the half of the settle that is not egui-bound; here the test stands in
+        // for that drain.
+        in_flight = false;
         assert!(
             request_cache_clear(&covers, &mut in_flight),
             "and now a press counts"
@@ -8278,10 +8282,9 @@ mod background_service_ui_tests {
     #[test]
     fn test_the_texture_cache_is_bounded_by_bytes_not_by_entry_count() {
         let ctx = egui::Context::default();
+        let mut cache = CoverCache::new();
         let mut textures = HashMap::new();
         let mut lru_keys = Vec::new();
-        let mut in_flight = HashSet::new();
-        let mut in_flight_keys = Vec::new();
 
         // 18 uploads of 1024x1024 = 72 MB: nowhere near the 200-entry count cap, and
         // over the byte budget from the 17th on.
@@ -8291,13 +8294,12 @@ mod background_service_ui_tests {
                 (id, COVER_HERO, Some(square_cover(1024)))
             })
             .collect();
-        cache_polled_covers(
+        land_covers(
+            &mut cache,
             &CannedCovers(batch),
+            &ctx,
             &mut textures,
             &mut lru_keys,
-            &mut in_flight,
-            &mut in_flight_keys,
-            &ctx,
         );
 
         let bytes: u64 = textures
@@ -8343,11 +8345,11 @@ mod background_service_ui_tests {
         let ctx = egui::Context::default();
         let mut textures = HashMap::new();
         let mut lru_keys = Vec::new();
-        let mut in_flight = HashSet::new();
-        let mut in_flight_keys = Vec::new();
 
         // The tile first, so it is the LRU tail and the obvious victim.
+        let mut cache = CoverCache::new();
         let tile = crate::ui::artwork::lookup_cover_texture(
+            &mut cache,
             &mut textures,
             &mut lru_keys,
             &ctx,
@@ -8367,13 +8369,12 @@ mod background_service_ui_tests {
                 (id, COVER_HERO, Some(square_cover(1024)))
             })
             .collect();
-        cache_polled_covers(
+        land_covers(
+            &mut cache,
             &CannedCovers(batch),
+            &ctx,
             &mut textures,
             &mut lru_keys,
-            &mut in_flight,
-            &mut in_flight_keys,
-            &ctx,
         );
 
         assert!(
@@ -8384,6 +8385,23 @@ mod background_service_ui_tests {
             lru_keys.contains(&crate::ui::artwork::placeholder_cache_key()),
             "and stays in the order, so it is still a live entry rather than a stray"
         );
+    }
+
+    /// Consume polled cover results exactly as `RiffApp::update_cover_cache`
+    /// does: the Cover Cache settles — which drops the markers and hands the
+    /// pixels over — and the View half files each arrival as a texture,
+    /// bounding the map as it goes. The two calls are the production ones; only
+    /// the `&mut self` is spelled out here.
+    fn land_covers(
+        cache: &mut CoverCache,
+        covers: &dyn Covers,
+        ctx: &egui::Context,
+        textures: &mut HashMap<CoverCacheKey, egui::TextureHandle>,
+        lru_keys: &mut Vec<CoverCacheKey>,
+    ) {
+        for arrival in cache.settle(covers) {
+            store_cover_texture(cache, ctx, textures, lru_keys, arrival);
+        }
     }
 
     /// Canned [`Covers`] fake whose single poll drains scripted results.
@@ -8907,276 +8925,23 @@ mod background_service_ui_tests {
     }
 
     #[test]
-    fn test_cover_intent_requests_only_when_that_exact_size_is_uncached() {
-        let id = TrackId("/music/t1.mp3".to_string());
-        let path = PathBuf::from("/music/t1.mp3");
-        let thumb = RequestedSize {
-            width: 56,
-            height: 56,
-        };
-        let hero = RequestedSize {
-            width: 512,
-            height: 512,
-        };
-        let covers = RecordingCovers::new();
-        let ctx = egui::Context::default();
-        let hero_texture = ctx.load_texture(
-            "hero",
-            egui::ColorImage::from_rgba_unmultiplied([2, 2], &[0; 16]),
-            egui::TextureOptions::default(),
-        );
-        let mut textures: std::collections::HashMap<_, egui::TextureHandle> =
-            std::collections::HashMap::new();
-
-        let mut in_flight = HashSet::new();
-        let mut in_flight_keys = Vec::new();
-        let mut texture_lru = Vec::new();
-
-        request_cover_intent(
-            &textures,
-            &mut in_flight,
-            &mut in_flight_keys,
-            &covers,
-            id.clone(),
-            path.clone(),
-            thumb,
-        );
-        assert_eq!(
-            covers.requested(),
-            vec![(id.clone(), path.clone(), thumb)],
-            "an uncached track sends intent, with the box it wants, to the service"
-        );
-
-        // The first answer arrives and is artless, so no texture lands: the
-        // thumbnail is still a miss at this box. Delivering it first is what keeps
-        // this test about the *cache* rather than about the in-flight marker —
-        // otherwise a suppressed second request could mean either thing.
-        let mut artless = CannedCovers(vec![(id.clone(), thumb, None)]);
-        cache_polled_covers(
-            &artless,
-            &mut textures,
-            &mut texture_lru,
-            &mut in_flight,
-            &mut in_flight_keys,
-            &ctx,
-        );
-        artless.0.clear();
-
-        // A hero upload exists; a thumbnail request is still a miss. Reusing
-        // the hero texture there would draw the wrong resolution and, worse,
-        // never fetch the right one.
-        textures.insert(cover_cache_key(&id.0, hero), hero_texture);
-        request_cover_intent(
-            &textures,
-            &mut in_flight,
-            &mut in_flight_keys,
-            &covers,
-            id.clone(),
-            path.clone(),
-            thumb,
-        );
-        assert_eq!(
-            covers.requested(),
-            vec![
-                (id.clone(), path.clone(), thumb),
-                (id.clone(), path.clone(), thumb),
-            ],
-            "a track cached at another size issues a fresh request at this size"
-        );
-
-        request_cover_intent(
-            &textures,
-            &mut in_flight,
-            &mut in_flight_keys,
-            &covers,
-            id.clone(),
-            path.clone(),
-            hero,
-        );
-        assert_eq!(
-            covers.requested().len(),
-            2,
-            "a texture already cached at exactly this box suppresses the request"
-        );
-    }
-
-    /// The repaint bug `07` exists for: a row whose Cover has not landed asked
-    /// again on *every* frame, against an unbounded channel. One request per
-    /// outstanding `(identity, box)` is the whole fix, and the marker has to
-    /// survive until the answer arrives.
-    #[test]
-    fn test_a_cover_request_still_outstanding_is_not_issued_again() {
-        let id = TrackId("/music/slow.mp3".to_string());
-        let path = PathBuf::from("/music/slow.mp3");
-        let box_ = RequestedSize {
-            width: 56,
-            height: 56,
-        };
-        let covers = RecordingCovers::new();
-        let textures: HashMap<CoverCacheKey, egui::TextureHandle> = HashMap::new();
-        let mut in_flight = HashSet::new();
-        let mut in_flight_keys = Vec::new();
-
-        for _frame in 0..40 {
-            request_cover_intent(
-                &textures,
-                &mut in_flight,
-                &mut in_flight_keys,
-                &covers,
-                id.clone(),
-                path.clone(),
-                box_,
-            );
-        }
-        assert_eq!(
-            covers.requested().len(),
-            1,
-            "forty repaints of one outstanding request are still one request"
-        );
-
-        // A different box for the same row is a different job, marker or not.
-        request_cover_intent(
-            &textures,
-            &mut in_flight,
-            &mut in_flight_keys,
-            &covers,
-            id.clone(),
-            path.clone(),
-            RequestedSize {
-                width: 512,
-                height: 512,
-            },
-        );
-        assert_eq!(covers.requested().len(), 2);
-    }
-
-    /// `None` is a terminal outcome too. A row that asked once and turned out to
-    /// be artless must be free to ask again — otherwise a single artless answer
-    /// silences that `(identity, box)` for the rest of the session.
-    #[test]
-    fn test_an_artless_answer_clears_the_marker_so_the_row_can_ask_again() {
-        let id = TrackId("/music/artless.mp3".to_string());
-        let path = PathBuf::from("/music/artless.mp3");
-        let box_ = RequestedSize {
-            width: 56,
-            height: 56,
-        };
-        let covers = RecordingCovers::new();
-        let ctx = egui::Context::default();
-        let mut textures = HashMap::new();
-        let mut lru_keys = Vec::new();
-        let mut in_flight = HashSet::new();
-        let mut in_flight_keys = Vec::new();
-
-        request_cover_intent(
-            &textures,
-            &mut in_flight,
-            &mut in_flight_keys,
-            &covers,
-            id.clone(),
-            path.clone(),
-            box_,
-        );
-        assert_eq!(in_flight.len(), 1);
-
-        cache_polled_covers(
-            &CannedCovers(vec![(id.clone(), box_, None)]),
-            &mut textures,
-            &mut lru_keys,
-            &mut in_flight,
-            &mut in_flight_keys,
-            &ctx,
-        );
-        assert!(
-            in_flight.is_empty(),
-            "an artless answer is still an answer, so the marker goes"
-        );
-        assert!(in_flight_keys.is_empty(), "and its place in the LRU too");
-        assert!(textures.is_empty(), "artless uploads nothing");
-
-        request_cover_intent(
-            &textures,
-            &mut in_flight,
-            &mut in_flight_keys,
-            &covers,
-            id.clone(),
-            path.clone(),
-            box_,
-        );
-        assert_eq!(
-            covers.requested().len(),
-            2,
-            "and the row is free to ask again"
-        );
-    }
-
-    /// The texture map is bounded, and this set grows per `(identity, box)` rather
-    /// than per cached texture — so without its own cap it would be a slow leak
-    /// across a scrolled library. Bounded, and the evicted entries are the *oldest*
-    /// markers, which cost one re-request each and nothing worse.
-    #[test]
-    fn test_the_in_flight_set_stays_within_its_cap() {
-        let covers = RecordingCovers::new();
-        let textures: HashMap<CoverCacheKey, egui::TextureHandle> = HashMap::new();
-        let mut in_flight = HashSet::new();
-        let mut in_flight_keys = Vec::new();
-        let box_ = RequestedSize {
-            width: 56,
-            height: 56,
-        };
-
-        for index in 0..3_000 {
-            let path = PathBuf::from(format!("/music/{index:04}.mp3"));
-            request_cover_intent(
-                &textures,
-                &mut in_flight,
-                &mut in_flight_keys,
-                &covers,
-                TrackId::from_path(&path),
-                path,
-                box_,
-            );
-        }
-        assert_eq!(
-            covers.requested().len(),
-            3_000,
-            "every distinct row still gets its request; the cap bounds the marker, not the asking"
-        );
-        assert!(
-            in_flight.len() <= COVER_IN_FLIGHT_CAP && in_flight_keys.len() <= COVER_IN_FLIGHT_CAP,
-            "set {} / list {} must stay at or under the cap of {COVER_IN_FLIGHT_CAP}",
-            in_flight.len(),
-            in_flight_keys.len()
-        );
-        assert_eq!(
-            in_flight.len(),
-            in_flight_keys.len(),
-            "the set and its LRU list must not drift apart, or an entry is unmarkable forever"
-        );
-    }
-
-    #[test]
-    fn test_folder_cover_intent_asks_once_then_paints_the_cached_texture() {
+    fn test_folder_cover_texture_asks_once_then_paints_the_cached_texture() {
         let dir = std::path::Path::new("/music/boards");
         let thumb = RequestedSize {
             width: 56,
             height: 56,
         };
         let covers = RecordingCovers::new();
+        let mut cache = CoverCache::new();
         let mut textures: std::collections::HashMap<_, egui::TextureHandle> =
             std::collections::HashMap::new();
+        let mut lru_keys = Vec::new();
+        let ctx = egui::Context::default();
 
         // A cold folder has nothing to paint, so the row keeps its glyph and
         // exactly one request goes out — for the directory itself.
         assert_eq!(
-            folder_cover_intent(
-                &textures,
-                &mut HashSet::new(),
-                &mut Vec::new(),
-                &covers,
-                dir,
-                thumb
-            ),
+            folder_cover_texture(&mut cache, &covers, &textures, dir, thumb),
             None,
             "an uncached folder has no texture to paint"
         );
@@ -9186,24 +8951,27 @@ mod background_service_ui_tests {
             "the folder row asks for its OWN directory, at the box it paints at"
         );
 
-        // The decode landing in the cache is `cache_polled_covers`' work; here
-        // it is simply already filed, and the row must find it.
-        let texture = egui::Context::default().load_texture(
-            "folder",
-            egui::ColorImage::from_rgba_unmultiplied([2, 2], &[0; 16]),
-            egui::TextureOptions::default(),
+        // The decode lands through the two halves exactly as a frame lands it —
+        // the cache records the arrival, the View half files the texture — and
+        // the row must find the art it is now holding.
+        land_covers(
+            &mut cache,
+            &CannedCovers(vec![(
+                TrackId::from_path(dir),
+                thumb,
+                Some(DecodedCover {
+                    rgba: vec![0; 2 * 2 * 4],
+                    width: 2,
+                    height: 2,
+                }),
+            )]),
+            &ctx,
+            &mut textures,
+            &mut lru_keys,
         );
-        let id = texture.id();
-        textures.insert(cover_cache_key(&dir.to_string_lossy(), thumb), texture);
+        let id = textures[&cover_cache_key(&dir.to_string_lossy(), thumb)].id();
         assert_eq!(
-            folder_cover_intent(
-                &textures,
-                &mut HashSet::new(),
-                &mut Vec::new(),
-                &covers,
-                dir,
-                thumb
-            ),
+            folder_cover_texture(&mut cache, &covers, &textures, dir, thumb),
             Some(id),
             "the cached art is handed back for the row to paint"
         );
@@ -9215,7 +8983,7 @@ mod background_service_ui_tests {
     }
 
     #[test]
-    fn test_cache_polled_covers_uploads_the_delivered_pixels_untouched() {
+    fn test_store_cover_texture_uploads_the_delivered_pixels_untouched() {
         let ctx = egui::Context::default();
         let big = RequestedSize {
             width: 512,
@@ -9233,17 +9001,11 @@ mod background_service_ui_tests {
             (TrackId("/music/art.mp3".to_string()), big, Some(cover)),
             (TrackId("/music/artless.mp3".to_string()), big, None),
         ]);
+        let mut cache = CoverCache::new();
         let mut textures = std::collections::HashMap::new();
         let mut lru_keys = Vec::new();
 
-        cache_polled_covers(
-            &covers,
-            &mut textures,
-            &mut lru_keys,
-            &mut HashSet::new(),
-            &mut Vec::new(),
-            &ctx,
-        );
+        land_covers(&mut cache, &covers, &ctx, &mut textures, &mut lru_keys);
 
         let texture = textures
             .get(&cover_cache_key("/music/art.mp3", big))
@@ -9280,6 +9042,7 @@ mod background_service_ui_tests {
             width: 1,
             height: 1,
         };
+        let mut cache = CoverCache::new();
         let mut textures = std::collections::HashMap::new();
         let mut lru_keys = Vec::new();
 
@@ -9287,13 +9050,12 @@ mod background_service_ui_tests {
         let full: Vec<_> = (0..COVER_CACHE_CAP)
             .map(|i| (track_at(i), thumb, Some(cover.clone())))
             .collect();
-        cache_polled_covers(
+        land_covers(
+            &mut cache,
             &CannedCovers(full),
+            &ctx,
             &mut textures,
             &mut lru_keys,
-            &mut HashSet::new(),
-            &mut Vec::new(),
-            &ctx,
         );
         assert_eq!(
             textures.len(),
@@ -9303,14 +9065,7 @@ mod background_service_ui_tests {
 
         let oldest = track_at(0);
         let newcomer = CannedCovers(vec![(oldest.clone(), hero, Some(cover))]);
-        cache_polled_covers(
-            &newcomer,
-            &mut textures,
-            &mut lru_keys,
-            &mut HashSet::new(),
-            &mut Vec::new(),
-            &ctx,
-        );
+        land_covers(&mut cache, &newcomer, &ctx, &mut textures, &mut lru_keys);
 
         assert!(
             !textures.contains_key(&cover_cache_key(&oldest.0, thumb)),
@@ -9337,7 +9092,7 @@ mod background_service_ui_tests {
     }
 
     #[test]
-    fn test_cache_polled_covers_keeps_one_texture_per_requested_size() {
+    fn test_one_track_keeps_one_texture_per_requested_size() {
         // The same track polled at two boxes must produce two textures: a
         // hero upload and a thumbnail upload are different pixels, and
         // neither may stand in for the other.
@@ -9371,17 +9126,11 @@ mod background_service_ui_tests {
                 }),
             ),
         ]);
+        let mut cache = CoverCache::new();
         let mut textures = std::collections::HashMap::new();
         let mut lru_keys = Vec::new();
 
-        cache_polled_covers(
-            &covers,
-            &mut textures,
-            &mut lru_keys,
-            &mut HashSet::new(),
-            &mut Vec::new(),
-            &ctx,
-        );
+        land_covers(&mut cache, &covers, &ctx, &mut textures, &mut lru_keys);
 
         assert_eq!(
             textures.len(),
@@ -9727,8 +9476,8 @@ mod browser_column_ui_tests {
                         empty_title: "",
                         empty_hint: "",
                     };
-                    riff_gui::ui::browser::show_browser_column(
-                        ui, &mut cache, &palette, column, actions,
+                    riff_gui::ui::browser::show_browser_column_scrolled(
+                        ui, &mut cache, &palette, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -9796,8 +9545,8 @@ mod browser_column_ui_tests {
                         empty_title: "",
                         empty_hint: "",
                     };
-                    riff_gui::ui::browser::show_browser_column(
-                        ui, &mut cache, &palette, column, actions,
+                    riff_gui::ui::browser::show_browser_column_scrolled(
+                        ui, &mut cache, &palette, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -9858,8 +9607,8 @@ mod browser_column_ui_tests {
                         empty_title: "",
                         empty_hint: "",
                     };
-                    riff_gui::ui::browser::show_browser_column(
-                        ui, &mut cache, &palette, column, actions,
+                    riff_gui::ui::browser::show_browser_column_scrolled(
+                        ui, &mut cache, &palette, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -9913,8 +9662,8 @@ mod browser_column_ui_tests {
                         empty_title: "",
                         empty_hint: "",
                     };
-                    riff_gui::ui::browser::show_browser_column(
-                        ui, &mut cache, &palette, column, actions,
+                    riff_gui::ui::browser::show_browser_column_scrolled(
+                        ui, &mut cache, &palette, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -9949,8 +9698,8 @@ mod browser_column_ui_tests {
                         empty_title: "No tracks yet",
                         empty_hint: "Add a folder to start scanning your library.",
                     };
-                    riff_gui::ui::browser::show_browser_column(
-                        ui, &mut cache, &palette, column, actions,
+                    riff_gui::ui::browser::show_browser_column_scrolled(
+                        ui, &mut cache, &palette, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -9992,8 +9741,8 @@ mod browser_column_ui_tests {
                             empty_title: "",
                             empty_hint: "",
                         };
-                        riff_gui::ui::browser::show_browser_column(
-                            ui, &mut cache, &palette, column, actions,
+                        riff_gui::ui::browser::show_browser_column_scrolled(
+                            ui, &mut cache, &palette, column, None, actions,
                         );
                     },
                     Vec::new(),
@@ -10046,8 +9795,8 @@ mod browser_column_ui_tests {
                         empty_title: "",
                         empty_hint: "",
                     };
-                    riff_gui::ui::browser::show_browser_column(
-                        ui, &mut cache, &palette, column, actions,
+                    riff_gui::ui::browser::show_browser_column_scrolled(
+                        ui, &mut cache, &palette, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -10100,8 +9849,8 @@ mod browser_column_ui_tests {
                         empty_title: "",
                         empty_hint: "",
                     };
-                    riff_gui::ui::browser::show_browser_column(
-                        ui, &mut cache, &palette, column, actions,
+                    riff_gui::ui::browser::show_browser_column_scrolled(
+                        ui, &mut cache, &palette, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -10224,14 +9973,14 @@ mod browser_column_ui_tests {
     //
     // The middle pane of the three-pane explorer. Tested at the same two
     // seams as the browser column (issue 08): the pure widget seam
-    // (`ui::detail::show_detail_column`, headless kittest harness) and the
+    // (`ui::detail::show_detail_column_scrolled`, headless kittest harness) and the
     // session-glue seam (`apply_detail_action`, real store/transport mocks).
 
     #[test]
     fn test_track_list_renders_rows_and_reports_row_gestures() {
         use egui_kittest::kittest::Queryable;
         use riff_gui::ui::detail::{
-            DetailAction, DetailColumn, DetailReport, TrackRow, show_detail_column,
+            DetailAction, DetailColumn, DetailReport, TrackRow, show_detail_column_scrolled,
         };
         use std::time::Duration;
 
@@ -10267,7 +10016,7 @@ mod browser_column_ui_tests {
                         tracks: &tracks,
                         ..DetailColumn::empty("", "")
                     };
-                    show_detail_column(ui, &mut cache, &palette, column, reports);
+                    show_detail_column_scrolled(ui, &mut cache, &palette, column, None, reports);
                 },
                 Vec::new(),
             );
@@ -10319,7 +10068,7 @@ mod browser_column_ui_tests {
         use egui_kittest::kittest::Queryable;
         use riff_backend::app::state::TrackSort;
         use riff_gui::ui::detail::{
-            DetailAction, DetailColumn, DetailReport, TrackRow, show_detail_column,
+            DetailAction, DetailColumn, DetailReport, TrackRow, show_detail_column_scrolled,
         };
 
         let palette = Palette::dark();
@@ -10343,7 +10092,7 @@ mod browser_column_ui_tests {
                         sort: Some(TrackSort::NumberAsc),
                         ..DetailColumn::empty("", "")
                     };
-                    show_detail_column(ui, &mut cache, &palette, column, reports);
+                    show_detail_column_scrolled(ui, &mut cache, &palette, column, None, reports);
                 },
                 Vec::new(),
             );
@@ -10395,7 +10144,9 @@ mod browser_column_ui_tests {
     fn test_a_secondary_click_on_a_track_row_reports_its_key_with_the_menu() {
         use egui_kittest::kittest::Queryable;
         use riff_backend::domain::PlaylistId;
-        use riff_gui::ui::detail::{DetailColumn, DetailReport, TrackRow, show_detail_column};
+        use riff_gui::ui::detail::{
+            DetailColumn, DetailReport, TrackRow, show_detail_column_scrolled,
+        };
         use riff_gui::ui::menu::{TrackMenu, TrackMenuIntent, TrackMenuReport};
         use std::time::Duration;
 
@@ -10436,7 +10187,7 @@ mod browser_column_ui_tests {
                         track_menu: Some(&track_menu),
                         ..DetailColumn::empty("", "")
                     };
-                    show_detail_column(ui, &mut cache, &palette, column, reports);
+                    show_detail_column_scrolled(ui, &mut cache, &palette, column, None, reports);
                 },
                 Vec::new(),
             );
@@ -10521,7 +10272,7 @@ mod browser_column_ui_tests {
     #[test]
     fn test_the_tracks_column_offers_each_row_its_own_favourite_wording() {
         use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::detail::{DetailColumn, TrackRow, show_detail_column};
+        use riff_gui::ui::detail::{DetailColumn, TrackRow, show_detail_column_scrolled};
         use riff_gui::ui::menu::TrackMenu;
 
         let palette = Palette::dark();
@@ -10560,7 +10311,7 @@ mod browser_column_ui_tests {
                         track_menu: Some(&track_menu),
                         ..DetailColumn::empty("", "")
                     };
-                    show_detail_column(ui, &mut cache, &palette, column, reports);
+                    show_detail_column_scrolled(ui, &mut cache, &palette, column, None, reports);
                 },
                 Vec::new(),
             );
@@ -10636,7 +10387,7 @@ mod browser_column_ui_tests {
     fn test_track_table_favorite_control_reports_the_toggle() {
         use egui_kittest::kittest::Queryable;
         use riff_gui::ui::detail::{
-            DetailAction, DetailColumn, DetailReport, TrackRow, show_detail_column,
+            DetailAction, DetailColumn, DetailReport, TrackRow, show_detail_column_scrolled,
         };
 
         let palette = Palette::dark();
@@ -10670,7 +10421,7 @@ mod browser_column_ui_tests {
                         tracks: &tracks,
                         ..DetailColumn::empty("", "")
                     };
-                    show_detail_column(ui, &mut cache, &palette, column, reports);
+                    show_detail_column_scrolled(ui, &mut cache, &palette, column, None, reports);
                 },
                 Vec::new(),
             );
@@ -10783,7 +10534,9 @@ mod browser_column_ui_tests {
     fn test_artist_detail_lists_albums_that_drill_deeper() {
         use egui_kittest::kittest::Queryable;
         use riff_gui::ui::browser::BrowserItem;
-        use riff_gui::ui::detail::{DetailAction, DetailColumn, DetailReport, show_detail_column};
+        use riff_gui::ui::detail::{
+            DetailAction, DetailColumn, DetailReport, show_detail_column_scrolled,
+        };
 
         let palette = Palette::dark();
         let mut cache = IconCache::new();
@@ -10804,7 +10557,7 @@ mod browser_column_ui_tests {
                         rows: &albums,
                         ..DetailColumn::empty("No albums yet", "Nothing here.")
                     };
-                    show_detail_column(ui, &mut cache, &palette, column, reports);
+                    show_detail_column_scrolled(ui, &mut cache, &palette, column, None, reports);
                 },
                 Vec::new(),
             );
@@ -11555,7 +11308,7 @@ mod browser_column_ui_tests {
     /// focus — so the only plane the list paints is the field itself, and the
     /// card plane is whatever the list failed to cover.
     fn render_idle_list_field() -> (image::RgbaImage, egui::Rect) {
-        use riff_gui::ui::browser::show_browser_column;
+        use riff_gui::ui::browser::show_browser_column_scrolled;
         /// Where the list lands, captured out of the frame so a test can count
         /// the plane inside the list's own area rather than over the card's
         /// padding around it.
@@ -11588,7 +11341,14 @@ mod browser_column_ui_tests {
                         empty_title: "",
                         empty_hint: "",
                     };
-                    show_browser_column(ui, &mut cache, &palette, column, &mut Vec::new());
+                    show_browser_column_scrolled(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        column,
+                        None,
+                        &mut Vec::new(),
+                    );
                 },
                 ListRect::default(),
             );
@@ -12980,7 +12740,7 @@ mod browser_column_ui_tests {
 
     /// The production Tracks-column data path, replicated frame-for-frame:
     /// `resolve_detail_content` maps the library session through the
-    /// Session Views seam, and `show_detail_column` paints it. Entity
+    /// Session Views seam, and `show_detail_column_scrolled` paints it. Entity
     /// listings are their own columns in the stage, so the widget receives
     /// no rows.
     fn render_detail_state_ui(ui: &mut egui::Ui, s: &mut DetailRenderState) {
@@ -12996,11 +12756,12 @@ mod browser_column_ui_tests {
             ..riff_gui::ui::detail::DetailColumn::empty("Nothing selected", "Pick a row.")
         };
         s.actions.clear();
-        riff_gui::ui::detail::show_detail_column(
+        riff_gui::ui::detail::show_detail_column_scrolled(
             ui,
             &mut s.cache,
             &palette,
             column,
+            None,
             &mut s.actions,
         );
     }
@@ -14581,8 +14342,8 @@ mod browser_column_ui_tests {
                         empty_title: "",
                         empty_hint: "",
                     };
-                    riff_gui::ui::browser::show_browser_column(
-                        ui, &mut cache, &palette, column, actions,
+                    riff_gui::ui::browser::show_browser_column_scrolled(
+                        ui, &mut cache, &palette, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -14620,7 +14381,7 @@ mod browser_column_ui_tests {
     fn test_track_table_rows_activate_by_keyboard() {
         use egui_kittest::kittest::Queryable;
         use riff_gui::ui::detail::{
-            DetailAction, DetailColumn, DetailReport, TrackRow, show_detail_column,
+            DetailAction, DetailColumn, DetailReport, TrackRow, show_detail_column_scrolled,
         };
         use std::time::Duration;
 
@@ -14644,7 +14405,7 @@ mod browser_column_ui_tests {
                         tracks: &tracks,
                         ..DetailColumn::empty("", "")
                     };
-                    show_detail_column(ui, &mut cache, &palette, column, reports);
+                    show_detail_column_scrolled(ui, &mut cache, &palette, column, None, reports);
                 },
                 Vec::new(),
             );
@@ -14771,11 +14532,12 @@ mod browser_column_ui_tests {
                                 empty_title: "",
                                 empty_hint: "",
                             };
-                            riff_gui::ui::browser::show_browser_column(
+                            riff_gui::ui::browser::show_browser_column_scrolled(
                                 ui,
                                 &mut cache,
                                 &palette,
                                 column,
+                                None,
                                 &mut browser_actions,
                             );
                         });
@@ -14806,11 +14568,12 @@ mod browser_column_ui_tests {
                                 tracks: &tracks,
                                 ..DetailColumn::empty("", "")
                             };
-                            riff_gui::ui::detail::show_detail_column(
+                            riff_gui::ui::detail::show_detail_column_scrolled(
                                 ui,
                                 &mut cache,
                                 &palette,
                                 column,
+                                None,
                                 &mut detail_actions,
                             );
                         });
@@ -19441,8 +19204,8 @@ mod context_menu_ui_tests {
                         empty_title: "",
                         empty_hint: "",
                     };
-                    riff_gui::ui::browser::show_browser_column(
-                        ui, &mut cache, &palette, column, actions,
+                    riff_gui::ui::browser::show_browser_column_scrolled(
+                        ui, &mut cache, &palette, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -19518,8 +19281,8 @@ mod context_menu_ui_tests {
                         empty_title: "",
                         empty_hint: "",
                     };
-                    riff_gui::ui::browser::show_browser_column(
-                        ui, &mut cache, &palette, column, actions,
+                    riff_gui::ui::browser::show_browser_column_scrolled(
+                        ui, &mut cache, &palette, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -21773,7 +21536,7 @@ mod component_boundary_tests {
     /// `now_playing`, `chrome`, `selection`) are deliberately absent — they are
     /// allowed to hold application state, and the sweeps below would be wrong
     /// to demand otherwise.
-    const PRIMITIVES: [&str; 13] = [
+    const PRIMITIVES: [&str; 12] = [
         "artwork.rs",
         "button.rs",
         "empty_state.rs",
@@ -21786,7 +21549,6 @@ mod component_boundary_tests {
         "stage.rs",
         "text_field.rs",
         "toggle_switch.rs",
-        "up_next.rs",
     ];
 
     fn ui_dir() -> PathBuf {
@@ -21836,7 +21598,8 @@ mod component_boundary_tests {
             "rfd::",
             // A primitive depends on the theme and its own props — never on the
             // composite that hosts it. (Both arrows used to point the wrong
-            // way: ui::app <-> ui::cover_placeholder, ui::stage -> ui::app.)
+            // way: the placeholder's own module <-> ui::app, ui::stage ->
+            // ui::app.)
             "ui::app::",
             "super::app::",
             "crate::app::",
@@ -21935,8 +21698,8 @@ mod component_boundary_tests {
         let _cap = riff_gui::ui::app::COVER_CACHE_CAP;
         let _evicted: Vec<String> = riff_gui::ui::app::lru_insert(&mut Vec::new(), "k".into(), 1);
 
-        // The artwork placeholder's old home.
-        let _tile = riff_gui::ui::cover_placeholder::placeholder_cache_key;
+        // The artwork placeholder's owner (its historical alias module is gone).
+        let _tile = riff_gui::ui::artwork::placeholder_cache_key;
 
         // Moved out of `ui::browser` (ticket 12) and `ui::now_playing` (ticket 05).
         let _empty: fn(&mut egui::Ui, &riff_gui::ui::theme::Palette, &str, &str) =

@@ -667,7 +667,7 @@ impl SqliteStore {
         f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> Result<T, StoreError> {
         let conn = self.conn.lock_or_recover();
-        f(&conn).map_err(|e| StoreError::InvalidOperation(format!("store query failed: {e}")))
+        f(&conn).map_err(|e| op_error("store query failed", e))
     }
 
     /// The session Library generation this handle bumps after each committed
@@ -724,38 +724,22 @@ impl SqliteStore {
         })
     }
 
-    /// Handle for wiring this store into the event backbone. Returns a fresh
-    /// crossbeam [`Sender`] of [`StoreChanged`] so tests and the event inbox can
-    /// consume the notifications this handle produces beside each generation bump.
-    #[must_use]
-    pub fn changes_sender(&self) -> Sender<StoreChanged> {
-        self.changes.clone()
-    }
-
     /// Durability setup required by the spec: WAL journal mode,
     /// synchronous=NORMAL, foreign keys ON, and a short busy timeout.
     fn configure_connection(conn: &mut Connection) -> Result<(), StoreError> {
         conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| StoreError::InvalidOperation(format!("failed to enable WAL mode: {e}")))?;
+            .map_err(|e| op_error("failed to enable WAL mode", e))?;
         conn.pragma_update(None, "synchronous", "NORMAL")
-            .map_err(|e| {
-                StoreError::InvalidOperation(format!("failed to set synchronous=NORMAL: {e}"))
-            })?;
+            .map_err(|e| op_error("failed to set synchronous=NORMAL", e))?;
         conn.pragma_update(None, "foreign_keys", "ON")
-            .map_err(|e| {
-                StoreError::InvalidOperation(format!("failed to enable foreign keys: {e}"))
-            })?;
+            .map_err(|e| op_error("failed to enable foreign keys", e))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(|e| {
-                StoreError::InvalidOperation(format!("failed to set busy timeout: {e}"))
-            })?;
+            .map_err(|e| op_error("failed to set busy timeout", e))?;
         // Folder prefix queries match paths byte-for-byte like the former
         // in-memory `Path::starts_with` checks; SQLite's default ASCII case
         // folding for LIKE would silently widen every folder query.
         conn.pragma_update(None, "case_sensitive_like", "ON")
-            .map_err(|e| {
-                StoreError::InvalidOperation(format!("failed to enable case-sensitive LIKE: {e}"))
-            })?;
+            .map_err(|e| op_error("failed to enable case-sensitive LIKE", e))?;
         Ok(())
     }
 
@@ -793,11 +777,7 @@ impl SqliteStore {
                     [migration.version],
                     |row| row.get(0),
                 )
-                .map(Some)
-                .or_else(|e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                    other => Err(other),
-                })
+                .optional()
                 .map_err(|e| {
                     OpenFailure::Corruption(StoreError::InvalidOperation(format!(
                         "failed to read migration state for version {}: {e}",
@@ -857,7 +837,8 @@ impl StoreMigrations for SqliteStore {
     }
 }
 
-/// stamp at creation).
+/// Rebuild a `SystemTime` from the store's UTC epoch-nanosecond encoding
+/// (the inverse of [`nanos_from_system_time`]).
 fn system_time_from_nanos(nanos: i64) -> SystemTime {
     let offset = std::time::Duration::from_nanos(nanos.unsigned_abs());
     if nanos >= 0 {
@@ -910,7 +891,7 @@ impl PlaylistStore for SqliteStore {
             }
             Ok(playlists)
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to load playlists: {e}")))
+        .map_err(|e| op_error("failed to load playlists", e))
     }
 
     /// One Playlist's entries in playlist order, each with its Library
@@ -948,7 +929,7 @@ impl PlaylistStore for SqliteStore {
             })?;
             rows.collect()
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to load playlist entries: {e}")))
+        .map_err(|e| op_error("failed to load playlist entries", e))
     }
 
     /// One immediate durable transaction: the playlist row plus its initial
@@ -960,16 +941,11 @@ impl PlaylistStore for SqliteStore {
     ) -> Result<PlaylistId, StoreError> {
         let created = self
             .with_connection(|conn| {
-                conn.execute_batch("BEGIN IMMEDIATE;")?;
-                match Self::create_playlist_in_tx(conn, name, initial_tracks) {
-                    Ok(id) => conn.execute_batch("COMMIT;").map(|()| id),
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK;");
-                        Err(e)
-                    }
-                }
+                in_tx(conn, |conn| {
+                    Self::create_playlist_in_tx(conn, name, initial_tracks)
+                })
             })
-            .map_err(|e| StoreError::InvalidOperation(format!("failed to create playlist: {e}")));
+            .map_err(|e| op_error("failed to create playlist", e));
         self.bump_playlist_generation_on_commit(created.is_ok());
         created
     }
@@ -978,21 +954,15 @@ impl PlaylistStore for SqliteStore {
     fn rename_playlist(&mut self, id: &PlaylistId, new_name: &str) -> Result<bool, StoreError> {
         let renamed = self
             .with_connection(|conn| {
-                conn.execute_batch("BEGIN IMMEDIATE;")?;
-                let updated = conn.execute(
-                    "UPDATE playlists SET name = ?2 WHERE id = ?1",
-                    rusqlite::params![id.0, new_name.trim()],
-                );
-                match updated {
-                    Ok(_) => conn.execute_batch("COMMIT;").map(|()| updated.unwrap_or(0)),
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK;");
-                        Err(e)
-                    }
-                }
+                in_tx(conn, |conn| {
+                    conn.execute(
+                        "UPDATE playlists SET name = ?2 WHERE id = ?1",
+                        rusqlite::params![id.0, new_name.trim()],
+                    )
+                })
             })
             .map(|rows| rows > 0)
-            .map_err(|e| StoreError::InvalidOperation(format!("failed to rename playlist: {e}")));
+            .map_err(|e| op_error("failed to rename playlist", e));
         self.bump_playlist_generation_on_commit(matches!(renamed, Ok(true)));
         renamed
     }
@@ -1002,18 +972,12 @@ impl PlaylistStore for SqliteStore {
     fn delete_playlist(&mut self, id: &PlaylistId) -> Result<bool, StoreError> {
         let deleted = self
             .with_connection(|conn| {
-                conn.execute_batch("BEGIN IMMEDIATE;")?;
-                let deleted = conn.execute("DELETE FROM playlists WHERE id = ?1", [&id.0]);
-                match deleted {
-                    Ok(_) => conn.execute_batch("COMMIT;").map(|()| deleted.unwrap_or(0)),
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK;");
-                        Err(e)
-                    }
-                }
+                in_tx(conn, |conn| {
+                    conn.execute("DELETE FROM playlists WHERE id = ?1", [&id.0])
+                })
             })
             .map(|rows| rows > 0)
-            .map_err(|e| StoreError::InvalidOperation(format!("failed to delete playlist: {e}")));
+            .map_err(|e| op_error("failed to delete playlist", e));
         self.bump_playlist_generation_on_commit(matches!(deleted, Ok(true)));
         deleted
     }
@@ -1023,8 +987,7 @@ impl PlaylistStore for SqliteStore {
     fn add_playlist_entry(&mut self, id: &PlaylistId, track: &TrackId) -> Result<bool, StoreError> {
         let added = self
             .with_connection(|conn| {
-                conn.execute_batch("BEGIN IMMEDIATE;")?;
-                let outcome = (|| -> rusqlite::Result<bool> {
+                in_tx(conn, |conn| {
                     let known: i64 = conn.query_row(
                         "SELECT COUNT(*) FROM playlists WHERE id = ?1",
                         [&id.0],
@@ -1054,18 +1017,9 @@ impl PlaylistStore for SqliteStore {
                         rusqlite::params![id.0, next, track.0],
                     )?;
                     Ok(true)
-                })();
-                match outcome {
-                    Ok(committed) => conn.execute_batch("COMMIT;").map(|()| committed),
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK;");
-                        Err(e)
-                    }
-                }
+                })
             })
-            .map_err(|e| {
-                StoreError::InvalidOperation(format!("failed to add playlist entry: {e}"))
-            });
+            .map_err(|e| op_error("failed to add playlist entry", e));
         self.bump_playlist_generation_on_commit(matches!(added, Ok(true)));
         added
     }
@@ -1079,23 +1033,15 @@ impl PlaylistStore for SqliteStore {
     ) -> Result<bool, StoreError> {
         let removed = self
             .with_connection(|conn| {
-                conn.execute_batch("BEGIN IMMEDIATE;")?;
-                let removed = conn.execute(
-                    "DELETE FROM playlist_entries WHERE playlist_id = ?1 AND track_id = ?2",
-                    rusqlite::params![id.0, track.0],
-                );
-                match removed {
-                    Ok(_) => conn.execute_batch("COMMIT;").map(|()| removed.unwrap_or(0)),
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK;");
-                        Err(e)
-                    }
-                }
+                in_tx(conn, |conn| {
+                    conn.execute(
+                        "DELETE FROM playlist_entries WHERE playlist_id = ?1 AND track_id = ?2",
+                        rusqlite::params![id.0, track.0],
+                    )
+                })
             })
             .map(|rows| rows > 0)
-            .map_err(|e| {
-                StoreError::InvalidOperation(format!("failed to remove playlist entries: {e}"))
-            });
+            .map_err(|e| op_error("failed to remove playlist entries", e));
         self.bump_playlist_generation_on_commit(matches!(removed, Ok(true)));
         removed
     }
@@ -1111,8 +1057,7 @@ impl PlaylistStore for SqliteStore {
     ) -> Result<bool, StoreError> {
         let reordered = self
             .with_connection(|conn| {
-                conn.execute_batch("BEGIN IMMEDIATE;")?;
-                let outcome = (|| -> rusqlite::Result<bool> {
+                in_tx(conn, |conn| {
                     let known: i64 = conn.query_row(
                         "SELECT COUNT(*) FROM playlists WHERE id = ?1",
                         [&id.0],
@@ -1137,18 +1082,9 @@ impl PlaylistStore for SqliteStore {
                         )?;
                     }
                     Ok(true)
-                })();
-                match outcome {
-                    Ok(committed) => conn.execute_batch("COMMIT;").map(|()| committed),
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK;");
-                        Err(e)
-                    }
-                }
+                })
             })
-            .map_err(|e| {
-                StoreError::InvalidOperation(format!("failed to reorder playlist entries: {e}"))
-            });
+            .map_err(|e| op_error("failed to reorder playlist entries", e));
         self.bump_playlist_generation_on_commit(matches!(reordered, Ok(true)));
         reordered
     }
@@ -1162,17 +1098,8 @@ impl LibraryMutationStore for SqliteStore {
     /// metadata without ever touching history.
     fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, StoreError> {
         let written = self
-            .with_connection(|conn| {
-                conn.execute_batch("BEGIN IMMEDIATE;")?;
-                match Self::apply_scan_batch_in_tx(conn, tracks) {
-                    Ok(written) => conn.execute_batch("COMMIT;").map(|()| written),
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK;");
-                        Err(e)
-                    }
-                }
-            })
-            .map_err(|e| StoreError::InvalidOperation(format!("failed to apply scan batch: {e}")));
+            .with_connection(|conn| in_tx(conn, |conn| Self::apply_scan_batch_in_tx(conn, tracks)))
+            .map_err(|e| op_error("failed to apply scan batch", e));
         self.bump_library_generation_on_commit(written.is_ok());
         written
     }
@@ -1187,25 +1114,16 @@ impl LibraryMutationStore for SqliteStore {
     ) -> Result<bool, StoreError> {
         let recorded = self
             .with_connection(|conn| {
-                conn.execute_batch("BEGIN IMMEDIATE;")?;
-                let updated = conn.execute(
-                    "UPDATE tracks SET play_count = play_count + 1, last_played_nanos = ?1
-                     WHERE path = ?2",
-                    rusqlite::params![nanos_from_system_time(played_at), id.0],
-                );
-                match updated {
-                    Ok(_) => conn
-                        .execute_batch("COMMIT;")
-                        .map(|()| updated.unwrap_or(0) > 0),
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK;");
-                        Err(e)
-                    }
-                }
+                in_tx(conn, |conn| {
+                    conn.execute(
+                        "UPDATE tracks SET play_count = play_count + 1, last_played_nanos = ?1
+                         WHERE path = ?2",
+                        rusqlite::params![nanos_from_system_time(played_at), id.0],
+                    )
+                    .map(|rows| rows > 0)
+                })
             })
-            .map_err(|e| {
-                StoreError::InvalidOperation(format!("failed to record played track: {e}"))
-            });
+            .map_err(|e| op_error("failed to record played track", e));
         self.bump_library_generation_on_commit(matches!(recorded, Ok(true)));
         recorded
     }
@@ -1217,25 +1135,16 @@ impl LibraryMutationStore for SqliteStore {
     fn set_track_favorite(&mut self, id: &TrackId, favorite: bool) -> Result<bool, StoreError> {
         let set = self
             .with_connection(|conn| {
-                conn.execute_batch("BEGIN IMMEDIATE;")?;
-                let updated = conn.execute(
-                    "UPDATE tracks SET favorite = ?1
-                     WHERE path = ?2 AND favorite != ?1",
-                    rusqlite::params![favorite, id.0],
-                );
-                match updated {
-                    Ok(_) => conn
-                        .execute_batch("COMMIT;")
-                        .map(|()| updated.unwrap_or(0) > 0),
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK;");
-                        Err(e)
-                    }
-                }
+                in_tx(conn, |conn| {
+                    conn.execute(
+                        "UPDATE tracks SET favorite = ?1
+                         WHERE path = ?2 AND favorite != ?1",
+                        rusqlite::params![favorite, id.0],
+                    )
+                    .map(|rows| rows > 0)
+                })
             })
-            .map_err(|e| {
-                StoreError::InvalidOperation(format!("failed to set the favorite flag: {e}"))
-            });
+            .map_err(|e| op_error("failed to set the favorite flag", e));
         self.bump_library_generation_on_commit(matches!(set, Ok(true)));
         set
     }
@@ -1245,17 +1154,8 @@ impl LibraryMutationStore for SqliteStore {
     /// orphan cleanup commit together or not at all.
     fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), StoreError> {
         let applied = self
-            .with_connection(|conn| {
-                conn.execute_batch("BEGIN IMMEDIATE;")?;
-                match Self::apply_tag_refresh_in_tx(conn, track) {
-                    Ok(()) => conn.execute_batch("COMMIT;"),
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK;");
-                        Err(e)
-                    }
-                }
-            })
-            .map_err(|e| StoreError::InvalidOperation(format!("failed to apply tag refresh: {e}")));
+            .with_connection(|conn| in_tx(conn, |conn| Self::apply_tag_refresh_in_tx(conn, track)))
+            .map_err(|e| op_error("failed to apply tag refresh", e));
         self.bump_library_generation_on_commit(applied.is_ok());
         applied
     }
@@ -1268,33 +1168,25 @@ impl LibraryMutationStore for SqliteStore {
         let root_text = root.to_string_lossy().into_owned();
         let removed = self
             .with_connection(|conn| {
-                conn.execute_batch("BEGIN IMMEDIATE;")?;
-                // Byte-prefix match mirroring `Path::starts_with`: the root
-                // itself (exact match) or the root followed by a path
-                // separator, so "m:\music" can never swallow "m:\music2\...".
-                let removed = conn.execute(
-                    "DELETE FROM tracks
-                     WHERE path = ?1
-                        OR (substr(path, 1, length(?1)) = ?1
-                            AND substr(path, length(?1) + 1, 1) IN ('\\', '/'))",
-                    [&root_text],
-                );
-                let outcome = removed.and_then(|count| {
-                    Self::delete_orphaned_parents(conn)?;
-                    conn.execute("DELETE FROM library_paths WHERE path = ?1", [&root_text])?;
-                    Ok(count)
-                });
-                match outcome {
-                    Ok(count) => conn.execute_batch("COMMIT;").map(|()| count),
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK;");
-                        Err(e)
-                    }
-                }
+                in_tx(conn, |conn| {
+                    // Byte-prefix match mirroring `Path::starts_with`: the root
+                    // itself (exact match) or the root followed by a path
+                    // separator, so "m:\music" can never swallow "m:\music2\...".
+                    conn.execute(
+                        "DELETE FROM tracks
+                         WHERE path = ?1
+                            OR (substr(path, 1, length(?1)) = ?1
+                                AND substr(path, length(?1) + 1, 1) IN ('\\', '/'))",
+                        [&root_text],
+                    )
+                    .and_then(|count| {
+                        Self::delete_orphaned_parents(conn)?;
+                        conn.execute("DELETE FROM library_paths WHERE path = ?1", [&root_text])?;
+                        Ok(count)
+                    })
+                })
             })
-            .map_err(|e| {
-                StoreError::InvalidOperation(format!("failed to remove library path: {e}"))
-            });
+            .map_err(|e| op_error("failed to remove library path", e));
         self.bump_library_generation_on_commit(removed.is_ok());
         removed
     }
@@ -1306,20 +1198,14 @@ impl LibraryMutationStore for SqliteStore {
     fn clear_library(&mut self) -> Result<usize, StoreError> {
         let cleared = self
             .with_connection(|conn| {
-                conn.execute_batch("BEGIN IMMEDIATE;")?;
-                let outcome = conn.execute("DELETE FROM tracks", []).and_then(|count| {
-                    Self::delete_orphaned_parents(conn)?;
-                    Ok(count)
-                });
-                match outcome {
-                    Ok(count) => conn.execute_batch("COMMIT;").map(|()| count),
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK;");
-                        Err(e)
-                    }
-                }
+                in_tx(conn, |conn| {
+                    conn.execute("DELETE FROM tracks", []).and_then(|count| {
+                        Self::delete_orphaned_parents(conn)?;
+                        Ok(count)
+                    })
+                })
             })
-            .map_err(|e| StoreError::InvalidOperation(format!("failed to clear the library: {e}")));
+            .map_err(|e| op_error("failed to clear the library", e));
         self.bump_library_generation_on_commit(cleared.is_ok());
         cleared
     }
@@ -1334,23 +1220,16 @@ impl LibraryMutationStore for SqliteStore {
         let value = format!("{}:{}:{}", nanos, summary.files, summary.errors);
         let committed = self
             .with_connection(|conn| {
-                conn.execute_batch("BEGIN IMMEDIATE;")?;
-                let outcome = conn.execute(
-                    "INSERT INTO store_metadata (key, value) VALUES ('last_full_scan', ?1)
-                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    [value],
-                );
-                match outcome {
-                    Ok(_) => conn.execute_batch("COMMIT;"),
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK;");
-                        Err(e)
-                    }
-                }
+                in_tx(conn, |conn| {
+                    conn.execute(
+                        "INSERT INTO store_metadata (key, value) VALUES ('last_full_scan', ?1)
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        [value],
+                    )
+                    .map(|_| ())
+                })
             })
-            .map_err(|e| {
-                StoreError::InvalidOperation(format!("failed to record the last scan: {e}"))
-            });
+            .map_err(|e| op_error("failed to record the last scan", e));
         self.bump_library_generation_on_commit(committed.is_ok());
         committed
     }
@@ -1365,9 +1244,7 @@ impl LibraryMutationStore for SqliteStore {
                 [i64::from(version)],
             )
         })
-        .map_err(|e| {
-            StoreError::InvalidOperation(format!("failed to stamp the metadata version: {e}"))
-        })?;
+        .map_err(|e| op_error("failed to stamp the metadata version", e))?;
         Ok(())
     }
 }
@@ -1391,6 +1268,114 @@ fn genre_segments(genre: &str) -> impl Iterator<Item = &str> {
 /// substring.
 fn genre_contains(stored: &str, target: &str) -> bool {
     genre_segments(stored).any(|g| g == target)
+}
+
+/// Run `f` as one immediate durable transaction: `BEGIN IMMEDIATE`, then
+/// `f`, then `COMMIT` on success — or `ROLLBACK` and the propagated error
+/// on failure. Every mutating store method wraps its writes in this, so the
+/// begin/commit/rollback discipline is written exactly once.
+fn in_tx<T>(
+    conn: &Connection,
+    f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+) -> rusqlite::Result<T> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    match f(conn) {
+        Ok(value) => conn.execute_batch("COMMIT;").map(|()| value),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
+/// Wrap a failure as a [`StoreError::InvalidOperation`] carrying the failing
+/// operation's context — the one spelling of that conversion for every store
+/// method, over either a rusqlite error or an already-wrapped store error.
+fn op_error(context: &str, e: impl std::fmt::Display) -> StoreError {
+    StoreError::InvalidOperation(format!("{context}: {e}"))
+}
+
+/// Widen a SQL `COUNT(*)` to `usize`, saturating at `usize::MAX` on the
+/// unreachable overflow path.
+fn count_usize(count: i64) -> usize {
+    usize::try_from(count).unwrap_or(usize::MAX)
+}
+
+/// Count every independent genre entry across the stored genre strings a
+/// query yields, sorted by genre name ascending — the shared body of
+/// `genre_counts`, `hit_genre_counts`, and `genres_window_on`.
+fn sorted_genre_counts(
+    rows: impl Iterator<Item = rusqlite::Result<String>>,
+) -> rusqlite::Result<Vec<GenreCount>> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for row in rows {
+        for segment in genre_segments(&row?) {
+            *counts.entry(segment.to_string()).or_insert(0) += 1;
+        }
+    }
+    let mut entries: Vec<GenreCount> = counts
+        .into_iter()
+        .map(|(genre, tracks)| GenreCount { genre, tracks })
+        .collect();
+    entries.sort_by(|a, b| a.genre.cmp(&b.genre));
+    Ok(entries)
+}
+
+/// Push one joined `(album, track-path)` row into a consecutive-group
+/// window listing: when the listing's last entry is the same album, the
+/// row's path joins it; otherwise the row opens the next album. An absent
+/// path (a LEFT JOIN miss) contributes no track — a name-hit album with no
+/// matching track still appears, with an empty track list.
+fn push_album_row(
+    albums: &mut Vec<Album>,
+    artist: String,
+    title: String,
+    year: Option<i64>,
+    genre: Option<String>,
+    path: Option<String>,
+) {
+    if albums
+        .last()
+        .is_some_and(|a: &Album| a.artist == artist && a.title == title)
+    {
+        if let Some(path) = path {
+            albums
+                .last_mut()
+                .expect("just checked")
+                .tracks
+                .push(TrackId(path));
+        }
+    } else {
+        albums.push(Album {
+            artist,
+            title,
+            year: narrow_u32(year),
+            genre,
+            tracks: path.map(|path| vec![TrackId(path)]).unwrap_or_default(),
+        });
+    }
+}
+
+/// Push one joined `(artist, album-title)` row into a consecutive-group
+/// window listing; the album key spelling is `"{artist} - {title}"`. An
+/// absent title (a LEFT JOIN miss) contributes no album key — a name-hit
+/// artist whose albums are not themselves hits still appears.
+fn push_artist_row(artists: &mut Vec<Artist>, name: String, hit_title: Option<String>) {
+    if artists.last().is_some_and(|a: &Artist| a.name == name) {
+        if let Some(title) = hit_title {
+            artists
+                .last_mut()
+                .expect("just checked")
+                .albums
+                .push(format!("{name} - {title}"));
+        }
+    } else {
+        let key = hit_title.map(|t| format!("{name} - {t}"));
+        artists.push(Artist {
+            name,
+            albums: key.map(|k| vec![k]).unwrap_or_default(),
+        });
+    }
 }
 
 impl SqliteStore {
@@ -1500,11 +1485,7 @@ impl SqliteStore {
                 [&track.id.0],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .map(Some)
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other),
-            })?;
+            .optional()?;
 
         Self::apply_scan_batch_in_tx(conn, std::slice::from_ref(track))?;
 
@@ -1537,11 +1518,7 @@ impl SqliteStore {
                         ))
                     },
                 )
-                .map(Some)
-                .or_else(|e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                    other => Err(other),
-                })?;
+                .optional()?;
             if let Some((year, genre)) = derived {
                 conn.execute(
                     "UPDATE albums SET year = ?1, genre = ?2
@@ -1717,7 +1694,7 @@ impl LibraryQueryStore for SqliteStore {
             let mut rows = stmt.query_map([&id.0], track_from_row)?;
             rows.next().transpose()
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to resolve track: {e}")))
+        .map_err(|e| op_error("failed to resolve track", e))
     }
 
     /// One scalar read of the single settings row. The scan's freshness filter
@@ -1731,9 +1708,7 @@ impl LibraryQueryStore for SqliteStore {
                     |row| row.get::<_, i64>(0),
                 )
             })
-            .map_err(|e| {
-                StoreError::InvalidOperation(format!("failed to read metadata version: {e}"))
-            })?;
+            .map_err(|e| op_error("failed to read metadata version", e))?;
         Ok(u32::try_from(stored).unwrap_or(u32::MAX))
     }
 
@@ -1758,7 +1733,7 @@ impl LibraryQueryStore for SqliteStore {
             let rows = stmt.query_map([], |row| row.get::<_, String>(0).map(TrackId))?;
             rows.collect()
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to list track ids: {e}")))
+        .map_err(|e| op_error("failed to list track ids", e))
     }
 
     fn search_page(
@@ -1813,7 +1788,7 @@ impl LibraryQueryStore for SqliteStore {
                 })
                 .collect())
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to list artists: {e}")))
+        .map_err(|e| op_error("failed to list artists", e))
     }
 
     /// One artist's albums newest-first (missing year last) then title,
@@ -1860,7 +1835,7 @@ impl LibraryQueryStore for SqliteStore {
             }
             Ok(albums)
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to list artist albums: {e}")))
+        .map_err(|e| op_error("failed to list artist albums", e))
     }
 
     /// One album's tracks in full: track number ascending with missing
@@ -1880,7 +1855,7 @@ impl LibraryQueryStore for SqliteStore {
                 stmt.query_map(rusqlite::params![album_artist, album_title], track_from_row)?;
             rows.collect()
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to list album tracks: {e}")))
+        .map_err(|e| op_error("failed to list album tracks", e))
     }
 
     /// The Library-count totals in one query: scalar subselects over
@@ -1915,7 +1890,7 @@ impl LibraryQueryStore for SqliteStore {
                 genres: genres.len(),
             })
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to count the library: {e}")))
+        .map_err(|e| op_error("failed to count the library", e))
     }
 
     /// Every genre entry name-ascending with its per-track count, aggregated
@@ -1933,20 +1908,9 @@ impl LibraryQueryStore for SqliteStore {
                  WHERE genre IS NOT NULL AND genre != ''",
             )?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-            let mut counts: HashMap<String, usize> = HashMap::new();
-            for row in rows {
-                for segment in genre_segments(&row?) {
-                    *counts.entry(segment.to_string()).or_insert(0) += 1;
-                }
-            }
-            let mut entries: Vec<GenreCount> = counts
-                .into_iter()
-                .map(|(genre, tracks)| GenreCount { genre, tracks })
-                .collect();
-            entries.sort_by(|a, b| a.genre.cmp(&b.genre));
-            Ok(entries)
+            sorted_genre_counts(rows)
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to aggregate genres: {e}")))
+        .map_err(|e| op_error("failed to aggregate genres", e))
     }
 
     /// Artists name-ascending having at least one track with `genre`, each
@@ -2011,7 +1975,7 @@ impl LibraryQueryStore for SqliteStore {
             }
             Ok(artists)
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to list genre artists: {e}")))
+        .map_err(|e| op_error("failed to list genre artists", e))
     }
 
     /// One artist's albums holding at least one track with `genre`, in
@@ -2070,9 +2034,7 @@ impl LibraryQueryStore for SqliteStore {
             }
             Ok(albums)
         })
-        .map_err(|e| {
-            StoreError::InvalidOperation(format!("failed to list artist albums in genre: {e}"))
-        })
+        .map_err(|e| op_error("failed to list artist albums in genre", e))
     }
 
     /// One album's tracks with `genre`: track number ascending with missing
@@ -2106,9 +2068,7 @@ impl LibraryQueryStore for SqliteStore {
                 })
                 .collect())
         })
-        .map_err(|e| {
-            StoreError::InvalidOperation(format!("failed to list album tracks in genre: {e}"))
-        })
+        .map_err(|e| op_error("failed to list album tracks in genre", e))
     }
 
     // --- Entity hit reads (search across Library sections) ------------------
@@ -2162,7 +2122,7 @@ impl LibraryQueryStore for SqliteStore {
             )?;
             rows.collect()
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to list album hit tracks: {e}")))
+        .map_err(|e| op_error("failed to list album hit tracks", e))
     }
 
     fn album_is_name_hit(
@@ -2188,7 +2148,7 @@ impl LibraryQueryStore for SqliteStore {
                 )?;
             Ok(hit > 0)
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to check album name hit: {e}")))
+        .map_err(|e| op_error("failed to check album name hit", e))
     }
 
     fn hit_albums_in_genre(
@@ -2205,9 +2165,7 @@ impl LibraryQueryStore for SqliteStore {
             Self::attach_genre_hit_track_ids(conn, genre, &needle, &mut albums)?;
             Ok(albums)
         })
-        .map_err(|e| {
-            StoreError::InvalidOperation(format!("failed to list hit albums in genre: {e}"))
-        })
+        .map_err(|e| op_error("failed to list hit albums in genre", e))
     }
 
     fn hit_artists_in_genre(
@@ -2241,9 +2199,7 @@ impl LibraryQueryStore for SqliteStore {
                 })
                 .collect())
         })
-        .map_err(|e| {
-            StoreError::InvalidOperation(format!("failed to list hit artists in genre: {e}"))
-        })
+        .map_err(|e| op_error("failed to list hit artists in genre", e))
     }
 
     fn album_hit_tracks_in_genre(
@@ -2278,9 +2234,7 @@ impl LibraryQueryStore for SqliteStore {
                 })
                 .collect())
         })
-        .map_err(|e| {
-            StoreError::InvalidOperation(format!("failed to list album hit tracks in genre: {e}"))
-        })
+        .map_err(|e| op_error("failed to list album hit tracks in genre", e))
     }
 
     fn hit_genre_counts(&self, query: &str) -> Result<Vec<GenreCount>, StoreError> {
@@ -2294,20 +2248,9 @@ impl LibraryQueryStore for SqliteStore {
                    AND genre IS NOT NULL AND genre != ''",
             )?;
             let rows = stmt.query_map([needle], |row| row.get::<_, String>(0))?;
-            let mut counts: HashMap<String, usize> = HashMap::new();
-            for row in rows {
-                for segment in genre_segments(&row?) {
-                    *counts.entry(segment.to_string()).or_insert(0) += 1;
-                }
-            }
-            let mut entries: Vec<GenreCount> = counts
-                .into_iter()
-                .map(|(genre, tracks)| GenreCount { genre, tracks })
-                .collect();
-            entries.sort_by(|a, b| a.genre.cmp(&b.genre));
-            Ok(entries)
+            sorted_genre_counts(rows)
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to aggregate hit genres: {e}")))
+        .map_err(|e| op_error("failed to aggregate hit genres", e))
     }
 
     // --- Paged browse reads (paginate-browse-columns) ----------------------
@@ -2399,7 +2342,7 @@ impl LibraryQueryStore for SqliteStore {
                 })?;
             Ok(exists > 0)
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("folder probe failed: {e}")))
+        .map_err(|e| op_error("folder probe failed", e))
     }
 
     /// Escaped prefix match combined with the flat search's literal
@@ -2425,7 +2368,7 @@ impl LibraryQueryStore for SqliteStore {
                 )?;
             Ok(exists > 0)
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("folder search failed: {e}")))
+        .map_err(|e| op_error("folder search failed", e))
     }
 
     /// How many tracks live under `folder` (component-wise path prefix,
@@ -2445,7 +2388,7 @@ impl LibraryQueryStore for SqliteStore {
                 },
             )
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to count folder tracks: {e}")))
+        .map_err(|e| op_error("failed to count folder tracks", e))
     }
 
     /// The last completed full library scan's summary from the store's
@@ -2482,9 +2425,7 @@ impl LibraryQueryStore for SqliteStore {
                 })
             })
         })
-        .map_err(|e| {
-            StoreError::InvalidOperation(format!("failed to read the last-scan summary: {e}"))
-        })
+        .map_err(|e| op_error("failed to read the last-scan summary", e))
     }
 
     /// Every path under `folder`, then re-sorted in Rust with the exact
@@ -2521,7 +2462,7 @@ impl LibraryQueryStore for SqliteStore {
             )?;
             rows.collect()
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to list folder: {e}")))
+        .map_err(|e| op_error("failed to list folder", e))
     }
 
     /// Direct child directories with audio. The escaped prefix query yields
@@ -2668,7 +2609,7 @@ impl LibraryQueryStore for SqliteStore {
                 })
             }
         }
-        .map_err(|e| StoreError::InvalidOperation(format!("smart playlist query failed: {e}")))
+        .map_err(|e| op_error("smart playlist query failed", e))
     }
 
     /// Every smart playlist's unbounded total, in [`SmartPlaylistKind::ALL`]
@@ -2715,7 +2656,7 @@ impl LibraryQueryStore for SqliteStore {
                 (SmartPlaylistKind::LostGems, lost_gems),
             ])
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("smart list counts failed: {e}")))
+        .map_err(|e| op_error("smart list counts failed", e))
     }
 }
 
@@ -2727,7 +2668,7 @@ impl SqliteStore {
         conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| {
             row.get::<_, i64>(0)
         })
-        .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+        .map(count_usize)
     }
 
     /// One window on an already-held connection, in `order`'s `ORDER BY`. A
@@ -2769,7 +2710,7 @@ impl SqliteStore {
                 })?;
             rows.collect()
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("folder listing failed: {e}")))
+        .map_err(|e| op_error("folder listing failed", e))
     }
 
     /// One Listing Page, both halves read on the connection this method holds
@@ -2782,9 +2723,8 @@ impl SqliteStore {
         read: impl FnOnce(&Connection) -> rusqlite::Result<(usize, Vec<T>)>,
     ) -> Result<Page<T>, StoreError> {
         let conn = self.conn.lock_or_recover();
-        let (total, rows) = read(&conn).map_err(|e| {
-            StoreError::InvalidOperation(format!("failed to read a listing page: {e}"))
-        })?;
+        let (total, rows) =
+            read(&conn).map_err(|e| op_error("failed to read a listing page", e))?;
         Ok(Page::new(total, rows))
     }
 
@@ -2796,7 +2736,7 @@ impl SqliteStore {
             [needle],
             |row| row.get::<_, i64>(0),
         )
-        .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+        .map(count_usize)
     }
 
     /// One search window on an already-held connection, in `order`'s
@@ -2971,7 +2911,7 @@ impl SqliteStore {
             [needle],
             |row| row.get::<_, i64>(0),
         )
-        .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+        .map(count_usize)
     }
 
     /// One bounded window of hit albums on an already-held connection. A
@@ -3035,26 +2975,7 @@ impl SqliteStore {
         let mut albums: Vec<Album> = Vec::new();
         for row in rows {
             let (artist, title, year, genre, hit_path) = row?;
-            if albums
-                .last()
-                .is_some_and(|a: &Album| a.artist == artist && a.title == title)
-            {
-                if let Some(path) = hit_path {
-                    albums
-                        .last_mut()
-                        .expect("just checked")
-                        .tracks
-                        .push(TrackId(path));
-                }
-            } else {
-                albums.push(Album {
-                    artist,
-                    title,
-                    year: narrow_u32(year),
-                    genre,
-                    tracks: hit_path.map(|path| vec![TrackId(path)]).unwrap_or_default(),
-                });
-            }
+            push_album_row(&mut albums, artist, title, year, genre, hit_path);
         }
         Ok(albums)
     }
@@ -3082,7 +3003,7 @@ impl SqliteStore {
             [needle],
             |row| row.get::<_, i64>(0),
         )
-        .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+        .map(count_usize)
     }
 
     /// One bounded window of hit artists on an already-held connection. A
@@ -3145,21 +3066,7 @@ impl SqliteStore {
         let mut artists: Vec<Artist> = Vec::new();
         for row in rows {
             let (name, hit_title) = row?;
-            if artists.last().is_some_and(|a: &Artist| a.name == name) {
-                if let Some(title) = hit_title {
-                    artists
-                        .last_mut()
-                        .expect("just checked")
-                        .albums
-                        .push(format!("{name} - {title}"));
-                }
-            } else {
-                let key = hit_title.map(|t| format!("{name} - {t}"));
-                artists.push(Artist {
-                    name,
-                    albums: key.map(|k| vec![k]).unwrap_or_default(),
-                });
-            }
+            push_artist_row(&mut artists, name, hit_title);
         }
         Ok(artists)
     }
@@ -3172,7 +3079,7 @@ impl SqliteStore {
         conn.query_row("SELECT COUNT(*) FROM artists", [], |row| {
             row.get::<_, i64>(0)
         })
-        .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+        .map(count_usize)
     }
 
     /// One bounded artist window on an already-held connection. A Listing
@@ -3211,22 +3118,7 @@ impl SqliteStore {
         let mut artists: Vec<Artist> = Vec::new();
         for row in rows {
             let (name, title) = row?;
-            if artists.last().is_some_and(|a: &Artist| a.name == name) {
-                if let Some(title) = title {
-                    artists
-                        .last_mut()
-                        .expect("just checked")
-                        .albums
-                        .push(format!("{name} - {title}"));
-                }
-            } else {
-                artists.push(Artist {
-                    name: name.clone(),
-                    albums: title
-                        .map(|t| vec![format!("{name} - {t}")])
-                        .unwrap_or_default(),
-                });
-            }
+            push_artist_row(&mut artists, name, title);
         }
         Ok(artists)
     }
@@ -3239,7 +3131,7 @@ impl SqliteStore {
         conn.query_row("SELECT COUNT(*) FROM albums", [], |row| {
             row.get::<_, i64>(0)
         })
-        .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+        .map(count_usize)
     }
 
     /// One bounded album window on an already-held connection. A Listing
@@ -3290,26 +3182,7 @@ impl SqliteStore {
         let mut albums: Vec<Album> = Vec::new();
         for row in rows {
             let (artist, title, year, genre, path) = row?;
-            if albums
-                .last()
-                .is_some_and(|a: &Album| a.artist == artist && a.title == title)
-            {
-                if let Some(path) = path {
-                    albums
-                        .last_mut()
-                        .expect("just checked")
-                        .tracks
-                        .push(TrackId(path));
-                }
-            } else {
-                albums.push(Album {
-                    artist,
-                    title,
-                    year: narrow_u32(year),
-                    genre,
-                    tracks: path.map(|p| vec![TrackId(p)]).unwrap_or_default(),
-                });
-            }
+            push_album_row(&mut albums, artist, title, year, genre, path);
         }
         Ok(albums)
     }
@@ -3349,17 +3222,7 @@ impl SqliteStore {
              WHERE genre IS NOT NULL AND genre != ''",
         )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for row in rows {
-            for segment in genre_segments(&row?) {
-                *counts.entry(segment.to_string()).or_insert(0) += 1;
-            }
-        }
-        let mut entries: Vec<GenreCount> = counts
-            .into_iter()
-            .map(|(genre, tracks)| GenreCount { genre, tracks })
-            .collect();
-        entries.sort_by(|a, b| a.genre.cmp(&b.genre));
+        let mut entries = sorted_genre_counts(rows)?;
         match direction {
             SortDirection::Ascending => {}
             SortDirection::Descending => entries.reverse(),
@@ -3637,7 +3500,7 @@ impl SettingsStore for SqliteStore {
                     },
                 )
             })
-            .map_err(|e| StoreError::InvalidOperation(format!("failed to load settings: {e}")))?;
+            .map_err(|e| op_error("failed to load settings", e))?;
 
         let library_paths = self.with_connection(|conn| {
             let mut stmt = conn.prepare("SELECT path FROM library_paths")?;
@@ -3675,46 +3538,40 @@ impl SettingsStore for SqliteStore {
     /// One small durable transaction for the scalar block.
     fn save_scalars(&mut self, scalars: &ScalarSettings) -> Result<(), StoreError> {
         self.with_connection(|conn| {
-            conn.execute_batch("BEGIN IMMEDIATE;")?;
-            let result = conn.execute(
-                "UPDATE app_settings
-                 SET volume = ?1, advanced_mode = ?2, high_contrast = ?3,
-                     replaygain_enabled = ?4, shuffle = ?5, repeat_mode = ?6,
-                     skip_hidden_files = ?7, scan_formats = ?8,
-                     read_embedded_artwork = ?9, smart_lists_collapsed = ?10,
-                     close_quits_app = ?11
-                 WHERE id = 1",
-                rusqlite::params![
-                    scalars.volume,
-                    i64::from(scalars.advanced_mode),
-                    i64::from(scalars.high_contrast),
-                    i64::from(scalars.replaygain_enabled),
-                    i64::from(scalars.shuffle),
-                    scalars.repeat_mode,
-                    i64::from(scalars.skip_hidden_files),
-                    scalars.scan_formats.join(","),
-                    i64::from(scalars.read_embedded_artwork),
-                    i64::from(scalars.smart_lists_collapsed),
-                    i64::from(scalars.close_quits_app),
-                ],
-            );
-            match result {
-                Ok(_) => conn.execute_batch("COMMIT;"),
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    Err(e)
-                }
-            }
+            in_tx(conn, |conn| {
+                conn.execute(
+                    "UPDATE app_settings
+                     SET volume = ?1, advanced_mode = ?2, high_contrast = ?3,
+                         replaygain_enabled = ?4, shuffle = ?5, repeat_mode = ?6,
+                         skip_hidden_files = ?7, scan_formats = ?8,
+                         read_embedded_artwork = ?9, smart_lists_collapsed = ?10,
+                         close_quits_app = ?11
+                     WHERE id = 1",
+                    rusqlite::params![
+                        scalars.volume,
+                        i64::from(scalars.advanced_mode),
+                        i64::from(scalars.high_contrast),
+                        i64::from(scalars.replaygain_enabled),
+                        i64::from(scalars.shuffle),
+                        scalars.repeat_mode,
+                        i64::from(scalars.skip_hidden_files),
+                        scalars.scan_formats.join(","),
+                        i64::from(scalars.read_embedded_artwork),
+                        i64::from(scalars.smart_lists_collapsed),
+                        i64::from(scalars.close_quits_app),
+                    ],
+                )
+                .map(|_| ())
+            })
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to save settings: {e}")))
+        .map_err(|e| op_error("failed to save settings", e))
     }
 
     /// Replace the library-path list in one small durable transaction.
     fn save_library_paths(&mut self, paths: &[std::path::PathBuf]) -> Result<(), StoreError> {
         self.with_connection(|conn| {
-            conn.execute_batch("BEGIN IMMEDIATE;")?;
-            let clear = conn.execute("DELETE FROM library_paths", []);
-            let insert_all = clear.and_then(|_| {
+            in_tx(conn, |conn| {
+                conn.execute("DELETE FROM library_paths", [])?;
                 for p in paths {
                     conn.execute(
                         "INSERT INTO library_paths(path) VALUES (?1)",
@@ -3722,16 +3579,9 @@ impl SettingsStore for SqliteStore {
                     )?;
                 }
                 Ok(())
-            });
-            match insert_all {
-                Ok(()) => conn.execute_batch("COMMIT;"),
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    Err(e)
-                }
-            }
+            })
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to save library paths: {e}")))
+        .map_err(|e| op_error("failed to save library paths", e))
     }
 
     /// Replace the whole watch-state map in one small durable transaction.
@@ -3740,9 +3590,8 @@ impl SettingsStore for SqliteStore {
         states: &HashMap<PathBuf, WatchState>,
     ) -> Result<(), StoreError> {
         self.with_connection(|conn| {
-            conn.execute_batch("BEGIN IMMEDIATE;")?;
-            let clear = conn.execute("DELETE FROM watch_states", []);
-            let insert_all = clear.and_then(|_| {
+            in_tx(conn, |conn| {
+                conn.execute("DELETE FROM watch_states", [])?;
                 for (path, state) in states {
                     let (state_text, warning_message) = match state {
                         WatchState::Disabled => ("disabled", None),
@@ -3759,15 +3608,8 @@ impl SettingsStore for SqliteStore {
                     )?;
                 }
                 Ok(())
-            });
-            match insert_all {
-                Ok(()) => conn.execute_batch("COMMIT;"),
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    Err(e)
-                }
-            }
+            })
         })
-        .map_err(|e| StoreError::InvalidOperation(format!("failed to save watch states: {e}")))
+        .map_err(|e| op_error("failed to save watch states", e))
     }
 }

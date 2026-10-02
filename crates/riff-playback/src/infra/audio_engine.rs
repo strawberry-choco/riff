@@ -180,8 +180,7 @@ impl AudioEngine {
                         if primary_decoder.is_some() {
                             primary_decoder.take();
                             if output_started {
-                                self.output.stop();
-                                output_started = false;
+                                stop_stream(self.output.as_mut(), &mut output_started);
                             }
                             current_format = None;
                         }
@@ -248,8 +247,7 @@ impl AudioEngine {
 
                     PlaybackCommand::Pause => {
                         if output_started {
-                            self.output.stop();
-                            output_started = false;
+                            stop_stream(self.output.as_mut(), &mut output_started);
                         }
                         let _ = self
                             .update_tx
@@ -272,14 +270,7 @@ impl AudioEngine {
                                 {
                                     let _ = decoder.seek(position);
                                 }
-                                if let Some(id) = current_track_id.clone() {
-                                    // Re-announce the track: a paused UI session
-                                    // lost its Now Playing binding.
-                                    let _ = self.update_tx.send(PlaybackUpdate::TrackChanged(id));
-                                }
-                                let _ = self
-                                    .update_tx
-                                    .send(PlaybackUpdate::StateChanged(PlaybackState::Playing));
+                                announce_resumed(&self.update_tx, current_track_id.as_ref());
                             }
                         }
                     }
@@ -288,8 +279,7 @@ impl AudioEngine {
                         // The decoder stays parked: an idle Seek (re-scrubbing
                         // the stopped track's position) still reaches it.
                         if output_started {
-                            self.output.stop();
-                            output_started = false;
+                            stop_stream(self.output.as_mut(), &mut output_started);
                         }
                         current_format = None;
                         current_track_id = None;
@@ -362,8 +352,7 @@ impl AudioEngine {
                         match state {
                             PlaybackState::Playing => {
                                 if output_started {
-                                    self.output.stop();
-                                    output_started = false;
+                                    stop_stream(self.output.as_mut(), &mut output_started);
                                 }
                                 let _ = self
                                     .update_tx
@@ -380,12 +369,12 @@ impl AudioEngine {
                                         let _ = self.update_tx.send(PlaybackUpdate::StateChanged(
                                             PlaybackState::Playing,
                                         ));
-                                        if let Some(id) = current_track_id.clone() {
-                                            // Re-announce the track: a paused UI
-                                            // session lost its Now Playing binding.
+                                        // Re-announce the track: a paused UI
+                                        // session lost its Now Playing binding.
+                                        if let Some(id) = current_track_id.as_ref() {
                                             let _ = self
                                                 .update_tx
-                                                .send(PlaybackUpdate::TrackChanged(id));
+                                                .send(PlaybackUpdate::TrackChanged(id.clone()));
                                         }
                                     }
                                 }
@@ -555,8 +544,7 @@ impl AudioEngine {
             // Normal EOF — emit TrackEnded, coordinator handles continuation
             primary_decoder.take();
             if *output_started {
-                self.output.stop();
-                *output_started = false;
+                stop_stream(self.output.as_mut(), &mut *output_started);
             }
             *current_format = None;
             let _ = self.update_tx.send(PlaybackUpdate::TrackEnded);
@@ -592,8 +580,7 @@ impl AudioEngine {
             return;
         }
         if *output_started {
-            self.output.stop();
-            *output_started = false;
+            stop_stream(self.output.as_mut(), &mut *output_started);
         }
         primary_decoder.take();
         *current_format = None;
@@ -602,6 +589,22 @@ impl AudioEngine {
             .update_tx
             .send(PlaybackUpdate::StateChanged(PlaybackState::Stopped));
     }
+}
+
+/// Stop the output stream and record that it is no longer running — the
+/// one spelling of the engine's "the stream is down" bookkeeping.
+fn stop_stream(output: &mut dyn AudioOutput, output_started: &mut bool) {
+    output.stop();
+    *output_started = false;
+}
+
+/// Re-announce the current track and `Playing` after a pause ends: a paused
+/// UI session lost its Now Playing binding.
+fn announce_resumed(update_tx: &Sender<PlaybackUpdate>, current_track_id: Option<&TrackId>) {
+    if let Some(id) = current_track_id {
+        let _ = update_tx.send(PlaybackUpdate::TrackChanged(id.clone()));
+    }
+    let _ = update_tx.send(PlaybackUpdate::StateChanged(PlaybackState::Playing));
 }
 
 /// Which way a manual skip moves through the queue.

@@ -50,14 +50,6 @@ impl WatcherManager {
         self.watched.remove(&canonical);
     }
 
-    pub fn stop_all(&mut self) {
-        let paths: Vec<PathBuf> = self.watched.iter().cloned().collect();
-        for path in paths {
-            self.stop_watching(&path);
-        }
-        self.watcher = None;
-    }
-
     /// Consume one already-debounced batch of changed audio-file paths (the
     /// coalescing window lives upstream in the concrete watcher adapter, so no
     /// timing state is kept here). Each distinct watched root gets exactly

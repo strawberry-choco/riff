@@ -183,22 +183,12 @@ impl LoftyMetadataReader {
         Ok(Self::metadata_from_tag(tag))
     }
 
-    pub fn read_duration(&self, path: &Path) -> Result<Option<Duration>, LibraryError> {
-        let tagged_file = Self::read_tagged_file(path)?;
-        Ok(Some(tagged_file.properties().duration()))
-    }
-
     pub fn read_cover_source(&self, path: &Path) -> Result<CoverSource, LibraryError> {
         let tagged_file = Self::read_tagged_file(path)?;
         Ok(match Self::best_tag(&tagged_file) {
             Some(tag) => Self::cover_from_tag(tag),
             None => CoverSource::None,
         })
-    }
-
-    pub fn read_audio_format(&self, path: &Path) -> Result<AudioFormatInfo, LibraryError> {
-        let tagged_file = Self::read_tagged_file(path)?;
-        Ok(Self::audio_format_from(&tagged_file))
     }
 
     /// One-pass read: metadata, duration, cover source, and audio format in

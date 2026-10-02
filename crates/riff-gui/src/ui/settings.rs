@@ -1,5 +1,6 @@
 use crate::ui::button::{self as button, TextButton, Variant};
 use crate::ui::icons::{Icon, IconCache};
+use crate::ui::now_playing::styled_font;
 use crate::ui::theme::geometry::settings::{
     ACTION_BTN_H, ACTIONS_ROW_GAP, ACTIONS_ROW_H, CARD_BORDER_W, CHIP_GAP, CHIP_H, CHIP_LABEL_PAD,
     CHIP_ROW_NO_WRAP_W, COLUMN_GAP, DOT_SIZE, FOOTER_ACTION_GAP, FOOTER_H, HEADER_GAP,
@@ -497,18 +498,6 @@ pub fn truncate_path(path: &str, max_len: usize) -> String {
     }
 }
 
-/// A design-scale [`egui::FontId`] at `size`, riding the family the installed
-/// token style mapped onto `key` (so weight families resolve even before the
-/// vendored fonts are installed).
-fn styled_font(ui: &egui::Ui, key: egui::TextStyle, size: f32) -> egui::FontId {
-    let family = ui
-        .style()
-        .text_styles
-        .get(&key)
-        .map_or(egui::FontFamily::Proportional, |font| font.family.clone());
-    egui::FontId::new(size, family)
-}
-
 /// A muted uppercase section header at the mockup's `text-sm font-semibold`.
 fn section_header(ui: &mut egui::Ui, palette: &Palette, text: &str) {
     let (rect, _) = ui.allocate_exact_size(
@@ -581,6 +570,24 @@ fn row_separator(ui: &mut egui::Ui, palette: &Palette, inset: f32) {
 
 /// The Music Libraries card: one readiness row per root plus the Add Library
 /// / Scan All actions row.
+/// The settings card: the shared surface fill/border/radius, with an
+/// optional inner margin, wrapping `body`.
+fn settings_card<R>(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    inner_margin: Option<i8>,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let mut frame = egui::Frame::new()
+        .fill(palette.surface)
+        .stroke(egui::Stroke::new(CARD_BORDER_W, palette.border))
+        .corner_radius(theme::RADIUS_LG);
+    if let Some(margin) = inner_margin {
+        frame = frame.inner_margin(egui::Margin::same(margin));
+    }
+    frame.show(ui, body)
+}
+
 fn libraries_card(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -588,31 +595,27 @@ fn libraries_card(
     content: &SettingsContent,
     actions: &mut Vec<SettingsAction>,
 ) {
-    egui::Frame::new()
-        .fill(palette.surface)
-        .stroke(egui::Stroke::new(CARD_BORDER_W, palette.border))
-        .corner_radius(theme::RADIUS_LG)
-        .show(ui, |ui| {
-            if content.libraries.is_empty() {
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), LIBRARY_ROW_H),
-                    egui::Sense::hover(),
-                );
-                ui.painter_at(rect).text(
-                    egui::pos2(rect.left() + 16.0, rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    "No music libraries configured. Add one to get started.",
-                    styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM),
-                    palette.ink_3,
-                );
-                row_separator(ui, palette, 0.0);
-            }
-            for row in &content.libraries {
-                library_row(ui, cache, palette, row, actions);
-                row_separator(ui, palette, 0.0);
-            }
-            actions_row(ui, cache, palette, actions);
-        });
+    settings_card(ui, palette, None, |ui| {
+        if content.libraries.is_empty() {
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), LIBRARY_ROW_H),
+                egui::Sense::hover(),
+            );
+            ui.painter_at(rect).text(
+                egui::pos2(rect.left() + 16.0, rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                "No music libraries configured. Add one to get started.",
+                styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM),
+                palette.ink_3,
+            );
+            row_separator(ui, palette, 0.0);
+        }
+        for row in &content.libraries {
+            library_row(ui, cache, palette, row, actions);
+            row_separator(ui, palette, 0.0);
+        }
+        actions_row(ui, cache, palette, actions);
+    });
 }
 
 /// The width a preference row's text column has, at `available_width`: the row
@@ -1345,94 +1348,87 @@ fn formats_card(
     content: &SettingsContent,
     actions: &mut Vec<SettingsAction>,
 ) {
-    egui::Frame::new()
-        .fill(palette.surface)
-        .stroke(egui::Stroke::new(CARD_BORDER_W, palette.border))
-        .corner_radius(theme::RADIUS_LG)
-        .inner_margin(egui::Margin::same(12))
-        .show(ui, |ui| {
-            let available = ui.available_width();
-            let font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS);
-            // Measure every chip before painting any of them: the card's height
-            // is the sum over the lines the placements come out on, which is
-            // not known until the last chip has been measured.
-            let mut labels = Vec::with_capacity(AUDIO_EXTENSIONS.len());
-            let mut chip_widths = Vec::with_capacity(AUDIO_EXTENSIONS.len());
-            for extension in AUDIO_EXTENSIONS {
-                let label = extension.to_uppercase();
-                let label_w = ui
-                    .painter()
-                    .layout_no_wrap(label.clone(), font.clone(), palette.ink)
-                    .size()
-                    .x;
-                labels.push(label);
-                chip_widths.push(CHIP_LABEL_PAD * 2.0 + label_w);
-            }
-            let placements = chip_placements(&chip_widths, available);
-            // `chip_flow` is the token-backed summary of the same decision, while
-            // the cursor is what actually places the chips. They must agree: if
-            // the token ever drifts away from the measured cluster it was derived
-            // from, the card would size itself for one form and paint the other.
-            // An empty list has nothing to wrap and is excluded, since
-            // `chip_flow` only reports on the column, not on the contents.
-            debug_assert!(
-                placements.is_empty()
-                    || placements.iter().any(|placement| placement.row > 0)
-                        == matches!(chip_flow(available), ChipFlow::Wrapped),
-                "chip_flow and chip_placements must agree about wrapping"
-            );
+    settings_card(ui, palette, Some(12), |ui| {
+        let available = ui.available_width();
+        let font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS);
+        // Measure every chip before painting any of them: the card's height
+        // is the sum over the lines the placements come out on, which is
+        // not known until the last chip has been measured.
+        let mut labels = Vec::with_capacity(AUDIO_EXTENSIONS.len());
+        let mut chip_widths = Vec::with_capacity(AUDIO_EXTENSIONS.len());
+        for extension in AUDIO_EXTENSIONS {
+            let label = extension.to_uppercase();
+            let label_w = ui
+                .painter()
+                .layout_no_wrap(label.clone(), font.clone(), palette.ink)
+                .size()
+                .x;
+            labels.push(label);
+            chip_widths.push(CHIP_LABEL_PAD * 2.0 + label_w);
+        }
+        let placements = chip_placements(&chip_widths, available);
+        // `chip_flow` is the token-backed summary of the same decision, while
+        // the cursor is what actually places the chips. They must agree: if
+        // the token ever drifts away from the measured cluster it was derived
+        // from, the card would size itself for one form and paint the other.
+        // An empty list has nothing to wrap and is excluded, since
+        // `chip_flow` only reports on the column, not on the contents.
+        debug_assert!(
+            placements.is_empty()
+                || placements.iter().any(|placement| placement.row > 0)
+                    == matches!(chip_flow(available), ChipFlow::Wrapped),
+            "chip_flow and chip_placements must agree about wrapping"
+        );
 
-            let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(available, chip_block_height(&placements)),
-                egui::Sense::hover(),
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(available, chip_block_height(&placements)),
+            egui::Sense::hover(),
+        );
+        for ((extension, label), placement) in AUDIO_EXTENSIONS.iter().zip(labels).zip(placements) {
+            let enabled = content.scan_formats.iter().any(|f| f == extension);
+            let chip_rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    rect.left() + placement.left,
+                    rect.top() + chip_row_top(placement),
+                ),
+                egui::vec2(placement.width, CHIP_H),
             );
-            for ((extension, label), placement) in
-                AUDIO_EXTENSIONS.iter().zip(labels).zip(placements)
-            {
-                let enabled = content.scan_formats.iter().any(|f| f == extension);
-                let chip_rect = egui::Rect::from_min_size(
-                    egui::pos2(
-                        rect.left() + placement.left,
-                        rect.top() + chip_row_top(placement),
-                    ),
-                    egui::vec2(placement.width, CHIP_H),
-                );
-                let a11y = format!("Index {extension} files");
-                if filled_button(
-                    ui,
-                    cache,
-                    palette,
-                    chip_rect,
-                    egui::Id::new(("settings_format_chip", *extension)),
-                    &label,
-                    &a11y,
-                    None,
-                    // PRE-EXISTING, deliberately preserved: this call site
-                    // passed `enabled` into the old `primary` slot, so a chip
-                    // has been painting as `Primary` — brand-filled — whenever
-                    // it is enabled, and only falls back to `Secondary` when
-                    // disabled. The golden shows it: the chip row is a band of
-                    // solid brand. That is almost certainly a slip (a chip is
-                    // not a primary action, and a chip that changes tier with
-                    // its own enabled state is not a tier at all), but fixing it
-                    // would restyle every idle chip, which is a resting-fill
-                    // change and therefore not this slice's business. Carried
-                    // forward verbatim so the wash stays the only difference.
-                    if enabled {
-                        Variant::Primary
-                    } else {
-                        Variant::Secondary
-                    },
-                    true,
-                    true,
-                ) {
-                    actions.push(SettingsAction::SetFormat(
-                        (*extension).to_string(),
-                        !enabled,
-                    ));
-                }
+            let a11y = format!("Index {extension} files");
+            if filled_button(
+                ui,
+                cache,
+                palette,
+                chip_rect,
+                egui::Id::new(("settings_format_chip", *extension)),
+                &label,
+                &a11y,
+                None,
+                // PRE-EXISTING, deliberately preserved: this call site
+                // passed `enabled` into the old `primary` slot, so a chip
+                // has been painting as `Primary` — brand-filled — whenever
+                // it is enabled, and only falls back to `Secondary` when
+                // disabled. The golden shows it: the chip row is a band of
+                // solid brand. That is almost certainly a slip (a chip is
+                // not a primary action, and a chip that changes tier with
+                // its own enabled state is not a tier at all), but fixing it
+                // would restyle every idle chip, which is a resting-fill
+                // change and therefore not this slice's business. Carried
+                // forward verbatim so the wash stays the only difference.
+                if enabled {
+                    Variant::Primary
+                } else {
+                    Variant::Secondary
+                },
+                true,
+                true,
+            ) {
+                actions.push(SettingsAction::SetFormat(
+                    (*extension).to_string(),
+                    !enabled,
+                ));
             }
-        });
+        }
+    });
 }
 
 /// The y offset of a chip's row from the top of the chip block. Rows advance by
@@ -1570,97 +1566,93 @@ fn scan_status_card(
     content: &SettingsContent,
     actions: &mut Vec<SettingsAction>,
 ) {
-    egui::Frame::new()
-        .fill(palette.surface)
-        .stroke(egui::Stroke::new(CARD_BORDER_W, palette.border))
-        .corner_radius(theme::RADIUS_LG)
-        .show(ui, |ui| {
-            let lines = scan_card_lines(content.last_scan.as_ref());
-            // The card always allocates `scan_card_height`, sized for three
-            // lines, so a scan whose error count changes never resizes it.
-            let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width(), scan_card_height(&lines)),
-                egui::Sense::hover(),
-            );
-            let painter = ui.painter_at(rect);
+    settings_card(ui, palette, None, |ui| {
+        let lines = scan_card_lines(content.last_scan.as_ref());
+        // The card always allocates `scan_card_height`, sized for three
+        // lines, so a scan whose error count changes never resizes it.
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), scan_card_height(&lines)),
+            egui::Sense::hover(),
+        );
+        let painter = ui.painter_at(rect);
 
-            // Action first: its width is what the text column has to yield, so
-            // the two never overlap and neither is hand-positioned against the
-            // other's arithmetic.
-            let btn_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS);
-            let btn_label_w = painter
-                .layout_no_wrap(RESCAN_LABEL.to_owned(), btn_font, palette.ink)
-                .size()
-                .x;
-            let btn_w = SMALL_BTN_LABEL_PAD + btn_label_w;
-            let btn_rect = egui::Rect::from_min_size(
-                egui::pos2(
-                    rect.right() - SCAN_CARD_PAD - btn_w,
-                    rect.center().y - SMALL_BTN_H / 2.0,
-                ),
-                egui::vec2(btn_w, SMALL_BTN_H),
-            );
+        // Action first: its width is what the text column has to yield, so
+        // the two never overlap and neither is hand-positioned against the
+        // other's arithmetic.
+        let btn_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS);
+        let btn_label_w = painter
+            .layout_no_wrap(RESCAN_LABEL.to_owned(), btn_font, palette.ink)
+            .size()
+            .x;
+        let btn_w = SMALL_BTN_LABEL_PAD + btn_label_w;
+        let btn_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                rect.right() - SCAN_CARD_PAD - btn_w,
+                rect.center().y - SMALL_BTN_H / 2.0,
+            ),
+            egui::vec2(btn_w, SMALL_BTN_H),
+        );
 
-            // A real vertical layout: the three lines are measured, then stacked
-            // by a child `Ui` that owns the column. No line is placed at an
-            // offset from the card's centre — the only arithmetic is halving a
-            // measured height so the block sits opposite the action.
-            let styles = [
-                (egui::TextStyle::Body, theme::TEXT_SM),
-                (egui::TextStyle::Small, theme::TEXT_XS),
-                (egui::TextStyle::Small, theme::TEXT_XS),
-            ];
-            let text_left = rect.left() + SCAN_CARD_PAD;
-            let text_width = (btn_rect.left() - SCAN_CARD_PAD - text_left).max(0.0);
-            let galleys: Vec<_> = lines
-                .iter()
-                .zip(styles)
-                .map(|(line, style)| {
-                    let color = scan_line_color(line, palette);
-                    let font = styled_font(ui, style.0, style.1);
-                    (
-                        color,
-                        painter.layout_no_wrap(line.text.clone(), font, color),
-                    )
-                })
-                .collect();
-            let block_h: f32 = galleys.iter().map(|(_, galley)| galley.size().y).sum();
-            let text_rect = egui::Rect::from_min_size(
-                egui::pos2(text_left, rect.center().y - block_h / 2.0_f32),
-                egui::vec2(text_width, block_h),
+        // A real vertical layout: the three lines are measured, then stacked
+        // by a child `Ui` that owns the column. No line is placed at an
+        // offset from the card's centre — the only arithmetic is halving a
+        // measured height so the block sits opposite the action.
+        let styles = [
+            (egui::TextStyle::Body, theme::TEXT_SM),
+            (egui::TextStyle::Small, theme::TEXT_XS),
+            (egui::TextStyle::Small, theme::TEXT_XS),
+        ];
+        let text_left = rect.left() + SCAN_CARD_PAD;
+        let text_width = (btn_rect.left() - SCAN_CARD_PAD - text_left).max(0.0);
+        let galleys: Vec<_> = lines
+            .iter()
+            .zip(styles)
+            .map(|(line, style)| {
+                let color = scan_line_color(line, palette);
+                let font = styled_font(ui, style.0, style.1);
+                (
+                    color,
+                    painter.layout_no_wrap(line.text.clone(), font, color),
+                )
+            })
+            .collect();
+        let block_h: f32 = galleys.iter().map(|(_, galley)| galley.size().y).sum();
+        let text_rect = egui::Rect::from_min_size(
+            egui::pos2(text_left, rect.center().y - block_h / 2.0_f32),
+            egui::vec2(text_width, block_h),
+        );
+        let mut text_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(text_rect)
+                .layout(egui::Layout::top_down(egui::Align::LEFT)),
+        );
+        for (color, galley) in &galleys {
+            text_ui.painter().galley(
+                egui::pos2(text_rect.left(), text_ui.cursor().top()),
+                galley.clone(),
+                *color,
             );
-            let mut text_ui = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(text_rect)
-                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
-            );
-            for (color, galley) in &galleys {
-                text_ui.painter().galley(
-                    egui::pos2(text_rect.left(), text_ui.cursor().top()),
-                    galley.clone(),
-                    *color,
-                );
-                // Advance by the line's own height, so the stack needs no
-                // leading constant of its own.
-                text_ui.add_space(galley.size().y);
-            }
+            // Advance by the line's own height, so the stack needs no
+            // leading constant of its own.
+            text_ui.add_space(galley.size().y);
+        }
 
-            if filled_button(
-                ui,
-                cache,
-                palette,
-                btn_rect,
-                egui::Id::new("settings_rescan_now"),
-                RESCAN_LABEL,
-                RESCAN_LABEL,
-                Some(Icon::RefreshCw),
-                Variant::Accent,
-                true,
-                true,
-            ) {
-                actions.push(SettingsAction::ScanAll);
-            }
-        });
+        if filled_button(
+            ui,
+            cache,
+            palette,
+            btn_rect,
+            egui::Id::new("settings_rescan_now"),
+            RESCAN_LABEL,
+            RESCAN_LABEL,
+            Some(Icon::RefreshCw),
+            Variant::Accent,
+            true,
+            true,
+        ) {
+            actions.push(SettingsAction::ScanAll);
+        }
+    });
 }
 
 /// The page footer: the immediate-apply note on the left, and the page's three
@@ -1903,19 +1895,14 @@ fn preferences_card(
     actions: &mut Vec<SettingsAction>,
     prefs: &[Preference],
 ) {
-    egui::Frame::new()
-        .fill(palette.surface)
-        .stroke(egui::Stroke::new(CARD_BORDER_W, palette.border))
-        .corner_radius(theme::RADIUS_LG)
-        .inner_margin(egui::Margin::same(4))
-        .show(ui, |ui| {
-            for (i, pref) in prefs.iter().enumerate() {
-                if i > 0 {
-                    row_separator(ui, palette, 16.0);
-                }
-                preference_row(ui, palette, *pref, pref.checked(content), actions);
+    settings_card(ui, palette, Some(4), |ui| {
+        for (i, pref) in prefs.iter().enumerate() {
+            if i > 0 {
+                row_separator(ui, palette, 16.0);
             }
-        });
+            preference_row(ui, palette, *pref, pref.checked(content), actions);
+        }
+    });
 }
 
 /// One preference row: title + muted description on the left, the toggle
@@ -2374,20 +2361,15 @@ fn artwork_card(
     content: &SettingsContent,
     actions: &mut Vec<SettingsAction>,
 ) {
-    egui::Frame::new()
-        .fill(palette.surface)
-        .stroke(egui::Stroke::new(CARD_BORDER_W, palette.border))
-        .corner_radius(theme::RADIUS_LG)
-        .inner_margin(egui::Margin::same(4))
-        .show(ui, |ui| {
-            preference_row(
-                ui,
-                palette,
-                Preference::ReadEmbedded,
-                content.read_embedded_artwork,
-                actions,
-            );
-        });
+    settings_card(ui, palette, Some(4), |ui| {
+        preference_row(
+            ui,
+            palette,
+            Preference::ReadEmbedded,
+            content.read_embedded_artwork,
+            actions,
+        );
+    });
 }
 
 /// The Library pane's lower four sections in the narrow fallback: one stacked

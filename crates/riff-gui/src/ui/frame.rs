@@ -665,11 +665,6 @@ impl<'a> Frame<'a> {
     /// Apply the frame's keyboard facts. Ctrl+K raises the one-shot search
     /// focus request; Space toggles playback. The draw half read both off
     /// egui's input, so this is where they become effects.
-    ///
-    /// A free function because the shortcut contract has a second, egui-bound
-    /// entry point — [`handle_keyboard_shortcuts`](crate::ui::app::handle_keyboard_shortcuts),
-    /// kept for the headless shortcut test — and one applier means the two
-    /// cannot drift.
     fn read_keyboard(&mut self, input: &FrameInput) {
         apply_keyboard(
             input.search_focus_requested,
@@ -780,33 +775,32 @@ impl<'a> Frame<'a> {
 
     // --- Step 11: the sidebar's actions ------------------------------------
 
+    /// The shared "land on the Library view" reset: the Library view in
+    /// Library browse mode, drill-down path and search filter cleared. Which
+    /// open-list slot (smart list / playlist) a caller then fills — or
+    /// clears — stays at the caller, since that is the one fact each row
+    /// states differently.
+    fn land_on_library(&mut self) {
+        self.library.view_mode = ViewMode::Library;
+        self.library.browse_mode = BrowseMode::Library;
+        // Section (or browse-mode) navigation resets the drill-down path:
+        // the new section starts at its root listing.
+        self.library.reset_browser_path();
+        self.library.search_query.clear();
+    }
+
     /// Apply one sidebar action.
-    ///
-    /// The sidebar's rows are pure navigation *and* pure prompt state, which
-    /// is why its report is an enum rather than a session borrow: every
-    /// "land on the Library view in this section, clearing the open list and
-    /// the search" is a single fact stated once here instead of four copied
-    /// blocks at four rows that could disagree.
     fn apply_sidebar_action(&mut self, action: SidebarAction, out: &mut FrameOutput) {
         match action {
             SidebarAction::Navigate { section } => {
-                self.library.view_mode = ViewMode::Library;
-                self.library.browse_mode = BrowseMode::Library;
+                self.land_on_library();
                 self.library.library_section = section;
-                // Section (or browse-mode) navigation resets the drill-down
-                // path: the new section starts at its root listing.
-                self.library.reset_browser_path();
-                self.library.search_query.clear();
                 *self.parts.smart_playlist_view = None;
                 *self.parts.playlist_view = None;
             }
             SidebarAction::NavigateFolders => {
-                self.library.view_mode = ViewMode::Library;
+                self.land_on_library();
                 self.library.browse_mode = BrowseMode::Folders;
-                // A browse-mode switch resets the drill-down path along with
-                // the section change.
-                self.library.reset_browser_path();
-                self.library.search_query.clear();
                 *self.parts.smart_playlist_view = None;
                 *self.parts.playlist_view = None;
             }
@@ -819,12 +813,7 @@ impl<'a> Frame<'a> {
                 *self.parts.smart_playlist_view = None;
             }
             SidebarAction::OpenSmartList(kind) => {
-                self.library.view_mode = ViewMode::Library;
-                self.library.browse_mode = BrowseMode::Library;
-                // Opening a smart list leaves the browser's drill-down path
-                // behind: the listing replaces the column stage.
-                self.library.reset_browser_path();
-                self.library.search_query.clear();
+                self.land_on_library();
                 *self.parts.smart_playlist_view = Some(kind);
                 *self.parts.playlist_view = None;
             }
@@ -849,12 +838,7 @@ impl<'a> Frame<'a> {
                 // playlist lands on the library view so its listing is on
                 // screen, and clears any search filter over the results.
                 if action == PlaylistRowAction::Open {
-                    self.library.view_mode = ViewMode::Library;
-                    self.library.browse_mode = BrowseMode::Library;
-                    // Opening a playlist leaves the browser's drill-down path
-                    // behind: the listing replaces the column stage.
-                    self.library.reset_browser_path();
-                    self.library.search_query.clear();
+                    self.land_on_library();
                 }
             }
             SidebarAction::PlaylistCreate(outcome) => {
@@ -1104,11 +1088,8 @@ pub struct StageReport {
 }
 
 /// Global keyboard shortcuts: Ctrl+K focuses the global search (issue 06),
-/// and Space toggles playback.
-///
-/// The one applier both the Frame's step 8 and the egui-bound
-/// [`handle_keyboard_shortcuts`](crate::ui::app::handle_keyboard_shortcuts)
-/// call, so the shortcut contract has exactly one behaviour.
+/// and Space toggles playback. The one applier the Frame's step 8 calls, so
+/// the shortcut contract has exactly one behaviour.
 pub fn apply_keyboard(
     search_focus_requested: bool,
     toggle_playback: bool,

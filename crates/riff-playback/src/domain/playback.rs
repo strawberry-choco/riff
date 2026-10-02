@@ -61,9 +61,9 @@ pub enum PlaybackUpdate {
 
 /// Nanoseconds per second, as `u128` so intermediate products of
 /// duration-to-sample conversions cannot overflow.
-pub const NANOS_PER_SEC: u128 = 1_000_000_000;
+const NANOS_PER_SEC: u128 = 1_000_000_000;
 /// Same constant as `u64` for use in contexts that do not need the wide type.
-pub const NANOS_PER_SEC_U64: u64 = 1_000_000_000;
+const NANOS_PER_SEC_U64: u64 = 1_000_000_000;
 
 /// Convert a frame count to a [`Duration`] at the given sample rate using
 /// exact integer arithmetic. Degenerate (zero) rates clamp to 1 Hz rather

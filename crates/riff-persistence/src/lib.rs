@@ -15,5 +15,6 @@ pub mod levels;
 pub mod playlist;
 pub mod store;
 pub mod sync;
+pub mod test_support;
 pub mod thumbnail;
 pub mod track;

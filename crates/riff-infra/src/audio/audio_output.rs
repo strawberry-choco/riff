@@ -2,16 +2,16 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use riff_playback::app::errors::PlaybackError;
 use ringbuf::{
     HeapCons, HeapProd, HeapRb,
-    traits::{Consumer, Observer, Producer, Split},
+    traits::{Consumer, Producer, Split},
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// Slack added on top of the engine's backpressure watermark
-/// (`sample_rate * channels * 2`) when sizing the ring. After the engine's
-/// `buffer_len() < max_buffer_samples` check a full decode chunk (4096
-/// samples) always fits, so steady-state writes never block or drop samples.
+/// Slack added on top of the decode loop's backpressure watermark
+/// (`sample_rate * channels * 2`) when sizing the ring. A full decode chunk
+/// (4096 samples) always fits, so steady-state writes never block or drop
+/// samples.
 const CHUNK_SLACK_SAMPLES: usize = 4096;
 
 /// How long [`CpalAudioOutput::write_samples`] may wait on the callback to free
@@ -44,10 +44,13 @@ pub struct CpalAudioOutput {
     producer: Option<HeapProd<f32>>,
     /// Consumer half parked until `start` hands it to the cpal callback.
     pending_consumer: Option<HeapCons<f32>>,
-    /// Flush generation shared with the callback. `clear_buffer` bumps it;
-    /// the callback detects the change and drains the ring, which is how a
+    /// Flush generation shared with the callback. A producer-side clear bumps
+    /// it; the callback detects the change and drains the ring, which is how a
     /// producer-side clear works without locks (the consumer owns the read
-    /// cursor, so only it can reclaim the space).
+    /// cursor, so only it can reclaim the space). No production path bumps it
+    /// today — teardown discards leftovers by replacing the ring per session —
+    /// but the callback side stays armed so a clear can be added without
+    /// touching the stream closures.
     flush_epoch: Arc<AtomicU64>,
     volume: Arc<AtomicU32>,
     /// `ReplayGain` linear factor (Task 4.3), stored as f32 bits like `volume`
@@ -197,7 +200,7 @@ fn audio_callback_u16(
 impl CpalAudioOutput {
     /// Pick the default output device and build a fresh ring sized to the
     /// decode loop's backpressure watermark.
-    pub fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), PlaybackError> {
+    fn initialize(&mut self, sample_rate: u32, channels: u16) -> Result<(), PlaybackError> {
         self.sample_rate = sample_rate;
         self.channels = channels;
 
@@ -328,25 +331,7 @@ impl CpalAudioOutput {
         self.stream = SendStream(None);
     }
 
-    pub fn buffer_len(&self) -> usize {
-        // Lock-free: the producer side can observe the fill level while the
-        // callback consumes concurrently.
-        self.producer.as_ref().map_or(0, Observer::occupied_len)
-    }
-
-    pub fn clear_buffer(&mut self) {
-        // Producer-side clear: bump the flush generation. The callback notices
-        // on its next invocation (and re-checks at the end of the current one,
-        // so a mid-callback clear can never play stale samples), drains the
-        // ring, and thereby hands the space back to the producer. Every
-        // `clear_buffer` call site either has a live stream to service the
-        // drain or is followed by `initialize`, which replaces the ring.
-        if self.producer.is_some() {
-            self.flush_epoch.fetch_add(1, Ordering::Release);
-        }
-    }
-
-    pub fn write_samples(&mut self, samples: &[f32]) -> Result<usize, PlaybackError> {
+    fn write_samples(&mut self, samples: &[f32]) -> Result<usize, PlaybackError> {
         let Some(producer) = self.producer.as_mut() else {
             return Err(PlaybackError::AudioOutput(
                 "Audio output not initialized".to_string(),
@@ -415,6 +400,10 @@ impl riff_playback::infra::ports::AudioOutput for CpalAudioOutput {
 
     fn set_volume(&mut self, volume: f32) {
         self.set_volume(volume);
+    }
+
+    fn set_replaygain(&mut self, factor: f32) {
+        self.set_replaygain(factor);
     }
 }
 

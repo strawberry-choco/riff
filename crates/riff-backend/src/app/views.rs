@@ -137,6 +137,63 @@ pub struct SessionViews {
     playlists: PlaylistProjection,
 }
 
+/// Generate one paged listing's `*_count` / `*_row` method pair — the shape
+/// the "Paged listings" section comment inside [`SessionViews`] describes,
+/// with the error policy (log, then degrade to the last good answer) written
+/// exactly once here.
+///
+/// - `$count` / `$row`: the two method names.
+/// - `args`: the parameters both take; `$row` takes the same list plus the
+///   row `index` last.
+/// - `projection`: the projection field the pair reads through.
+/// - `key`: the projection key expression, built from the args.
+/// - `page`: the store query method and its leading arguments; the macro
+///   appends the `(offset, limit)` window and routes it through
+///   `self.queries`.
+/// - `listing`: the human label interpolated into the warn logs — a
+///   `format!` over the args, evaluated on the error path only.
+macro_rules! paged_listing {
+    (
+        $(#[$count_meta:meta])* ; $(#[$row_meta:meta])* ;
+        $count:ident, $row:ident, $ret:ty,
+        args ($($arg:ident: $arg_ty:ty),*),
+        projection $proj:ident,
+        key $key:expr,
+        page $page:ident ($($parg:expr),* $(,)?),
+        listing $listing:expr $(,)?
+    ) => {
+        $(#[$count_meta])*
+        pub fn $count(&mut self, $($arg: $arg_ty),*) -> usize {
+            match self.$proj.count($key, &mut || {
+                self.queries
+                    .$page($($parg,)* 0, COUNT_ROWS)
+                    .map(|page| page.total())
+            }) {
+                Ok(total) => total,
+                Err(e) => {
+                    let listing = $listing;
+                    tracing::warn!("Failed to count {listing} in the store: {e}");
+                    self.$proj.cached_count().unwrap_or(0)
+                }
+            }
+        }
+
+        $(#[$row_meta])*
+        pub fn $row(&mut self, $($arg: $arg_ty,)* index: usize) -> Option<$ret> {
+            match self.$proj.row($key, index, &mut |offset, limit| {
+                self.queries.$page($($parg,)* offset, limit)
+            }) {
+                Ok(row) => row,
+                Err(e) => {
+                    let listing = $listing;
+                    tracing::warn!("Failed to refresh {listing} from the store: {e}");
+                    self.$proj.cached_row(index)
+                }
+            }
+        }
+    };
+}
+
 impl SessionViews {
     /// Wire the seam to the Library query port and the Playlists query
     /// port plus both session counters — the Library generation and the
@@ -250,7 +307,6 @@ impl SessionViews {
     // last good answer — the last good row, the last good total — or to the
     // default (`None`, `0`) when there is none. The UI never sees a
     // `Result`, and a header never blanks over rows still on screen.
-
     // --- Flat list / search -------------------------------------------------
 
     /// The query signature of the flat track list (`query` empty) or the
@@ -334,342 +390,142 @@ impl SessionViews {
 
     // --- Entity hit roots (search across Library sections) ------------------
 
-    /// How many rows the hit-albums listing for `query` has — what the
-    /// Albums root renders under a query. Its own read, cached per query
-    /// per generation; a failed read keeps the last good total.
-    pub fn hit_album_count(&mut self, query: &str) -> usize {
-        match self.hit_albums.count(query.to_string(), &mut || {
-            self.queries
-                .hit_albums_page(query, 0, COUNT_ROWS)
-                .map(|page| page.total())
-        }) {
-            Ok(total) => total,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to count the hit-albums list (query {query:?}) in the store: {e}"
-                );
-                self.hit_albums.cached_count().unwrap_or(0)
-            }
-        }
+    paged_listing! {
+        /// How many rows the hit-albums listing for `query` has — what the
+        /// Albums root renders under a query. Its own read, cached per query
+        /// per generation; a failed read keeps the last good total.
+        ;
+        /// Row `index` of the hit-albums listing for `query`. The listing is a
+        /// bounded-window projection keyed by the query text: a keystroke
+        /// retarget drops stale rows even at an unchanged generation, and a row
+        /// the projection already has costs no store read. `None` when the
+        /// listing has no row at that index.
+        ;
+        hit_album_count, hit_album_row, Arc<Album>,
+        args (query: &str),
+        projection hit_albums,
+        key query.to_string(),
+        page hit_albums_page(query),
+        listing format!("the hit-albums list (query {query:?})"),
     }
 
-    /// Row `index` of the hit-albums listing for `query`. The listing is a
-    /// bounded-window projection keyed by the query text: a keystroke
-    /// retarget drops stale rows even at an unchanged generation, and a row
-    /// the projection already has costs no store read. `None` when the
-    /// listing has no row at that index.
-    pub fn hit_album_row(&mut self, query: &str, index: usize) -> Option<Arc<Album>> {
-        match self
-            .hit_albums
-            .row(query.to_string(), index, &mut |offset, limit| {
-                self.queries.hit_albums_page(query, offset, limit)
-            }) {
-            Ok(row) => row,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to refresh the hit-albums list (query {query:?}) from the store: {e}"
-                );
-                self.hit_albums.cached_row(index)
-            }
-        }
-    }
-
-    /// How many rows the hit-artists listing for `query` has — what the
-    /// Artists root renders under a query. Its own read, cached per query
-    /// per generation; a failed read keeps the last good total.
-    pub fn hit_artist_count(&mut self, query: &str) -> usize {
-        match self.hit_artists.count(query.to_string(), &mut || {
-            self.queries
-                .hit_artists_page(query, 0, COUNT_ROWS)
-                .map(|page| page.total())
-        }) {
-            Ok(total) => total,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to count the hit-artists list (query {query:?}) in the store: {e}"
-                );
-                self.hit_artists.cached_count().unwrap_or(0)
-            }
-        }
-    }
-
-    /// Row `index` of the hit-artists listing for `query`, name-ascending.
-    /// `None` when the listing has no row at that index.
-    pub fn hit_artist_row(&mut self, query: &str, index: usize) -> Option<Arc<Artist>> {
-        match self
-            .hit_artists
-            .row(query.to_string(), index, &mut |offset, limit| {
-                self.queries.hit_artists_page(query, offset, limit)
-            }) {
-            Ok(row) => row,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to refresh the hit-artists list (query {query:?}) from the store: {e}"
-                );
-                self.hit_artists.cached_row(index)
-            }
-        }
+    paged_listing! {
+        /// How many rows the hit-artists listing for `query` has — what the
+        /// Artists root renders under a query. Its own read, cached per query
+        /// per generation; a failed read keeps the last good total.
+        ;
+        /// Row `index` of the hit-artists listing for `query`,
+        /// name-ascending. `None` when the listing has no row at that index.
+        ;
+        hit_artist_count, hit_artist_row, Arc<Artist>,
+        args (query: &str),
+        projection hit_artists,
+        key query.to_string(),
+        page hit_artists_page(query),
+        listing format!("the hit-artists list (query {query:?})"),
     }
 
     // --- Browse roots --------------------------------------------------------
 
-    /// How many rows the Artists root has, name-ascending or
-    /// name-descending per `direction`. Its own read, cached per query
-    /// signature per generation; a failed read keeps the last good total.
-    pub fn artist_count(&mut self, direction: SortDirection) -> usize {
-        let key = BrowseProjectionKey {
-            list: BrowseList::Artists,
-            direction,
-        };
-        match self.artists_pages.count(key, &mut || {
-            self.queries
-                .artists_page(direction, 0, COUNT_ROWS)
-                .map(|page| page.total())
-        }) {
-            Ok(total) => total,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to count the artists list (direction {direction:?}) in the store: {e}"
-                );
-                self.artists_pages.cached_count().unwrap_or(0)
-            }
-        }
+    paged_listing! {
+        /// How many rows the Artists root has, name-ascending or
+        /// name-descending per `direction`. Its own read, cached per query
+        /// signature per generation; a failed read keeps the last good total.
+        ;
+        /// Row `index` of the Artists root, name-ascending or name-descending
+        /// per `direction` — the Artist a surface is about to draw. `None` when
+        /// the listing has no row at that index.
+        ;
+        artist_count, artist_row, Arc<Artist>,
+        args (direction: SortDirection),
+        projection artists_pages,
+        key BrowseProjectionKey { list: BrowseList::Artists, direction },
+        page artists_page(direction),
+        listing format!("the artists list (direction {direction:?})"),
     }
 
-    /// Row `index` of the Artists root, name-ascending or name-descending
-    /// per `direction` — the Artist a surface is about to draw. `None` when
-    /// the listing has no row at that index.
-    pub fn artist_row(&mut self, direction: SortDirection, index: usize) -> Option<Arc<Artist>> {
-        let key = BrowseProjectionKey {
-            list: BrowseList::Artists,
-            direction,
-        };
-        match self.artists_pages.row(key, index, &mut |offset, limit| {
-            self.queries.artists_page(direction, offset, limit)
-        }) {
-            Ok(row) => row,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to refresh the artists list (direction {direction:?}) from the store: {e}"
-                );
-                self.artists_pages.cached_row(index)
-            }
-        }
+    paged_listing! {
+        /// How many rows the Albums root has over the flat browsing order (or
+        /// its exact reversal per `direction`). Its own read, cached per query
+        /// signature per generation; a failed read keeps the last good total.
+        ;
+        /// Row `index` of the Albums root, in the flat browsing order or its
+        /// exact reversal per `direction`. Each album carries its full track
+        /// ids, so the cover thumbnail and detail line need no extra queries.
+        /// `None` when the listing has no row at that index.
+        ;
+        album_count, album_row, Arc<Album>,
+        args (direction: SortDirection),
+        projection albums_pages,
+        key BrowseProjectionKey { list: BrowseList::Albums, direction },
+        page albums_page(direction),
+        listing format!("the albums list (direction {direction:?})"),
     }
 
-    /// How many rows the Albums root has over the flat browsing order (or
-    /// its exact reversal per `direction`). Its own read, cached per query
-    /// signature per generation; a failed read keeps the last good total.
-    pub fn album_count(&mut self, direction: SortDirection) -> usize {
-        let key = BrowseProjectionKey {
-            list: BrowseList::Albums,
-            direction,
-        };
-        match self.albums_pages.count(key, &mut || {
-            self.queries
-                .albums_page(direction, 0, COUNT_ROWS)
-                .map(|page| page.total())
-        }) {
-            Ok(total) => total,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to count the albums list (direction {direction:?}) in the store: {e}"
-                );
-                self.albums_pages.cached_count().unwrap_or(0)
-            }
-        }
-    }
-
-    /// Row `index` of the Albums root, in the flat browsing order or its
-    /// exact reversal per `direction`. Each album carries its full track
-    /// ids, so the cover thumbnail and detail line need no extra queries.
-    /// `None` when the listing has no row at that index.
-    pub fn album_row(&mut self, direction: SortDirection, index: usize) -> Option<Arc<Album>> {
-        let key = BrowseProjectionKey {
-            list: BrowseList::Albums,
-            direction,
-        };
-        match self.albums_pages.row(key, index, &mut |offset, limit| {
-            self.queries.albums_page(direction, offset, limit)
-        }) {
-            Ok(row) => row,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to refresh the albums list (direction {direction:?}) from the store: {e}"
-                );
-                self.albums_pages.cached_row(index)
-            }
-        }
-    }
-
-    /// How many rows the Genres root has, name-ascending or name-descending
-    /// per `direction`. Its own read, cached per query signature per
-    /// generation; a failed read keeps the last good total.
-    pub fn genre_count(&mut self, direction: SortDirection) -> usize {
-        let key = BrowseProjectionKey {
-            list: BrowseList::Genres,
-            direction,
-        };
-        match self.genres_pages.count(key, &mut || {
-            self.queries
-                .genres_page(direction, 0, COUNT_ROWS)
-                .map(|page| page.total())
-        }) {
-            Ok(total) => total,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to count the genres list (direction {direction:?}) in the store: {e}"
-                );
-                self.genres_pages.cached_count().unwrap_or(0)
-            }
-        }
-    }
-
-    /// Row `index` of the Genres root, name-ascending or name-descending
-    /// per `direction`. Each row carries its per-track count. `None` when
-    /// the listing has no row at that index.
-    pub fn genre_row(&mut self, direction: SortDirection, index: usize) -> Option<Arc<GenreCount>> {
-        let key = BrowseProjectionKey {
-            list: BrowseList::Genres,
-            direction,
-        };
-        match self.genres_pages.row(key, index, &mut |offset, limit| {
-            self.queries.genres_page(direction, offset, limit)
-        }) {
-            Ok(row) => row,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to refresh the genres list (direction {direction:?}) from the store: {e}"
-                );
-                self.genres_pages.cached_row(index)
-            }
-        }
+    paged_listing! {
+        /// How many rows the Genres root has, name-ascending or name-descending
+        /// per `direction`. Its own read, cached per query signature per
+        /// generation; a failed read keeps the last good total.
+        ;
+        /// Row `index` of the Genres root, name-ascending or name-descending
+        /// per `direction`. Each row carries its per-track count. `None` when
+        /// the listing has no row at that index.
+        ;
+        genre_count, genre_row, Arc<GenreCount>,
+        args (direction: SortDirection),
+        projection genres_pages,
+        key BrowseProjectionKey { list: BrowseList::Genres, direction },
+        page genres_page(direction),
+        listing format!("the genres list (direction {direction:?})"),
     }
 
     // --- Genre drill-downs ---------------------------------------------------
 
-    /// How many artists `genre` has, name-ascending or name-descending per
-    /// `direction`. Its own read; a genre change retargets the projection,
-    /// dropping the previous genre's total even at an unchanged generation.
-    pub fn genre_artist_count(&mut self, genre: &str, direction: SortDirection) -> usize {
-        let key = BrowseProjectionKey {
+    paged_listing! {
+        /// How many artists `genre` has, name-ascending or name-descending per
+        /// `direction`. Its own read; a genre change retargets the projection,
+        /// dropping the previous genre's total even at an unchanged generation.
+        ;
+        /// Row `index` of a genre's artists, name-ascending or name-descending
+        /// per `direction` — what the genre drill's artists column renders. A
+        /// genre change retargets the projection, dropping stale rows even at an
+        /// unchanged generation. `None` when the listing has no row at that
+        /// index.
+        ;
+        genre_artist_count, genre_artist_row, Arc<Artist>,
+        args (genre: &str, direction: SortDirection),
+        projection genre_artists_pages,
+        key BrowseProjectionKey {
             list: BrowseList::ArtistsInGenre(genre.to_string()),
             direction,
-        };
-        match self.genre_artists_pages.count(key, &mut || {
-            self.queries
-                .artists_in_genre_page(genre, direction, 0, COUNT_ROWS)
-                .map(|page| page.total())
-        }) {
-            Ok(total) => total,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to count the artists list in genre {genre:?} (direction {direction:?}) \
-                     in the store: {e}"
-                );
-                self.genre_artists_pages.cached_count().unwrap_or(0)
-            }
-        }
+        },
+        page artists_in_genre_page(genre, direction),
+        listing format!("the artists list in genre {genre:?} (direction {direction:?})"),
     }
 
-    /// Row `index` of a genre's artists, name-ascending or name-descending
-    /// per `direction` — what the genre drill's artists column renders. A
-    /// genre change retargets the projection, dropping stale rows even at an
-    /// unchanged generation. `None` when the listing has no row at that
-    /// index.
-    pub fn genre_artist_row(
-        &mut self,
-        genre: &str,
-        direction: SortDirection,
-        index: usize,
-    ) -> Option<Arc<Artist>> {
-        let key = BrowseProjectionKey {
-            list: BrowseList::ArtistsInGenre(genre.to_string()),
-            direction,
-        };
-        match self
-            .genre_artists_pages
-            .row(key, index, &mut |offset, limit| {
-                self.queries
-                    .artists_in_genre_page(genre, direction, offset, limit)
-            }) {
-            Ok(row) => row,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to refresh the artists list in genre {genre:?} (direction {direction:?}) \
-                     from the store: {e}"
-                );
-                self.genre_artists_pages.cached_row(index)
-            }
-        }
-    }
-
-    /// How many albums `artist` has within `genre`, in canonical browsing
-    /// order or its exact reversal per `direction`. Its own read; a genre or
-    /// artist change retargets the projection.
-    pub fn genre_album_count(
-        &mut self,
-        artist: &str,
-        genre: &str,
-        direction: SortDirection,
-    ) -> usize {
-        let key = BrowseProjectionKey {
+    paged_listing! {
+        /// How many albums `artist` has within `genre`, in canonical browsing
+        /// order or its exact reversal per `direction`. Its own read; a genre or
+        /// artist change retargets the projection.
+        ;
+        /// Row `index` of an artist's albums within `genre`, in canonical
+        /// browsing order or its exact reversal per `direction` — what the genre
+        /// drill's album column renders. A genre or artist change retargets the
+        /// projection, dropping stale rows even at an unchanged generation.
+        /// `None` when the listing has no row at that index.
+        ;
+        genre_album_count, genre_album_row, Arc<Album>,
+        args (artist: &str, genre: &str, direction: SortDirection),
+        projection genre_albums_pages,
+        key BrowseProjectionKey {
             list: BrowseList::ArtistAlbumsInGenre {
                 artist: artist.to_string(),
                 genre: genre.to_string(),
             },
             direction,
-        };
-        match self.genre_albums_pages.count(key, &mut || {
-            self.queries
-                .artist_albums_in_genre_page(artist, genre, direction, 0, COUNT_ROWS)
-                .map(|page| page.total())
-        }) {
-            Ok(total) => total,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to count the albums list for {artist} in genre {genre:?} \
-                     (direction {direction:?}) in the store: {e}"
-                );
-                self.genre_albums_pages.cached_count().unwrap_or(0)
-            }
-        }
-    }
-
-    /// Row `index` of an artist's albums within `genre`, in canonical
-    /// browsing order or its exact reversal per `direction` — what the genre
-    /// drill's album column renders. A genre or artist change retargets the
-    /// projection, dropping stale rows even at an unchanged generation.
-    /// `None` when the listing has no row at that index.
-    pub fn genre_album_row(
-        &mut self,
-        artist: &str,
-        genre: &str,
-        direction: SortDirection,
-        index: usize,
-    ) -> Option<Arc<Album>> {
-        let key = BrowseProjectionKey {
-            list: BrowseList::ArtistAlbumsInGenre {
-                artist: artist.to_string(),
-                genre: genre.to_string(),
-            },
-            direction,
-        };
-        match self
-            .genre_albums_pages
-            .row(key, index, &mut |offset, limit| {
-                self.queries
-                    .artist_albums_in_genre_page(artist, genre, direction, offset, limit)
-            }) {
-            Ok(row) => row,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to refresh the albums list for {artist} in genre {genre:?} \
-                     (direction {direction:?}) from the store: {e}"
-                );
-                self.genre_albums_pages.cached_row(index)
-            }
-        }
+        },
+        page artist_albums_in_genre_page(artist, genre, direction),
+        listing format!("the albums list for {artist} in genre {genre:?} (direction {direction:?})"),
     }
 
     // --- Scoped entity hits --------------------------------------------------

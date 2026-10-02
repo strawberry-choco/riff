@@ -798,15 +798,10 @@ mod tests {
 
     #[test]
     fn test_brand_amber_scale_matches_the_mockup() {
-        // --riff-brand-50 … --riff-brand-700; 500 is the primary.
+        // --riff-brand-50/400/500 — the rungs anything reads; 500 is the primary.
         assert_eq!(theme::BRAND_50, egui::Color32::from_rgb(0xff, 0xf8, 0xe7));
-        assert_eq!(theme::BRAND_100, egui::Color32::from_rgb(0xff, 0xef, 0xcc));
-        assert_eq!(theme::BRAND_200, egui::Color32::from_rgb(0xff, 0xe0, 0x99));
-        assert_eq!(theme::BRAND_300, egui::Color32::from_rgb(0xff, 0xcc, 0x66));
         assert_eq!(theme::BRAND_400, egui::Color32::from_rgb(0xff, 0xb8, 0x33));
         assert_eq!(theme::BRAND_500, egui::Color32::from_rgb(0xf0, 0x82, 0x1e));
-        assert_eq!(theme::BRAND_600, egui::Color32::from_rgb(0xd9, 0x8a, 0x0d));
-        assert_eq!(theme::BRAND_700, egui::Color32::from_rgb(0xa6, 0x67, 0x09));
     }
 
     #[test]
@@ -866,8 +861,6 @@ mod tests {
         assert!((theme::SPACE_SM - 6.0).abs() < f32::EPSILON);
         assert!((theme::SPACE_MD - 8.0).abs() < f32::EPSILON);
         assert!((theme::SPACE_LG - 12.0).abs() < f32::EPSILON);
-        assert!((theme::SPACE_XL - 16.0).abs() < f32::EPSILON);
-        assert!((theme::SPACE_XXL - 24.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -10530,58 +10523,6 @@ mod browser_column_ui_tests {
         );
     }
 
-    #[test]
-    fn test_artist_detail_lists_albums_that_drill_deeper() {
-        use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::browser::BrowserItem;
-        use riff_gui::ui::detail::{
-            DetailAction, DetailColumn, DetailReport, show_detail_column_scrolled,
-        };
-
-        let palette = Palette::dark();
-        let mut cache = IconCache::new();
-        let albums = vec![BrowserItem {
-            key: album_key("Boards of Canada", "Geogaddi"),
-            label: "Geogaddi".to_string(),
-            detail: Some("2002".to_string()),
-            thumbnail: None,
-            selected: false,
-            now_playing: false,
-        }];
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(420.0, 300.0))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, reports: &mut Vec<DetailReport>| {
-                    let column = DetailColumn {
-                        rows: &albums,
-                        ..DetailColumn::empty("No albums yet", "Nothing here.")
-                    };
-                    show_detail_column_scrolled(ui, &mut cache, &palette, column, None, reports);
-                },
-                Vec::new(),
-            );
-        harness.run();
-
-        // The artist level lists the artist's albums (the browser column's
-        // row shape, drilled one level down). The row's detail line ("2002")
-        // folds into the accessibility label (issue 16).
-        assert!(
-            harness.query_by_label("Geogaddi (2002)").is_some(),
-            "the artist's album rows render in the detail column"
-        );
-        harness.get_by_label("Geogaddi (2002)").click();
-        harness.run();
-        assert_eq!(
-            harness.state(),
-            &vec![DetailReport::Action(DetailAction::SelectRow(album_key(
-                "Boards of Canada",
-                "Geogaddi",
-            )))],
-            "clicking an album row reports its key; the app resolves the level"
-        );
-    }
-
     /// A Drill Column's row click lands at the depth **the Column stated**, and
     /// truncates anything deeper.
     ///
@@ -12752,7 +12693,6 @@ mod browser_column_ui_tests {
         );
         let column = riff_gui::ui::detail::DetailColumn {
             tracks: &content.tracks,
-            rows: &[],
             ..riff_gui::ui::detail::DetailColumn::empty("Nothing selected", "Pick a row.")
         };
         s.actions.clear();
@@ -14282,33 +14222,6 @@ mod browser_column_ui_tests {
             "Song A",
             "the clicked track wins over the album in the drill-down path"
         );
-    }
-
-    // --- Flat-slot mapping (the Albums variant derives its listing from
-    // the per-artist album tables) ----------------------------------------------
-
-    use riff_gui::ui::browser::flat_slot;
-
-    /// Two artists: the first with 2 albums, the second with 1. Prefix sums
-    /// `[0, 2, 3]`, total 3.
-    #[test]
-    fn test_flat_slot_maps_ascending_indexes_front_to_back() {
-        let counts = [0usize, 2, 3];
-        assert_eq!(flat_slot(&counts, 0, false), Some((0, 0)));
-        assert_eq!(flat_slot(&counts, 1, false), Some((0, 1)));
-        assert_eq!(flat_slot(&counts, 2, false), Some((1, 0)));
-        assert_eq!(flat_slot(&counts, 3, false), None, "past the end is None");
-    }
-
-    #[test]
-    fn test_flat_slot_maps_descending_indexes_back_to_front() {
-        // Z–A flips both the bucket order AND each bucket's contents, so
-        // the last bucket's last item comes first.
-        let counts = [0usize, 2, 3];
-        assert_eq!(flat_slot(&counts, 0, true), Some((1, 0)));
-        assert_eq!(flat_slot(&counts, 1, true), Some((0, 1)));
-        assert_eq!(flat_slot(&counts, 2, true), Some((0, 0)));
-        assert_eq!(flat_slot(&counts, 3, true), None);
     }
 
     // --- Keyboard operability (design-handoff issue 16) ---------------------

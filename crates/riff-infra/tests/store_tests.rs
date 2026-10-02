@@ -77,12 +77,7 @@ fn test_store_reopen_reuses_migrated_store_without_reapplying() {
 
 #[test]
 fn test_store_double_apply_is_idempotent() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
     store
         .with_connection(|conn| conn.execute("UPDATE schema_migrations SET applied_at = 777", []))
         .expect("marking applied_at must work");
@@ -259,11 +254,7 @@ fn test_store_migration_011_backfills_lowercased_entity_search_keys() {
 /// SQL-only backfill could only fold ASCII).
 #[test]
 fn test_store_scan_writes_rust_lowercased_entity_search_keys() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     store
         .apply_scan_batch(std::slice::from_ref(&browsing_track(
@@ -555,12 +546,7 @@ fn test_store_fresh_start_creates_its_own_parent_directories() {
 
 #[test]
 fn test_store_connection_setup_pragmas() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, store, _changes_rx) = open_store();
     let journal_mode: String = store
         .with_connection(|conn| conn.query_row("PRAGMA journal_mode", [], |row| row.get(0)))
         .expect("reading journal_mode must work");
@@ -579,12 +565,7 @@ fn test_store_connection_setup_pragmas() {
 
 #[test]
 fn test_store_busy_timeout_is_about_five_seconds() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, store, _changes_rx) = open_store();
     let timeout_ms: i64 = store
         .with_connection(|conn| conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0)))
         .expect("reading busy_timeout must work");
@@ -869,11 +850,7 @@ fn test_store_migration_012_drops_the_browser_layout_column() {
 /// migration set's newest schema is what a new install gets.
 #[test]
 fn test_store_fresh_start_never_creates_the_browser_layout_column() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, store, _changes_rx) = open_store();
 
     let columns: Vec<String> = store
         .with_connection(|conn| {
@@ -1080,12 +1057,7 @@ use riff_persistence::track::TrackId;
 
 #[test]
 fn test_store_fresh_playlists_are_empty() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, store, _changes_rx) = open_store();
     let playlists = store
         .load_playlists()
         .expect("loading playlists from a fresh store must work");
@@ -1288,12 +1260,7 @@ fn test_store_entry_add_remove_semantics_and_dangling_survival() {
 
 #[test]
 fn test_store_duplicate_names_allowed_with_unique_ids() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
     // Same-millisecond creation of same-named playlists must not collide:
     // ids dedupe, names may repeat (today's behavior).
     let a = store.create_playlist("Mix", &[]).unwrap();
@@ -1382,12 +1349,7 @@ fn test_store_reorder_playlist_entries_persists_the_new_order_across_restart() {
 
 #[test]
 fn test_store_reorder_unknown_playlist_is_a_noop_and_other_playlists_are_untouched() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
     let keep = store
         .create_playlist(
             "Keep",
@@ -1480,7 +1442,7 @@ fn test_store_playlist_entries_report_library_validity_via_left_join() {
 
 // --- Application Store: Library collection (ticket 05) ---------------------
 
-use riff_persistence::store::{LibraryMutationStore, LibraryQueryStore, TrackListOrder};
+use riff_persistence::store::{LibraryMutationStore, LibraryQueryStore, Page, TrackListOrder};
 use std::time::Duration;
 
 /// Build a Track fixture with full metadata control (compilation cases need
@@ -1525,72 +1487,91 @@ fn library_track(
 // take a `SortDirection` their count reads never had; a total is
 // direction-independent in the store, so the count helpers pass `Ascending`.
 
+/// A page read's rows, unwrapped — the `*_window` helpers' shared body.
+fn page_rows<T: Clone>(page: Result<Page<T>, StoreError>, what: &str) -> Vec<T> {
+    page.expect(what).rows().to_vec()
+}
+
+/// A page read's total, unwrapped — the `*_count` helpers' shared body.
+fn page_total<T>(page: Result<Page<T>, StoreError>, what: &str) -> usize {
+    page.expect(what).total()
+}
+
+/// A fresh, fully migrated store in a scratch directory — the fixture most
+/// store tests start from. Returns the directory guard (keep it alive: it
+/// owns the database file), the store, and the change receiver for tests
+/// that assert on the event backbone.
+fn open_store() -> (
+    tempfile::TempDir,
+    SqliteStore,
+    crossbeam_channel::Receiver<StoreChanged>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (changes_tx, changes_rx) = crossbeam_channel::unbounded::<StoreChanged>();
+    let store =
+        SqliteStore::open_and_migrate(&dir.path().join("riff.sqlite3"), changes_tx).unwrap();
+    (dir, store, changes_rx)
+}
+
 /// The flat library listing's window, from its Listing Page.
 fn tracks_window(store: &SqliteStore, offset: usize, limit: usize) -> Vec<Track> {
-    store
-        .tracks_page(TrackListOrder::default(), offset, limit)
-        .expect("tracks page reads")
-        .rows()
-        .to_vec()
+    page_rows(
+        store.tracks_page(TrackListOrder::default(), offset, limit),
+        "tracks page reads",
+    )
 }
 
 /// The flat library listing's total, from its Listing Page.
 fn track_count(store: &SqliteStore) -> usize {
-    store
-        .tracks_page(TrackListOrder::default(), 0, 1)
-        .expect("tracks page reads")
-        .total()
+    page_total(
+        store.tracks_page(TrackListOrder::default(), 0, 1),
+        "tracks page reads",
+    )
 }
 
 /// The search listing's window, from its Listing Page.
 fn search_window(store: &SqliteStore, query: &str, offset: usize, limit: usize) -> Vec<Track> {
-    store
-        .search_page(query, TrackListOrder::default(), offset, limit)
-        .expect("search page reads")
-        .rows()
-        .to_vec()
+    page_rows(
+        store.search_page(query, TrackListOrder::default(), offset, limit),
+        "search page reads",
+    )
 }
 
 /// The search listing's total, from its Listing Page.
 fn search_count(store: &SqliteStore, query: &str) -> usize {
-    store
-        .search_page(query, TrackListOrder::default(), 0, 1)
-        .expect("search page reads")
-        .total()
+    page_total(
+        store.search_page(query, TrackListOrder::default(), 0, 1),
+        "search page reads",
+    )
 }
 
 /// The hit-album listing's window, from its Listing Page.
 fn hit_albums(store: &SqliteStore, query: &str, offset: usize, limit: usize) -> Vec<Album> {
-    store
-        .hit_albums_page(query, offset, limit)
-        .expect("hit albums page reads")
-        .rows()
-        .to_vec()
+    page_rows(
+        store.hit_albums_page(query, offset, limit),
+        "hit albums page reads",
+    )
 }
 
 /// The hit-album listing's total, from its Listing Page.
 fn hit_albums_count(store: &SqliteStore, query: &str) -> usize {
-    store
-        .hit_albums_page(query, 0, 1)
-        .expect("hit albums page reads")
-        .total()
+    page_total(store.hit_albums_page(query, 0, 1), "hit albums page reads")
 }
 
 /// The hit-artist listing's window, from its Listing Page.
 fn hit_artists(store: &SqliteStore, query: &str, offset: usize, limit: usize) -> Vec<Artist> {
-    store
-        .hit_artists_page(query, offset, limit)
-        .expect("hit artists page reads")
-        .rows()
-        .to_vec()
+    page_rows(
+        store.hit_artists_page(query, offset, limit),
+        "hit artists page reads",
+    )
 }
 
 /// The hit-artist listing's total, from its Listing Page.
 fn hit_artists_count(store: &SqliteStore, query: &str) -> usize {
-    store
-        .hit_artists_page(query, 0, 1)
-        .expect("hit artists page reads")
-        .total()
+    page_total(
+        store.hit_artists_page(query, 0, 1),
+        "hit artists page reads",
+    )
 }
 
 /// The Artists root's window, from its Listing Page.
@@ -1600,19 +1581,18 @@ fn artists_window(
     offset: usize,
     limit: usize,
 ) -> Vec<Artist> {
-    store
-        .artists_page(direction, offset, limit)
-        .expect("artists page reads")
-        .rows()
-        .to_vec()
+    page_rows(
+        store.artists_page(direction, offset, limit),
+        "artists page reads",
+    )
 }
 
 /// The Artists root's total, from its Listing Page.
 fn artists_count(store: &SqliteStore) -> usize {
-    store
-        .artists_page(SortDirection::Ascending, 0, 1)
-        .expect("artists page reads")
-        .total()
+    page_total(
+        store.artists_page(SortDirection::Ascending, 0, 1),
+        "artists page reads",
+    )
 }
 
 /// The Albums root's window, from its Listing Page.
@@ -1622,19 +1602,18 @@ fn albums_window(
     offset: usize,
     limit: usize,
 ) -> Vec<Album> {
-    store
-        .albums_page(direction, offset, limit)
-        .expect("albums page reads")
-        .rows()
-        .to_vec()
+    page_rows(
+        store.albums_page(direction, offset, limit),
+        "albums page reads",
+    )
 }
 
 /// The Albums root's total, from its Listing Page.
 fn albums_count(store: &SqliteStore) -> usize {
-    store
-        .albums_page(SortDirection::Ascending, 0, 1)
-        .expect("albums page reads")
-        .total()
+    page_total(
+        store.albums_page(SortDirection::Ascending, 0, 1),
+        "albums page reads",
+    )
 }
 
 /// The Genres root's window, from its Listing Page.
@@ -1644,19 +1623,18 @@ fn genres_window(
     offset: usize,
     limit: usize,
 ) -> Vec<GenreCount> {
-    store
-        .genres_page(direction, offset, limit)
-        .expect("genres page reads")
-        .rows()
-        .to_vec()
+    page_rows(
+        store.genres_page(direction, offset, limit),
+        "genres page reads",
+    )
 }
 
 /// The Genres root's total, from its Listing Page.
 fn genres_count(store: &SqliteStore) -> usize {
-    store
-        .genres_page(SortDirection::Ascending, 0, 1)
-        .expect("genres page reads")
-        .total()
+    page_total(
+        store.genres_page(SortDirection::Ascending, 0, 1),
+        "genres page reads",
+    )
 }
 
 /// The genre drill-down's artist window, from its Listing Page.
@@ -1667,19 +1645,18 @@ fn artists_in_genre_window(
     offset: usize,
     limit: usize,
 ) -> Vec<Artist> {
-    store
-        .artists_in_genre_page(genre, direction, offset, limit)
-        .expect("artists in genre page reads")
-        .rows()
-        .to_vec()
+    page_rows(
+        store.artists_in_genre_page(genre, direction, offset, limit),
+        "artists in genre page reads",
+    )
 }
 
 /// The genre drill-down's artist total, from its Listing Page.
 fn artists_in_genre_count(store: &SqliteStore, genre: &str) -> usize {
-    store
-        .artists_in_genre_page(genre, SortDirection::Ascending, 0, 1)
-        .expect("artists in genre page reads")
-        .total()
+    page_total(
+        store.artists_in_genre_page(genre, SortDirection::Ascending, 0, 1),
+        "artists in genre page reads",
+    )
 }
 
 /// The artist-and-genre drill-down's album window, from its Listing Page.
@@ -1691,19 +1668,18 @@ fn artist_albums_in_genre_window(
     offset: usize,
     limit: usize,
 ) -> Vec<Album> {
-    store
-        .artist_albums_in_genre_page(artist, genre, direction, offset, limit)
-        .expect("artist albums in genre page reads")
-        .rows()
-        .to_vec()
+    page_rows(
+        store.artist_albums_in_genre_page(artist, genre, direction, offset, limit),
+        "artist albums in genre page reads",
+    )
 }
 
 /// The artist-and-genre drill-down's album total, from its Listing Page.
 fn artist_albums_in_genre_count(store: &SqliteStore, artist: &str, genre: &str) -> usize {
-    store
-        .artist_albums_in_genre_page(artist, genre, SortDirection::Ascending, 0, 1)
-        .expect("artist albums in genre page reads")
-        .total()
+    page_total(
+        store.artist_albums_in_genre_page(artist, genre, SortDirection::Ascending, 0, 1),
+        "artist albums in genre page reads",
+    )
 }
 
 #[test]
@@ -1740,11 +1716,7 @@ fn test_store_library_migration_004_applies_and_reopens_idempotently() {
 
 #[test]
 fn test_scan_batch_populates_collection_including_compilations() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     // Compilation: one album credited to "Various Artists", two tracks with
     // their own track-level artists.
@@ -1855,11 +1827,7 @@ fn test_interrupted_scan_keeps_committed_batches() {
 
 #[test]
 fn test_rescan_is_idempotent_and_preserves_history() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     let first = vec![library_track(
         "m:\\music\\old.mp3",
@@ -1927,11 +1895,7 @@ fn test_rescan_is_idempotent_and_preserves_history() {
 
 #[test]
 fn test_foreign_keys_reject_orphan_tracks() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, store, _changes_rx) = open_store();
 
     let err = store
         .with_connection(|conn| {
@@ -1950,11 +1914,7 @@ fn test_foreign_keys_reject_orphan_tracks() {
 
 #[test]
 fn test_flat_list_windows_are_path_ordered_and_bounded() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     // Shuffled insertion order with byte-ordering traps: uppercase sorts
     // before lowercase ('B' 0x42 < 'a' 0x61), digits before letters.
@@ -2001,11 +1961,7 @@ fn test_flat_list_windows_are_path_ordered_and_bounded() {
 fn test_flat_list_orders_land_in_sql_per_track_list_order() {
     use riff_persistence::store::TrackListOrder as Order;
 
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     // Path order deliberately disagrees with title order, and titles carry
     // a case trap: NOCASE folding must rank 'b' beside 'A', while byte-wise
@@ -2107,11 +2063,7 @@ fn test_all_track_ids_are_canonically_path_ordered() {
 
 #[test]
 fn test_search_parity_with_legacy_semantics() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     // Fixture library including non-Latin titles and literal wildcard
     // characters in metadata.
@@ -2186,11 +2138,7 @@ fn test_search_parity_with_legacy_semantics() {
 
 #[test]
 fn test_get_track_roundtrips_all_fields() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     let full = Track {
         id: TrackId::from_path(std::path::Path::new("f:\\full.flac")),
@@ -2846,11 +2794,7 @@ fn test_browsing_queries_match_independent_reference_orderings() {
     let fixtures = browsing_fixtures();
 
     // Store side: the whole fixture set through one scan commit.
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
     store.apply_scan_batch(&fixtures).expect("batch applies");
 
     // Artists A–Z.
@@ -2892,11 +2836,7 @@ fn test_browsing_queries_match_independent_reference_orderings() {
 
 #[test]
 fn test_all_artists_lists_names_az_with_canonical_album_keys() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     // Fresh store: no artists.
     assert!(
@@ -2938,11 +2878,7 @@ fn test_all_artists_lists_names_az_with_canonical_album_keys() {
 
 #[test]
 fn test_artists_window_slices_name_order_both_directions_and_counts() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     // Fresh store: no artists.
     assert_eq!(artists_count(&store), 0);
@@ -3022,11 +2958,7 @@ fn test_artists_window_slices_name_order_both_directions_and_counts() {
 
 #[test]
 fn test_albums_window_flat_order_slices_and_counts_in_both_directions() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     store
         .apply_scan_batch(&[
@@ -3071,11 +3003,7 @@ fn test_albums_window_flat_order_slices_and_counts_in_both_directions() {
 
 #[test]
 fn test_genres_window_counts_and_orders_both_directions() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     // A track tagged "Rock; Jazz" counts once per entry; byte-wise
     // case-sensitivity means "rock" is a distinct entry from "Rock".
@@ -3110,11 +3038,7 @@ fn test_genres_window_counts_and_orders_both_directions() {
 
 #[test]
 fn test_artists_in_genre_window_and_count_are_scoped_and_ordered() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     store
         .apply_scan_batch(&[
@@ -3161,11 +3085,7 @@ fn test_artists_in_genre_window_and_count_are_scoped_and_ordered() {
 
 #[test]
 fn test_artist_albums_in_genre_window_and_count_are_scoped_and_ordered() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     store
         .apply_scan_batch(&[
@@ -3210,11 +3130,7 @@ fn test_artist_albums_in_genre_window_and_count_are_scoped_and_ordered() {
 
 #[test]
 fn test_artist_albums_in_genre_window_slices_offset() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     store
         .apply_scan_batch(&[
@@ -3234,11 +3150,7 @@ fn test_artist_albums_in_genre_window_slices_offset() {
 
 #[test]
 fn test_artist_albums_in_genre_unknown_scopes_yield_empty() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     store
         .apply_scan_batch(&[genre_track("f:\\1.mp3", "1", "A", "Zeta", Some("Rock"))])
@@ -3258,11 +3170,7 @@ fn test_artist_albums_in_genre_unknown_scopes_yield_empty() {
 
 #[test]
 fn test_artist_albums_orders_newest_first_missing_year_last_title_tiebreak() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     store
         .apply_scan_batch(&[
@@ -3297,11 +3205,7 @@ fn test_artist_albums_orders_newest_first_missing_year_last_title_tiebreak() {
 
 #[test]
 fn test_album_tracks_orders_missing_numbers_first_then_path() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     // Insertion order deliberately scrambled relative to both number and
     // path; the query must impose the canonical order regardless.
@@ -3406,11 +3310,7 @@ fn genre_track(
 
 #[test]
 fn test_genre_counts_aggregate_per_track_genres_and_skip_missing() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     // A fresh store answers with no genre rows at all — no phantom entries.
     assert!(
@@ -3452,11 +3352,7 @@ fn test_genre_counts_aggregate_per_track_genres_and_skip_missing() {
 /// `"Rock"`.
 #[test]
 fn test_genre_semicolon_split_yields_independent_entries() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     store
         .apply_scan_batch(&[
@@ -3536,11 +3432,7 @@ fn test_genre_semicolon_split_yields_independent_entries() {
 
 #[test]
 fn test_artists_in_genre_returns_only_matching_artists_and_album_keys() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     store
         .apply_scan_batch(&[
@@ -3581,11 +3473,7 @@ fn test_artists_in_genre_returns_only_matching_artists_and_album_keys() {
 
 #[test]
 fn test_artist_albums_in_genre_returns_matching_albums_with_matching_track_ids() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     store
         .apply_scan_batch(&[
@@ -4447,11 +4335,7 @@ fn test_hit_genre_counts_aggregate_hit_tracks_across_split_segments() {
 
 #[test]
 fn test_library_counts_answers_track_artist_album_and_genre_totals() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     // A fresh store counts nothing — no phantom rows for the empty sidebar.
     let fresh = store.library_counts().expect("fresh store counts");
@@ -4504,11 +4388,7 @@ fn count_track(
 
 #[test]
 fn test_smart_list_counts_match_the_smart_list_membership() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     // A fresh store counts nothing for every smart list.
     assert!(
@@ -6038,11 +5918,7 @@ mod emit_beside_bump {
 
 #[test]
 fn set_track_favorite_round_trips_through_get_track() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     let track = library_track("m:\\music\\fav\\01.mp3", "Song", None, "Album", None);
     store.apply_scan_batch(&[track]).unwrap();
@@ -6069,11 +5945,7 @@ fn set_track_favorite_round_trips_through_get_track() {
 
 #[test]
 fn favorites_smart_list_returns_exactly_the_favorited_tracks() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     store
         .apply_scan_batch(&[
@@ -6143,11 +6015,7 @@ fn favorite_flag_survives_store_reopen() {
 
 #[test]
 fn rescanning_and_tag_refreshing_a_favorited_track_preserve_the_flag() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     let path = "m:\\music\\fav\\01.mp3";
     let id = TrackId::from_path(std::path::Path::new(path));
@@ -6178,11 +6046,7 @@ fn rescanning_and_tag_refreshing_a_favorited_track_preserve_the_flag() {
 
 #[test]
 fn favorites_query_orders_by_path_regardless_of_marking_order() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     store
         .apply_scan_batch(&[
@@ -6226,11 +6090,7 @@ fn favorites_query_orders_by_path_regardless_of_marking_order() {
 
 #[test]
 fn removing_and_clearing_the_library_drop_their_favorites() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, mut store, _changes_rx) = open_store();
 
     store
         .apply_scan_batch(&[

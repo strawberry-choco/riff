@@ -65,10 +65,6 @@ use super::theme::{self, Palette};
 /// [`DetailReport`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetailAction {
-    /// An entity row (an album under an artist, an artist under a genre)
-    /// was clicked, by its key. The caller resolves the level from the
-    /// current selection — the widget stays identity-agnostic.
-    SelectRow(String),
     /// A track-table row was selected, by its [`crate::riff_backend::domain::TrackId`]
     /// key.
     SelectTrack(String),
@@ -145,9 +141,6 @@ pub struct DetailColumn<'a> {
     /// The album's track list (the shared 40px track row, one per track);
     /// empty when the selection has none.
     pub tracks: &'a [TrackRow],
-    /// The entity rows below the album level: an artist's albums, or a
-    /// genre's artists (the browser column's row shape, drilled down).
-    pub rows: &'a [super::browser::BrowserItem],
     /// The Track menu ONE track row anchors, as a factory over the row.
     ///
     /// A factory and not one finished menu, because a Track menu is not all
@@ -181,12 +174,11 @@ pub struct DetailColumn<'a> {
 }
 
 impl<'a> DetailColumn<'a> {
-    /// An empty frame: no tracks, no rows, so the column paints nothing but
-    /// its empty state. The construction path every listing starts from.
+    /// An empty frame: no tracks, so the column paints nothing but its empty
+    /// state. The construction path every listing starts from.
     pub fn empty(empty_title: &'a str, empty_hint: &'a str) -> Self {
         Self {
             tracks: &[],
-            rows: &[],
             track_menu: None,
             empty_title,
             empty_hint,
@@ -211,8 +203,8 @@ pub fn show_detail_column_scrolled(
     reports: &mut Vec<DetailReport>,
 ) {
     // Asked up front, because the fallback at the end of this function is what
-    // a column with neither tracks nor rows renders.
-    let has_content = !column.tracks.is_empty() || !column.rows.is_empty();
+    // a column with no tracks renders.
+    let has_content = !column.tracks.is_empty();
     if let Some(sort) = column.sort
         && !column.tracks.is_empty()
     {
@@ -233,12 +225,6 @@ pub fn show_detail_column_scrolled(
             column.track_menu,
             reports,
         );
-    }
-    for row in column.rows {
-        let response = super::browser::detail_entity_row(ui, cache, palette, row);
-        if response.clicked() {
-            reports.push(DetailAction::SelectRow(row.key.clone()).into());
-        }
     }
     // Nothing to render (no album selected yet, or a selection with no
     // tracks): the column says so at its top instead of going blank. Every
@@ -315,19 +301,15 @@ fn track_list(
                     ui,
                     cache,
                     palette,
-                    super::sidebar::TreeRow {
-                        indent_level: 0,
-                        icon: None,
-                        cover: None,
-                        label: &track.title,
-                        count: None,
-                        meta: Some(track.meta()),
-                        favorite: Some(track.favorite),
-                        selected: track.selected,
-                        now_playing: track.now_playing,
-                        playing: false,
-                        art_slot: false,
-                    },
+                    super::sidebar::TreeRow::track(
+                        &track.title,
+                        None,
+                        Some(track.meta()),
+                        Some(track.favorite),
+                        track.selected,
+                        track.now_playing,
+                        false,
+                    ),
                 );
                 if row.response.clicked() {
                     reports.push(DetailAction::SelectTrack(track.key.clone()).into());

@@ -110,7 +110,7 @@ impl PlaybackQueue {
     /// order instead. The one spelling of that rule — asked by
     /// [`crate::domain::continuation`] and by the Audio Engine's gapless gate.
     #[must_use]
-    pub fn repeats_one(&self) -> bool {
+    pub(crate) fn repeats_one(&self) -> bool {
         self.repeat == RepeatMode::One && !self.shuffle
     }
 

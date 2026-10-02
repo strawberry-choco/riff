@@ -25,17 +25,14 @@ use riff_backend::app::state::{
     BrowseMode, LibrarySection, LibrarySession, LibraryStatus, PlaybackSession, ViewMode,
 };
 use riff_backend::app::store::{
-    FullScanSummary, LibraryCounts, LibraryQueryStore, Page, PlaylistEntry, PlaylistStore,
-    ScalarSettings, Settings, SettingsStore, SortDirection, StoreChanged, StoreGeneration,
-    TrackListOrder, WatchState,
+    PlaylistEntry, PlaylistStore, ScalarSettings, Settings, SettingsStore, StoreChanged,
+    StoreGeneration, WatchState,
 };
 use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
 use riff_backend::app::traits::{DecodedCover, RequestedSize};
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
-use riff_backend::domain::{
-    Album, Artist, GenreCount, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
-};
+use riff_backend::domain::{Playlist, PlaylistId, TrackId};
 use riff_gui::ui::app::{InlineTagEditor, ThemeState};
 use riff_gui::ui::artwork::COVER_THUMB;
 use riff_gui::ui::chrome::TitleBarAction;
@@ -51,6 +48,7 @@ use riff_gui::ui::prompts::PromptOutcome;
 use riff_gui::ui::scroll_memory::ScrollMemory;
 use riff_gui::ui::sidebar::PlaylistRowAction;
 use riff_gui::ui::theme;
+use riff_persistence::test_support::FailingLibraryQueryStore;
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -232,349 +230,6 @@ impl PlaylistStore for QuietPlaylistStore {
     }
 }
 
-/// A library query store that knows nothing. Every read answers the store-error
-/// variant, which is what an empty session seam produces anyway — and no test
-/// below reads a Track, so nothing here can silently become load-bearing.
-#[derive(Default)]
-struct NoLibraryStore;
-
-impl LibraryQueryStore for NoLibraryStore {
-    fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
-        let _ = (&self, id);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn metadata_version(&self) -> Result<u32, StoreError> {
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn tracks_page(
-        &self,
-        order: TrackListOrder,
-        offset: usize,
-        limit: usize,
-    ) -> Result<Page<Track>, StoreError> {
-        let _ = (&self, order, offset, limit);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn library_counts(&self) -> Result<LibraryCounts, StoreError> {
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn search_page(
-        &self,
-        query: &str,
-        order: TrackListOrder,
-        offset: usize,
-        limit: usize,
-    ) -> Result<Page<Track>, StoreError> {
-        let _ = (&self, query, order, offset, limit);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, StoreError> {
-        let _ = (&self, artist);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn folder_has_audio(&self, folder: &std::path::Path) -> Result<bool, StoreError> {
-        let _ = (&self, folder);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn folder_has_search_match(
-        &self,
-        folder: &std::path::Path,
-        query: &str,
-    ) -> Result<bool, StoreError> {
-        let _ = (&self, folder, query);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn track_ids_in_folder_tree(
-        &self,
-        folder: &std::path::Path,
-    ) -> Result<Vec<TrackId>, StoreError> {
-        let _ = (&self, folder);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn tracks_in_folder(&self, folder: &std::path::Path) -> Result<Vec<Track>, StoreError> {
-        let _ = (&self, folder);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn folder_track_count(&self, folder: &std::path::Path) -> Result<usize, StoreError> {
-        let _ = (&self, folder);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn last_full_scan(&self) -> Result<Option<FullScanSummary>, StoreError> {
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn subdirs_with_audio(&self, folder: &std::path::Path) -> Result<Vec<PathBuf>, StoreError> {
-        let _ = (&self, folder);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn smart_playlist(
-        &self,
-        kind: SmartPlaylistKind,
-        limit: usize,
-    ) -> Result<Vec<Track>, StoreError> {
-        let _ = (&self, kind, limit);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn artists_in_genre(&self, genre: &str) -> Result<Vec<Artist>, StoreError> {
-        let _ = (&self, genre);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn artist_albums_in_genre(&self, artist: &str, genre: &str) -> Result<Vec<Album>, StoreError> {
-        let _ = (&self, artist, genre);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn album_tracks_in_genre(
-        &self,
-        album_artist: &str,
-        album_title: &str,
-        genre: &str,
-    ) -> Result<Vec<Track>, StoreError> {
-        let _ = (&self, album_artist, album_title, genre);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn hit_albums_page(
-        &self,
-        query: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Result<Page<Album>, StoreError> {
-        let _ = (&self, query, offset, limit);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn hit_artists_page(
-        &self,
-        query: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Result<Page<Artist>, StoreError> {
-        let _ = (&self, query, offset, limit);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn album_hit_tracks(
-        &self,
-        album_artist: &str,
-        album_title: &str,
-        query: &str,
-    ) -> Result<Vec<Track>, StoreError> {
-        let _ = (&self, album_artist, album_title, query);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn album_is_name_hit(
-        &self,
-        album_artist: &str,
-        album_title: &str,
-        query: &str,
-    ) -> Result<bool, StoreError> {
-        let _ = (&self, album_artist, album_title, query);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn hit_albums_in_genre(
-        &self,
-        genre: &str,
-        query: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Result<Vec<Album>, StoreError> {
-        let _ = (&self, genre, query, offset, limit);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn hit_artists_in_genre(
-        &self,
-        genre: &str,
-        query: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Result<Vec<Artist>, StoreError> {
-        let _ = (&self, genre, query, offset, limit);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn album_hit_tracks_in_genre(
-        &self,
-        album_artist: &str,
-        album_title: &str,
-        genre: &str,
-        query: &str,
-    ) -> Result<Vec<Track>, StoreError> {
-        let _ = (&self, album_artist, album_title, genre, query);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn hit_genre_counts(&self, query: &str) -> Result<Vec<GenreCount>, StoreError> {
-        let _ = (&self, query);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn artists_page(
-        &self,
-        direction: SortDirection,
-        offset: usize,
-        limit: usize,
-    ) -> Result<Page<Artist>, StoreError> {
-        let _ = (&self, direction, offset, limit);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn albums_page(
-        &self,
-        direction: SortDirection,
-        offset: usize,
-        limit: usize,
-    ) -> Result<Page<Album>, StoreError> {
-        let _ = (&self, direction, offset, limit);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn genres_page(
-        &self,
-        direction: SortDirection,
-        offset: usize,
-        limit: usize,
-    ) -> Result<Page<GenreCount>, StoreError> {
-        let _ = (&self, direction, offset, limit);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn artists_in_genre_page(
-        &self,
-        genre: &str,
-        direction: SortDirection,
-        offset: usize,
-        limit: usize,
-    ) -> Result<Page<Artist>, StoreError> {
-        let _ = (&self, genre, direction, offset, limit);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn artist_albums_in_genre_page(
-        &self,
-        artist: &str,
-        genre: &str,
-        direction: SortDirection,
-        offset: usize,
-        limit: usize,
-    ) -> Result<Page<Album>, StoreError> {
-        let _ = (&self, artist, genre, direction, offset, limit);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-
-    fn album_tracks(
-        &self,
-        album_artist: &str,
-        album_title: &str,
-    ) -> Result<Vec<Track>, StoreError> {
-        let _ = (&self, album_artist, album_title);
-        Err(StoreError::InvalidOperation(
-            "headless frame test: no store behind this seam".to_string(),
-        ))
-    }
-}
-
 // ---------------------------------------------------------------------------
 // The harness
 // ---------------------------------------------------------------------------
@@ -677,7 +332,9 @@ impl Harness {
             playlist_store: QuietPlaylistStore::default(),
             tag_edits: InlineTagEditor::new(Box::new(QuietTagEdits)),
             views: SessionViews::new(
-                Box::new(NoLibraryStore),
+                Box::new(FailingLibraryQueryStore::new(
+                    "headless frame test: no store behind this seam",
+                )),
                 Box::new(QuietPlaylistStore::default()),
                 StoreGeneration::new(),
                 StoreGeneration::new(),

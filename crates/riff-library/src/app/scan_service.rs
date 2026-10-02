@@ -415,9 +415,9 @@ impl ScanWorker {
 mod tests {
     use super::*;
     use crate::app::errors::LibraryError;
-    use crate::app::store::{LibraryCounts, LibraryMutationStore, LibraryQueryStore, StoreError};
+    use crate::app::store::{LibraryMutationStore, StoreError};
     use crate::app::traits::{AudioFormatInfo, MetadataReader};
-    use crate::domain::{Album, Artist, CoverSource, GenreCount, SmartPlaylistKind};
+    use crate::domain::CoverSource;
     use riff_persistence::track::{Track, TrackId, TrackMetadata};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -462,235 +462,19 @@ mod tests {
         }
     }
 
-    struct MockQueries {
+    /// The stub queries: every read answers empty; `get_track` resolves
+    /// exactly the paths in `known` — the freshness filter's behavior under
+    /// test. The shared no-op double carries the other thirty reads.
+    fn stub_queries(
         known: Arc<Mutex<HashSet<PathBuf>>>,
-    }
-    impl LibraryQueryStore for MockQueries {
-        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
-            Ok(self
-                .known
+    ) -> riff_persistence::test_support::StubLibraryQueryStore {
+        riff_persistence::test_support::StubLibraryQueryStore::new(move |id| {
+            known
                 .lock()
                 .unwrap()
                 .contains(&PathBuf::from(&id.0))
-                .then(|| make_track(&id.0)))
-        }
-
-        // Current, so these tests keep exercising the skipping branch; the
-        // lagging branch has its own fixtures.
-        fn metadata_version(&self) -> Result<u32, StoreError> {
-            Ok(METADATA_VERSION)
-        }
-
-        fn tracks_page(
-            &self,
-            _order: crate::app::store::TrackListOrder,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<crate::app::store::Page<Track>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new()))
-        }
-        fn library_counts(&self) -> Result<LibraryCounts, StoreError> {
-            Ok(LibraryCounts::default())
-        }
-        fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
-            Ok(Vec::new())
-        }
-        fn search_page(
-            &self,
-            _query: &str,
-            _order: crate::app::store::TrackListOrder,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<crate::app::store::Page<Track>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new()))
-        }
-        fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
-        }
-        fn artist_albums(&self, _artist: &str) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
-        }
-        fn album_tracks(
-            &self,
-            _album_artist: &str,
-            _title: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-        fn folder_has_audio(&self, _folder: &Path) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-        fn folder_has_search_match(
-            &self,
-            _folder: &Path,
-            _query: &str,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-        fn track_ids_in_folder_tree(&self, _folder: &Path) -> Result<Vec<TrackId>, StoreError> {
-            Ok(Vec::new())
-        }
-        fn tracks_in_folder(&self, _folder: &Path) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn folder_track_count(&self, _folder: &Path) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn last_full_scan(&self) -> Result<Option<FullScanSummary>, StoreError> {
-            Ok(None)
-        }
-        fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, StoreError> {
-            Ok(Vec::new())
-        }
-        fn smart_playlist(
-            &self,
-            _kind: SmartPlaylistKind,
-            _limit: usize,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artists_in_genre(&self, _genre: &str) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artist_albums_in_genre(
-            &self,
-            _artist: &str,
-            _genre: &str,
-        ) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn album_tracks_in_genre(
-            &self,
-            _album_artist: &str,
-            _album_title: &str,
-            _genre: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn hit_albums_page(
-            &self,
-            _query: &str,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<crate::app::store::Page<Album>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new()))
-        }
-        fn hit_artists_page(
-            &self,
-            _query: &str,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<crate::app::store::Page<Artist>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new()))
-        }
-        fn album_hit_tracks(
-            &self,
-            _album_artist: &str,
-            _album_title: &str,
-            _query: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-        fn album_is_name_hit(
-            &self,
-            _album_artist: &str,
-            _album_title: &str,
-            _query: &str,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-        fn hit_albums_in_genre(
-            &self,
-            _genre: &str,
-            _query: &str,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
-        }
-        fn hit_artists_in_genre(
-            &self,
-            _genre: &str,
-            _query: &str,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
-        }
-        fn album_hit_tracks_in_genre(
-            &self,
-            _album_artist: &str,
-            _album_title: &str,
-            _genre: &str,
-            _query: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-        fn hit_genre_counts(&self, _query: &str) -> Result<Vec<GenreCount>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artists_page(
-            &self,
-            _direction: crate::app::store::SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<crate::app::store::Page<Artist>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new()))
-        }
-
-        fn albums_page(
-            &self,
-            _direction: crate::app::store::SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<crate::app::store::Page<Album>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new()))
-        }
-
-        fn genres_page(
-            &self,
-            _direction: crate::app::store::SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<crate::app::store::Page<GenreCount>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new()))
-        }
-
-        fn artists_in_genre_page(
-            &self,
-            _genre: &str,
-            _direction: crate::app::store::SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<crate::app::store::Page<Artist>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new()))
-        }
-
-        fn artist_albums_in_genre_page(
-            &self,
-            _artist: &str,
-            _genre: &str,
-            _direction: crate::app::store::SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<crate::app::store::Page<Album>, StoreError> {
-            Ok(crate::app::store::Page::new(0, Vec::new()))
-        }
+                .then(|| make_track(&id.0))
+        })
     }
 
     struct MockMutations;
@@ -746,9 +530,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let (service, _worker) = ScanService::new(
             Box::new(MockReader),
-            Box::new(MockQueries {
-                known: Arc::new(Mutex::new(HashSet::new())),
-            }),
+            Box::new(stub_queries(Arc::new(Mutex::new(HashSet::new())))),
             Box::new(MockMutations),
             Arc::clone(&cancel),
             Arc::new(AtomicBool::new(false)),
@@ -764,9 +546,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let (service, _worker) = ScanService::new(
             Box::new(MockReader),
-            Box::new(MockQueries {
-                known: Arc::new(Mutex::new(HashSet::new())),
-            }),
+            Box::new(stub_queries(Arc::new(Mutex::new(HashSet::new())))),
             Box::new(MockMutations),
             Arc::clone(&cancel),
             Arc::new(AtomicBool::new(false)),

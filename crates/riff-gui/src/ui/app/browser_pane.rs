@@ -35,6 +35,7 @@
 //! forget it.
 
 use eframe::egui;
+use riff_backend::app::store::SortDirection;
 use riff_backend::domain::{Album, PlaylistId, SmartPlaylistKind, TrackId};
 use std::sync::Arc;
 
@@ -365,8 +366,6 @@ impl RiffApp {
         playback: &mut PlaybackSession,
         genre: &str,
     ) {
-        use riff_backend::app::store::SortDirection;
-
         let palette = self.theme.active;
         let mut actions: Vec<browser::BrowserAction> = Vec::new();
         let views = &mut self.views;
@@ -379,11 +378,7 @@ impl RiffApp {
         // signature — the store applies it in SQL, so a row index names the
         // same row before and after the flip (no in-memory reversal of an
         // ascending copy).
-        let direction = if library.drill_sort_desc {
-            SortDirection::Descending
-        } else {
-            SortDirection::Ascending
-        };
+        let direction = sort_direction(library.drill_sort_desc);
         // One window in hand (paginate-browse-columns issue 05): opening a
         // large genre reads only the visible artists, so a common genre like
         // "Rock" no longer loads every artist that touches it at once. The
@@ -474,8 +469,6 @@ impl RiffApp {
         artist: &str,
         genre: &str,
     ) {
-        use riff_backend::app::store::SortDirection;
-
         let palette = self.theme.active;
         let mut actions: Vec<browser::BrowserAction> = Vec::new();
         let views = &mut self.views;
@@ -488,11 +481,7 @@ impl RiffApp {
         // signature — the store applies it in SQL, so a row index names the
         // same row before and after the flip (no in-memory reversal of an
         // ascending copy).
-        let direction = if library.drill_sort_desc {
-            SortDirection::Descending
-        } else {
-            SortDirection::Ascending
-        };
+        let direction = sort_direction(library.drill_sort_desc);
         let total = views.genre_album_count(artist, genre, direction);
         let mut item = |i: usize| -> Option<browser::BrowserItem> {
             let album = views.genre_album_row(artist, genre, direction, i)?;
@@ -607,7 +596,7 @@ impl RiffApp {
         // canonical order; the title modes compare case-insensitively, ties
         // keeping the canonical order.
         let mut tracks = content.tracks;
-        sort_track_rows(&mut tracks, library.track_sort);
+        sort_tracks(&mut tracks, |row| row.title.clone(), library.track_sort);
         let (empty_title, empty_hint): (&str, String) = if query.is_empty() {
             (
                 "Nothing here yet",
@@ -664,7 +653,6 @@ impl RiffApp {
             &self.theme.active,
             crate::ui::detail::DetailColumn {
                 tracks: &tracks,
-                rows: &[],
                 track_menu: Some(&track_menu),
                 empty_title,
                 empty_hint: &empty_hint,
@@ -756,19 +744,13 @@ impl RiffApp {
         query: &str,
     ) {
         use riff_backend::app::state::BrowserSelection;
-        use riff_backend::app::store::SortDirection;
-
         let palette = self.theme.active;
         let sort_desc = library.browser_sort_desc;
         let hit = !query.is_empty();
         // The direction is part of the listing's query signature: the store
         // applies it in SQL, so a row index names the same row before and
         // after the sort reverses (no in-memory reversal of an ascending copy).
-        let direction = if sort_desc {
-            SortDirection::Descending
-        } else {
-            SortDirection::Ascending
-        };
+        let direction = sort_direction(sort_desc);
         // The root column highlights the path's first entry: the artist the
         // listener is drilled into.
         let selected = match library.browser_path.first() {
@@ -905,19 +887,13 @@ impl RiffApp {
         query: &str,
     ) {
         use riff_backend::app::state::BrowserSelection;
-        use riff_backend::app::store::SortDirection;
-
         let palette = self.theme.active;
         let sort_desc = library.browser_sort_desc;
         let hit = !query.is_empty();
         // The direction is part of the listing's query signature: the store
         // applies it in SQL, so a row index names the same row before and
         // after the sort reverses (no in-memory reversal of an ascending copy).
-        let direction = if sort_desc {
-            SortDirection::Descending
-        } else {
-            SortDirection::Ascending
-        };
+        let direction = sort_direction(sort_desc);
         // The root column highlights the path's first entry: the album the
         // listener is drilled into.
         let selected = match library.browser_path.first() {
@@ -1043,15 +1019,9 @@ impl RiffApp {
         query: &str,
     ) {
         use riff_backend::app::state::BrowserSelection;
-        use riff_backend::app::store::SortDirection;
-
         let palette = self.theme.active;
         let sort_desc = library.browser_sort_desc;
-        let direction = if sort_desc {
-            SortDirection::Descending
-        } else {
-            SortDirection::Ascending
-        };
+        let direction = sort_direction(sort_desc);
         // The root column highlights the path's first entry: the genre the
         // listener is drilled into.
         let selected = match library.browser_path.first() {
@@ -1225,18 +1195,30 @@ fn artist_name_hits(artist: &str, query: &str) -> bool {
     !query.is_empty() && artist.to_lowercase().contains(&query.to_lowercase())
 }
 
-/// Sort a track listing's display copy in place per `sort`. `NumberAsc` is
-/// the canonical order the store served — the no-op anchor; `NumberDesc` is
-/// its exact reversal. The title modes compare the display title
-/// case-insensitively, and being stable sorts, ties keep the canonical
-/// order.
-pub(super) fn sort_track_rows(rows: &mut [crate::ui::detail::TrackRow], sort: TrackSort) {
+/// The sort toggle's bool as the store's sort direction — the one spelling
+/// of that conversion for the paged columns (the direction is part of each
+/// listing's query signature: the store applies it in SQL, so a row index
+/// names the same row before and after the flip).
+fn sort_direction(desc: bool) -> SortDirection {
+    if desc {
+        SortDirection::Descending
+    } else {
+        SortDirection::Ascending
+    }
+}
+
+/// Sort a track listing in place per `sort`: `NumberAsc` is the canonical
+/// order the store served — the no-op anchor; `NumberDesc` is its exact
+/// reversal; the title modes compare `title_key` case-insensitively, and
+/// being stable sorts, ties keep the canonical order. Shared by the owned
+/// `TrackRow` listings here and the borrowed `&Track` listings in `app.rs`.
+pub(super) fn sort_tracks<T>(rows: &mut [T], title_key: impl Fn(&T) -> String, sort: TrackSort) {
     match sort {
         TrackSort::NumberAsc => {}
         TrackSort::NumberDesc => rows.reverse(),
-        TrackSort::TitleAsc => rows.sort_by_key(|row| row.title.to_lowercase()),
+        TrackSort::TitleAsc => rows.sort_by_key(|row| title_key(row).to_lowercase()),
         TrackSort::TitleDesc => {
-            rows.sort_by_key(|row| std::cmp::Reverse(row.title.to_lowercase()));
+            rows.sort_by_key(|row| std::cmp::Reverse(title_key(row).to_lowercase()));
         }
     }
 }

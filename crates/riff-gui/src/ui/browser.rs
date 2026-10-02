@@ -151,26 +151,6 @@ pub fn show_browser_column_scrolled(
     show_browser_list(ui, cache, palette, &mut column, scroll, actions)
 }
 
-/// Map a flat listing index into `(bucket, offset)` over a prefix-sum
-/// table `counts` (`counts[0] == 0`, monotone, `counts[n]` the total). The
-/// Albums variant derives its flat listing from the per-artist album
-/// tables this way: `bucket` is the artist, `offset` the album slot within
-/// that artist's albums.
-///
-/// With `desc`, the listing is traversed back to front — the Z–A flip
-/// reverses the whole listing, which reverses both the bucket order and
-/// each bucket's contents at once. Indexes past the total yield `None`.
-#[must_use]
-pub fn flat_slot(counts: &[usize], index: usize, desc: bool) -> Option<(usize, usize)> {
-    let total = *counts.last()?;
-    if index >= total {
-        return None;
-    }
-    let flat = if desc { total - 1 - index } else { index };
-    let bucket = counts.partition_point(|&c| c <= flat).saturating_sub(1);
-    Some((bucket, flat - counts[bucket]))
-}
-
 /// The friendly empty state — the shared composition now owned by
 /// [`super::empty_state`] and re-exported here so the explorer's call sites and
 /// the historical `browser::empty_state` path keep resolving. See
@@ -371,18 +351,6 @@ fn accessible_label(item: &BrowserItem) -> String {
         Some(detail) => format!("{} ({detail})", item.label),
         None => item.label.clone(),
     }
-}
-
-/// The detail column (issue 09) reuses the browser row for its entity
-/// listings (an artist's albums, a genre's artists) — same 48px row shape,
-/// one pane over. Clicks stay with the caller.
-pub fn detail_entity_row(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    item: &BrowserItem,
-) -> egui::Response {
-    browser_row(ui, cache, palette, item)
 }
 
 /// The text column's wrap width: the row width minus the thumbnail slot and

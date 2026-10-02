@@ -304,13 +304,6 @@ impl StoreGeneration {
     pub fn current(&self) -> u64 {
         self.0.load(Ordering::SeqCst)
     }
-
-    /// Freshness guard alias for [`Self::current`] — used by projections to
-    /// check if their cached generation is still current (issue 10).
-    #[must_use]
-    pub fn generation_at(&self) -> u64 {
-        self.current()
-    }
 }
 
 /// Generic generation-keyed cache slot — the ONE implementation of "drop

@@ -31,9 +31,6 @@ use super::theme::geometry::sidebar::ROW_H;
 use super::theme::{self, Palette};
 use riff_backend::domain::{PlaybackState, RepeatMode, TrackId};
 
-/// Full-texture UV rect for [`egui::Painter::image`] (sidebar precedent).
-const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-
 // --- Readout helpers -------------------------------------------------------------
 
 /// The monospace font for elapsed/total time readouts: `text-xs` on the
@@ -431,6 +428,15 @@ fn expand_button(
     )
 }
 
+/// The next ghost button's square, centered in the right-to-left layout
+/// cursor — the one spelling of that rect for the strip's icon buttons.
+fn ghost_btn_rect(x: f32, cy: f32) -> egui::Rect {
+    egui::Rect::from_center_size(
+        egui::pos2(x - GHOST_BTN / 2.0, cy),
+        egui::vec2(GHOST_BTN, GHOST_BTN),
+    )
+}
+
 /// The right-hand cluster, laid right-to-left from the strip's right edge:
 /// the expand/fullscreen button at the corner, the volume slider, the mute
 /// toggle, the queue-open button, the repeat and shuffle toggles, and the
@@ -451,10 +457,7 @@ fn show_right_cluster(
     // Expand/fullscreen at the strip's right corner (handoff issue 13):
     // enters or leaves the enlarged player view; the glyph flips between
     // the corner brackets while the enlarged view is up.
-    let expand_rect = egui::Rect::from_center_size(
-        egui::pos2(x - GHOST_BTN / 2.0, cy),
-        egui::vec2(GHOST_BTN, GHOST_BTN),
-    );
+    let expand_rect = ghost_btn_rect(x, cy);
     if expand_button(ui, cache, palette, expand_rect, content) {
         actions.push(PlayerBarAction::ToggleExpanded);
     }
@@ -465,10 +468,7 @@ fn show_right_cluster(
     x -= VOLUME_W + 8.0;
 
     // Mute toggle: icon flips between speaker and crossed-out speaker.
-    let mute_rect = egui::Rect::from_center_size(
-        egui::pos2(x - GHOST_BTN / 2.0, cy),
-        egui::vec2(GHOST_BTN, GHOST_BTN),
-    );
+    let mute_rect = ghost_btn_rect(x, cy);
     let (mute_icon, mute_label) = if content.muted {
         (Icon::VolumeMuted, "Unmute")
     } else {
@@ -490,20 +490,14 @@ fn show_right_cluster(
 
     // Queue-open button (handoff issue 13): reveals the Up Next / queue
     // panel; the label flips and the tint engages while it is open.
-    let queue_rect = egui::Rect::from_center_size(
-        egui::pos2(x - GHOST_BTN / 2.0, cy),
-        egui::vec2(GHOST_BTN, GHOST_BTN),
-    );
+    let queue_rect = ghost_btn_rect(x, cy);
     if queue_open_button(ui, cache, palette, queue_rect, content) {
         actions.push(PlayerBarAction::ToggleQueue);
     }
     x -= GHOST_BTN + 6.0;
 
     // Repeat toggle: cycles off → all → one; active tint while engaged.
-    let repeat_rect = egui::Rect::from_center_size(
-        egui::pos2(x - GHOST_BTN / 2.0, cy),
-        egui::vec2(GHOST_BTN, GHOST_BTN),
-    );
+    let repeat_rect = ghost_btn_rect(x, cy);
     let repeat_icon = if content.repeat == RepeatMode::One {
         Icon::RepeatOne
     } else {
@@ -524,10 +518,7 @@ fn show_right_cluster(
     x -= GHOST_BTN + 6.0;
 
     // Shuffle toggle: active tint while engaged.
-    let shuffle_rect = egui::Rect::from_center_size(
-        egui::pos2(x - GHOST_BTN / 2.0, cy),
-        egui::vec2(GHOST_BTN, GHOST_BTN),
-    );
+    let shuffle_rect = ghost_btn_rect(x, cy);
     if ghost_circle_button(
         ui,
         cache,
@@ -960,7 +951,7 @@ fn ghost_circle_button(
     };
     let tex_id = cache.texture(ui.ctx(), icon, 16.0, tint);
     let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
-    painter.image(tex_id, icon_rect, UV_FULL, tint);
+    painter.image(tex_id, icon_rect, super::artwork::UV_FULL, tint);
 
     super::button::finish_icon_button(ui, palette, &button, label)
 }
@@ -1007,7 +998,7 @@ fn primary_play_button(
     }
     let tex_id = cache.texture(ui.ctx(), icon, 18.0, palette.on_brand);
     let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(18.0, 18.0));
-    painter.image(tex_id, icon_rect, UV_FULL, palette.on_brand);
+    painter.image(tex_id, icon_rect, super::artwork::UV_FULL, palette.on_brand);
 
     super::button::finish_icon_button(ui, palette, &button, label)
 }

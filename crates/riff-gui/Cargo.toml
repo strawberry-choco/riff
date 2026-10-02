@@ -89,5 +89,8 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
 [dev-dependencies]
 egui = "0.35"
 
+# The shared failing-store double the frame tests drive their UI over.
+riff-persistence = { path = "../riff-persistence" }
+
 [lints]
 workspace = true

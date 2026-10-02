@@ -204,9 +204,6 @@ pub fn search_ring_stroke(palette: &Palette, focused: bool) -> egui::Stroke {
     }
 }
 
-/// Full-texture UV rect for [`egui::Painter::image`].
-const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-
 /// A ghost icon button: an invisible click target with a tinted glyph. With
 /// `hover_reveal` the glyph appears only while hovered (the mockup's
 /// playlist-row affordances); otherwise it is always painted (the top bar's
@@ -242,7 +239,7 @@ pub fn ghost_icon_button(
         let tint = if lit { palette.ink } else { palette.ink_3 };
         let tex_id = cache.texture(ui.ctx(), icon, 16.0, tint);
         ui.painter_at(rect)
-            .image(tex_id, rect.shrink(4.0), UV_FULL, tint);
+            .image(tex_id, rect.shrink(4.0), super::artwork::UV_FULL, tint);
     }
     super::button::finish_icon_button(ui, palette, &button, label)
 }
@@ -310,6 +307,56 @@ pub struct TreeRow<'a> {
     /// the same place. The folder tree sets it; every other row keeps the
     /// compact 16px glyph strip.
     pub art_slot: bool,
+}
+
+impl<'a> TreeRow<'a> {
+    /// A track listing row: the shared 40px shape with the cover tile,
+    /// favorite control, and meta cluster — what the All Tracks list, the
+    /// album's Tracks column, playlists, and folder tracks speak. Fields
+    /// every track row leaves empty are defaulted out; a site that needs a
+    /// non-default one struct-updates over this.
+    #[allow(clippy::too_many_arguments)]
+    pub fn track(
+        label: &'a str,
+        cover: Option<egui::TextureId>,
+        meta: Option<RowMeta>,
+        favorite: Option<bool>,
+        selected: bool,
+        now_playing: bool,
+        playing: bool,
+    ) -> Self {
+        Self {
+            indent_level: 0,
+            icon: None,
+            cover,
+            label,
+            count: None,
+            meta,
+            favorite,
+            selected,
+            now_playing,
+            playing,
+            art_slot: false,
+        }
+    }
+
+    /// A navigation row: icon, label, count, selection — the sidebar and
+    /// browser rows with no track furniture.
+    pub fn nav(label: &'a str, icon: Option<Icon>, count: Option<usize>, selected: bool) -> Self {
+        Self {
+            indent_level: 0,
+            icon,
+            cover: None,
+            label,
+            count,
+            meta: None,
+            favorite: None,
+            selected,
+            now_playing: false,
+            playing: false,
+            art_slot: false,
+        }
+    }
 }
 
 /// The row's right-aligned value cluster text: the present parts of
@@ -538,7 +585,7 @@ fn paint_favorite(
     painter.image(
         texture,
         egui::Rect::from_center_size(heart_rect.center(), egui::vec2(HEART_SIZE, HEART_SIZE)),
-        UV_FULL,
+        super::artwork::UV_FULL,
         tint,
     );
     heart_response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
@@ -600,7 +647,7 @@ fn paint_row_leading(
             egui::pos2(x + inset + box_px / 2.0, cells.rect.center().y),
             egui::vec2(box_px, box_px),
         );
-        painter.image(tex_id, icon_rect, UV_FULL, tint);
+        painter.image(tex_id, icon_rect, super::artwork::UV_FULL, tint);
         x += inset + box_px + ICON_GAP;
     }
 
@@ -752,19 +799,7 @@ pub fn up_next_row(
         ui,
         cache,
         palette,
-        TreeRow {
-            indent_level: 0,
-            icon: None,
-            cover: None,
-            label: &entry.label,
-            count: None,
-            meta: None,
-            favorite: None,
-            selected: false,
-            now_playing: false,
-            playing: false,
-            art_slot: false,
-        },
+        TreeRow::nav(&entry.label, None, None, false),
     )
     .response
 }
@@ -895,19 +930,7 @@ pub fn sidebar_footer(
         ui,
         cache,
         palette,
-        TreeRow {
-            indent_level: 0,
-            icon: Some(Icon::Folder),
-            cover: None,
-            label: "Add folder",
-            count: None,
-            meta: None,
-            favorite: None,
-            selected: false,
-            now_playing: false,
-            playing: false,
-            art_slot: false,
-        },
+        TreeRow::nav("Add folder", Some(Icon::Folder), None, false),
     )
     .response
     .clicked();

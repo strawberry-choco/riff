@@ -338,7 +338,9 @@ pub fn evict_all_covers<S: std::hash::BuildHasher>(
 // --- The presentation primitive -------------------------------------------------
 
 /// Full-texture UV rect for [`egui::Painter::image`].
-const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+/// The full-rect UVs for `painter.image` — shared by every texture blit.
+pub(crate) const UV_FULL: egui::Rect =
+    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
 /// How a texture maps onto the artwork block. The caller states it, so no
 /// surface distorts its art by accident — and a surface that wants its art

@@ -4166,6 +4166,7 @@ dependencies = [
  "resvg",
  "rfd",
  "riff-backend",
+ "riff-persistence",
  "tracing",
  "tracing-subscriber",
  "tray-icon",

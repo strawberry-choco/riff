@@ -820,19 +820,18 @@ impl RiffApp {
             &self.theme.active,
             TreeRow {
                 indent_level,
-                icon: None,
-                cover,
-                label,
-                count: None,
-                meta: Some(sidebar::RowMeta {
-                    plays: Some(track.play_count),
-                    time: track.duration,
-                }),
-                favorite: Some(track.favorite),
-                selected: is_selected,
-                now_playing: is_current,
-                playing: is_current && playing,
-                art_slot: false,
+                ..TreeRow::track(
+                    label,
+                    cover,
+                    Some(sidebar::RowMeta {
+                        plays: Some(track.play_count),
+                        time: track.duration,
+                    }),
+                    Some(track.favorite),
+                    is_selected,
+                    is_current,
+                    is_current && playing,
+                )
             },
         );
         if row.response.clicked() {
@@ -1493,21 +1492,29 @@ pub fn entity_track_ids(
             if !known {
                 return Vec::new();
             }
-            let mut ids = Vec::new();
-            for artist in views.artists_in_genre(&genre).iter() {
-                for album in views.artist_albums_in_genre(&artist.name, &genre).iter() {
-                    for track in views
-                        .album_tracks_in_genre(&album.artist, &album.title, &genre)
-                        .iter()
-                    {
-                        ids.push(track.id.clone());
-                    }
-                }
-            }
-            ids
+            genre_track_ids(views, &genre)
         }
         None => Vec::new(),
     }
+}
+
+/// The genre-scoped track walk: the genre's artists, their genre-scoped
+/// albums, and those albums' genre-scoped tracks — the batch both a
+/// whole-genre play (`entity_track_ids`) and the genre inspector's readout
+/// need.
+fn genre_track_ids(views: &mut SessionViews, genre: &str) -> Vec<TrackId> {
+    let mut ids = Vec::new();
+    for artist in views.artists_in_genre(genre).iter() {
+        for album in views.artist_albums_in_genre(&artist.name, genre).iter() {
+            for track in views
+                .album_tracks_in_genre(&album.artist, &album.title, genre)
+                .iter()
+            {
+                ids.push(track.id.clone());
+            }
+        }
+    }
+    ids
 }
 
 /// Apply one [`crate::ui::detail::DetailAction`] (handoff issue 09) to the
@@ -1533,11 +1540,6 @@ pub fn apply_detail_action(
 ) {
     use crate::ui::detail::DetailAction as Action;
     match action {
-        // Entity rows no longer render inside the detail column — they are
-        // their own columns in the elastic stage — so this action cannot
-        // fire from the app. The widget seam keeps the variant for its
-        // own contract (tests render rows directly).
-        Action::SelectRow(_) => {}
         Action::SelectTrack(key) => {
             library.selected_track = Some(TrackId(key));
         }
@@ -1559,26 +1561,6 @@ pub fn apply_detail_action(
     }
 }
 
-/// Sort borrowed track refs in place per `sort` — the `&Track` variant of
-/// `browser_pane`'s `sort_track_rows`, for the listings that render straight
-/// from a resolved track list (smart lists). The canonical order is the
-/// no-op anchor; the title modes compare the display title
-/// case-insensitively, and being stable sorts, ties keep the canonical
-/// order.
-fn sort_track_refs(rows: &mut [&Track], sort: riff_backend::app::state::TrackSort) {
-    use riff_backend::app::state::TrackSort;
-    match sort {
-        TrackSort::NumberAsc => {}
-        TrackSort::NumberDesc => rows.reverse(),
-        TrackSort::TitleAsc => {
-            rows.sort_by_key(|t| t.metadata.display_title(&t.file_path).to_lowercase());
-        }
-        TrackSort::TitleDesc => rows.sort_by_key(|t| {
-            std::cmp::Reverse(t.metadata.display_title(&t.file_path).to_lowercase())
-        }),
-    }
-}
-
 // `apply_drill_action` is gone too: it was a one-line wrapper over
 // `apply_entity_selection` that existed only because a drill Column re-supplied
 // its own Section and level on every action. Both shapes of Column now reach
@@ -1586,8 +1568,8 @@ fn sort_track_refs(rows: &mut [&Track], sort: riff_backend::app::state::TrackSor
 // level 0 and a drill's at 1 or 2 without either spelling a number twice.
 
 /// The one shared batch-play helper: a list's first Track plays and the rest
-/// queue behind it as a single `play_many` batch — exactly [`play_folder`]'s
-/// gesture. An empty batch starts nothing, and so never re-enables shuffle.
+/// queue behind it as a single `play_many` batch. An empty batch starts
+/// nothing, and so never re-enables shuffle.
 ///
 /// It has no caller in [`apply_detail_action`] any more — the Tracks column's
 /// header buttons that used to reach it are gone — and it is deliberately not
@@ -1887,47 +1869,44 @@ fn tag_rows(tracks: &[Track]) -> Vec<crate::ui::selection::TagRow> {
         .collect()
 }
 
+/// One inspector readout row — the shorthand that keeps the detail grids
+/// scannable.
+fn detail(label: &str, value: impl Into<String>) -> crate::ui::selection::SelectionDetail {
+    crate::ui::selection::SelectionDetail {
+        label: label.to_string(),
+        value: value.into(),
+    }
+}
+
 /// The compact track readout: title, artist, album, metadata, and the
 /// single-track batch the Play/Queue actions start.
 fn track_inspector(track: riff_backend::domain::Track) -> InspectorContent {
     let mut details = vec![
-        crate::ui::selection::SelectionDetail {
-            label: "Plays".to_string(),
-            value: track.play_count.to_string(),
-        },
-        crate::ui::selection::SelectionDetail {
-            label: "Last played".to_string(),
-            value: track.last_played.map_or_else(
+        detail("Plays", track.play_count.to_string()),
+        detail(
+            "Last played",
+            track.last_played.map_or_else(
                 || "Never".to_string(),
                 |at| {
                     let elapsed = at.elapsed().unwrap_or(std::time::Duration::ZERO);
                     crate::ui::sidebar::format_last_scan_ago(elapsed)
                 },
             ),
-        },
-        crate::ui::selection::SelectionDetail {
-            label: "Path".to_string(),
-            value: track.file_path.to_string_lossy().to_string(),
-        },
+        ),
+        detail("Path", track.file_path.to_string_lossy().to_string()),
     ];
     // ReplayGain is a read-only fact the file carries: the tag editor cannot
     // express it, and the album value is never applied. A file without the
     // tag grows no row — the DETAILS block has no `(none)` state (that
     // convention belongs to `tag_rows`).
     if let Some(gain) = track.metadata.replaygain_track_gain {
-        details.push(crate::ui::selection::SelectionDetail {
-            label: "ReplayGain (track)".to_string(),
-            // `.2` is load-bearing: the f32 widens into the store's REAL
-            // column and narrows back, so an unformatted print is
-            // `-6.540000057220459`.
-            value: format!("{gain:+.2} dB"),
-        });
+        // `.2` is load-bearing: the f32 widens into the store's REAL
+        // column and narrows back, so an unformatted print is
+        // `-6.540000057220459`.
+        details.push(detail("ReplayGain (track)", format!("{gain:+.2} dB")));
     }
     if let Some(gain) = track.metadata.replaygain_album_gain {
-        details.push(crate::ui::selection::SelectionDetail {
-            label: "ReplayGain (album)".to_string(),
-            value: format!("{gain:+.2} dB"),
-        });
+        details.push(detail("ReplayGain (album)", format!("{gain:+.2} dB")));
     }
     InspectorContent {
         visible: true,
@@ -1959,13 +1938,10 @@ fn album_inspector(views: &mut SessionViews, artist: &str, title: &str) -> Inspe
     let albums = views.artist_albums(artist);
     let album = albums.iter().find(|album| album.title == title);
     let mut details = vec![
-        crate::ui::selection::SelectionDetail {
-            label: "Artist".to_string(),
-            value: artist.to_string(),
-        },
-        crate::ui::selection::SelectionDetail {
-            label: "Tracks".to_string(),
-            value: format!(
+        detail("Artist", artist.to_string()),
+        detail(
+            "Tracks",
+            format!(
                 "{}{}",
                 tracks.len(),
                 total_duration(&tracks)
@@ -1975,27 +1951,24 @@ fn album_inspector(views: &mut SessionViews, artist: &str, title: &str) -> Inspe
                     ))
                     .unwrap_or_default()
             ),
-        },
-        crate::ui::selection::SelectionDetail {
-            label: "Plays".to_string(),
-            value: tracks
+        ),
+        detail(
+            "Plays",
+            tracks
                 .iter()
                 .map(|track| track.play_count)
                 .sum::<u32>()
                 .to_string(),
-        },
-        crate::ui::selection::SelectionDetail {
-            label: "Last played".to_string(),
-            value: last_played_label(&tracks),
-        },
-        crate::ui::selection::SelectionDetail {
-            label: "Path".to_string(),
-            value: tracks[0]
+        ),
+        detail("Last played", last_played_label(&tracks)),
+        detail(
+            "Path",
+            tracks[0]
                 .file_path
                 .parent()
                 .map(|path| path.to_string_lossy().to_string())
                 .unwrap_or_default(),
-        },
+        ),
     ];
     // One album has one album gain, so the first Track that carries it is the
     // honest read — there is no `(different)` state to reach for here. Absent
@@ -2004,10 +1977,7 @@ fn album_inspector(views: &mut SessionViews, artist: &str, title: &str) -> Inspe
         .iter()
         .find_map(|track| track.metadata.replaygain_album_gain)
     {
-        details.push(crate::ui::selection::SelectionDetail {
-            label: "ReplayGain".to_string(),
-            value: format!("{gain:+.2} dB"),
-        });
+        details.push(detail("ReplayGain", format!("{gain:+.2} dB")));
     }
     InspectorContent {
         visible: true,
@@ -2037,14 +2007,8 @@ fn artist_inspector(views: &mut SessionViews, name: &str) -> InspectorContent {
     }
     let total_tracks: usize = albums.iter().map(|album| album.tracks.len()).sum();
     let details = vec![
-        crate::ui::selection::SelectionDetail {
-            label: "Albums".to_string(),
-            value: album_count_label(albums.len()),
-        },
-        crate::ui::selection::SelectionDetail {
-            label: "Tracks".to_string(),
-            value: total_tracks.to_string(),
-        },
+        detail("Albums", album_count_label(albums.len())),
+        detail("Tracks", total_tracks.to_string()),
     ];
     InspectorContent {
         visible: true,
@@ -2078,21 +2042,8 @@ fn genre_inspector(views: &mut SessionViews, genre: &str) -> InspectorContent {
         // readout.
         return InspectorContent::default();
     };
-    let mut track_ids = Vec::new();
-    for artist in views.artists_in_genre(genre).iter() {
-        for album in views.artist_albums_in_genre(&artist.name, genre).iter() {
-            for track in views
-                .album_tracks_in_genre(&album.artist, &album.title, genre)
-                .iter()
-            {
-                track_ids.push(track.id.clone());
-            }
-        }
-    }
-    let details = vec![crate::ui::selection::SelectionDetail {
-        label: "Tracks".to_string(),
-        value: tracks.to_string(),
-    }];
+    let track_ids = genre_track_ids(views, genre);
+    let details = vec![detail("Tracks", tracks.to_string())];
     InspectorContent {
         visible: true,
         kind: InspectorKind::Genre,
@@ -2566,19 +2517,12 @@ impl RiffApp {
                 ui,
                 &mut self.icons,
                 &palette,
-                TreeRow {
-                    indent_level: 0,
-                    icon: Some(icon),
-                    cover: None,
+                TreeRow::nav(
                     label,
-                    count: Some(count),
-                    meta: None,
-                    favorite: None,
-                    selected: library_section_live && library.library_section == section,
-                    now_playing: false,
-                    playing: false,
-                    art_slot: false,
-                },
+                    Some(icon),
+                    Some(count),
+                    library_section_live && library.library_section == section,
+                ),
             );
             if row.response.clicked() {
                 report.push(SidebarAction::Navigate { section });
@@ -2590,19 +2534,12 @@ impl RiffApp {
             ui,
             &mut self.icons,
             &palette,
-            TreeRow {
-                indent_level: 0,
-                icon: Some(crate::ui::icons::Icon::Folder),
-                cover: None,
-                label: "Folders",
-                count: Some(counts.folder_roots),
-                meta: None,
-                favorite: None,
-                selected: folder_section_live,
-                now_playing: false,
-                playing: false,
-                art_slot: false,
-            },
+            TreeRow::nav(
+                "Folders",
+                Some(crate::ui::icons::Icon::Folder),
+                Some(counts.folder_roots),
+                folder_section_live,
+            ),
         );
         if folders_row.response.clicked() {
             report.push(SidebarAction::NavigateFolders);
@@ -2701,19 +2638,12 @@ impl RiffApp {
                 ui,
                 &mut self.icons,
                 &palette,
-                TreeRow {
-                    indent_level: 0,
-                    icon: Some(crate::ui::icons::Icon::Sparkles),
-                    cover: None,
-                    label: kind.display_name(),
-                    count: Some(smart_count(kind)),
-                    meta: None,
-                    favorite: None,
-                    selected: self.smart_playlist_view == Some(kind),
-                    now_playing: false,
-                    playing: false,
-                    art_slot: false,
-                },
+                TreeRow::nav(
+                    kind.display_name(),
+                    Some(crate::ui::icons::Icon::Sparkles),
+                    Some(smart_count(kind)),
+                    self.smart_playlist_view == Some(kind),
+                ),
             );
             if row.response.clicked() {
                 report.push(SidebarAction::OpenSmartList(kind));
@@ -2921,7 +2851,11 @@ impl RiffApp {
         // canonical order is the no-op anchor and the title modes compare
         // case-insensitively, ties keeping the computed order.
         let mut rows: Vec<&Track> = tracks.iter().collect();
-        sort_track_refs(&mut rows, library.track_sort);
+        crate::ui::app::browser_pane::sort_tracks(
+            &mut rows,
+            |t| t.metadata.display_title(&t.file_path).clone(),
+            library.track_sort,
+        );
 
         egui::ScrollArea::vertical().show_rows(
             ui,
@@ -3325,19 +3259,15 @@ impl RiffApp {
                 .id(),
         );
 
-        let row = TreeRow {
-            indent_level: 0,
-            icon: None,
+        let row = TreeRow::track(
+            &label,
             cover,
-            label: &label,
-            count: None,
-            meta: None,
-            favorite: Some(track.favorite),
-            selected: is_selected,
-            now_playing: is_current,
-            playing: is_current && playing,
-            art_slot: false,
-        };
+            None,
+            Some(track.favorite),
+            is_selected,
+            is_current,
+            is_current && playing,
+        );
         let (response, favorite_toggled, drop_from) = if reorderable {
             let outcome = sidebar::reorderable_row(
                 ui,
@@ -3573,15 +3503,8 @@ impl RiffApp {
             TreeRow {
                 indent_level: level,
                 icon: cover.is_none().then_some(glyph),
-                cover,
-                label: &label,
-                count: None,
-                meta: None,
-                favorite: None,
-                selected: is_selected,
-                now_playing: false,
-                playing: false,
                 art_slot: true,
+                ..TreeRow::track(&label, cover, None, None, is_selected, false, false)
             },
         );
 
@@ -3593,7 +3516,7 @@ impl RiffApp {
             library.selected_folder = Some(path.to_path_buf());
         }
         if row.response.double_clicked() {
-            play_folder(&folder_track_ids, self.transport.as_ref());
+            play_album_batch(&folder_track_ids, self.transport.as_ref());
         }
         if !folder_track_ids.is_empty() {
             show_list_context_menu(
@@ -3765,18 +3688,6 @@ pub fn flush_cleared_cache<S: std::hash::BuildHasher>(
     if *outcome == ClearCacheOutcome::Cleared {
         crate::ui::artwork::evict_all_covers(textures, lru_keys);
     }
-}
-
-/// Play a folder: start its first track and queue the rest as ONE batch
-/// command (allocation plan 4.3), so the queue mutates once under one lock
-/// instead of N times. The ids arrive in the store's path order — exactly
-/// what the former mirror listing produced. The play/append split maps onto
-/// the Transport port's [`crate::app::transport::Transport::play_many`].
-fn play_folder(track_ids: &[TrackId], transport: &dyn Transport) {
-    let Some(first) = track_ids.first() else {
-        return;
-    };
-    transport.play_many(first.clone(), track_ids[1..].to_vec());
 }
 
 /// Tracks directly in a folder, optionally filtered by search query. The

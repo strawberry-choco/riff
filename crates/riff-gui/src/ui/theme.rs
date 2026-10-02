@@ -209,20 +209,10 @@ pub fn hero_title_font() -> egui::FontId {
 
 /// `--riff-brand-50` — `#fff8e7`.
 pub const BRAND_50: Color32 = Color32::from_rgb(0xff, 0xf8, 0xe7);
-/// `--riff-brand-100` — `#ffefcc`.
-pub const BRAND_100: Color32 = Color32::from_rgb(0xff, 0xef, 0xcc);
-/// `--riff-brand-200` — `#ffe099`.
-pub const BRAND_200: Color32 = Color32::from_rgb(0xff, 0xe0, 0x99);
-/// `--riff-brand-300` — `#ffcc66`.
-pub const BRAND_300: Color32 = Color32::from_rgb(0xff, 0xcc, 0x66);
 /// `--riff-brand-400` — `#ffb833`.
 pub const BRAND_400: Color32 = Color32::from_rgb(0xff, 0xb8, 0x33);
 /// `--riff-brand-500` — `#f0821e`, the primary brand color.
 pub const BRAND_500: Color32 = Color32::from_rgb(0xf0, 0x82, 0x1e);
-/// `--riff-brand-600` — `#d98a0d`.
-pub const BRAND_600: Color32 = Color32::from_rgb(0xd9, 0x8a, 0x0d);
-/// `--riff-brand-700` — `#a66709`.
-pub const BRAND_700: Color32 = Color32::from_rgb(0xa6, 0x67, 0x09);
 
 /// The brand gradient's first stop: [`BRAND_400`], the lighter end. A wash that
 /// steps from here to [`BRAND_GRADIENT_BOTTOM`] reads as one lit shape; the
@@ -463,10 +453,6 @@ pub const SPACE_MD: f32 = 8.0;
 /// 12 px — the gap at a BOUNDARY between grouped regions (the inspector's
 /// sections).
 pub const SPACE_LG: f32 = 12.0;
-/// 16 px — a heading above the content it names.
-pub const SPACE_XL: f32 = 16.0;
-/// 24 px — the hero-scale gaps (the mockup's `mb-6`).
-pub const SPACE_XXL: f32 = 24.0;
 
 // --- Motion -------------------------------------------------------------------
 //
@@ -694,8 +680,8 @@ pub mod geometry {
         /// First-level indent: content starts 12px into the row. Deeper levels
         /// add [`INDENT_STEP`] each, so this is the whole indent at level 0.
         pub const INDENT_BASE: f32 = 12.0;
-        /// The three-level indent scale: 12 / 28 / 44px, one
-        /// [`super::super::SPACE_XL`] per level. The mockup's 12 / 44 / 80 was
+        /// The three-level indent scale: 12 / 28 / 44px, one [`INDENT_STEP`]
+        /// per level. The mockup's 12 / 44 / 80 was
         /// twice as wide, which spent a third of a 280px column on nesting
         /// alone.
         pub const INDENT_SCALE: [f32; 3] = [12.0, 28.0, 44.0];
@@ -1628,13 +1614,6 @@ pub fn paint_accent_glow(painter: &egui::Painter, palette: &Palette, rect: egui:
         mesh.add_triangle(0, 1 + u32::from(step), 1 + u32::from((step + 1) % SEGMENTS));
     }
     painter.add(mesh);
-}
-
-/// The tint a hero glyph is rasterized with: the palette's muted ink at the
-/// mockup's `muted-foreground/40` strength.
-#[must_use]
-pub fn hero_glyph(palette: &Palette) -> Color32 {
-    palette.ink_3.gamma_multiply(0.4)
 }
 
 /// The coverage a role's hover wash is painted at — the mockup's

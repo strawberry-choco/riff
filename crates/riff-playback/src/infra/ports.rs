@@ -59,7 +59,7 @@ pub trait PlaybackLibrary {
 /// once, in [`PlaybackStart::enqueue_and_start_if_idle`], so a fourth
 /// queue-mutating Playback Command is one variant here plus one line at its arm
 /// — never a fourth copy of the rule.
-pub enum QueueStart<'a> {
+pub(crate) enum QueueStart<'a> {
     /// A `Play` command: the engine is the load itself, so it has no queue
     /// write of its own. It may still answer a **Queue Fill**.
     Fill { wanted: &'a TrackId },
@@ -70,8 +70,6 @@ pub enum QueueStart<'a> {
     /// Append a batch behind everything queued as one write, under one lock —
     /// the whole collection's **Add to Queue**.
     AppendMany { ids: &'a [TrackId] },
-    /// Nothing to queue and nothing to start: an empty batch.
-    Nothing,
 }
 
 /// **The Audio Engine's rule for *when* playback starts** — the **Queue Fill**
@@ -88,7 +86,7 @@ pub enum QueueStart<'a> {
 /// own command channel (how a start is re-dispatched as a `Play` the engine
 /// then loads), and the Library read port. That is also what makes the rule
 /// callable on its own — no decoder, no output, no thread.
-pub struct PlaybackStart {
+pub(crate) struct PlaybackStart {
     session: Arc<Mutex<PlaybackSession>>,
     cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
     library: Arc<dyn PlaybackLibrary + Send>,
@@ -98,7 +96,7 @@ impl PlaybackStart {
     /// Wire the rule over the shared session, the engine's command channel,
     /// and the Library read port.
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         session: Arc<Mutex<PlaybackSession>>,
         cmd_tx: crossbeam_channel::Sender<PlaybackCommand>,
         library: Arc<dyn PlaybackLibrary + Send>,
@@ -126,7 +124,11 @@ impl PlaybackStart {
     /// Both answers are taken under one lock, so a batch is one mutation and
     /// the auto-play decision cannot be made against a queue another thread has
     /// changed in between.
-    pub fn enqueue_and_start_if_idle(&self, start: QueueStart<'_>, now_playing: Option<&TrackId>) {
+    pub(crate) fn enqueue_and_start_if_idle(
+        &self,
+        start: QueueStart<'_>,
+        now_playing: Option<&TrackId>,
+    ) {
         let mut session = self.session.lock_or_recover();
 
         // The command's intent, answered once: its own single write to the
@@ -149,7 +151,6 @@ impl PlaybackStart {
                 }
                 None
             }
-            QueueStart::Nothing => None,
             QueueStart::Next { id } => {
                 session.queue.insert_next(id.clone());
                 Some(id.clone())
@@ -215,7 +216,7 @@ pub struct AudioFormatInfo {
 impl AudioFormatInfo {
     /// Check if this format is compatible with another for gapless handoff.
     #[must_use]
-    pub fn compatible_with(&self, other: &AudioFormatInfo) -> bool {
+    pub(crate) fn compatible_with(&self, other: &AudioFormatInfo) -> bool {
         self.sample_rate == other.sample_rate && self.channels == other.channels
     }
 }

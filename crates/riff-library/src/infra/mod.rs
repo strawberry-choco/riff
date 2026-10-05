@@ -9,6 +9,6 @@
 pub mod ports;
 
 pub use ports::{
-    AudioFormatInfo, CoverLoader, DecodedCover, FilesystemWatch, MetadataReader, MetadataWriter,
-    RequestedSize, TagEdit,
+    AudioFormatInfo, CoverLoader, DecodedCover, FilesystemWatch, LoudnessAnalyzer, MetadataReader,
+    MetadataWriter, ReplayGainTags, ReplayGainWriter, RequestedSize, TagEdit, TrackLoudness,
 };

@@ -42,6 +42,9 @@ use riff_backend::app::Transport;
 pub use riff_backend::app::cover_service::{
     COVER_CACHE_CAP, ClearCacheOutcome, Covers, lru_insert,
 };
+use riff_backend::app::pass_service::Passes;
+use riff_backend::app::replaygain_pass::PassCommand;
+use riff_backend::app::replaygain_pass::PassReport;
 // The artwork cache-key space moved to `ui::artwork` with the artwork primitive
 // (issue 13); these keep the historical `ui::app::` paths resolving.
 pub use crate::ui::artwork::{
@@ -217,6 +220,18 @@ pub struct RiffApp {
     /// The Cover Service front end (ADR 0006): sends resolve intent and
     /// yields drained results; dedup and the negative cache live behind it.
     covers: Box<dyn Covers>,
+    /// The `ReplayGain` Pass service front end (ADR 0006): submits pass
+    /// commands and yields polled progress and outcomes. Whether one runs is
+    /// the service's own fact (`is_running`), so no frontend-local in-flight
+    /// flag shadows it.
+    pub(crate) passes: Box<dyn Passes>,
+    /// The Force choice for the next library-wide pass, driven from the
+    /// Settings surface. Session-local and never persisted: an automatic
+    /// pass never redoes finished work.
+    pub(crate) pass_force_choice: bool,
+    /// The last settled pass's outcome, kept so the Settings card can show
+    /// the report inline until the next pass.
+    pub(crate) last_pass_report: Option<PassReport>,
     /// The Tag Edit Service front end (ADR 0006) lives inside the inline
     /// editor's controller: submits save intent and yields polled outcomes;
     /// the whole save flow lives behind it.
@@ -381,6 +396,7 @@ impl RiffApp {
         library_mutations: Box<dyn LibraryMutationStore>,
         views: SessionViews,
         tag_edits: Box<dyn TagEdits>,
+        passes: Box<dyn Passes>,
         covers: Box<dyn Covers>,
         backend_events: Arc<Mutex<BackendEvents>>,
         #[cfg(not(target_os = "linux"))]
@@ -399,6 +415,9 @@ impl RiffApp {
             cover_lru_keys: Vec::new(),
             cover_cache: crate::ui::cover_cache::CoverCache::new(),
             covers,
+            passes,
+            pass_force_choice: false,
+            last_pass_report: None,
             tag_editor: InlineTagEditor::new(tag_edits),
             smart_playlist_view: None,
             playlist_view: None,
@@ -487,6 +506,7 @@ impl RiffApp {
         library_mutations: Box<dyn LibraryMutationStore>,
         views: SessionViews,
         tag_edits: Box<dyn TagEdits>,
+        passes: Box<dyn Passes>,
         covers: Box<dyn Covers>,
         backend_events: Arc<Mutex<BackendEvents>>,
     ) -> (Self, crate::ui::window_visibility::VisibilityTx) {
@@ -520,6 +540,7 @@ impl RiffApp {
             library_mutations,
             views,
             tag_edits,
+            passes,
             covers,
             backend_events,
             #[cfg(not(target_os = "linux"))]
@@ -683,6 +704,7 @@ impl RiffApp {
     ) -> TrackMenuHost<'a> {
         TrackMenuHost::new(
             self.transport.as_ref(),
+            self.passes.as_ref(),
             self.playlist_store.as_mut(),
             self.library_mutations.as_mut(),
             &mut self.tag_editor,
@@ -900,6 +922,9 @@ impl RiffApp {
                 scans: self.scans.as_ref(),
                 tag_edits: &mut self.tag_editor,
                 covers: self.covers.as_ref(),
+                passes: self.passes.as_ref(),
+                pass_force_choice: &mut self.pass_force_choice,
+                last_pass_report: &mut self.last_pass_report,
                 cover_cache: &mut self.cover_cache,
                 watchers: &self.watcher_manager,
                 prefs: &mut self.prefs,
@@ -1576,11 +1601,20 @@ pub fn apply_detail_action(
 /// folded into what replaced them. A whole-list menu's Play and Shuffle, on
 /// the album, artist, genre, playlist, smart-playlist and folder surfaces, are
 /// what still reach it, so it must never be deleted as dead code.
-fn play_album_batch(album_tracks: &[TrackId], transport: &dyn Transport) {
+/// Play a batch of tracks as one enqueue. `whole_album` marks the batch the
+/// listener chose as an **Album play**: `ReplayGain` then levels the Album's
+/// shared pair across it (per-Track fallback where the Album value is
+/// absent), while every other batch — a folder, a playlist, an Artist or
+/// Genre — levels each Track's own pair.
+fn play_batch(album_tracks: &[TrackId], whole_album: bool, transport: &dyn Transport) {
     let Some(first) = album_tracks.first() else {
         return;
     };
-    transport.play_many(first.clone(), album_tracks[1..].to_vec());
+    if whole_album {
+        transport.play_album(first.clone(), album_tracks[1..].to_vec());
+    } else {
+        transport.play_many(first.clone(), album_tracks[1..].to_vec());
+    }
 }
 
 /// One frame of the Tracks column's content, resolved from the library
@@ -1824,8 +1858,17 @@ pub fn resolve_inspector(views: &mut SessionViews, library: &LibrarySession) -> 
 /// single-track readout the row carries that track's value or `(none)`. Each
 /// row keeps the per-track originals the inline editor's draft (tickets
 /// 02/03) diffs against, so the model never fabricates a value.
-fn tag_rows(tracks: &[Track]) -> Vec<crate::ui::selection::TagRow> {
+fn tag_rows(
+    tracks: &[Track],
+    unmeasured_replaygain: &'static str,
+) -> Vec<crate::ui::selection::TagRow> {
     use crate::ui::selection::{TagField, TagRow, TagRowState};
+
+    // The f32 print is `.2` on purpose: the value widens into the store's
+    // REAL column and narrows back, so an unformatted print is
+    // `-6.540000057220459`. The unit lives in the row's label — the buffer
+    // the editor prefills must be the exact text it parses back.
+    let replaygain_text = |value: f32| -> String { format!("{value:.2}") };
 
     TagField::ALL
         .iter()
@@ -1840,6 +1883,18 @@ fn tag_rows(tracks: &[Track]) -> Vec<crate::ui::selection::TagRow> {
                     TagField::Genre => track.metadata.genre.clone(),
                     TagField::Year => track.metadata.year.map(|year| year.to_string()),
                     TagField::TrackNumber => track.metadata.track_number.map(|n| n.to_string()),
+                    TagField::ReplayGainTrackGain => {
+                        track.metadata.replaygain_track_gain.map(replaygain_text)
+                    }
+                    TagField::ReplayGainTrackPeak => {
+                        track.metadata.replaygain_track_peak.map(replaygain_text)
+                    }
+                    TagField::ReplayGainAlbumGain => {
+                        track.metadata.replaygain_album_gain.map(replaygain_text)
+                    }
+                    TagField::ReplayGainAlbumPeak => {
+                        track.metadata.replaygain_album_peak.map(replaygain_text)
+                    }
                 })
                 .collect();
             let state = if originals.iter().all(Option::is_none) {
@@ -1857,7 +1912,19 @@ fn tag_rows(tracks: &[Track]) -> Vec<crate::ui::selection::TagRow> {
                     .and_then(Option::clone)
                     .unwrap_or_default(),
                 TagRowState::Different => "(different)".to_string(),
-                TagRowState::None => "(none)".to_string(),
+                TagRowState::None => {
+                    // An unmeasured `ReplayGain` value is never shown as a
+                    // number — least of all zero, which would read as
+                    // "analyzed at 0 dB". A single-Track readout says so in
+                    // the domain's own word; an Album readout keeps the
+                    // aggregation's `(none)`.
+                    if field.is_replaygain() {
+                        unmeasured_replaygain
+                    } else {
+                        "(none)"
+                    }
+                    .to_string()
+                }
             };
             TagRow {
                 field,
@@ -1881,7 +1948,7 @@ fn detail(label: &str, value: impl Into<String>) -> crate::ui::selection::Select
 /// The compact track readout: title, artist, album, metadata, and the
 /// single-track batch the Play/Queue actions start.
 fn track_inspector(track: riff_backend::domain::Track) -> InspectorContent {
-    let mut details = vec![
+    let details = vec![
         detail("Plays", track.play_count.to_string()),
         detail(
             "Last played",
@@ -1895,19 +1962,9 @@ fn track_inspector(track: riff_backend::domain::Track) -> InspectorContent {
         ),
         detail("Path", track.file_path.to_string_lossy().to_string()),
     ];
-    // ReplayGain is a read-only fact the file carries: the tag editor cannot
-    // express it, and the album value is never applied. A file without the
-    // tag grows no row — the DETAILS block has no `(none)` state (that
-    // convention belongs to `tag_rows`).
-    if let Some(gain) = track.metadata.replaygain_track_gain {
-        // `.2` is load-bearing: the f32 widens into the store's REAL
-        // column and narrows back, so an unformatted print is
-        // `-6.540000057220459`.
-        details.push(detail("ReplayGain (track)", format!("{gain:+.2} dB")));
-    }
-    if let Some(gain) = track.metadata.replaygain_album_gain {
-        details.push(detail("ReplayGain (album)", format!("{gain:+.2} dB")));
-    }
+    // ReplayGain lives in the tag section now — the four values ride the
+    // same tag-row doors as Metadata, editable like any other field, an
+    // unmeasured one shown as unmeasured rather than as a number.
     InspectorContent {
         visible: true,
         kind: InspectorKind::Track,
@@ -1918,7 +1975,7 @@ fn track_inspector(track: riff_backend::domain::Track) -> InspectorContent {
         details,
         // The Artist/Album/Genre detail rows moved into the tag section;
         // the non-tag facts (Plays, Last played, Path) stay below it.
-        tags: tag_rows(std::slice::from_ref(&track)),
+        tags: tag_rows(std::slice::from_ref(&track), "unmeasured"),
     }
 }
 
@@ -1993,7 +2050,7 @@ fn album_inspector(views: &mut SessionViews, artist: &str, title: &str) -> Inspe
         // The Released/Genre detail rows moved into the aggregated tag
         // section; the non-tag facts (Artist, Tracks, Plays, Last played,
         // Path) stay below it.
-        tags: tag_rows(&tracks),
+        tags: tag_rows(&tracks, "(none)"),
     }
 }
 
@@ -3516,7 +3573,7 @@ impl RiffApp {
             library.selected_folder = Some(path.to_path_buf());
         }
         if row.response.double_clicked() {
-            play_album_batch(&folder_track_ids, self.transport.as_ref());
+            play_batch(&folder_track_ids, false, self.transport.as_ref());
         }
         if !folder_track_ids.is_empty() {
             show_list_context_menu(
@@ -3778,6 +3835,9 @@ pub struct CollectionMenuEffects<'a> {
     pub playback: &'a mut PlaybackSession,
     /// The playback command port the batch intents go through.
     pub transport: &'a dyn Transport,
+    /// The `ReplayGain` Pass service: the Album menu's two measure items are
+    /// submissions here, never runs — the pass owns its worker thread.
+    pub passes: &'a dyn Passes,
     /// The Session Views seam, which resolves the row's Track batch at
     /// dispatch time.
     pub views: &'a mut SessionViews,
@@ -3811,8 +3871,54 @@ pub fn apply_collection_menu(
 ) {
     apply_entity_selection(key, column, effects.library);
     for intent in intents {
-        let batch = entity_track_ids(key, column, effects.views);
-        apply_list_menu_intent(*intent, &batch, effects.transport, effects.playback);
+        // The Album menu's two measure items are not batch actions over a
+        // Track set — they name the Album itself. The other four go through
+        // the shared list-intent applier.
+        // An Album row's play/shuffle is a **whole-Album play** — the
+        // `ReplayGain` queue provenance — while an Artist or Genre row is a
+        // batch of Albums and a folder or playlist is neither.
+        let whole_album = matches!(
+            entity_row(key, column.section(), column.level()),
+            Some(EntityRow::Album { .. })
+        );
+        match intent {
+            crate::ui::menu::ListMenuIntent::MeasureAlbumAggregate => {
+                if let Some(EntityRow::Album { artist, title }) =
+                    entity_row(key, column.section(), column.level())
+                {
+                    effects.passes.submit(PassCommand::AlbumAggregate {
+                        album_artist: artist,
+                        album_title: title,
+                    });
+                }
+            }
+            crate::ui::menu::ListMenuIntent::MeasureAlbumTracks => {
+                if let Some(EntityRow::Album { artist, title }) =
+                    entity_row(key, column.section(), column.level())
+                {
+                    effects.passes.submit(PassCommand::AlbumTracks {
+                        album_artist: artist,
+                        album_title: title,
+                    });
+                }
+            }
+            crate::ui::menu::ListMenuIntent::Play => {
+                let batch = entity_track_ids(key, column, effects.views);
+                play_batch(&batch, whole_album, effects.transport);
+            }
+            crate::ui::menu::ListMenuIntent::Shuffle => {
+                let batch = entity_track_ids(key, column, effects.views);
+                if batch.is_empty() {
+                    continue;
+                }
+                effects.playback.queue.set_shuffle(true);
+                play_batch(&batch, whole_album, effects.transport);
+            }
+            intent => {
+                let batch = entity_track_ids(key, column, effects.views);
+                apply_list_menu_intent(*intent, &batch, effects.transport, effects.playback);
+            }
+        }
     }
 }
 
@@ -3833,7 +3939,7 @@ pub fn apply_list_menu_intent(
         // The collection's Play is the SAME helper the album header's and the
         // Detail Panel's Play use, so a Track menu and a collection menu cannot
         // drift apart: one `play_many` batch, never a command per Track.
-        ListMenuIntent::Play => play_album_batch(track_ids, transport),
+        ListMenuIntent::Play => play_batch(track_ids, false, transport),
         ListMenuIntent::PlayNext => {
             for tid in track_ids.iter().rev() {
                 transport.play_next(tid.clone());
@@ -3854,8 +3960,13 @@ pub fn apply_list_menu_intent(
                 return;
             }
             playback.queue.set_shuffle(true);
-            play_album_batch(track_ids, transport);
+            play_batch(track_ids, false, transport);
         }
+        // The Album menu's two measure items never reach this applier: they
+        // name the Album, not a Track batch, and `apply_collection_menu`
+        // dispatches them before delegating here. No other renderer produces
+        // them — a playlist header or a folder node has nothing to measure.
+        ListMenuIntent::MeasureAlbumAggregate | ListMenuIntent::MeasureAlbumTracks => {}
     }
 }
 

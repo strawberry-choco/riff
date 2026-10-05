@@ -57,6 +57,7 @@ pub struct FeedbackBoard {
     scan: Option<Feedback>,
     playback: Option<Feedback>,
     tag_edit: Option<Feedback>,
+    replaygain: Option<Feedback>,
 }
 
 impl FeedbackBoard {
@@ -92,6 +93,17 @@ impl FeedbackBoard {
         });
     }
 
+    /// Record a `ReplayGain` Pass notice (a settled pass's outcome, or its
+    /// running progress line) into the pass's own slot.
+    pub fn set_replaygain(&mut self, message: impl Into<String>, severity: NoticeSeverity) {
+        self.replaygain = Some(Feedback {
+            severity,
+            source: NoticeSource::ReplayGain,
+            message: message.into(),
+            recovery: None,
+        });
+    }
+
     /// Record a structured notice, routing it to its source's slot. A playback
     /// notice carries its recovery intent through untouched.
     pub fn put(&mut self, feedback: Feedback) {
@@ -101,6 +113,7 @@ impl FeedbackBoard {
             }
             NoticeSource::Scan | NoticeSource::Library => &mut self.scan,
             NoticeSource::TagEdit => &mut self.tag_edit,
+            NoticeSource::ReplayGain => &mut self.replaygain,
         };
         *slot = Some(feedback);
     }
@@ -113,6 +126,7 @@ impl FeedbackBoard {
             }
             NoticeSource::Scan | NoticeSource::Library => self.scan = None,
             NoticeSource::TagEdit => self.tag_edit = None,
+            NoticeSource::ReplayGain => self.replaygain = None,
         }
     }
 
@@ -124,12 +138,16 @@ impl FeedbackBoard {
     /// Whether no source currently has anything to report.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.scan.is_none() && self.playback.is_none() && self.tag_edit.is_none()
+        self.scan.is_none()
+            && self.playback.is_none()
+            && self.tag_edit.is_none()
+            && self.replaygain.is_none()
     }
 
     /// The notice the titlebar paints: the highest-severity active source, with
-    /// a stable tie-break (playback, then Tag Edit, then scan) so a lower
-    /// severity never masks a higher one that is still live.
+    /// a stable tie-break (playback, then the `ReplayGain` Pass, then Tag Edit,
+    /// then scan) so a lower severity never masks a higher one that is still
+    /// live.
     #[must_use]
     pub fn display(&self) -> Option<&Feedback> {
         let rank = |f: &Feedback| match f.severity {
@@ -138,11 +156,13 @@ impl FeedbackBoard {
             NoticeSeverity::Info => 0,
         };
         // Iterated low-priority-first because `max_by_key` keeps the LAST of
-        // equal keys: playback (last) wins a severity tie, then Tag Edit, then
-        // scan — and any higher severity still outranks them all.
+        // equal keys: playback (last) wins a severity tie, then the pass, then
+        // Tag Edit, then scan — and any higher severity still outranks them
+        // all.
         [
             self.scan.as_ref(),
             self.tag_edit.as_ref(),
+            self.replaygain.as_ref(),
             self.playback.as_ref(),
         ]
         .into_iter()

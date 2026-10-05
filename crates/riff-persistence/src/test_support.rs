@@ -20,12 +20,24 @@ type Answer<T> = Result<T, StoreError>;
 /// The `get_track` resolver a suite hands [`StubLibraryQueryStore::new`].
 type TrackResolver = Box<dyn Fn(&TrackId) -> Option<Track> + Send + Sync>;
 
+/// The `album_tracks` resolver a suite sets via
+/// [`StubLibraryQueryStore::with_album_tracks`]; the default answers empty.
+type AlbumResolver = Box<dyn Fn(&str, &str) -> Vec<Track> + Send + Sync>;
+
+/// The `all_track_ids` resolver a suite sets via
+/// [`StubLibraryQueryStore::with_all_track_ids`]; the default answers empty.
+type AllIdsResolver = Box<dyn Fn() -> Vec<TrackId> + Send + Sync>;
+
 /// A [`LibraryQueryStore`] that answers every read with the empty result —
 /// the double for suites exercising logic indifferent to the library's
 /// contents. `get_track` is the one read a suite varies, via [`Self::new`]'s
-/// resolver; [`Self::empty`] answers `None`.
+/// resolver; [`Self::empty`] answers `None`. A suite that also needs the
+/// album-membership or flat-listing reads sets them via
+/// [`Self::with_album_tracks`] / [`Self::with_all_track_ids`].
 pub struct StubLibraryQueryStore {
     get_track: TrackResolver,
+    album_tracks: AlbumResolver,
+    all_track_ids: AllIdsResolver,
 }
 
 impl StubLibraryQueryStore {
@@ -33,12 +45,34 @@ impl StubLibraryQueryStore {
     pub fn new(resolve: impl Fn(&TrackId) -> Option<Track> + Send + Sync + 'static) -> Self {
         Self {
             get_track: Box::new(resolve),
+            album_tracks: Box::new(|_, _| Vec::new()),
+            all_track_ids: Box::new(Vec::new),
         }
     }
 
     /// A stub with the default `get_track` (`None` for every id).
     pub fn empty() -> Self {
         Self::new(|_| None)
+    }
+
+    /// Also answer `album_tracks` with `resolve`.
+    #[must_use]
+    pub fn with_album_tracks(
+        mut self,
+        resolve: impl Fn(&str, &str) -> Vec<Track> + Send + Sync + 'static,
+    ) -> Self {
+        self.album_tracks = Box::new(resolve);
+        self
+    }
+
+    /// Also answer `all_track_ids` with `resolve`.
+    #[must_use]
+    pub fn with_all_track_ids(
+        mut self,
+        resolve: impl Fn() -> Vec<TrackId> + Send + Sync + 'static,
+    ) -> Self {
+        self.all_track_ids = Box::new(resolve);
+        self
     }
 }
 
@@ -75,7 +109,7 @@ impl LibraryQueryStore for StubLibraryQueryStore {
     }
 
     fn all_track_ids(&self) -> Answer<Vec<TrackId>> {
-        Ok(Vec::new())
+        Ok((self.all_track_ids)())
     }
 
     fn search_page(
@@ -96,8 +130,8 @@ impl LibraryQueryStore for StubLibraryQueryStore {
         Ok(Vec::new())
     }
 
-    fn album_tracks(&self, _album_artist: &str, _album_title: &str) -> Answer<Vec<Track>> {
-        Ok(Vec::new())
+    fn album_tracks(&self, album_artist: &str, album_title: &str) -> Answer<Vec<Track>> {
+        Ok((self.album_tracks)(album_artist, album_title))
     }
 
     fn folder_has_audio(&self, _folder: &std::path::Path) -> Answer<bool> {

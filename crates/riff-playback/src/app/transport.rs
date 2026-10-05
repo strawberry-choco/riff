@@ -79,6 +79,15 @@ pub trait Transport: Send {
     /// mutates once under one lock with one shuffle regeneration.
     fn play_many(&self, first: TrackId, rest: Vec<TrackId>);
 
+    /// Play a **whole-Album batch**: the listener chose to play an Album, so
+    /// `ReplayGain` levels the Album's shared pair across it. The default
+    /// falls back to [`Self::play_many`] — a plain batch play — so test
+    /// doubles that record commands unchanged keep compiling; the production
+    /// transport sends `PlayAlbum` + `AddMany`.
+    fn play_album(&self, first: TrackId, rest: Vec<TrackId>) {
+        self.play_many(first, rest)
+    }
+
     /// Toggle shuffle mode on the session queue. No command is sent — the
     /// engine reads the shared session.
     fn toggle_shuffle(&self, session: &mut PlaybackSession);
@@ -166,6 +175,11 @@ impl Transport for ChannelTransport {
 
     fn play_many(&self, first: TrackId, rest: Vec<TrackId>) {
         self.send(PlaybackCommand::Play(first));
+        self.send(PlaybackCommand::AddMany(rest));
+    }
+
+    fn play_album(&self, first: TrackId, rest: Vec<TrackId>) {
+        self.send(PlaybackCommand::PlayAlbum(first));
         self.send(PlaybackCommand::AddMany(rest));
     }
 

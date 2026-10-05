@@ -399,6 +399,40 @@ const MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE app_settings
           ADD COLUMN metadata_version INTEGER NOT NULL DEFAULT 0;",
     },
+    Migration {
+        version: 16,
+        name: "016_replaygain_album_peak",
+        // The `REPLAYGAIN_ALBUM_PEAK` a file carries becomes a stored fact,
+        // the peak counterpart of migration 014's album gain. Nullable
+        // `REAL` with no default and no table rebuild — the same
+        // add-a-column precedent, so an existing store pays nothing and the
+        // metadata-version re-read backfills it.
+        sql: "ALTER TABLE tracks
+          ADD COLUMN replaygain_album_peak REAL;",
+    },
+    Migration {
+        version: 17,
+        name: "017_replaygain_mode",
+        // The `ReplayGain Mode` becomes a persisted preference: `0` (default)
+        // keeps the historical Track leveling, `1` applies the Album pair.
+        // Same add-a-boolean precedent as migrations 009/013; default 0
+        // preserves existing stores' behavior.
+        sql: "ALTER TABLE app_settings
+          ADD COLUMN replaygain_mode INTEGER NOT NULL DEFAULT 0 CHECK (replaygain_mode IN (0, 1));",
+    },
+    Migration {
+        version: 18,
+        name: "018_replaygain_pass_prefs",
+        // The library-wide `ReplayGain` Pass's Settings gating: which value
+        // kinds it writes, on demand and after every Library Scan. Two
+        // booleans, both default 0 — a scan's behavior is unchanged until the
+        // listener opts in. Force is deliberately not persisted: an automatic
+        // pass never redoes finished work.
+        sql: "ALTER TABLE app_settings
+          ADD COLUMN replaygain_pass_track INTEGER NOT NULL DEFAULT 0 CHECK (replaygain_pass_track IN (0, 1));
+        ALTER TABLE app_settings
+          ADD COLUMN replaygain_pass_album INTEGER NOT NULL DEFAULT 0 CHECK (replaygain_pass_album IN (0, 1));",
+    },
 ];
 
 /// Location of the Application Store database file: `riff.sqlite3` in the
@@ -1420,7 +1454,7 @@ impl SqliteStore {
                     duration_nanos, sample_rate, channels,
                     play_count, last_played_nanos, date_added_nanos,
                     search_text, album_artist_key, album_title_key,
-                    replaygain_album_gain
+                    replaygain_album_gain, replaygain_album_peak
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5,
                     ?6, ?7, ?8, ?9, ?10, ?11,
@@ -1428,7 +1462,7 @@ impl SqliteStore {
                     ?14, ?15, ?16,
                     0, NULL, ?17,
                     ?18, ?19, ?20,
-                    ?21
+                    ?21, ?22
                  )
                  ON CONFLICT(path) DO UPDATE SET
                     title = ?2, artist = ?3, album = ?4, album_artist = ?5,
@@ -1437,7 +1471,7 @@ impl SqliteStore {
                     replaygain_track_gain = ?12, replaygain_track_peak = ?13,
                     duration_nanos = ?14, sample_rate = ?15, channels = ?16,
                     search_text = ?18, album_artist_key = ?19, album_title_key = ?20,
-                    replaygain_album_gain = ?21",
+                    replaygain_album_gain = ?21, replaygain_album_peak = ?22",
                 rusqlite::params![
                     track.id.0,
                     track.metadata.title,
@@ -1464,6 +1498,7 @@ impl SqliteStore {
                     // to group the three would silently mis-file the columns
                     // it shifts — a wrong index compiles and passes clippy.
                     track.metadata.replaygain_album_gain.map(f64::from),
+                    track.metadata.replaygain_album_peak.map(f64::from),
                 ],
             )?;
             written += 1;
@@ -1575,12 +1610,12 @@ const TRACK_COLUMNS: &str = "path, title, artist, album, album_artist,
             replaygain_track_gain, replaygain_track_peak,
             duration_nanos, sample_rate, channels,
             play_count, last_played_nanos, date_added_nanos, search_text, favorite,
-            replaygain_album_gain";
+            replaygain_album_gain, replaygain_album_peak";
 
 /// How many columns [`TRACK_COLUMNS`] expands to; result rows that append
 /// extra columns after them (e.g. the playlist-entries LEFT JOIN) index
 /// past this.
-const TRACK_COLUMN_COUNT: usize = 22;
+const TRACK_COLUMN_COUNT: usize = 23;
 
 /// Escape SQL-LIKE wildcards and the escape character itself so a path
 /// component matches literally under `LIKE ... ESCAPE '#'`: `%` and `_`
@@ -1666,11 +1701,12 @@ fn track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
             comment: row.get(10)?,
             replaygain_track_gain: row.get::<_, Option<f64>>(11)?.map(narrow_f32),
             replaygain_track_peak: row.get::<_, Option<f64>>(12)?.map(narrow_f32),
-            // Index 21, appended after `favorite` rather than grouped with its
-            // siblings above, because [`TRACK_COLUMNS`] is read positionally:
-            // moving it would shift every index below the gap and mis-file
-            // those columns without failing to compile.
+            // Indexes 21/22, appended after `favorite` rather than grouped
+            // with their siblings above, because [`TRACK_COLUMNS`] is read
+            // positionally: moving them would shift every index below the gap
+            // and mis-file those columns without failing to compile.
             replaygain_album_gain: row.get::<_, Option<f64>>(21)?.map(narrow_f32),
+            replaygain_album_peak: row.get::<_, Option<f64>>(22)?.map(narrow_f32),
         },
         duration: row.get::<_, Option<i64>>(13)?.map(duration_from_nanos),
         sample_rate: narrow_u32(row.get(14)?),
@@ -3475,7 +3511,9 @@ impl SettingsStore for SqliteStore {
                     "SELECT volume, advanced_mode, high_contrast, replaygain_enabled,
                             shuffle, repeat_mode,
                             skip_hidden_files, scan_formats, read_embedded_artwork,
-                            smart_lists_collapsed, close_quits_app
+                            smart_lists_collapsed, close_quits_app,
+                            replaygain_pass_track, replaygain_pass_album,
+                            replaygain_mode
                      FROM app_settings WHERE id = 1",
                     [],
                     |row| {
@@ -3496,6 +3534,9 @@ impl SettingsStore for SqliteStore {
                             read_embedded_artwork: row.get::<_, i64>(8)? != 0,
                             smart_lists_collapsed: row.get::<_, i64>(9)? != 0,
                             close_quits_app: row.get::<_, i64>(10)? != 0,
+                            replaygain_pass_track: row.get::<_, i64>(11)? != 0,
+                            replaygain_pass_album: row.get::<_, i64>(12)? != 0,
+                            replaygain_mode: row.get(13)?,
                         })
                     },
                 )
@@ -3542,10 +3583,12 @@ impl SettingsStore for SqliteStore {
                 conn.execute(
                     "UPDATE app_settings
                      SET volume = ?1, advanced_mode = ?2, high_contrast = ?3,
-                         replaygain_enabled = ?4, shuffle = ?5, repeat_mode = ?6,
+                         replaygain_enabled = ?4,
+                         shuffle = ?5, repeat_mode = ?6,
                          skip_hidden_files = ?7, scan_formats = ?8,
                          read_embedded_artwork = ?9, smart_lists_collapsed = ?10,
-                         close_quits_app = ?11
+                         close_quits_app = ?11, replaygain_pass_track = ?12,
+                         replaygain_pass_album = ?13, replaygain_mode = ?14
                      WHERE id = 1",
                     rusqlite::params![
                         scalars.volume,
@@ -3559,6 +3602,9 @@ impl SettingsStore for SqliteStore {
                         i64::from(scalars.read_embedded_artwork),
                         i64::from(scalars.smart_lists_collapsed),
                         i64::from(scalars.close_quits_app),
+                        i64::from(scalars.replaygain_pass_track),
+                        i64::from(scalars.replaygain_pass_album),
+                        scalars.replaygain_mode,
                     ],
                 )
                 .map(|_| ())

@@ -48,6 +48,9 @@ What riff is, what it does, and how to use it.
 - [ADR 0009: Vertical crate split of the backend](adr/0009-vertical-crate-split-of-the-backend.md) — the backend is split by capability into a strict, compiler-enforced dependency chain.
 - [ADR 0010: Inline tag editor in the detail panel](adr/0010-inline-tag-editor-in-the-detail-panel.md) — the Edit Tags modal moves into the detail panel as an inline editor with album-level tag aggregation and batch save.
 - [ADR 0011: Retire the grid browser layout and the content top bar](adr/0011-retire-grid-and-content-top-bar-search-in-titlebar.md) — the search field becomes shared titlebar chrome; the browser is permanently list-only and its persisted setting is migrated out of the store.
+- [ADR 0012: A narrow port gets a real adapter, not a blanket impl](adr/0012-narrow-port-gets-a-real-adapter.md) — `StorePlaybackLibrary` replaces the blanket impl so the engine's port stays fakeable.
+- [ADR 0013: ReplayGain 2.0 via BS.1770, never 1.0](adr/0013-replaygain-2-via-bs1770-never-1.md) — the measurement standard, the −18 LUFS reference, and the `ebur128` adapter behind the `LoudnessAnalyzer` port.
+- [ADR 0014: File tags are the source of truth; the Store mirrors them](adr/0014-file-tags-are-the-source-of-truth.md) — file-first write ordering and the Library Scan as the reconciler of external edits, made the general rule of the scan's and Tag Edit's semantics.
 
 The numbering skips 0008: no ADR 0008 was ever written, so a missing `0008` is expected rather than a lost file.
 

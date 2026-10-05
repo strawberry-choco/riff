@@ -7,7 +7,9 @@
 // `riff-infra`; every pre-existing assertion is unchanged.
 
 use super::*;
-use riff_library::app::traits::{CoverLoader, MetadataWriter, RequestedSize};
+use riff_library::app::traits::{
+    CoverLoader, MetadataWriter, ReplayGainTags, ReplayGainWriter, RequestedSize,
+};
 
 // --- ReplayGain tag parsing (pure) -------------------------------------------
 
@@ -42,7 +44,7 @@ fn test_parse_replaygain_gain_rejects_garbage() {
 
 /// Write a tiny but fully valid PCM WAV file (0.1 s of mono 8 kHz audio)
 /// so the tag writer/reader have a real audio file to work on.
-fn write_minimal_wav(path: &std::path::Path) {
+pub(crate) fn write_minimal_wav(path: &std::path::Path) {
     const SAMPLES: u32 = 800; // 0.1 s at 8 kHz
     let data_size = SAMPLES * 2; // 16-bit mono
     let mut bytes = Vec::with_capacity(44 + data_size as usize);
@@ -183,7 +185,7 @@ fn test_lofty_writer_extended_fields_round_trip() {
 
 /// Write a scratch WAV carrying `items` on its primary tag, using lofty
 /// directly so the fixture does not depend on riff's own writer.
-fn seed_file_with_items(path: &std::path::Path, items: &[(lofty::tag::ItemKey, &str)]) {
+pub(crate) fn seed_file_with_items(path: &std::path::Path, items: &[(lofty::tag::ItemKey, &str)]) {
     use lofty::config::WriteOptions;
     use lofty::file::TaggedFileExt;
     use lofty::read_from_path;
@@ -223,6 +225,38 @@ fn test_reader_parses_replaygain_album_gain_from_seeded_file() {
 }
 
 #[test]
+fn test_reader_parses_replaygain_album_peak_from_seeded_file() {
+    // The album peak rides the same bare-ratio contract as the track peak —
+    // foobar2000, rsgain, and Mp3tag all write it unsuffixed — so a file
+    // tagged by any of them round-trips both album values.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tagged.wav");
+    seed_file_with_items(
+        &path,
+        &[
+            (lofty::tag::ItemKey::ReplayGainTrackGain, "-6.54 dB"),
+            (lofty::tag::ItemKey::ReplayGainTrackPeak, "0.98"),
+            (lofty::tag::ItemKey::ReplayGainAlbumGain, "-7.12 dB"),
+            (lofty::tag::ItemKey::ReplayGainAlbumPeak, "0.810000"),
+        ],
+    );
+
+    let metadata = LoftyMetadataReader::new()
+        .read_metadata(&path)
+        .expect("seeded file must read");
+    assert_eq!(
+        metadata.replaygain_album_gain,
+        Some(-7.12),
+        "album gain keeps parsing through the ` dB`-stripping helper"
+    );
+    assert_eq!(
+        metadata.replaygain_album_peak,
+        Some(0.81),
+        "album peak parses as a bare linear ratio, like the track peak"
+    );
+}
+
+#[test]
 fn test_reader_leaves_replaygain_album_gain_none_when_the_file_carries_no_tag() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("untagged.wav");
@@ -232,6 +266,7 @@ fn test_reader_leaves_replaygain_album_gain_none_when_the_file_carries_no_tag() 
         .read_metadata(&path)
         .expect("bare file must read");
     assert_eq!(metadata.replaygain_album_gain, None);
+    assert_eq!(metadata.replaygain_album_peak, None);
 }
 
 #[test]
@@ -247,6 +282,7 @@ fn test_writer_neither_writes_nor_clobbers_replaygain_tags() {
             (lofty::tag::ItemKey::ReplayGainTrackGain, "-6.54 dB"),
             (lofty::tag::ItemKey::ReplayGainTrackPeak, "0.98"),
             (lofty::tag::ItemKey::ReplayGainAlbumGain, "-7.12 dB"),
+            (lofty::tag::ItemKey::ReplayGainAlbumPeak, "0.810000"),
         ],
     );
 
@@ -267,6 +303,81 @@ fn test_writer_neither_writes_nor_clobbers_replaygain_tags() {
     assert_eq!(metadata.replaygain_track_gain, Some(-6.54));
     assert_eq!(metadata.replaygain_track_peak, Some(0.98));
     assert_eq!(metadata.replaygain_album_gain, Some(-7.12));
+    assert_eq!(metadata.replaygain_album_peak, Some(0.81));
+}
+
+/// A minimal valid MP3 whose ID3v2 tag carries a `COMM` frame with a
+/// malformed language field (`"\x00en"` — exactly what some taggers write).
+/// Hand-built because lofty itself refuses to *create* the malformation;
+/// that strictness at save time is what this test pins the repair against.
+fn write_mp3_with_malformed_comment(path: &std::path::Path) {
+    // ID3v2.3 tag: "ID3" v2.3 flags 0, syncsafe size, one COMM frame whose
+    // language bytes are `\x00en`; then a few MPEG-1 Layer III frames.
+    const FRAME_BODY: &[u8] = &[
+        0x00, // latin-1 encoding
+        0x00, b'e', b'n', // malformed language field
+        0x00, // empty description terminator
+        b'h', b'e', b'l', b'l', b'o', 0x00, // comment text
+    ];
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"ID3\x03\x00\x00");
+    let body_len = 10usize + FRAME_BODY.len();
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, body_len as u8]);
+    bytes.extend_from_slice(b"COMM");
+    bytes.extend_from_slice(&(FRAME_BODY.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&[0x00, 0x00]);
+    bytes.extend_from_slice(FRAME_BODY);
+    // MPEG-1 Layer III 128 kbps / 44.1 kHz frames (header + zero payload).
+    let mut mpeg_frame = vec![0xFF_u8, 0xFB, 0x90, 0x00];
+    mpeg_frame.resize(417, 0);
+    for _ in 0..4 {
+        bytes.extend_from_slice(&mpeg_frame);
+    }
+    std::fs::write(path, bytes).expect("malformed-MP3 fixture must be writable");
+}
+
+/// A file carrying a malformed `COMM` language field (written by some
+/// real-world taggers) would fail EVERY tag write forever: lofty
+/// re-serializes the whole tag on save and rejects the malformed frame.
+/// riff normalizes the language to `XXX` before saving — the comment text
+/// survives, the write lands, and the `ReplayGain` values read back.
+#[test]
+fn test_writer_repairs_a_malformed_comment_language_and_writes_replaygain() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("malformed.mp3");
+    write_mp3_with_malformed_comment(&path);
+
+    // Sanity: the file reads (lofty is lenient on read) and carries the
+    // malformed comment's text.
+    let before = LoftyMetadataReader::new()
+        .read_metadata(&path)
+        .expect("the malformed file must read");
+    assert_eq!(before.comment.as_deref(), Some("hello"));
+
+    LoftyMetadataWriter::new()
+        .write_replaygain(
+            &path,
+            &ReplayGainTags {
+                track_gain: Some(-6.54),
+                track_peak: Some(0.98),
+                album_gain: Some(-7.12),
+                album_peak: Some(0.81),
+            },
+        )
+        .expect("the write must repair the language field and land");
+
+    let metadata = LoftyMetadataReader::new()
+        .read_metadata(&path)
+        .expect("the written file must read");
+    assert_eq!(
+        metadata.comment.as_deref(),
+        Some("hello"),
+        "the comment survives"
+    );
+    assert_eq!(metadata.replaygain_track_gain, Some(-6.54));
+    assert_eq!(metadata.replaygain_track_peak, Some(0.98));
+    assert_eq!(metadata.replaygain_album_gain, Some(-7.12));
+    assert_eq!(metadata.replaygain_album_peak, Some(0.81));
 }
 
 #[test]

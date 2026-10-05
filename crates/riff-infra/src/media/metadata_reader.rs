@@ -13,9 +13,9 @@ use std::time::Duration;
 /// lowercasing the whole value), trims, and parses; malformed values yield
 /// `None`.
 ///
-/// The suffixed form is written by the tooling that measures the gain — riff
-/// reads `ReplayGain` and never writes it, so this parser is the only place
-/// the ` dB` contract is exercised (see the seeded-file reader tests).
+/// The suffixed form is the contract the measuring tooling writes — riff's
+/// own writer included (`LoftyMetadataWriter::write_replaygain`) — so a file
+/// riff has measured parses back through this parser unchanged.
 pub fn parse_replaygain_gain(s: &str) -> Option<f32> {
     let trimmed = s.trim();
     let bytes = trimmed.as_bytes();
@@ -29,6 +29,13 @@ pub fn parse_replaygain_gain(s: &str) -> Option<f32> {
         trimmed
     };
     without_unit.parse::<f32>().ok()
+}
+
+/// Parse an RFC 7845 R128 gain value: an integer in Q7.8 — units of 1/256 dB
+/// — so `-1674` is `−6.5390625 dB`. Malformed values yield `None`.
+fn parse_r128_gain(s: &str) -> Option<f32> {
+    #[allow(clippy::cast_precision_loss)]
+    s.trim().parse::<i32>().ok().map(|raw| raw as f32 / 256.0)
 }
 
 /// Format facts for the richer inherent read API: the stream's shape plus
@@ -85,8 +92,10 @@ impl LoftyMetadataReader {
             .or_else(|| tagged_file.first_tag())
     }
 
-    /// Extract [`TrackMetadata`] from a tag.
-    fn metadata_from_tag(tag: &Tag) -> TrackMetadata {
+    /// Extract [`TrackMetadata`] from a tag, knowing which format the file
+    /// is: Opus carries its `ReplayGain` in the R128 convention per RFC 7845
+    /// (Q7.8 unit encoding), every other format in the RG convention.
+    fn metadata_from_tag(tag: &Tag, opus: bool) -> TrackMetadata {
         let text_val =
             |item: &lofty::tag::TagItem| -> Option<String> { item.value().clone().into_string() };
 
@@ -131,19 +140,47 @@ impl LoftyMetadataReader {
 
         // ReplayGain (Task 4.3): the dedicated `ItemKey` variants are passed
         // by value (`ItemKey` is `Copy` as of lofty 0.25).
-        metadata.replaygain_track_gain = tag
-            .get_string(ItemKey::ReplayGainTrackGain)
-            .and_then(parse_replaygain_gain);
+        //
+        // Gains: on Opus the RFC 7845 R128 items win — an integer in Q7.8
+        // (units of 1/256 dB) — falling back to the RG-convention items other
+        // tools may have written. Peaks have no R128 standard, so they ride
+        // the RG-convention items on every format, bare linear ratios.
+        metadata.replaygain_track_gain = if opus {
+            tag.get_string(ItemKey::R128TrackGain)
+                .and_then(parse_r128_gain)
+                .or_else(|| {
+                    tag.get_string(ItemKey::ReplayGainTrackGain)
+                        .and_then(parse_replaygain_gain)
+                })
+        } else {
+            tag.get_string(ItemKey::ReplayGainTrackGain)
+                .and_then(parse_replaygain_gain)
+        };
         metadata.replaygain_track_peak = tag
             .get_string(ItemKey::ReplayGainTrackPeak)
             .and_then(|s| s.trim().parse::<f32>().ok());
-        // Album gain goes through the gain helper too: it carries the same
-        // ` dB` suffix contract, unlike the bare-ratio peak.
-        metadata.replaygain_album_gain = tag
-            .get_string(ItemKey::ReplayGainAlbumGain)
-            .and_then(parse_replaygain_gain);
+        metadata.replaygain_album_gain = if opus {
+            tag.get_string(ItemKey::R128AlbumGain)
+                .and_then(parse_r128_gain)
+                .or_else(|| {
+                    tag.get_string(ItemKey::ReplayGainAlbumGain)
+                        .and_then(parse_replaygain_gain)
+                })
+        } else {
+            tag.get_string(ItemKey::ReplayGainAlbumGain)
+                .and_then(parse_replaygain_gain)
+        };
+        metadata.replaygain_album_peak = tag
+            .get_string(ItemKey::ReplayGainAlbumPeak)
+            .and_then(|s| s.trim().parse::<f32>().ok());
 
         metadata
+    }
+
+    /// Whether the tagged file is an Opus stream — the one format whose
+    /// `ReplayGain` tags follow the RFC 7845 R128 convention.
+    fn is_opus(tagged_file: &TaggedFile) -> bool {
+        tagged_file.file_type() == lofty::file::FileType::Opus
     }
 
     /// Locate embedded JPEG/PNG cover art in a tag, if any.
@@ -180,7 +217,7 @@ impl LoftyMetadataReader {
         let Some(tag) = Self::best_tag(&tagged_file) else {
             return Ok(TrackMetadata::default());
         };
-        Ok(Self::metadata_from_tag(tag))
+        Ok(Self::metadata_from_tag(tag, Self::is_opus(&tagged_file)))
     }
 
     pub fn read_cover_source(&self, path: &Path) -> Result<CoverSource, LibraryError> {
@@ -207,8 +244,9 @@ impl LoftyMetadataReader {
     > {
         let tagged_file = Self::read_tagged_file(path)?;
 
-        let metadata = Self::best_tag(&tagged_file)
-            .map_or_else(TrackMetadata::default, Self::metadata_from_tag);
+        let metadata = Self::best_tag(&tagged_file).map_or_else(TrackMetadata::default, |tag| {
+            Self::metadata_from_tag(tag, Self::is_opus(&tagged_file))
+        });
         let cover_source =
             Self::best_tag(&tagged_file).map_or(CoverSource::None, Self::cover_from_tag);
         let audio_format = Self::audio_format_from(&tagged_file);

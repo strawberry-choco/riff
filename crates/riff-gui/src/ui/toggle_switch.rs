@@ -157,6 +157,48 @@ pub fn paint_checkbox_with_focus(
     }
 }
 
+/// The standalone checkbox: the same square-with-checkmark treatment as
+/// [`paint_checkbox_box`], painted at its own larger size and with a sharper
+/// corner radius, so the SQUARE shape reads at a glance — a 14px box at the
+/// small radius rounds nearly into a circle and reads as a radio. Use this
+/// for a control that stands on its own (the ReplayGain Pass card's options)
+/// rather than embedded in a row that already labels the box.
+pub fn paint_square_checkbox_with_focus(
+    painter: &egui::Painter,
+    palette: &Palette,
+    rect: egui::Rect,
+    checked: bool,
+    focused: bool,
+) {
+    painter.rect_filled(
+        rect,
+        theme::RADIUS_XS,
+        if checked {
+            palette.brand_primary
+        } else {
+            palette.surface_2
+        },
+    );
+    painter.rect_stroke(
+        rect,
+        theme::RADIUS_XS,
+        egui::Stroke::new(1.0_f32, palette.border),
+        egui::StrokeKind::Inside,
+    );
+    if checked {
+        let side = rect.width();
+        let a = egui::pos2(rect.left() + side * 0.25, rect.center().y + side * 0.05);
+        let b = egui::pos2(rect.left() + side * 0.42, rect.bottom() - side * 0.25);
+        let c = egui::pos2(rect.right() - side * 0.2, rect.top() + side * 0.25);
+        let check = egui::Stroke::new(2.0_f32, palette.on_brand);
+        painter.line_segment([a, b], check);
+        painter.line_segment([b, c], check);
+    }
+    if let Some(ring) = theme::focus_ring_stroke(palette, focused) {
+        painter.rect_stroke(rect, theme::RADIUS_XS, ring, egui::StrokeKind::Inside);
+    }
+}
+
 /// Register a checkbox's accessible state on its interaction `response`: a
 /// [`egui::WidgetType::Checkbox`] carrying `checked` and whether the control is
 /// enabled, so assistive tech reads the same selected state the toggle does.

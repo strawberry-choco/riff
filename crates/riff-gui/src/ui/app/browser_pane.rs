@@ -1119,6 +1119,7 @@ impl RiffApp {
                             library,
                             playback,
                             transport: self.transport.as_ref(),
+                            passes: self.passes.as_ref(),
                             views: &mut self.views,
                         },
                     );
@@ -1167,6 +1168,7 @@ impl RiffApp {
                             library,
                             playback,
                             transport: self.transport.as_ref(),
+                            passes: self.passes.as_ref(),
                             views: &mut self.views,
                         },
                     );

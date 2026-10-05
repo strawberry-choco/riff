@@ -43,6 +43,7 @@ pub enum NoticeSource {
     Library,
     Settings,
     System,
+    ReplayGain,
 }
 
 #[derive(Debug, Clone, PartialEq)]

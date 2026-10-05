@@ -1,6 +1,7 @@
 use crate::ui::button::{self as button, TextButton, Variant};
 use crate::ui::icons::{Icon, IconCache};
 use crate::ui::now_playing::styled_font;
+use crate::ui::theme::geometry::settings::WATCH_BOX;
 use crate::ui::theme::geometry::settings::{
     ACTION_BTN_H, ACTIONS_ROW_GAP, ACTIONS_ROW_H, CARD_BORDER_W, CHIP_GAP, CHIP_H, CHIP_LABEL_PAD,
     CHIP_ROW_NO_WRAP_W, COLUMN_GAP, DOT_SIZE, FOOTER_ACTION_GAP, FOOTER_H, HEADER_GAP,
@@ -8,13 +9,13 @@ use crate::ui::theme::geometry::settings::{
     NAV_HAIRLINE_W, NAV_ITEM_H, NAV_TOP_INSET, NAV_W, PAGE_HEADER_H, PAGE_PAD, PANE_PAD,
     PREF_ROW_H, PREF_ROW_PAD, PREF_ROW_TEXT_GAP, PREF_ROW_TEXT_INSET, READINESS_GAP, ROW_BTN_PAD,
     SCAN_CARD_H, SCAN_CARD_PAD, SECTION_GAP, SMALL_BTN_H, SMALL_BTN_LABEL_PAD, TRASH_BTN,
-    WATCH_BOX,
 };
 use crate::ui::theme::{self, Palette};
 use eframe::egui;
 use riff_backend::app::MutexExt;
+use riff_backend::app::replaygain_pass::PassCommand;
 use riff_backend::app::state::{
-    LibrarySession, LibraryStatus, PlaybackSession, ViewMode, WatchState,
+    LibrarySession, LibraryStatus, PlaybackSession, ReplayGainMode, ViewMode, WatchState,
 };
 use riff_backend::app::store::{AUDIO_EXTENSIONS, FullScanSummary};
 use std::path::PathBuf;
@@ -330,6 +331,17 @@ pub const PREF_REPLAYGAIN: (&str, &str) = (
     "ReplayGain",
     "Normalize loudness across tracks when available.",
 );
+/// Playback pane copy for the `ReplayGain Mode` row: which of the two pairs
+/// playback levels at.
+pub const PREF_REPLAYGAIN_MODE: (&str, &str) = (
+    "ReplayGain Mode",
+    "Which values a Track plays at: its own, or its Album's.",
+);
+
+/// Playback pane section heading for the `ReplayGain` Mode choice.
+pub const SECTION_REPLAYGAIN_MODE: &str = "REPLAYGAIN MODE";
+/// Advanced pane section heading for the library-wide `ReplayGain` Pass.
+pub const SECTION_REPLAYGAIN_PASS: &str = "REPLAYGAIN PASS";
 
 /// Library pane section headings (design-handoff issue 12), uppercased for
 /// display like [`SECTION_LIBRARIES`].
@@ -415,6 +427,9 @@ pub struct SettingsContent {
     pub high_contrast: bool,
     /// `ReplayGain` preference (drives the third toggle).
     pub replaygain_enabled: bool,
+    /// Which `ReplayGain` pair playback levels at — the Mode card's current
+    /// choice, beside the toggle that turns the whole feature off.
+    pub replaygain_mode: ReplayGainMode,
     /// The pane-level "Watch for changes" toggle: `true` when at least one
     /// root is being watched. Turning it off stops every watcher; turning
     /// it on starts one per root.
@@ -428,6 +443,20 @@ pub struct SettingsContent {
     /// Whether the title-bar close button quits the app instead of minimizing
     /// to the tray (Advanced pane; rendered only where a tray exists).
     pub close_quits_app: bool,
+    /// The library-wide `ReplayGain` Pass's Settings gating: which value kinds
+    /// a pass writes (persisted) and whether Force is chosen for this run
+    /// (session-local, never persisted — an automatic pass never redoes
+    /// finished work).
+    pub pass_track: bool,
+    pub pass_album: bool,
+    pub pass_force: bool,
+    /// Whether a `ReplayGain` Pass is running on its worker right now: the
+    /// button is disabled while it is, so a second pass cannot start.
+    pub pass_running: bool,
+    /// The running pass's `(done, total)` measurement progress.
+    pub pass_progress: (usize, usize),
+    /// The last settled pass's outcome line, `None` until one has run.
+    pub pass_outcome: Option<String>,
     /// The last completed full scan's summary, `None` when never scanned.
     pub last_scan: Option<FullScanSummary>,
 }
@@ -462,6 +491,17 @@ pub enum SettingsAction {
     SetHighContrast(bool),
     /// Set the `ReplayGain` preference.
     SetReplayGain(bool),
+    /// Choose which `ReplayGain` pair playback levels at.
+    SetReplayGainMode(ReplayGainMode),
+    /// Gate the library-wide `ReplayGain` Pass's value kinds (persisted).
+    SetReplayGainPassTrack(bool),
+    SetReplayGainPassAlbum(bool),
+    /// Choose Force for the next pass (session-local, never persisted).
+    SetReplayGainPassForce(bool),
+    /// Start one library-wide `ReplayGain` Pass, gated by the checkboxes.
+    StartReplayGainPass,
+    /// Ask the running pass to stop; everything committed stays.
+    CancelReplayGainPass,
     /// Start or stop watching every configured root (the pane's
     /// "Watch for changes" toggle).
     SetWatchAll(bool),
@@ -1905,9 +1945,369 @@ fn preferences_card(
     });
 }
 
-/// One preference row: title + muted description on the left, the toggle
-/// switch on the right. The whole row is clickable, like the mockup's
-/// wrapping `<label>`.
+fn artwork_card(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    content: &SettingsContent,
+    actions: &mut Vec<SettingsAction>,
+) {
+    settings_card(ui, palette, Some(4), |ui| {
+        preference_row(
+            ui,
+            palette,
+            Preference::ReadEmbedded,
+            content.read_embedded_artwork,
+            actions,
+        );
+    });
+}
+fn info_lines(ui: &mut egui::Ui, palette: &Palette) {
+    let mut lines =
+        vec!["Smart playlists update automatically from play history and date added.".to_owned()];
+    #[cfg(not(target_os = "linux"))]
+    lines.push(
+        "The system tray icon keeps the player reachable when the window is closed.".to_owned(),
+    );
+    lines.push(
+        "Folder pickers use the native dialog on macOS and Windows; a text input is used on \
+         Linux."
+            .to_owned(),
+    );
+
+    for line in lines {
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), theme::TEXT_SM + 8.0),
+            egui::Sense::hover(),
+        );
+        ui.painter_at(rect).text(
+            egui::pos2(rect.left(), rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            line,
+            styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM),
+            palette.ink_3,
+        );
+        ui.add_space(8.0);
+    }
+}
+fn library_lower_sections(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    content: &SettingsContent,
+    actions: &mut Vec<SettingsAction>,
+) {
+    preferences_card(
+        ui,
+        palette,
+        content,
+        actions,
+        &[Preference::WatchChanges, Preference::SkipHidden],
+    );
+
+    ui.add_space(SECTION_GAP);
+    section_header(ui, palette, SECTION_FORMATS);
+    ui.add_space(HEADER_GAP);
+    formats_card(ui, cache, palette, content, actions);
+
+    ui.add_space(SECTION_GAP);
+    section_header(ui, palette, SECTION_SCAN_STATUS);
+    ui.add_space(HEADER_GAP);
+    scan_status_card(ui, cache, palette, content, actions);
+
+    ui.add_space(SECTION_GAP);
+    section_header(ui, palette, SECTION_ARTWORK);
+    ui.add_space(HEADER_GAP);
+    artwork_card(ui, palette, content, actions);
+}
+fn library_pane(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    content: &SettingsContent,
+    actions: &mut Vec<SettingsAction>,
+) {
+    // The Libraries card keeps the full width: its rows and
+    // its Add Library / Scan All actions simply get more
+    // room than they had in the single stack.
+    section_header(ui, palette, SECTION_LIBRARIES);
+    ui.add_space(HEADER_GAP);
+    libraries_card(ui, cache, palette, content, actions);
+
+    ui.add_space(SECTION_GAP);
+    // The lower four sections settle into two balanced
+    // columns above MIN_TWO_COL_W and one stack below it.
+    // `settings_pane_columns` owns the branch; this only
+    // allocates the rects it hands back, the same idiom the
+    // elastic stage uses for its columns.
+    match settings_pane_columns(ui.available_width()) {
+        LibraryPaneColumns::Stacked { width } => {
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(width, ui.available_height()),
+                    ))
+                    .id_salt("settings-pane-column"),
+                |ui| library_lower_sections(ui, cache, palette, content, actions),
+            );
+        }
+        LibraryPaneColumns::TwoColumns { left, right } => {
+            ui.horizontal_top(|ui| {
+                // Left column: Preferences, then Formats.
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_min_size(
+                            ui.cursor().min,
+                            egui::vec2(left, ui.available_height()),
+                        ))
+                        .layout(egui::Layout::top_down(egui::Align::Min))
+                        .id_salt(("settings-pane-column", 0)),
+                    |ui| {
+                        preferences_card(
+                            ui,
+                            palette,
+                            content,
+                            actions,
+                            &[Preference::WatchChanges, Preference::SkipHidden],
+                        );
+
+                        ui.add_space(SECTION_GAP);
+                        section_header(ui, palette, SECTION_FORMATS);
+                        ui.add_space(HEADER_GAP);
+                        formats_card(ui, cache, palette, content, actions);
+                    },
+                );
+
+                // Right column: Last Full Scan, then Artwork.
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_min_size(
+                            ui.cursor().min,
+                            egui::vec2(right, ui.available_height()),
+                        ))
+                        .layout(egui::Layout::top_down(egui::Align::Min))
+                        .id_salt(("settings-pane-column", 1)),
+                    |ui| {
+                        section_header(ui, palette, SECTION_SCAN_STATUS);
+                        ui.add_space(HEADER_GAP);
+                        scan_status_card(ui, cache, palette, content, actions);
+
+                        ui.add_space(SECTION_GAP);
+                        section_header(ui, palette, SECTION_ARTWORK);
+                        ui.add_space(HEADER_GAP);
+                        artwork_card(ui, palette, content, actions);
+                    },
+                );
+            });
+        }
+    }
+}
+fn modal_header(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    actions: &mut Vec<SettingsAction>,
+) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), PAGE_HEADER_H),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+
+    let heading_font = styled_font(ui, egui::TextStyle::Heading, theme::TEXT_XL);
+    let galley = painter.layout_no_wrap("Settings".to_owned(), heading_font, palette.ink);
+    painter.galley(
+        egui::pos2(rect.left() + 16.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        palette.ink,
+    );
+
+    // Close control at the header's right edge, hugging its content, painted
+    // through the shared [`Variant::Caption`] primitive.
+    let body_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM);
+    let label_galley = painter.layout_no_wrap("Back".to_owned(), body_font, palette.ink_2);
+    let btn_w = 12.0 + 16.0 + 8.0 + label_galley.size().x + 12.0;
+    let btn_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - btn_w - 12.0, rect.center().y - 16.0),
+        egui::vec2(btn_w, 32.0),
+    );
+    if button::text_button(
+        ui,
+        cache,
+        palette,
+        &TextButton {
+            id: egui::Id::new("settings_back"),
+            rect: btn_rect,
+            label: "Back",
+            a11y: "Back to Library",
+            tooltip: None,
+            icon: Some(Icon::ArrowLeft),
+            small: false,
+            variant: Variant::Caption,
+            enabled: true,
+        },
+    ) {
+        actions.push(SettingsAction::Back);
+    }
+}
+fn nav_item(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    section: SettingsSection,
+    selected: bool,
+    actions: &mut Vec<SettingsAction>,
+) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), NAV_ITEM_H),
+        egui::Sense::hover(),
+    );
+    let response = ui.interact(
+        rect,
+        egui::Id::new(("settings_nav", section.label())),
+        egui::Sense::click(),
+    );
+    let painter = ui.painter_at(rect);
+    if selected {
+        painter.rect_filled(
+            rect.shrink2(egui::vec2(8.0, 0.0)),
+            theme::RADIUS_MD,
+            palette.surface_2,
+        );
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left() + 8.0, rect.top() + 6.0),
+                egui::pos2(rect.left() + 11.0, rect.bottom() - 6.0),
+            ),
+            theme::RADIUS_FULL,
+            palette.brand_primary,
+        );
+    } else if response.hovered() {
+        painter.rect_filled(
+            rect.shrink2(egui::vec2(8.0, 0.0)),
+            theme::RADIUS_MD,
+            palette.row_hover,
+        );
+    }
+    painter.text(
+        egui::pos2(rect.left() + 20.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        section.label(),
+        styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM),
+        if selected { palette.ink } else { palette.ink_2 },
+    );
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, section.label()));
+    if response.clicked() {
+        actions.push(SettingsAction::SelectSection(section));
+    }
+}
+fn paint_preference_text(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    rect: egui::Rect,
+    copy: &(&str, &str),
+    title_font: egui::FontId,
+    desc_font: egui::FontId,
+    desc_galley: Option<Arc<egui::Galley>>,
+    title_h: f32,
+) {
+    let painter = ui.painter_at(rect);
+    if let Some(wrapped) = desc_galley {
+        let top = rect.top() + PREF_ROW_TEXT_INSET;
+        painter.galley(
+            egui::pos2(rect.left() + PREF_ROW_PAD, top),
+            painter.layout_no_wrap(copy.0.to_owned(), title_font, palette.ink),
+            palette.ink,
+        );
+        painter.galley(
+            egui::pos2(
+                rect.left() + PREF_ROW_PAD,
+                top + title_h + PREF_ROW_TEXT_GAP,
+            ),
+            wrapped,
+            palette.ink_3,
+        );
+    } else {
+        painter.text(
+            egui::pos2(rect.left() + PREF_ROW_PAD, rect.top() + PREF_ROW_TEXT_INSET),
+            egui::Align2::LEFT_TOP,
+            copy.0,
+            title_font,
+            palette.ink,
+        );
+        painter.text(
+            egui::pos2(
+                rect.left() + PREF_ROW_PAD,
+                rect.bottom() - PREF_ROW_TEXT_INSET,
+            ),
+            egui::Align2::LEFT_BOTTOM,
+            copy.1,
+            desc_font,
+            palette.ink_3,
+        );
+    }
+}
+
+// --- Library Path input (Linux text flow) -----------------------------------------
+//
+// What the input draws and what the listener chose; the filesystem probe, the
+// session registration, and the durable write are the host's Library Path
+// adapter (`ui::app::library_picker`).
+
+/// What the Library Path input shows, all of it resolved by the host: the draft
+/// being typed, the rejection the last attempt earned, and the directory
+/// suggestions for what is typed so far.
+pub struct PathInput<'a> {
+    pub text: &'a mut String,
+    pub error: Option<&'a str>,
+    pub suggestions: &'a [PathBuf],
+}
+
+/// What the listener did to the input. The host decides what each one means
+/// for the Library Path facts and the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathInputAction {
+    /// The typed path should become a Library Path.
+    Confirm,
+    /// The flow is abandoned; the draft is the host's to clear.
+    Cancel,
+    /// A suggestion was taken into the field to keep drilling with.
+    Complete(PathBuf),
+}
+
+/// Render the text-based folder picker (no native dialog on Linux), reported as
+/// typed actions. Pure presentation: no filesystem read, no session, no store —
+/// whether a candidate is a root is the host's decision.
+pub fn path_input(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    input: &mut PathInput<'_>,
+) -> Vec<PathInputAction> {
+    let mut actions = Vec::new();
+    if let Some(error) = input.error {
+        ui.colored_label(palette.error, error);
+    }
+    ui.horizontal(|ui| {
+        ui.label("Path:");
+        ui.text_edit_singleline(input.text);
+        if ui.button("Confirm").clicked() {
+            actions.push(PathInputAction::Confirm);
+        }
+        if ui.button("Cancel").clicked() {
+            actions.push(PathInputAction::Cancel);
+        }
+    });
+    for suggestion in input.suggestions {
+        let label = suggestion.to_string_lossy().to_string();
+        if ui
+            .selectable_label(false, format!("\u{1F4C1} {label}"))
+            .clicked()
+        {
+            actions.push(PathInputAction::Complete(suggestion.clone()));
+        }
+    }
+    actions
+}
 fn preference_row(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -1997,46 +2397,71 @@ fn preference_row(
         actions.push(pref.action(!checked));
     }
 }
-
-/// The Advanced & platform info section: muted factual lines. The tray line
-/// exists only where a tray exists (decision 002); the picker line covers
-/// both platform splits in one sentence, as the mockup writes it.
-fn info_lines(ui: &mut egui::Ui, palette: &Palette) {
-    let mut lines =
-        vec!["Smart playlists update automatically from play history and date added.".to_owned()];
-    #[cfg(not(target_os = "linux"))]
-    lines.push(
-        "The system tray icon keeps the player reachable when the window is closed.".to_owned(),
-    );
-    lines.push(
-        "Folder pickers use the native dialog on macOS and Windows; a text input is used on \
-         Linux."
-            .to_owned(),
-    );
-
-    for line in lines {
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), theme::TEXT_SM + 8.0),
-            egui::Sense::hover(),
-        );
-        ui.painter_at(rect).text(
-            egui::pos2(rect.left(), rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            line,
-            styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM),
-            palette.ink_3,
-        );
-        ui.add_space(8.0);
-    }
+fn section_pane(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    content: &SettingsContent,
+    current: SettingsSection,
+    actions: &mut Vec<SettingsAction>,
+) {
+    egui::ScrollArea::vertical()
+        .id_salt("settings_pane")
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            egui::Frame::new()
+                .inner_margin(egui::Margin::from(PANE_PAD))
+                .show(ui, |ui| match current {
+                    SettingsSection::Library => {
+                        library_pane(ui, cache, palette, content, actions);
+                    }
+                    SettingsSection::Advanced => {
+                        // "Quit on close" is offered only where a tray exists:
+                        // on Linux there is no tray, so closing always quits
+                        // and the choice would be inert (decision 002).
+                        #[cfg(not(target_os = "linux"))]
+                        const ADVANCED_PREFS: &[Preference] =
+                            &[Preference::Advanced, Preference::CloseQuitsApp];
+                        #[cfg(target_os = "linux")]
+                        const ADVANCED_PREFS: &[Preference] = &[Preference::Advanced];
+                        preferences_card(ui, palette, content, actions, ADVANCED_PREFS);
+                        ui.add_space(SECTION_GAP);
+                        section_header(ui, palette, SECTION_REPLAYGAIN_PASS);
+                        ui.add_space(HEADER_GAP);
+                        replaygain_pass_card(ui, cache, palette, content, actions);
+                        ui.add_space(SECTION_GAP);
+                        section_header(ui, palette, SECTION_ADVANCED_INFO);
+                        ui.add_space(HEADER_GAP);
+                        info_lines(ui, palette);
+                    }
+                    SettingsSection::Playback => {
+                        preferences_card(ui, palette, content, actions, &[Preference::ReplayGain]);
+                        ui.add_space(SECTION_GAP);
+                        section_header(ui, palette, SECTION_REPLAYGAIN_MODE);
+                        ui.add_space(HEADER_GAP);
+                        replaygain_mode_card(ui, cache, palette, content, actions);
+                    }
+                    SettingsSection::Appearance => {
+                        preferences_card(
+                            ui,
+                            palette,
+                            content,
+                            actions,
+                            &[Preference::HighContrast],
+                        );
+                    }
+                    SettingsSection::About => {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} settings are not implemented yet.",
+                                current.label()
+                            ))
+                            .color(palette.ink_3),
+                        );
+                    }
+                });
+        });
 }
-
-// --- Sectioned modal (issue 11) --------------------------------------------------
-
-/// Draw the sectioned Settings modal (Issue 11): a centered card with a
-/// header, a left nav listing [`SettingsSection::ALL`], and the current
-/// section's pane. Must run inside the shell's central stage panel; reports
-/// every interaction as [`SettingsAction`]s so the app adapter applies them
-/// through its state/command/store paths.
 pub fn show_settings_modal(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -2104,492 +2529,345 @@ pub fn show_settings_modal(
     actions
 }
 
-/// The page header: the "Settings" xl heading with a bordered close
-/// (arrow-left) control whose activation reports [`SettingsAction::Back`].
-/// Spans the full stage width. Named `modal_header` from when the page was a
-/// floating card; the name is kept to avoid churn.
-fn modal_header(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    actions: &mut Vec<SettingsAction>,
-) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), PAGE_HEADER_H),
-        egui::Sense::hover(),
-    );
-    let painter = ui.painter_at(rect);
-
-    let heading_font = styled_font(ui, egui::TextStyle::Heading, theme::TEXT_XL);
-    let galley = painter.layout_no_wrap("Settings".to_owned(), heading_font, palette.ink);
-    painter.galley(
-        egui::pos2(rect.left() + 16.0, rect.center().y - galley.size().y / 2.0),
-        galley,
-        palette.ink,
-    );
-
-    // Close control at the header's right edge, hugging its content, painted
-    // through the shared [`Variant::Caption`] primitive.
-    let body_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM);
-    let label_galley = painter.layout_no_wrap("Back".to_owned(), body_font, palette.ink_2);
-    let btn_w = 12.0 + 16.0 + 8.0 + label_galley.size().x + 12.0;
-    let btn_rect = egui::Rect::from_min_size(
-        egui::pos2(rect.right() - btn_w - 12.0, rect.center().y - 16.0),
-        egui::vec2(btn_w, 32.0),
-    );
-    if button::text_button(
-        ui,
-        cache,
-        palette,
-        &TextButton {
-            id: egui::Id::new("settings_back"),
-            rect: btn_rect,
-            label: "Back",
-            a11y: "Back to Library",
-            tooltip: None,
-            icon: Some(Icon::ArrowLeft),
-            small: false,
-            variant: Variant::Caption,
-            enabled: true,
-        },
-    ) {
-        actions.push(SettingsAction::Back);
-    }
-}
-
-/// One left-nav row. The active section is visually indicated: a surface fill
-/// plus a brand accent bar and full ink, against muted ink for the rest.
-fn nav_item(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    section: SettingsSection,
-    selected: bool,
-    actions: &mut Vec<SettingsAction>,
-) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), NAV_ITEM_H),
-        egui::Sense::hover(),
-    );
-    let response = ui.interact(
-        rect,
-        egui::Id::new(("settings_nav", section.label())),
-        egui::Sense::click(),
-    );
-    let painter = ui.painter_at(rect);
-    if selected {
-        painter.rect_filled(
-            rect.shrink2(egui::vec2(8.0, 0.0)),
-            theme::RADIUS_MD,
-            palette.surface_2,
-        );
-        painter.rect_filled(
-            egui::Rect::from_min_max(
-                egui::pos2(rect.left() + 8.0, rect.top() + 6.0),
-                egui::pos2(rect.left() + 11.0, rect.bottom() - 6.0),
-            ),
-            theme::RADIUS_FULL,
-            palette.brand_primary,
-        );
-    } else if response.hovered() {
-        painter.rect_filled(
-            rect.shrink2(egui::vec2(8.0, 0.0)),
-            theme::RADIUS_MD,
-            palette.row_hover,
-        );
-    }
-    painter.text(
-        egui::pos2(rect.left() + 20.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        section.label(),
-        styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM),
-        if selected { palette.ink } else { palette.ink_2 },
-    );
-    response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, section.label()));
-    if response.clicked() {
-        actions.push(SettingsAction::SelectSection(section));
-    }
-}
-
-/// The Library pane: the full-width Libraries card, then the lower four
-/// sections in two balanced columns or one stack, per
-/// [`settings_pane_columns`].
-fn library_pane(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    content: &SettingsContent,
-    actions: &mut Vec<SettingsAction>,
-) {
-    // The Libraries card keeps the full width: its rows and
-    // its Add Library / Scan All actions simply get more
-    // room than they had in the single stack.
-    section_header(ui, palette, SECTION_LIBRARIES);
-    ui.add_space(HEADER_GAP);
-    libraries_card(ui, cache, palette, content, actions);
-
-    ui.add_space(SECTION_GAP);
-    // The lower four sections settle into two balanced
-    // columns above MIN_TWO_COL_W and one stack below it.
-    // `settings_pane_columns` owns the branch; this only
-    // allocates the rects it hands back, the same idiom the
-    // elastic stage uses for its columns.
-    match settings_pane_columns(ui.available_width()) {
-        LibraryPaneColumns::Stacked { width } => {
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(egui::Rect::from_min_size(
-                        ui.cursor().min,
-                        egui::vec2(width, ui.available_height()),
-                    ))
-                    .id_salt("settings-pane-column"),
-                |ui| library_lower_sections(ui, cache, palette, content, actions),
-            );
-        }
-        LibraryPaneColumns::TwoColumns { left, right } => {
-            ui.horizontal_top(|ui| {
-                // Left column: Preferences, then Formats.
-                ui.scope_builder(
-                    egui::UiBuilder::new()
-                        .max_rect(egui::Rect::from_min_size(
-                            ui.cursor().min,
-                            egui::vec2(left, ui.available_height()),
-                        ))
-                        .layout(egui::Layout::top_down(egui::Align::Min))
-                        .id_salt(("settings-pane-column", 0)),
-                    |ui| {
-                        preferences_card(
-                            ui,
-                            palette,
-                            content,
-                            actions,
-                            &[Preference::WatchChanges, Preference::SkipHidden],
-                        );
-
-                        ui.add_space(SECTION_GAP);
-                        section_header(ui, palette, SECTION_FORMATS);
-                        ui.add_space(HEADER_GAP);
-                        formats_card(ui, cache, palette, content, actions);
-                    },
-                );
-
-                // Right column: Last Full Scan, then Artwork.
-                ui.scope_builder(
-                    egui::UiBuilder::new()
-                        .max_rect(egui::Rect::from_min_size(
-                            ui.cursor().min,
-                            egui::vec2(right, ui.available_height()),
-                        ))
-                        .layout(egui::Layout::top_down(egui::Align::Min))
-                        .id_salt(("settings-pane-column", 1)),
-                    |ui| {
-                        section_header(ui, palette, SECTION_SCAN_STATUS);
-                        ui.add_space(HEADER_GAP);
-                        scan_status_card(ui, cache, palette, content, actions);
-
-                        ui.add_space(SECTION_GAP);
-                        section_header(ui, palette, SECTION_ARTWORK);
-                        ui.add_space(HEADER_GAP);
-                        artwork_card(ui, palette, content, actions);
-                    },
-                );
-            });
-        }
-    }
-}
-
-/// Paint a preference row's title and description.
+/// The `ReplayGain Mode` card (Settings → Playback): the row's copy beside one
+/// chip per Mode, the chosen one filled.
 ///
-/// The single-line form reproduces the previous fixed geometry exactly (title
-/// pinned to the top inset, description to the bottom inset), which is what
-/// keeps the pinned widths untouched. The stacked form stacks the title above
-/// the wrapped description using the title's own measured height.
-#[allow(clippy::too_many_arguments)]
-fn paint_preference_text(
+/// The chips are the whole control and carry no Off of their own — the
+/// `ReplayGain` toggle above this card is what turns the feature off, and the
+/// Mode only says which pair it applies when it is on.
+fn replaygain_mode_card(
     ui: &mut egui::Ui,
-    palette: &Palette,
-    rect: egui::Rect,
-    copy: &(&str, &str),
-    title_font: egui::FontId,
-    desc_font: egui::FontId,
-    desc_galley: Option<Arc<egui::Galley>>,
-    title_h: f32,
-) {
-    let painter = ui.painter_at(rect);
-    if let Some(wrapped) = desc_galley {
-        let top = rect.top() + PREF_ROW_TEXT_INSET;
-        painter.galley(
-            egui::pos2(rect.left() + PREF_ROW_PAD, top),
-            painter.layout_no_wrap(copy.0.to_owned(), title_font, palette.ink),
-            palette.ink,
-        );
-        painter.galley(
-            egui::pos2(
-                rect.left() + PREF_ROW_PAD,
-                top + title_h + PREF_ROW_TEXT_GAP,
-            ),
-            wrapped,
-            palette.ink_3,
-        );
-    } else {
-        painter.text(
-            egui::pos2(rect.left() + PREF_ROW_PAD, rect.top() + PREF_ROW_TEXT_INSET),
-            egui::Align2::LEFT_TOP,
-            copy.0,
-            title_font,
-            palette.ink,
-        );
-        painter.text(
-            egui::pos2(
-                rect.left() + PREF_ROW_PAD,
-                rect.bottom() - PREF_ROW_TEXT_INSET,
-            ),
-            egui::Align2::LEFT_BOTTOM,
-            copy.1,
-            desc_font,
-            palette.ink_3,
-        );
-    }
-}
-
-/// The Artwork card: just the "Read embedded artwork" preference. The
-/// "Missing artwork" strategy row and the separator above nothing are gone
-/// (ticket 03).
-fn artwork_card(
-    ui: &mut egui::Ui,
+    cache: &mut IconCache,
     palette: &Palette,
     content: &SettingsContent,
     actions: &mut Vec<SettingsAction>,
 ) {
     settings_card(ui, palette, Some(4), |ui| {
-        preference_row(
+        let copy = PREF_REPLAYGAIN_MODE;
+        let modes = [
+            ("Track", ReplayGainMode::Track),
+            ("Album", ReplayGainMode::Album),
+        ];
+        let flow = row_flow(ui.available_width());
+        let title_font = styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM).clone();
+        let desc_font = styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS).clone();
+        // Measured rather than assumed, as the format chips are: the text
+        // column is whatever the two chips leave, so a wider font stack
+        // narrows the copy instead of overwriting the choice. The measure is
+        // the row's title size while `filled_button` paints the label at the
+        // small button size — that difference is the air around each label.
+        let chip_widths: Vec<f32> = modes
+            .iter()
+            .map(|(label, _)| {
+                let label_w = ui
+                    .painter()
+                    .layout_no_wrap((*label).to_owned(), title_font.clone(), palette.ink)
+                    .size()
+                    .x;
+                CHIP_LABEL_PAD * 2.0 + label_w
+            })
+            .collect();
+        // Two chips, so exactly one gap between them — no index arithmetic.
+        let chips_w = chip_widths.iter().sum::<f32>() + CHIP_GAP;
+
+        let text_width = ui.available_width() - 2.0 * PREF_ROW_PAD - chips_w - PREF_ROW_TEXT_GAP;
+        let title_galley =
+            ui.painter()
+                .layout_no_wrap(copy.0.to_owned(), title_font.clone(), palette.ink);
+        let title_h = title_galley.size().y;
+        let (row_h, desc_galley) = match flow {
+            // The copy runs top-down in both flows — the description sits
+            // under the title rather than pinned to the row's bottom edge,
+            // the way the pass card's rows lay theirs out — and only the
+            // stacked form trades row height for a wrapped column.
+            RowFlow::Inline => (
+                PREF_ROW_H,
+                Some(ui.painter().layout_no_wrap(
+                    copy.1.to_owned(),
+                    desc_font.clone(),
+                    palette.ink_3,
+                )),
+            ),
+            RowFlow::Stacked => {
+                let wrapped = ui.painter().layout(
+                    copy.1.to_owned(),
+                    desc_font.clone(),
+                    palette.ink_3,
+                    text_width,
+                );
+                (
+                    preference_row_height(flow, title_h, wrapped.size().y),
+                    Some(wrapped),
+                )
+            }
+        };
+
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), row_h),
+            egui::Sense::hover(),
+        );
+        paint_preference_text(
             ui,
             palette,
-            Preference::ReadEmbedded,
-            content.read_embedded_artwork,
-            actions,
+            rect,
+            &copy,
+            title_font,
+            desc_font,
+            desc_galley,
+            title_h,
         );
+
+        // Right-aligned as a pair, so the row's right edge is the chips' even
+        // as the labels change width.
+        let mut chip_left = rect.right() - PREF_ROW_PAD - chips_w;
+        for (i, (label, mode)) in modes.iter().enumerate() {
+            let chip_rect = egui::Rect::from_min_size(
+                egui::pos2(chip_left, rect.center().y - CHIP_H / 2.0),
+                egui::vec2(chip_widths[i], CHIP_H),
+            );
+            let selected = content.replaygain_mode == *mode;
+            if filled_button(
+                ui,
+                cache,
+                palette,
+                chip_rect,
+                egui::Id::new(("settings_replaygain_mode", *label)),
+                label,
+                label,
+                None,
+                if selected {
+                    Variant::Primary
+                } else {
+                    Variant::Secondary
+                },
+                true,
+                true,
+            ) {
+                actions.push(SettingsAction::SetReplayGainMode(*mode));
+            }
+            chip_left += chip_widths[i] + CHIP_GAP;
+        }
     });
 }
 
-/// The Library pane's lower four sections in the narrow fallback: one stacked
-/// column, in the same top-to-bottom reading order the two-column branch keeps
-/// (Preferences, Formats, Last Full Scan, Artwork).
-fn library_lower_sections(
+/// The library-wide `ReplayGain` Pass card (Settings → Advanced): two
+/// persisted checkboxes choosing which value kinds a pass writes, one
+/// session-local Force choice, and one button that starts the pass — disabled
+/// while a pass runs, so a second one cannot start. While it runs the card
+/// shows the polled progress and a cancel control; when one settles, the
+/// outcome line stays until the next pass.
+///
+/// The checkboxes gate ONLY the library-wide pass — the automatic one after a
+/// Library Scan included, and the on-demand one here. The Track-menu and
+/// Album-menu commands are targeted passes that never read this state, so a
+/// menu command always does exactly what its label says.
+fn replaygain_pass_card(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
     content: &SettingsContent,
     actions: &mut Vec<SettingsAction>,
 ) {
-    preferences_card(
-        ui,
-        palette,
-        content,
-        actions,
-        &[Preference::WatchChanges, Preference::SkipHidden],
+    settings_card(ui, palette, Some(4), |ui| {
+        for (label, desc, checked, action) in [
+            (
+                "Track values",
+                "Measure every unmeasured Track's own gain and peak.",
+                content.pass_track,
+                SettingsAction::SetReplayGainPassTrack(!content.pass_track),
+            ),
+            (
+                "Album values",
+                "Also write each Album's aggregate to every Track of it.",
+                content.pass_album,
+                SettingsAction::SetReplayGainPassAlbum(!content.pass_album),
+            ),
+            (
+                "Force",
+                "Re-measure Tracks that are already measured. Not remembered \
+                 between runs.",
+                content.pass_force,
+                SettingsAction::SetReplayGainPassForce(!content.pass_force),
+            ),
+        ] {
+            replaygain_pass_check_row(ui, palette, label, desc, checked, action, actions);
+        }
+        // The rule about who wins, stated where the measurement happens
+        // rather than tracked with a flag: the next measurement simply
+        // overwrites whatever a hand edit held.
+        let note_font = styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS).clone();
+        let (note_rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), note_font.size * 1.6),
+            egui::Sense::hover(),
+        );
+        ui.painter_at(note_rect).galley(
+            egui::pos2(note_rect.left() + PREF_ROW_PAD, note_rect.top()),
+            ui.painter().layout_no_wrap(
+                "Measuring overwrites any manual edit.".to_owned(),
+                note_font,
+                palette.ink_3,
+            ),
+            palette.ink_3,
+        );
+
+        ui.add_space(8.0);
+        row_separator(ui, palette, 8.0);
+        ui.add_space(8.0);
+        replaygain_pass_action_row(ui, cache, palette, content, actions);
+    });
+}
+
+/// One checkbox row of the pass card: the shared checkbox box (with the
+/// focus ring every other boolean control wears) beside a label and its
+/// description, the whole row clickable like the Watch control.
+fn replaygain_pass_check_row(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    label: &str,
+    desc: &str,
+    checked: bool,
+    action: SettingsAction,
+    actions: &mut Vec<SettingsAction>,
+) {
+    let check_font = styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM).clone();
+    let desc_font = styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS).clone();
+
+    let row_h = PREF_ROW_H / 2.0 + 8.0;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), row_h),
+        egui::Sense::click(),
     );
-
-    ui.add_space(SECTION_GAP);
-    section_header(ui, palette, SECTION_FORMATS);
-    ui.add_space(HEADER_GAP);
-    formats_card(ui, cache, palette, content, actions);
-
-    ui.add_space(SECTION_GAP);
-    section_header(ui, palette, SECTION_SCAN_STATUS);
-    ui.add_space(HEADER_GAP);
-    scan_status_card(ui, cache, palette, content, actions);
-
-    ui.add_space(SECTION_GAP);
-    section_header(ui, palette, SECTION_ARTWORK);
-    ui.add_space(HEADER_GAP);
-    artwork_card(ui, palette, content, actions);
+    let box_side = WATCH_BOX;
+    let box_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + PREF_ROW_PAD + box_side / 2.0, rect.center().y),
+        egui::vec2(box_side, box_side),
+    );
+    let text_left = box_rect.right() + PREF_ROW_TEXT_GAP;
+    let painter = ui.painter_at(rect);
+    painter.galley(
+        egui::pos2(text_left, rect.top() + 4.0),
+        painter.layout_no_wrap(label.to_owned(), check_font.clone(), palette.ink),
+        palette.ink,
+    );
+    painter.galley(
+        egui::pos2(text_left, rect.top() + 4.0 + check_font.size + 2.0),
+        painter.layout_no_wrap(desc.to_owned(), desc_font, palette.ink_3),
+        palette.ink_3,
+    );
+    let focused = ui.memory(|m| m.has_focus(response.id));
+    super::toggle_switch::paint_square_checkbox_with_focus(
+        ui.painter(),
+        palette,
+        box_rect,
+        checked,
+        focused,
+    );
+    super::toggle_switch::register_checkbox_a11y(&response, true, checked, label);
+    if response.clicked() {
+        actions.push(action);
+    }
 }
 
-/// The right pane's content for the current section. Sections with existing
-/// content show it; the rest show a clear placeholder (full implementations
-/// are later tickets).
-fn section_pane(
+/// The pass card's action row: one button (disabled while a pass runs, so a
+/// second one cannot start), the polled progress line while running with its
+/// cancel control, and the settled outcome otherwise.
+fn replaygain_pass_action_row(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
     content: &SettingsContent,
-    current: SettingsSection,
     actions: &mut Vec<SettingsAction>,
 ) {
-    egui::ScrollArea::vertical()
-        .id_salt("settings_pane")
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            egui::Frame::new()
-                .inner_margin(egui::Margin::from(PANE_PAD))
-                .show(ui, |ui| match current {
-                    SettingsSection::Library => {
-                        library_pane(ui, cache, palette, content, actions);
-                    }
-                    SettingsSection::Advanced => {
-                        // "Quit on close" is offered only where a tray exists:
-                        // on Linux there is no tray, so closing always quits
-                        // and the choice would be inert (decision 002).
-                        #[cfg(not(target_os = "linux"))]
-                        const ADVANCED_PREFS: &[Preference] =
-                            &[Preference::Advanced, Preference::CloseQuitsApp];
-                        #[cfg(target_os = "linux")]
-                        const ADVANCED_PREFS: &[Preference] = &[Preference::Advanced];
-                        preferences_card(ui, palette, content, actions, ADVANCED_PREFS);
-                        ui.add_space(SECTION_GAP);
-                        section_header(ui, palette, SECTION_ADVANCED_INFO);
-                        ui.add_space(HEADER_GAP);
-                        info_lines(ui, palette);
-                    }
-                    SettingsSection::Playback => {
-                        preferences_card(ui, palette, content, actions, &[Preference::ReplayGain]);
-                    }
-                    SettingsSection::Appearance => {
-                        preferences_card(
-                            ui,
-                            palette,
-                            content,
-                            actions,
-                            &[Preference::HighContrast],
-                        );
-                    }
-                    SettingsSection::About => {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{} settings are not implemented yet.",
-                                current.label()
-                            ))
-                            .color(palette.ink_3),
-                        );
-                    }
-                });
-        });
-}
-
-// --- Library Path input (Linux text flow) -----------------------------------------
-//
-// What the input draws and what the listener chose; the filesystem probe, the
-// session registration, and the durable write are the host's Library Path
-// adapter (`ui::app::library_picker`).
-
-/// What the Library Path input shows, all of it resolved by the host: the draft
-/// being typed, the rejection the last attempt earned, and the directory
-/// suggestions for what is typed so far.
-pub struct PathInput<'a> {
-    pub text: &'a mut String,
-    pub error: Option<&'a str>,
-    pub suggestions: &'a [PathBuf],
-}
-
-/// What the listener did to the input. The host decides what each one means
-/// for the Library Path facts and the store.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PathInputAction {
-    /// The typed path should become a Library Path.
-    Confirm,
-    /// The flow is abandoned; the draft is the host's to clear.
-    Cancel,
-    /// A suggestion was taken into the field to keep drilling with.
-    Complete(PathBuf),
-}
-
-/// Render the text-based folder picker (no native dialog on Linux), reported as
-/// typed actions. Pure presentation: no filesystem read, no session, no store —
-/// whether a candidate is a root is the host's decision.
-pub fn path_input(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    input: &mut PathInput<'_>,
-) -> Vec<PathInputAction> {
-    let mut actions = Vec::new();
-    if let Some(error) = input.error {
-        ui.colored_label(palette.error, error);
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), SMALL_BTN_H),
+        egui::Sense::hover(),
+    );
+    let button_w = 128.0;
+    let button_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - PREF_ROW_PAD - button_w, rect.top()),
+        egui::vec2(button_w, SMALL_BTN_H),
+    );
+    let running = content.pass_running;
+    if filled_button(
+        ui,
+        cache,
+        palette,
+        button_rect,
+        egui::Id::new("settings_start_replaygain_pass"),
+        if running {
+            "Measuring\u{2026}"
+        } else {
+            "Measure Library"
+        },
+        if running {
+            "Measuring\u{2026}"
+        } else {
+            "Measure Library"
+        },
+        None,
+        Variant::Primary,
+        true,
+        !running,
+    ) {
+        actions.push(SettingsAction::StartReplayGainPass);
     }
-    ui.horizontal(|ui| {
-        ui.label("Path:");
-        ui.text_edit_singleline(input.text);
-        if ui.button("Confirm").clicked() {
-            actions.push(PathInputAction::Confirm);
+
+    let line = if running {
+        let (done, total) = content.pass_progress;
+        if total > 0 {
+            Some(format!("Measuring ReplayGain ({done}/{total})\u{2026}"))
+        } else {
+            Some("Measuring ReplayGain\u{2026}".to_string())
         }
-        if ui.button("Cancel").clicked() {
-            actions.push(PathInputAction::Cancel);
-        }
-    });
-    for suggestion in input.suggestions {
-        let label = suggestion.to_string_lossy().to_string();
-        if ui
-            .selectable_label(false, format!("\u{1F4C1} {label}"))
-            .clicked()
-        {
-            actions.push(PathInputAction::Complete(suggestion.clone()));
+    } else {
+        content.pass_outcome.clone()
+    };
+    if let Some(text) = line {
+        // The progress/outcome line is a real widget (not a bare paint), so
+        // the status is readable by assistive tech and visible to the test
+        // harness like every other label on this stage.
+        let line_w = rect.width() - button_w - 3.0 * PREF_ROW_PAD;
+        let line_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + PREF_ROW_PAD, rect.top()),
+            egui::vec2(line_w, SMALL_BTN_H),
+        );
+        let text_font = styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS).clone();
+        let galley = ui.painter().layout_no_wrap(text, text_font, palette.ink_3);
+        ui.put(line_rect, egui::Label::new(galley).truncate());
+        // The cancel control sits beside the progress line while a pass
+        // runs: it asks, never forces — the pass stops at its next
+        // measurement boundary and keeps what it committed.
+        if running {
+            let cancel_w = 60.0;
+            let cancel_rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    button_rect.left() - 8.0 - cancel_w,
+                    rect.center().y - SMALL_BTN_H / 2.0,
+                ),
+                egui::vec2(cancel_w, SMALL_BTN_H),
+            );
+            if filled_button(
+                ui,
+                cache,
+                palette,
+                cancel_rect,
+                egui::Id::new("settings_cancel_replaygain_pass"),
+                "Cancel",
+                "Cancel",
+                None,
+                Variant::Secondary,
+                true,
+                true,
+            ) {
+                actions.push(SettingsAction::CancelReplayGainPass);
+            }
         }
     }
-    actions
 }
 
 // --- App adapter --------------------------------------------------------------------
 
 impl super::app::RiffApp {
-    /// Render the sectioned Settings modal inside the shell's central panel
-    /// and apply everything the user did this frame. The modal itself is a
-    /// pure renderer ([`show_settings_modal`]); this adapter owns the
-    /// effects: watcher start/stop, store mutations, scan requests through
-    /// the Library Scan Service, and the platform folder-picker split.
-    pub fn show_settings_view(
-        &mut self,
-        ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-        playback: &mut PlaybackSession,
-    ) {
-        // Per-root indexed-track counts come from the store through the
-        // Session Views seam (one bounded count read per row, invalidated by
-        // generation bumps) — never the former in-memory mirror.
-        let content = SettingsContent {
-            libraries: library
-                .library_paths
-                .paths()
-                .iter()
-                .map(|path| LibraryRow {
-                    path: path.clone(),
-                    status: library.library_paths.readiness(path),
-                    watch: library.library_paths.watch_state(path),
-                    indexed_tracks: self.views.folder_track_count(path),
-                })
-                .collect(),
-            advanced_mode: library.ui_flags.advanced_mode,
-            high_contrast: library.ui_flags.high_contrast,
-            replaygain_enabled: playback.replaygain_enabled,
-            watch_any: library.library_paths.watches_any(),
-            skip_hidden_files: library.scan_prefs.skip_hidden_files,
-            scan_formats: library.scan_prefs.scan_formats.clone(),
-            read_embedded_artwork: library.scan_prefs.read_embedded_artwork,
-            close_quits_app: library.ui_flags.close_quits_app,
-            last_scan: self.views.last_full_scan_summary(),
-        };
-
-        let palette = self.theme.active;
-        for action in show_settings_modal(
-            ui,
-            &mut self.icons,
-            &palette,
-            &content,
-            self.settings_section,
-        ) {
-            self.apply_settings_action(action, library, playback);
-        }
-
-        // Transient rows beneath the stage column.
-        #[cfg(target_os = "linux")]
-        self.render_library_path_input(ui, library);
-        if self.clear_library_confirm {
-            self.render_clear_library_confirm(ui, library);
-        }
-        if self.clear_thumbnail_cache_confirm {
-            self.render_clear_thumbnail_cache_confirm(ui);
-        }
-    }
-
     /// Apply one [`SettingsAction`] through the app's state/service/store
     /// paths.
     fn apply_settings_action(
@@ -2644,6 +2922,30 @@ impl super::app::RiffApp {
             SettingsAction::SetReplayGain(value) => {
                 playback.replaygain_enabled = value;
             }
+            SettingsAction::SetReplayGainMode(mode) => {
+                playback.replaygain_mode = mode;
+            }
+            // The two value-kind checkboxes are persisted with the rest of the
+            // Library preferences by the frame's Settings round-trip; Force is
+            // session-local and never joins that snapshot.
+            SettingsAction::SetReplayGainPassTrack(value) => {
+                library.pass_prefs.track_values = value;
+            }
+            SettingsAction::SetReplayGainPassAlbum(value) => {
+                library.pass_prefs.album_values = value;
+            }
+            SettingsAction::SetReplayGainPassForce(value) => {
+                self.pass_force_choice = value;
+            }
+            SettingsAction::StartReplayGainPass => {
+                let prefs = &library.pass_prefs;
+                self.passes.submit(PassCommand::LibraryWide {
+                    track_values: prefs.track_values,
+                    album_values: prefs.album_values,
+                    force: self.pass_force_choice,
+                });
+            }
+            SettingsAction::CancelReplayGainPass => self.passes.cancel(),
             SettingsAction::SetWatchAll(watching) => {
                 // Every root in one batch with one durable write.
                 let mut watcher = self.watcher_manager.lock_or_recover();
@@ -2745,6 +3047,75 @@ impl super::app::RiffApp {
                 self.clear_thumbnail_cache_confirm = false;
             }
             None => {}
+        }
+    }
+
+    /// Render the sectioned Settings modal inside the shell's central panel
+    /// and apply everything the user did this frame. The modal itself is a
+    /// pure renderer ([`show_settings_modal`]); this adapter owns the
+    /// effects: watcher start/stop, store mutations, scan requests through
+    /// the Library Scan Service, and the platform folder-picker split.
+    pub fn show_settings_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        playback: &mut PlaybackSession,
+    ) {
+        // Per-root indexed-track counts come from the store through the
+        // Session Views seam (one bounded count read per row, invalidated by
+        // generation bumps) — never the former in-memory mirror.
+        let content = SettingsContent {
+            libraries: library
+                .library_paths
+                .paths()
+                .iter()
+                .map(|path| LibraryRow {
+                    path: path.clone(),
+                    status: library.library_paths.readiness(path),
+                    watch: library.library_paths.watch_state(path),
+                    indexed_tracks: self.views.folder_track_count(path),
+                })
+                .collect(),
+            advanced_mode: library.ui_flags.advanced_mode,
+            high_contrast: library.ui_flags.high_contrast,
+            replaygain_enabled: playback.replaygain_enabled,
+            replaygain_mode: playback.replaygain_mode,
+            watch_any: library.library_paths.watches_any(),
+            skip_hidden_files: library.scan_prefs.skip_hidden_files,
+            scan_formats: library.scan_prefs.scan_formats.clone(),
+            read_embedded_artwork: library.scan_prefs.read_embedded_artwork,
+            close_quits_app: library.ui_flags.close_quits_app,
+            pass_track: library.pass_prefs.track_values,
+            pass_album: library.pass_prefs.album_values,
+            pass_force: self.pass_force_choice,
+            pass_running: self.passes.is_running(),
+            pass_progress: self.passes.poll_progress(),
+            pass_outcome: self
+                .last_pass_report
+                .as_ref()
+                .map(crate::ui::frame::pass_outcome_line),
+            last_scan: self.views.last_full_scan_summary(),
+        };
+
+        let palette = self.theme.active;
+        for action in show_settings_modal(
+            ui,
+            &mut self.icons,
+            &palette,
+            &content,
+            self.settings_section,
+        ) {
+            self.apply_settings_action(action, library, playback);
+        }
+
+        // Transient rows beneath the stage column.
+        #[cfg(target_os = "linux")]
+        self.render_library_path_input(ui, library);
+        if self.clear_library_confirm {
+            self.render_clear_library_confirm(ui, library);
+        }
+        if self.clear_thumbnail_cache_confirm {
+            self.render_clear_thumbnail_cache_confirm(ui);
         }
     }
 }

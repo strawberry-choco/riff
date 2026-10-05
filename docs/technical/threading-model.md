@@ -18,6 +18,7 @@ Every worker thread is spawned and joined by the Composition Root — `AppRuntim
 | Filesystem-event forwarder | Receives raw change paths from the `notify` watcher and forwards them to the `WatcherManager`, which debounces and triggers rescans through the `ScanService`. | `composition.rs` (`spawn_fs_watcher`) |
 | Tag-edit worker | Processes `TagEdit` requests: writes file tags via lofty (source of truth) and commits the store facts as one durable change, reporting a single combined outcome. | `composition.rs` (`TagEditService::new` + worker run) |
 | Cover worker | Receives cover requests, resolves each one's cover Source, and answers pixels: a Thumbnail already stored on disk is read back and decoded from those bytes, otherwise the Source is read, decoded, and the rung written back for next time. Dedups in-flight work by `(identity, box)`, keeps an artless-verdict LRU, and returns results to the UI. Decoding is the only work it does that a cache cannot skip, and it never happens on the UI thread. | `composition.rs` (`CoverService::new` + worker run) |
+| ReplayGain Pass worker | Runs the `ReplayGainPass` use case: receives pass commands (a targeted Track or Album command, or a library-wide run), measures each target through the loudness analyzer (one decode per Track), writes the file tags first and commits the Store facts as one durable batched change, and reports progress and a settled outcome. A pass honours its cancel flag at measurement boundaries and keeps every batch already committed. | `composition.rs` (`PassService::new` + worker run) |
 | Tray event thread (non-Linux) | Dispatches system tray menu events (play/pause, next, previous, show/hide, quit) through the tray's recording `ChannelTransport`. | `riff-gui/src/ui/tray.rs` |
 
 The audio engine thread is the heart of playback. It is a single long-lived loop that polls `cmd_rx` for a `PlaybackCommand` — on the 10 ms `COMMAND_POLL` interval, whether or not a track is loaded, so that an idle engine can still observe a stop request. When it receives `Play(TrackId)` it resolves the Track through the store query port, opens a decoder through the injected `DecoderFactory` (which mints a fresh symphonia `CodecRegistry` per decoder, so the Opus adapter decodes correctly), starts the cpal stream, and enters an inner decode loop that runs until the track ends or a command interrupts it.
@@ -26,7 +27,7 @@ The audio engine thread is the heart of playback. It is a single long-lived loop
 
 `AppRuntime::spawn` opens the Application Store first — open/migration failures are returned to the caller, never silently tolerated — and then wires everything: the playback and library sessions, the command and update channels, the event inbox, and the store port views.
 
-One shared `SqliteStore` connection serves every store port view; both session generations (library and playlist) bump inside the store's mutation impls, and the `StoreChanged` stream feeds the event inbox. The UI's `Box<dyn Transport>` and the tray's transport are both `ChannelTransport`s over the same command channel, so a dispatch is one send straight to the engine — dispatches are not events, and nothing reports them onto the event inbox. The scan service, watcher manager, tag-edit service, and cover service are constructed over the real adapters here, and their worker threads are owned by the returned `RuntimeLifecycle`. The frontend then receives everything it renders with as one `AppRuntime` value. The store's Settings are hydrated here too, after the watcher and the transports exist: a restored Library Path has its watcher started and the audio engine starts at the restored volume before `spawn` returns.
+One shared `SqliteStore` connection serves every store port view; both session generations (library and playlist) bump inside the store's mutation impls, and the `StoreChanged` stream feeds the event inbox. The UI's `Box<dyn Transport>` and the tray's transport are both `ChannelTransport`s over the same command channel, so a dispatch is one send straight to the engine — dispatches are not events, and nothing reports them onto the event inbox. The scan service, watcher manager, tag-edit service, cover service, and ReplayGain Pass service are constructed over the real adapters here, and their worker threads are owned by the returned `RuntimeLifecycle`. The frontend then receives everything it renders with as one `AppRuntime` value. The store's Settings are hydrated here too, after the watcher and the transports exist: a restored Library Path has its watcher started and the audio engine starts at the restored volume before `spawn` returns.
 
 ## Shutdown
 
@@ -34,10 +35,10 @@ One shared `SqliteStore` connection serves every store port view; both session g
 
 `shutdown` is idempotent (each handle is taken before it is joined, so a second call returns immediately) and runs in a fixed order:
 
-1. Raise the stop flag of every worker that has one: the audio engine, the scan worker, the tag-edit worker, and the cover worker. The coordinator and the filesystem-event forwarder need none — they exit when their upstream channel disconnects.
-2. Set the scan cancel flag, so a scan in flight aborts at its next batch boundary. The batches already committed stay: durability is per batch, and an interrupted scan never rolls work back.
+1. Raise the stop flag of every worker that has one: the audio engine, the scan worker, the tag-edit worker, the cover worker, and the ReplayGain Pass worker. The coordinator and the filesystem-event forwarder need none — they exit when their upstream channel disconnects.
+2. Set the scan cancel flag, so a scan in flight aborts at its next batch boundary, and the pass cancel flag, so a pass in flight aborts at its next measurement boundary. What both already committed stays: durability is per batch, and neither an interrupted scan nor an interrupted pass rolls work back.
 3. Clear the watcher-manager cell, which drops the filesystem watcher and therefore the event sender the forwarder is parked on.
-4. Join, in dependency order — audio engine first, because the engine's exit is what disconnects the coordinator's update channel, then the coordinator, scan, tag-edit, cover, and forwarder.
+4. Join, in dependency order — audio engine first, because the engine's exit is what disconnects the coordinator's update channel, then the coordinator, scan, tag-edit, cover, pass, and forwarder.
 
 A stop is always honored *between* units of work, never inside one: the engine finishes the command it is holding (the gapless self-dispatch through `cmd_tx` is never truncated), the tag-edit worker reports the outcome of the edit it is holding, and a running scan ends through the ordinary cancel path.
 
@@ -69,6 +70,7 @@ All cross-thread messaging uses unbounded `crossbeam_channel` channels created i
 | `notify` watcher -> fs-event forwarder | `Vec<PathBuf>` | The paths that changed, forwarded to `WatcherManager::on_fs_events` |
 | UI -> tag-edit service | `TagEditSubmission` | A tag edit; the service answers over an outcome poll |
 | UI -> cover service | Cover request | Resolve and decode the art for a track; results come back over the response poll |
+| UI / watcher -> pass service | `PassCommand` | A targeted Track or Album command, or a library-wide run; the worker is serial, progress and the settled outcome are polled |
 
 Because the channels are unbounded, producers never block on a slow consumer. Backpressure for audio is enforced inside the output adapter (see below), not by the channel.
 

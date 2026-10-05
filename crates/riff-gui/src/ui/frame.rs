@@ -102,6 +102,9 @@ use super::prompts::PromptOutcome;
 use super::scroll_memory::ScrollMemory;
 use super::sidebar::PlaylistRowAction;
 use super::theme::{self, Palette};
+use riff_backend::app::pass_service::Passes;
+use riff_backend::app::replaygain_pass::PassCommand;
+use riff_backend::app::replaygain_pass::PassReport;
 
 /// What one frame's egui input said.
 ///
@@ -272,6 +275,13 @@ pub struct FrameParts<'a> {
     pub tag_edits: &'a mut InlineTagEditor,
     /// The Cover Service front end.
     pub covers: &'a dyn Covers,
+    /// The `ReplayGain` Pass service front end.
+    pub passes: &'a dyn Passes,
+    /// The Settings surface's Force choice for the next library-wide pass.
+    pub pass_force_choice: &'a mut bool,
+    /// The last settled pass's outcome, kept for the Settings card's inline
+    /// report; the frame's poll writes it.
+    pub last_pass_report: &'a mut Option<PassReport>,
     /// The Cover Cache's decision half: wanted, in flight, arrived.
     pub cover_cache: &'a mut CoverCache,
     /// The watcher manager, polled once per frame.
@@ -415,8 +425,8 @@ impl<'a> Frame<'a> {
     /// so it sees the frame's playback snapshot (volume, mute, replay-gain,
     /// shuffle, repeat) together with the library session's preference fields
     /// and lands any drift in the store — durability by construction, no
-    /// per-handler call sites. Only then are the six UI-owned playback fields
-    /// written back into the live session; `playback_state`,
+    /// per-handler call sites. Only then are the seven UI-owned playback
+    /// fields written back into the live session; `playback_state`,
     /// `current_position`, and the queue's traversal state are the engine's and
     /// the coordinator's, and a whole-session replace here would clobber their
     /// work between frames.
@@ -429,6 +439,10 @@ impl<'a> Frame<'a> {
         live.current_volume = self.playback.current_volume;
         live.muted = self.playback.muted;
         live.replaygain_enabled = self.playback.replaygain_enabled;
+        live.replaygain_mode = self.playback.replaygain_mode;
+        // What is NOT written back is deliberate: the engine and coordinator own
+        // `playback_state`, `current_position`, and the queue's traversal index,
+        // so a whole-session replace here would clobber them mid-frame.
         live.queue.set_shuffle(self.playback.queue.shuffle);
         live.queue.repeat = self.playback.queue.repeat;
     }
@@ -546,6 +560,38 @@ impl<'a> Frame<'a> {
         self.poll_library_updates();
         self.parts.tag_edits.poll_outcomes(self.parts.feedback);
         self.poll_cache_clear_outcome(out);
+        self.poll_pass_outcome();
+    }
+
+    /// Poll the `ReplayGain` Pass service: while a pass runs, its progress
+    /// line lives on the pass's own feedback slot; when one settles, its
+    /// outcome report lands there — measured, skipped, failed, cancelled —
+    /// the way Tag Edit outcomes are surfaced. Nothing else in the frame is
+    /// touched: the values themselves are Store facts the read models pick
+    /// up through the session generation.
+    fn poll_pass_outcome(&mut self) {
+        use riff_backend::app::events::NoticeSeverity;
+        let passes = self.parts.passes;
+        if passes.is_running() {
+            let (done, total) = passes.poll_progress();
+            if total > 0 {
+                self.parts.feedback.set_replaygain(
+                    format!("Measuring ReplayGain ({done}/{total})\u{2026}"),
+                    NoticeSeverity::Info,
+                );
+            }
+        }
+        while let Some(report) = passes.poll() {
+            let failed = report.failed > 0;
+            *self.parts.last_pass_report = Some(report.clone());
+            let message = pass_outcome_line(&report);
+            let severity = if failed {
+                NoticeSeverity::Error
+            } else {
+                NoticeSeverity::Info
+            };
+            self.parts.feedback.set_replaygain(message, severity);
+        }
     }
 
     /// Drain polled Library Scan outcomes and report each root's Readiness
@@ -574,6 +620,21 @@ impl<'a> Frame<'a> {
                         format!("Scan complete: {total_files} tracks"),
                         NoticeSeverity::Info,
                     );
+                    // When the pass's Settings gating enables it, a
+                    // library-wide pass follows every completed scan —
+                    // watcher-triggered included — filling in only unmeasured
+                    // Tracks, so scans never redo finished work. Force is
+                    // never set here. The checkboxes never affect the menu
+                    // commands: those are targeted passes that ignore this
+                    // state entirely.
+                    let prefs = &self.library.pass_prefs;
+                    if prefs.track_values || prefs.album_values {
+                        self.parts.passes.submit(PassCommand::LibraryWide {
+                            track_values: prefs.track_values,
+                            album_values: prefs.album_values,
+                            force: false,
+                        });
+                    }
                     // Scan batches already committed through the store as they
                     // progressed; nothing whole-file remains to save.
                 }
@@ -1136,4 +1197,30 @@ pub fn request_cover(
     size: RequestedSize,
 ) {
     cache.want_track(covers, track_id.clone(), file_path.to_path_buf(), size);
+}
+
+/// The one wording a settled `ReplayGain` Pass gets. Shared because the same
+/// report is read in two places — the status line the frame writes on the
+/// drain, and the Settings card's inline outcome line — and a report that
+/// described itself differently to each would make the two disagree.
+pub(crate) fn pass_outcome_line(report: &PassReport) -> String {
+    let PassReport {
+        measured,
+        skipped,
+        failed,
+        first_failure,
+        cancelled,
+    } = report;
+    if *failed > 0 {
+        format!(
+            "ReplayGain pass finished: {measured} measured, {failed} failed \u{2014} {}",
+            first_failure.as_deref().unwrap_or("unknown reason")
+        )
+    } else if *cancelled {
+        format!("ReplayGain pass stopped: {measured} tracks measured so far")
+    } else if *skipped > 0 {
+        format!("ReplayGain measured: {measured} tracks ({skipped} already measured)")
+    } else {
+        format!("ReplayGain measured: {measured} tracks")
+    }
 }

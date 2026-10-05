@@ -26,6 +26,9 @@ use riff_gui::ui::RiffApp;
 #[cfg(not(target_os = "linux"))]
 use riff_gui::ui::window_visibility::spawn_visibility_listener;
 
+// One linear wiring sequence into `RiffApp::new`'s argument list — the
+// composition root's shape, and one argument per line is the point.
+#[allow(clippy::too_many_lines)]
 fn main() {
     color_eyre::install().expect("failed to install color_eyre");
     tracing_subscriber::fmt::init();
@@ -111,6 +114,7 @@ fn main() {
                 rt.library_mutations,
                 rt.session_views,
                 rt.tag_edits,
+                rt.passes,
                 rt.covers,
                 rt.backend_events,
                 visibility_listener,
@@ -132,6 +136,7 @@ fn main() {
                 rt.library_mutations,
                 rt.session_views,
                 rt.tag_edits,
+                rt.passes,
                 rt.covers,
                 rt.backend_events,
                 visibility_listener,
@@ -151,6 +156,7 @@ fn main() {
                 rt.library_mutations,
                 rt.session_views,
                 rt.tag_edits,
+                rt.passes,
                 rt.covers,
                 rt.backend_events,
             );

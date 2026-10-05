@@ -28,6 +28,12 @@ pub struct PlaybackPosition {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlaybackCommand {
     Play(riff_persistence::track::TrackId),
+    /// Start `Track` as part of a **whole-Album play**: the listener chose to
+    /// play an Album, so `ReplayGain` levels the Album's shared pair (falling
+    /// back per Track where the Album value is absent). Auto-advance inside
+    /// such a queue re-sends this, so the provenance rides to every member;
+    /// a plain `Play` is a single-Track choice and levels the Track's own.
+    PlayAlbum(riff_persistence::track::TrackId),
     Pause,
     Resume,
     Stop,

@@ -21,9 +21,11 @@
 //! boxed front-end handle.
 
 use crate::app::store::{LibraryMutationStore, LibraryQueryStore};
-use crate::app::traits::{MetadataWriter, TagEdit};
+use crate::app::traits::{MetadataWriter, ReplayGainTags, ReplayGainWriter, TagEdit};
 use crate::domain::{Track, TrackId};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
+use riff_library::app::errors::LibraryError;
+use riff_persistence::track::TrackMetadata;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +35,50 @@ use std::time::Duration;
 /// Application Store (removed mid-edit, or the read failed): nothing is
 /// persisted. Exact wording is product behavior (spec user story 2).
 const TRACK_NO_LONGER_IN_LIBRARY: &str = "Track is no longer in the library";
+
+/// The Metadata half of the one writer adapter: forwards
+/// [`MetadataWriter::write_tags`] to the shared implementation.
+struct MetadataWriteView<W>(std::sync::Arc<W>);
+
+impl<W: MetadataWriter + ReplayGainWriter + Send + Sync> MetadataWriter for MetadataWriteView<W> {
+    fn write_tags(&self, path: &std::path::Path, edit: &TagEdit) -> Result<(), LibraryError> {
+        self.0.write_tags(path, edit)
+    }
+}
+
+/// The `ReplayGain` half of the one writer adapter: forwards
+/// [`ReplayGainWriter::write_replaygain`] to the shared implementation.
+struct ReplayGainWriteView<W>(std::sync::Arc<W>);
+
+impl<W: MetadataWriter + ReplayGainWriter + Send + Sync> ReplayGainWriter
+    for ReplayGainWriteView<W>
+{
+    fn write_replaygain(
+        &self,
+        path: &std::path::Path,
+        tags: &ReplayGainTags,
+    ) -> Result<(), LibraryError> {
+        self.0.write_replaygain(path, tags)
+    }
+}
+
+/// Mirror a written `ReplayGainTags` into the Track's stored metadata —
+/// the same facts the file now carries, so the Store commit lands them as
+/// one durable change with the rest of the edit.
+fn apply_replaygain_to_metadata(metadata: &mut TrackMetadata, tags: &ReplayGainTags) {
+    if let Some(gain) = tags.track_gain {
+        metadata.replaygain_track_gain = Some(gain);
+    }
+    if let Some(peak) = tags.track_peak {
+        metadata.replaygain_track_peak = Some(peak);
+    }
+    if let Some(gain) = tags.album_gain {
+        metadata.replaygain_album_gain = Some(gain);
+    }
+    if let Some(peak) = tags.album_peak {
+        metadata.replaygain_album_peak = Some(peak);
+    }
+}
 
 /// How long [`TagEditWorker::run`] waits for the next request before it looks
 /// at its stop flag. The worker is idle almost all the time, so the wait must
@@ -50,6 +96,11 @@ pub struct TagEditRequest {
     pub path: PathBuf,
     /// The requested edit; only `Some` fields are written.
     pub edit: TagEdit,
+    /// The requested `ReplayGain` facts, when the edit carries any. These
+    /// travel their own write path — never the Metadata one (the `TagEdit`
+    /// DTO stays closed) — but ride the same service, the same file-first
+    /// ordering, and the same one durable store change.
+    pub replaygain: ReplayGainTags,
 }
 
 /// The single combined outcome of one submitted Tag Edit: either the whole
@@ -91,14 +142,31 @@ impl TagEditService {
     /// (`worker.run()`), exactly like the Audio Engine. `stop` is the
     /// Composition Root's shutdown request for that thread.
     #[must_use]
-    pub fn new(
-        writer: Box<dyn MetadataWriter + Send>,
+    /// `writer` serves both file-write paths a save needs — the Metadata
+    /// write and `ReplayGain`'s own — so one adapter carries the two port
+    /// objects the worker holds separately.
+    pub fn new<W: MetadataWriter + ReplayGainWriter + Send + Sync + 'static>(
+        writer: Box<W>,
         library_queries: Box<dyn LibraryQueryStore + Send>,
         library_mutations: Box<dyn LibraryMutationStore + Send>,
         stop: Arc<AtomicBool>,
     ) -> (Self, TagEditWorker) {
         let (request_tx, request_rx) = unbounded();
         let (outcome_tx, outcome_rx) = unbounded();
+        // The two port objects are separately owned views over the one
+        // adapter the caller handed in: the worker writes Metadata through
+        // one and `ReplayGain` through the other, and neither knows about
+        // the other's path.
+        // The two port objects are shared views over the one adapter: each
+        // write path reaches only its own trait method through its view.
+        let shared: std::sync::Arc<W> = std::sync::Arc::from(writer);
+        let (metadata_writer, replaygain_writer): (
+            Box<dyn MetadataWriter + Send>,
+            Box<dyn ReplayGainWriter + Send>,
+        ) = (
+            Box::new(MetadataWriteView(std::sync::Arc::clone(&shared))),
+            Box::new(ReplayGainWriteView(shared)),
+        );
         (
             Self {
                 request_tx,
@@ -107,7 +175,8 @@ impl TagEditService {
             TagEditWorker {
                 request_rx,
                 outcome_tx,
-                writer,
+                writer: metadata_writer,
+                replaygain_writer,
                 library_queries,
                 library_mutations,
                 stop,
@@ -136,6 +205,7 @@ pub struct TagEditWorker {
     request_rx: Receiver<TagEditRequest>,
     outcome_tx: Sender<TagEditOutcome>,
     writer: Box<dyn MetadataWriter + Send>,
+    replaygain_writer: Box<dyn ReplayGainWriter + Send>,
     library_queries: Box<dyn LibraryQueryStore + Send>,
     library_mutations: Box<dyn LibraryMutationStore + Send>,
     /// Cooperative stop request from the Composition Root; see [`Self::run`].
@@ -171,9 +241,24 @@ impl TagEditWorker {
     /// Store facts through the targeted tag-refresh flow.
     fn process(&mut self, request: TagEditRequest) -> TagEditOutcome {
         // File tags first: they are the source of truth. A failed write
-        // ends the flow here — nothing is resolved or persisted.
-        if let Err(e) = self.writer.write_tags(&request.path, &request.edit) {
+        // ends the flow here — nothing is resolved or persisted. Metadata
+        // and `ReplayGain` each write through their own path; a request
+        // that carries neither writes nothing but still resolves and
+        // re-commits the Track unchanged (an inert save, as before).
+        if !request.edit.is_empty()
+            && let Err(e) = self.writer.write_tags(&request.path, &request.edit)
+        {
             tracing::warn!("Tag write failed for {:?}: {e}", request.path);
+            return TagEditOutcome::Failed {
+                reason: e.to_string(),
+            };
+        }
+        if !request.replaygain.is_empty()
+            && let Err(e) = self
+                .replaygain_writer
+                .write_replaygain(&request.path, &request.replaygain)
+        {
+            tracing::warn!("ReplayGain write failed for {:?}: {e}", request.path);
             return TagEditOutcome::Failed {
                 reason: e.to_string(),
             };
@@ -189,6 +274,7 @@ impl TagEditWorker {
 
         // Apply the edit to the fresh copy; play history fields are untouched.
         request.edit.apply_to(&mut track.metadata);
+        apply_replaygain_to_metadata(&mut track.metadata, &request.replaygain);
 
         // Persist the Store facts as one durable transaction. A failed
         // commit collapses the whole save into a failure — never a silent

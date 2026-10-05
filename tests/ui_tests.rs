@@ -5878,9 +5878,9 @@ mod tests {
 
         let palette = Palette::dark();
         let content = sample_content();
-        // Playback is the one section that is a single card, so the card's own
-        // edge is separable from every other thing in the frame.
-        let mut harness = settings_modal_harness(&content, SettingsSection::Playback);
+        // Appearance is the one section that is a single card, so the card's
+        // own edge is separable from every other thing in the frame.
+        let mut harness = settings_modal_harness(&content, SettingsSection::Appearance);
         harness.run();
         let frame = harness
             .render()
@@ -7241,6 +7241,136 @@ mod tests {
     }
 
     #[test]
+    fn test_replaygain_pass_card_reports_its_gating_and_start_actions() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::SettingsSection;
+
+        let content = sample_content();
+
+        let mut harness = settings_modal_harness(&content, SettingsSection::Advanced);
+        harness.run();
+        harness.get_by_label("Track values").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SetReplayGainPassTrack(true)),
+            "the track-values checkbox gates the library-wide pass"
+        );
+        harness.get_by_label("Album values").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SetReplayGainPassAlbum(true)),
+            "the album-values checkbox gates the library-wide pass"
+        );
+        harness.get_by_label("Force").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SetReplayGainPassForce(true)),
+            "the Force choice re-measures already-measured Tracks"
+        );
+        harness.get_by_label("Measure Library").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::StartReplayGainPass),
+            "one button starts the pass writing whatever was enabled"
+        );
+    }
+
+    #[test]
+    fn test_replaygain_pass_button_is_disabled_while_a_pass_runs() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::SettingsSection;
+
+        let mut content = sample_content();
+        content.pass_running = true;
+        content.pass_progress = (3, 10);
+
+        let mut harness = settings_modal_harness(&content, SettingsSection::Advanced);
+        harness.run();
+        // The button reads as in-progress and is disabled: clicking it
+        // reports nothing, so a second pass cannot start.
+        harness.get_by_label("Measuring\u{2026}").click();
+        harness.run();
+        assert!(
+            !harness
+                .state()
+                .contains(&SettingsAction::StartReplayGainPass),
+            "no second pass can start while one runs"
+        );
+        harness.get_by_label("Cancel").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::CancelReplayGainPass),
+            "the running pass has a cancel control"
+        );
+        harness.get_by_label("Force").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SetReplayGainPassForce(true)),
+            "the Force choice stays readable while a pass runs"
+        );
+    }
+
+    #[test]
+    fn test_replaygain_pass_card_shows_the_settled_outcome_inline() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::SettingsSection;
+
+        let mut content = sample_content();
+        content.pass_outcome = Some("Measured 10 tracks (2 were already measured)".to_string());
+
+        let mut harness = settings_modal_harness(&content, SettingsSection::Advanced);
+        harness.run();
+        harness.get_by_label("Measured 10 tracks (2 were already measured)");
+        // The settled pass's outcome report shows inline — resolving by its
+        // accessible label is the assertion.
+    }
+
+    #[test]
+    fn test_replaygain_mode_choice_reports_the_chosen_mode() {
+        use egui_kittest::kittest::Queryable;
+        use riff_backend::app::state::ReplayGainMode;
+        use riff_gui::ui::settings::SettingsSection;
+
+        let content = sample_content();
+
+        // The Playback pane carries the Mode choice beside the master toggle:
+        // clicking Album reports the Album mode, and Track reports Track.
+        let mut harness = settings_modal_harness(&content, SettingsSection::Playback);
+        harness.run();
+        harness.get_by_label("Album").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SetReplayGainMode(ReplayGainMode::Album)),
+            "the Mode choice reports the chosen ReplayGain Mode"
+        );
+
+        let mut harness = settings_modal_harness(&content, SettingsSection::Playback);
+        harness.run();
+        harness.get_by_label("Track").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SetReplayGainMode(ReplayGainMode::Track)),
+            "the Mode choice reports the chosen ReplayGain Mode"
+        );
+    }
+
+    #[test]
     fn test_toggle_switch_click_reports_the_preference_action() {
         use egui_kittest::kittest::Queryable;
         use riff_gui::ui::settings::SettingsSection;
@@ -7590,6 +7720,7 @@ mod tests {
             events: Vec<&'static str>,
             selected: Option<TrackId>,
             transport: MockTransport,
+            passes: crate::mocks::MockPasses,
             playlist_store: MockPlaylistStore,
             library_mutations: MockLibraryMutationStore,
             tag_editor: InlineTagEditor,
@@ -7601,6 +7732,7 @@ mod tests {
                     events: Vec::new(),
                     selected: None,
                     transport: MockTransport::new(),
+                    passes: crate::mocks::MockPasses,
                     playlist_store: MockPlaylistStore::default(),
                     library_mutations: MockLibraryMutationStore::new(),
                     tag_editor: InlineTagEditor::new(Box::new(MockTagEdits)),
@@ -7667,6 +7799,7 @@ mod tests {
                         let subject = TrackMenuSubject::unresolved(&attached, None);
                         let mut host = TrackMenuHost::new(
                             &frame.transport,
+                            &frame.passes,
                             &mut frame.playlist_store,
                             &mut frame.library_mutations,
                             &mut frame.tag_editor,
@@ -13721,8 +13854,9 @@ mod browser_column_ui_tests {
         };
         assert_eq!(
             content.tags.len(),
-            7,
-            "the tag section carries the seven fields"
+            11,
+            "the tag section carries the seven Metadata fields and the four \
+             ReplayGain values"
         );
         for (label, value) in [
             ("Artist", "Boards of Canada"),
@@ -13906,6 +14040,7 @@ mod browser_column_ui_tests {
     fn test_track_readout_reports_the_replaygain_rows_the_file_carries() {
         use riff_backend::app::state::LibrarySession;
         use riff_gui::ui::app::resolve_inspector;
+        use riff_gui::ui::selection::TagRowState;
 
         let dir = tempfile::tempdir().unwrap();
         let (mut store, _rx) = inspector_store(&dir);
@@ -13923,12 +14058,12 @@ mod browser_column_ui_tests {
             store.library_generation(),
             store.playlist_generation(),
         );
-        let detail = |content: &riff_gui::ui::app::InspectorContent, label: &str| {
+        let row = |content: &riff_gui::ui::app::InspectorContent, label: &str| {
             content
-                .details
+                .tags
                 .iter()
-                .find(|d| d.label == label)
-                .map(|d| d.value.clone())
+                .find(|row| row.field.label() == label)
+                .map(|row| (row.state, row.text.clone()))
         };
         let mut readout = |id: riff_backend::domain::TrackId| {
             resolve_inspector(
@@ -13941,38 +14076,38 @@ mod browser_column_ui_tests {
         };
 
         let content = readout(tagged.id);
-        // The signed two-decimal form is the row: `.2` is load-bearing, since
-        // an f32 widened into the REAL column and narrowed back prints
+        // The two-decimal form is the row: `.2` is load-bearing, since an f32
+        // widened into the REAL column and narrowed back prints
         // `-6.540000057220459`.
         assert_eq!(
-            detail(&content, "ReplayGain (track)").as_deref(),
-            Some("-6.54 dB"),
-            "the track gain row carries the sign and two decimals"
+            row(&content, "Track Gain (dB)"),
+            Some((TagRowState::Value, "-6.54".to_string())),
+            "the track gain row carries the measured value"
         );
         assert_eq!(
-            detail(&content, "ReplayGain (album)").as_deref(),
-            Some("+1.50 dB"),
-            "a positive album gain reads with its `+`"
+            row(&content, "Album Gain (dB)"),
+            Some((TagRowState::Value, "1.50".to_string())),
+            "a positive album gain reads as the value that will be written"
         );
 
-        // A file with neither tag shows neither row: the DETAILS block is
-        // exactly what it was before this feature.
+        // A file with neither tag shows both rows as unmeasured — never as a
+        // number, least of all zero, which would read as "analyzed at 0 dB".
         let content = readout(plain.id);
         assert_eq!(
-            content
-                .details
-                .iter()
-                .map(|d| d.label.as_str())
-                .collect::<Vec<_>>(),
-            vec!["Plays", "Last played", "Path"],
-            "an untagged track grows no row and prints no `(none)`"
+            row(&content, "Track Gain (dB)"),
+            Some((TagRowState::None, "unmeasured".to_string())),
+        );
+        assert_eq!(
+            row(&content, "Album Gain (dB)"),
+            Some((TagRowState::None, "unmeasured".to_string())),
         );
     }
 
     #[test]
-    fn test_album_readout_reports_one_replaygain_row() {
+    fn test_album_readout_aggregates_the_replaygain_rows() {
         use riff_backend::app::state::{BrowserSelection, LibrarySection, LibrarySession};
         use riff_gui::ui::app::resolve_inspector;
+        use riff_gui::ui::selection::TagRowState;
 
         let dir = tempfile::tempdir().unwrap();
         let (mut store, _rx) = inspector_store(&dir);
@@ -13984,7 +14119,7 @@ mod browser_column_ui_tests {
             Some(-7.12),
         );
         // A second track that carries the album value but no track value of
-        // its own: the album readout must find the gain regardless of order.
+        // its own: the album readout aggregates what the tracks carry.
         seed_gain_track(&mut store, "music/a/02.flac", "Two", None, Some(-7.12));
         let mut views = riff_backend::app::views::SessionViews::new(
             Box::new(store.clone()),
@@ -13992,7 +14127,7 @@ mod browser_column_ui_tests {
             store.library_generation(),
             store.playlist_generation(),
         );
-        let mut detail = |label: &str| {
+        let mut row = |label: &str| {
             let content = resolve_inspector(
                 &mut views,
                 &LibrarySession {
@@ -14005,20 +14140,21 @@ mod browser_column_ui_tests {
                 },
             );
             content
-                .details
+                .tags
                 .iter()
-                .find(|d| d.label == label)
-                .map(|d| d.value.clone())
+                .find(|row| row.field.label() == label)
+                .map(|row| (row.state, row.text.clone()))
         };
 
         assert_eq!(
-            detail("ReplayGain").as_deref(),
-            Some("-7.12 dB"),
-            "the album readout shows the album value the tracks carry"
+            row("Album Gain (dB)"),
+            Some((TagRowState::Value, "-7.12".to_string())),
+            "every Track carries the album value, so the row is that value"
         );
-        assert!(
-            detail("ReplayGain (track)").is_none(),
-            "the album readout reports the album gain only, never a track gain"
+        assert_eq!(
+            row("Track Gain (dB)"),
+            Some((TagRowState::Different, "(different)".to_string())),
+            "one member measured, one not — the mix is the orange state"
         );
     }
 
@@ -14068,8 +14204,13 @@ mod browser_column_ui_tests {
                 "Genre",
                 "Year",
                 "Track Number",
+                "Track Gain (dB)",
+                "Track Peak",
+                "Album Gain (dB)",
+                "Album Peak",
             ],
-            "the tag rows resolve in the seven-field modal order, Duration excluded"
+            "the tag rows resolve in the modal order, the ReplayGain values \
+             after the Metadata fields"
         );
         let row = |field: TagField| content.tags.iter().find(|r| r.field == field).unwrap();
         assert_eq!(row(TagField::Title).state, TagRowState::Different);
@@ -14789,6 +14930,7 @@ mod whole_frame_tests {
             library_mutations,
             views,
             Box::new(MockTagEdits),
+            Box::new(crate::mocks::MockPasses),
             Box::new(ShellCovers(Arc::clone(&folder_covers))),
             Arc::clone(&backend_events),
         );
@@ -18291,6 +18433,7 @@ mod whole_frame_tests {
                 StoreGeneration::new(),
             ),
             Box::new(MockTagEdits),
+            Box::new(crate::mocks::MockPasses),
             Box::new(ShellCovers(Arc::clone(&folder_covers))),
             Arc::clone(&backend_events),
         );
@@ -18505,6 +18648,7 @@ mod whole_frame_tests {
 
 #[cfg(test)]
 mod context_menu_ui_tests {
+    use crate::mocks::RecordingPasses;
     use egui_kittest::kittest::{NodeT, Queryable};
     use riff_backend::app::state::{
         BrowserSelection, LibrarySection, LibrarySession, PlaybackSession,
@@ -18644,10 +18788,114 @@ mod context_menu_ui_tests {
             track_menu_intents(&props, &["Edit Tags"]),
             vec![TrackMenuIntent::EditTags]
         );
+        assert_eq!(
+            track_menu_intents(&props, &["Measure ReplayGain"]),
+            vec![TrackMenuIntent::MeasureReplayGain],
+            "the measure item reports its own typed intent"
+        );
         assert!(
             track_menu_intents(&props, &[]).is_empty(),
             "rendering a menu reports no intent at all"
         );
+    }
+
+    /// The measure item's dispatch: the host submits a targeted Track pass —
+    /// exactly that Track, never the Album aggregate — and nothing else in
+    /// the host's handle set is touched.
+    #[test]
+    fn the_measure_item_submits_a_targeted_track_pass() {
+        use crate::mocks::{
+            MockLibraryMutationStore, MockPlaylistStore, MockTransport, RecordingPasses,
+        };
+        use riff_backend::app::replaygain_pass::PassCommand;
+
+        let passes = RecordingPasses::default();
+        let transport = MockTransport::new();
+        let mut playlist_store = MockPlaylistStore::default();
+        let mut library_mutations = MockLibraryMutationStore::new();
+        let mut tag_editor = InlineTagEditor::new(Box::new(crate::mocks::MockTagEdits));
+        let mut selected: Option<TrackId> = None;
+
+        // Track identity is the full file path, so the fixture's id and path
+        // agree, as they always do in the store.
+        let track = crate::test_utils::create_test_track("/music/a1.flac", "/music/a1.flac");
+        let subject = TrackMenuSubject::resolved(&track, None);
+        let mut host = TrackMenuHost::new(
+            &transport,
+            &passes,
+            &mut playlist_store,
+            &mut library_mutations,
+            &mut tag_editor,
+            &mut selected,
+        );
+        host.item_chosen(subject, TrackMenuIntent::MeasureReplayGain);
+
+        assert_eq!(
+            passes.submitted.lock().unwrap().clone(),
+            vec![PassCommand::Track(TrackId("/music/a1.flac".to_string()))],
+            "exactly one targeted Track pass, for exactly this Track"
+        );
+        assert!(
+            transport.recorded().is_empty(),
+            "the measure item starts no playback"
+        );
+    }
+
+    /// The Album menu's two measure items dispatch as Album pass commands
+    /// naming the row's Album; the play items still dispatch as batches.
+    #[test]
+    fn the_album_measure_items_submit_album_pass_commands() {
+        use riff_backend::app::replaygain_pass::PassCommand;
+
+        let mut playback = PlaybackSession::default();
+        let mut library = LibrarySession {
+            library_section: LibrarySection::Albums,
+            ..Default::default()
+        };
+        let mut views = entity_views();
+        let transport = MockTransport::new();
+        let passes = RecordingPasses::default();
+
+        apply_collection_menu(
+            "Boards of Canada\u{1f}Geogaddi",
+            &[ListMenuIntent::MeasureAlbumAggregate],
+            ColumnIdentity::root(LibrarySection::Albums),
+            CollectionMenuEffects {
+                library: &mut library,
+                playback: &mut playback,
+                transport: &transport,
+                passes: &passes,
+                views: &mut views,
+            },
+        );
+        apply_collection_menu(
+            "Boards of Canada\u{1f}Geogaddi",
+            &[ListMenuIntent::MeasureAlbumTracks],
+            ColumnIdentity::root(LibrarySection::Albums),
+            CollectionMenuEffects {
+                library: &mut library,
+                playback: &mut playback,
+                transport: &transport,
+                passes: &passes,
+                views: &mut views,
+            },
+        );
+
+        assert_eq!(
+            passes.submitted.lock().unwrap().clone(),
+            vec![
+                PassCommand::AlbumAggregate {
+                    album_artist: "Boards of Canada".to_string(),
+                    album_title: "Geogaddi".to_string(),
+                },
+                PassCommand::AlbumTracks {
+                    album_artist: "Boards of Canada".to_string(),
+                    album_title: "Geogaddi".to_string(),
+                },
+            ],
+            "each measure item names the row's Album, and nothing is played"
+        );
+        assert!(transport.recorded().is_empty());
     }
 
     /// The menu's content policy is unchanged by the extraction: a Track whose
@@ -18757,8 +19005,10 @@ mod context_menu_ui_tests {
                 );
             }
         });
-        let plain_rows: Vec<String> = rows[..6].to_vec();
-        let favourited_rows: Vec<String> = rows[6..].to_vec();
+        // Each menu now ends with the ReplayGain measure item — the seventh
+        // row in both renders, appended after the tag editor's.
+        let plain_rows: Vec<String> = rows[..7].to_vec();
+        let favourited_rows: Vec<String> = rows[7..].to_vec();
         assert_eq!(
             plain_rows,
             vec![
@@ -18767,7 +19017,8 @@ mod context_menu_ui_tests {
                 "Add to Queue",
                 "Add to Playlist",
                 "Add to Favorites",
-                "Edit Tags"
+                "Edit Tags",
+                "Measure ReplayGain",
             ],
             "a Track that is not a Favourite is offered the wording that adds one"
         );
@@ -18779,7 +19030,8 @@ mod context_menu_ui_tests {
                 "Add to Queue",
                 "Add to Playlist",
                 "Remove from Favorites",
-                "Edit Tags"
+                "Edit Tags",
+                "Measure ReplayGain",
             ],
             "and the Favourited one the opposite wording, in the SAME render, in the same \
              place — the label carries the condition, so nothing is marked"
@@ -18946,8 +19198,9 @@ mod context_menu_ui_tests {
                 "Add to Playlist",
                 "Add to Favorites",
                 "Edit Tags",
+                "Measure ReplayGain",
             ],
-            "a Track row's menu offers these six rows, in this order, and nothing else"
+            "a Track row's menu offers these seven rows, in this order, and nothing else"
         );
 
         // A row that IS in a Playlist, which is the one extra row that host
@@ -18978,6 +19231,7 @@ mod context_menu_ui_tests {
                 "Add to Favorites",
                 "Remove from Playlist",
                 "Edit Tags",
+                "Measure ReplayGain",
             ],
             "a playlist entry's menu is the same menu plus the removal, in the same place"
         );
@@ -19363,6 +19617,7 @@ mod context_menu_ui_tests {
                 library: &mut library,
                 playback: &mut playback,
                 transport: &transport,
+                passes: &crate::mocks::MockPasses,
                 views: &mut views,
             },
         );
@@ -19446,6 +19701,7 @@ mod context_menu_ui_tests {
                     library: &mut library,
                     playback: &mut playback,
                     transport: &transport,
+                    passes: &crate::mocks::MockPasses,
                     views: &mut views,
                 },
             );
@@ -19499,6 +19755,7 @@ mod context_menu_ui_tests {
                 library: &mut library,
                 playback: &mut playback,
                 transport: &transport,
+                passes: &crate::mocks::MockPasses,
                 views: &mut views,
             },
         );
@@ -19547,6 +19804,7 @@ mod context_menu_ui_tests {
                 library: &mut library,
                 playback: &mut playback,
                 transport: &transport,
+                passes: &crate::mocks::MockPasses,
                 views: &mut views,
             },
         );
@@ -19942,6 +20200,7 @@ mod context_menu_ui_tests {
         let playlist_store: &'a mut dyn PlaylistStore = store;
         TrackMenuHost::new(
             transport,
+            &crate::mocks::MockPasses,
             playlist_store,
             library_mutations,
             editor,

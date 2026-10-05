@@ -95,7 +95,7 @@ impl SmartPlaylistKind {
 /// The number describes the metadata shape and the columns that hold it, not
 /// any user preference, so it lives beside the struct it versions rather than
 /// with Settings.
-pub const METADATA_VERSION: u32 = 1;
+pub const METADATA_VERSION: u32 = 2;
 
 /// Metadata extracted from an audio file.
 ///
@@ -123,11 +123,14 @@ pub struct TrackMetadata {
     /// `ReplayGain` album gain in dB (e.g. `-7.12`), from the
     /// `REPLAYGAIN_ALBUM_GAIN` tag. `None` when the file carries no tag.
     ///
-    /// Displayed, never applied — playback leveling uses the track pair
-    /// above, and album leveling does not ship. Every Track of an Album
-    /// carries the same value, because the tag lives on each of the Album's
-    /// files rather than on the Album itself.
+    /// Every Track of an Album carries the same value, because the tag lives
+    /// on each of the Album's files rather than on the Album itself.
     pub replaygain_album_gain: Option<f32>,
+    /// `ReplayGain` album peak as a linear ratio (0..1), from the
+    /// `REPLAYGAIN_ALBUM_PEAK` tag. `None` when the file carries no tag.
+    /// The peak counterpart of [`TrackMetadata::replaygain_album_gain`]:
+    /// caps the album gain the same way the track peak caps the track gain.
+    pub replaygain_album_peak: Option<f32>,
 }
 
 impl TrackMetadata {

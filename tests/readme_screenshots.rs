@@ -946,6 +946,7 @@ mod tests {
             current_volume: 0.8,
             muted: false,
             replaygain_enabled: false,
+            replaygain_mode: Default::default(),
         }
     }
 
@@ -980,6 +981,7 @@ mod tests {
                         StoreGeneration::new(),
                     ),
                     Box::new(MockTagEdits),
+                    Box::new(crate::mocks::MockPasses),
                     Box::new(ProceduralCovers::default()),
                     Arc::new(Mutex::new(
                         riff_backend::app::events::BackendEvents::default(),

@@ -14,12 +14,15 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use riff_backend::app::Transport;
 use riff_backend::app::cover_service::{ClearCacheOutcome, Covers};
 use riff_backend::app::errors::StoreError;
+use riff_backend::app::pass_service::Passes;
 use riff_backend::app::preferences::Preferences;
+use riff_backend::app::replaygain_pass::{PassCommand, PassReport};
 use riff_backend::app::scan_service::{ScanOutcome, Scans};
 use riff_backend::app::state::{
     BrowseMode, LibrarySection, LibrarySession, LibraryStatus, PlaybackSession, ViewMode,
@@ -98,6 +101,45 @@ impl Scans for ScriptedScans {
     }
     fn is_scanning(&self, _path: &Path) -> bool {
         false
+    }
+}
+
+/// A `ReplayGain` Pass service that serves whatever a test queued: a running
+/// flag with canned progress, and settled outcome reports. Everything else
+/// is inert.
+#[derive(Default)]
+struct ScriptedPasses {
+    running: AtomicBool,
+    progress: Mutex<(usize, usize)>,
+    outcomes: Mutex<Vec<PassReport>>,
+    submitted: Mutex<Vec<PassCommand>>,
+}
+
+impl ScriptedPasses {
+    fn set_running(&self, running: bool, progress: (usize, usize)) {
+        self.running
+            .store(running, std::sync::atomic::Ordering::Relaxed);
+        *self.progress.lock().expect("unpoisoned") = progress;
+    }
+
+    fn settle(&self, report: PassReport) {
+        self.outcomes.lock().expect("unpoisoned").push(report);
+    }
+}
+
+impl Passes for ScriptedPasses {
+    fn submit(&self, command: PassCommand) {
+        self.submitted.lock().expect("unpoisoned").push(command);
+    }
+    fn cancel(&self) {}
+    fn is_running(&self) -> bool {
+        self.running.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn poll(&self) -> Option<PassReport> {
+        self.outcomes.lock().expect("unpoisoned").pop()
+    }
+    fn poll_progress(&self) -> (usize, usize) {
+        *self.progress.lock().expect("unpoisoned")
     }
 }
 
@@ -258,6 +300,9 @@ struct Harness {
     views: SessionViews,
     scans: ScriptedScans,
     covers: ScriptedCovers,
+    passes: ScriptedPasses,
+    pass_force_choice: bool,
+    last_pass_report: Option<PassReport>,
     playlist_view: Option<PlaylistId>,
     smart_playlist_view: Option<riff_backend::domain::SmartPlaylistKind>,
     playlist_rename: Option<(PlaylistId, String)>,
@@ -341,6 +386,9 @@ impl Harness {
             ),
             scans: ScriptedScans::default(),
             covers: ScriptedCovers::default(),
+            passes: ScriptedPasses::default(),
+            pass_force_choice: false,
+            last_pass_report: None,
             playlist_view: None,
             smart_playlist_view: None,
             playlist_rename: None,
@@ -383,6 +431,9 @@ impl Harness {
             scans: &self.scans,
             tag_edits: &mut self.tag_edits,
             covers: &self.covers,
+            passes: &self.passes,
+            pass_force_choice: &mut self.pass_force_choice,
+            last_pass_report: &mut self.last_pass_report,
             cover_cache: &mut self.cover_cache,
             watchers: &self.watchers,
             prefs: &mut self.prefs,
@@ -1089,4 +1140,101 @@ impl SettingsStore for NoSettingsStore {
     ) -> Result<(), StoreError> {
         Ok(())
     }
+}
+
+#[test]
+fn a_running_pass_polls_its_progress_and_a_settled_pass_its_outcome() {
+    let mut harness = Harness::new();
+
+    // While the pass runs, the frame keeps the pass's progress line current
+    // on its own feedback slot.
+    harness.passes.set_running(true, (3, 10));
+    harness.advance(&FrameInput::default());
+    assert_eq!(
+        harness.feedback.display_message(),
+        Some("Measuring ReplayGain (3/10)\u{2026}".to_string()),
+        "the running pass's progress line is polled per frame"
+    );
+
+    // The pass settles: the outcome report lands on the same slot, and the
+    // running flag is down, so the progress line does not come back.
+    harness.passes.set_running(false, (0, 0));
+    harness.passes.settle(PassReport {
+        measured: 10,
+        skipped: 2,
+        failed: 0,
+        first_failure: None,
+        cancelled: false,
+    });
+    harness.advance(&FrameInput::default());
+    assert_eq!(
+        harness.feedback.display_message(),
+        Some("ReplayGain measured: 10 tracks (2 already measured)".to_string()),
+    );
+
+    // A failed pass reports its first failure with an error severity.
+    harness.passes.settle(PassReport {
+        measured: 1,
+        skipped: 0,
+        failed: 1,
+        first_failure: Some("music/a1.flac: IO error: permission denied".to_string()),
+        cancelled: false,
+    });
+    harness.advance(&FrameInput::default());
+    assert_eq!(
+        harness.feedback.display_message(),
+        Some(
+            "ReplayGain pass finished: 1 measured, 1 failed \u{2014} music/a1.flac: IO error: permission denied"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn an_enabled_automatic_pass_follows_every_completed_scan() {
+    let mut harness = Harness::new();
+    // The Settings gating: both value kinds enabled.
+    harness.library.pass_prefs = riff_backend::app::state::PassPrefs {
+        track_values: true,
+        album_values: true,
+    };
+
+    harness.scans.serve(ScanOutcome::Complete {
+        path: PathBuf::from("/music"),
+        total_files: 12,
+    });
+    harness.advance(&FrameInput::default());
+
+    assert_eq!(
+        harness.passes.submitted.lock().expect("unpoisoned").clone(),
+        vec![PassCommand::LibraryWide {
+            track_values: true,
+            album_values: true,
+            force: false,
+        }],
+        "the automatic pass is the library-wide shape under the checkbox \
+         gating, filling in only unmeasured Tracks (never forced)"
+    );
+}
+
+#[test]
+fn a_disabled_automatic_pass_never_follows_a_scan() {
+    let mut harness = Harness::new();
+    // Default gating: both checkboxes off.
+
+    harness.scans.serve(ScanOutcome::Complete {
+        path: PathBuf::from("/music"),
+        total_files: 12,
+    });
+    harness.advance(&FrameInput::default());
+
+    assert!(
+        harness
+            .passes
+            .submitted
+            .lock()
+            .expect("unpoisoned")
+            .is_empty(),
+        "a scan whose gating is off changes nothing about measurement"
+    );
 }

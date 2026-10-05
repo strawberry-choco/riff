@@ -466,6 +466,7 @@ mod tests {
                         StoreGeneration::new(),
                     ),
                     Box::new(MockTagEdits),
+                    Box::new(crate::mocks::MockPasses),
                     covers,
                     Arc::new(Mutex::new(BackendEvents::default())),
                 );

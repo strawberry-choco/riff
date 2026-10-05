@@ -32,10 +32,11 @@ pub trait MetadataReader: Send + Sync {
 /// Pure application-layer DTO: only `Some` fields are written, `None` fields
 /// leave the existing tag value untouched. Contains no infrastructure types.
 ///
-/// The field list is the editable surface, and it is deliberately closed:
-/// `ReplayGain` has no place here because a gain is measured from the audio,
-/// not typed by a listener. riff reads those tags and never writes them, so
-/// the values the Detail Panel shows are always the file's own.
+/// `ReplayGain` is deliberately not an editable field here: a gain is
+/// measured from the audio, not typed by a listener, so a Tag Edit can
+/// neither set nor clear it — the values survive a Metadata edit untouched.
+/// `ReplayGain` travels its own write path ([`ReplayGainWriter`]), driven by
+/// the `ReplayGain` Pass and the Inline Tag Editor's `ReplayGain` rows.
 #[derive(Debug, Clone, Default)]
 pub struct TagEdit {
     pub title: Option<String>,
@@ -71,6 +72,101 @@ impl TagEdit {
 pub trait MetadataWriter: Send {
     /// Write the given edit to the file at `path`.
     fn write_tags(&self, path: &std::path::Path, edit: &TagEdit) -> Result<(), LibraryError>;
+}
+
+/// The `ReplayGain` facts one write carries, mirroring what the file tags
+/// hold: gains in dB, peaks as linear ratios. Only `Some` fields are
+/// written; `None` fields leave the existing tag value untouched — a write
+/// never clears a value it was not asked to set.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ReplayGainTags {
+    pub track_gain: Option<f32>,
+    pub track_peak: Option<f32>,
+    pub album_gain: Option<f32>,
+    pub album_peak: Option<f32>,
+}
+
+impl ReplayGainTags {
+    /// A write of just a Track's own measured pair.
+    #[must_use]
+    pub fn track_pair(gain: f32, peak: f32) -> Self {
+        Self {
+            track_gain: Some(gain),
+            track_peak: Some(peak),
+            ..Self::default()
+        }
+    }
+
+    /// A write of just an Album's shared pair.
+    #[must_use]
+    pub fn album_pair(gain: f32, peak: f32) -> Self {
+        Self {
+            album_gain: Some(gain),
+            album_peak: Some(peak),
+            ..Self::default()
+        }
+    }
+
+    /// Whether this write would change anything.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.track_gain.is_none()
+            && self.track_peak.is_none()
+            && self.album_gain.is_none()
+            && self.album_peak.is_none()
+    }
+}
+
+/// Trait for `ReplayGain` tag writers (implemented by infrastructure).
+///
+/// `ReplayGain` travels its own write path, never the Metadata one: the
+/// [`TagEdit`] DTO stays closed. The string contract is the reader's
+/// gain-string parser's, so anything riff writes, riff and every other
+/// player read back — ` dB`-suffixed gains, bare-ratio peaks — with Opus
+/// per RFC 7845 (R128-convention gains in their Q7.8 unit encoding).
+pub trait ReplayGainWriter: Send {
+    /// Write the given `ReplayGain` facts to the file at `path`.
+    fn write_replaygain(
+        &self,
+        path: &std::path::Path,
+        tags: &ReplayGainTags,
+    ) -> Result<(), LibraryError>;
+}
+
+/// One Track's `ReplayGain` 2.0 measurement: the track gain against the
+/// −18 LUFS reference, and the track's true peak as a linear ratio. The
+/// album aggregate is computed from these plus each member's duration — see
+/// [`crate::app::replaygain::album_aggregate`].
+///
+/// Both fields are finite. A Track with no loudness verdict — digital silence,
+/// which the BS.1770 gate reports as no energy at all — lands the domain's
+/// no-verdict pair ([`crate::app::replaygain::REPLAYGAIN_FALLBACK_GAIN_DB`]
+/// and [`crate::app::replaygain::REPLAYGAIN_FALLBACK_PEAK`]) rather than an
+/// infinite gain, which no tag form, player, or Album aggregate can honor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackLoudness {
+    /// Track gain in dB: the value that brings this Track to the reference
+    /// loudness. Negative attenuates, positive amplifies (peak-capped).
+    pub track_gain_db: f32,
+    /// True peak as a linear ratio (0..=1+); caps the applied gain so
+    /// amplified samples cannot clip.
+    pub track_peak: f32,
+}
+
+/// Trait for loudness analyzers (implemented by infrastructure over the
+/// decoder stack and the `ebur128` crate). The measurement standard is
+/// `ReplayGain` 2.0 — BS.1770 integrated loudness against a −18 LUFS
+/// reference, true-peak measurement; `ReplayGain` 1.0 is never produced.
+pub trait LoudnessAnalyzer: Send + Sync {
+    /// Decode and measure one audio file. One decode yields the Track's own
+    /// values; its contribution to the Album aggregate is the same
+    /// measurement plus the member's duration at aggregation time.
+    ///
+    /// A file that yields no loudness verdict — digital silence, whose gated
+    /// BS.1770 measurement has no energy to report — returns the no-verdict
+    /// pair, not an error and not an infinite gain: the values a measurement
+    /// returns are always finite and writable.
+    fn measure_track(&self, path: &std::path::Path) -> Result<TrackLoudness, LibraryError>;
 }
 
 /// Trait for cover art loaders (implemented by infrastructure).

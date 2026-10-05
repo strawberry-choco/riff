@@ -25,11 +25,11 @@
 use std::sync::{Arc, Mutex};
 
 use riff_persistence::store::ScalarSettings;
-use riff_playback::app::state::PlaybackSession;
+use riff_playback::app::state::{PlaybackSession, ReplayGainMode};
 use riff_playback::app::transport::Transport;
 
 use crate::app::MutexExt;
-use crate::app::state::{LibrarySession, ScanPrefs};
+use crate::app::state::{LibrarySession, PassPrefs, ScanPrefs};
 use crate::app::store::{Settings, SettingsStore};
 use crate::app::watcher_manager::WatcherManager;
 use crate::domain::RepeatMode;
@@ -82,6 +82,8 @@ impl Preferences {
                 session.current_volume = vol;
             }
             session.replaygain_enabled = settings.scalars.replaygain_enabled;
+            session.replaygain_mode =
+                replaygain_mode_from_store_code(settings.scalars.replaygain_mode);
             // Restore the player-bar toggles so shuffle/repeat survive restarts.
             session.queue.shuffle = settings.scalars.shuffle;
             session.queue.repeat = repeat_mode_from_store_code(settings.scalars.repeat_mode);
@@ -108,6 +110,10 @@ impl Preferences {
                 skip_hidden_files: settings.scalars.skip_hidden_files,
                 scan_formats: settings.scalars.scan_formats.clone(),
                 read_embedded_artwork: settings.scalars.read_embedded_artwork,
+            };
+            session.pass_prefs = PassPrefs {
+                track_values: settings.scalars.replaygain_pass_track,
+                album_values: settings.scalars.replaygain_pass_album,
             };
         }
 
@@ -152,12 +158,15 @@ fn scalar_settings(playback: &PlaybackSession, library: &LibrarySession) -> Scal
         high_contrast: library.ui_flags.high_contrast,
         smart_lists_collapsed: library.ui_flags.smart_lists_collapsed,
         replaygain_enabled: playback.replaygain_enabled,
+        replaygain_mode: replaygain_mode_to_store_code(playback.replaygain_mode),
         shuffle: playback.queue.shuffle,
         repeat_mode: repeat_mode_to_store_code(playback.queue.repeat),
         skip_hidden_files: library.scan_prefs.skip_hidden_files,
         scan_formats: library.scan_prefs.scan_formats.clone(),
         read_embedded_artwork: library.scan_prefs.read_embedded_artwork,
         close_quits_app: library.ui_flags.close_quits_app,
+        replaygain_pass_track: library.pass_prefs.track_values,
+        replaygain_pass_album: library.pass_prefs.album_values,
     }
 }
 
@@ -177,5 +186,23 @@ fn repeat_mode_from_store_code(code: i64) -> RepeatMode {
         1 => RepeatMode::All,
         2 => RepeatMode::One,
         _ => RepeatMode::None,
+    }
+}
+
+/// `ReplayGainMode` → persisted scalar code: 0 = Track, 1 = Album.
+fn replaygain_mode_to_store_code(mode: ReplayGainMode) -> i64 {
+    match mode {
+        ReplayGainMode::Track => 0,
+        ReplayGainMode::Album => 1,
+    }
+}
+
+/// Persisted scalar code → `ReplayGainMode`; anything but the Album code reads
+/// as Track, the default the feature ships with, so a hand-edited store can
+/// never put playback in a state the Mode has no name for.
+fn replaygain_mode_from_store_code(code: i64) -> ReplayGainMode {
+    match code {
+        1 => ReplayGainMode::Album,
+        _ => ReplayGainMode::Track,
     }
 }

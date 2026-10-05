@@ -322,12 +322,18 @@ fn show_browser_list(
                 // row off that report, and an item chosen later arrives on the
                 // same report with the key still attached.
                 let mut intents = Vec::new();
-                if response
-                    .context_menu(|ui| {
+                // An Album row's key carries the `artist\u{1f}title` separator —
+                // the same fact `entity_row` reads — so the one row kind that
+                // is a measurable unit gets its own two items here, and an
+                // Artist or Genre row still gets the shared collection menu.
+                let menu_body = |ui: &mut egui::Ui| {
+                    if item.key.contains('\u{1f}') {
+                        super::menu::album_menu(ui, palette, &mut intents);
+                    } else {
                         super::menu::collection_menu(ui, palette, &mut intents);
-                    })
-                    .is_some()
-                {
+                    }
+                };
+                if response.context_menu(menu_body).is_some() {
                     actions.push(BrowserAction::ContextMenu {
                         key: item.key.clone(),
                         intents,

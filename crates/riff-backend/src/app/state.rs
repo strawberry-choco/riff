@@ -91,7 +91,9 @@ impl Default for ScanPrefs {
 /// Re-exported from `riff_playback::app::state` — the canonical playback
 /// session the Transport, coordinator, and engine all take. The backend keeps
 /// the library-side session types (`LibrarySession`, `ViewMode`, `UiFlags`).
-pub use riff_playback::app::state::{PlaybackSession, replaygain_factor};
+pub use riff_playback::app::state::{
+    PlaybackSession, REPLAYGAIN_GAIN_LIMIT_DB, ReplayGainMode, replaygain_factor,
+};
 
 /// The sort mode of a track listing — the Tracks column, All Tracks, a user
 /// playlist, or a smart list. The default is each listing's canonical order:
@@ -174,6 +176,24 @@ pub struct LibrarySession {
     /// The Library Scan preferences (see [`ScanPrefs`]) the Settings Library
     /// pane drives and the scan/cover workers honor.
     pub scan_prefs: ScanPrefs,
+    /// The `ReplayGain` Pass's Settings gating (see [`PassPrefs`]): which value
+    /// kinds a library-wide pass writes, on demand and after every Library
+    /// Scan. Force is not persisted and lives with the Settings surface.
+    pub pass_prefs: PassPrefs,
+}
+
+/// The `ReplayGain` Pass's Settings gating, hydrated from the Application
+/// Store's scalar row at startup and written back on every change. Both
+/// default off: a scan's behavior is unchanged until the listener opts in.
+/// Menu commands never read this — a targeted pass always does exactly what
+/// its label says.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PassPrefs {
+    /// Library-wide passes write each measured Track's own pair.
+    pub track_values: bool,
+    /// Library-wide passes write each affected Album's aggregate to its
+    /// Tracks.
+    pub album_values: bool,
 }
 
 /// UI display flags grouped out of [`LibrarySession`] so the top-level state
@@ -227,6 +247,7 @@ impl Default for LibrarySession {
             queue_open: false,
             ui_flags: UiFlags::default(),
             scan_prefs: ScanPrefs::default(),
+            pass_prefs: PassPrefs::default(),
         }
     }
 }

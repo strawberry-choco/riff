@@ -278,6 +278,10 @@ pub enum TrackMenuIntent {
     SetFavorite(bool),
     /// Select this Track and open the Detail Panel's Inline Tag Editor.
     EditTags,
+    /// Measure this Track's `ReplayGain` and write the values to its file
+    /// tags and the Store. Exactly this Track: the Album aggregate is
+    /// untouched.
+    MeasureReplayGain,
 }
 
 /// One choice in a whole-list context menu, over the list the host attached it
@@ -295,6 +299,12 @@ pub enum ListMenuIntent {
     /// afterwards — the long-standing behaviour of the album header's Shuffle,
     /// preserved rather than quietly changed.
     Shuffle,
+    /// Measure this Album's `ReplayGain` aggregate and write the album pair
+    /// to every Track of the Album. Album rows only.
+    MeasureAlbumAggregate,
+    /// Measure track `ReplayGain` for every Track of this Album individually
+    /// and write exactly those. Album rows only.
+    MeasureAlbumTracks,
 }
 
 /// The props one Track's menu renders from.
@@ -391,6 +401,9 @@ pub fn track_menu(
     {
         intents.push(TrackMenuIntent::EditTags);
     }
+    if menu.editable && item(ui, palette, &Item::new("Measure ReplayGain")) {
+        intents.push(TrackMenuIntent::MeasureReplayGain);
+    }
 }
 
 /// The "Add to Playlist" group: one row per playlist, or the inert line that
@@ -475,6 +488,26 @@ fn set_of_tracks_items(ui: &mut egui::Ui, palette: &Palette, intents: &mut Vec<L
 /// navigates.
 pub fn list_menu(ui: &mut egui::Ui, palette: &Palette, intents: &mut Vec<ListMenuIntent>) {
     set_of_tracks_items(ui, palette, intents);
+}
+
+/// Render an Album row's context menu, appending one [`ListMenuIntent`] per
+/// activation.
+///
+/// The shared set-of-Tracks rows, then the two `ReplayGain` items only an
+/// Album earns: an Album is a measurable unit — one aggregate over its Track
+/// set, or every member's own pair — while an Artist or a Genre is only a
+/// set of Tracks with no measurement of its own. The two items ride the same
+/// report the play items do; what the host does with them is the host's
+/// answer, and a Track command's independence from any Settings state lives
+/// there.
+pub fn album_menu(ui: &mut egui::Ui, palette: &Palette, intents: &mut Vec<ListMenuIntent>) {
+    set_of_tracks_items(ui, palette, intents);
+    if item(ui, palette, &Item::new("Measure Album ReplayGain")) {
+        intents.push(ListMenuIntent::MeasureAlbumAggregate);
+    }
+    if item(ui, palette, &Item::new("Measure Track ReplayGain")) {
+        intents.push(ListMenuIntent::MeasureAlbumTracks);
+    }
 }
 
 /// Render a collection's context menu — the menu on an Album, Artist, or Genre

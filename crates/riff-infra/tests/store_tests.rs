@@ -36,10 +36,13 @@ fn test_store_fresh_start_creates_file_and_applies_initial_migration_once() {
     // + v11 (lowercased entity search keys) + v12 (retire the browser layout)
     // + v13 (the quit-on-close preference) + v14 (ReplayGain album gain)
     // + v15 (the metadata version the freshness filter compares against
-    //   `METADATA_VERSION`).
+    //   `METADATA_VERSION`) + v16 (ReplayGain album peak) + v17 (the
+    //   ReplayGain Mode preference) + v18 (the pass's Settings gating).
     assert_eq!(
         applied.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        vec![
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+        ]
     );
 }
 
@@ -96,10 +99,12 @@ fn test_store_double_apply_is_idempotent() {
             mapped.collect()
         })
         .expect("reading schema_migrations must work");
-    assert_eq!(rows.len(), 15, "no duplicate migration rows allowed");
+    assert_eq!(rows.len(), 18, "no duplicate migration rows allowed");
     assert_eq!(
         rows.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        vec![
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+        ]
     );
 
     let applied_at: i64 = store
@@ -134,14 +139,17 @@ fn test_store_migration_010_drops_the_missing_artwork_strategy_column() {
 
     // Roll back to the 009-era state: forget migration 010 and restore the
     // columns exactly as migrations 007/008 created them, plus some
-    // non-default scalars that 010's table rebuild must preserve. Migration
-    // 013 is also un-applied because 010 rebuilds the settings row from a
-    // column snapshot that predates `close_quits_app`; re-applying it on the
-    // way back keeps the newest scalar present for reads.
+    // non-default scalars that 010's table rebuild must preserve. The later
+    // app_settings-column migrations (013 `close_quits_app`, 015 the
+    // metadata version, 017 the ReplayGain Mode, 018 the pass's Settings
+    // gating) are also un-applied, because
+    // 010 rebuilds the settings row from a column snapshot predating them;
+    // re-applying them on the way back keeps the newest scalars present for
+    // reads.
     store
         .with_connection(|conn| {
             conn.execute_batch(
-                "DELETE FROM schema_migrations WHERE version IN (10, 13);
+                "DELETE FROM schema_migrations WHERE version IN (10, 13, 15, 17, 18);
                  ALTER TABLE app_settings
                    ADD COLUMN missing_artwork_strategy TEXT NOT NULL DEFAULT 'generated_colour'
                      CHECK (missing_artwork_strategy IN ('generated_colour'));
@@ -372,7 +380,7 @@ fn test_store_checksum_tamper_is_fatal() {
             )
             .expect("the tampered bookkeeping row must still be there");
     assert_eq!(
-        tampered, 15,
+        tampered, 18,
         "the store's own migration rows are untouched: nothing re-applied, nothing replaced"
     );
 }
@@ -733,6 +741,11 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
         assert!(!settings.scalars.advanced_mode);
         assert!(!settings.scalars.high_contrast);
         assert!(!settings.scalars.replaygain_enabled);
+        // The pass's gating defaults off, so a scan's behavior is unchanged
+        // until the listener opts in. The ReplayGain Mode is deliberately
+        // NOT a setting: the queue provenance decides it during playback.
+        assert!(!settings.scalars.replaygain_pass_track);
+        assert!(!settings.scalars.replaygain_pass_album);
         assert!(!settings.scalars.smart_lists_collapsed);
         assert!(!settings.scalars.close_quits_app);
     }
@@ -749,6 +762,8 @@ fn test_store_scalar_settings_roundtrip_across_reopen() {
                 advanced_mode: true,
                 high_contrast: true,
                 replaygain_enabled: true,
+                replaygain_pass_track: true,
+                replaygain_pass_album: true,
                 shuffle: true,
                 repeat_mode: 2,
                 smart_lists_collapsed: true,
@@ -795,13 +810,15 @@ fn test_store_migration_012_drops_the_browser_layout_column() {
     // Roll back to the 011-era state: forget migration 012 and restore the
     // column exactly as migration 007 created it, plus a non-default grid
     // engagement and some non-default scalars that the rebuild must preserve.
-    // Migration 013 is also un-applied because 012 rebuilds the settings row
-    // from a column snapshot predating `close_quits_app`; re-applying it keeps
-    // the newest scalar present for reads.
+    // The later app_settings-column migrations (013 `close_quits_app`, 015
+    // the metadata version, 017 the ReplayGain Mode, 018 the pass's Settings
+    // gating) are also un-applied, because 012 rebuilds the settings row from
+    // a column snapshot predating them; re-applying them keeps the newest
+    // scalars present for reads.
     store
         .with_connection(|conn| {
             conn.execute_batch(
-                "DELETE FROM schema_migrations WHERE version IN (12, 13);
+                "DELETE FROM schema_migrations WHERE version IN (12, 13, 15, 17, 18);
                  ALTER TABLE app_settings
                    ADD COLUMN browser_layout INTEGER NOT NULL DEFAULT 0
                      CHECK (browser_layout IN (0, 1));
@@ -1894,6 +1911,63 @@ fn test_rescan_is_idempotent_and_preserves_history() {
 }
 
 #[test]
+fn test_rescan_refreshes_replaygain_pair_after_external_retag() {
+    let (_dir, mut store, _changes_rx) = open_store();
+
+    // First scan: the file carries an older measurement.
+    let mut first = library_track(
+        "m:\\music\\old.mp3",
+        "Old Title",
+        Some("Artist A"),
+        "Album A",
+        None,
+    );
+    first.metadata.replaygain_track_gain = Some(-6.54);
+    first.metadata.replaygain_track_peak = Some(0.75);
+    first.metadata.replaygain_album_gain = Some(-7.12);
+    first.metadata.replaygain_album_peak = Some(0.81);
+    store
+        .apply_scan_batch(std::slice::from_ref(&first))
+        .expect("initial scan applies");
+
+    // The file is re-tagged by an external tool and the rescan re-reads it:
+    // the stored values refresh in place rather than duplicating or going
+    // stale.
+    let mut rescanned = library_track(
+        "m:\\music\\old.mp3",
+        "Old Title",
+        Some("Artist A"),
+        "Album A",
+        None,
+    );
+    rescanned.metadata.replaygain_track_gain = Some(-9.20);
+    rescanned.metadata.replaygain_track_peak = Some(0.90);
+    rescanned.metadata.replaygain_album_gain = Some(-8.00);
+    rescanned.metadata.replaygain_album_peak = Some(0.95);
+    store
+        .apply_scan_batch(std::slice::from_ref(&rescanned))
+        .expect("rescan applies");
+
+    let got = store
+        .get_track(&first.id)
+        .expect("get_track works")
+        .expect("known id resolves");
+    assert_eq!(got.metadata.replaygain_track_gain, Some(-9.20));
+    assert_eq!(got.metadata.replaygain_track_peak, Some(0.90));
+    assert_eq!(got.metadata.replaygain_album_gain, Some(-8.00));
+    assert_eq!(got.metadata.replaygain_album_peak, Some(0.95));
+
+    let (tracks, albums): (i64, i64) = store
+        .with_connection(|conn| {
+            let t: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))?;
+            let al: i64 = conn.query_row("SELECT COUNT(*) FROM albums", [], |r| r.get(0))?;
+            Ok((t, al))
+        })
+        .expect("counting rows must work");
+    assert_eq!((tracks, albums), (1, 1), "rescan must not duplicate rows");
+}
+
+#[test]
 fn test_foreign_keys_reject_orphan_tracks() {
     let (_dir, store, _changes_rx) = open_store();
 
@@ -2157,6 +2231,7 @@ fn test_get_track_roundtrips_all_fields() {
             replaygain_track_gain: Some(-6.54),
             replaygain_track_peak: Some(0.75),
             replaygain_album_gain: Some(-7.12),
+            replaygain_album_peak: Some(0.81),
         },
         duration: Some(Duration::from_secs_f32(12.5)),
         sample_rate: Some(44_100),
@@ -2227,6 +2302,10 @@ fn test_get_track_roundtrips_all_fields() {
     assert_eq!(
         got_min.metadata.replaygain_album_gain, None,
         "a track scanned without the tag stores NULL, not a default gain"
+    );
+    assert_eq!(
+        got_min.metadata.replaygain_album_peak, None,
+        "a track scanned without the tag stores NULL, not a default peak"
     );
     assert_eq!(got_min.duration, None);
     assert_eq!(got_min.last_played, None);

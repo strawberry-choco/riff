@@ -156,7 +156,7 @@ impl AudioEngine {
 
             if let Some(cmd) = cmd {
                 match cmd {
-                    PlaybackCommand::Play(id) => {
+                    PlaybackCommand::Play(id) | PlaybackCommand::PlayAlbum(id) => {
                         // The Playback Queue is empty, so the Library becomes
                         // it: the *when* of a **Queue Fill** is the shared
                         // operation's, and Continuation owns the *what*. This
@@ -228,8 +228,11 @@ impl AudioEngine {
                             let session = self.session.lock_or_recover();
                             let factor = replaygain_factor(
                                 session.replaygain_enabled,
+                                session.replaygain_mode,
                                 track.metadata.replaygain_track_gain,
                                 track.metadata.replaygain_track_peak,
+                                track.metadata.replaygain_album_gain,
+                                track.metadata.replaygain_album_peak,
                             );
                             self.output.set_replaygain(factor);
                         }

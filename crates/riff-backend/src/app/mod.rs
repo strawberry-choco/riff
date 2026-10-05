@@ -1,6 +1,7 @@
 pub mod errors;
 pub mod events;
 pub mod library_paths;
+pub mod pass_service;
 pub mod preferences;
 pub mod state;
 pub mod store;
@@ -18,6 +19,7 @@ pub use riff_library::app::{
         BrowsingProjection, FolderProjection, GenreProjection, HitListProjection, HitProjection,
         PlaylistProjection, SmartPlaylistsProjection, TrackListProjection, WindowedListProjection,
     },
+    replaygain_pass::{PassCommand, PassReport, ReplayGainPass},
     scan::build_tracks,
     scan_service::{SCAN_BATCH_SIZE, ScanOutcome, ScanService, ScanWorker, Scans},
 };
@@ -25,7 +27,9 @@ pub use riff_library::app::{
 /// Module-qualified re-exports of the library and playback surfaces, so the
 /// frontend and integration tests keep their historical
 /// `riff_backend::app::<module>::` import paths across the crate split.
-pub use riff_library::app::{cover_service, playlist_manager, projection, scan, scan_service};
+pub use riff_library::app::{
+    cover_service, playlist_manager, projection, replaygain, replaygain_pass, scan, scan_service,
+};
 pub use riff_playback::app::{gapless, playback_coordinator, transport};
 pub use riff_playback::infra::audio_engine;
 pub use riff_playback::infra::ports::{AudioDecoder, AudioOutput, DecoderFactory};

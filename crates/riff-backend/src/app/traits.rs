@@ -11,5 +11,5 @@
 
 pub use riff_library::app::traits::{
     AudioFormatInfo, CoverLoader, DecodedCover, FilesystemWatch, MetadataReader, MetadataWriter,
-    RequestedSize, TagEdit,
+    ReplayGainTags, ReplayGainWriter, RequestedSize, TagEdit,
 };

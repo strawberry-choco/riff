@@ -12,8 +12,9 @@
 //! The draft never outlives its selection: that ADR-invariant is enforced
 //! here ([`InlineTagEditor::reconcile`]), not by call-site discipline.
 
+use riff_backend::app::state::REPLAYGAIN_GAIN_LIMIT_DB;
 use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
-use riff_backend::app::traits::TagEdit;
+use riff_backend::app::traits::{ReplayGainTags, TagEdit};
 use riff_backend::domain::TrackId;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -157,6 +158,13 @@ impl InlineTagEditor {
         let Some(draft) = self.draft.as_mut() else {
             return;
         };
+        let replaygain = match parse_replaygain(draft) {
+            Ok(tags) => tags,
+            Err(error) => {
+                draft.error = Some(error);
+                return;
+            }
+        };
         match (
             parse_number("Year", &draft.fields[TagField::Year.index()]),
             parse_number("Track number", &draft.fields[TagField::TrackNumber.index()]),
@@ -177,6 +185,7 @@ impl InlineTagEditor {
                         track_number,
                         ..Default::default()
                     },
+                    replaygain,
                 };
                 self.in_flight = Some((request.track_id.clone(), request.path.clone()));
                 self.tag_edits.submit(request);
@@ -226,6 +235,13 @@ impl InlineTagEditor {
         } else {
             None
         };
+        let replaygain = match parse_dirty_replaygain(draft) {
+            Ok(tags) => tags,
+            Err(error) => {
+                draft.error = Some(error);
+                return;
+            }
+        };
         let value = |field: TagField| -> Option<String> {
             draft
                 .is_dirty(field)
@@ -248,6 +264,10 @@ impl InlineTagEditor {
                         track_number,
                         ..Default::default()
                     },
+                    // The Album value is one fact shared by all its Tracks:
+                    // the same dirty values ride every member's request, so
+                    // the batch lands them as one shared fact.
+                    replaygain,
                 };
                 self.tag_edits.submit(request);
                 (track_id.clone(), path.clone())
@@ -401,5 +421,151 @@ fn parse_number(label: &str, raw: &str) -> Result<Option<u32>, String> {
             .parse::<u32>()
             .map(Some)
             .map_err(|_| format!("{label} must be a whole number"))
+    }
+}
+
+/// Parse one optional `ReplayGain` field's text; empty input means "leave
+/// unset" — an unmeasured value is never written by accident. Gains carry
+/// the unit in their label and are clamped into ±51 dB after parsing, and a
+/// value that is not a number at all — `inf`, `nan` — is rejected before the
+/// clamp; peaks are bare linear ratios. Measurement always wins over a manual
+/// edit later, which is why nothing here records "was hand-edited" anywhere.
+fn parse_replaygain_field(field: TagField, raw: &str) -> Result<Option<f32>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let label = field.label();
+    let value: f32 = trimmed
+        .parse()
+        .map_err(|_| format!("{label} must be a number"))?;
+    // `"inf"` and `"nan"` parse as numbers, and a silent Track's own tag is
+    // exactly one of them. They are rejected rather than clamped into the
+    // writable band: clamping would rewrite the file with a +51 dB boost no
+    // measurement ever claimed, on audio that carries none.
+    if !value.is_finite() {
+        return Err(format!("{label} must be a finite number"));
+    }
+    Ok(Some(match field {
+        TagField::ReplayGainTrackGain | TagField::ReplayGainAlbumGain => {
+            value.clamp(-REPLAYGAIN_GAIN_LIMIT_DB, REPLAYGAIN_GAIN_LIMIT_DB)
+        }
+        _ => value,
+    }))
+}
+
+/// The four `ReplayGain` buffers of a draft, parsed and validated together
+/// so one bad field fails the whole save with its inline reason.
+fn parse_replaygain(draft: &TagDraft) -> Result<ReplayGainTags, String> {
+    let mut tags = ReplayGainTags::default();
+    for field in [
+        TagField::ReplayGainTrackGain,
+        TagField::ReplayGainTrackPeak,
+        TagField::ReplayGainAlbumGain,
+        TagField::ReplayGainAlbumPeak,
+    ] {
+        if let Some(value) = parse_replaygain_field(field, &draft.fields[field.index()])? {
+            match field {
+                TagField::ReplayGainTrackGain => tags.track_gain = Some(value),
+                TagField::ReplayGainTrackPeak => tags.track_peak = Some(value),
+                TagField::ReplayGainAlbumGain => tags.album_gain = Some(value),
+                TagField::ReplayGainAlbumPeak => tags.album_peak = Some(value),
+                _ => {}
+            }
+        }
+    }
+    Ok(tags)
+}
+
+/// The dirty subset of a draft's `ReplayGain` buffers, parsed and validated:
+/// an untouched buffer stays `None` in every request rather than being
+/// rewritten — the Album batch's rule, applied to the values that travel
+/// `ReplayGain`'s own path.
+fn parse_dirty_replaygain(draft: &TagDraft) -> Result<ReplayGainTags, String> {
+    let mut tags = ReplayGainTags::default();
+    for field in [
+        TagField::ReplayGainTrackGain,
+        TagField::ReplayGainTrackPeak,
+        TagField::ReplayGainAlbumGain,
+        TagField::ReplayGainAlbumPeak,
+    ] {
+        if !draft.is_dirty(field) {
+            continue;
+        }
+        if let Some(value) = parse_replaygain_field(field, &draft.fields[field.index()])? {
+            match field {
+                TagField::ReplayGainTrackGain => tags.track_gain = Some(value),
+                TagField::ReplayGainTrackPeak => tags.track_peak = Some(value),
+                TagField::ReplayGainAlbumGain => tags.album_gain = Some(value),
+                TagField::ReplayGainAlbumPeak => tags.album_peak = Some(value),
+                _ => {}
+            }
+        }
+    }
+    Ok(tags)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Gains are validated as numbers and clamped into the ±51 dB range, so
+    /// a typo cannot command an extreme playback factor.
+    #[test]
+    fn a_gain_is_clamped_into_the_51_db_range() {
+        let gain = TagField::ReplayGainTrackGain;
+        assert_eq!(
+            parse_replaygain_field(gain, "-6.54").unwrap(),
+            Some(-6.54),
+            "an in-range value passes through"
+        );
+        assert_eq!(
+            parse_replaygain_field(gain, "-80").unwrap(),
+            Some(-51.0),
+            "an out-of-range attenuation clamps to the limit"
+        );
+        assert_eq!(
+            parse_replaygain_field(gain, "+99").unwrap(),
+            Some(51.0),
+            "an out-of-range boost clamps to the limit"
+        );
+        assert_eq!(parse_replaygain_field(gain, "").unwrap(), None);
+        assert!(parse_replaygain_field(gain, "loud").is_err());
+    }
+
+    /// Peaks are bare linear ratios: parsed, never clamped to the dB range.
+    #[test]
+    fn a_peak_is_parsed_but_not_db_clamped() {
+        let peak = TagField::ReplayGainAlbumPeak;
+        assert_eq!(parse_replaygain_field(peak, "0.81").unwrap(), Some(0.81));
+        assert_eq!(parse_replaygain_field(peak, "").unwrap(), None);
+        assert!(parse_replaygain_field(peak, "louder").is_err());
+    }
+
+    /// A silent Track's own tag holds `inf`, which parses as a number. Both
+    /// fields reject it rather than clamping: the draft prefills from the file,
+    /// so clamping would let an untouched Save rewrite the gain as +51 dB.
+    #[test]
+    fn a_non_finite_gain_is_rejected_rather_than_clamped() {
+        for field in [
+            TagField::ReplayGainTrackGain,
+            TagField::ReplayGainAlbumGain,
+            TagField::ReplayGainTrackPeak,
+        ] {
+            for raw in ["inf", "-inf", "NaN"] {
+                let reason = parse_replaygain_field(field, raw)
+                    .err()
+                    .unwrap_or_else(|| panic!("{field:?} must reject {raw:?}"));
+                assert!(
+                    reason.contains("finite"),
+                    "the inline reason says why, got {reason}"
+                );
+            }
+        }
+        // The clamp still bounds the finite range a listener can type.
+        assert_eq!(
+            parse_replaygain_field(TagField::ReplayGainTrackGain, "+99").unwrap(),
+            Some(51.0)
+        );
     }
 }

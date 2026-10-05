@@ -74,11 +74,24 @@ pub enum TagField {
     Genre,
     Year,
     TrackNumber,
+    /// The Track's measured gain in dB — edited like any other field, but
+    /// traveling its own write path: `ReplayGain` is not Metadata.
+    ReplayGainTrackGain,
+    /// The Track's measured peak, a bare linear ratio.
+    ReplayGainTrackPeak,
+    /// The Album's shared gain in dB — one fact across the Album's Tracks;
+    /// an edit on an Album readout is a Batch Tag Edit over every member.
+    ReplayGainAlbumGain,
+    /// The Album's shared peak, a bare linear ratio.
+    ReplayGainAlbumPeak,
 }
 
 impl TagField {
-    /// The seven fields in the stable modal order the tag section renders.
-    pub const ALL: [TagField; 7] = [
+    /// The eleven fields in the stable modal order the tag section renders:
+    /// the seven Metadata fields, then the four `ReplayGain` values —
+    /// which ride the same rows and the same door, but never the Metadata
+    /// write path.
+    pub const ALL: [TagField; 11] = [
         TagField::Title,
         TagField::Artist,
         TagField::Album,
@@ -86,6 +99,10 @@ impl TagField {
         TagField::Genre,
         TagField::Year,
         TagField::TrackNumber,
+        TagField::ReplayGainTrackGain,
+        TagField::ReplayGainTrackPeak,
+        TagField::ReplayGainAlbumGain,
+        TagField::ReplayGainAlbumPeak,
     ];
 
     /// The row's display label, as the modal named the field.
@@ -98,7 +115,24 @@ impl TagField {
             TagField::Genre => "Genre",
             TagField::Year => "Year",
             TagField::TrackNumber => "Track Number",
+            TagField::ReplayGainTrackGain => "Track Gain (dB)",
+            TagField::ReplayGainTrackPeak => "Track Peak",
+            TagField::ReplayGainAlbumGain => "Album Gain (dB)",
+            TagField::ReplayGainAlbumPeak => "Album Peak",
         }
+    }
+
+    /// Whether this field is one of the `ReplayGain` values: validated and
+    /// clamped differently from the metadata numerics, and written through
+    /// `ReplayGain`'s own path rather than the Metadata one.
+    pub const fn is_replaygain(self) -> bool {
+        matches!(
+            self,
+            TagField::ReplayGainTrackGain
+                | TagField::ReplayGainTrackPeak
+                | TagField::ReplayGainAlbumGain
+                | TagField::ReplayGainAlbumPeak
+        )
     }
 
     /// The field's index into draft buffers and the model's stable order.
@@ -111,6 +145,10 @@ impl TagField {
             TagField::Genre => 4,
             TagField::Year => 5,
             TagField::TrackNumber => 6,
+            TagField::ReplayGainTrackGain => 7,
+            TagField::ReplayGainTrackPeak => 8,
+            TagField::ReplayGainAlbumGain => 9,
+            TagField::ReplayGainAlbumPeak => 10,
         }
     }
 }
@@ -137,8 +175,9 @@ pub struct TagRow {
     pub originals: Vec<Option<String>>,
 }
 
-/// The inline editor's per-selection draft: the seven field buffers the
-/// widget renders, prefilled from the resolved readout, plus the selection's
+/// The inline editor's per-selection draft: one field buffer per
+/// [`TagField::ALL`] entry the widget renders, prefilled from the resolved
+/// readout, plus the selection's
 /// identity and the save-flow states the app layer owns. The widget edits
 /// the buffers and reports Save/Cancel; the app layer owns the draft's
 /// lifecycle — created when editing starts, discarded when the selection
@@ -156,13 +195,13 @@ pub struct TagDraft {
     /// The album's track targets, one `(track, path)` per Track in store
     /// order (a [`DraftKind::Album`] draft). Empty for a Track draft.
     pub album_tracks: Vec<(TrackId, PathBuf)>,
-    /// The seven field buffers in [`TagField::ALL`] order.
-    pub fields: [String; 7],
+    /// The field buffers in [`TagField::ALL`] order.
+    pub fields: Vec<String>,
     /// The readout value each buffer started from — an untouched buffer is
     /// exactly its original, so nothing is ever "dirty by construction" (a
     /// `(different)` / `(none)` row opens as an empty buffer against an
     /// empty original).
-    pub originals: [String; 7],
+    pub originals: Vec<String>,
     /// The inline failure reason: a failed save keeps the draft open with it.
     pub error: Option<String>,
     /// Whether a save is in flight: Save is disabled and the bar spins.
@@ -261,10 +300,8 @@ impl TagDraft {
             track_id: TrackId(String::new()),
             path: PathBuf::new(),
             album_tracks: Vec::new(),
-            fields: fields.try_into().expect("the seven tag fields stay seven"),
-            originals: originals
-                .try_into()
-                .expect("the seven tag fields stay seven"),
+            fields,
+            originals,
             error: None,
             saving: false,
             batch: None,
@@ -277,7 +314,7 @@ impl TagDraft {
         self.fields[field.index()] != self.originals[field.index()]
     }
 
-    /// Whether any of the seven buffers differ from the readout.
+    /// Whether any buffer differs from the readout.
     pub fn any_dirty(&self) -> bool {
         TagField::ALL.iter().any(|&field| self.is_dirty(field))
     }

@@ -383,6 +383,7 @@ pub const FOCUS_RING: Color32 = Color32::from_rgb(0xa7, 0x8b, 0xfa);
 // geometry never had a say in.
 
 /// `--riff-radius-sm` — 6 px: small controls (buttons, inputs).
+pub const RADIUS_XS: f32 = 3.0;
 pub const RADIUS_SM: f32 = 6.0;
 /// `--riff-radius-md` — 10 px: cards, menus, popovers.
 pub const RADIUS_MD: f32 = 10.0;
@@ -986,6 +987,9 @@ pub mod geometry {
         pub const TRASH_BTN: f32 = 28.0;
         /// Watch checkbox square size (a native checkbox at xs text ≈ 14px).
         pub const WATCH_BOX: f32 = 14.0;
+        /// Standalone checkbox size — large enough that the square shape
+        /// reads at a glance (the 14px Watch box rounds nearly circular).
+        pub const CHECK_BOX: f32 = 18.0;
         /// Height of one format chip — literally the small secondary button,
         /// named separately because it is a different control.
         pub const CHIP_H: f32 = SMALL_BTN_H;

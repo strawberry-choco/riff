@@ -100,6 +100,10 @@ pub struct ScalarSettings {
     /// display preference, restored on launch).
     pub smart_lists_collapsed: bool,
     pub replaygain_enabled: bool,
+    /// Which `ReplayGain` pair playback levels at, encoded as an integer so
+    /// this crate stays dependency-free exactly like `repeat_mode` above:
+    /// `0` = the Track pair (the default), `1` = the Album pair.
+    pub replaygain_mode: i64,
     pub shuffle: bool,
     pub repeat_mode: i64,
     /// Skip hidden (dot-prefixed) files and directories during scans.
@@ -113,6 +117,13 @@ pub struct ScalarSettings {
     /// minimizing it to the system tray. `false` (the default) preserves the
     /// minimize-to-tray behavior; inert on Linux, which has no tray.
     pub close_quits_app: bool,
+    /// The `ReplayGain` Pass's Settings gating: which value kinds a
+    /// library-wide pass writes, both on demand and automatically after
+    /// every Library Scan. Both default off, so a scan's behavior is
+    /// unchanged until the listener opts in. Force is deliberately NOT
+    /// persisted — an automatic pass never redoes finished work.
+    pub replaygain_pass_track: bool,
+    pub replaygain_pass_album: bool,
 }
 
 impl Default for ScalarSettings {
@@ -126,6 +137,7 @@ impl Default for ScalarSettings {
             high_contrast: false,
             smart_lists_collapsed: false,
             replaygain_enabled: false,
+            replaygain_mode: 0,
             shuffle: false,
             repeat_mode: 0,
             skip_hidden_files: true,
@@ -135,6 +147,8 @@ impl Default for ScalarSettings {
                 .collect(),
             read_embedded_artwork: true,
             close_quits_app: false,
+            replaygain_pass_track: false,
+            replaygain_pass_album: false,
         }
     }
 }

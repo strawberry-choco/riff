@@ -169,7 +169,7 @@ The rightmost selection readout showing the currently selected entity or Track �
 _Avoid_: inspector, selection panel, readout column
 
 **Inline Tag Editor**:
-The tag editing surface that lives inside the Detail Panel, replacing the retired Edit Tags modal. It renders one row per editable Metadata field; editing happens in place and saving commits through the Tag Edit service. It has exactly **one door**: the **Track-menu host** opens it, from whichever surface the gesture came from, and the Detail Panel's tag rows open the same draft through the same controller. A Track row's "Edit Tags" item is therefore not a second way in — it is that one opening, reached from a row.
+The tag editing surface that lives inside the Detail Panel, replacing the retired Edit Tags modal. It renders one row per editable field — Metadata or ReplayGain; editing happens in place and saving commits through the Tag Edit service. It has exactly **one door**: the **Track-menu host** opens it, from whichever surface the gesture came from, and the Detail Panel's tag rows open the same draft through the same controller. A Track row's "Edit Tags" item is therefore not a second way in — it is that one opening, reached from a row.
 _Avoid_: edit dialog, tag modal, second tag editor
 
 **Track-menu host**:
@@ -187,6 +187,22 @@ _Avoid_: multi-edit, bulk write
 **Tag Edit**:
 The user action of editing a Track's Metadata through the Inline Tag Editor; saving commits the file tags and the Store facts as one durable change, and a failure is reported inline with the reason.
 _Avoid_: metadata editor, tag writer
+
+**ReplayGain**:
+The loudness facts a Track carries: track gain and track peak measured from the Track's own audio, and album gain and album peak measured across every Track of its Album — the album values are one fact shared by all Tracks of the Album. Carried in the Track's file tags and mirrored in the Application Store. Which pair is applied to playback is the ReplayGain Mode's decision.
+_Avoid_: volume normalization, loudness info, gain tags
+
+**ReplayGain Mode**:
+The playback choice of which ReplayGain pair a Track plays under: Track mode applies the track pair, Album mode the album pair — the peak follows the pair, so clipping prevention stays exact. The ReplayGain toggle turns application off entirely; the Mode has no off of its own.
+_Avoid_: smart mode, normalization mode
+
+**ReplayGain Pass**:
+One run of ReplayGain measurement. A pass is targeted — a Track-menu or Album-menu command naming its Track or Album — or library-wide: after every Library Scan finishes, or on demand from Settings, where the checkboxes choose which values the pass writes and Force makes it re-measure measured Tracks too. A library-wide pass measures unmeasured Tracks; a targeted pass measures only its target and writes only that target's values — a Track command measures track ReplayGain and never touches the Album's aggregate.
+_Avoid_: ReplayGain scan, analysis run
+
+**Unmeasured**:
+A Track or Album for which a ReplayGain value has never been measured. It is displayed as unmeasured — never as zero — and analysis treats it as work to do, not as a value to respect.
+_Avoid_: not analyzed, no gain, empty
 
 **Frame**:
 One pass of the read-decide-draw cycle: the backend's events are drained, the services are polled, what the user did is applied, and the View is handed what to draw. Its order is part of what it is — a fact filled in after the compose is a frame late — so the Frame is one module with one interface, not a sequence of steps threaded through the render path.

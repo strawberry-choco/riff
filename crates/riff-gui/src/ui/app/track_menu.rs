@@ -49,6 +49,8 @@
 use crate::ui::menu::{TrackMenu, TrackMenuIntent};
 use crate::ui::theme::Palette;
 use riff_backend::app::Transport;
+use riff_backend::app::pass_service::Passes;
+use riff_backend::app::replaygain_pass::PassCommand;
 use riff_backend::app::store::{LibraryMutationStore, PlaylistStore};
 use riff_backend::domain::{PlaylistId, Track, TrackId};
 
@@ -156,6 +158,9 @@ impl<'a> TrackMenuSubject<'a> {
 pub struct TrackMenuHost<'a> {
     /// The Playback Queue's command port: the playback intents go here.
     transport: &'a dyn Transport,
+    /// The `ReplayGain` Pass service: the measure command goes here — a
+    /// submission, not a run, because the pass owns its worker thread.
+    passes: &'a dyn Passes,
     /// The Application Store's playlists section: the playlist intents commit
     /// through it as one immediate durable transaction.
     playlist_store: &'a mut dyn PlaylistStore,
@@ -179,6 +184,7 @@ impl<'a> TrackMenuHost<'a> {
     /// two to drift apart in.
     pub fn new(
         transport: &'a dyn Transport,
+        passes: &'a dyn Passes,
         playlist_store: &'a mut dyn PlaylistStore,
         library_mutations: &'a mut dyn LibraryMutationStore,
         tag_editor: &'a mut InlineTagEditor,
@@ -186,6 +192,7 @@ impl<'a> TrackMenuHost<'a> {
     ) -> Self {
         Self {
             transport,
+            passes,
             playlist_store,
             library_mutations,
             tag_editor,
@@ -257,12 +264,18 @@ impl<'a> TrackMenuHost<'a> {
             // "Edit Tags" is the inline editor's entry point: it selects the
             // Track (so the Detail Panel shows its readout) and opens the
             // per-selection draft focused on the first tag field (Issue 04).
+            TrackMenuIntent::MeasureReplayGain => {
+                // A targeted pass: exactly this Track's track values, the Album
+                // aggregate untouched. Menu commands are independent of any
+                // Settings state by construction — nothing is consulted here.
+                self.passes.submit(PassCommand::Track(track_id));
+            }
             TrackMenuIntent::EditTags => {
                 let Some(track) = subject.track() else {
                     return;
                 };
                 *self.selected_track = Some(track_id);
-                let rows = tag_rows(std::slice::from_ref(track));
+                let rows = tag_rows(std::slice::from_ref(track), "unmeasured");
                 self.tag_editor
                     .open_track(track.id.clone(), track.file_path.clone(), &rows);
                 // The entry point focuses the first tag field (Issue 04): the

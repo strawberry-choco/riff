@@ -48,7 +48,8 @@ pub use riff_backend::app::gapless::{
     samples_from_duration,
 };
 pub use riff_backend::app::state::{
-    LibrarySession, LibraryStatus, PlaybackQueue, PlaybackSession, WatchState, replaygain_factor,
+    LibrarySession, LibraryStatus, PlaybackQueue, PlaybackSession, ReplayGainMode, WatchState,
+    replaygain_factor,
 };
 pub use riff_backend::app::store::SortDirection;
 pub use riff_backend::app::transport::clamp_seek;
@@ -552,6 +553,10 @@ pub mod mocks {
         /// (the worker processes requests sequentially).
         pub fail_after_writes: Option<usize>,
         pub writes: Mutex<Vec<(PathBuf, TagEdit)>>,
+        /// The `ReplayGain` writes recorded alongside the Metadata ones, in
+        /// arrival order — the two write paths stay distinct, so their
+        /// records do too.
+        pub replaygain_writes: Mutex<Vec<(PathBuf, riff_library::app::traits::ReplayGainTags)>>,
     }
 
     impl Default for MockMetadataWriter {
@@ -568,6 +573,7 @@ pub mod mocks {
                 fail: false,
                 fail_after_writes: None,
                 writes: Mutex::new(Vec::new()),
+                replaygain_writes: Mutex::new(Vec::new()),
             }
         }
 
@@ -578,6 +584,7 @@ pub mod mocks {
                 fail: true,
                 fail_after_writes: None,
                 writes: Mutex::new(Vec::new()),
+                replaygain_writes: Mutex::new(Vec::new()),
             }
         }
 
@@ -589,6 +596,7 @@ pub mod mocks {
                 fail: false,
                 fail_after_writes: Some(n),
                 writes: Mutex::new(Vec::new()),
+                replaygain_writes: Mutex::new(Vec::new()),
             }
         }
 
@@ -612,6 +620,26 @@ pub mod mocks {
                 .lock()
                 .unwrap()
                 .push((path.to_path_buf(), edit.clone()));
+            Ok(())
+        }
+    }
+
+    impl riff_library::app::traits::ReplayGainWriter for MockMetadataWriter {
+        fn write_replaygain(
+            &self,
+            path: &Path,
+            tags: &riff_library::app::traits::ReplayGainTags,
+        ) -> Result<(), riff_library::app::errors::LibraryError> {
+            let spent = self.writes.lock().unwrap().len();
+            if self.fail || self.fail_after_writes.is_some_and(|n| spent >= n) {
+                return Err(riff_library::app::errors::LibraryError::MetadataWrite(
+                    format!("permission denied: {}", path.display()),
+                ));
+            }
+            self.replaygain_writes
+                .lock()
+                .unwrap()
+                .push((path.to_path_buf(), *tags));
             Ok(())
         }
     }
@@ -2054,6 +2082,36 @@ pub mod mocks {
     #[derive(Default)]
     pub struct MockTagEdits;
 
+    /// No-op [`Passes`](riff_backend::app::pass_service::Passes) for UI tests
+    /// that exercise menus but never submit a pass. `submit` discards; every
+    /// poll answers idle.
+    #[derive(Default)]
+    pub struct MockPasses;
+
+    /// A [`Passes`](riff_backend::app::pass_service::Passes) that records every
+    /// submission, so a menu test can assert exactly which pass command its
+    /// item chose. Polls answer idle.
+    #[derive(Default)]
+    pub struct RecordingPasses {
+        pub submitted: Mutex<Vec<riff_backend::app::replaygain_pass::PassCommand>>,
+    }
+
+    impl riff_backend::app::pass_service::Passes for crate::mocks::RecordingPasses {
+        fn submit(&self, command: riff_backend::app::replaygain_pass::PassCommand) {
+            self.submitted.lock().unwrap().push(command);
+        }
+        fn cancel(&self) {}
+        fn is_running(&self) -> bool {
+            false
+        }
+        fn poll(&self) -> Option<riff_backend::app::replaygain_pass::PassReport> {
+            None
+        }
+        fn poll_progress(&self) -> (usize, usize) {
+            (0, 0)
+        }
+    }
+
     /// No-op [`Covers`] for UI tests that exercise `RiffApp` but never request
     /// a cover. `request` discards; `poll` always returns an empty Vec.
     #[derive(Default)]
@@ -2135,6 +2193,20 @@ impl riff_library::app::scan_service::Scans for crate::mocks::MockScans {
 
     fn is_scanning(&self, _path: &std::path::Path) -> bool {
         false
+    }
+}
+
+impl riff_backend::app::pass_service::Passes for crate::mocks::MockPasses {
+    fn submit(&self, _command: riff_backend::app::replaygain_pass::PassCommand) {}
+    fn cancel(&self) {}
+    fn is_running(&self) -> bool {
+        false
+    }
+    fn poll(&self) -> Option<riff_backend::app::replaygain_pass::PassReport> {
+        None
+    }
+    fn poll_progress(&self) -> (usize, usize) {
+        (0, 0)
     }
 }
 

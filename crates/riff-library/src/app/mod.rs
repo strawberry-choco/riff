@@ -5,6 +5,8 @@ pub mod cover_service;
 pub mod errors;
 pub mod playlist_manager;
 pub mod projection;
+pub mod replaygain;
+pub mod replaygain_pass;
 pub mod scan;
 pub mod scan_service;
 pub mod store;

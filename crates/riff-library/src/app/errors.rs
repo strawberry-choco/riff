@@ -10,6 +10,8 @@ pub enum LibraryError {
     MetadataWrite(String),
     #[error("Cover load error: {0}")]
     CoverLoad(String),
+    #[error("Loudness measurement error: {0}")]
+    Loudness(String),
     #[error("IO error: {0}")]
     Io(String),
 }

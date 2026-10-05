@@ -24,6 +24,7 @@ use std::thread::{self, JoinHandle};
 use crossbeam_channel::unbounded;
 
 use riff_infra::audio::decoder::default_codec_registry;
+use riff_infra::audio::loudness_analyzer::Ebur128LoudnessAnalyzer;
 use riff_infra::audio::{CpalAudioOutput, SymphoniaDecoder};
 use riff_infra::filesystem::{AudioFileScanner, FilesystemWatcher};
 use riff_infra::media::{
@@ -44,6 +45,7 @@ use riff_playback::infra::ports::DecoderFactory;
 
 use crate::app::MutexExt;
 use crate::app::events::BackendEvents;
+use crate::app::pass_service::PassService;
 use crate::app::preferences::Preferences;
 use crate::app::state::{LibrarySession, PlaybackSession};
 use crate::app::tag_edit_service::TagEditService;
@@ -90,6 +92,8 @@ pub struct AppRuntime {
     pub session_views: SessionViews,
     /// The Tag Edit service front-end handle.
     pub tag_edits: Box<dyn crate::app::tag_edit_service::TagEdits>,
+    /// The `ReplayGain` Pass service front-end handle.
+    pub passes: Box<dyn crate::app::pass_service::Passes>,
     /// The Cover service front-end handle.
     pub covers: Box<dyn riff_library::app::cover_service::Covers>,
     /// The persistent Thumbnail cache, shared with the Cover worker.
@@ -124,6 +128,8 @@ pub struct RuntimeLifecycle {
     tag_edit: WorkerCell,
     /// The Cover worker thread cell.
     cover: WorkerCell,
+    /// The `ReplayGain` Pass worker thread cell.
+    pass: WorkerCell,
     /// The filesystem-event forwarder thread cell. No stop lever: it exits
     /// when clearing the watcher drops the event sender it is parked on.
     fs_forwarder: WorkerCell,
@@ -131,6 +137,9 @@ pub struct RuntimeLifecycle {
     /// reached through `Scans::cancel`, so shutdown does not depend on a
     /// front-end handle the UI may already have moved or dropped.
     scan_cancel: Arc<AtomicBool>,
+    /// The pass worker's cancel flag, held for the same reason: shutdown
+    /// aborts a pass in flight so the join below cannot outwait it.
+    pass_cancel: Arc<AtomicBool>,
     /// The watcher-manager cell. Clearing it drops the filesystem watcher,
     /// which drops the event sender the forwarder is parked on.
     watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
@@ -214,8 +223,13 @@ impl RuntimeLifecycle {
         self.scan.raise_stop();
         self.tag_edit.raise_stop();
         self.cover.raise_stop();
+        self.pass.raise_stop();
 
         self.scan_cancel.store(true, Ordering::Relaxed);
+        // A pass in flight aborts at its next measurement boundary, keeping
+        // every batch it already committed — the same durability rule as the
+        // scan's cancellation above.
+        self.pass_cancel.store(true, Ordering::Relaxed);
 
         *self.watcher_manager.lock_or_recover() = None;
 
@@ -224,6 +238,7 @@ impl RuntimeLifecycle {
         self.scan.join("library scan worker");
         self.tag_edit.join("tag-edit worker");
         self.cover.join("cover worker");
+        self.pass.join("ReplayGain pass worker");
         self.fs_forwarder.join("filesystem-event forwarder");
     }
 }
@@ -362,13 +377,19 @@ impl AppRuntime {
         // threads — spawned here exactly like the Audio Engine.
         let tag_edit_stop = Arc::new(AtomicBool::new(false));
         let cover_stop = Arc::new(AtomicBool::new(false));
+        let pass_stop = Arc::new(AtomicBool::new(false));
+        let pass_cancel = Arc::new(AtomicBool::new(false));
+        let pass_progress = Arc::new(Mutex::new((0, 0)));
         let thumbnail_cache: Arc<dyn ThumbnailCache> = Arc::new(FileThumbnailCache::new()?);
-        let (tag_edits, covers, tag_edit, cover) = spawn_background_services(
+        let (tag_edits, covers, passes, tag_edit, cover, pass) = spawn_background_services(
             library_query_store.clone(),
             library_mutation_store.clone(),
             Arc::clone(&thumbnail_cache),
             Arc::clone(&tag_edit_stop),
             Arc::clone(&cover_stop),
+            Arc::clone(&pass_stop),
+            Arc::clone(&pass_cancel),
+            pass_progress,
         );
 
         // The UI's `Box<dyn Transport>` and the tray's transport are plain
@@ -416,6 +437,7 @@ impl AppRuntime {
             library_mutations: Box::new(library_mutation_store),
             session_views,
             tag_edits: Box::new(tag_edits),
+            passes: Box::new(passes),
             covers: Box::new(covers),
             thumbnail_cache,
         };
@@ -426,8 +448,10 @@ impl AppRuntime {
             scan: WorkerCell::new(Some(scan_stop), scan),
             tag_edit: WorkerCell::new(Some(tag_edit_stop), tag_edit),
             cover: WorkerCell::new(Some(cover_stop), cover),
+            pass: WorkerCell::new(Some(pass_stop), pass),
             fs_forwarder: WorkerCell::new(None, fs_forwarder),
             scan_cancel,
+            pass_cancel,
             watcher_manager,
         };
 
@@ -502,17 +526,29 @@ fn spawn_fs_watcher(scans: ScanService) -> (Arc<Mutex<Option<WatcherManager>>>, 
 }
 
 /// Composition-root wiring for the background services (ADR 0006): construct
-/// the real Tag Edit and Cover service pairs over real adapters and run each
-/// blocking worker on its dedicated thread — exactly like the Audio Engine.
-/// Returns the front-end handles the UI holds boxed (`Box<dyn TagEdits>`,
-/// `Box<dyn Covers>`) plus each worker's join handle, in that order.
+/// the real Tag Edit, Cover, and `ReplayGain` Pass service pairs over real
+/// adapters and run each blocking worker on its dedicated thread — exactly
+/// like the Audio Engine. Returns the front-end handles the UI holds boxed
+/// (`Box<dyn TagEdits>`, `Box<dyn Covers>`, `Box<dyn Passes>`) plus each
+/// worker's join handle, in that order.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn spawn_background_services(
     library_queries: SqliteStore,
     library_mutations: SqliteStore,
     thumbnail_cache: Arc<dyn ThumbnailCache>,
     tag_edit_stop: Arc<AtomicBool>,
     cover_stop: Arc<AtomicBool>,
-) -> (TagEditService, CoverService, JoinHandle<()>, JoinHandle<()>) {
+    pass_stop: Arc<AtomicBool>,
+    pass_cancel: Arc<AtomicBool>,
+    pass_progress: Arc<Mutex<(usize, usize)>>,
+) -> (
+    TagEditService,
+    CoverService,
+    PassService,
+    JoinHandle<()>,
+    JoinHandle<()>,
+    JoinHandle<()>,
+) {
     // The cover worker reads the artwork policy fresh per resolution so
     // the Settings pane's "Read embedded artwork" toggle applies
     // immediately (design-handoff issue 12); a read failure falls back to
@@ -520,8 +556,8 @@ fn spawn_background_services(
     let cover_settings = library_queries.clone();
     let (tag_edits, tag_worker) = TagEditService::new(
         Box::new(LoftyMetadataWriter::new()),
-        Box::new(library_queries),
-        Box::new(library_mutations),
+        Box::new(library_queries.clone()),
+        Box::new(library_mutations.clone()),
         tag_edit_stop,
     );
     let tag_edit = thread::spawn(move || tag_worker.run());
@@ -544,7 +580,21 @@ fn spawn_background_services(
     );
     let cover = thread::spawn(move || cover_worker.run());
 
-    (tag_edits, covers, tag_edit, cover)
+    // The `ReplayGain` Pass worker: the use case over the real analyzer
+    // (decode + `ebur128`), the real tag writer, and the store, on its own
+    // thread with its own stop lever and cancel flag.
+    let (passes, pass_worker) = PassService::new(
+        Box::new(Ebur128LoudnessAnalyzer::new()),
+        Box::new(LoftyMetadataWriter::new()),
+        Box::new(library_queries),
+        Box::new(library_mutations),
+        pass_cancel,
+        pass_stop,
+        pass_progress,
+    );
+    let pass = thread::spawn(move || pass_worker.run());
+
+    (tag_edits, covers, passes, tag_edit, cover, pass)
 }
 
 /// Composition-root wiring for the audio engine thread: construct the real

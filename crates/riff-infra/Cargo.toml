@@ -44,7 +44,8 @@ cpal = "0.18"
 ringbuf = "0.5"
 
 # Metadata reading/writing
-lofty = "0.25"
+lofty = "0.25.4"
+ebur128 = "0.1"
 
 # Image format detection for cover art
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

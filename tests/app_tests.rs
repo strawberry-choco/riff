@@ -192,26 +192,28 @@ mod tests {
 
     #[test]
     fn test_replaygain_factor_disabled_is_neutral() {
-        let f = replaygain_factor(false, Some(-6.0), Some(0.9));
-        assert!((f - 1.0).abs() < f32::EPSILON);
+        for mode in [ReplayGainMode::Track, ReplayGainMode::Album] {
+            let f = replaygain_factor(false, mode, Some(-6.0), Some(0.9), Some(-1.0), Some(0.5));
+            assert!((f - 1.0).abs() < f32::EPSILON);
+        }
     }
 
     #[test]
     fn test_replaygain_factor_missing_gain_is_neutral() {
-        let f = replaygain_factor(true, None, Some(0.9));
+        let f = replaygain_factor(true, ReplayGainMode::Track, None, Some(0.9), None, None);
         assert!((f - 1.0).abs() < f32::EPSILON);
-        let f = replaygain_factor(true, None, None);
+        let f = replaygain_factor(true, ReplayGainMode::Track, None, None, None, None);
         assert!((f - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
     fn test_replaygain_factor_converts_db_to_linear() {
         // -6 dB ≈ 0.5012, +6 dB ≈ 1.9953, 0 dB → exactly 1.0.
-        let f = replaygain_factor(true, Some(-6.0), None);
+        let f = replaygain_factor(true, ReplayGainMode::Track, Some(-6.0), None, None, None);
         assert!((f - 0.5012).abs() < 1e-3);
-        let f = replaygain_factor(true, Some(6.0), None);
+        let f = replaygain_factor(true, ReplayGainMode::Track, Some(6.0), None, None, None);
         assert!((f - 1.9953).abs() < 1e-3);
-        let f = replaygain_factor(true, Some(0.0), None);
+        let f = replaygain_factor(true, ReplayGainMode::Track, Some(0.0), None, None, None);
         assert!((f - 1.0).abs() < f32::EPSILON);
     }
 
@@ -219,7 +221,14 @@ mod tests {
     fn test_replaygain_factor_peak_caps_positive_gain() {
         // +6 dB wants ≈1.995, but peak 0.8 caps the factor at 1/0.8 = 1.25 so
         // factor * peak <= 1.0 (no clipping).
-        let f = replaygain_factor(true, Some(6.0), Some(0.8));
+        let f = replaygain_factor(
+            true,
+            ReplayGainMode::Track,
+            Some(6.0),
+            Some(0.8),
+            None,
+            None,
+        );
         assert!((f - 1.25).abs() < 1e-6);
         assert!(f * 0.8 <= 1.0 + 1e-6);
     }
@@ -227,17 +236,141 @@ mod tests {
     #[test]
     fn test_replaygain_factor_peak_does_not_raise_attenuation() {
         // Negative gain (≈0.5012) sits below the 1/0.9 ≈ 1.111 cap → uncapped.
-        let f = replaygain_factor(true, Some(-6.0), Some(0.9));
+        let f = replaygain_factor(
+            true,
+            ReplayGainMode::Track,
+            Some(-6.0),
+            Some(0.9),
+            None,
+            None,
+        );
         assert!((f - 0.5012).abs() < 1e-3);
     }
 
     #[test]
     fn test_replaygain_factor_zero_or_missing_peak_no_divide_by_zero() {
         // peak 0.0 is not positive, so it is ignored (no 1/0 division).
-        let f = replaygain_factor(true, Some(6.0), Some(0.0));
+        let f = replaygain_factor(
+            true,
+            ReplayGainMode::Track,
+            Some(6.0),
+            Some(0.0),
+            None,
+            None,
+        );
         assert!((f - 1.9953).abs() < 1e-3);
-        let f = replaygain_factor(true, Some(6.0), None);
+        let f = replaygain_factor(true, ReplayGainMode::Track, Some(6.0), None, None, None);
         assert!((f - 1.9953).abs() < 1e-3);
+    }
+
+    /// A Track with no signal carries an infinite gain and a 0.0 peak, so the
+    /// peak cap cannot bound it (`1.0 / 0.0` is infinite too). The factor must
+    /// stay finite: it is multiplied into every sample in the audio callback,
+    /// and `0.0 * inf` is NaN — non-finite samples handed to the output device.
+    #[test]
+    fn test_replaygain_factor_non_finite_gain_is_neutral() {
+        let silent = (f32::INFINITY, 0.0);
+        for (gain, peak) in [silent, (f32::NEG_INFINITY, 0.0), (f32::NAN, 0.9)] {
+            let f = replaygain_factor(
+                true,
+                ReplayGainMode::Track,
+                Some(gain),
+                Some(peak),
+                None,
+                None,
+            );
+            assert!(
+                (f - 1.0).abs() < f32::EPSILON,
+                "a {gain} dB gain carries no loudness information, so it must play unadjusted, got {f}"
+            );
+        }
+
+        // Album mode resolves the Album's own infinite pair, and the pair the
+        // Track-mode path would have used never reaches the factor.
+        let f = replaygain_factor(
+            true,
+            ReplayGainMode::Album,
+            Some(-6.0),
+            Some(0.9),
+            Some(f32::INFINITY),
+            Some(0.0),
+        );
+        assert!((f - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_replaygain_mode_defaults_to_track() {
+        // ReplayGain Mode defaults to Track: existing behavior changes only
+        // for the better, never surprisingly.
+        let state = PlaybackSession::default();
+        assert_eq!(state.replaygain_mode, ReplayGainMode::Track);
+    }
+
+    #[test]
+    fn test_replaygain_factor_track_mode_uses_the_track_pair() {
+        // Album values sit on the Track but Track mode ignores them.
+        let f = replaygain_factor(
+            true,
+            ReplayGainMode::Track,
+            Some(-6.0),
+            Some(0.9),
+            Some(-1.0),
+            Some(0.5),
+        );
+        assert!(
+            (f - 0.5012).abs() < 1e-3,
+            "track gain decides, not album gain"
+        );
+    }
+
+    #[test]
+    fn test_replaygain_factor_album_mode_applies_the_album_pair() {
+        // Album mode applies the album gain, and the peak that caps it is the
+        // album peak — Album Mode is protected against clipping exactly as
+        // Track Mode is.
+        let f = replaygain_factor(
+            true,
+            ReplayGainMode::Album,
+            Some(-6.0),
+            Some(0.9),
+            Some(6.0),
+            Some(0.8),
+        );
+        assert!(
+            (f - 1.25).abs() < 1e-6,
+            "album gain, capped by the album peak"
+        );
+        assert!(f * 0.8 <= 1.0 + 1e-6);
+    }
+
+    #[test]
+    fn test_replaygain_factor_album_mode_falls_back_to_the_track_pair_when_album_gain_is_absent() {
+        let f = replaygain_factor(
+            true,
+            ReplayGainMode::Album,
+            Some(-6.0),
+            Some(0.9),
+            None,
+            None,
+        );
+        assert!(
+            (f - 0.5012).abs() < 1e-3,
+            "no album value → the track pair plays"
+        );
+    }
+
+    #[test]
+    fn test_replaygain_factor_album_mode_missing_album_gain_is_neutral_like_track_mode() {
+        // Neither pair carries a gain → no adjustment in either mode.
+        let f = replaygain_factor(
+            true,
+            ReplayGainMode::Album,
+            None,
+            Some(0.9),
+            None,
+            Some(0.5),
+        );
+        assert!((f - 1.0).abs() < f32::EPSILON);
     }
 
     // --- Gapless-playback helpers (Task 4.1) ----------------------------------
@@ -4912,6 +5045,7 @@ mod tag_edit_service_tests {
     use super::*;
     use crate::mocks::{MockLibraryMutationStore, MockLibraryQueryStore, MockMetadataWriter};
     use riff_backend::app::errors::StoreError;
+    use riff_library::app::traits::{ReplayGainTags, ReplayGainWriter};
     // The tag-edit save flow consumes the library slice's `MetadataWriter`
     // port, whose errors are the library slice's `LibraryError`.
     use riff_backend::app::store::LibraryQueryStore;
@@ -4938,6 +5072,12 @@ mod tag_edit_service_tests {
     impl MetadataWriter for SharedWriter {
         fn write_tags(&self, path: &Path, edit: &TagEdit) -> Result<(), LibraryError> {
             self.0.lock().unwrap().write_tags(path, edit)
+        }
+    }
+
+    impl ReplayGainWriter for SharedWriter {
+        fn write_replaygain(&self, path: &Path, tags: &ReplayGainTags) -> Result<(), LibraryError> {
+            self.0.lock().unwrap().write_replaygain(path, tags)
         }
     }
 
@@ -5300,6 +5440,50 @@ mod tag_edit_service_tests {
     }
 
     #[test]
+    fn test_replaygain_edit_writes_its_own_path_and_commits_the_values() {
+        let track = stored_track();
+        let h = spawn_service(
+            MockMetadataWriter::recording(),
+            HashMap::from([(track.id.clone(), track)]),
+            MockLibraryMutationStore::new(),
+        );
+
+        let path = PathBuf::from("/music/t1.mp3");
+        h.service.submit(TagEditRequest {
+            track_id: TrackId::from_path(&path),
+            path: path.clone(),
+            edit: TagEdit::default(),
+            replaygain: ReplayGainTags {
+                track_gain: Some(-6.54),
+                track_peak: Some(0.98),
+                album_gain: Some(-7.12),
+                album_peak: Some(0.81),
+            },
+        });
+
+        let outcome = poll_outcome(&h.service);
+        assert_eq!(outcome, Some(TagEditOutcome::Saved));
+
+        // The ReplayGain facts went through their own write path — the
+        // Metadata path saw nothing — and the committed Track carries them.
+        let rg_writes = h
+            .writer
+            .lock()
+            .unwrap()
+            .replaygain_writes
+            .lock()
+            .unwrap()
+            .clone();
+        assert_eq!(rg_writes.len(), 1, "exactly one ReplayGain file write");
+        assert_eq!(rg_writes[0].0, path);
+        assert_eq!(rg_writes[0].1.track_gain, Some(-6.54));
+        let committed = h.mutations.lock().unwrap().refreshed();
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0].metadata.replaygain_track_gain, Some(-6.54));
+        assert_eq!(committed[0].metadata.replaygain_album_peak, Some(0.81));
+    }
+
+    #[test]
     fn test_tag_edit_success_reports_saved_and_commits_edited_track() {
         let track = stored_track();
         let h = spawn_service(
@@ -5313,6 +5497,7 @@ mod tag_edit_service_tests {
             track_id: TrackId::from_path(&path),
             path: path.clone(),
             edit: title_edit("New Title"),
+            replaygain: Default::default(),
         });
 
         let outcome = poll_outcome(&h.service);
@@ -5347,6 +5532,7 @@ mod tag_edit_service_tests {
             track_id: TrackId::from_path(&path),
             path,
             edit: title_edit("New Title"),
+            replaygain: Default::default(),
         });
 
         match poll_outcome(&h.service) {
@@ -5387,6 +5573,7 @@ mod tag_edit_service_tests {
             track_id: track_id.clone(),
             path,
             edit: title_edit("New Title"),
+            replaygain: Default::default(),
         });
 
         assert_eq!(
@@ -5425,6 +5612,7 @@ mod tag_edit_service_tests {
             track_id: TrackId::from_path(&path),
             path,
             edit: title_edit("New Title"),
+            replaygain: Default::default(),
         });
 
         match poll_outcome(&h.service) {
@@ -5462,6 +5650,7 @@ mod tag_edit_service_tests {
             track_id: TrackId::from_path(&path),
             path,
             edit: title_edit("New Title"),
+            replaygain: Default::default(),
         });
 
         assert_eq!(poll_outcome(&h.service), Some(TagEditOutcome::Saved));
@@ -5505,11 +5694,13 @@ mod tag_edit_service_tests {
             track_id: TrackId::from_path(&path),
             path: path.clone(),
             edit: title_edit("New Title"),
+            replaygain: Default::default(),
         });
         h.service.submit(TagEditRequest {
             track_id: TrackId::from_path(&path),
             path,
             edit: title_edit("Doomed"),
+            replaygain: Default::default(),
         });
 
         let first = poll_outcome(&h.service);
@@ -7940,7 +8131,7 @@ mod preferences_tests {
 
     use riff_backend::app::MutexExt;
     use riff_backend::app::preferences::Preferences;
-    use riff_backend::app::state::{LibrarySession, PlaybackSession};
+    use riff_backend::app::state::{LibrarySession, PlaybackSession, ReplayGainMode};
 
     use crate::mocks::{MockSettingsStore, MockTransport, SettingsCall};
 
@@ -7976,6 +8167,39 @@ mod preferences_tests {
         assert_eq!(playback.lock_or_recover().current_volume, 0.4);
         assert!(library.lock_or_recover().ui_flags.advanced_mode);
         assert!(library.lock_or_recover().ui_flags.close_quits_app);
+    }
+
+    #[test]
+    fn hydrate_lands_the_stored_replaygain_mode_in_the_playback_session() {
+        let mut store = MockSettingsStore::default();
+        store.state.scalars.replaygain_enabled = true;
+        store.state.scalars.replaygain_mode = 1;
+
+        let playback = Arc::new(Mutex::new(PlaybackSession::default()));
+        let library = Arc::new(Mutex::new(LibrarySession::default()));
+        let _prefs = hydrate_from(&store, &playback, &library);
+
+        let session = playback.lock_or_recover();
+        assert!(session.replaygain_enabled);
+        assert_eq!(session.replaygain_mode, ReplayGainMode::Album);
+    }
+
+    #[test]
+    fn an_album_mode_change_commits_the_store_code() {
+        let playback = Arc::new(Mutex::new(PlaybackSession::default()));
+        let library = Arc::new(Mutex::new(LibrarySession::default()));
+        let mut prefs = hydrate_from(&MockSettingsStore::default(), &playback, &library);
+
+        let mut snapshot = playback.lock_or_recover().clone();
+        snapshot.replaygain_mode = ReplayGainMode::Album;
+        let mut store = MockSettingsStore::default();
+        prefs.commit_if_changed(&snapshot, &library.lock_or_recover(), &mut store);
+
+        assert_eq!(store.calls, vec![SettingsCall::Scalars]);
+        assert_eq!(
+            store.state.scalars.replaygain_mode, 1,
+            "Album commits as store code 1"
+        );
     }
 
     #[test]

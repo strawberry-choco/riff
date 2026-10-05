@@ -877,6 +877,7 @@ mod composition_root_tests {
                 track_id: TrackId("gone.wav".to_string()),
                 path: nowhere.clone(),
                 edit: TagEdit::default(),
+                replaygain: Default::default(),
             });
             let _ = tag_edits.poll();
 

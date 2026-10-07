@@ -88,34 +88,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      # a broken validator must fail loudly here, never pass by crashing into
-      # a pass — hence the self-test before any commit is validated.
-      - name: Run the validator's self-test
-        run: python3 tools/validate-commit-msg.py --self-test
+      # the gate logic itself (self-test, non-empty-range guard, per-commit
+      # loop) lives in the composite action shared with the push gate; the job
+      # only computes the range the pull request adds.
+      - name: Resolve the pull request's commit range
+        id: range
+        run: echo "range=$(git merge-base "origin/${{ github.base_ref }}" HEAD)..HEAD" >> "$GITHUB_OUTPUT"
 
       - name: Validate the pull request's commits
-        run: |
-          set -euo pipefail
-
-          base=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
-          count=$(git rev-list --count "${base}..HEAD")
-
-          # an empty range would validate nothing and pass vacuously — the
-          # failure mode the release workflow's version guard is explicitly
-          # written to avoid — so it is an explicit error, not a pass.
-          if [ "$count" -eq 0 ]; then
-            echo "::error::commit range ${base}..HEAD resolved to nothing; there are no commits to validate"
-            exit 1
-          fi
-
-          # all rules live in the validator; nothing about the message format
-          # is re-implemented here.
-          tmp=$(mktemp)
-          trap 'rm -f "$tmp"' EXIT
-          for sha in $(git rev-list --reverse "${base}..HEAD"); do
-            git log -1 --format=%B "$sha" > "$tmp"
-            if ! reason=$(python3 tools/validate-commit-msg.py "$tmp" 2>&1); then
-              echo "::error::commit $(git log -1 --format='%h %s' "$sha") is not a valid commit message: $reason"
-              exit 1
-            fi
-          done
+        uses: ./.github/actions/commit-lint
+        with:
+          range: ${{ steps.range.outputs.range }}

@@ -1,0 +1,50 @@
+# the shared implementation of the commit-message range discipline. Both the
+# pull-request gate and the push gate call this action, so the two cannot drift
+# apart: one implementation of the self-test, the non-empty-range guard and the
+# per-commit validation loop.
+name: 'commit message lint'
+description: 'Self-test the validator, assert the commit range is non-empty, then validate every commit in the range.'
+inputs:
+  range:
+    description: 'The resolved commit range to validate, e.g. <base>..HEAD'
+    required: true
+runs:
+  using: composite
+  steps:
+    # a broken validator must fail loudly here, never pass by crashing into
+    # a pass — hence the self-test before any commit is validated.
+    - name: Run the validator's self-test
+      shell: bash
+      run: python3 tools/validate-commit-msg.py --self-test
+
+    - name: Assert the commit range is non-empty
+      shell: bash
+      run: |
+        set -euo pipefail
+        range="${{ inputs.range }}"
+        count=$(git rev-list --count "$range")
+
+        # an empty range would validate nothing and pass vacuously — the
+        # failure mode the release workflow's version guard is explicitly
+        # written to avoid — so it is an explicit error, not a pass.
+        if [ "$count" -eq 0 ]; then
+          echo "::error::commit range $range resolved to nothing; there are no commits to validate"
+          exit 1
+        fi
+
+    # all rules live in the validator; nothing about the message format
+    # is re-implemented here.
+    - name: Validate every commit in the range
+      shell: bash
+      run: |
+        set -euo pipefail
+        range="${{ inputs.range }}"
+        tmp=$(mktemp)
+        trap 'rm -f "$tmp"' EXIT
+        for sha in $(git rev-list --reverse "$range"); do
+          git log -1 --format=%B "$sha" > "$tmp"
+          if ! reason=$(python3 tools/validate-commit-msg.py "$tmp" 2>&1); then
+            echo "::error::commit $(git log -1 --format='%h %s' "$sha") is not a valid commit message: $reason"
+            exit 1
+          fi
+        done

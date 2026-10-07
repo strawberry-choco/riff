@@ -130,6 +130,29 @@ jobs:
           rm -rf "/tmp/git-cliff-${version}"
           git-cliff --version
 
+      # "Nothing may merge between release preparation and tagging" as a
+      # checked invariant rather than a discipline. The Changelog committed at
+      # the tag is regenerated with the exact documented preparation commands
+      # and diffed against itself; a mismatch means a commit landed between
+      # the preparation commit and the tag. The guard runs before the section
+      # rendering and before the build matrix finishes, so the drift costs a
+      # minute rather than four builds.
+      - name: Check the Changelog against the tag
+        run: |
+          set -euo pipefail
+          # The SAME commands as step 2 of "Cutting a release": one
+          # implementation of what the Changelog should be, never a second one.
+          git cliff --tag "${GITHUB_REF_NAME}" v0.1.0..HEAD -o /tmp/changelog.next
+          printf '\n' >> /tmp/changelog.next
+          awk '/^## \[0\.1\.0\]$/{f=1} f' CHANGELOG.md >> /tmp/changelog.next
+          if ! diff -u CHANGELOG.md /tmp/changelog.next > /tmp/changelog.diff; then
+            echo "::error::CHANGELOG.md at ${GITHUB_REF_NAME} does not match a regeneration from the commit range v0.1.0..HEAD: a commit landed between release preparation and tagging. Re-run release preparation against the actual tag range (it is idempotent); never hand-edit the generated sections."
+            head -40 /tmp/changelog.diff
+            exit 1
+          fi
+          echo "CHANGELOG.md at ${GITHUB_REF_NAME} matches the commit range"
+          rm -f /tmp/changelog.diff /tmp/changelog.next
+
       - name: Generate release notes
         shell: bash
         run: |

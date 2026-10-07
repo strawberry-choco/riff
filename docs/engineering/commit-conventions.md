@@ -91,6 +91,20 @@ Three enforcement points run the same validator, so there is exactly one rule im
 
 Both CI jobs run on Linux only, so the matrix does not grow.
 
-## History before conventional commits
+## History: the whole log conforms
 
-Everything before the first conventional commit stays freeform on purpose. Nothing has been retro-fitted: no old message has been rewritten and no changelog has been reconstructed for that era. No gate ever reads whole history, either — the hook sees one draft message, and each CI job validates a commit range. The changelog generator filters non-conventional commits out rather than failing on them, and it hides anything it cannot parse. Do not "fix" old messages.
+There is no exempt era. On 2026-10-07 the repository's history was rewritten
+as a one-time maintenance action, and the log conforms to this profile from
+the first commit to the latest: every message satisfies the validator, the
+merge structure is linear, and the changelog is generated from that log. The
+rewrite decision, its costs — the old SHAs, the four pull-request merge
+commits, every external reference to a pre-rewrite commit — and the
+constraint that justified paying them are recorded in
+[ADR 0016](../adr/0016-history-retrofit.md).
+
+The three enforcement points above continue to guard the history going
+forward, unchanged. The changelog generator runs with
+`filter_unconventional = false`: after the retrofit nothing in the log is
+unconventional, so the filter's only remaining power would be to silently
+hide a non-conforming commit that slipped past the gates — and a regression
+must be visible in regeneration output, never absorbed.

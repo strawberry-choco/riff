@@ -59,7 +59,7 @@ body = """
 {% for group, commits in commits | group_by(attribute="group") %}
     ### {{ group }}
     {% for commit in commits %}
-        - {{ commit.message | split(pat="\n") | first | upper_first | trim }}\
+        - {% if commit.breaking %}**breaking:** {% endif %}{{ commit.message | split(pat="\n") | first | upper_first | trim }}\
     {% endfor %}
 {% endfor %}\n
 """
@@ -99,8 +99,11 @@ sort_commits = "oldest"
 # The type-to-section catalog. `feat` and `fix` are the only two types
 # that reach a visible section; `refactor`, `perf`, and `deps` land in
 # the Changed section; everything else is hidden and never affects a
-# version bump.
+# version bump. A `!`-marked breaking commit is parsed FIRST and given
+# its own section whatever its type is; a footer-marked one keeps its
+# type's section and is flagged inline in the body template below.
 commit_parsers = [
+  { message = "^[a-z]+(\\([^)]*\\))?!:", group = "Breaking changes" },
   { message = "^feat", group = "Added" },
   { message = "^fix", group = "Fixed" },
   { message = "^perf", group = "Changed" },

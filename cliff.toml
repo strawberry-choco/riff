@@ -62,7 +62,7 @@ footer = """\
 {% endif %}\
 {% endfor %}\
 [Unreleased]: https://github.com/strawberry-choco/riff/compare/{{ prev }}...HEAD
-[0.1.0]: https://github.com/strawberry-choco/riff/releases\
+[0.1.0]: https://github.com/strawberry-choco/riff/releases/tag/v0.1.0\
 """
 trim = true
 
@@ -78,9 +78,10 @@ filter_unconventional = false
 split_commits = false
 protect_breaking_commits = false
 tag_pattern = "v[0-9].*"
-# The hand-written 0.1.0 section is never generated: its tag is ignored
-# (its commits are freeform and filtered out anyway) and the section is
-# appended from the existing file by the documented release-prep command.
+# The hand-written 0.1.0 section is never generated (D6: the retrofit does
+# not reconstruct per-release notes for an era that predates the tooling) —
+# its tag is ignored here and the section is appended from the existing file
+# by the documented release-prep command.
 ignore_tags = "v0.1.0"
 topo_order = false
 sort_commits = "oldest"

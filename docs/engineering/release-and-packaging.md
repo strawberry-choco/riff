@@ -62,7 +62,14 @@ The release notes are generated in the workflow from a literal template rather t
 ## Cutting a release
 
 1. Set the version in the root `Cargo.toml` `[workspace.package]` block. The seven member manifests inherit it and must not be edited.
-2. Update `CHANGELOG.md`: fill in the date on the version section, move anything under `## [Unreleased]` into it, and repoint the link at the bottom of the file.
+2. Regenerate `CHANGELOG.md` with git-cliff (`brew install git-cliff`, or `cargo install git-cliff --locked`). Regeneration is a pure function of the git state — the generated sections come from the commits since `v0.1.0`, and the hand-written 0.1.0 section is appended from the existing file — so running it twice is harmless:
+   ```bash
+   git cliff --tag v<version> v0.1.0..HEAD -o CHANGELOG.next
+   printf '\n' >> CHANGELOG.next
+   awk '/^## \[0\.1\.0\]$/{f=1} f' CHANGELOG.md >> CHANGELOG.next
+   mv CHANGELOG.next CHANGELOG.md
+   ```
+   The explicit `v0.1.0..HEAD` range is what keeps pre-conventional history out of the generator and bounds the regeneration to exactly what a release contains. This inserts the new version's section at the top, emits a fresh `[Unreleased]` section when unreleased commits exist, and regenerates the footer link definitions. Once the tag exists, the same three commands regenerate the section in place — that is the recovery path when the release workflow's consistency guard reports drift; never edit the generated sections by hand. The type-to-section catalog and the pre-1.0 bump semantics live in `cliff.toml` at the repository root.
 3. Merge to `master` and let CI pass. The release workflow does not re-run the quality gate, so a red `master` will not be caught by tagging it.
 4. Push the tag: `git push origin v<version>`. The `verify` job fails in under a minute if the tag and the workspace version disagree, which is the intended moment to notice a version bump that was forgotten.
 5. When the four artifacts are published, add the download badges to `README.md`. This is deliberately **not** automated: the badges are a claim that a real release exists, and a workflow that rewrote the README on a failed run would leave a claim behind with nothing to back it.

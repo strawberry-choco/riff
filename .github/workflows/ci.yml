@@ -99,3 +99,42 @@ jobs:
         uses: ./.github/actions/commit-lint
         with:
           range: ${{ steps.range.outputs.range }}
+
+  # the defense-in-depth gate for direct pushes to the default branch. The
+  # range is exactly the commits that landed — the branch's previous tip up to
+  # the new one — so a push that arrives by another route meets the same
+  # message rules a pull request does, and the same shared gate logic runs.
+  commit-lint-push:
+    name: commit messages (push)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      # full history: github.event.before is the branch's previous tip, which
+      # a shallow clone of the new tip cannot resolve.
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      # a push whose previous tip cannot be resolved — the zero SHA, as on a
+      # branch created at the new tip, or a SHA the checkout does not contain —
+      # cannot name the commits that landed, so it fails loudly rather than
+      # passing vacuously.
+      - name: Resolve the pushed commit range
+        id: range
+        run: |
+          set -euo pipefail
+
+          zero=0000000000000000000000000000000000000000
+          before="${{ github.event.before }}"
+          if [ "$before" = "$zero" ] || ! git rev-parse --verify --quiet "${before}^{commit}" >/dev/null 2>&1; then
+            echo "::error::github.event.before (${before}) does not resolve to an existing commit; the pushed commit range cannot be resolved, so there is nothing safe to validate"
+            exit 1
+          fi
+
+          echo "range=${before}..${{ github.event.after }}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate the pushed commits
+        uses: ./.github/actions/commit-lint
+        with:
+          range: ${{ steps.range.outputs.range }}

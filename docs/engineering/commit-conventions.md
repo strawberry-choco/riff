@@ -58,6 +58,8 @@ The changelog generator (git-cliff, configured by `cliff.toml`) groups each comm
 | `deps` | Changed | none |
 | `build`, `ci`, `chore`, `docs`, `test`, `style`, `revert` | — (hidden) | none |
 
+A breaking change outranks the type mapping. A commit marked with `!` after the type — `feat!:`, `fix(api)!:` — is grouped first, whatever its type, and lands in its own **Breaking changes** section. A commit marked by a `BREAKING CHANGE:` footer instead stays in its type's section, with an inline `**breaking:**` marker before its entry, so the release notes never bury the fact that something broke. Either way the version bump follows the breaking-change rule below, not the type's own bump.
+
 The pre-1.0 semantics are pinned in `cliff.toml`'s `[bump]` section, set explicitly rather than inherited from git-cliff's defaults, so "is this a minor or a major" is answered by a rule rather than by taste at release time:
 
 - A feature bumps the **minor** version, even while the major version is zero.

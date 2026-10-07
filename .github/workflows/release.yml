@@ -84,6 +84,205 @@ jobs:
           fi
           echo "tag ${tag} matches workspace version ${workspace_version}"
 
+  # Generate the release notes' "what changed" section from the commit
+  # history — the same git-cliff rendering, over the same tag range and with
+  # the same cliff.toml, that produces CHANGELOG.md (see "Cutting a release"
+  # in docs/engineering/release-and-packaging.md). Rendering the section here
+  # rather than copying the Changelog means the notes and the Changelog can
+  # never disagree about what a release contains.
+  #
+  # This is a separate job from publication on purpose: it runs alongside the
+  # build matrix, and the `release` job needs both, so a notes failure stops
+  # the run before anything is published — the notes can never be
+  # half-published.
+  notes:
+    name: generate release notes
+    # `needs: []` states that this job depends on nothing, like `verify`
+    # above: it runs in parallel with the build matrix, and only the publish
+    # job waits for it.
+    needs: []
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The ONLY checkout at full history in this workflow: rendering the
+          # range v0.1.0..<tag> requires the commits between the two, and the
+          # default shallow clone contains neither the old tag nor the
+          # history behind it. Every other job here can stay shallow, and the
+          # publish job never checks the repository out at all.
+          fetch-depth: 0
+
+      # Installed as a pinned release binary rather than through the official
+      # Action: the generation step below pipes git-cliff's raw stdout
+      # straight into the section extractor, and a pinned binary keeps the
+      # toolchain version explicit — the same 2.14.x line cliff.toml was
+      # verified against. (orhun/git-cliff-action v4.9.1, pinned to
+      # a9a95522b26fe6403f7bb24031f21fb573d0f5ff, is the like-for-like
+      # Action substitute if this ever needs to become an Action step.)
+      - name: Install git-cliff
+        run: |
+          set -euo pipefail
+          version="2.14.2"
+          curl -fsSL "https://github.com/orhun/git-cliff/releases/download/v${version}/git-cliff-${version}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xzf - -C /tmp "git-cliff-${version}/git-cliff"
+          sudo install -m 0755 "/tmp/git-cliff-${version}/git-cliff" /usr/local/bin/git-cliff
+          rm -rf "/tmp/git-cliff-${version}"
+          git-cliff --version
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The change section comes from the SAME source as CHANGELOG.md:
+          # git-cliff with the repository's cliff.toml, over the same tag
+          # range the documented release preparation uses. `--tag` labels the
+          # section with the pushed tag; the range keeps the pre-conventional
+          # history out, exactly as in the Changelog regeneration command.
+          version="${GITHUB_REF_NAME#v}"
+          section="$(
+            git cliff --tag "${GITHUB_REF_NAME}" v0.1.0..HEAD \
+              | awk -v heading="## [${version}]" '
+                  # Everything between the version heading and the first
+                  # footer link definition is the section. The heading is
+                  # dropped (the notes carry their own title) and the link
+                  # definitions end it (the notes are not a changelog file).
+                  index($0, heading) == 1 { insec = 1; next }
+                  insec && /^\[[^]]*\]: / { exit }
+                  insec { lines[++n] = $0 }
+                  END {
+                    start = 1; while (start <= n && lines[start] == "") start++;
+                    end = n;   while (end >= 1 && lines[end] == "") end--;
+                    for (i = start; i <= end; i++) print lines[i]
+                  }')"
+          # A release with no change entries is not a release: an empty
+          # section means the range held no conventional commits, which is a
+          # tagging mistake to fix, not notes to publish. The explicit error
+          # is the same defence the version guard uses against a check that
+          # would otherwise pass vacuously.
+          if [ -z "${section}" ]; then
+            echo "::error::the generated change section for ${GITHUB_REF_NAME} is empty: no conventional commits between v0.1.0 and the tag"
+            exit 1
+          fi
+          notes="release-notes.md"
+          {
+            # Only the title line interpolates. The hand-written text below is
+            # passed as single-quoted arguments, so a future edit cannot
+            # accidentally leave an unexpanded `$`, a backtick command, or a
+            # stray version string in the published notes. (It is
+            # `printf '%s\n' arg arg...` rather than a here-doc on purpose: a
+            # here-doc's terminator would have to sit at column 0 of the
+            # script, which YAML block-scalar indentation cannot express
+            # without tab-tricks.)
+            printf '# riff %s\n\n' "${GITHUB_REF_NAME}"
+            # The first-release sentence is conditional on the tag: only
+            # v0.1.0 is the first public release, so the 0.2.0 notes must not
+            # claim it.
+            if [ "${GITHUB_REF_NAME}" = "v0.1.0" ]; then
+              printf '%s\n' 'The first public release of riff.' ''
+            fi
+            printf '%s\n' \
+              'riff is pre-1.0, and it is offline-only by design: it plays the' \
+              'audio files already on your own disks, opens no network' \
+              'connection, and has no account, no telemetry, and no upload. Each' \
+              'artifact below carries the compiled `riff` executable and nothing' \
+              'else — no installer, no code signature. Point it at a folder of' \
+              'music.' \
+              ''
+            # The generated section sits here: after the short introduction,
+            # before the download table. Everything from the next printf on is
+            # hand-written and retained verbatim — the download table, the
+            # per-platform caveats, and the pre-release statement. They answer
+            # a question the commit log cannot: what the artifact actually IS
+            # on each platform.
+            printf '%s\n' "${section}" \
+              ''
+            printf '%s\n' \
+              '## Downloads' \
+              '' \
+              '| Platform | File |' \
+              '|---|---|' \
+              '| macOS, Apple silicon | `riff-<tag>-macos-arm64.dmg` |' \
+              '| macOS, Intel | `riff-<tag>-macos-x86_64.dmg` |' \
+              '| Linux, x86-64 | `riff-<tag>-linux-x86_64.tar.gz` |' \
+              '| Windows, x86-64 | `riff-<tag>-windows-x86_64.exe` |' \
+              '' \
+              '`<tag>` stands for this release tag, so every file name starts with' \
+              '`riff-` followed by it. Take the four downloads from this page' \
+              'rather than assembling the names yourself.' \
+              '' \
+              '## What each platform actually gives you' \
+              '' \
+              '**Windows — the bare `riff.exe`,** straight from the build, with' \
+              'no zip wrapper and no installer. The executable is unsigned, so' \
+              'SmartScreen warns the first time you open it: choose "More info",' \
+              'then "Run anyway". Wrapping this same unsigned binary in an NSIS' \
+              'installer would hit the identical wall; an installer buys a setup' \
+              'experience, not trust. Only a code-signing certificate buys' \
+              'trust, and riff does not have one.' \
+              '' \
+              '**macOS — a `.dmg` containing `riff.app`,** with the riff brand' \
+              'icon. The bundle is ad-hoc signed but NOT identified with Apple,' \
+              'so Gatekeeper quarantines the download and blocks the first' \
+              'launch. There is one extra step, and doing it BEFORE opening the' \
+              'image is the easy way — it needs no password and no permission:' \
+              '' \
+              '    xattr -d com.apple.quarantine ~/Downloads/riff-*.dmg' \
+              '' \
+              'Run it on the file you actually downloaded, then open the image,' \
+              'drag riff into Applications, and launch it. Do that first and it' \
+              'just runs. (If the command complains — "no matches found" or' \
+              '"No such xattr" — there was nothing left to clear, which is' \
+              'harmless: the usual cause is a different download folder, or' \
+              'running it twice.)' \
+              '' \
+              'The reason order matters: the quarantine attribute is not on the' \
+              'app inside the image, it is copied onto the app when you drag it' \
+              'out. Clearing it on the image first means the app never picks it' \
+              'up at all.' \
+              '' \
+              'Already dragged it out? Then clear it where it landed instead:' \
+              '' \
+              '    xattr -dr com.apple.quarantine /Applications/riff.app' \
+              '' \
+              'That needs no time limit and clears either of the two warnings' \
+              'macOS shows, but writing to /Applications may ask for your' \
+              'password.' \
+              '' \
+              'If you would rather not use Terminal at all: launch riff and let' \
+              'it fail, THEN go to System Settings → Privacy & Security → scroll' \
+              'to the blocked app → "Open Anyway". The order is not optional —' \
+              'that button only exists for about an hour after a blocked launch,' \
+              'and it is not there at all if you open System Settings first.' \
+              '(The old right-click → Open bypass no longer works on macOS' \
+              'Sequoia and later.)' \
+              '' \
+              '**Linux — a `tar.gz` of the `riff` executable,** dynamically linked' \
+              'against `libasound2` (ALSA). On Debian and Ubuntu:' \
+              '' \
+              '    sudo apt install libasound2' \
+              '' \
+              'There is no tray icon on Linux by design, so closing the window' \
+              'quits.' \
+              '' \
+              '## This is a pre-release' \
+              '' \
+              'It is published as a GitHub pre-release while riff is pre-1.0,' \
+              'and it is unsigned, so expect the caveats above rather than a' \
+              'polished, trust-signed install experience. Reports and feature' \
+              'requests:' \
+              '' \
+              'https://github.com/strawberry-choco/riff/issues'
+          } > "${notes}"
+          cat "${notes}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
   # Build and package, but publish nothing. The publish step is a separate job
   # because a matrix job that also creates the release has a race built into it:
   # the first leg to finish creates the release and the other three fail with
@@ -266,9 +465,12 @@ jobs:
   release:
     name: publish pre-release
     # `build` depends on `verify`, so a version mismatch already stopped the run
-    # before any of this is reached. The only thing between four finished builds
-    # and a published release is this one job.
-    needs: [build]
+    # before any of this is reached. The `notes` job runs alongside the build
+    # matrix, and this job needs BOTH of them: a notes failure has to stop the
+    # run here, before anything is published. The only thing between four
+    # finished builds plus generated notes and a published release is this one
+    # job.
+    needs: [build, notes]
     runs-on: ubuntu-latest
     # The ONLY grant of write scope in this workflow, and the reason the
     # workflow-level default above is `contents: read`. `gh release create` is
@@ -283,118 +485,28 @@ jobs:
       # paying for a full checkout to get it.
       GH_REPO: ${{ github.repository }}
     steps:
-      - name: Download artifacts
+      # The build artifacts merge into one flat staging directory — correct
+      # precisely because the four names differ, so flattening cannot collide.
+      # The `pattern` keeps the release-notes artifact out of the merge: the
+      # notes are downloaded separately below and assets and notes must never
+      # share a directory, so nothing that lists or globs release-assets can
+      # ever pick the notes file up as an asset.
+      - name: Download build artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          # Four artifacts, four distinct names, one flat staging directory.
-          # merge-multiple is correct here precisely because the names differ:
-          # without it each artifact lands in its own subdirectory and the
-          # asset paths in the `gh release create` step would have to be
-          # `release-assets/<name>/<file>`.
+          pattern: riff-*
           path: release-assets
           merge-multiple: true
 
-      - name: Generate release notes
-        shell: bash
-        run: |
-          set -euo pipefail
-          notes="release-notes.md"
-          {
-            # Only the title line interpolates. The caveat text below is passed
-            # as single-quoted arguments, so a future edit cannot accidentally
-            # leave an unexpanded `$`, a backtick command, or a stray version
-            # string in the published notes. (It is `printf '%s\n' arg arg...`
-            # rather than a here-doc on purpose: a here-doc's terminator would
-            # have to sit at column 0 of the script, which YAML block-scalar
-            # indentation cannot express without tab-tricks.)
-            printf '# riff %s\n\n' "${GITHUB_REF_NAME}"
-            printf '%s\n' \
-              'The first public release of riff.' \
-              '' \
-              'riff is pre-1.0, and it is offline-only by design: it plays the' \
-              'audio files already on your own disks, opens no network' \
-              'connection, and has no account, no telemetry, and no upload. Each' \
-              'artifact below carries the compiled `riff` executable and nothing' \
-              'else — no installer, no code signature. Point it at a folder of' \
-              'music.' \
-              '' \
-              '## Downloads' \
-              '' \
-              '| Platform | File |' \
-              '|---|---|' \
-              '| macOS, Apple silicon | `riff-<tag>-macos-arm64.dmg` |' \
-              '| macOS, Intel | `riff-<tag>-macos-x86_64.dmg` |' \
-              '| Linux, x86-64 | `riff-<tag>-linux-x86_64.tar.gz` |' \
-              '| Windows, x86-64 | `riff-<tag>-windows-x86_64.exe` |' \
-              '' \
-              '`<tag>` stands for this release tag, so every file name starts with' \
-              '`riff-` followed by it. Take the four downloads from this page' \
-              'rather than assembling the names yourself.' \
-              '' \
-              '## What each platform actually gives you' \
-              '' \
-              '**Windows — the bare `riff.exe`,** straight from the build, with' \
-              'no zip wrapper and no installer. The executable is unsigned, so' \
-              'SmartScreen warns the first time you open it: choose "More info",' \
-              'then "Run anyway". Wrapping this same unsigned binary in an NSIS' \
-              'installer would hit the identical wall; an installer buys a setup' \
-              'experience, not trust. Only a code-signing certificate buys' \
-              'trust, and riff does not have one.' \
-              '' \
-              '**macOS — a `.dmg` containing `riff.app`,** with the riff brand' \
-              'icon. The bundle is ad-hoc signed but NOT identified with Apple,' \
-              'so Gatekeeper quarantines the download and blocks the first' \
-              'launch. There is one extra step, and doing it BEFORE opening the' \
-              'image is the easy way — it needs no password and no permission:' \
-              '' \
-              '    xattr -d com.apple.quarantine ~/Downloads/riff-*.dmg' \
-              '' \
-              'Run it on the file you actually downloaded, then open the image,' \
-              'drag riff into Applications, and launch it. Do that first and it' \
-              'just runs. (If the command complains — "no matches found" or' \
-              '"No such xattr" — there was nothing left to clear, which is' \
-              'harmless: the usual cause is a different download folder, or' \
-              'running it twice.)' \
-              '' \
-              'The reason order matters: the quarantine attribute is not on the' \
-              'app inside the image, it is copied onto the app when you drag it' \
-              'out. Clearing it on the image first means the app never picks it' \
-              'up at all.' \
-              '' \
-              'Already dragged it out? Then clear it where it landed instead:' \
-              '' \
-              '    xattr -dr com.apple.quarantine /Applications/riff.app' \
-              '' \
-              'That needs no time limit and clears either of the two warnings' \
-              'macOS shows, but writing to /Applications may ask for your' \
-              'password.' \
-              '' \
-              'If you would rather not use Terminal at all: launch riff and let' \
-              'it fail, THEN go to System Settings → Privacy & Security → scroll' \
-              'to the blocked app → "Open Anyway". The order is not optional —' \
-              'that button only exists for about an hour after a blocked launch,' \
-              'and it is not there at all if you open System Settings first.' \
-              '(The old right-click → Open bypass no longer works on macOS' \
-              'Sequoia and later.)' \
-              '' \
-              '**Linux — a `tar.gz` of the `riff` executable,** dynamically linked' \
-              'against `libasound2` (ALSA). On Debian and Ubuntu:' \
-              '' \
-              '    sudo apt install libasound2' \
-              '' \
-              'There is no tray icon on Linux by design, so closing the window' \
-              'quits.' \
-              '' \
-              '## This is a pre-release' \
-              '' \
-              'It is published as a GitHub pre-release while riff is pre-1.0,' \
-              'and it is unsigned, so expect the caveats above rather than a' \
-              'polished, trust-signed install experience. Reports and feature' \
-              'requests:' \
-              '' \
-              'https://github.com/strawberry-choco/riff/issues'
-          } > "${notes}"
-          cat "${notes}"
+      # The notes land in their own directory for the same reason the assets
+      # are merged into theirs: the two download scopes must not mix. The
+      # publish job itself stays checkout-free — the notes arrive as an
+      # artifact, not from a git checkout.
+      - name: Download the release notes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-notes
+          path: release-notes
 
       - name: Create the GitHub release
         shell: bash
@@ -428,5 +540,5 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             --prerelease \
             --title "riff ${GITHUB_REF_NAME}" \
-            --notes-file release-notes.md \
+            --notes-file release-notes/release-notes.md \
             "${assets[@]}"

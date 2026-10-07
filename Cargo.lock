@@ -4172,7 +4172,7 @@ dependencies = [
 
 [[package]]
 name = "riff-backend"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
  "riff-infra",
@@ -4185,7 +4185,7 @@ dependencies = [
 
 [[package]]
 name = "riff-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "color-eyre",
  "crossbeam-channel",
@@ -4206,7 +4206,7 @@ dependencies = [
 
 [[package]]
 name = "riff-infra"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cpal",
  "crossbeam-channel",
@@ -4231,7 +4231,7 @@ dependencies = [
 
 [[package]]
 name = "riff-library"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
  "riff-persistence",
@@ -4241,11 +4241,11 @@ dependencies = [
 
 [[package]]
 name = "riff-persistence"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "riff-playback"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
  "fastrand",
@@ -4255,7 +4255,7 @@ dependencies = [
 
 [[package]]
 name = "riff-tests"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
  "eframe",

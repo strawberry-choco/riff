@@ -35,7 +35,7 @@ resolver = "2"
 # that every member inherits via `<key>.workspace = true`. Releases touch this
 # one block instead of seven manifests, so the crates can never disagree.
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"

@@ -44,6 +44,14 @@ Run all of these before you open a pull request — it is the same gate CI runs 
 
 For UI changes, also run `cargo run -p riff-gui` and check the behavior by hand — much of the interface is exercised manually rather than by an automated test. New logic should come with new tests; [docs/engineering/testing-strategy.md](docs/engineering/testing-strategy.md) says which suite a given change belongs in.
 
+Commit messages are validated at commit time, so you learn about a malformed message before CI does. One command wires the hook in:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The hook is a thin shim over `tools/validate-commit-msg.py` and needs `python3` on your `PATH`; without it the hook prints a notice and steps aside — CI (the `commit-lint` job in `ci.yml`) is the real gate.
+
 ## Golden-image tests
 
 The committed golden snapshots are byte-exact baselines authored on a specific machine, with a **zero-pixel threshold** on macOS. wgpu picks a different adapter per machine, and GPU-rasterized shapes — 1px strokes, rounded-rect edges, dividers, image sampling — drift with the driver, so a golden that fails on your hardware is often a hardware difference rather than a change you made. Read the diff PNG before you assume either way, and never re-baseline to make an unexplained failure disappear: [docs/engineering/golden-image-testing.md](docs/engineering/golden-image-testing.md) documents the workflow, the determinism rules, and how to prove a re-baseline is what you think it is.

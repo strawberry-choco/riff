@@ -71,6 +71,7 @@ How to work on riff correctly.
 - [Development setup](engineering/development-setup.md) — prerequisites, the command set, and build-profile notes.
 - [Coding standards](engineering/coding-standards.md) — layering rules, the per-OS branch rule, clippy and formatting configuration, the error-handling pattern, and the implementation gotchas.
 - [Contributing](engineering/contributing.md) — how to orient yourself and the pull-request checklist.
+- [Commit conventions](engineering/commit-conventions.md) — the commit-message profile the validator enforces, the type-to-section-to-bump table from `cliff.toml`, and the three enforcement points.
 - [Testing strategy](engineering/testing-strategy.md) — the per-crate suites and the workspace-root integration/golden suite, plus prioritized recommendations.
 - [Golden-image testing](engineering/golden-image-testing.md) — the snapshot-test harness for visual parity: authoring goldens, re-baselining, and reviewing image diffs.
 - [Access-violation flake](engineering/access-violation-flake.md) — the open `STATUS_ACCESS_VIOLATION` crash of the `riff-tests` binary: hypotheses ruled in and out, and the next move.

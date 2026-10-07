@@ -91,15 +91,15 @@ jobs:
   # rather than copying the Changelog means the notes and the Changelog can
   # never disagree about what a release contains.
   #
-  # This is a separate job from publication on purpose: it runs alongside the
-  # build matrix, and the `release` job needs both, so a notes failure stops
-  # the run before anything is published — the notes can never be
-  # half-published.
+  # This is a separate job from publication on purpose: the build matrix
+  # waits on it, so a notes or guard failure stops the run before any
+  # platform build starts — the notes can never be half-published, and
+  # drift is caught at the cost of a minute rather than four builds.
   notes:
     name: generate release notes
     # `needs: []` states that this job depends on nothing, like `verify`
-    # above: it runs in parallel with the build matrix, and only the publish
-    # job waits for it.
+    # above: it starts in parallel with `verify`, and the build matrix
+    # begins only after both of them succeed.
     needs: []
     runs-on: ubuntu-latest
     steps:
@@ -135,7 +135,7 @@ jobs:
       # the tag is regenerated with the exact documented preparation commands
       # and diffed against itself; a mismatch means a commit landed between
       # the preparation commit and the tag. The guard runs before the section
-      # rendering and before the build matrix finishes, so the drift costs a
+      # rendering and before the build matrix starts, so the drift costs a
       # minute rather than four builds.
       - name: Check the Changelog against the tag
         run: |
@@ -313,7 +313,9 @@ jobs:
   # so the four legs cannot interfere with each other.
   build:
     name: build ${{ matrix.target }}
-    needs: [verify]
+    # `notes` is required here so the changelog consistency guard completes
+    # before any platform build starts: drift costs a minute, not four builds.
+    needs: [verify, notes]
     strategy:
       # Not fail-fast: one broken leg should not cancel the other three, because
       # the failure report is much more useful when every platform reports.
@@ -487,13 +489,12 @@ jobs:
 
   release:
     name: publish pre-release
-    # `build` depends on `verify`, so a version mismatch already stopped the run
-    # before any of this is reached. The `notes` job runs alongside the build
-    # matrix, and this job needs BOTH of them: a notes failure has to stop the
-    # run here, before anything is published. The only thing between four
-    # finished builds plus generated notes and a published release is this one
-    # job.
-    needs: [build, notes]
+    # `build` depends on `verify` and `notes`, so a version mismatch or a
+    # changelog-drift failure already stopped the run before any of this is
+    # reached — the notes transitively, since the build matrix cannot start
+    # until they exist. The only thing between four finished builds plus
+    # generated notes and a published release is this one job.
+    needs: [build]
     runs-on: ubuntu-latest
     # The ONLY grant of write scope in this workflow, and the reason the
     # workflow-level default above is `contents: read`. `gh release create` is

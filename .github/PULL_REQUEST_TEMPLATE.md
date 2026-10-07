@@ -15,6 +15,7 @@ Closes #
 - [ ] **No panics in the UI.** Recoverable errors surface as user-facing messages, never as panics.
 - [ ] **Clippy clean.** `cargo clippy --all-targets -- -D warnings` produces no warnings.
 - [ ] **Formatted.** `cargo fmt` has been run and produces no diff.
+- [ ] **Commit messages conventional.** Every commit on the branch passes the commit-message rules (type, scope, header length); rebase rather than squash-fix, since commits land as written — see [docs/engineering/commit-conventions.md](docs/engineering/commit-conventions.md).
 - [ ] **Tests added.** New domain logic (and, where practical, app logic) has accompanying tests, and `cargo test --all-targets` passes.
 
 The same list, with the reasoning behind each item, is in [docs/engineering/contributing.md](docs/engineering/contributing.md#pull-request-checklist).

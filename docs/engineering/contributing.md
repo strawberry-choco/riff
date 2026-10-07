@@ -40,6 +40,7 @@ Run through this before requesting review. Each item maps to a rule above:
 - [ ] **No panics in the UI.** Recoverable errors surface as user-facing messages, never as panics.
 - [ ] **Clippy clean.** `cargo clippy` produces no new warnings under the pedantic configuration.
 - [ ] **Formatted.** `cargo fmt` has been run and produces no diff.
+- [ ] **Commit messages conventional.** Every commit on the branch passes the commit-message rules (type, scope, header length); rebase rather than squash-fix, since commits land as written — see [commit-conventions.md](./commit-conventions.md).
 - [ ] **Tests added.** New domain logic (and, where practical, app logic) has accompanying tests, and `cargo test` passes.
 
 ## What to Avoid

@@ -56,7 +56,7 @@ The hook is a thin shim over `tools/validate-commit-msg.py` and needs `python3` 
 
 ## Commands
 
-The full day-to-day command set is below. There is no project script runner, task runner, or Makefile; everything goes through `cargo`. The one exception-shaped fact: the repo versions a git commit-message hook and the `tools/validate-commit-msg.py` validator it calls (wired with `git config core.hooksPath .githooks`, as described above) — neither is part of the build workflow. Run from the workspace root; add `-p <crate>` to scope a build to one member.
+The full day-to-day command set is below. There is no project script runner, task runner, or Makefile — everything goes through `cargo`. The one project script is the commit-message validator (`tools/validate-commit-msg.py`); neither it nor its git hook is part of the build workflow. Run from the workspace root; add `-p <crate>` to scope a build to one member.
 
 | Command | Purpose | Notes |
 |---|---|---|

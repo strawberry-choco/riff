@@ -56,7 +56,7 @@ The hook is a thin shim over `tools/validate-commit-msg.py` and needs `python3` 
 
 ## Commands
 
-The full day-to-day command set is below. There are no project-specific scripts, task runners, or Makefiles; everything goes through `cargo`. Run from the workspace root; add `-p <crate>` to scope a build to one member.
+The full day-to-day command set is below. There is no project script runner, task runner, or Makefile; everything goes through `cargo`. The one exception-shaped fact: the repo versions a git commit-message hook and the `tools/validate-commit-msg.py` validator it calls (wired with `git config core.hooksPath .githooks`, as described above) — neither is part of the build workflow. Run from the workspace root; add `-p <crate>` to scope a build to one member.
 
 | Command | Purpose | Notes |
 |---|---|---|
@@ -82,4 +82,4 @@ A few facts about the project shape that simplify expectations:
 - **No feature flags.** There are no Cargo features to enable or disable. The only conditional compilation is per-target-OS (`#[cfg(target_os = "linux")]` and its negation) for platform-specific system integration such as the tray icon and native file dialogs.
 - **No codegen step.** There is no build script output, no schema generation, and no asset pipeline to run before compiling.
 - **Embedded migrations.** State persists in the Application Store (`riff.sqlite3` via rusqlite, bundled — in `riff-infra`). Schema evolution runs through ordered, checksummed migrations applied automatically on open — there is no external migration tooling to run.
-- **CI pipeline.** `.github/workflows/ci.yml` runs the quality gate (`cargo fmt --check`, `cargo clippy --all-targets`, `cargo test`) on push and pull requests to master, on Linux and Windows runners. There are no pre-commit hooks. Pull requests are merged with rebase-and-merge only, and the `commit messages (pull request)` job (`commit-lint`) is the required branch-protection check behind it — every commit lands on `master` as written, so each must be well-formed. The full story is in [CONTRIBUTING.md](../../CONTRIBUTING.md#merge-strategy).
+- **CI pipeline.** `.github/workflows/ci.yml` runs the quality gate (`cargo fmt --check`, `cargo clippy --all-targets`, `cargo test`) on push and pull requests to master, on Linux and Windows runners. A commit-message hook is available locally (`git config core.hooksPath .githooks`) — optional, with the CI jobs as the real gate; see [commit-conventions.md](./commit-conventions.md). Pull requests are merged with rebase-and-merge only, and the `commit messages (pull request)` job (`commit-lint`) is the required branch-protection check behind it — every commit lands on `master` as written, so each must be well-formed. The full story is in [CONTRIBUTING.md](../../CONTRIBUTING.md#merge-strategy).

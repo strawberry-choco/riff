@@ -79,7 +79,7 @@ The five individually allowed lints are worth understanding, because they reflec
 
 ## Formatting with rustfmt
 
-There is no `rustfmt.toml` or `.rustfmt.toml` in the repository, so riff uses rustfmt's default style. Run `cargo fmt` before committing so that formatting is consistent and does not appear as noise in diffs. There are no pre-commit hooks to do this for you.
+There is no `rustfmt.toml` or `.rustfmt.toml` in the repository, so riff uses rustfmt's default style. Run `cargo fmt` before committing so that formatting is consistent and does not appear as noise in diffs. No hook does this for you — the only versioned hook is the optional commit-message validator (see [commit-conventions.md](./commit-conventions.md)) — so the formatting check in CI is the gate.
 
 ## Error Handling
 

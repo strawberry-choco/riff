@@ -22,7 +22,7 @@ forward only**, starting with the next commit. From then on, commit messages
 follow the format, and each release's section here is written from the commits
 and pull requests between the previous tag and the new one.
 
-## [0.1.0] - 2026-10-07
+## [0.2.0] - 2026-10-07
 
 ### Added
 
@@ -30,8 +30,8 @@ and pull requests between the previous tag and the new one.
 - Add commit-message validator with a self-test
 - Validate commit messages at commit time
 
-[0.1.0]: https://github.com/strawberry-choco/riff/compare/v0.1.0...v0.1.0
-[Unreleased]: https://github.com/strawberry-choco/riff/compare/v0.1.0...HEAD
+[0.2.0]: https://github.com/strawberry-choco/riff/compare/v0.1.0...v0.2.0
+[Unreleased]: https://github.com/strawberry-choco/riff/compare/v0.2.0...HEAD
 [0.1.0]: https://github.com/strawberry-choco/riff/releases
 
 ## [0.1.0]

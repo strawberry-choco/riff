@@ -71,3 +71,51 @@ jobs:
 
       - name: Test
         run: cargo test --all-targets
+
+  # the pre-merge gate for commit messages. Validates every commit between the
+  # merge base and the branch head with the same validator the local hook runs,
+  # so a message that passes locally can never fail here and break an
+  # otherwise green build. Linux only, so the matrix does not grow.
+  commit-lint:
+    name: commit messages (pull request)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      # full history: the merge base against the target branch cannot be
+      # computed from the default shallow clone.
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      # a broken validator must fail loudly here, never pass by crashing into
+      # a pass — hence the self-test before any commit is validated.
+      - name: Run the validator's self-test
+        run: python3 tools/validate-commit-msg.py --self-test
+
+      - name: Validate the pull request's commits
+        run: |
+          set -euo pipefail
+
+          base=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          count=$(git rev-list --count "${base}..HEAD")
+
+          # an empty range would validate nothing and pass vacuously — the
+          # failure mode the release workflow's version guard is explicitly
+          # written to avoid — so it is an explicit error, not a pass.
+          if [ "$count" -eq 0 ]; then
+            echo "::error::commit range ${base}..HEAD resolved to nothing; there are no commits to validate"
+            exit 1
+          fi
+
+          # all rules live in the validator; nothing about the message format
+          # is re-implemented here.
+          tmp=$(mktemp)
+          trap 'rm -f "$tmp"' EXIT
+          for sha in $(git rev-list --reverse "${base}..HEAD"); do
+            git log -1 --format=%B "$sha" > "$tmp"
+            if ! reason=$(python3 tools/validate-commit-msg.py "$tmp" 2>&1); then
+              echo "::error::commit $(git log -1 --format='%h %s' "$sha") is not a valid commit message: $reason"
+              exit 1
+            fi
+          done

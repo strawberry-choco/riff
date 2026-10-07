@@ -1,0 +1,13 @@
+#!/bin/sh
+# commit-msg hook: run the commit-message validator on the draft message.
+# A thin shim on purpose — every rule lives in tools/validate-commit-msg.py.
+
+# Python is an optional local convenience, not a requirement: without it,
+# name the CI job that is the real gate and let the commit through.
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "commit-message check skipped: python3 not found; ci.yml job 'commit-lint' is the real gate"
+    exit 0
+fi
+
+# The hook runs from any cwd; resolve the repo root from git itself.
+exec python3 "$(git rev-parse --show-toplevel)/tools/validate-commit-msg.py" "$1"

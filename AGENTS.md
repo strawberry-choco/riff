@@ -8,6 +8,7 @@ A lightweight, offline-first desktop music player. A Cargo workspace: backend ca
 cargo run -p riff-gui              # dev build of the `riff` binary (opt-level=1)
 cargo build --release -p riff-gui  # LTO, stripped, optimized release
 cargo check --workspace            # fast type-check without codegen
+git config core.hooksPath .githooks  # wire the commit-message hook (CI is the real gate)
 ```
 
 No special features or feature flags. No codegen step, no migrations to run by hand.

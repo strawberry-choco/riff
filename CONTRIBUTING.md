@@ -68,8 +68,15 @@ If the `riff-tests` binary dies mid-run with `STATUS_ACCESS_VIOLATION` and no fa
 - [ ] **Clippy clean.** `cargo clippy --all-targets -- -D warnings` produces no warnings.
 - [ ] **Formatted.** `cargo fmt` has been run and produces no diff.
 - [ ] **Tests added.** New domain logic (and, where practical, app logic) has accompanying tests, and `cargo test --all-targets` passes.
+- [ ] **Commit messages conventional.** Every commit on the branch is a well-formed Conventional Commit; see [Merge strategy](#merge-strategy) for why there is no rewrite step to fix one later.
 
 This is the short version; [docs/engineering/contributing.md](docs/engineering/contributing.md#pull-request-checklist) has the same list with the reasoning behind each item, plus the anti-patterns that are specifically watched for in review.
+
+## Merge strategy
+
+Pull requests are merged with **rebase-and-merge only** — merge commits and squash merging are disabled in the repository settings, and history stays linear. What you write on the branch is what lands on `master`, verbatim: GitHub replays each commit onto the current tip of the merge target, preserving every message, author, and author date, and changing only the committer and the commit SHAs. There is no rewrite step between the branch and the default branch, so every commit on the branch must be a well-formed Conventional Commit (the [checklist item](#pull-request-checklist) above); the `commit messages (pull request)` CI job is the required branch-protection check that enforces it.
+
+One cost of the replay is accepted knowingly: every commit receives a new SHA when it lands, so a commit SHA quoted in a review comment or an issue points at something that will not exist after the merge. The durable reference is the **pull request number**, never a commit SHA.
 
 ## Where things live
 

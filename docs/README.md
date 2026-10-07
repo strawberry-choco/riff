@@ -52,6 +52,7 @@ What riff is, what it does, and how to use it.
 - [ADR 0013: ReplayGain 2.0 via BS.1770, never 1.0](adr/0013-replaygain-2-via-bs1770-never-1.md) — the measurement standard, the −18 LUFS reference, and the `ebur128` adapter behind the `LoudnessAnalyzer` port.
 - [ADR 0014: File tags are the source of truth; the Store mirrors them](adr/0014-file-tags-are-the-source-of-truth.md) — file-first write ordering and the Library Scan as the reconciler of external edits, made the general rule of the scan's and Tag Edit's semantics.
 - [ADR 0015: Commit messages are a machine-read interface](adr/0015-commit-messages-are-a-machine-read-interface.md) — the message format is load-bearing because the changelog generator parses it; one validator, a generated Changelog, rebase-and-merge only, and the pinned pre-1.0 bump semantics in `cliff.toml`.
+- [ADR 0016: The commit history was retrofitted to conform](adr/0016-history-retrofit.md) — the 2026-10-07 one-time rewrite that made the whole log satisfy the commit profile, what it destroyed (pre-rewrite SHAs, the merge structure), and the constraint that justified it.
 
 The numbering skips 0008: no ADR 0008 was ever written, so a missing `0008` is expected rather than a lost file.
 

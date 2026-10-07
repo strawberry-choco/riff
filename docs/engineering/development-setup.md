@@ -46,6 +46,14 @@ cargo build
 
 The first build downloads and compiles all dependencies. Subsequent builds are incremental and much faster. To run the application during development, use `cargo run -p riff-gui`, which builds (if needed) and launches the player in one step.
 
+Commit messages are validated locally too, so a malformed message is caught while the change is still fresh. One command wires the hook in:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The hook is a thin shim over `tools/validate-commit-msg.py` and needs `python3` on your `PATH`; without it the hook prints a notice and steps aside — CI (the `commit-lint` job in `ci.yml`) is the real gate.
+
 ## Commands
 
 The full day-to-day command set is below. There are no project-specific scripts, task runners, or Makefiles; everything goes through `cargo`. Run from the workspace root; add `-p <crate>` to scope a build to one member.

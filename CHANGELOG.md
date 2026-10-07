@@ -20,10 +20,6 @@ forward only**, starting with the next commit. From then on, commit messages
 follow the format, and each release's section here is written from the commits
 and pull requests between the previous tag and the new one.
 
-## [Unreleased]
-
-Nothing yet. The next set of changes collects here until the next tag.
-
 ## [0.1.0]
 
 <!--
@@ -121,6 +117,3 @@ upload.
   advanced mode revealing the power features.
 - **Embedded fonts and icons** — the Inter faces and Lucide icons are compiled
   into the binary, so the executable needs no companion asset files.
-
-[Unreleased]: https://github.com/strawberry-choco/riff/commits/master
-[0.1.0]: https://github.com/strawberry-choco/riff/releases

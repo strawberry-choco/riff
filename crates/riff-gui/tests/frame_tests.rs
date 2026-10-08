@@ -316,6 +316,7 @@ struct Harness {
     title_key: TitleKey,
     /// The app-wide quit intent, cleared: a headless frame has no tray to set
     /// it, and only the macOS native-close step reads it.
+    #[cfg(target_os = "macos")]
     quit_flag: std::sync::atomic::AtomicBool,
     /// The Linux text-row folder flow's state, cleared: only the Linux
     /// sidebar-footer step reads it.
@@ -406,6 +407,7 @@ impl Harness {
             clear_cache_in_flight: false,
             global_search_focus: false,
             title_key: TitleKey::Unset,
+            #[cfg(target_os = "macos")]
             quit_flag: std::sync::atomic::AtomicBool::new(false),
             #[cfg(target_os = "linux")]
             settings_show_input: false,

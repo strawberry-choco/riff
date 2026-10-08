@@ -306,7 +306,7 @@ fn test_writer_neither_writes_nor_clobbers_replaygain_tags() {
     assert_eq!(metadata.replaygain_album_peak, Some(0.81));
 }
 
-/// A minimal valid MP3 whose ID3v2 tag carries a `COMM` frame with a
+/// A minimal valid MP3 whose `ID3v2` tag carries a `COMM` frame with a
 /// malformed language field (`"\x00en"` — exactly what some taggers write).
 /// Hand-built because lofty itself refuses to *create* the malformation;
 /// that strictness at save time is what this test pins the repair against.
@@ -322,8 +322,10 @@ fn write_mp3_with_malformed_comment(path: &std::path::Path) {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"ID3\x03\x00\x00");
     let body_len = 10usize + FRAME_BODY.len();
+    #[allow(clippy::cast_possible_truncation)] // the fixture tag is one frame
     bytes.extend_from_slice(&[0x00, 0x00, 0x00, body_len as u8]);
     bytes.extend_from_slice(b"COMM");
+    #[allow(clippy::cast_possible_truncation)] // the fixture frame body is tiny
     bytes.extend_from_slice(&(FRAME_BODY.len() as u32).to_be_bytes());
     bytes.extend_from_slice(&[0x00, 0x00]);
     bytes.extend_from_slice(FRAME_BODY);

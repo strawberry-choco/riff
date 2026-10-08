@@ -951,7 +951,7 @@ mod tests {
             report.first_failure.as_deref(),
             Some("Track is no longer in the library")
         );
-        assert!(wired.writer.writes().is_empty());
+        assert_eq!(wired.writer.writes(), [] as [(String, ReplayGainTags); 0]);
     }
 
     // --- Targeted Album commands ----------------------------------------------------
@@ -1515,8 +1515,8 @@ mod tests {
         );
 
         assert_eq!(report.measured, 0);
-        assert!(wired.analyzer.calls().is_empty());
-        assert!(wired.writer.writes().is_empty());
+        assert_eq!(wired.analyzer.calls(), [] as [String; 0]);
+        assert_eq!(wired.writer.writes(), [] as [(String, ReplayGainTags); 0]);
     }
 
     // --- progress -------------------------------------------------------------------

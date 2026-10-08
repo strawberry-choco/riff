@@ -309,6 +309,12 @@ pub struct FrameParts<'a> {
     /// The live playback session, re-locked by [`Frame::finish`] to write the
     /// six UI-owned fields back.
     pub playback_live: &'a Mutex<PlaybackSession>,
+    /// The Linux text-row folder flow's own state (no native dialog there): the
+    /// sidebar footer opens it during its apply step, before the stage draws.
+    #[cfg(target_os = "linux")]
+    pub settings_show_input: &'a mut bool,
+    #[cfg(target_os = "linux")]
+    pub settings_path_error: &'a mut Option<String>,
     /// The app-wide quit intent, the one fact separating a riff-initiated quit
     /// from an OS window close (macOS only — nothing elsewhere reads it, and
     /// an ungated import would be an `unused_imports` there).
@@ -491,6 +497,7 @@ impl<'a> Frame<'a> {
 
     /// No native close request to resolve anywhere but macOS.
     #[cfg(not(target_os = "macos"))]
+    #[allow(clippy::unused_self)]
     fn resolve_native_close(&mut self, _input: &FrameInput, _out: &mut FrameOutput) {}
 
     // --- Step 2: the theme -------------------------------------------------

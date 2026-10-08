@@ -85,7 +85,7 @@ pub trait Transport: Send {
     /// doubles that record commands unchanged keep compiling; the production
     /// transport sends `PlayAlbum` + `AddMany`.
     fn play_album(&self, first: TrackId, rest: Vec<TrackId>) {
-        self.play_many(first, rest)
+        self.play_many(first, rest);
     }
 
     /// Toggle shuffle mode on the session queue. No command is sent — the

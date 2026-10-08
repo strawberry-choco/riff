@@ -938,6 +938,10 @@ impl RiffApp {
                 playlist_rename: &mut self.playlist_rename,
                 playlist_create_name: &mut self.playlist_create_name,
                 playback_live: &self.playback,
+                #[cfg(target_os = "linux")]
+                settings_show_input: &mut self.settings_show_input,
+                #[cfg(target_os = "linux")]
+                settings_path_error: &mut self.settings_path_error,
                 #[cfg(target_os = "macos")]
                 quit_flag: &self.quit_flag,
             },

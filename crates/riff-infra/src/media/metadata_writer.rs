@@ -22,20 +22,20 @@ impl Default for LoftyMetadataWriter {
 }
 
 /// Lofty re-serializes every existing frame on save and validates each one
-/// strictly — including the ID3v2 `COMM`/`USLT` language field, which
+/// strictly — including the `ID3v2` `COMM`/`USLT` language field, which
 /// real-world taggers have written as malformed bytes (`"\x00en"`). Any
 /// write to such a file would fail forever, so a malformed language field is
 /// normalized to `XXX` (unknown language) before saving: the frame's
 /// description and text are untouched, and the file becomes writable by riff
 /// and by every other tool that re-serializes it.
 fn sanitize_language_frames(tag: &mut Tag) {
-    fn language_is_valid(lang: &[u8; 3]) -> bool {
+    fn language_is_valid(lang: [u8; 3]) -> bool {
         lang.iter().all(u8::is_ascii_alphabetic)
     }
     for key in [ItemKey::Comment, ItemKey::UnsyncLyrics] {
         let mut items: Vec<TagItem> = tag.take(key).collect();
         for item in &mut items {
-            if !language_is_valid(item.lang()) {
+            if !language_is_valid(*item.lang()) {
                 item.set_lang(*b"XXX");
             }
         }

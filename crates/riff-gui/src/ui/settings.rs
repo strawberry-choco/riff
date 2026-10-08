@@ -2201,6 +2201,7 @@ fn nav_item(
         actions.push(SettingsAction::SelectSection(section));
     }
 }
+#[allow(clippy::too_many_arguments, reason = "one preference row's paint call")]
 fn paint_preference_text(
     ui: &mut egui::Ui,
     palette: &Palette,

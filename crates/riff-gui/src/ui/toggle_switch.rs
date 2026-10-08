@@ -161,7 +161,7 @@ pub fn paint_checkbox_with_focus(
 /// [`paint_checkbox_box`], painted at its own larger size and with a sharper
 /// corner radius, so the SQUARE shape reads at a glance — a 14px box at the
 /// small radius rounds nearly into a circle and reads as a radio. Use this
-/// for a control that stands on its own (the ReplayGain Pass card's options)
+/// for a control that stands on its own (the `ReplayGain` Pass card's options)
 /// rather than embedded in a row that already labels the box.
 pub fn paint_square_checkbox_with_focus(
     painter: &egui::Painter,

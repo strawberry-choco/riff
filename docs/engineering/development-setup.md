@@ -23,7 +23,7 @@ Audio output is provided by the `cpal` crate, which talks to each operating syst
 | macOS | CoreAudio | None — ships with the OS |
 | Linux | ALSA | ALSA development headers are required to compile `cpal` |
 
-Note that ALSA is not the only Linux dependency. The windowing stack in `riff-gui` (`winit`) also needs X11/xcb and Wayland development headers, and `cpal` needs `libudev-dev`, so a first build of the GUI fails without them too — the ALSA headers are just the most commonly-missing piece. The full list CI installs on `ubuntu-latest`, which is authoritative, is in [../../CONTRIBUTING.md](../../CONTRIBUTING.md#prerequisites):
+Note that ALSA is not the only Linux dependency. The windowing stack in `riff-gui` (`winit`) also needs X11/xcb and Wayland development headers, and `cpal` needs `libudev-dev`, so a first build of the GUI fails without them too — the ALSA headers are just the most commonly-missing piece. The full list CI installs on its Linux runners, which is authoritative, is in [../../CONTRIBUTING.md](../../CONTRIBUTING.md#prerequisites):
 
 ```bash
 sudo apt-get install pkg-config libasound2-dev libudev-dev \

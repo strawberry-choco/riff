@@ -21,7 +21,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # The Linux leg names its image because the image is part of the verdict:
+        # the golden tests rasterise through the runner's Mesa/lavapipe, so an image
+        # move can cross a smoke threshold with no code change. `ubuntu-latest`
+        # resolves to `ubuntu-24.04` today, which makes this a no-op pin rather than
+        # a migration. Windows deliberately stays on `latest`: that alias now covers
+        # two Windows Server 2025 flavours differing by Visual Studio toolset, and no
+        # public source says which one it carries, so naming a label there would be a
+        # toolchain change dressed up as a pin. Settle that first — and keep this leg
+        # and `release.yml`'s Windows build leg the same label, or the Windows
+        # toolchain CI tests is not the one that ships.
+        os: [ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -52,13 +62,22 @@ jobs:
             libssl-dev \
             mesa-vulkan-drivers
 
-      # Installs pinned stable Rust with rustfmt + clippy, enables cargo caching
-      # (Swatinem/rust-cache under the hood) and PR problem-matchers. Successor to
-      # the archived actions-rs/toolchain.
+      # Installs the pinned Rust toolchain with rustfmt + clippy, enables cargo
+      # caching (Swatinem/rust-cache under the hood) and PR problem-matchers.
+      # Successor to the archived actions-rs/toolchain.
+      #
+      # The toolchain is pinned rather than `stable` because this workflow's
+      # verdict must be about the change, not about the calendar: `clippy
+      # --all-targets -- -D warnings` with the workspace's pedantic lints means a
+      # Rust release can redden every branch with no code change (1.99.0 did, via
+      # `assert_is_empty`). `msrv` in the manifests is separate — 1.95, and no job
+      # enforces it. Bump deliberately: install the new version locally and get a
+      # clean `cargo +<new> clippy --locked --all-targets --keep-going -- -D warnings`
+      # first, remembering that a platform's `cfg` arms compile only on it.
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
-          toolchain: stable
+          toolchain: 1.99.0
           components: rustfmt, clippy
 
       - name: Check formatting
@@ -66,11 +85,20 @@ jobs:
 
       # Respects the repo's [lints.clippy] levels (pedantic = warn). The tree
       # is kept clippy-clean, so any warning fails the build (-D warnings).
+      #
+      # `--locked` pins the dependency graph, which the toolchain pin alone does
+      # not: Cargo.lock is committed, so without it an unsatisfiable requirement (an
+      # edited manifest, a new transitive version) silently re-resolves into a build
+      # nothing else saw — `egui = "0.35"` is the live case, since the goldens are
+      # exact for one patch level and a caret range lets any 0.35.x in. With it, a
+      # stale lock is a loud failure instead of a different program.
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
+      # Same lock discipline as Clippy: the tests, and the golden baselines they
+      # compare against, must run against the resolved graph the repository carries.
       - name: Test
-        run: cargo test --all-targets
+        run: cargo test --locked --all-targets
 
   # the pre-merge gate for commit messages. Validates every commit between the
   # merge base and the branch head with the same validator the local hook runs,

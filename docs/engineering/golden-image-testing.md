@@ -269,7 +269,7 @@ run. The harness enforces several rules; keep them when adding goldens:
 
   The committed set is authored on, and exact for, **macOS**
   (`[mac] failed_pixel_count_threshold = 0`). CI runs only
-  `ubuntu-latest` and `windows-latest` (`.github/workflows/ci.yml`), so the
+  `ubuntu-24.04` and `windows-latest` (`.github/workflows/ci.yml`), so the
   per-platform thresholds in [`kittest.toml`](../../kittest.toml) absorb genuine
   cross-rasterizer drift and are **smoke-only**: they catch layout shifts and
   large colour changes, and they cannot catch a sub-threshold regression. That

@@ -10,10 +10,10 @@ Be decent to each other. riff follows the [Contributor Covenant](https://www.con
 
 ## Prerequisites
 
-- **Rust stable**, installed via [rustup](https://rustup.rs/), which brings `cargo`, `rustfmt`, and `clippy` with it. Every crate manifest declares `rust-version = "1.95"` and edition 2024, so you want a toolchain at or above that; CI uses the pinned stable toolchain. The MSRV is informational — no CI job enforces it, so an older compiler may happen to work but is not supported.
+- **Rust stable**, installed via [rustup](https://rustup.rs/), which brings `cargo`, `rustfmt`, and `clippy` with it. Every crate manifest declares `rust-version = "1.95"` and edition 2024, so you want a toolchain at or above that; CI pins one exact toolchain (`toolchain:` in `.github/workflows/ci.yml`) rather than tracking `stable`. The MSRV is informational — no CI job enforces it, so an older compiler may happen to work but is not supported.
 - **A C toolchain**, and on Linux the system libraries below. The pure-Rust crates build with no native dependencies at all; `riff-infra` (bundled SQLite, ALSA) and `riff-gui` (wgpu, winit) are the ones that need them.
 
-On Linux, install the development headers. This is the exact list CI installs on `ubuntu-latest`, which is also the full list for any Debian/Ubuntu derivative:
+On Linux, install the development headers. This is the exact list CI installs on its Linux runners, which is also the full list for any Debian/Ubuntu derivative:
 
 ```bash
 sudo apt-get install pkg-config libasound2-dev libudev-dev \

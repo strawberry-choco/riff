@@ -41,11 +41,12 @@ jobs:
       # cargo version is not something this workflow should quietly depend on:
       # the manifests are edition 2024, which older cargo cannot parse. Pin the
       # same toolchain the build job installs, minus the lint components that
-      # only CI needs.
+      # only CI needs. The version is ci.yml's pin — these workflows are one
+      # decision, so bump the three `toolchain:` values together or not at all.
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
-          toolchain: stable
+          toolchain: 1.99.0
 
       - name: Check the tag against the workspace version
         run: |
@@ -55,8 +56,12 @@ jobs:
           # and every member says `version.workspace = true`, so no manifest
           # contains a literal `version = "..."` any more: a grep-based guard
           # would find nothing, pass vacuously, and let `v0.9.9` ship.
+          # `--locked` because this is the first job that touches the dependency
+          # graph: a Cargo.lock that no longer satisfies the manifests should fail
+          # here, at minute one, rather than after four platform builds resolved it
+          # a different way. The build job repeats it.
           workspace_version="$(
-            cargo metadata --no-deps --format-version 1 \
+            cargo metadata --locked --no-deps --format-version 1 \
               | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])'
           )"
           tag="${GITHUB_REF_NAME}"
@@ -384,15 +389,20 @@ jobs:
             mesa-vulkan-drivers
 
       # Successor to the archived actions-rs/toolchain, pinned to the same SHA
-      # as ci.yml. No `components:` here: rustfmt and clippy are CI's concern,
-      # and a release build wants nothing but the compiler.
+      # and the same toolchain version as ci.yml. No `components:` here: rustfmt
+      # and clippy are CI's concern, and a release build wants nothing but the
+      # compiler.
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
-          toolchain: stable
+          toolchain: 1.99.0
 
+      # `--locked` for the same reason the verify job repeats it: the four published
+      # artifacts must be the program the committed Cargo.lock describes, not what a
+      # fresh resolution happened to pick for a caret range like `egui = "0.35"` on
+      # build day.
       - name: Build
-        run: cargo build --release -p riff-gui
+        run: cargo build --locked --release -p riff-gui
 
       # Nothing here is archived on Windows any more: the release asset IS the
       # executable. GitHub release assets must be single files, but a bare

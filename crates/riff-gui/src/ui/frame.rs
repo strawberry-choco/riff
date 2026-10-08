@@ -859,6 +859,10 @@ impl<'a> Frame<'a> {
 
     /// Apply one sidebar action.
     fn apply_sidebar_action(&mut self, action: SidebarAction, out: &mut FrameOutput) {
+        // On Linux no arm reports an output: the folder footer opens the Settings
+        // text row through `parts` instead of the native dialog.
+        #[cfg(target_os = "linux")]
+        let _ = out;
         match action {
             SidebarAction::Navigate { section } => {
                 self.land_on_library();

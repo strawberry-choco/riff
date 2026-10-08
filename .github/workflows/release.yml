@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # `cargo metadata` is not needed for the check, but the runner image's
       # cargo version is not something this workflow should quietly depend on:
@@ -43,7 +43,7 @@ jobs:
       # same toolchain the build job installs, minus the lint components that
       # only CI needs.
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           toolchain: stable
 
@@ -104,7 +104,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The ONLY checkout at full history in this workflow: rendering the
           # range v0.1.0..<tag> requires the commits between the two, and the
@@ -300,7 +300,7 @@ jobs:
           cat "${notes}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-notes
           path: release-notes.md
@@ -350,7 +350,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # eframe 0.35 (wgpu + winit x11/wayland + clipboard) and cpal 0.18 (ALSA)
       # need these headers to COMPILE on Linux. tray-icon/muda/rfd are gated to
@@ -387,7 +387,7 @@ jobs:
       # as ci.yml. No `components:` here: rustfmt and clippy are CI's concern,
       # and a release build wants nothing but the compiler.
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           toolchain: stable
 
@@ -481,7 +481,7 @@ jobs:
       # uploaded, merged into the staging directory, and published as a
       # 0-byte download.
       - name: Upload artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: riff-${{ github.ref_name }}-${{ matrix.target }}-${{ runner.os == 'macOS' && 'dmg' || runner.os == 'Windows' && 'exe' || 'tar.gz' }}
           path: ${{ runner.os == 'macOS' && 'dist/*.dmg' || runner.os == 'Windows' && 'dist/*.exe' || 'dist/*.tar.gz' }}
@@ -516,7 +516,7 @@ jobs:
       # share a directory, so nothing that lists or globs release-assets can
       # ever pick the notes file up as an asset.
       - name: Download build artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: riff-*
           path: release-assets
@@ -527,7 +527,7 @@ jobs:
       # publish job itself stays checkout-free — the notes arrive as an
       # artifact, not from a git checkout.
       - name: Download the release notes
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-notes
           path: release-notes

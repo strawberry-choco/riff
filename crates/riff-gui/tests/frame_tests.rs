@@ -678,7 +678,7 @@ fn a_sidebar_navigation_clears_the_opened_list_and_the_search() {
     assert_eq!(harness.library.view_mode, ViewMode::Library);
     assert_eq!(harness.library.browse_mode, BrowseMode::Library);
     assert_eq!(harness.library.library_section, LibrarySection::Albums);
-    assert!(harness.library.search_query.is_empty());
+    assert_eq!(harness.library.search_query, "");
     assert!(harness.playlist_view.is_none());
     assert!(harness.smart_playlist_view.is_none());
     assert!(

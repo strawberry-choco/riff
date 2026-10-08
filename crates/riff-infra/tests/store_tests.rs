@@ -2094,11 +2094,9 @@ fn test_all_track_ids_are_canonically_path_ordered() {
     let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
 
     // A fresh store has no ids to fill a queue with.
-    assert!(
-        store
-            .all_track_ids()
-            .expect("empty store lists no ids")
-            .is_empty()
+    assert_eq!(
+        store.all_track_ids().expect("empty store lists no ids"),
+        [] as [TrackId; 0]
     );
 
     let (changes_tx, _changes_rx) =
@@ -4402,11 +4400,11 @@ fn test_hit_genre_counts_aggregate_hit_tracks_across_split_segments() {
     );
 
     // No hit tracks aggregate into nothing.
-    assert!(
+    assert_eq!(
         store
             .hit_genre_counts("zzz-no-match")
-            .expect("no-match counts")
-            .is_empty()
+            .expect("no-match counts"),
+        [] as [GenreCount; 0]
     );
 }
 

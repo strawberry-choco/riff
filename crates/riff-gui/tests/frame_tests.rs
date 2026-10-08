@@ -278,6 +278,10 @@ impl PlaylistStore for QuietPlaylistStore {
 
 /// One frame's whole state, assembled exactly as `RiffApp::frame` assembles it
 /// — from ports, not from an application.
+///
+/// The fourth bool is the Linux folder-picker's `settings_show_input`, so the
+/// lint fires on Linux only — the same shape as `RiffApp`.
+#[allow(clippy::struct_excessive_bools)]
 struct Harness {
     playback: PlaybackSession,
     playback_live: Arc<Mutex<PlaybackSession>>,
@@ -313,6 +317,12 @@ struct Harness {
     /// The app-wide quit intent, cleared: a headless frame has no tray to set
     /// it, and only the macOS native-close step reads it.
     quit_flag: std::sync::atomic::AtomicBool,
+    /// The Linux text-row folder flow's state, cleared: only the Linux
+    /// sidebar-footer step reads it.
+    #[cfg(target_os = "linux")]
+    settings_show_input: bool,
+    #[cfg(target_os = "linux")]
+    settings_path_error: Option<String>,
 }
 
 /// A borrow bundle over [`Harness`] for one frame: every field of the harness
@@ -397,6 +407,10 @@ impl Harness {
             global_search_focus: false,
             title_key: TitleKey::Unset,
             quit_flag: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(target_os = "linux")]
+            settings_show_input: false,
+            #[cfg(target_os = "linux")]
+            settings_path_error: None,
         }
     }
 
@@ -447,6 +461,10 @@ impl Harness {
             playlist_rename: &mut self.playlist_rename,
             playlist_create_name: &mut self.playlist_create_name,
             playback_live: &self.playback_live,
+            #[cfg(target_os = "linux")]
+            settings_show_input: &mut self.settings_show_input,
+            #[cfg(target_os = "linux")]
+            settings_path_error: &mut self.settings_path_error,
             #[cfg(target_os = "macos")]
             quit_flag: &self.quit_flag,
         };

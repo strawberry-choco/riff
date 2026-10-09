@@ -45,11 +45,11 @@ Near-miss spellings — `BREAKING:`, `Breaking Change:`, `BREAKING_CHANGE:`, and
 
 Git generates some message texts itself, and the validator accepts those without checking them: a message starting with `Merge `, `Revert "`, `fixup! `, `squash! `, `amend! `, `WIP:`, or `WIP ` passes through untouched. Ordinary git operations — merging a branch, reverting a commit, autosquashing during a rebase, saving a change in progress — are never blocked by the message rules.
 
-## What each commit does to the Changelog and the version
+## What each commit does to the release notes and the version
 
-The changelog generator (git-cliff, configured by `cliff.toml`) groups each commit by its type into a [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) section and derives the version bump from what landed. This table paraphrases `cliff.toml`, which is the single source of the mapping — extending the catalog means editing that file, not a document and a config together.
+The release-notes generator (git-cliff, configured by `cliff.toml`) groups each commit by its type into a section of the GitHub release notes and derives the version bump from what landed. This table paraphrases `cliff.toml`, which is the single source of the mapping — extending the catalog means editing that file, not a document and a config together.
 
-| Type | Changelog section | Version bump (pre-1.0) |
+| Type | Release-notes section | Version bump (pre-1.0) |
 |---|---|---|
 | `feat` | Added | minor |
 | `fix` | Fixed | patch |
@@ -65,7 +65,7 @@ The pre-1.0 semantics are pinned in `cliff.toml`'s `[bump]` section, set explici
 - A feature bumps the **minor** version, even while the major version is zero.
 - A breaking change bumps the **minor** version while the major version is zero. After 1.0 the standard SemVer rule — a breaking change bumps major — resumes.
 - A fix or a performance change bumps the **patch** version.
-- A type that never reaches a changelog section never affects a version bump either.
+- A type that never reaches a release-notes section never affects a version bump either.
 
 ## Referencing changes: the pull request, not the SHA
 
@@ -73,7 +73,7 @@ Pull requests are merged with rebase-and-merge, and the replay gives every commi
 
 ## The format is load-bearing
 
-The commit message is a machine-read interface, not decoration: the changelog generator parses these messages to write `CHANGELOG.md` and to compute version bumps. A malformed message would not merely look untidy — left in, it would put a change in the wrong section or miss a version bump, silently. That is why a malformed message is rejected rather than tidied, why the type set is closed, and why near-miss breaking markers are checked for exact spellings.
+The commit message is a machine-read interface, not decoration: the release-notes generator parses these messages to build the GitHub release notes and to compute version bumps. A malformed message would not merely look untidy — left in, it would put a change in the wrong section or miss a version bump, silently. That is why a malformed message is rejected rather than tidied, why the type set is closed, and why near-miss breaking markers are checked for exact spellings.
 
 ## Where the rules are enforced
 
@@ -96,15 +96,15 @@ Both CI jobs run on Linux only, so the matrix does not grow.
 There is no exempt era. On 2026-10-07 the repository's history was rewritten
 as a one-time maintenance action, and the log conforms to this profile from
 the first commit to the latest: every message satisfies the validator, the
-merge structure is linear, and the changelog is generated from that log. The
-rewrite decision, its costs — the old SHAs, the four pull-request merge
-commits, every external reference to a pre-rewrite commit — and the
+merge structure is linear, and the release notes are generated from that
+log. The rewrite decision, its costs — the old SHAs, the four pull-request
+merge commits, every external reference to a pre-rewrite commit — and the
 constraint that justified paying them are recorded in
 [ADR 0016](../adr/0016-history-retrofit.md).
 
 The three enforcement points above continue to guard the history going
-forward, unchanged. The changelog generator runs with
+forward, unchanged. The release-notes generator runs with
 `filter_unconventional = false`: after the retrofit nothing in the log is
 unconventional, so the filter's only remaining power would be to silently
 hide a non-conforming commit that slipped past the gates — and a regression
-must be visible in regeneration output, never absorbed.
+must show up in the rendered notes, never be absorbed.

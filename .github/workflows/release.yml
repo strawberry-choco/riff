@@ -90,16 +90,15 @@ jobs:
           echo "tag ${tag} matches workspace version ${workspace_version}"
 
   # Generate the release notes' "what changed" section from the commit
-  # history — the same git-cliff rendering, over the same tag range and with
-  # the same cliff.toml, that produces CHANGELOG.md (see "Cutting a release"
-  # in docs/engineering/release-and-packaging.md). Rendering the section here
-  # rather than copying the Changelog means the notes and the Changelog can
-  # never disagree about what a release contains.
+  # history — git-cliff over the tag range, with the repository's cliff.toml
+  # (see "Cutting a release" in docs/engineering/release-and-packaging.md).
+  # The commit log is the only source of the change list; there is no
+  # separate changelog file to keep in sync with it.
   #
   # This is a separate job from publication on purpose: the build matrix
-  # waits on it, so a notes or guard failure stops the run before any
-  # platform build starts — the notes can never be half-published, and
-  # drift is caught at the cost of a minute rather than four builds.
+  # waits on it, so a notes failure stops the run before any platform build
+  # starts — the notes can never be half-published, and a tagging mistake
+  # is caught at the cost of a minute rather than four builds.
   notes:
     name: generate release notes
     # `needs: []` states that this job depends on nothing, like `verify`
@@ -135,38 +134,14 @@ jobs:
           rm -rf "/tmp/git-cliff-${version}"
           git-cliff --version
 
-      # "Nothing may merge between release preparation and tagging" as a
-      # checked invariant rather than a discipline. The Changelog committed at
-      # the tag is regenerated with the exact documented preparation commands
-      # and diffed against itself; a mismatch means a commit landed between
-      # the preparation commit and the tag. The guard runs before the section
-      # rendering and before the build matrix starts, so the drift costs a
-      # minute rather than four builds.
-      - name: Check the Changelog against the tag
-        run: |
-          set -euo pipefail
-          # The SAME commands as step 2 of "Cutting a release": one
-          # implementation of what the Changelog should be, never a second one.
-          git cliff --tag "${GITHUB_REF_NAME}" v0.1.0..HEAD -o /tmp/changelog.next
-          printf '\n' >> /tmp/changelog.next
-          awk '/^## \[0\.1\.0\]$/{f=1} f' CHANGELOG.md >> /tmp/changelog.next
-          if ! diff -u CHANGELOG.md /tmp/changelog.next > /tmp/changelog.diff; then
-            echo "::error::CHANGELOG.md at ${GITHUB_REF_NAME} does not match a regeneration from the commit range v0.1.0..HEAD: a commit landed between release preparation and tagging. Re-run release preparation against the actual tag range (it is idempotent); never hand-edit the generated sections."
-            head -40 /tmp/changelog.diff
-            exit 1
-          fi
-          echo "CHANGELOG.md at ${GITHUB_REF_NAME} matches the commit range"
-          rm -f /tmp/changelog.diff /tmp/changelog.next
-
       - name: Generate release notes
         shell: bash
         run: |
           set -euo pipefail
-          # The change section comes from the SAME source as CHANGELOG.md:
-          # git-cliff with the repository's cliff.toml, over the same tag
-          # range the documented release preparation uses. `--tag` labels the
-          # section with the pushed tag; the range keeps the pre-conventional
-          # history out, exactly as in the Changelog regeneration command.
+          # The change section comes from git-cliff with the repository's
+          # cliff.toml, over the tag range a release contains. `--tag` labels
+          # the section with the pushed tag; the range keeps the
+          # pre-conventional history out of the render.
           version="${GITHUB_REF_NAME#v}"
           section="$(
             git cliff --tag "${GITHUB_REF_NAME}" v0.1.0..HEAD \
@@ -318,8 +293,9 @@ jobs:
   # so the four legs cannot interfere with each other.
   build:
     name: build ${{ matrix.target }}
-    # `notes` is required here so the changelog consistency guard completes
-    # before any platform build starts: drift costs a minute, not four builds.
+    # `notes` is required here so a notes failure — an empty change section
+    # is a tagging mistake — stops the run before any platform build starts:
+    # a bad tag costs a minute, not four builds.
     needs: [verify, notes]
     strategy:
       # Not fail-fast: one broken leg should not cancel the other three, because
@@ -500,9 +476,9 @@ jobs:
   release:
     name: publish pre-release
     # `build` depends on `verify` and `notes`, so a version mismatch or a
-    # changelog-drift failure already stopped the run before any of this is
-    # reached — the notes transitively, since the build matrix cannot start
-    # until they exist. The only thing between four finished builds plus
+    # notes failure already stopped the run before any of this is reached —
+    # the notes transitively, since the build matrix cannot start until
+    # they exist. The only thing between four finished builds plus
     # generated notes and a published release is this one job.
     needs: [build]
     runs-on: ubuntu-latest

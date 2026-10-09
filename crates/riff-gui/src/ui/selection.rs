@@ -23,7 +23,7 @@ use riff_backend::domain::TrackId;
 use std::path::PathBuf;
 
 use super::icons::IconCache;
-use super::theme::geometry::inspector::ART_H;
+use super::theme::geometry::inspector::{ART_H, TAG_FIELD_H};
 use super::theme::{self, Palette};
 
 /// What the user did to the selection panel this frame; `app.rs` applies
@@ -513,8 +513,14 @@ fn editor_section(
         // leading glyph and no clear affordance, and Escape belongs to the
         // editor below (it discards the whole draft) rather than emptying the
         // row the cursor happens to sit on.
+        //
+        // The well is a full [`TAG_FIELD_H`] tall rather than the bare
+        // one-line interact height: the inner text rides a 4px inset, so a
+        // one-line-tall well left no room and the text clipped on the vertical
+        // axis. TAG_FIELD_H is the shared input-well height, so a tag field
+        // sits and reads like the search boxes.
         let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+            egui::vec2(ui.available_width(), TAG_FIELD_H),
             egui::Sense::hover(),
         );
         let response = super::text_field::text_field(

@@ -870,6 +870,25 @@ pub mod geometry {
         /// Art block height (design: the 268×200 cover block under the
         /// header).
         pub const ART_H: f32 = 200.0;
+        /// Height of one inline tag-editor field's input well.
+        ///
+        /// The editor's rows reuse the shared single-line text field
+        /// ([`crate::ui::text_field`]) — the same rounded well, focus ring, and
+        /// 4px inner inset as the app's search boxes — so a field must be a
+        /// full input well, not the bare one-line interact height. At egui's
+        /// default interact height the well is a single text line tall with a
+        /// 4px inset eating into it from each edge, which leaves no room and
+        /// clips the text vertically. This value gives one text line room above
+        /// and below it inside the well, and it matches the shared input-well
+        /// height the search fields already render at, so an edit field reads
+        /// as the same control as a search field.
+        ///
+        /// It is the inspector's own token rather than a read of the search
+        /// height so the editor can be retuned on its own — a taller form field
+        /// here, say — without dragging the search boxes along with it, the same
+        /// per-surface independence `browser::ROW_H` has from
+        /// `sidebar::ROW_H`.
+        pub const TAG_FIELD_H: f32 = 32.0;
     }
 
     /// The shell's size policy: the fixed 56/280/88 chrome plus the least

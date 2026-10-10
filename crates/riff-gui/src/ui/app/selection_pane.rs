@@ -95,6 +95,7 @@ impl RiffApp {
                     ui,
                     &mut self.icons,
                     &self.theme.active,
+                    library.ui_flags.reduce_motion,
                     panel,
                     &mut actions,
                 );

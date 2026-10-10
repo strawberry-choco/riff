@@ -198,6 +198,7 @@ pub fn show_detail_column_scrolled(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     column: DetailColumn<'_>,
     scroll: Option<super::scroll_memory::ScrollControl>,
     reports: &mut Vec<DetailReport>,
@@ -220,6 +221,7 @@ pub fn show_detail_column_scrolled(
             ui,
             cache,
             palette,
+            reduce_motion,
             scroll,
             column.tracks,
             column.track_menu,
@@ -248,10 +250,15 @@ pub fn show_detail_column_scrolled(
 /// of its props — the row's Favourite flag — is a fact about this row and not
 /// about the column. Building one menu for the list and painting it on every
 /// row would be a single answer to a per-row question.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the list's own data plus the global theme pair (palette, reduce_motion)"
+)]
 fn track_list(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     scroll: Option<super::scroll_memory::ScrollControl>,
     tracks: &[TrackRow],
     track_menu: Option<&TrackMenuFactory<'_>>,
@@ -301,6 +308,7 @@ fn track_list(
                     ui,
                     cache,
                     palette,
+                    reduce_motion,
                     super::sidebar::TreeRow::track(
                         &track.title,
                         None,

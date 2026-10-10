@@ -507,6 +507,49 @@ pub const MOTION_DEFAULT: f32 = 0.18;
 /// number.
 pub const MOTION_HOVER: f32 = 0.10;
 
+/// The reduced-motion duration, in seconds: `0.0` — the value every motion
+/// token collapses to when the Reduce Motion preference is on. Resolved at the
+/// theme boundary by [`animation_time`] and [`hover_duration`], never read
+/// directly by a paint site.
+///
+/// **Why `0.0` lands exactly on the settled target, on the first frame.**
+/// egui's `AnimationManager::animate_bool` computes
+/// `last_value + (end - start) * (elapsed / animation_time)`; with
+/// `animation_time == 0.0` the fraction is non-finite, and egui falls back to
+/// the clamped `end` — so every custom wash snaps to its settled value (1.0
+/// hovered, 0.0 at rest) in one step, with no intermediate frames and no
+/// repaint loop (the `0.0 < v && v < 1.0` frame request never fires on a bound).
+/// Publishing `0.0` onto `Style::animation_time` snap-to-targets egui's *own*
+/// widget tweens for the same reason — menus, popups, collapsing headers, the
+/// scrollbars — and those need no extra code here.
+pub const MOTION_REDUCED: f32 = 0.0;
+
+/// The `animation_time` to publish for the Reduce Motion flag: the
+/// snap-to-target sentinel [`MOTION_REDUCED`] when motion is reduced, else the
+/// global tempo [`MOTION_DEFAULT`]. Read once at the theme boundary by
+/// [`style_from`].
+#[must_use]
+pub fn animation_time(reduce_motion: bool) -> f32 {
+    if reduce_motion {
+        MOTION_REDUCED
+    } else {
+        MOTION_DEFAULT
+    }
+}
+
+/// The hover-wash duration for the Reduce Motion flag: [`MOTION_REDUCED`] when
+/// motion is reduced, else [`MOTION_HOVER`]. A riff-authored wash passes this to
+/// its own tween explicitly (it does not read `animation_time` off the style),
+/// so a reduced-motion wash snaps rather than fades.
+#[must_use]
+pub fn hover_duration(reduce_motion: bool) -> f32 {
+    if reduce_motion {
+        MOTION_REDUCED
+    } else {
+        MOTION_HOVER
+    }
+}
+
 // --- Chrome dimensions (`--riff-titlebar-h`, `--riff-sidebar-w`,
 // `--riff-playerbar-h`) ---------------------------------------------------------
 
@@ -1795,9 +1838,10 @@ fn corner(radius: f32) -> CornerRadius {
 
 /// Build the global [`egui::Style`] for `palette`: backgrounds, widget
 /// visuals per kind, corner radii, and strokes — every value from tokens,
-/// none from hardcoded colors.
+/// none from hardcoded colors. `reduce_motion` is the temporal axis, orthogonal
+/// to colour: it selects the place's tempo, not its pixels.
 #[must_use]
-pub fn style_from(palette: &Palette) -> egui::Style {
+pub fn style_from(palette: &Palette, reduce_motion: bool) -> egui::Style {
     let mut style = egui::Style::default();
     let v = &mut style.visuals;
 
@@ -1815,8 +1859,10 @@ pub fn style_from(palette: &Palette) -> egui::Style {
     // No call site is migrated because there is nothing to migrate: riff never
     // wrote `animation_time` anywhere, and a riff-driven tween passes its own
     // duration (see the motion rule in this module's doc). Four palettes, one
-    // tempo — motion is family-invariant, so this is not a `palette` read.
-    style.animation_time = MOTION_DEFAULT;
+    // tempo — motion is family-invariant, so this is not a `palette` read; the
+    // Reduce Motion axis selects the tempo through [`animation_time`], and zero
+    // snaps egui's own widget tweens to their targets (see [`MOTION_REDUCED`]).
+    style.animation_time = animation_time(reduce_motion);
 
     // High Contrast variants thicken focus-bearing strokes (REQ-UI-007).
     let focus_width = if palette.high_contrast {
@@ -1954,13 +2000,75 @@ pub fn resolve(dark: bool, high_contrast: bool) -> Palette {
 
 /// Apply `palette` globally to `ctx` in one call: pins egui's theme
 /// preference to the palette's family and installs the token-built style for
-/// it, so every subsequent frame renders from this token set.
-pub fn install(ctx: &egui::Context, palette: &Palette) {
+/// it, so every subsequent frame renders from this token set. `reduce_motion`
+/// is the temporal axis, forwarded to [`style_from`].
+pub fn install(ctx: &egui::Context, palette: &Palette, reduce_motion: bool) {
     let theme = if palette.dark {
         egui::Theme::Dark
     } else {
         egui::Theme::Light
     };
     ctx.set_theme(theme);
-    ctx.set_style_of(theme, style_from(palette));
+    ctx.set_style_of(theme, style_from(palette, reduce_motion));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Reduce Motion axis resolves to the snap-to-target sentinel, and the
+    /// two duration tokens collapse to it. `MOTION_REDUCED == 0.0` is the whole
+    /// mechanism (see the constant's doc), so it is pinned here too.
+    #[test]
+    fn animation_time_resolves_the_reduce_motion_axis() {
+        assert!((animation_time(false) - MOTION_DEFAULT).abs() < f32::EPSILON);
+        assert!((animation_time(true) - MOTION_REDUCED).abs() < f32::EPSILON);
+        assert!((MOTION_REDUCED - 0.0).abs() < f32::EPSILON);
+    }
+
+    /// The hover token resolves on the same axis: the hover duration at rest,
+    /// the sentinel when motion is reduced.
+    #[test]
+    fn hover_duration_resolves_the_reduce_motion_axis() {
+        assert!((hover_duration(false) - MOTION_HOVER).abs() < f32::EPSILON);
+        assert!((hover_duration(true) - MOTION_REDUCED).abs() < f32::EPSILON);
+    }
+
+    /// `style_from` publishes the tempo, and Reduce Motion selects it — the
+    /// one `Style` field the temporal axis touches.
+    #[test]
+    fn style_from_publishes_the_tempo_reduce_motion_selects() {
+        let palette = resolve(false, false);
+        let moving = style_from(&palette, false);
+        let reduced = style_from(&palette, true);
+        assert!((moving.animation_time - MOTION_DEFAULT).abs() < f32::EPSILON);
+        assert!((reduced.animation_time - MOTION_REDUCED).abs() < f32::EPSILON);
+        assert!((reduced.animation_time - 0.0).abs() < f32::EPSILON);
+    }
+
+    /// `resolve` stays a pure two-axis function of `(dark, high_contrast)`, and
+    /// `reduce_motion` never reaches the palette: two styles that differ only in
+    /// the motion flag carry byte-identical visuals. This is the guard against a
+    /// future regression that would turn the temporal axis into a third Palette
+    /// slot (or let it bleed into colour).
+    #[test]
+    fn resolve_is_two_axis_and_the_palette_is_motion_blind() {
+        // The palette itself is a pure function of the two colour axes.
+        assert_eq!(resolve(true, false), Palette::dark());
+        assert_eq!(resolve(false, false), Palette::light());
+        assert_eq!(resolve(true, true), Palette::dark().high_contrast());
+        assert_eq!(resolve(false, true), Palette::light().high_contrast());
+
+        // The style's colour book is identical whichever way motion is set;
+        // only the tempo differs. (If `reduce_motion` ever became a colour
+        // axis, the colours would diverge here.)
+        let palette = resolve(false, false);
+        let moving = style_from(&palette, false);
+        let reduced = style_from(&palette, true);
+        assert_eq!(moving.visuals, reduced.visuals);
+        assert!(
+            (moving.animation_time - reduced.animation_time).abs() > f32::EPSILON,
+            "reduce motion must at least change the tempo, even though it changes no colour"
+        );
+    }
 }

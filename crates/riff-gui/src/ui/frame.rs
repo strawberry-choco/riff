@@ -88,7 +88,7 @@ use riff_backend::app::watcher_manager::WatcherManager;
 use riff_backend::app::{MutexExt, Transport};
 use riff_backend::domain::{PlaylistId, SmartPlaylistKind};
 
-use super::app::{InlineTagEditor, ThemeState};
+use super::app::{InlineTagEditor, ThemeInputs, ThemeState};
 // Gated with the one caller: nothing on Windows or Linux resolves a native
 // close, and an ungated import would be an `unused_imports` there.
 #[cfg(target_os = "macos")]
@@ -516,19 +516,25 @@ impl<'a> Frame<'a> {
     /// hydrated it before this app existed — so it takes effect on the very
     /// first frame.
     fn apply_theme(&mut self, out: &mut FrameOutput) {
-        let dark = self.parts.theme.dark;
-        if self.parts.theme.last_applied == Some((dark, self.library.ui_flags.high_contrast)) {
+        let inputs = ThemeInputs {
+            dark: self.parts.theme.dark,
+            high_contrast: self.library.ui_flags.high_contrast,
+            reduce_motion: self.library.ui_flags.reduce_motion,
+        };
+        if self.parts.theme.last_applied == Some(inputs) {
             return;
         }
 
-        let palette = theme::resolve(dark, self.library.ui_flags.high_contrast);
+        let palette = theme::resolve(inputs.dark, inputs.high_contrast);
         // A palette-family flip invalidates the placeholder tile: its well and
         // glyph colours were derived for the old family's tokens, so it
-        // re-renders under the new one on its next lookup.
+        // re-renders under the new one on its next lookup. Keyed on the dark
+        // axis ONLY: a reduce-motion-only flip re-installs the style above but
+        // must not evict any real cover, so `evict_generated` never fires for it.
         out.evict_generated = self.parts.theme.active.dark != palette.dark;
         out.palette = Some(palette);
         self.parts.theme.active = palette;
-        self.parts.theme.last_applied = Some((dark, self.library.ui_flags.high_contrast));
+        self.parts.theme.last_applied = Some(inputs);
     }
 
     // --- Step 3: the event inbox -------------------------------------------

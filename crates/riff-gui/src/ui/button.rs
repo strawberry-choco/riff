@@ -160,9 +160,18 @@ const DESTRUCTIVE_WASH: &str = "destructive_hover_wash";
 /// would be tidier and wrong: it would tween the wash out over the hover token
 /// during a press, which is a tween on press feedback, and rule 4 of the motion
 /// rule puts press outside the allow-list entirely.
-fn wash_tween(ui: &egui::Ui, id: egui::Id, suffix: &str, hovered: bool) -> f32 {
-    ui.ctx()
-        .animate_bool_with_time(id.with(suffix), hovered, theme::MOTION_HOVER)
+fn wash_tween(
+    ui: &egui::Ui,
+    id: egui::Id,
+    reduce_motion: bool,
+    suffix: &str,
+    hovered: bool,
+) -> f32 {
+    ui.ctx().animate_bool_with_time(
+        id.with(suffix),
+        hovered,
+        theme::hover_duration(reduce_motion),
+    )
 }
 
 // --- Semantic text buttons -------------------------------------------------------
@@ -283,6 +292,7 @@ pub fn text_button(
     ui: &egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     btn: &TextButton,
 ) -> bool {
     let sense = if btn.enabled {
@@ -296,6 +306,7 @@ pub fn text_button(
         ui,
         cache,
         palette,
+        reduce_motion,
         btn.id,
         btn.rect,
         btn.label,
@@ -343,6 +354,7 @@ pub fn paint_text_button(
     ui: &egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     id: egui::Id,
     rect: egui::Rect,
     label: &str,
@@ -371,8 +383,8 @@ pub fn paint_text_button(
     // transparent to a low-alpha tint, so the step is large in alpha, and they
     // sit on the two affordances where a missed click costs most.
     let wash_t = match variant {
-        Variant::Accent => wash_tween(ui, id, ACCENT_WASH, hovered),
-        Variant::Destructive => wash_tween(ui, id, DESTRUCTIVE_WASH, hovered),
+        Variant::Accent => wash_tween(ui, id, reduce_motion, ACCENT_WASH, hovered),
+        Variant::Destructive => wash_tween(ui, id, reduce_motion, DESTRUCTIVE_WASH, hovered),
         _ => 0.0,
     };
     let painter = ui.painter_at(rect);

@@ -179,6 +179,7 @@ pub fn clear_library_confirm(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
 ) -> Option<PromptOutcome> {
     let mut confirmed = false;
     let mut cancelled = false;
@@ -193,6 +194,7 @@ pub fn clear_library_confirm(
             ui,
             cache,
             palette,
+            reduce_motion,
             &button::TextButton {
                 id: egui::Id::new("clear_library_confirm_action"),
                 rect,
@@ -241,6 +243,7 @@ pub fn clear_thumbnail_cache_confirm(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
 ) -> Option<PromptOutcome> {
     let mut confirmed = false;
     let mut cancelled = false;
@@ -255,6 +258,7 @@ pub fn clear_thumbnail_cache_confirm(
             ui,
             cache,
             palette,
+            reduce_motion,
             &button::TextButton {
                 id: egui::Id::new("clear_thumbnail_cache_confirm_action"),
                 rect,

@@ -36,7 +36,7 @@ use riff_backend::app::traits::{DecodedCover, RequestedSize};
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
 use riff_backend::domain::{Playlist, PlaylistId, TrackId};
-use riff_gui::ui::app::{InlineTagEditor, ThemeState};
+use riff_gui::ui::app::{InlineTagEditor, ThemeInputs, ThemeState};
 use riff_gui::ui::artwork::COVER_THUMB;
 use riff_gui::ui::chrome::TitleBarAction;
 use riff_gui::ui::cover_cache::CoverCache;
@@ -849,7 +849,64 @@ fn the_palette_is_offered_once_at_init_and_not_again_on_a_quiet_frame() {
     // The palette is installed by the draw half from `FrameOutput::palette`;
     // what the Frame keeps is the identity it resolved, so a quiet frame can
     // tell "nothing changed" from "never applied".
-    assert_eq!(harness.theme.last_applied, Some((true, false)));
+    assert_eq!(
+        harness.theme.last_applied,
+        Some(ThemeInputs {
+            dark: true,
+            high_contrast: false,
+            reduce_motion: false,
+        })
+    );
+}
+
+/// A reduce-motion-only flip still offers a palette, so the draw half
+/// re-installs the temporal policy — but it must NOT evict the generated cover
+/// textures. Eviction is keyed on the dark axis alone; folding the temporal
+/// axis into it would wipe every derived cover on a preference toggle that
+/// changes no colour.
+#[test]
+fn a_reduce_motion_flip_reinstalls_the_style_but_does_not_evict_covers() {
+    let mut harness = Harness::new();
+
+    // Baseline identity, then a quiet frame that offers nothing — the same
+    // steady state the palette test above establishes.
+    let first = harness.advance(&FrameInput::default());
+    let quiet = harness.advance(&FrameInput::default());
+    assert!(first.palette.is_some());
+    assert!(quiet.palette.is_none());
+
+    {
+        let Leases { library, .. } = harness.frame();
+        // Flip ONLY the temporal axis: same dark, same high-contrast.
+        library.ui_flags.reduce_motion = true;
+    }
+
+    let flipped = harness.advance(&FrameInput::default());
+
+    assert!(
+        flipped.palette.is_some(),
+        "a reduce-motion-only flip offers the palette, so the draw half re-installs the style atop it"
+    );
+    assert!(
+        !flipped.evict_generated,
+        "eviction is keyed on the dark axis, so a motion-only flip leaves every generated cover in place"
+    );
+    assert_eq!(
+        harness
+            .theme
+            .last_applied
+            .map(|inputs| inputs.reduce_motion),
+        Some(true),
+        "the recorded identity carries the new temporal axis"
+    );
+    assert_eq!(
+        harness
+            .theme
+            .last_applied
+            .map(|inputs| (inputs.dark, inputs.high_contrast)),
+        Some((true, false)),
+        "the colour axes are untouched by the motion flip"
+    );
 }
 
 /// A titlebar `ToggleMaximize` is a decision, and the viewport's maximized flag

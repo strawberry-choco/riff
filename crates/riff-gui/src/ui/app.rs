@@ -86,9 +86,27 @@ pub struct ThemeState {
     /// view code reads its semantic slots instead of hardcoding colors, so
     /// every themed surface follows the active palette (ADR 0004).
     pub active: theme::Palette,
-    /// The `(dark, high_contrast)` pair currently installed on the context,
-    /// or `None` before the first install.
-    pub last_applied: Option<(bool, bool)>,
+    /// The theme inputs currently installed on the context, or `None` before
+    /// the first install. A reduce-motion-only flip still re-installs the style
+    /// (it retargets the temporal policy), so `reduce_motion` is part of the
+    /// identity the Frame compares against — see [`ThemeInputs`].
+    pub last_applied: Option<ThemeInputs>,
+}
+
+/// The three axes the theme install is keyed on. Sibling of the resolved
+/// palette's own two colour axes (`dark`, `high_contrast`) plus the temporal
+/// axis: `reduce_motion` is not a colour, so it does not reach the palette — it
+/// retargets the style's tempo. The Frame compares this against the live flags
+/// to decide whether a re-install is due; the View half's texture eviction stays
+/// keyed on `dark` alone (a motion-only flip must not evict covers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeInputs {
+    /// `true` = dark family, `false` = light family.
+    pub dark: bool,
+    /// High Contrast token-set variant applied over the base family.
+    pub high_contrast: bool,
+    /// Reduce Motion: the temporal axis, snapping tweens to their targets.
+    pub reduce_motion: bool,
 }
 
 /// `"Artist - Title"` for one track — flat list, search, playlists, window
@@ -570,11 +588,16 @@ impl RiffApp {
     /// re-renders under the new one on its next lookup. The eviction is
     /// View-half work (it touches the texture map), so the Frame decides it and
     /// this performs it — in the frame's order, before any row looks a cover up.
-    fn enact_theme_palette(&mut self, ctx: &egui::Context, out: &mut FrameOutput) {
+    fn enact_theme_palette(
+        &mut self,
+        ctx: &egui::Context,
+        out: &mut FrameOutput,
+        reduce_motion: bool,
+    ) {
         let Some(palette) = out.palette.take() else {
             return;
         };
-        theme::install(ctx, &palette);
+        theme::install(ctx, &palette, reduce_motion);
         if out.evict_generated {
             crate::ui::artwork::evict_generated(&mut self.cover_textures, &mut self.cover_lru_keys);
         }
@@ -840,6 +863,7 @@ impl RiffApp {
             ui,
             &mut self.icons,
             &self.theme.active,
+            library.ui_flags.reduce_motion,
             TreeRow {
                 indent_level,
                 ..TreeRow::track(
@@ -964,8 +988,13 @@ impl RiffApp {
     /// disk is genuinely empty, so it is the moment the screen can be emptied
     /// with it. A `Failed` clear leaves every texture in place, because nothing
     /// was removed and so nothing has to be re-derived.
-    fn enact_frame_head(&mut self, ctx: &egui::Context, out: &mut FrameOutput) {
-        self.enact_theme_palette(ctx, out);
+    fn enact_frame_head(
+        &mut self,
+        ctx: &egui::Context,
+        out: &mut FrameOutput,
+        reduce_motion: bool,
+    ) {
+        self.enact_theme_palette(ctx, out, reduce_motion);
         if let Some(outcome) = out.cache_clear.clone() {
             flush_cleared_cache(&outcome, &mut self.cover_textures, &mut self.cover_lru_keys);
         }
@@ -1192,7 +1221,12 @@ impl RiffApp {
                     self.render_elastic_stage(ui, library, playback);
                 }
                 ViewMode::NowPlaying => {
-                    self.show_now_playing_view(ui, playback, &mut report);
+                    self.show_now_playing_view(
+                        ui,
+                        playback,
+                        library.ui_flags.reduce_motion,
+                        &mut report,
+                    );
                 }
                 ViewMode::Settings => {
                     self.show_settings_view(ui, library, playback);
@@ -1286,7 +1320,7 @@ impl eframe::App for RiffApp {
         // the rows resolve cover textures as they paint and the widgets need
         // the palette installed.
         let mut output = self.frame(&mut playback, &mut library).advance(&input);
-        self.enact_frame_head(ui.ctx(), &mut output);
+        self.enact_frame_head(ui.ctx(), &mut output, library.ui_flags.reduce_motion);
 
         // --- SHELL (Issue 06): unified Panel API at exact token dimensions ---
         //
@@ -2401,6 +2435,7 @@ impl RiffApp {
                 ui,
                 &mut self.icons,
                 &self.theme.active,
+                library.ui_flags.reduce_motion,
                 &up_next,
                 &mut self.playerbar_actions,
             );
@@ -2500,7 +2535,7 @@ impl RiffApp {
         self.render_playlists_header(ui, &mut header);
         self.apply_sidebar_slot(playback, library, out, &header);
         let mut prompts = SidebarReport::default();
-        self.render_playlist_rows(ui, &mut prompts);
+        self.render_playlist_rows(ui, library.ui_flags.reduce_motion, &mut prompts);
         self.apply_sidebar_slot(playback, library, out, &prompts);
 
         // --- FOOTER (pinned to the panel's bottom) ------------------------------
@@ -2508,7 +2543,7 @@ impl RiffApp {
         egui::Panel::bottom("sidebar_footer")
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
-                self.render_sidebar_footer(ui, &mut section);
+                self.render_sidebar_footer(ui, library.ui_flags.reduce_motion, &mut section);
             });
         self.apply_sidebar_slot(playback, library, out, &section);
     }
@@ -2578,6 +2613,7 @@ impl RiffApp {
                 ui,
                 &mut self.icons,
                 &palette,
+                library.ui_flags.reduce_motion,
                 TreeRow::nav(
                     label,
                     Some(icon),
@@ -2595,6 +2631,7 @@ impl RiffApp {
             ui,
             &mut self.icons,
             &palette,
+            library.ui_flags.reduce_motion,
             TreeRow::nav(
                 "Folders",
                 Some(crate::ui::icons::Icon::Folder),
@@ -2699,6 +2736,7 @@ impl RiffApp {
                 ui,
                 &mut self.icons,
                 &palette,
+                library.ui_flags.reduce_motion,
                 TreeRow::nav(
                     kind.display_name(),
                     Some(crate::ui::icons::Icon::Sparkles),
@@ -2716,14 +2754,25 @@ impl RiffApp {
     /// last-scan read model (issue 05) formatted by
     /// [`sidebar::format_last_scan_ago`]; Add folder routes through the
     /// EXISTING add-library-path flow.
-    fn render_sidebar_footer(&mut self, ui: &mut egui::Ui, report: &mut SidebarReport) {
+    fn render_sidebar_footer(
+        &mut self,
+        ui: &mut egui::Ui,
+        reduce_motion: bool,
+        report: &mut SidebarReport,
+    ) {
         use crate::ui::sidebar;
 
         let stamp = self.views.last_scan().map(|scan| {
             let elapsed = scan.elapsed().unwrap_or_default();
             format!("Last scan {}", sidebar::format_last_scan_ago(elapsed))
         });
-        if sidebar::sidebar_footer(ui, &mut self.icons, &self.theme.active, stamp.as_deref()) {
+        if sidebar::sidebar_footer(
+            ui,
+            &mut self.icons,
+            &self.theme.active,
+            reduce_motion,
+            stamp.as_deref(),
+        ) {
             // The native folder picker is an OS dialog, not a decision, so the
             // Frame decides that one was asked for and the draw half performs
             // it (on Linux it is a view change, which the Frame applies itself
@@ -2977,7 +3026,12 @@ impl RiffApp {
     }
 
     /// The playlist rows themselves, with the create prompt above them.
-    fn render_playlist_rows(&mut self, ui: &mut egui::Ui, report: &mut SidebarReport) {
+    fn render_playlist_rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        reduce_motion: bool,
+        report: &mut SidebarReport,
+    ) {
         use crate::ui::sidebar;
 
         let palette = self.theme.active;
@@ -3010,6 +3064,7 @@ impl RiffApp {
                     ui,
                     &mut self.icons,
                     &palette,
+                    reduce_motion,
                     &playlist.name,
                     &label,
                     selected,
@@ -3334,6 +3389,7 @@ impl RiffApp {
                 ui,
                 &mut self.icons,
                 &self.theme.active,
+                library.ui_flags.reduce_motion,
                 egui::Id::new(("riff_playlist_entry", &playlist_id.0, index)),
                 index,
                 row,
@@ -3344,7 +3400,13 @@ impl RiffApp {
                 outcome.drop_from,
             )
         } else {
-            let outcome = sidebar::tree_row(ui, &mut self.icons, &self.theme.active, row);
+            let outcome = sidebar::tree_row(
+                ui,
+                &mut self.icons,
+                &self.theme.active,
+                library.ui_flags.reduce_motion,
+                row,
+            );
             (outcome.response, outcome.favorite_toggled, None)
         };
         if response.clicked() {
@@ -3388,6 +3450,7 @@ impl RiffApp {
         &mut self,
         ui: &mut egui::Ui,
         playback: &PlaybackSession,
+        reduce_motion: bool,
         report: &mut StageReport,
     ) {
         // The title and meta lines ride the bar's once-per-frame handout.
@@ -3450,6 +3513,7 @@ impl RiffApp {
             ui,
             &mut self.icons,
             &palette,
+            reduce_motion,
             &content,
             &mut self.stage_readouts,
             &mut self.now_playing_actions,
@@ -3561,6 +3625,7 @@ impl RiffApp {
             ui,
             &mut self.icons,
             &palette,
+            library.ui_flags.reduce_motion,
             TreeRow {
                 indent_level: level,
                 icon: cover.is_none().then_some(glyph),

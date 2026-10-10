@@ -53,8 +53,12 @@ const HOVER_WASH: &str = "row_hover_wash";
 /// samples one request per in-flight pass, attributed (via `#[track_caller]`)
 /// to the call below, and none once the wash has settled — so an extra
 /// `request_repaint` here shows up as a second cause on every in-flight pass.
-fn hover_wash_t(ctx: &egui::Context, id: egui::Id, hovered: bool) -> f32 {
-    ctx.animate_bool_with_time(id.with(HOVER_WASH), hovered, theme::MOTION_HOVER)
+fn hover_wash_t(ctx: &egui::Context, id: egui::Id, reduce_motion: bool, hovered: bool) -> f32 {
+    ctx.animate_bool_with_time(
+        id.with(HOVER_WASH),
+        hovered,
+        theme::hover_duration(reduce_motion),
+    )
 }
 
 /// Paint one row's background band: the selected fill with the hover wash
@@ -80,19 +84,25 @@ fn hover_wash_t(ctx: &egui::Context, id: egui::Id, hovered: bool) -> f32 {
 /// out between the painter and the token.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the band, its identity and its state"
+    clippy::fn_params_excessive_bools,
+    reason = "the band, its identity and its state; reduce_motion rides the wash alongside the independent state booleans"
 )]
 pub fn paint_row_band(
     ui: &egui::Ui,
     painter: &egui::Painter,
     palette: &Palette,
+    reduce_motion: bool,
     band: egui::Rect,
     id: egui::Id,
     selected: bool,
     hovered: bool,
     focused: bool,
 ) {
-    let fill = theme::row_band_fill(palette, selected, hover_wash_t(ui.ctx(), id, hovered));
+    let fill = theme::row_band_fill(
+        palette,
+        selected,
+        hover_wash_t(ui.ctx(), id, reduce_motion, hovered),
+    );
     // A fully transparent fill is not painted at all rather than painted at
     // zero: an idle row's band must emit no primitive, so a list of fifty
     // unhovered rows costs fifty fewer shapes than it used to and a golden

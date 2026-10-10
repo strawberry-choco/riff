@@ -103,6 +103,8 @@ The egui-based graphical interface: the main window, a dual-view library explore
 
 **Keyboard Accessibility & High Contrast.** The entire UI is operable from the keyboard, with a clearly visible focus indicator showing where you are. A high-contrast theme is available from settings; the choice persists across restarts, and switching it off fully restores the normal theme.
 
+**Reduce Motion.** A Reduce motion preference in Settings → Appearance turns off interface animation: hover washes and the Now Playing equalizer's dancing bars settle instantly instead of fading, and the choice persists across restarts.
+
 ## System Integration
 
 Cross-platform integration with the desktop: the system tray and per-platform window and audio behavior.

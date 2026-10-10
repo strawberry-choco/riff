@@ -220,6 +220,11 @@ pub struct UiFlags {
     /// minimizing it to the system tray (persisted; inert on Linux, which has
     /// no tray). `false` (the default) keeps the minimize-to-tray behavior.
     pub close_quits_app: bool,
+    /// Accessibility flag: when `true` the UI suppresses non-essential motion
+    /// (view transitions, animated reveals) in favor of instant changes,
+    /// honouring the listener's system reduce-motion preference. `false`
+    /// (the default) leaves motion as it is (persisted, restored on launch).
+    pub reduce_motion: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

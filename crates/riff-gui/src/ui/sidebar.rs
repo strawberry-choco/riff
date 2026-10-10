@@ -117,6 +117,19 @@ pub fn equalizer_heights(phase: f64) -> [f32; EQ_BAR_COUNT] {
     ]
 }
 
+/// The equalizer's calm rest shape: four bars flat at half height, the centred
+/// "at rest" silhouette the now-playing row paints when motion is reduced (the
+/// Reduce Motion preference is on).
+///
+/// **Why not phase zero.** [`equalizer_heights`] at phase `0.0` is a lopsided
+/// staircase — `0.50 / 0.98 / 0.76 / 0.16`, the four sine waves not yet in
+/// agreement (the same shape the paused-row doc warns reads as a glitch). A
+/// frozen snapshot at a held phase would inherit that lopsidedness, and a
+/// deliberately calm rest must look chosen, so the reduced shape is its own
+/// constant: flat, symmetric, and the settled look the animated bars orbit
+/// around.
+pub const EQUALIZER_REST: [f32; EQ_BAR_COUNT] = [0.5; EQ_BAR_COUNT];
+
 /// The equalizer phase this frame, in seconds of playback time, for the row
 /// with id `row_id`.
 ///
@@ -509,13 +522,14 @@ fn paint_row(
     ui: &egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     row: &TreeRow<'_>,
     cells: &RowCells,
 ) {
     let painter = ui.painter_at(cells.whole);
-    paint_row_band(ui, palette, row, cells, &painter);
+    paint_row_band(ui, palette, reduce_motion, row, cells, &painter);
     paint_favorite(ui, cache, palette, row, cells, &painter);
-    let x = paint_row_leading(ui, cache, palette, row, cells, &painter);
+    let x = paint_row_leading(ui, cache, palette, reduce_motion, row, cells, &painter);
     paint_row_label(ui, palette, row, cells, &painter, x);
 }
 
@@ -527,6 +541,7 @@ fn paint_row(
 fn paint_row_band(
     ui: &egui::Ui,
     palette: &Palette,
+    reduce_motion: bool,
     row: &TreeRow<'_>,
     cells: &RowCells,
     painter: &egui::Painter,
@@ -536,6 +551,7 @@ fn paint_row_band(
         ui,
         painter,
         palette,
+        reduce_motion,
         cells.whole,
         cells.response.id,
         row.selected,
@@ -598,6 +614,7 @@ fn paint_row_leading(
     ui: &egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     row: &TreeRow<'_>,
     cells: &RowCells,
     painter: &egui::Painter,
@@ -653,19 +670,29 @@ fn paint_row_leading(
 
     if row.now_playing {
         // The animated equalizer-bars indicator replaces the old play glyph.
-        // The phase is the row's own, held across a pause — see
-        // [`equalizer_phase`].
-        let phase = equalizer_phase(ui, cells.response.id, row.playing);
-        let heights = equalizer_heights(phase);
+        //
+        // **Reduce Motion freezes the bars at their calm rest shape and
+        // advances nothing.** The temporal axis only decides *whether* the
+        // bars move: under reduce motion neither the held phase is consulted
+        // nor a frame is requested, so a reduce-motion now-playing row is as
+        // still as a paused one. Off the temporal axis the behaviour is exactly
+        // what it always was — the phase is the row's own, advanced only while
+        // playing and held across a pause (see [`equalizer_phase`]).
+        let (heights, animating) = if reduce_motion {
+            (EQUALIZER_REST, false)
+        } else {
+            let phase = equalizer_phase(ui, cells.response.id, row.playing);
+            (equalizer_heights(phase), row.playing)
+        };
         let eq_rect = egui::Rect::from_center_size(
             egui::pos2(x + 7.0, cells.rect.center().y),
             egui::vec2(14.0, 14.0),
         );
         paint_equalizer(painter, eq_rect, palette.brand_primary, &heights);
         x += 14.0 + ICON_GAP;
-        if row.playing {
+        if animating {
             // Keep the bars dancing between repaints, at the budget the
-            // tempo was chosen to suit.
+            // tempo was chosen to suit. A frozen row asks for nothing.
             ui.ctx().request_repaint_after(EQ_REPAINT_INTERVAL);
         }
     }
@@ -729,10 +756,11 @@ pub fn tree_row(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     row: TreeRow<'_>,
 ) -> TreeRowResponse {
     let cells = allocate_row_cells(ui, &row);
-    paint_row(ui, cache, palette, &row, &cells);
+    paint_row(ui, cache, palette, reduce_motion, &row, &cells);
     let favorite_toggled = match (row.favorite, cells.heart.as_ref()) {
         (Some(favorite), Some((_, heart))) if heart.clicked() => Some(!favorite),
         _ => None,
@@ -793,12 +821,14 @@ pub fn up_next_row(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     entry: &UpNextEntry,
 ) -> egui::Response {
     tree_row(
         ui,
         cache,
         palette,
+        reduce_motion,
         TreeRow::nav(&entry.label, None, None, false),
     )
     .response
@@ -828,6 +858,7 @@ pub fn playlist_row(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     name: &str,
     label: &str,
     selected: bool,
@@ -843,6 +874,7 @@ pub fn playlist_row(
         ui,
         &painter,
         palette,
+        reduce_motion,
         rect,
         response.id,
         selected,
@@ -917,6 +949,7 @@ pub fn sidebar_footer(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     last_scan: Option<&str>,
 ) -> bool {
     let (rect, _) =
@@ -930,6 +963,7 @@ pub fn sidebar_footer(
         ui,
         cache,
         palette,
+        reduce_motion,
         TreeRow::nav("Add folder", Some(Icon::Folder), None, false),
     )
     .response
@@ -1014,6 +1048,7 @@ pub fn reorderable_row(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     id: egui::Id,
     index: usize,
     row: TreeRow<'_>,
@@ -1046,7 +1081,7 @@ pub fn reorderable_row(
             egui::UiBuilder::new()
                 .layer_id(layer_id)
                 .max_rect(slot_rect),
-            |ui| tree_row(ui, cache, palette, row),
+            |ui| tree_row(ui, cache, palette, reduce_motion, row),
         );
         if let Some(pointer_pos) = ui.ctx().pointer_interact_pos() {
             let delta = pointer_pos - floated.inner.response.rect.center();
@@ -1066,7 +1101,7 @@ pub fn reorderable_row(
             .on_hover_cursor(egui::CursorIcon::Grab);
         let row = ui
             .scope_builder(egui::UiBuilder::new().max_rect(slot_rect), |ui| {
-                tree_row(ui, cache, palette, row)
+                tree_row(ui, cache, palette, reduce_motion, row)
             })
             .inner;
         let favorite_toggled = row.favorite_toggled;

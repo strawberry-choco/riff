@@ -1521,7 +1521,7 @@ mod tests {
                 let background = ui.ctx().layer_painter(egui::LayerId::background());
                 background.rect_filled(ui.ctx().content_rect(), 0.0, palette.background);
                 let mut cache = riff_gui::ui::icons::IconCache::new();
-                let _ = clear_library_confirm(ui, &mut cache, &palette);
+                let _ = clear_library_confirm(ui, &mut cache, &palette, false);
             });
         harness.run();
 
@@ -1575,7 +1575,7 @@ mod tests {
 
     #[test]
     fn test_style_from_applies_dark_tokens_to_the_global_style() {
-        let style = theme::style_from(&theme::Palette::dark());
+        let style = theme::style_from(&theme::Palette::dark(), false);
         let v = &style.visuals;
 
         // Window background + panel surfaces from the surface tokens.
@@ -1626,7 +1626,7 @@ mod tests {
     #[test]
     fn test_style_from_applies_light_tokens_when_given_the_light_palette() {
         let light = theme::Palette::light();
-        let style = theme::style_from(&light);
+        let style = theme::style_from(&light, false);
         let v = &style.visuals;
 
         assert!(!v.dark_mode);
@@ -1648,7 +1648,7 @@ mod tests {
         // REQ-UI-007 carried over: focused/selected elements get strokes
         // thicker than egui's 1.0 default, over either base.
         for base in [theme::Palette::dark(), theme::Palette::light()] {
-            let style = theme::style_from(&base.high_contrast());
+            let style = theme::style_from(&base.high_contrast(), false);
             let v = &style.visuals;
             assert!(
                 v.selection.stroke.width > 1.0,
@@ -1681,7 +1681,7 @@ mod tests {
         let ctx = egui::Context::default();
         let light = theme::Palette::light();
 
-        theme::install(&ctx, &light);
+        theme::install(&ctx, &light, false);
 
         let style = ctx.global_style();
         assert_eq!(style.visuals.panel_fill, light.surface);
@@ -1883,7 +1883,7 @@ mod tests {
     #[test]
     fn test_install_applies_the_text_styles_to_the_context() {
         let ctx = egui::Context::default();
-        theme::install(&ctx, &theme::Palette::dark());
+        theme::install(&ctx, &theme::Palette::dark(), false);
 
         let style = ctx.global_style();
         assert_eq!(style.text_styles, theme::text_styles());
@@ -3369,6 +3369,7 @@ mod tests {
     /// band and the glyph are the same in all of them.
     fn now_playing_row_harness(
         playing: bool,
+        reduce_motion: bool,
     ) -> (
         egui_kittest::Harness<'static>,
         std::rc::Rc<std::cell::Cell<bool>>,
@@ -3385,6 +3386,7 @@ mod tests {
                     ui,
                     &mut cache,
                     &palette,
+                    reduce_motion,
                     sidebar::TreeRow {
                         indent_level: 1,
                         icon: Some(icons::Icon::Music),
@@ -3446,7 +3448,7 @@ mod tests {
     fn test_equalizer_pause_holds_the_last_advanced_phase() {
         // Step, never `run()`: a playing row asks for a repaint every frame,
         // which is exactly what `run()` refuses to settle.
-        let (mut playing, flag) = now_playing_row_harness(true);
+        let (mut playing, flag) = now_playing_row_harness(true, false);
         playing.step();
         playing.step();
         playing.step();
@@ -3473,7 +3475,7 @@ mod tests {
 
         // A row that has never played has nothing to hold: it starts at phase
         // zero and stays there, so it never drifts.
-        let (mut never_played, _) = now_playing_row_harness(false);
+        let (mut never_played, _) = now_playing_row_harness(false, false);
         never_played.step();
         let idle_frame_one = never_played.render().expect("the row renders headlessly");
         never_played.step();
@@ -3504,6 +3506,58 @@ mod tests {
             "and only in the row's leading strip, not in its label; they differ \
              up to x={x1} of a {}-px row",
             idle_frame_one.width()
+        );
+    }
+
+    /// Under Reduce Motion the now-playing equalizer holds its calm rest shape
+    /// and asks the frame loop for nothing — the only thing that changes from
+    /// the default is whether the bars move. It paints the flat
+    /// [`sidebar::EQUALIZER_REST`] silhouette even when the row is playing, and
+    /// issues no `request_repaint_after`, so a playing reduce-motion row is as
+    /// still as a paused one and costs no frames.
+    #[test]
+    fn test_reduce_motion_equalizer_holds_the_rest_shape_and_asks_for_no_frames() {
+        // A playing row under reduce_motion: `playing == true`, but the bars
+        // must not advance and no frame must be requested.
+        let (mut playing_reduced, _pflag) = now_playing_row_harness(true, true);
+        playing_reduced.step();
+        let causes: Vec<String> = playing_reduced
+            .ctx
+            .repaint_causes()
+            .iter()
+            .map(|cause| format!("{}:{}", cause.file.replace('\\', "/"), cause.line))
+            .collect();
+        assert!(
+            causes.is_empty(),
+            "a reduce-motion playing row must not ask for frames: the equalizer holds \
+             EQUALIZER_REST and issues no request_repaint_after; causes={causes:?}"
+        );
+
+        // The rest shape is motionless across frames.
+        let playing_frame_a = playing_reduced
+            .render()
+            .expect("the row renders headlessly");
+        playing_reduced.step();
+        let playing_frame_b = playing_reduced
+            .render()
+            .expect("the row renders headlessly");
+        let (drifted, where_) = pixel_diff(&playing_frame_a, &playing_frame_b);
+        assert_eq!(
+            drifted, 0,
+            "the reduce-motion bars must not drift: they hold EQUALIZER_REST; {drifted} moved, \
+             at {where_:?}"
+        );
+
+        // A paused row under reduce_motion paints the same rest shape, so a
+        // playing and a paused reduce-motion row are indistinguishable.
+        let (mut paused_reduced, _qflag) = now_playing_row_harness(false, true);
+        paused_reduced.step();
+        let paused_frame = paused_reduced.render().expect("the paused row renders");
+        let (moved, where_) = pixel_diff(&playing_frame_a, &paused_frame);
+        assert_eq!(
+            moved, 0,
+            "a playing and a paused row under reduce motion both paint EQUALIZER_REST; \
+             {moved} pixels moved, at {where_:?}"
         );
     }
 
@@ -3543,6 +3597,7 @@ mod tests {
                         ui,
                         &mut cache,
                         &palette,
+                        false,
                         sidebar::TreeRow {
                             indent_level: 1,
                             icon: Some(icons::Icon::Music),
@@ -3589,6 +3644,7 @@ mod tests {
                         ui,
                         &mut cache,
                         &palette,
+                        false,
                         sidebar::TreeRow {
                             indent_level: 0,
                             icon: None,
@@ -3657,6 +3713,7 @@ mod tests {
                         ui,
                         &mut cache,
                         &palette,
+                        false,
                         sidebar::TreeRow {
                             indent_level: 0,
                             icon: Some(icons::Icon::ListMusic),
@@ -3675,6 +3732,7 @@ mod tests {
                         ui,
                         &mut cache,
                         &palette,
+                        false,
                         sidebar::TreeRow {
                             indent_level: 0,
                             icon: Some(icons::Icon::Music),
@@ -3806,6 +3864,7 @@ mod tests {
                         ui,
                         &mut cache,
                         &palette,
+                        false,
                         Some("Last scan 5m ago"),
                     ) {
                         clicks.push("add_folder");
@@ -3839,7 +3898,7 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, _clicks: &mut Vec<&'static str>| {
-                    riff_gui::ui::sidebar::sidebar_footer(ui, &mut cache, &palette, None);
+                    riff_gui::ui::sidebar::sidebar_footer(ui, &mut cache, &palette, false, None);
                 },
                 Vec::new(),
             );
@@ -3867,9 +3926,9 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, actions: &mut Vec<PlaylistRowAction>| {
-                    if let Some(action) =
-                        sidebar::playlist_row(ui, &mut cache, &palette, "Gym", "Gym (3)", false)
-                    {
+                    if let Some(action) = sidebar::playlist_row(
+                        ui, &mut cache, &palette, false, "Gym", "Gym (3)", false,
+                    ) {
                         actions.push(action);
                     }
                 },
@@ -4695,7 +4754,7 @@ mod tests {
                         &mut buf,
                     );
                     riff_gui::ui::playerbar::show_queue_panel(
-                        ui, &mut cache, palette, entries, &mut buf,
+                        ui, &mut cache, palette, false, entries, &mut buf,
                     );
                     actions.append(&mut buf);
                 },
@@ -5442,6 +5501,7 @@ mod tests {
                         ui,
                         &mut cache,
                         &palette,
+                        false,
                         &content,
                         &mut readouts,
                         &mut buf,
@@ -5499,6 +5559,7 @@ mod tests {
                         ui,
                         &mut cache,
                         &palette,
+                        false,
                         &content,
                         &mut readouts,
                         &mut buf,
@@ -7415,6 +7476,29 @@ mod tests {
         );
     }
 
+    /// Reduce motion is the temporal peer of High contrast in the Appearance
+    /// pane: its switch is wired to `SettingsAction::SetReduceMotion`, whose
+    /// handler writes `library.ui_flags.reduce_motion` (the line that resolves
+    /// the theme boundary). Starts OFF beside High contrast.
+    #[test]
+    fn test_the_reduce_motion_preference_reports_set_reduce_motion() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::settings::SettingsSection;
+
+        let content = sample_content();
+
+        let mut harness = settings_modal_harness(&content, SettingsSection::Appearance);
+        harness.run();
+        harness.get_by_label("Reduce motion").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .contains(&SettingsAction::SetReduceMotion(true)),
+            "the Appearance pane's Reduce motion switch reports SetReduceMotion(true)"
+        );
+    }
+
     /// Render one boolean control (the toggle pill, or the shared checkbox box
     /// when `boxy`) and report whether it painted the keyboard focus ring, so a
     /// test can prove the toggle and the checkbox share the focus treatment.
@@ -7658,6 +7742,7 @@ mod tests {
                             ui,
                             &mut cache,
                             &palette,
+                            false,
                             egui::Id::new(("dnd_fixture", i)),
                             i,
                             sidebar::TreeRow {
@@ -7762,6 +7847,7 @@ mod tests {
                         ui,
                         &mut cache,
                         &palette,
+                        false,
                         egui::Id::new(("menu_fixture", 0)),
                         0,
                         sidebar::TreeRow {
@@ -9603,7 +9689,7 @@ mod browser_column_ui_tests {
                         empty_hint: "",
                     };
                     riff_gui::ui::browser::show_browser_column_scrolled(
-                        ui, &mut cache, &palette, column, None, actions,
+                        ui, &mut cache, &palette, false, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -9672,7 +9758,7 @@ mod browser_column_ui_tests {
                         empty_hint: "",
                     };
                     riff_gui::ui::browser::show_browser_column_scrolled(
-                        ui, &mut cache, &palette, column, None, actions,
+                        ui, &mut cache, &palette, false, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -9734,7 +9820,7 @@ mod browser_column_ui_tests {
                         empty_hint: "",
                     };
                     riff_gui::ui::browser::show_browser_column_scrolled(
-                        ui, &mut cache, &palette, column, None, actions,
+                        ui, &mut cache, &palette, false, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -9789,7 +9875,7 @@ mod browser_column_ui_tests {
                         empty_hint: "",
                     };
                     riff_gui::ui::browser::show_browser_column_scrolled(
-                        ui, &mut cache, &palette, column, None, actions,
+                        ui, &mut cache, &palette, false, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -9825,7 +9911,7 @@ mod browser_column_ui_tests {
                         empty_hint: "Add a folder to start scanning your library.",
                     };
                     riff_gui::ui::browser::show_browser_column_scrolled(
-                        ui, &mut cache, &palette, column, None, actions,
+                        ui, &mut cache, &palette, false, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -9868,7 +9954,7 @@ mod browser_column_ui_tests {
                             empty_hint: "",
                         };
                         riff_gui::ui::browser::show_browser_column_scrolled(
-                            ui, &mut cache, &palette, column, None, actions,
+                            ui, &mut cache, &palette, false, column, None, actions,
                         );
                     },
                     Vec::new(),
@@ -9922,7 +10008,7 @@ mod browser_column_ui_tests {
                         empty_hint: "",
                     };
                     riff_gui::ui::browser::show_browser_column_scrolled(
-                        ui, &mut cache, &palette, column, None, actions,
+                        ui, &mut cache, &palette, false, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -9976,7 +10062,7 @@ mod browser_column_ui_tests {
                         empty_hint: "",
                     };
                     riff_gui::ui::browser::show_browser_column_scrolled(
-                        ui, &mut cache, &palette, column, None, actions,
+                        ui, &mut cache, &palette, false, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -10142,7 +10228,9 @@ mod browser_column_ui_tests {
                         tracks: &tracks,
                         ..DetailColumn::empty("", "")
                     };
-                    show_detail_column_scrolled(ui, &mut cache, &palette, column, None, reports);
+                    show_detail_column_scrolled(
+                        ui, &mut cache, &palette, false, column, None, reports,
+                    );
                 },
                 Vec::new(),
             );
@@ -10218,7 +10306,9 @@ mod browser_column_ui_tests {
                         sort: Some(TrackSort::NumberAsc),
                         ..DetailColumn::empty("", "")
                     };
-                    show_detail_column_scrolled(ui, &mut cache, &palette, column, None, reports);
+                    show_detail_column_scrolled(
+                        ui, &mut cache, &palette, false, column, None, reports,
+                    );
                 },
                 Vec::new(),
             );
@@ -10313,7 +10403,9 @@ mod browser_column_ui_tests {
                         track_menu: Some(&track_menu),
                         ..DetailColumn::empty("", "")
                     };
-                    show_detail_column_scrolled(ui, &mut cache, &palette, column, None, reports);
+                    show_detail_column_scrolled(
+                        ui, &mut cache, &palette, false, column, None, reports,
+                    );
                 },
                 Vec::new(),
             );
@@ -10437,7 +10529,9 @@ mod browser_column_ui_tests {
                         track_menu: Some(&track_menu),
                         ..DetailColumn::empty("", "")
                     };
-                    show_detail_column_scrolled(ui, &mut cache, &palette, column, None, reports);
+                    show_detail_column_scrolled(
+                        ui, &mut cache, &palette, false, column, None, reports,
+                    );
                 },
                 Vec::new(),
             );
@@ -10547,7 +10641,9 @@ mod browser_column_ui_tests {
                         tracks: &tracks,
                         ..DetailColumn::empty("", "")
                     };
-                    show_detail_column_scrolled(ui, &mut cache, &palette, column, None, reports);
+                    show_detail_column_scrolled(
+                        ui, &mut cache, &palette, false, column, None, reports,
+                    );
                 },
                 Vec::new(),
             );
@@ -11332,7 +11428,9 @@ mod browser_column_ui_tests {
                 let rect =
                     egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(200.0, 40.0));
                 let painter = ui.painter();
-                paint_row_band(ui, painter, &palette, rect, id, selected, hovered, focused);
+                paint_row_band(
+                    ui, painter, &palette, false, rect, id, selected, hovered, focused,
+                );
             });
         harness.run();
         harness
@@ -11419,6 +11517,7 @@ mod browser_column_ui_tests {
                         ui,
                         &mut cache,
                         &palette,
+                        false,
                         column,
                         None,
                         &mut Vec::new(),
@@ -11664,7 +11763,11 @@ mod browser_column_ui_tests {
     /// Build a one-row harness that paints the shared row band, with the
     /// pointer state held in the harness state so a test can hover the row
     /// between steps.
-    fn row_band_frame_loop(step_dt: f32, id: egui::Id) -> egui_kittest::Harness<'static, bool> {
+    fn row_band_frame_loop(
+        step_dt: f32,
+        id: egui::Id,
+        reduce_motion: bool,
+    ) -> egui_kittest::Harness<'static, bool> {
         use riff_gui::ui::row::paint_row_band;
         use riff_gui::ui::theme::Palette;
         let palette = Palette::dark();
@@ -11676,7 +11779,17 @@ mod browser_column_ui_tests {
                 move |ui, hovered: &mut bool| {
                     let rect =
                         egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(200.0, 40.0));
-                    paint_row_band(ui, ui.painter(), &palette, rect, id, false, *hovered, false);
+                    paint_row_band(
+                        ui,
+                        ui.painter(),
+                        &palette,
+                        reduce_motion,
+                        rect,
+                        id,
+                        false,
+                        *hovered,
+                        false,
+                    );
                 },
                 false,
             )
@@ -11746,7 +11859,7 @@ mod browser_column_ui_tests {
         /// asserted over a run and not over one frame.
         const SETTLED_PASSES: usize = 4;
 
-        let mut harness = row_band_frame_loop(STEP_DT, egui::Id::new("row_band_frame_loop"));
+        let mut harness = row_band_frame_loop(STEP_DT, egui::Id::new("row_band_frame_loop"), false);
 
         // One pass with the row idle. This seeds the tween at `0.0`, which is
         // what lets the next pass read a *transition* rather than the animation
@@ -11828,6 +11941,58 @@ mod browser_column_ui_tests {
                 "pass {pass} asked for a frame from outside the row band: {causes:?}"
             );
         }
+    }
+
+    /// Under Reduce Motion the row band's hover wash asks for zero repaints and
+    /// lands exactly on the settled hover tint on the first hovered frame: the
+    /// `MOTION_REDUCED` sentinel snaps the tween to its target (`t == 1.0`), so
+    /// nothing is ever in flight and no fade is shown.
+    #[test]
+    fn test_reduce_motion_row_wash_lands_on_the_settled_tint_and_asks_for_no_frames() {
+        /// Short steps, matching the wash test above.
+        const STEP_DT: f32 = 0.02;
+        /// Enough passes for the default (motion) wash to settle and to prove
+        /// the reduce-motion wash never comes in flight across a run.
+        const PASSES: usize = 12;
+
+        // The settled hover tint under the default tempo: hovered, stepped past
+        // MOTION_HOVER so the fade completes, is the reference both bands land
+        // on.
+        let mut moving = row_band_frame_loop(STEP_DT, egui::Id::new("row_band_moving"), false);
+        *moving.state_mut() = true;
+        for _ in 0..PASSES {
+            moving.step();
+        }
+        let settled = moving.render().expect("the moving band settles");
+
+        // The reduce-motion band: idle first (the tween rests at 0.0), then
+        // hovered — with no pass ever asking for a frame.
+        let mut reduced = row_band_frame_loop(STEP_DT, egui::Id::new("row_band_reduced"), true);
+        reduced.step();
+        assert!(
+            asked_by(&reduced).is_empty(),
+            "an idle reduce-motion band asks for nothing, exactly like the default"
+        );
+        *reduced.state_mut() = true;
+        let mut asked: Vec<Vec<String>> = Vec::with_capacity(PASSES);
+        for _ in 0..PASSES {
+            asked.push(asked_by(&reduced));
+            reduced.step();
+        }
+        assert!(
+            asked.iter().all(|causes| causes.is_empty()),
+            "reduce-motion snaps the wash to its target, so no pass is ever in flight and none \
+             asks for a frame: {asked:?}"
+        );
+
+        // And it lands exactly on the settled hover tint, with no intermediate
+        // fade — identical pixels to the default band after its fade completes.
+        let first_hover = reduced.render().expect("the reduced band renders");
+        assert_eq!(
+            &settled, &first_hover,
+            "the first reduce-motion hover frame must be the fully-settled hover tint, identical \
+             to the default band after its fade completes"
+        );
     }
 
     /// Render one shared icon button and return the frame, so a test can see
@@ -11928,7 +12093,7 @@ mod browser_column_ui_tests {
                     variant,
                     enabled: !disabled,
                 };
-                text_button(ui, &mut cache, &palette, &spec);
+                text_button(ui, &mut cache, &palette, false, &spec);
             });
         harness.run();
         harness
@@ -11965,7 +12130,7 @@ mod browser_column_ui_tests {
                     variant: Variant::Primary,
                     enabled: true,
                 };
-                text_button(ui, &mut cache, &palette, &spec);
+                text_button(ui, &mut cache, &palette, false, &spec);
             });
         harness.run();
         let frame = harness
@@ -12361,6 +12526,7 @@ mod browser_column_ui_tests {
                     ui,
                     &mut cache,
                     &palette,
+                    false,
                     id,
                     rect,
                     "Rescan now",
@@ -12833,6 +12999,7 @@ mod browser_column_ui_tests {
             ui,
             &mut s.cache,
             &palette,
+            false,
             column,
             None,
             &mut s.actions,
@@ -13111,7 +13278,7 @@ mod browser_column_ui_tests {
                         tags: &[],
                         editor: None,
                     };
-                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                    show_selection_panel(ui, &mut cache, &palette, false, panel, actions);
                 },
                 Vec::new(),
             );
@@ -13205,7 +13372,7 @@ mod browser_column_ui_tests {
                         tags: &[],
                         editor: None,
                     };
-                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                    show_selection_panel(ui, &mut cache, &palette, false, panel, actions);
                 },
                 Vec::new(),
             );
@@ -13256,7 +13423,7 @@ mod browser_column_ui_tests {
                         tags: &[],
                         editor: None,
                     };
-                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                    show_selection_panel(ui, &mut cache, &palette, false, panel, actions);
                 },
                 Vec::new(),
             );
@@ -13324,7 +13491,7 @@ mod browser_column_ui_tests {
                         tags: &tags,
                         editor: None,
                     };
-                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                    show_selection_panel(ui, &mut cache, &palette, false, panel, actions);
                 },
                 Vec::new(),
             );
@@ -13417,7 +13584,7 @@ mod browser_column_ui_tests {
                         tags: &tags,
                         editor: Some(&mut draft),
                     };
-                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                    show_selection_panel(ui, &mut cache, &palette, false, panel, actions);
                 },
                 Vec::new(),
             );
@@ -13499,7 +13666,7 @@ mod browser_column_ui_tests {
                         tags: &tags,
                         editor: Some(&mut draft),
                     };
-                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                    show_selection_panel(ui, &mut cache, &palette, false, panel, actions);
                 },
                 Vec::new(),
             );
@@ -13572,7 +13739,7 @@ mod browser_column_ui_tests {
                         tags: &tags,
                         editor: Some(&mut draft),
                     };
-                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                    show_selection_panel(ui, &mut cache, &palette, false, panel, actions);
                 },
                 Vec::new(),
             );
@@ -13639,7 +13806,7 @@ mod browser_column_ui_tests {
                         tags: &tags,
                         editor: Some(&mut draft),
                     };
-                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                    show_selection_panel(ui, &mut cache, &palette, false, panel, actions);
                 },
                 Vec::new(),
             );
@@ -13682,7 +13849,7 @@ mod browser_column_ui_tests {
                         tags: &tags,
                         editor: None,
                     };
-                    show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                    show_selection_panel(ui, &mut cache, &palette, false, panel, actions);
                 },
                 Vec::new(),
             );
@@ -13734,7 +13901,7 @@ mod browser_column_ui_tests {
                             tags: &[],
                             editor: None,
                         };
-                        show_selection_panel(ui, &mut cache, &palette, panel, actions);
+                        show_selection_panel(ui, &mut cache, &palette, false, panel, actions);
                     }
                 },
                 Vec::new(),
@@ -14397,7 +14564,7 @@ mod browser_column_ui_tests {
                         empty_hint: "",
                     };
                     riff_gui::ui::browser::show_browser_column_scrolled(
-                        ui, &mut cache, &palette, column, None, actions,
+                        ui, &mut cache, &palette, false, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -14459,7 +14626,9 @@ mod browser_column_ui_tests {
                         tracks: &tracks,
                         ..DetailColumn::empty("", "")
                     };
-                    show_detail_column_scrolled(ui, &mut cache, &palette, column, None, reports);
+                    show_detail_column_scrolled(
+                        ui, &mut cache, &palette, false, column, None, reports,
+                    );
                 },
                 Vec::new(),
             );
@@ -14590,6 +14759,7 @@ mod browser_column_ui_tests {
                                 ui,
                                 &mut cache,
                                 &palette,
+                                false,
                                 column,
                                 None,
                                 &mut browser_actions,
@@ -14611,6 +14781,7 @@ mod browser_column_ui_tests {
                                 ui,
                                 &mut cache,
                                 &palette,
+                                false,
                                 panel,
                                 &mut selection_actions,
                             );
@@ -14626,6 +14797,7 @@ mod browser_column_ui_tests {
                                 ui,
                                 &mut cache,
                                 &palette,
+                                false,
                                 column,
                                 None,
                                 &mut detail_actions,
@@ -18050,7 +18222,7 @@ mod whole_frame_tests {
             .build_ui_state(
                 |ui, outcomes: &mut Vec<PromptOutcome>| {
                     let mut cache = riff_gui::ui::icons::IconCache::new();
-                    outcomes.extend(clear_library_confirm(ui, &mut cache, &palette));
+                    outcomes.extend(clear_library_confirm(ui, &mut cache, &palette, false));
                 },
                 Vec::new(),
             );
@@ -18092,7 +18264,9 @@ mod whole_frame_tests {
             .build_ui_state(
                 |ui, outcomes: &mut Vec<PromptOutcome>| {
                     let mut cache = riff_gui::ui::icons::IconCache::new();
-                    outcomes.extend(clear_thumbnail_cache_confirm(ui, &mut cache, &palette));
+                    outcomes.extend(clear_thumbnail_cache_confirm(
+                        ui, &mut cache, &palette, false,
+                    ));
                 },
                 Vec::new(),
             );
@@ -19372,7 +19546,7 @@ mod context_menu_ui_tests {
                         empty_hint: "",
                     };
                     riff_gui::ui::browser::show_browser_column_scrolled(
-                        ui, &mut cache, &palette, column, None, actions,
+                        ui, &mut cache, &palette, false, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -19449,7 +19623,7 @@ mod context_menu_ui_tests {
                         empty_hint: "",
                     };
                     riff_gui::ui::browser::show_browser_column_scrolled(
-                        ui, &mut cache, &palette, column, None, actions,
+                        ui, &mut cache, &palette, false, column, None, actions,
                     );
                 },
                 Vec::new(),
@@ -20971,6 +21145,7 @@ mod button_wash_tests {
                         ui,
                         &mut cache,
                         &palette,
+                        false,
                         &riff_gui::ui::button::TextButton {
                             id,
                             rect,
@@ -21396,7 +21571,7 @@ mod press_feedback_tests {
     /// about what a press looks like — which is only true if both read the one
     /// style.
     fn active_fill() -> egui::Color32 {
-        theme::style_from(&theme::Palette::dark())
+        theme::style_from(&theme::Palette::dark(), false)
             .visuals
             .widgets
             .active
@@ -21503,6 +21678,7 @@ mod press_feedback_tests {
                         ui,
                         &mut cache,
                         &palette,
+                        false,
                         &riff_gui::ui::button::TextButton {
                             id,
                             rect,

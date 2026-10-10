@@ -123,6 +123,7 @@ pub fn show_now_playing(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     content: &NowPlayingContent,
     readouts: &mut playerbar::SeekReadouts,
     actions: &mut Vec<NowPlayingAction>,
@@ -196,6 +197,7 @@ pub fn show_now_playing(
         ui,
         cache,
         palette,
+        reduce_motion,
         content,
         actions,
         stage,
@@ -372,6 +374,7 @@ fn up_next_section(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     content: &NowPlayingContent,
     actions: &mut Vec<NowPlayingAction>,
     stage: egui::Rect,
@@ -419,7 +422,8 @@ fn up_next_section(
                         let Some(entry) = content.up_next.get(i) else {
                             continue;
                         };
-                        let response = sidebar::up_next_row(ui, cache, palette, entry);
+                        let response =
+                            sidebar::up_next_row(ui, cache, palette, reduce_motion, entry);
                         if response.clicked() {
                             actions.push(NowPlayingAction::PlayNext(entry.id.clone()));
                         }

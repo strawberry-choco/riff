@@ -53,6 +53,7 @@ What riff is, what it does, and how to use it.
 - [ADR 0014: File tags are the source of truth; the Store mirrors them](adr/0014-file-tags-are-the-source-of-truth.md) — file-first write ordering and the Library Scan as the reconciler of external edits, made the general rule of the scan's and Tag Edit's semantics.
 - [ADR 0015: Commit messages are a machine-read interface](adr/0015-commit-messages-are-a-machine-read-interface.md) — the message format is load-bearing because the release-notes generator parses it; one validator, generated release notes, rebase-and-merge only, and the pinned pre-1.0 bump semantics in `cliff.toml`.
 - [ADR 0016: The commit history was retrofitted to conform](adr/0016-history-retrofit.md) — the 2026-10-07 one-time rewrite that made the whole log satisfy the commit profile, what it destroyed (pre-rewrite SHAs, the merge structure), and the constraint that justified it.
+- [ADR 0017: Reduce motion resolves to tempo, not palette](adr/0017-reduce-motion-resolves-to-tempo-not-palette.md) — the Reduce motion setting is a `UiFlags` peer of High contrast but resolves into a temporal policy at the theme boundary; `Palette` stays a pure colour set and the `0.0` sentinel snaps washes to their settled tint with no repaint loop.
 
 The numbering skips 0008: no ADR 0008 was ever written, so a missing `0008` is expected rather than a lost file.
 

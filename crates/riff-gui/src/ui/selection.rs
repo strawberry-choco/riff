@@ -366,6 +366,7 @@ pub fn show_selection_panel(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     panel: SelectionPanel<'_>,
     actions: &mut Vec<SelectionAction>,
 ) {
@@ -376,7 +377,7 @@ pub fn show_selection_panel(
         .id_salt("selection_panel_readout")
         .auto_shrink(false)
         .show(ui, |ui| {
-            readout(ui, cache, palette, panel, actions);
+            readout(ui, cache, palette, reduce_motion, panel, actions);
         });
 }
 
@@ -401,6 +402,7 @@ fn readout(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     mut panel: SelectionPanel<'_>,
     actions: &mut Vec<SelectionAction>,
 ) {
@@ -418,7 +420,7 @@ fn readout(
         if panel.editor.is_some() || !panel.tags.is_empty() {
             ui.add_space(theme::SPACE_LG);
             if let Some(editor) = panel.editor.as_deref_mut() {
-                editor_section(ui, cache, palette, editor, actions);
+                editor_section(ui, cache, palette, reduce_motion, editor, actions);
             } else {
                 tag_section(ui, palette, panel.tags, actions);
             }
@@ -493,6 +495,7 @@ fn editor_section(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     draft: &mut TagDraft,
     actions: &mut Vec<SelectionAction>,
 ) {
@@ -559,7 +562,15 @@ fn editor_section(
     let save_enabled =
         !(draft.saving || batch_in_flight || draft.kind == DraftKind::Album && !draft.any_dirty());
 
-    save_bar(ui, cache, palette, draft, save_enabled, actions);
+    save_bar(
+        ui,
+        cache,
+        palette,
+        reduce_motion,
+        draft,
+        save_enabled,
+        actions,
+    );
 
     // The batch's outcome line lands under the bar once every request has:
     // "Saved N of M tracks", or "... — k failed: <reason>" in the warning
@@ -667,6 +678,7 @@ fn save_bar(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     draft: &TagDraft,
     save_enabled: bool,
     actions: &mut Vec<SelectionAction>,
@@ -683,6 +695,7 @@ fn save_bar(
             ui,
             cache,
             palette,
+            reduce_motion,
             &super::button::TextButton {
                 id: egui::Id::new("tag_editor_save"),
                 rect,
@@ -705,6 +718,7 @@ fn save_bar(
             ui,
             cache,
             palette,
+            reduce_motion,
             &super::button::TextButton {
                 id: egui::Id::new("tag_editor_cancel"),
                 rect,

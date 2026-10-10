@@ -124,6 +124,11 @@ pub struct ScalarSettings {
     /// persisted — an automatic pass never redoes finished work.
     pub replaygain_pass_track: bool,
     pub replaygain_pass_album: bool,
+    /// Accessibility flag: when `true` the UI suppresses non-essential motion
+    /// (view transitions, animated reveals) in favor of instant changes,
+    /// honouring the listener's system reduce-motion preference. `false`
+    /// (the default) leaves motion as it is.
+    pub reduce_motion: bool,
 }
 
 impl Default for ScalarSettings {
@@ -149,6 +154,7 @@ impl Default for ScalarSettings {
             close_quits_app: false,
             replaygain_pass_track: false,
             replaygain_pass_album: false,
+            reduce_motion: false,
         }
     }
 }

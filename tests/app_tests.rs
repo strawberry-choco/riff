@@ -8159,6 +8159,7 @@ mod preferences_tests {
         store.state.scalars.volume = Some(0.4);
         store.state.scalars.advanced_mode = true;
         store.state.scalars.close_quits_app = true;
+        store.state.scalars.reduce_motion = true;
 
         let playback = Arc::new(Mutex::new(PlaybackSession::default()));
         let library = Arc::new(Mutex::new(LibrarySession::default()));
@@ -8167,6 +8168,7 @@ mod preferences_tests {
         assert_eq!(playback.lock_or_recover().current_volume, 0.4);
         assert!(library.lock_or_recover().ui_flags.advanced_mode);
         assert!(library.lock_or_recover().ui_flags.close_quits_app);
+        assert!(library.lock_or_recover().ui_flags.reduce_motion);
     }
 
     #[test]
@@ -8293,6 +8295,38 @@ mod preferences_tests {
         assert_eq!(store.state.scalars.volume, Some(0.9));
 
         // And the frame after that is a no-op again.
+        store.calls.clear();
+        prefs.commit_if_changed(&snapshot, &library.lock_or_recover(), &mut store);
+        assert!(store.calls.is_empty());
+    }
+
+    /// Reduce Motion rides the same diff-commit as every other persisted
+    /// display flag (`close_quits_app`, `high_contrast`): hydrate starts it
+    /// off, the frame after the listener turns it on commits exactly once,
+    /// and the store holds the value — no per-handler persist call.
+    #[test]
+    fn a_reduce_motion_change_commits_the_persisted_flag() {
+        let playback = Arc::new(Mutex::new(PlaybackSession::default()));
+        let library = Arc::new(Mutex::new(LibrarySession::default()));
+        let mut prefs = hydrate_from(&MockSettingsStore::default(), &playback, &library);
+
+        // Hydrated off: motion stays as it is until the listener opts in.
+        assert!(!library.lock_or_recover().ui_flags.reduce_motion);
+
+        // The listener turns Reduce Motion on before the frame-end commit.
+        let snapshot = playback.lock_or_recover().clone();
+        library.lock_or_recover().ui_flags.reduce_motion = true;
+
+        let mut store = MockSettingsStore::default();
+        prefs.commit_if_changed(&snapshot, &library.lock_or_recover(), &mut store);
+
+        assert_eq!(store.calls, vec![SettingsCall::Scalars]);
+        assert!(
+            store.state.scalars.reduce_motion,
+            "the reduce-motion toggle must persist through the one diff-commit"
+        );
+
+        // The same state again: the commit landed, so nothing more to save.
         store.calls.clear();
         prefs.commit_if_changed(&snapshot, &library.lock_or_recover(), &mut store);
         assert!(store.calls.is_empty());

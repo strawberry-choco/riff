@@ -132,6 +132,7 @@ pub fn show_browser_column_scrolled(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     mut column: BrowserColumn<'_>,
     scroll: Option<super::scroll_memory::ScrollControl>,
     actions: &mut Vec<BrowserAction>,
@@ -148,7 +149,15 @@ pub fn show_browser_column_scrolled(
         empty_state(ui, palette, column.empty_title, column.empty_hint);
         return 0.0;
     }
-    show_browser_list(ui, cache, palette, &mut column, scroll, actions)
+    show_browser_list(
+        ui,
+        cache,
+        palette,
+        reduce_motion,
+        &mut column,
+        scroll,
+        actions,
+    )
 }
 
 /// The friendly empty state — the shared composition now owned by
@@ -222,6 +231,7 @@ fn show_browser_list(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     column: &mut BrowserColumn<'_>,
     scroll: Option<super::scroll_memory::ScrollControl>,
     actions: &mut Vec<BrowserAction>,
@@ -310,7 +320,7 @@ fn show_browser_list(
                     egui::vec2(ui.available_width(), h),
                 ));
             } else {
-                let response = browser_row(ui, cache, palette, &item);
+                let response = browser_row(ui, cache, palette, reduce_motion, &item);
                 if response.clicked() {
                     actions.push(BrowserAction::Select(item.key.clone()));
                 }
@@ -427,6 +437,7 @@ fn browser_row(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     item: &BrowserItem,
 ) -> egui::Response {
     let text = layout_row_text(ui, palette, item);
@@ -447,6 +458,7 @@ fn browser_row(
         ui,
         &painter,
         palette,
+        reduce_motion,
         rect,
         response.id,
         item.selected,

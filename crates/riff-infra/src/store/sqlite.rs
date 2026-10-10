@@ -433,6 +433,16 @@ const MIGRATIONS: &[Migration] = &[
         ALTER TABLE app_settings
           ADD COLUMN replaygain_pass_album INTEGER NOT NULL DEFAULT 0 CHECK (replaygain_pass_album IN (0, 1));",
     },
+    Migration {
+        version: 19,
+        name: "019_reduce_motion",
+        // Reduce Motion becomes a persisted accessibility preference: `0`
+        // (the default) leaves non-essential UI motion as it is, `1` asks for
+        // it to be suppressed. Same add-a-boolean precedent as migrations
+        // 009/013/017; default 0 preserves existing stores' behavior.
+        sql: "ALTER TABLE app_settings
+          ADD COLUMN reduce_motion INTEGER NOT NULL DEFAULT 0 CHECK (reduce_motion IN (0, 1));",
+    },
 ];
 
 /// Location of the Application Store database file: `riff.sqlite3` in the
@@ -3513,7 +3523,7 @@ impl SettingsStore for SqliteStore {
                             skip_hidden_files, scan_formats, read_embedded_artwork,
                             smart_lists_collapsed, close_quits_app,
                             replaygain_pass_track, replaygain_pass_album,
-                            replaygain_mode
+                            replaygain_mode, reduce_motion
                      FROM app_settings WHERE id = 1",
                     [],
                     |row| {
@@ -3537,6 +3547,7 @@ impl SettingsStore for SqliteStore {
                             replaygain_pass_track: row.get::<_, i64>(11)? != 0,
                             replaygain_pass_album: row.get::<_, i64>(12)? != 0,
                             replaygain_mode: row.get(13)?,
+                            reduce_motion: row.get::<_, i64>(14)? != 0,
                         })
                     },
                 )
@@ -3588,7 +3599,8 @@ impl SettingsStore for SqliteStore {
                          skip_hidden_files = ?7, scan_formats = ?8,
                          read_embedded_artwork = ?9, smart_lists_collapsed = ?10,
                          close_quits_app = ?11, replaygain_pass_track = ?12,
-                         replaygain_pass_album = ?13, replaygain_mode = ?14
+                         replaygain_pass_album = ?13, replaygain_mode = ?14,
+                         reduce_motion = ?15
                      WHERE id = 1",
                     rusqlite::params![
                         scalars.volume,
@@ -3605,6 +3617,7 @@ impl SettingsStore for SqliteStore {
                         i64::from(scalars.replaygain_pass_track),
                         i64::from(scalars.replaygain_pass_album),
                         scalars.replaygain_mode,
+                        i64::from(scalars.reduce_motion),
                     ],
                 )
                 .map(|_| ())

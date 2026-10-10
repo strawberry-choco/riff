@@ -792,6 +792,7 @@ pub fn show_queue_panel(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     entries: &[super::sidebar::UpNextEntry],
     actions: &mut Vec<PlayerBarAction>,
 ) {
@@ -846,8 +847,13 @@ pub fn show_queue_panel(
                                         let Some(entry) = entries.get(i) else {
                                             continue;
                                         };
-                                        let response =
-                                            super::sidebar::up_next_row(ui, cache, palette, entry);
+                                        let response = super::sidebar::up_next_row(
+                                            ui,
+                                            cache,
+                                            palette,
+                                            reduce_motion,
+                                            entry,
+                                        );
                                         if response.clicked() {
                                             actions
                                                 .push(PlayerBarAction::PlayNext(entry.id.clone()));

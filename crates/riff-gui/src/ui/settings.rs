@@ -326,6 +326,12 @@ pub const PREF_HIGH_CONTRAST: (&str, &str) = (
     "High contrast",
     "Increase contrast for text and focus outlines.",
 );
+/// Preference row copy for the Reduce Motion toggle, the temporal sibling of
+/// High Contrast in the Appearance pane.
+pub const PREF_REDUCE_MOTION: (&str, &str) = (
+    "Reduce motion",
+    "Skip animations and show state changes immediately.",
+);
 /// Preference row copy verbatim from the mockup.
 pub const PREF_REPLAYGAIN: (&str, &str) = (
     "ReplayGain",
@@ -425,6 +431,11 @@ pub struct SettingsContent {
     pub advanced_mode: bool,
     /// High contrast preference (drives the second toggle).
     pub high_contrast: bool,
+    /// Reduce Motion preference (drives the Appearance pane's third toggle).
+    /// The temporal sibling of `high_contrast`: not a colour, so it never
+    /// reaches the resolved palette — it selects the style's tempo at the theme
+    /// boundary and the rest shape the now-playing equalizer holds.
+    pub reduce_motion: bool,
     /// `ReplayGain` preference (drives the third toggle).
     pub replaygain_enabled: bool,
     /// Which `ReplayGain` pair playback levels at — the Mode card's current
@@ -489,6 +500,8 @@ pub enum SettingsAction {
     SetAdvanced(bool),
     /// Set the High contrast preference.
     SetHighContrast(bool),
+    /// Set the Reduce Motion preference (the temporal axis of the theme).
+    SetReduceMotion(bool),
     /// Set the `ReplayGain` preference.
     SetReplayGain(bool),
     /// Choose which `ReplayGain` pair playback levels at.
@@ -566,6 +579,7 @@ fn filled_button(
     ui: &egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     rect: egui::Rect,
     id: egui::Id,
     label: &str,
@@ -579,6 +593,7 @@ fn filled_button(
         ui,
         cache,
         palette,
+        reduce_motion,
         &TextButton {
             id,
             rect,
@@ -651,10 +666,10 @@ fn libraries_card(
             row_separator(ui, palette, 0.0);
         }
         for row in &content.libraries {
-            library_row(ui, cache, palette, row, actions);
+            library_row(ui, cache, palette, content.reduce_motion, row, actions);
             row_separator(ui, palette, 0.0);
         }
-        actions_row(ui, cache, palette, actions);
+        actions_row(ui, cache, palette, content.reduce_motion, actions);
     });
 }
 
@@ -874,6 +889,7 @@ fn library_row(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     row: &LibraryRow,
     actions: &mut Vec<SettingsAction>,
 ) {
@@ -924,6 +940,7 @@ fn library_row(
         ui,
         cache,
         palette,
+        reduce_motion,
         strip_band,
         row,
         &path_str,
@@ -1072,6 +1089,7 @@ fn library_row_controls(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     rect: egui::Rect,
     row: &LibraryRow,
     path_str: &str,
@@ -1156,6 +1174,7 @@ fn library_row_controls(
             &strip_ui,
             cache,
             palette,
+            reduce_motion,
             &TextButton {
                 id: egui::Id::new("settings_scan"),
                 rect: scan_rect,
@@ -1283,6 +1302,7 @@ fn actions_row(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     actions: &mut Vec<SettingsAction>,
 ) {
     // The two buttons share a line while both fit beside each other; below
@@ -1329,6 +1349,7 @@ fn actions_row(
         ui,
         cache,
         palette,
+        reduce_motion,
         add_rect,
         egui::Id::new("settings_add_library"),
         "Add Library",
@@ -1360,6 +1381,7 @@ fn actions_row(
         ui,
         cache,
         palette,
+        reduce_motion,
         scan_all_rect,
         egui::Id::new("settings_scan_all"),
         "Scan All",
@@ -1438,6 +1460,7 @@ fn formats_card(
                 ui,
                 cache,
                 palette,
+                content.reduce_motion,
                 chip_rect,
                 egui::Id::new(("settings_format_chip", *extension)),
                 &label,
@@ -1681,6 +1704,7 @@ fn scan_status_card(
             ui,
             cache,
             palette,
+            content.reduce_motion,
             btn_rect,
             egui::Id::new("settings_rescan_now"),
             RESCAN_LABEL,
@@ -1712,6 +1736,7 @@ fn library_footer(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     actions: &mut Vec<SettingsAction>,
 ) {
     let (rect, _) = ui.allocate_exact_size(
@@ -1739,6 +1764,7 @@ fn library_footer(
         ui,
         cache,
         palette,
+        reduce_motion,
         &painter,
         CLEAR_LIBRARY_LABEL,
         done_rect.left(),
@@ -1755,6 +1781,7 @@ fn library_footer(
         ui,
         cache,
         palette,
+        reduce_motion,
         &painter,
         crate::ui::prompts::CLEAR_THUMBNAIL_CACHE_LABEL,
         library_left,
@@ -1790,6 +1817,7 @@ fn library_footer(
         ui,
         cache,
         palette,
+        reduce_motion,
         done_rect,
         egui::Id::new("settings_done"),
         DONE_LABEL,
@@ -1813,6 +1841,7 @@ fn footer_ghost(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     painter: &egui::Painter,
     label: &str,
     right_of: f32,
@@ -1833,6 +1862,7 @@ fn footer_ghost(
         ui,
         cache,
         palette,
+        reduce_motion,
         &TextButton {
             id,
             rect: egui::Rect::from_min_size(
@@ -1857,6 +1887,7 @@ fn footer_ghost(
 enum Preference {
     Advanced,
     HighContrast,
+    ReduceMotion,
     ReplayGain,
     WatchChanges,
     SkipHidden,
@@ -1877,6 +1908,7 @@ impl Preference {
         match self {
             Self::Advanced => PREF_ADVANCED,
             Self::HighContrast => PREF_HIGH_CONTRAST,
+            Self::ReduceMotion => PREF_REDUCE_MOTION,
             Self::ReplayGain => PREF_REPLAYGAIN,
             Self::WatchChanges => PREF_WATCH_CHANGES,
             Self::SkipHidden => PREF_SKIP_HIDDEN,
@@ -1890,6 +1922,7 @@ impl Preference {
         match self {
             Self::Advanced => SettingsAction::SetAdvanced(value),
             Self::HighContrast => SettingsAction::SetHighContrast(value),
+            Self::ReduceMotion => SettingsAction::SetReduceMotion(value),
             Self::ReplayGain => SettingsAction::SetReplayGain(value),
             Self::WatchChanges => SettingsAction::SetWatchAll(value),
             Self::SkipHidden => SettingsAction::SetSkipHidden(value),
@@ -1903,6 +1936,7 @@ impl Preference {
         match self {
             Self::Advanced => "pref_advanced",
             Self::HighContrast => "pref_high_contrast",
+            Self::ReduceMotion => "pref_reduce_motion",
             Self::ReplayGain => "pref_replaygain",
             Self::WatchChanges => "pref_watch_changes",
             Self::SkipHidden => "pref_skip_hidden",
@@ -1916,6 +1950,7 @@ impl Preference {
         match self {
             Self::Advanced => content.advanced_mode,
             Self::HighContrast => content.high_contrast,
+            Self::ReduceMotion => content.reduce_motion,
             Self::ReplayGain => content.replaygain_enabled,
             Self::WatchChanges => content.watch_any,
             Self::SkipHidden => content.skip_hidden_files,
@@ -2106,6 +2141,7 @@ fn modal_header(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
+    reduce_motion: bool,
     actions: &mut Vec<SettingsAction>,
 ) {
     let (rect, _) = ui.allocate_exact_size(
@@ -2135,6 +2171,7 @@ fn modal_header(
         ui,
         cache,
         palette,
+        reduce_motion,
         &TextButton {
             id: egui::Id::new("settings_back"),
             rect: btn_rect,
@@ -2448,7 +2485,7 @@ fn section_pane(
                             palette,
                             content,
                             actions,
-                            &[Preference::HighContrast],
+                            &[Preference::HighContrast, Preference::ReduceMotion],
                         );
                     }
                     SettingsSection::About => {
@@ -2482,7 +2519,7 @@ pub fn show_settings_modal(
         // Header first: it owns the top strip at full page width, and its Back
         // control is the first focusable widget on the page.
         ui.scope_builder(egui::UiBuilder::new().max_rect(rects.header), |ui| {
-            modal_header(ui, cache, palette, &mut actions);
+            modal_header(ui, cache, palette, content.reduce_motion, &mut actions);
         });
 
         // Body takes the fill between header and footer; that fill is what
@@ -2523,7 +2560,7 @@ pub fn show_settings_modal(
         // Footer last, outside the scroll area, so the page's one destructive
         // action is offered by every section rather than only by Library.
         ui.scope_builder(egui::UiBuilder::new().max_rect(rects.footer), |ui| {
-            library_footer(ui, cache, palette, &mut actions);
+            library_footer(ui, cache, palette, content.reduce_motion, &mut actions);
         });
     });
 
@@ -2631,6 +2668,7 @@ fn replaygain_mode_card(
                 ui,
                 cache,
                 palette,
+                content.reduce_motion,
                 chip_rect,
                 egui::Id::new(("settings_replaygain_mode", *label)),
                 label,
@@ -2793,6 +2831,7 @@ fn replaygain_pass_action_row(
         ui,
         cache,
         palette,
+        content.reduce_motion,
         button_rect,
         egui::Id::new("settings_start_replaygain_pass"),
         if running {
@@ -2851,6 +2890,7 @@ fn replaygain_pass_action_row(
                 ui,
                 cache,
                 palette,
+                content.reduce_motion,
                 cancel_rect,
                 egui::Id::new("settings_cancel_replaygain_pass"),
                 "Cancel",
@@ -2919,6 +2959,9 @@ impl super::app::RiffApp {
             }
             SettingsAction::SetHighContrast(value) => {
                 library.ui_flags.high_contrast = value;
+            }
+            SettingsAction::SetReduceMotion(value) => {
+                library.ui_flags.reduce_motion = value;
             }
             SettingsAction::SetReplayGain(value) => {
                 playback.replaygain_enabled = value;
@@ -2994,7 +3037,12 @@ impl super::app::RiffApp {
         // The composition is the pure widget seam in [`crate::ui::prompts`]
         // (golden-image gap audit P1-7): the same pixels the golden pins.
         let palette = self.theme.active;
-        let outcome = crate::ui::prompts::clear_library_confirm(ui, &mut self.icons, &palette);
+        let outcome = crate::ui::prompts::clear_library_confirm(
+            ui,
+            &mut self.icons,
+            &palette,
+            library.ui_flags.reduce_motion,
+        );
         match outcome {
             Some(crate::ui::prompts::PromptOutcome::Confirm) => {
                 self.clear_library_confirm = false;
@@ -3035,10 +3083,14 @@ impl super::app::RiffApp {
     /// Confirm does: the deletion is handed to the cover worker rather than run on
     /// this thread, because `remove_dir_all` over a few hundred thousand entries
     /// takes seconds and a frame may not wait for it.
-    fn render_clear_thumbnail_cache_confirm(&mut self, ui: &mut egui::Ui) {
+    fn render_clear_thumbnail_cache_confirm(&mut self, ui: &mut egui::Ui, reduce_motion: bool) {
         let palette = self.theme.active;
-        let outcome =
-            crate::ui::prompts::clear_thumbnail_cache_confirm(ui, &mut self.icons, &palette);
+        let outcome = crate::ui::prompts::clear_thumbnail_cache_confirm(
+            ui,
+            &mut self.icons,
+            &palette,
+            reduce_motion,
+        );
         match outcome {
             Some(crate::ui::prompts::PromptOutcome::Confirm) => {
                 self.clear_thumbnail_cache_confirm = false;
@@ -3079,6 +3131,7 @@ impl super::app::RiffApp {
                 .collect(),
             advanced_mode: library.ui_flags.advanced_mode,
             high_contrast: library.ui_flags.high_contrast,
+            reduce_motion: library.ui_flags.reduce_motion,
             replaygain_enabled: playback.replaygain_enabled,
             replaygain_mode: playback.replaygain_mode,
             watch_any: library.library_paths.watches_any(),
@@ -3116,7 +3169,7 @@ impl super::app::RiffApp {
             self.render_clear_library_confirm(ui, library);
         }
         if self.clear_thumbnail_cache_confirm {
-            self.render_clear_thumbnail_cache_confirm(ui);
+            self.render_clear_thumbnail_cache_confirm(ui, library.ui_flags.reduce_motion);
         }
     }
 }

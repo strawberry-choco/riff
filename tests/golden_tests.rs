@@ -2666,6 +2666,7 @@ mod tests {
                                 ui,
                                 &mut cache,
                                 palette,
+                                false,
                                 &TextButton {
                                     id: ui.id().with("golden_play"),
                                     rect,
@@ -2826,7 +2827,7 @@ mod tests {
                     draw(ui, &palette);
                 }
             });
-        theme::install(&harness.ctx, &palette);
+        theme::install(&harness.ctx, &palette, false);
         harness.ctx.set_fonts(inter_only_font_definitions());
         // AFTER the palette install, never before: `theme::install` replaces
         // the whole `Arc<Style>` for the palette's theme from a
@@ -2921,6 +2922,7 @@ mod tests {
                     ui,
                     &mut cache,
                     &palette,
+                    false,
                     TreeRow {
                         indent_level: 0,
                         icon: None,
@@ -2936,7 +2938,7 @@ mod tests {
                     },
                 );
             });
-        theme::install(&harness.ctx, &Palette::dark());
+        theme::install(&harness.ctx, &Palette::dark(), false);
 
         // Idle: no amber wash anywhere in the frame.
         harness.run();
@@ -3014,7 +3016,7 @@ mod tests {
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                 ui.painter().image(tile.id(), canvas, uv, TEXTURE_TINT);
             });
-        theme::install(&harness.ctx, &Palette::dark());
+        theme::install(&harness.ctx, &Palette::dark(), false);
         harness.run();
 
         let frame = harness.render().unwrap();

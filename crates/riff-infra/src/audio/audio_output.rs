@@ -222,19 +222,87 @@ impl CpalAudioOutput {
         Ok(())
     }
 
-    pub fn start(&mut self) -> Result<(), PlaybackError> {
+    fn write_samples(&mut self, samples: &[f32]) -> Result<usize, PlaybackError> {
+        let Some(producer) = self.producer.as_mut() else {
+            return Err(PlaybackError::AudioOutput(
+                "Audio output not initialized".to_string(),
+            ));
+        };
+        // Push as much as fits, waiting for the callback to free space rather
+        // than dropping samples (the old shared VecDeque grew unboundedly; the
+        // ring is bounded). Under normal playback the watermark plus slack
+        // guarantees the whole chunk fits on the first push; the retry loop
+        // matters for the gapless handoff's bulk pre-buffer write, which the
+        // callback drains in real time.
+        let deadline = Instant::now() + WRITE_TIMEOUT;
+        let mut written = 0usize;
+        while written < samples.len() {
+            written += producer.push_slice(&samples[written..]);
+            if written == samples.len() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(PlaybackError::AudioOutput(format!(
+                    "Audio output buffer stalled: wrote {written}/{} samples",
+                    samples.len()
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Ok(written)
+    }
+
+    pub fn effective_sample_rate(&self) -> u32 {
+        self.effective_sample_rate
+    }
+}
+
+/// The layer the port adds over an adapter failure.
+///
+/// This port used to reach `start`'s stream-opening half through an inherent
+/// method and wrap that method's whole result, so every refusal was reported
+/// twice: once as the adapter's `AudioOutput` reason and once as the port's.
+/// The engine forwards that text to the frontend as `PlaybackUpdate::Error`, so
+/// the fold that inlined the body keeps the wrap — applied at each fallible
+/// step, where the forwarder applied it over the whole result — rather than
+/// letting a message quietly lose a prefix.
+fn wrap_as_port_error(e: PlaybackError) -> PlaybackError {
+    PlaybackError::AudioOutput(e.to_string())
+}
+
+/// The playback engine's output port, served over the richer backend port
+/// above: the engine's single `start(format)` maps onto the backend's
+/// `initialize` + `start` pair (which owns the device-default-rate fallback).
+/// A stalled ring write is swallowed here rather than surfaced, because the
+/// engine's response to it is to keep decoding — the port that used to carry
+/// the short-write count upstream dropped it at both call sites anyway.
+impl riff_playback::infra::ports::AudioOutput for CpalAudioOutput {
+    fn start(
+        &mut self,
+        format: riff_playback::infra::ports::AudioFormatInfo,
+    ) -> Result<(), riff_playback::app::errors::PlaybackError> {
+        self.initialize(format.sample_rate, format.channels)
+            .map_err(wrap_as_port_error)?;
+
+        // The stream-opening half this port used to forward to an inherent
+        // `start`, inlined: every fallible step below is wrapped by
+        // `wrap_as_port_error` where that forwarder wrapped the whole result,
+        // so a refused start reports exactly the text it always has.
         let device = self
             .device
             .as_ref()
-            .ok_or_else(|| PlaybackError::AudioOutput("Device not initialized".to_string()))?;
+            .ok_or_else(|| PlaybackError::AudioOutput("Device not initialized".to_string()))
+            .map_err(wrap_as_port_error)?;
         let mut consumer = self
             .pending_consumer
             .take()
-            .ok_or_else(|| PlaybackError::AudioOutput("Output not initialized".to_string()))?;
+            .ok_or_else(|| PlaybackError::AudioOutput("Output not initialized".to_string()))
+            .map_err(wrap_as_port_error)?;
 
         let supported_config = device
             .default_output_config()
-            .map_err(|e| PlaybackError::AudioOutput(format!("Config error: {e}")))?;
+            .map_err(|e| PlaybackError::AudioOutput(format!("Config error: {e}")))
+            .map_err(wrap_as_port_error)?;
 
         let sample_format = supported_config.sample_format();
 
@@ -306,22 +374,33 @@ impl CpalAudioOutput {
                 None,
             ),
             _ => {
-                return Err(PlaybackError::AudioOutput(format!(
+                return Err(wrap_as_port_error(PlaybackError::AudioOutput(format!(
                     "Unsupported sample format: {sample_format:?}"
-                )));
+                ))));
             }
         }
-        .map_err(|e| PlaybackError::AudioOutput(format!("Stream error: {e}")))?;
+        .map_err(|e| PlaybackError::AudioOutput(format!("Stream error: {e}")))
+        .map_err(wrap_as_port_error)?;
 
         stream
             .play()
-            .map_err(|e| PlaybackError::AudioOutput(format!("Play error: {e}")))?;
+            .map_err(|e| PlaybackError::AudioOutput(format!("Play error: {e}")))
+            .map_err(wrap_as_port_error)?;
 
         self.stream = SendStream(Some(stream));
         Ok(())
     }
 
-    pub fn stop(&mut self) {
+    fn write(&mut self, samples: &[f32]) {
+        // The verdict stays inside: a ring that never frees is reported by
+        // `write_samples` as a stall carrying how far it got, which this port
+        // now swallows the only way it can — the caller has no count to act
+        // on, and must never have one. Everything it decides (bounded ring,
+        // `WRITE_TIMEOUT` deadline, no dropped samples) stays right here.
+        let _ = self.write_samples(samples);
+    }
+
+    fn stop(&mut self) {
         if let Some(ref stream) = self.stream.0 {
             let _ = stream.pause();
         }
@@ -331,79 +410,13 @@ impl CpalAudioOutput {
         self.stream = SendStream(None);
     }
 
-    fn write_samples(&mut self, samples: &[f32]) -> Result<usize, PlaybackError> {
-        let Some(producer) = self.producer.as_mut() else {
-            return Err(PlaybackError::AudioOutput(
-                "Audio output not initialized".to_string(),
-            ));
-        };
-        // Push as much as fits, waiting for the callback to free space rather
-        // than dropping samples (the old shared VecDeque grew unboundedly; the
-        // ring is bounded). Under normal playback the watermark plus slack
-        // guarantees the whole chunk fits on the first push; the retry loop
-        // matters for the gapless handoff's bulk pre-buffer write, which the
-        // callback drains in real time.
-        let deadline = Instant::now() + WRITE_TIMEOUT;
-        let mut written = 0usize;
-        while written < samples.len() {
-            written += producer.push_slice(&samples[written..]);
-            if written == samples.len() {
-                break;
-            }
-            if Instant::now() >= deadline {
-                return Err(PlaybackError::AudioOutput(format!(
-                    "Audio output buffer stalled: wrote {written}/{} samples",
-                    samples.len()
-                )));
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        Ok(written)
-    }
-
-    pub fn set_volume(&mut self, volume: f32) {
+    fn set_volume(&mut self, volume: f32) {
         self.volume.store(f32::to_bits(volume), Ordering::Relaxed);
     }
 
-    pub fn set_replaygain(&mut self, factor: f32) {
+    fn set_replaygain(&mut self, factor: f32) {
         self.replaygain
             .store(f32::to_bits(factor), Ordering::Relaxed);
-    }
-
-    pub fn effective_sample_rate(&self) -> u32 {
-        self.effective_sample_rate
-    }
-}
-
-/// The playback engine's output port, served over the richer backend port
-/// above: the engine's single `start(format)` maps onto the backend's
-/// `initialize` + `start` pair (which owns the device-default-rate fallback),
-/// and a stalled ring write surfaces as a short-write instead of an error.
-impl riff_playback::infra::ports::AudioOutput for CpalAudioOutput {
-    fn start(
-        &mut self,
-        format: riff_playback::infra::ports::AudioFormatInfo,
-    ) -> Result<(), riff_playback::app::errors::PlaybackError> {
-        self.initialize(format.sample_rate, format.channels)
-            .map_err(|e| riff_playback::app::errors::PlaybackError::AudioOutput(e.to_string()))?;
-        self.start()
-            .map_err(|e| riff_playback::app::errors::PlaybackError::AudioOutput(e.to_string()))
-    }
-
-    fn write(&mut self, samples: &[f32]) -> usize {
-        self.write_samples(samples).unwrap_or(0)
-    }
-
-    fn stop(&mut self) {
-        self.stop();
-    }
-
-    fn set_volume(&mut self, volume: f32) {
-        self.set_volume(volume);
-    }
-
-    fn set_replaygain(&mut self, factor: f32) {
-        self.set_replaygain(factor);
     }
 }
 
@@ -439,4 +452,231 @@ fn build_stream_config(
     }
 
     config
+}
+
+#[cfg(test)]
+mod write_policy_tests {
+    use super::*;
+    use riff_playback::infra::ports::AudioOutput;
+
+    /// The stall deadline the adapter's write policy runs on, asserted so the
+    /// 500 ms figure the port's contract leans on cannot drift silently.
+    /// What it does not lock is the shape of the loop itself — that is what
+    /// the two `write_samples` tests below are for.
+    #[test]
+    fn the_stall_deadline_is_five_hundred_milliseconds() {
+        assert_eq!(WRITE_TIMEOUT, Duration::from_millis(500));
+        // The ring's slack is sized so a full decode chunk always fits: a
+        // ring without it would turn a steady-state write into a stall.
+        assert_eq!(CHUNK_SLACK_SAMPLES, 4096);
+    }
+
+    /// A fresh output with a producer half installed and nobody draining it:
+    /// the ring is full and stays full, the shape a dead device leaves behind.
+    fn output_with_ring(ring_samples: usize) -> (CpalAudioOutput, HeapCons<f32>) {
+        let mut output = CpalAudioOutput::new();
+        let (producer, consumer) = HeapRb::<f32>::new(ring_samples).split();
+        output.producer = Some(producer);
+        (output, consumer)
+    }
+
+    /// The device-gone path: with no producer the write reports a failure, it
+    /// does not quietly accept nothing and call it a short write. The port
+    /// swallows that failure either way — before this change it surfaced as a
+    /// `0` return, now as no return at all — so both spellings must leave the
+    /// adapter untouched.
+    #[test]
+    fn a_write_without_an_initialized_stream_reports_a_failure_not_a_short_write() {
+        let mut output = CpalAudioOutput::new();
+
+        let samples = vec![0.0_f32; 64];
+        assert!(
+            output.write_samples(&samples).is_err(),
+            "no producer means no stream, which is a failure — not a short write"
+        );
+
+        // Through the port, the failure stays swallowed: the call completes and
+        // the adapter is left exactly as it was.
+        output.write(&samples);
+        output.write(&samples);
+        assert!(output.producer.is_none(), "the adapter stays uninitialized");
+        assert!(output.device.is_none(), "and still holds no device");
+        assert_eq!(
+            output.effective_sample_rate(),
+            44100,
+            "and its rate is its default"
+        );
+    }
+
+    /// A ring that never frees: the write waits out the deadline and then
+    /// reports a stall carrying how far it got. This is the bounded ring plus
+    /// the 500 ms deadline, and it must survive the port losing its count.
+    #[test]
+    fn a_write_into_a_full_ring_reports_a_stall_after_the_deadline() {
+        let (mut output, _sealed_consumer) = output_with_ring(4);
+        let samples = vec![0.0_f32; 8];
+
+        let started = Instant::now();
+        let stall = output
+            .write_samples(&samples)
+            .expect_err("a ring that never frees must report a stall");
+        let waited = started.elapsed();
+
+        assert!(
+            waited >= WRITE_TIMEOUT,
+            "the write waits the full deadline before giving up (waited {waited:?})"
+        );
+        assert!(
+            stall.to_string().contains("stalled"),
+            "the stall names itself: {stall}"
+        );
+        assert!(
+            stall.to_string().contains("4/8"),
+            "and reports how far it got into the chunk: {stall}"
+        );
+    }
+
+    /// A ring with room takes the whole chunk in one push and never reports a
+    /// short write — the steady-state case the slack is there to guarantee.
+    #[test]
+    fn a_write_that_fits_the_ring_takes_the_whole_chunk() {
+        let (mut output, _consumer) = output_with_ring(4096);
+
+        let samples = vec![0.5_f32; 3000];
+        let written = output
+            .write_samples(&samples)
+            .expect("a roomy ring takes the whole chunk");
+
+        assert_eq!(
+            written,
+            samples.len(),
+            "no chunk that fits is ever reported short"
+        );
+    }
+}
+
+#[cfg(test)]
+mod port_surface_tests {
+    use riff_playback::infra::ports::{AudioFormatInfo, AudioOutput};
+
+    use super::*;
+
+    /// The port's volume write lands in the atomic the audio callback reads
+    /// lock-free. Volume is a level, not a stack: a second write replaces it.
+    #[test]
+    fn set_volume_through_the_port_reaches_the_callback() {
+        let mut output = CpalAudioOutput::new();
+
+        AudioOutput::set_volume(&mut output, 0.25);
+        assert_eq!(output.volume.load(Ordering::Relaxed), f32::to_bits(0.25));
+
+        AudioOutput::set_volume(&mut output, 1.0);
+        assert_eq!(
+            output.volume.load(Ordering::Relaxed),
+            f32::to_bits(1.0),
+            "a later volume replaces the earlier one"
+        );
+    }
+
+    /// The port's `ReplayGain` write lands in its own atomic, starts at 1.0
+    /// (no adjustment), and leaves volume alone: the two are separate knobs
+    /// the callback multiplies together.
+    #[test]
+    fn set_replaygain_through_the_port_reaches_the_callback() {
+        let mut output = CpalAudioOutput::new();
+        assert_eq!(
+            output.replaygain.load(Ordering::Relaxed),
+            f32::to_bits(1.0),
+            "the default is no adjustment"
+        );
+
+        AudioOutput::set_replaygain(&mut output, 0.5);
+        assert_eq!(output.replaygain.load(Ordering::Relaxed), f32::to_bits(0.5));
+        assert_eq!(
+            output.volume.load(Ordering::Relaxed),
+            f32::to_bits(1.0),
+            "setting ReplayGain leaves volume untouched"
+        );
+    }
+
+    /// `stop` through the port on an output that never started tears down
+    /// nothing and is safe to repeat.
+    ///
+    /// With a producer half installed the lock gets teeth: `stop` tears down
+    /// the stream and nothing else — the ring is `initialize`'s to replace, per
+    /// session — so an inline that also cleared the ring (or forgot the
+    /// teardown entirely) fails here. The pause-and-drop half needs a live
+    /// stream, which needs a device; that part stays in the adapter's own
+    /// hands.
+    #[test]
+    fn stop_through_the_port_on_an_unstarted_output_is_a_no_op() {
+        let mut output = CpalAudioOutput::new();
+
+        AudioOutput::stop(&mut output);
+        assert!(output.stream.0.is_none(), "there is no stream to tear down");
+
+        AudioOutput::stop(&mut output);
+        assert!(output.stream.0.is_none(), "and stopping again is safe");
+
+        // A producer half stands in for the ring a session installs.
+        let (producer, _consumer) = HeapRb::<f32>::new(16).split();
+        output.producer = Some(producer);
+        AudioOutput::stop(&mut output);
+        assert!(
+            output.producer.is_some(),
+            "stop tears down the stream, never the ring a session owns"
+        );
+    }
+
+    /// `start` through the port reports a failure the way it always has.
+    ///
+    /// The port opens the device (`initialize`) and then the stream, wrapping
+    /// every failure of its own — that text is what the engine forwards to the
+    /// frontend as `PlaybackUpdate::Error`. Two starts are attempted because
+    /// the refusal a machine can produce differs: where there is no default
+    /// output device the first refuses with "No default output device", and
+    /// where there is one, every `initialize` installs a fresh consumer half,
+    /// so a start that reaches the stream succeeds and no failure is producible
+    /// from outside the adapter. So the lock is conditional: **when** a start
+    /// refuses, its reason arrives under the port's own `AudioOutput` layer, on
+    /// top of the adapter's — never bare.
+    #[test]
+    fn start_through_the_port_reports_a_failure_the_way_it_always_has() {
+        let mut output = CpalAudioOutput::new();
+        let format = AudioFormatInfo {
+            sample_rate: 44_100,
+            channels: 2,
+        };
+
+        let first = AudioOutput::start(&mut output, format.clone());
+        let first_accepted = first.is_ok();
+        let second = AudioOutput::start(&mut output, format);
+
+        let failures: Vec<PlaybackError> = [first, second]
+            .into_iter()
+            .filter_map(Result::err)
+            .collect::<Vec<_>>();
+        for failure in &failures {
+            assert!(
+                failure
+                    .to_string()
+                    .starts_with("Audio output error: Audio output error: "),
+                "the port keeps its layer over the adapter's own reason: {failure}"
+            );
+        }
+
+        // Whatever the machine could produce, the adapter is left holding
+        // exactly it: an accepted start's stream, or nothing at all.
+        if first_accepted {
+            assert!(
+                output.stream.0.is_some(),
+                "an accepted start leaves its stream held"
+            );
+        } else {
+            assert!(
+                output.stream.0.is_none(),
+                "a refused start leaves no stream behind"
+            );
+        }
+    }
 }

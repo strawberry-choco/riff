@@ -30,9 +30,9 @@ pub const AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "aac", "opus", "ogg", "fla
 
 /// The Library Scan's behavior knobs, projected from the persisted
 /// [`ScalarSettings`] and handed to the filesystem walk as an explicit
-/// value (design-handoff issue 12). The default mirrors the scanner's
-/// historical behavior: hidden entries skipped, every [`AUDIO_EXTENSIONS`]
-/// format indexed.
+/// value (design-handoff issue 12). The default is the persisted row's own
+/// default, so the historical behavior (hidden entries skipped, every
+/// [`AUDIO_EXTENSIONS`] format indexed) is spelled once, in the row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanOptions {
     /// Leave dot-prefixed files and directories out of the walk.
@@ -43,13 +43,7 @@ pub struct ScanOptions {
 
 impl Default for ScanOptions {
     fn default() -> Self {
-        Self {
-            skip_hidden_files: true,
-            formats: AUDIO_EXTENSIONS
-                .iter()
-                .map(|extension| (*extension).to_string())
-                .collect(),
-        }
+        Self::from(&ScalarSettings::default())
     }
 }
 
@@ -856,6 +850,11 @@ pub trait LibraryQueryStore {
         album_title: &str,
         query: &str,
     ) -> Result<bool, StoreError>;
+
+    /// Whether `artist` is itself a name hit for `query` — its own name
+    /// matches case-insensitively — as opposed to an album or track hit.
+    /// Unknown artists yield `false`.
+    fn artist_is_name_hit(&self, artist: &str, query: &str) -> Result<bool, StoreError>;
 
     /// One bounded window of hit albums within `genre` for `query`, in the
     /// canonical browsing order. An album appears when it holds at least one

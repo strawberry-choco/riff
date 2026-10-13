@@ -62,8 +62,9 @@ pub use riff_persistence::store::{ScalarSettings, WatchState};
 
 /// The Library Scan preferences the Settings Library pane drives
 /// (design-handoff issue 12), hydrated from the Application Store's scalar
-/// row at startup and written back on every change. The default mirrors the
-/// scanner's historical behavior.
+/// row at startup and written back on every change. The default is the
+/// persisted row's own default, so the scanner's historical behavior is
+/// spelled once, in the row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanPrefs {
     /// Skip hidden (dot-prefixed) files and directories during scans.
@@ -77,13 +78,19 @@ pub struct ScanPrefs {
 
 impl Default for ScanPrefs {
     fn default() -> Self {
+        Self::from(&ScalarSettings::default())
+    }
+}
+
+impl From<&ScalarSettings> for ScanPrefs {
+    /// The row's three Library Scan columns are the session's scan prefs:
+    /// the one mapping both the hydrate path and the row's own write go
+    /// through, so the two directions of the round-trip cannot drift.
+    fn from(scalars: &ScalarSettings) -> Self {
         Self {
-            skip_hidden_files: true,
-            scan_formats: riff_persistence::store::AUDIO_EXTENSIONS
-                .iter()
-                .map(|extension| (*extension).to_string())
-                .collect(),
-            read_embedded_artwork: true,
+            skip_hidden_files: scalars.skip_hidden_files,
+            scan_formats: scalars.scan_formats.clone(),
+            read_embedded_artwork: scalars.read_embedded_artwork,
         }
     }
 }
@@ -280,5 +287,107 @@ impl LibrarySession {
     /// starts navigation over at the root listing).
     pub fn reset_browser_path(&mut self) {
         self.browser_path.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ScanPrefs;
+    use riff_persistence::store::{AUDIO_EXTENSIONS, ScalarSettings, ScanOptions};
+
+    /// The three Library Scan columns resolve to the same values wherever
+    /// they are read: the persisted row's own default, the Library Scan's
+    /// default options, and the session's `ScanPrefs` default. That agreement
+    /// is what lets the composition root fall back to `ScanOptions::default()`
+    /// on a settings read failure, so the guard belongs in one place rather
+    /// than in each site's own test.
+    ///
+    /// `read_embedded_artwork` is the artwork policy's flag, not a scan knob,
+    /// so the scan's two-field options legitimately carry only two of the
+    /// three; the row and the session prefs must agree on all three.
+    #[test]
+    fn the_scan_defaults_agree_at_every_site() {
+        let scalars = ScalarSettings::default();
+        let from_row = ScanPrefs::from(&scalars);
+
+        assert_eq!(
+            from_row.read_embedded_artwork, scalars.read_embedded_artwork,
+            "the row's artwork flag rides the mapping into the session prefs"
+        );
+        assert_eq!(
+            from_row.skip_hidden_files, scalars.skip_hidden_files,
+            "the row's hidden-files flag rides the mapping into the session prefs"
+        );
+        assert_eq!(
+            from_row.scan_formats, scalars.scan_formats,
+            "the row's format list rides the mapping into the session prefs"
+        );
+
+        assert_eq!(
+            ScanPrefs::default().skip_hidden_files,
+            ScanOptions::default().skip_hidden_files,
+            "the session prefs and the scan options default to the same hidden-files flag"
+        );
+        assert_eq!(
+            ScanPrefs::default().scan_formats,
+            ScanOptions::default().formats,
+            "the session prefs and the scan options default to the same format list"
+        );
+
+        assert_eq!(
+            from_row,
+            ScanPrefs::default(),
+            "the row's default and the prefs' own default are the same values"
+        );
+    }
+
+    /// The row → prefs mapping carries all three columns through unchanged,
+    /// with distinct values per field so a mapping that swaps two of them
+    /// cannot pass by coincidence.
+    #[test]
+    fn scan_prefs_from_the_row_carries_all_three_columns() {
+        let scalars = ScalarSettings {
+            skip_hidden_files: false,
+            scan_formats: vec!["flac".to_string(), "mp3".to_string()],
+            read_embedded_artwork: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            ScanPrefs::from(&scalars),
+            ScanPrefs {
+                skip_hidden_files: false,
+                scan_formats: vec!["flac".to_string(), "mp3".to_string()],
+                read_embedded_artwork: true,
+            },
+            "the row's three Library Scan columns are the prefs, unchanged"
+        );
+    }
+
+    /// `ScanPrefs::default()` used to spell its own copy of the audio
+    /// extension list; it now derives that list from the one canonical
+    /// constant, so a format added there reaches the scan's defaults too.
+    /// The resolved values are what lock that: a reintroduced private copy
+    /// would have to carry these same seven, in this same order.
+    #[test]
+    fn scan_prefs_default_resolves_the_canonical_extensions() {
+        let expected: Vec<String> = AUDIO_EXTENSIONS
+            .iter()
+            .map(|extension| (*extension).to_string())
+            .collect();
+
+        let prefs = ScanPrefs::default();
+        assert_eq!(
+            prefs.scan_formats, expected,
+            "the scan defaults derive from the one canonical list"
+        );
+        assert!(
+            prefs.skip_hidden_files,
+            "the scan default keeps skipping hidden entries"
+        );
+        assert!(
+            prefs.read_embedded_artwork,
+            "the scan default keeps reading embedded artwork"
+        );
     }
 }

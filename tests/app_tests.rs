@@ -878,7 +878,7 @@ mod tests {
 
     use crate::mocks::{FailingQuery, LibraryQueryCall, MockLibraryQueryStore};
     use riff_backend::app::state::TrackSort;
-    use riff_backend::app::store::{LibraryQueryStore, PlaylistStore, StoreGeneration};
+    use riff_backend::app::store::{PlaylistStore, StoreGeneration};
     use riff_backend::app::views::SessionViews;
 
     /// Deterministic fixture row for a window slot.
@@ -889,299 +889,6 @@ mod tests {
     /// A flat fixture library of `rows` deterministic tracks.
     fn flat_library(rows: usize) -> Vec<Track> {
         (0..rows).map(projection_track).collect()
-    }
-
-    /// [`LibraryQueryStore`] view over one shared [`MockLibraryQueryStore`]
-    /// behind a mutex: the seam takes ownership of the port, so the test
-    /// keeps the other handle for assertions and post-wire configuration
-    /// changes (failure flags, mutated canned data).
-    #[derive(Clone)]
-    struct SharedMock(Arc<Mutex<MockLibraryQueryStore>>);
-
-    impl LibraryQueryStore for SharedMock {
-        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
-            self.0.lock().unwrap().get_track(id)
-        }
-
-        fn metadata_version(&self) -> Result<u32, StoreError> {
-            Ok(riff_persistence::track::METADATA_VERSION)
-        }
-
-        fn tracks_page(
-            &self,
-            order: riff_persistence::store::TrackListOrder,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            self.0.lock().unwrap().tracks_page(order, offset, limit)
-        }
-
-        fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
-            self.0.lock().unwrap().library_counts()
-        }
-
-        fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
-            self.0.lock().unwrap().all_track_ids()
-        }
-
-        fn search_page(
-            &self,
-            query: &str,
-            order: riff_persistence::store::TrackListOrder,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .search_page(query, order, offset, limit)
-        }
-
-        fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
-            self.0.lock().unwrap().all_artists()
-        }
-
-        fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, StoreError> {
-            self.0.lock().unwrap().artist_albums(artist)
-        }
-
-        fn album_tracks(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .album_tracks(album_artist, album_title)
-        }
-
-        fn folder_has_audio(&self, folder: &std::path::Path) -> Result<bool, StoreError> {
-            self.0.lock().unwrap().folder_has_audio(folder)
-        }
-
-        fn folder_has_search_match(
-            &self,
-            folder: &std::path::Path,
-            query: &str,
-        ) -> Result<bool, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .folder_has_search_match(folder, query)
-        }
-
-        fn track_ids_in_folder_tree(
-            &self,
-            folder: &std::path::Path,
-        ) -> Result<Vec<TrackId>, StoreError> {
-            self.0.lock().unwrap().track_ids_in_folder_tree(folder)
-        }
-
-        fn tracks_in_folder(&self, folder: &std::path::Path) -> Result<Vec<Track>, StoreError> {
-            self.0.lock().unwrap().tracks_in_folder(folder)
-        }
-
-        fn folder_track_count(&self, folder: &std::path::Path) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().folder_track_count(folder)
-        }
-
-        fn last_full_scan(
-            &self,
-        ) -> Result<Option<riff_backend::app::store::FullScanSummary>, StoreError> {
-            self.0.lock().unwrap().last_full_scan()
-        }
-
-        fn subdirs_with_audio(&self, folder: &std::path::Path) -> Result<Vec<PathBuf>, StoreError> {
-            self.0.lock().unwrap().subdirs_with_audio(folder)
-        }
-
-        fn smart_playlist(
-            &self,
-            kind: SmartPlaylistKind,
-            limit: usize,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0.lock().unwrap().smart_playlist(kind, limit)
-        }
-
-        fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
-            self.0.lock().unwrap().smart_list_counts()
-        }
-
-        fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
-            self.0.lock().unwrap().genre_counts()
-        }
-
-        fn artists_in_genre(&self, genre: &str) -> Result<Vec<Artist>, StoreError> {
-            self.0.lock().unwrap().artists_in_genre(genre)
-        }
-
-        fn artist_albums_in_genre(
-            &self,
-            artist: &str,
-            genre: &str,
-        ) -> Result<Vec<Album>, StoreError> {
-            self.0.lock().unwrap().artist_albums_in_genre(artist, genre)
-        }
-
-        fn album_tracks_in_genre(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-            genre: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .album_tracks_in_genre(album_artist, album_title, genre)
-        }
-
-        fn hit_albums_page(
-            &self,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            self.0.lock().unwrap().hit_albums_page(query, offset, limit)
-        }
-
-        fn hit_artists_page(
-            &self,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .hit_artists_page(query, offset, limit)
-        }
-
-        fn album_hit_tracks(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-            query: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .album_hit_tracks(album_artist, album_title, query)
-        }
-
-        fn album_is_name_hit(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-            query: &str,
-        ) -> Result<bool, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .album_is_name_hit(album_artist, album_title, query)
-        }
-
-        fn hit_albums_in_genre(
-            &self,
-            genre: &str,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .hit_albums_in_genre(genre, query, offset, limit)
-        }
-
-        fn hit_artists_in_genre(
-            &self,
-            genre: &str,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .hit_artists_in_genre(genre, query, offset, limit)
-        }
-
-        fn album_hit_tracks_in_genre(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-            genre: &str,
-            query: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0.lock().unwrap().album_hit_tracks_in_genre(
-                album_artist,
-                album_title,
-                genre,
-                query,
-            )
-        }
-
-        fn hit_genre_counts(&self, query: &str) -> Result<Vec<GenreCount>, StoreError> {
-            self.0.lock().unwrap().hit_genre_counts(query)
-        }
-
-        fn artists_page(
-            &self,
-            direction: SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .artists_page(direction, offset, limit)
-        }
-
-        fn albums_page(
-            &self,
-            direction: SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            self.0.lock().unwrap().albums_page(direction, offset, limit)
-        }
-
-        fn genres_page(
-            &self,
-            direction: SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<GenreCount>, StoreError> {
-            self.0.lock().unwrap().genres_page(direction, offset, limit)
-        }
-
-        fn artists_in_genre_page(
-            &self,
-            genre: &str,
-            direction: SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .artists_in_genre_page(genre, direction, offset, limit)
-        }
-
-        fn artist_albums_in_genre_page(
-            &self,
-            artist: &str,
-            genre: &str,
-            direction: SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .artist_albums_in_genre_page(artist, genre, direction, offset, limit)
-        }
     }
 
     /// Test-side handle to the shared mock: locks on every access so
@@ -1229,7 +936,7 @@ mod tests {
         // The playlist ports are wired but unused by these Library-view
         // tests; an empty stub stands in for the Playlists section.
         let views = SessionViews::new(
-            Box::new(SharedMock(Arc::clone(&mock))),
+            Box::new(crate::mocks::SharedQueryStore(Arc::clone(&mock))),
             Box::new(crate::mocks::MockPlaylistStore::default()),
             generation.clone(),
             StoreGeneration::new(),
@@ -2052,6 +1759,50 @@ mod tests {
     }
 
     #[test]
+    fn test_artist_name_hit_cached_per_artist_and_query() {
+        let (mut views, mock, generation) = wire(MockLibraryQueryStore {
+            artist_name_hits: vec!["Alpha".to_string()],
+            ..Default::default()
+        });
+        assert!(views.artist_is_name_hit("Alpha", "q"));
+        assert!(views.artist_is_name_hit("Alpha", "q"), "cached");
+        assert!(
+            !views.artist_is_name_hit("Beta", "q"),
+            "an unknown artist yields false"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::ArtistIsNameHit("Alpha".to_string())),
+            1,
+            "the boolean fetches once per (artist, query)"
+        );
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::ArtistIsNameHit("Beta".to_string())),
+            1,
+            "a different artist re-asks the store"
+        );
+
+        // A committed store mutation bumps the generation, which drops the
+        // cached answer: no frame can serve a pre-edit name-hit decision.
+        generation.bump();
+        assert!(views.artist_is_name_hit("Alpha", "q"));
+        assert_eq!(
+            mock.count_of(&LibraryQueryCall::ArtistIsNameHit("Alpha".to_string())),
+            2,
+            "a generation bump drops the cached answer"
+        );
+
+        // Degrade-on-error: the UI never sees a Result.
+        let (mut views, _mock, _gen) = wire(MockLibraryQueryStore {
+            failing: vec![FailingQuery::ArtistIsNameHit],
+            ..Default::default()
+        });
+        assert!(
+            !views.artist_is_name_hit("Alpha", "q"),
+            "a store error degrades to false"
+        );
+    }
+
+    #[test]
     fn test_album_hit_tracks_in_genre_cached_and_degrades_on_error() {
         let (mut views, mock, _gen) = wire(MockLibraryQueryStore {
             album_hit_tracks_in_genre: vec![projection_track(1)],
@@ -2303,7 +2054,7 @@ mod tests {
         let generation = StoreGeneration::new();
         let playlist_generation = StoreGeneration::new();
         let views = SessionViews::new(
-            Box::new(SharedMock(Arc::clone(&mock))),
+            Box::new(crate::mocks::SharedQueryStore(Arc::clone(&mock))),
             Box::new(SharedPlaylists(playlists)),
             generation.clone(),
             playlist_generation.clone(),
@@ -3276,7 +3027,7 @@ mod tests {
         let generation = StoreGeneration::new();
         let playlist_generation = StoreGeneration::new();
         let mut views = SessionViews::new(
-            Box::new(SharedMock(Arc::new(Mutex::new(
+            Box::new(crate::mocks::SharedQueryStore(Arc::new(Mutex::new(
                 MockLibraryQueryStore::default(),
             )))),
             Box::new(FlakyPlaylists {
@@ -3315,7 +3066,7 @@ mod tests {
         let generation = StoreGeneration::new();
         let playlist_generation = StoreGeneration::new();
         let mut views = SessionViews::new(
-            Box::new(SharedMock(Arc::new(Mutex::new(
+            Box::new(crate::mocks::SharedQueryStore(Arc::new(Mutex::new(
                 MockLibraryQueryStore::default(),
             )))),
             Box::new(FlakyPlaylists {
@@ -3712,6 +3463,10 @@ mod scan_service_tests {
         }
 
         fn album_is_name_hit(&self, _a: &str, _t: &str, _q: &str) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        fn artist_is_name_hit(&self, _artist: &str, _query: &str) -> Result<bool, StoreError> {
             Ok(false)
         }
 
@@ -4629,6 +4384,92 @@ mod audio_engine_tests {
 
     // --- Red 1 tests -----------------------------------------------------------
 
+    /// The engine's observable behavior through one scripted track: the shape
+    /// and content of everything it offered the output port, and what it
+    /// announced while doing so.
+    #[derive(Debug, PartialEq)]
+    struct WriteFingerprint {
+        /// Every chunk the engine offered, in order — samples as well as sizes,
+        /// so neither a truncation nor a re-offer can hide.
+        offered: Vec<Vec<f32>>,
+        track_changes: usize,
+        position_changes: usize,
+        track_ended: usize,
+        state_changes: usize,
+        stream_starts: Vec<(u32, u16)>,
+        settled_state: PlaybackState,
+    }
+
+    /// Run one scripted track through the engine and fingerprint what it did.
+    ///
+    /// The script is two 2,400-frame batches, so each splits across the
+    /// engine's 4,096-sample decode chunk: 4,096 samples then the 704-sample
+    /// remainder, twice over.
+    fn write_fingerprint() -> WriteFingerprint {
+        let (state, library) = queued_state_and_library(&["music/t1.wav"]);
+        let script = vec![batch(2_400), batch(2_400)];
+        let source = source_with_duration(Some(Duration::from_secs(1)));
+        let h = spawn_engine(state.clone(), library, script, Vec::new(), source);
+
+        h.cmd_tx
+            .send(PlaybackCommand::Play(TrackId("music/t1.wav".into())))
+            .unwrap();
+        let updates = collect_until(&h, |u| matches!(u, PlaybackUpdate::TrackEnded));
+
+        let fingerprint = WriteFingerprint {
+            offered: h.output.written(),
+            track_changes: count(&updates, |u| {
+                is_track_changed(u, &TrackId("music/t1.wav".into()))
+            }),
+            position_changes: count(&updates, |u| {
+                matches!(u, PlaybackUpdate::PositionChanged(_))
+            }),
+            track_ended: count(&updates, |u| matches!(u, PlaybackUpdate::TrackEnded)),
+            state_changes: count(&updates, |u| matches!(u, PlaybackUpdate::StateChanged(_))),
+            stream_starts: h.output.started(),
+            settled_state: state.lock_or_recover().playback_state,
+        };
+
+        // End the session the way the tests below do, then wait for the engine
+        // to settle it rather than assume the drain already ran.
+        h.cmd_tx.send(PlaybackCommand::Stop).unwrap();
+        wait_until(|| state.lock_or_recover().playback_state == PlaybackState::Stopped);
+        release(h);
+        fingerprint
+    }
+
+    /// What the engine offers the output port, and what it announces, through
+    /// one scripted track — pinned so the port can lose a value without the
+    /// engine's behavior moving.
+    ///
+    /// The value it loses is the short-write count, which both production call
+    /// sites already dropped: this fingerprint is what a fully accepted write,
+    /// a ring that never frees, and a device that is gone all had to cost the
+    /// engine, and it is the same for all three. The ring-full and device-gone
+    /// verdicts themselves are locked where they are decided, in `riff-infra`'s
+    /// `audio_output` policy tests, over a real sealed ring.
+    #[test]
+    fn the_engine_offers_the_same_samples_and_announces_the_same_updates() {
+        // 2,048 stereo frames fill one decode chunk; the 352-frame remainder
+        // rides the next; the script repeats, so four writes in all.
+        let expected_offered: Vec<Vec<f32>> =
+            vec![batch(2_048), batch(352), batch(2_048), batch(352)];
+
+        assert_eq!(
+            write_fingerprint(),
+            WriteFingerprint {
+                offered: expected_offered,
+                track_changes: 1,
+                position_changes: 4,
+                track_ended: 1,
+                state_changes: 1,
+                stream_starts: vec![(RATE, CHANNELS)],
+                settled_state: PlaybackState::Stopped,
+            },
+            "the engine's writes and announcements are unchanged"
+        );
+    }
+
     /// Play(track) → `TrackChanged` + `StateChanged(Playing)` + position
     /// updates as the script decodes, then the gapped EOF path emits
     /// `TrackEnded`.
@@ -4695,6 +4536,224 @@ mod audio_engine_tests {
             state.lock_or_recover().playback_state,
             PlaybackState::Stopped
         );
+    }
+
+    /// The stream-ownership invariant (C24): `output_started` is engine-local
+    /// state with ONE writer pair — `start_stream` for the up transition,
+    /// `stop_stream` for the down one — and it is true **iff** a cpal output
+    /// stream is running.
+    ///
+    /// The failure half is what the fold bought: a `start` the port refuses
+    /// leaves the stream down, so the flag is written false and can never be
+    /// stale-true from an earlier run. Through the port that is observable as
+    /// three things at once — no stream was opened, no samples were offered
+    /// to one, and the recovery `Play` opens a stream without first tearing
+    /// one down (a stale-true flag would make it stop a stream that never
+    /// came up).
+    ///
+    /// The only intended behavior change is that failure path: the happy
+    /// path's started-stream counts are the ones pinned above — one start
+    /// per format change, gapless handoffs adding none.
+    #[test]
+    fn a_failed_stream_start_leaves_no_stream_running() {
+        let (state, library) = queued_state_and_library(&["music/t1.wav"]);
+        // Two small batches, and the same script in both slots: every `Play`
+        // mints a fresh decoder, so the recovery load decodes the same two
+        // batches. One decode chunk per command tick means the engine settles
+        // deterministically instead of racing the assertions below.
+        let script = vec![batch(2_400), batch(2_400)];
+        let source = source_with_duration(Some(Duration::from_secs(1)));
+        let h = spawn_engine(state.clone(), library, script.clone(), script, source);
+
+        // The port refuses to open a stream while this switch is on.
+        h.output.set_fail_starts(true);
+        h.cmd_tx
+            .send(PlaybackCommand::Play(TrackId("music/t1.wav".into())))
+            .unwrap();
+        let refused = collect_until(&h, |u| matches!(u, PlaybackUpdate::Error(_)));
+
+        assert!(
+            refused
+                .iter()
+                .any(|u| matches!(u, PlaybackUpdate::Error(_))),
+            "the refused start is reported to the coordinator, got {refused:?}"
+        );
+        assert!(
+            !refused
+                .iter()
+                .any(|u| is_track_changed(u, &TrackId("music/t1.wav".into()))),
+            "nothing was announced playing: the load never got past the stream"
+        );
+        assert!(
+            h.output.started().is_empty(),
+            "the refused start opened no stream"
+        );
+        assert_eq!(
+            h.output.failed_starts(),
+            vec![(RATE, CHANNELS)],
+            "the start was attempted at the track's own format"
+        );
+        assert!(
+            h.output.written().is_empty(),
+            "no samples were offered to a stream that is not running"
+        );
+        assert_eq!(
+            h.output.stop_count(),
+            0,
+            "and nothing was torn down — there was no stream to stop"
+        );
+
+        // A second attempt while the port still refuses changes none of it:
+        // the engine does not believe a stream is already up.
+        h.cmd_tx
+            .send(PlaybackCommand::Play(TrackId("music/t1.wav".into())))
+            .unwrap();
+        collect_until(&h, |u| matches!(u, PlaybackUpdate::Error(_)));
+        assert_eq!(h.output.failed_starts().len(), 2, "it tried again");
+        assert!(
+            h.output.started().is_empty(),
+            "still no stream, and nothing was written to one"
+        );
+
+        // Recovery: the same command with the port working again runs its one
+        // stream through to the gapped EOF, which is the session's single
+        // teardown. A flag left stale-true would have made this Play stop a
+        // stream that never came up first — a second teardown.
+        h.output.set_fail_starts(false);
+        h.cmd_tx
+            .send(PlaybackCommand::Play(TrackId("music/t1.wav".into())))
+            .unwrap();
+        collect_until(&h, |u| is_track_changed(u, &TrackId("music/t1.wav".into())));
+        collect_until(&h, |u| matches!(u, PlaybackUpdate::TrackEnded));
+        h.cmd_tx.send(PlaybackCommand::Stop).unwrap();
+        collect_until(&h, |u| is_state(u, PlaybackState::Stopped));
+
+        assert_eq!(
+            h.output.started(),
+            vec![(RATE, CHANNELS)],
+            "the recovery Play opened exactly one stream, across the session"
+        );
+        assert_eq!(
+            h.output.stop_count(),
+            1,
+            "the one stream that ran was torn down once — nothing was torn down for the stream that never came up"
+        );
+        assert_eq!(
+            h.output.written().len(),
+            4,
+            "the decode loop wrote to a live stream once it was up"
+        );
+        let decoders = h.decoders.lock().unwrap();
+        assert_eq!(
+            decoders.len(),
+            3,
+            "one decoder minted per Play: two loads that never reached a stream, then the recovery load"
+        );
+        assert_eq!(
+            decoders[2].opened(),
+            vec![PathBuf::from("music/t1.wav")],
+            "the recovery load opened the track once"
+        );
+        drop(decoders);
+
+        release(h);
+    }
+
+    /// The same invariant on the `Resume` path, whose refusal has its own
+    /// reader of the flag: the decode loop. A refused resume leaves the
+    /// stream down, so the "resumed" half (re-opening the decoder, seeking
+    /// back, announcing) is skipped and no further samples are offered; the
+    /// retry restarts the stream exactly once.
+    #[test]
+    fn a_failed_resume_start_offers_no_samples_and_reopens_nothing() {
+        let (state, library) = queued_state_and_library(&["music/t1.wav"]);
+        // A long script, and one decode chunk per command tick: the session
+        // is parked mid-track while the test holds the floor.
+        let script: Vec<Vec<f32>> = (0..200).map(|_| batch(2_400)).collect();
+        let source = source_with_duration(Some(Duration::from_secs(80)));
+        let h = spawn_engine(state.clone(), library, script, Vec::new(), source);
+
+        h.cmd_tx
+            .send(PlaybackCommand::Play(TrackId("music/t1.wav".into())))
+            .unwrap();
+        collect_until(&h, |u| is_state(u, PlaybackState::Playing));
+        wait_until(|| !h.output.started().is_empty());
+        h.cmd_tx.send(PlaybackCommand::Pause).unwrap();
+        collect_until(&h, |u| is_state(u, PlaybackState::Paused));
+        let offered_while_paused = h.output.written().len();
+        assert!(
+            offered_while_paused > 0,
+            "the stream ran before the pause, so a later write is observable"
+        );
+
+        h.output.set_fail_starts(true);
+        h.cmd_tx.send(PlaybackCommand::Resume).unwrap();
+        let refused = collect_until(&h, |u| matches!(u, PlaybackUpdate::Error(_)));
+
+        assert!(
+            !refused
+                .iter()
+                .any(|u| is_track_changed(u, &TrackId("music/t1.wav".into()))),
+            "a refused resume announces no resumption, got {refused:?}"
+        );
+        assert_eq!(
+            h.output.started(),
+            vec![(RATE, CHANNELS)],
+            "the refused resume opened no new stream"
+        );
+        assert_eq!(
+            h.output.failed_starts(),
+            vec![(RATE, CHANNELS)],
+            "the resume's start was attempted at the kept format"
+        );
+
+        // The stream being down, no further samples are offered to it and
+        // the parked decoder is not re-opened.
+        let offered_before = h.output.written().len();
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            h.output.written().len(),
+            offered_before,
+            "nothing is written to a stream that is not running"
+        );
+        let decoders = h.decoders.lock().unwrap();
+        assert_eq!(
+            decoders[0].opened().len(),
+            1,
+            "the decoder was not re-opened for a start that failed"
+        );
+        assert!(
+            decoders[0].seeks().is_empty(),
+            "and the pause position was not re-sought"
+        );
+        drop(decoders);
+
+        // Recovery: the same resume with the port working restarts the
+        // stream once, and only then re-opens and seeks the decoder.
+        h.output.set_fail_starts(false);
+        h.cmd_tx.send(PlaybackCommand::Resume).unwrap();
+        collect_until(&h, |u| is_track_changed(u, &TrackId("music/t1.wav".into())));
+
+        assert_eq!(
+            h.output.started(),
+            vec![(RATE, CHANNELS), (RATE, CHANNELS)],
+            "the retried resume restarted the stream exactly once"
+        );
+        let decoders = h.decoders.lock().unwrap();
+        assert_eq!(
+            decoders[0].opened().len(),
+            2,
+            "resume re-opened the decoder"
+        );
+        assert_eq!(
+            decoders[0].seeks().len(),
+            1,
+            "and seeked back to the pause position exactly once"
+        );
+        drop(decoders);
+
+        h.cmd_tx.send(PlaybackCommand::Stop).unwrap();
+        release(h);
     }
 
     /// Regression (Queue Fill restoration): playing into an EMPTY queue
@@ -5237,6 +5296,10 @@ mod tag_edit_service_tests {
             Ok(false)
         }
 
+        fn artist_is_name_hit(&self, _artist: &str, _query: &str) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
         fn hit_albums_in_genre(
             &self,
             _g: &str,
@@ -5320,53 +5383,6 @@ mod tag_edit_service_tests {
         }
     }
 
-    /// [`riff_backend::app::store::LibraryMutationStore`] view over one recording
-    /// [`MockLibraryMutationStore`] owned by the worker; the test keeps the
-    /// other handle. Only `apply_tag_refresh` is delegated with its real
-    /// behavior — it is the only mutation the save flow issues.
-    struct SharedMutations(Arc<Mutex<MockLibraryMutationStore>>);
-
-    impl riff_backend::app::store::LibraryMutationStore for SharedMutations {
-        fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().apply_scan_batch(tracks)
-        }
-
-        fn stamp_metadata_version(&mut self, _version: u32) -> Result<(), StoreError> {
-            Ok(())
-        }
-
-        fn record_track_played(
-            &mut self,
-            id: &TrackId,
-            played_at: std::time::SystemTime,
-        ) -> Result<bool, StoreError> {
-            self.0.lock().unwrap().record_track_played(id, played_at)
-        }
-
-        fn record_full_scan_completed(
-            &mut self,
-            _summary: riff_backend::app::store::FullScanSummary,
-        ) -> Result<(), StoreError> {
-            Ok(())
-        }
-
-        fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), StoreError> {
-            self.0.lock().unwrap().apply_tag_refresh(track)
-        }
-
-        fn set_track_favorite(&mut self, id: &TrackId, favorite: bool) -> Result<bool, StoreError> {
-            self.0.lock().unwrap().set_track_favorite(id, favorite)
-        }
-
-        fn remove_library_path(&mut self, root: &Path) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().remove_library_path(root)
-        }
-
-        fn clear_library(&mut self) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().clear_library()
-        }
-    }
-
     // --- Harness ---------------------------------------------------------------
 
     /// Ports under test plus the front-end handle to drive them with.
@@ -5374,7 +5390,7 @@ mod tag_edit_service_tests {
         service: TagEditService,
         writer: Arc<Mutex<MockMetadataWriter>>,
         queries: Arc<Mutex<MockLibraryQueryStore>>,
-        mutations: Arc<Mutex<MockLibraryMutationStore>>,
+        mutations: MockLibraryMutationStore,
     }
 
     /// Wire a real service/worker pair over injected mocks and run the
@@ -5390,11 +5406,10 @@ mod tag_edit_service_tests {
             library,
             ..Default::default()
         }));
-        let mutations = Arc::new(Mutex::new(mutations));
         let (service, worker) = TagEditService::new(
             Box::new(SharedWriter(Arc::clone(&writer))),
             Box::new(SharedQueries(Arc::clone(&queries))),
-            Box::new(SharedMutations(Arc::clone(&mutations))),
+            Box::new(mutations.clone()),
             inert_stop_flag(),
         );
         std::thread::spawn(move || worker.run());
@@ -5477,7 +5492,7 @@ mod tag_edit_service_tests {
         assert_eq!(rg_writes.len(), 1, "exactly one ReplayGain file write");
         assert_eq!(rg_writes[0].0, path);
         assert_eq!(rg_writes[0].1.track_gain, Some(-6.54));
-        let committed = h.mutations.lock().unwrap().refreshed();
+        let committed = h.mutations.refreshed();
         assert_eq!(committed.len(), 1);
         assert_eq!(committed[0].metadata.replaygain_track_gain, Some(-6.54));
         assert_eq!(committed[0].metadata.replaygain_album_peak, Some(0.81));
@@ -5511,7 +5526,7 @@ mod tag_edit_service_tests {
 
         // The store commit received a Track whose metadata carries the
         // applied edit; untouched fields stay as resolved from the store.
-        let refreshed = h.mutations.lock().unwrap().refreshed();
+        let refreshed = h.mutations.refreshed();
         assert_eq!(refreshed.len(), 1, "exactly one tag refresh commit");
         assert_eq!(refreshed[0].metadata.title.as_deref(), Some("New Title"));
         assert_eq!(refreshed[0].metadata.artist.as_deref(), Some("Artist"));
@@ -5552,7 +5567,7 @@ mod tag_edit_service_tests {
             "the store was queried despite the write failing"
         );
         assert!(
-            h.mutations.lock().unwrap().refreshed().is_empty(),
+            h.mutations.refreshed().is_empty(),
             "the store was committed despite the write failing"
         );
     }
@@ -5589,7 +5604,7 @@ mod tag_edit_service_tests {
         assert_eq!(h.writer.lock().unwrap().recorded().len(), 1);
         assert_eq!(h.queries.lock().unwrap().get_track_calls(), vec![track_id]);
         assert!(
-            h.mutations.lock().unwrap().refreshed().is_empty(),
+            h.mutations.refreshed().is_empty(),
             "the store was committed for a vanished track"
         );
     }
@@ -5655,7 +5670,7 @@ mod tag_edit_service_tests {
 
         assert_eq!(poll_outcome(&h.service), Some(TagEditOutcome::Saved));
 
-        let refreshed = h.mutations.lock().unwrap().refreshed();
+        let refreshed = h.mutations.refreshed();
         assert_eq!(refreshed.len(), 1, "exactly one tag refresh commit");
         let committed = &refreshed[0];
         assert_eq!(committed.metadata.title.as_deref(), Some("New Title"));
@@ -5734,6 +5749,7 @@ mod tag_edit_service_tests {
 // dedup/negative-cache discipline actually suppressed disk I/O.
 mod cover_service_tests {
     use super::*;
+    use crate::mocks::MockCoverLoader;
     use riff_backend::app::cover_service::{COVER_CACHE_CAP, CoverService, Covers};
     use riff_backend::domain::CoverSource;
     use riff_infra::media::FileThumbnailCache;
@@ -6194,41 +6210,6 @@ mod cover_service_tests {
         );
     }
 
-    /// [`CoverLoader`] fake that records every [`CoverSource`] it was asked
-    /// to load, so the policy tests can pin which source reached the loader.
-    struct RecordingLoader {
-        seen: std::sync::Arc<Mutex<Vec<CoverSource>>>,
-        result: Result<Option<DecodedCover>, String>,
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl CoverLoader for RecordingLoader {
-        fn load_cover(
-            &self,
-            source: &CoverSource,
-            _size: RequestedSize,
-        ) -> Result<Option<DecodedCover>, LibraryError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            self.seen.lock().unwrap().push(source.clone());
-            self.result.clone().map_err(LibraryError::CoverLoad)
-        }
-
-        fn decode_thumbnail(
-            &self,
-            bytes: &[u8],
-            size: RequestedSize,
-        ) -> Result<DecodedCover, LibraryError> {
-            crate::fake_decode_thumbnail(bytes, size)
-        }
-
-        fn encode_thumbnail(
-            &self,
-            cover: &DecodedCover,
-        ) -> Result<riff_persistence::thumbnail::EncodedThumbnail, LibraryError> {
-            crate::fake_encode_thumbnail(cover)
-        }
-    }
-
     #[test]
     fn test_cover_worker_skips_embedded_art_while_read_embedded_is_off() {
         // The "Read embedded artwork" setting is off: the worker must not
@@ -6243,7 +6224,7 @@ mod cover_service_tests {
                 source: CoverSource::Embedded(vec![1, 2, 3].into()),
                 calls: Arc::clone(&reader_calls),
             }),
-            Box::new(RecordingLoader {
+            Box::new(MockCoverLoader {
                 seen: std::sync::Arc::clone(&seen),
                 result: Ok(Some(test_image())),
                 calls: Arc::clone(&loader_calls),
@@ -6608,13 +6589,12 @@ mod cover_service_tests {
 // mostly do not exist on disk, so they never reach the walk.
 mod cover_resolver_tests {
     use super::*;
+    use crate::mocks::MockCoverLoader;
     use riff_backend::app::CoverResolver;
     use riff_backend::domain::CoverSource;
     use riff_infra::media::FileThumbnailCache;
     use riff_library::app::errors::LibraryError;
-    use riff_library::app::traits::{
-        AudioFormatInfo, CoverLoader, DecodedCover, MetadataReader, RequestedSize,
-    };
+    use riff_library::app::traits::{AudioFormatInfo, MetadataReader, RequestedSize};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6649,39 +6629,6 @@ mod cover_resolver_tests {
         }
     }
 
-    /// [`CoverLoader`] fake recording every [`CoverSource`] it was handed. The
-    /// source is the resolver's entire output — decoding is the adapter's
-    /// business — so recording it is what pins *which* file the probe chose.
-    struct RecordingLoader {
-        seen: Arc<Mutex<Vec<CoverSource>>>,
-    }
-
-    impl CoverLoader for RecordingLoader {
-        fn load_cover(
-            &self,
-            source: &CoverSource,
-            _size: RequestedSize,
-        ) -> Result<Option<DecodedCover>, LibraryError> {
-            self.seen.lock().unwrap().push(source.clone());
-            Ok(None)
-        }
-
-        fn decode_thumbnail(
-            &self,
-            bytes: &[u8],
-            size: RequestedSize,
-        ) -> Result<DecodedCover, LibraryError> {
-            crate::fake_decode_thumbnail(bytes, size)
-        }
-
-        fn encode_thumbnail(
-            &self,
-            cover: &DecodedCover,
-        ) -> Result<riff_persistence::thumbnail::EncodedThumbnail, LibraryError> {
-            crate::fake_encode_thumbnail(cover)
-        }
-    }
-
     /// Resolve a track parked at `track_in` with embedded art allowed but
     /// absent, returning the one source the loader was asked for.
     fn fallback_source(track_in: &Path) -> CoverSource {
@@ -6691,8 +6638,10 @@ mod cover_resolver_tests {
             Box::new(NoEmbeddedArt {
                 reads: Arc::new(AtomicUsize::new(0)),
             }),
-            Box::new(RecordingLoader {
+            Box::new(MockCoverLoader {
+                result: Ok(None),
                 seen: Arc::clone(&seen),
+                calls: Arc::new(AtomicUsize::new(0)),
             }),
             Arc::new(FileThumbnailCache::with_root(scratch.path().join("covers"))),
         );
@@ -6838,8 +6787,10 @@ mod cover_resolver_tests {
             Box::new(NoEmbeddedArt {
                 reads: Arc::clone(&reads),
             }),
-            Box::new(RecordingLoader {
+            Box::new(MockCoverLoader {
+                result: Ok(None),
                 seen: Arc::clone(&seen),
+                calls: Arc::new(AtomicUsize::new(0)),
             }),
             Arc::new(FileThumbnailCache::with_root(scratch.path().join("covers"))),
         );
@@ -7094,6 +7045,69 @@ mod playlist_projection_tests {
     }
 
     #[test]
+    fn test_valid_ids_are_the_playable_entries_ids_in_playlist_order() {
+        let mut scratch = Scratch::new();
+        let first = scratch.seed_track("first.mp3");
+        let vanished = scratch.seed_track("vanished.mp3");
+        let second = scratch.seed_track("second.mp3");
+        let never_scanned = TrackId("f:\\nowhere\\gone.mp3".to_string());
+
+        // Two ways an entry cannot play: the Library lost it, or its file
+        // vanished after it was indexed. Both stay listed (ADR 0001); only
+        // the survivors reach `valid_ids`, and they keep the playlist's order
+        // rather than compacting to the front of the list.
+        std::fs::remove_file(scratch.dir.path().join("vanished.mp3")).expect("the file vanishes");
+        let pid = scratch
+            .mutations
+            .create_playlist(
+                "Focus Mix",
+                &[
+                    first.id.clone(),
+                    vanished.id.clone(),
+                    never_scanned.clone(),
+                    second.id.clone(),
+                ],
+            )
+            .expect("create works");
+
+        let view = scratch
+            .views
+            .playlist_view(&pid)
+            .expect("known id yields a view");
+
+        assert_eq!(
+            view.valid_ids.as_ref(),
+            &[first.id.clone(), second.id.clone()],
+            "valid_ids keeps only the playable entries, in playlist order"
+        );
+        let row_ids: Vec<TrackId> = view.rows.iter().map(|(id, _, _)| id.clone()).collect();
+        assert_eq!(
+            row_ids,
+            vec![
+                first.id.clone(),
+                vanished.id.clone(),
+                never_scanned.clone(),
+                second.id.clone(),
+            ],
+            "entries stay listed whether or not they can play"
+        );
+        let verdicts: Vec<bool> = view.rows.iter().map(|(_, _, valid)| *valid).collect();
+        assert_eq!(
+            verdicts,
+            vec![true, false, false, true],
+            "each row carries its own playability verdict"
+        );
+        assert!(
+            view.rows[2].1.is_none(),
+            "an entry the Library lost resolves to None"
+        );
+        assert!(
+            view.rows[1].1.is_some(),
+            "a vanished file is still Library-known"
+        );
+    }
+
+    #[test]
     fn an_empty_playlist_list_is_answered_once_and_not_requeried() {
         // "Loaded, and there are none" is an answer, not a miss. If the cache
         // reported the empty list as unloaded, the sidebar would requery the
@@ -7216,64 +7230,11 @@ mod playlist_projection_tests {
 // state and owns playback continuation. These tests drive the synchronous
 // core (`PlaybackCoordinator::apply_update`) directly — no threads, no real
 // store — over the shared recording mocks.
-//
-// The shared-handle adapter below exists because the coordinator takes
-// ownership of its mutation port: it delegates every call to the real mock
-// behind a mutex so the mock's recordings remain inspectable after wiring.
 mod playback_coordinator_tests {
     use super::*;
     use crate::mocks::MockLibraryMutationStore;
     use crossbeam_channel::{Receiver, unbounded};
-    use riff_backend::app::errors::StoreError;
     use riff_backend::app::playback_coordinator::PlaybackCoordinator;
-    use riff_backend::app::store::LibraryMutationStore;
-    use std::path::Path;
-
-    /// [`LibraryMutationStore`] view over one recording
-    /// [`MockLibraryMutationStore`] owned by the coordinator; the test keeps
-    /// the other handle and inspects the recordings afterwards.
-    struct SharedMutations(Arc<Mutex<MockLibraryMutationStore>>);
-
-    impl LibraryMutationStore for SharedMutations {
-        fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().apply_scan_batch(tracks)
-        }
-
-        fn stamp_metadata_version(&mut self, _version: u32) -> Result<(), StoreError> {
-            Ok(())
-        }
-
-        fn record_track_played(
-            &mut self,
-            id: &TrackId,
-            played_at: std::time::SystemTime,
-        ) -> Result<bool, StoreError> {
-            self.0.lock().unwrap().record_track_played(id, played_at)
-        }
-
-        fn record_full_scan_completed(
-            &mut self,
-            _summary: riff_backend::app::store::FullScanSummary,
-        ) -> Result<(), StoreError> {
-            Ok(())
-        }
-
-        fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), StoreError> {
-            self.0.lock().unwrap().apply_tag_refresh(track)
-        }
-
-        fn set_track_favorite(&mut self, id: &TrackId, favorite: bool) -> Result<bool, StoreError> {
-            self.0.lock().unwrap().set_track_favorite(id, favorite)
-        }
-
-        fn remove_library_path(&mut self, root: &Path) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().remove_library_path(root)
-        }
-
-        fn clear_library(&mut self) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().clear_library()
-        }
-    }
 
     /// One wired coordinator plus every handle a test inspects: the shared
     /// playback and library sessions (held in two separate `Arc<Mutex<>>`s so
@@ -7285,7 +7246,7 @@ mod playback_coordinator_tests {
         library: Arc<Mutex<LibrarySession>>,
         cmd_rx: Receiver<PlaybackCommand>,
         notice_rx: Receiver<String>,
-        mutations: Arc<Mutex<MockLibraryMutationStore>>,
+        mutations: MockLibraryMutationStore,
         coordinator: PlaybackCoordinator,
     }
 
@@ -7305,12 +7266,12 @@ mod playback_coordinator_tests {
         let library = Arc::new(Mutex::new(LibrarySession::default()));
         let (cmd_tx, cmd_rx) = unbounded();
         let (notice_tx, notice_rx) = unbounded();
-        let mutations = Arc::new(Mutex::new(MockLibraryMutationStore::new()));
+        let mutations = MockLibraryMutationStore::new();
         let coordinator = PlaybackCoordinator::new(
             state.clone(),
             unbounded().1,
             cmd_tx,
-            Box::new(SharedMutations(mutations.clone())),
+            Box::new(mutations.clone()),
             notice_tx,
         );
         Harness {
@@ -7331,7 +7292,7 @@ mod playback_coordinator_tests {
 
         // The recorded play is the track that WAS current at commit time —
         // proof the store commit happened BEFORE the advance moved the index.
-        let played = h.mutations.lock().unwrap().played();
+        let played = h.mutations.played();
         assert_eq!(played.len(), 1, "exactly one play commits");
         assert_eq!(
             played[0].0,
@@ -7360,7 +7321,7 @@ mod playback_coordinator_tests {
         h.coordinator.apply_update(PlaybackUpdate::TrackEnded);
 
         // History still commits for the finished track...
-        let played = h.mutations.lock().unwrap().played();
+        let played = h.mutations.played();
         assert_eq!(played.len(), 1, "repeat-one still records the play");
         assert_eq!(played[0].0, TrackId("a.mp3".to_string()));
 
@@ -8346,8 +8307,7 @@ mod browse_row_seam_tests {
     use super::*;
     use crate::domain::GenreCount;
     use crate::mocks::{FailingQuery, MockLibraryQueryStore};
-    use app::errors::StoreError;
-    use app::store::{LibraryQueryStore, SortDirection, StoreGeneration};
+    use app::store::{SortDirection, StoreGeneration};
     use app::views::SessionViews;
 
     /// An artist fixture with a deterministic name and album key count.
@@ -8377,215 +8337,8 @@ mod browse_row_seam_tests {
     ) {
         let mock = Arc::new(Mutex::new(mock));
         let generation = StoreGeneration::new();
-        #[derive(Clone)]
-        struct Shared(Arc<Mutex<MockLibraryQueryStore>>);
-        impl LibraryQueryStore for Shared {
-            fn get_track(
-                &self,
-                id: &riff_backend::domain::TrackId,
-            ) -> Result<Option<Track>, StoreError> {
-                self.0.lock().unwrap().get_track(id)
-            }
-
-            fn metadata_version(&self) -> Result<u32, StoreError> {
-                Ok(riff_persistence::track::METADATA_VERSION)
-            }
-            fn tracks_page(
-                &self,
-                order: riff_persistence::store::TrackListOrder,
-                offset: usize,
-                limit: usize,
-            ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-                self.0.lock().unwrap().tracks_page(order, offset, limit)
-            }
-            fn search_page(
-                &self,
-                query: &str,
-                order: riff_persistence::store::TrackListOrder,
-                offset: usize,
-                limit: usize,
-            ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .search_page(query, order, offset, limit)
-            }
-            fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
-                self.0.lock().unwrap().all_artists()
-            }
-            fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, StoreError> {
-                self.0.lock().unwrap().artist_albums(artist)
-            }
-            fn album_tracks(&self, a: &str, t: &str) -> Result<Vec<Track>, StoreError> {
-                self.0.lock().unwrap().album_tracks(a, t)
-            }
-            fn folder_has_audio(&self, f: &std::path::Path) -> Result<bool, StoreError> {
-                self.0.lock().unwrap().folder_has_audio(f)
-            }
-            fn folder_has_search_match(
-                &self,
-                f: &std::path::Path,
-                q: &str,
-            ) -> Result<bool, StoreError> {
-                self.0.lock().unwrap().folder_has_search_match(f, q)
-            }
-            fn track_ids_in_folder_tree(
-                &self,
-                f: &std::path::Path,
-            ) -> Result<Vec<TrackId>, StoreError> {
-                self.0.lock().unwrap().track_ids_in_folder_tree(f)
-            }
-            fn tracks_in_folder(&self, f: &std::path::Path) -> Result<Vec<Track>, StoreError> {
-                self.0.lock().unwrap().tracks_in_folder(f)
-            }
-            fn subdirs_with_audio(&self, f: &std::path::Path) -> Result<Vec<PathBuf>, StoreError> {
-                self.0.lock().unwrap().subdirs_with_audio(f)
-            }
-            fn smart_playlist(
-                &self,
-                kind: SmartPlaylistKind,
-                limit: usize,
-            ) -> Result<Vec<Track>, StoreError> {
-                self.0.lock().unwrap().smart_playlist(kind, limit)
-            }
-            fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
-                self.0.lock().unwrap().genre_counts()
-            }
-            fn artists_in_genre(&self, g: &str) -> Result<Vec<Artist>, StoreError> {
-                self.0.lock().unwrap().artists_in_genre(g)
-            }
-            fn artist_albums_in_genre(&self, a: &str, g: &str) -> Result<Vec<Album>, StoreError> {
-                self.0.lock().unwrap().artist_albums_in_genre(a, g)
-            }
-            fn album_tracks_in_genre(
-                &self,
-                a: &str,
-                t: &str,
-                g: &str,
-            ) -> Result<Vec<Track>, StoreError> {
-                self.0.lock().unwrap().album_tracks_in_genre(a, t, g)
-            }
-            fn hit_albums_page(
-                &self,
-                q: &str,
-                o: usize,
-                l: usize,
-            ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-                self.0.lock().unwrap().hit_albums_page(q, o, l)
-            }
-            fn hit_artists_page(
-                &self,
-                q: &str,
-                o: usize,
-                l: usize,
-            ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-                self.0.lock().unwrap().hit_artists_page(q, o, l)
-            }
-            fn album_hit_tracks(
-                &self,
-                a: &str,
-                t: &str,
-                q: &str,
-            ) -> Result<Vec<Track>, StoreError> {
-                self.0.lock().unwrap().album_hit_tracks(a, t, q)
-            }
-            fn album_is_name_hit(&self, a: &str, t: &str, q: &str) -> Result<bool, StoreError> {
-                self.0.lock().unwrap().album_is_name_hit(a, t, q)
-            }
-            fn hit_albums_in_genre(
-                &self,
-                g: &str,
-                q: &str,
-                o: usize,
-                l: usize,
-            ) -> Result<Vec<Album>, StoreError> {
-                self.0.lock().unwrap().hit_albums_in_genre(g, q, o, l)
-            }
-            fn hit_artists_in_genre(
-                &self,
-                g: &str,
-                q: &str,
-                o: usize,
-                l: usize,
-            ) -> Result<Vec<Artist>, StoreError> {
-                self.0.lock().unwrap().hit_artists_in_genre(g, q, o, l)
-            }
-            fn album_hit_tracks_in_genre(
-                &self,
-                a: &str,
-                t: &str,
-                g: &str,
-                q: &str,
-            ) -> Result<Vec<Track>, StoreError> {
-                self.0.lock().unwrap().album_hit_tracks_in_genre(a, t, g, q)
-            }
-            fn hit_genre_counts(&self, q: &str) -> Result<Vec<GenreCount>, StoreError> {
-                self.0.lock().unwrap().hit_genre_counts(q)
-            }
-            fn artists_page(
-                &self,
-                d: SortDirection,
-                o: usize,
-                l: usize,
-            ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-                self.0.lock().unwrap().artists_page(d, o, l)
-            }
-            fn albums_page(
-                &self,
-                d: SortDirection,
-                o: usize,
-                l: usize,
-            ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-                self.0.lock().unwrap().albums_page(d, o, l)
-            }
-            fn genres_page(
-                &self,
-                d: SortDirection,
-                o: usize,
-                l: usize,
-            ) -> Result<riff_persistence::store::Page<GenreCount>, StoreError> {
-                self.0.lock().unwrap().genres_page(d, o, l)
-            }
-            fn artists_in_genre_page(
-                &self,
-                g: &str,
-                d: SortDirection,
-                o: usize,
-                l: usize,
-            ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-                self.0.lock().unwrap().artists_in_genre_page(g, d, o, l)
-            }
-            fn artist_albums_in_genre_page(
-                &self,
-                a: &str,
-                g: &str,
-                d: SortDirection,
-                o: usize,
-                l: usize,
-            ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .artist_albums_in_genre_page(a, g, d, o, l)
-            }
-            fn library_counts(&self) -> Result<app::store::LibraryCounts, StoreError> {
-                self.0.lock().unwrap().library_counts()
-            }
-            fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
-                self.0.lock().unwrap().smart_list_counts()
-            }
-            fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
-                self.0.lock().unwrap().all_track_ids()
-            }
-            fn folder_track_count(&self, f: &std::path::Path) -> Result<usize, StoreError> {
-                self.0.lock().unwrap().folder_track_count(f)
-            }
-            fn last_full_scan(&self) -> Result<Option<app::store::FullScanSummary>, StoreError> {
-                self.0.lock().unwrap().last_full_scan()
-            }
-        }
         let views = SessionViews::new(
-            Box::new(Shared(Arc::clone(&mock))),
+            Box::new(crate::mocks::SharedQueryStore(Arc::clone(&mock))),
             Box::new(crate::mocks::MockPlaylistStore::default()),
             generation.clone(),
             StoreGeneration::new(),
@@ -10084,6 +9837,255 @@ mod cover_thumbnail_cache_tests {
         assert_eq!(
             poll_clear(&served.service),
             Some(ClearCacheOutcome::Cleared)
+        );
+    }
+}
+
+// --- ReplayGain mirror: the two write paths agree on which fields move -------
+//
+// The `ReplayGain` facts reach the Store through two paths — the Pass's
+// per-Track commit (`write_commit`, which mirrors the written tags into the
+// Track it queues for the batch) and the Tag Edit's save (`process`, which
+// mirrors them into the Track it resolves from the Store). Both mirror the
+// same four `TrackMetadata` fields under the same rule: a `Some` field moves,
+// a `None` field never clears. Each crate spells that rule in its own private
+// function today, so this pins that the two agree before they fold into one
+// owner.
+mod replaygain_mirror_tests {
+    use super::*;
+    use crate::mocks::{MockLibraryMutationStore, MockLibraryQueryStore, MockMetadataWriter};
+    use riff_backend::app::errors::StoreError;
+    use riff_backend::app::replaygain_pass::{PassCommand, ReplayGainPass};
+    use riff_backend::app::store::LibraryMutationStore;
+    use riff_backend::app::tag_edit_service::{
+        TagEditOutcome, TagEditRequest, TagEditService, TagEdits,
+    };
+    use riff_backend::app::traits::TagEdit;
+    use riff_library::app::errors::LibraryError;
+    use riff_library::app::traits::{LoudnessAnalyzer, ReplayGainTags, TrackLoudness};
+    use std::path::Path;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant, SystemTime};
+
+    /// The measurement the analyzer always returns: −6.54 dB / 0.98 linear.
+    const MEASURED_GAIN_DB: f32 = -6.54;
+    const MEASURED_PEAK: f32 = 0.98;
+
+    /// What the manual edit held before either path ran.
+    const MANUAL_TRACK_GAIN: f32 = -99.0;
+    const MANUAL_TRACK_PEAK: f32 = 0.11;
+    const MANUAL_ALBUM_GAIN: f32 = -77.0;
+    const MANUAL_ALBUM_PEAK: f32 = 0.22;
+
+    /// The one write both paths carry: the Track pair, with the Album pair
+    /// absent — so two fields are `Some` and two are `None`.
+    fn mirror_tags() -> ReplayGainTags {
+        ReplayGainTags::track_pair(MEASURED_GAIN_DB, MEASURED_PEAK)
+    }
+
+    /// A Track whose four `ReplayGain` fields all hold a manual edit, so a
+    /// `None` field that wrongly cleared would be visible.
+    fn manually_edited_track() -> Track {
+        let mut track = crate::test_utils::create_test_track_with_metadata(
+            "/music/t1.mp3",
+            "/music/t1.mp3",
+            "Artist",
+            "Old Title",
+            "Album",
+        );
+        track.metadata.replaygain_track_gain = Some(MANUAL_TRACK_GAIN);
+        track.metadata.replaygain_track_peak = Some(MANUAL_TRACK_PEAK);
+        track.metadata.replaygain_album_gain = Some(MANUAL_ALBUM_GAIN);
+        track.metadata.replaygain_album_peak = Some(MANUAL_ALBUM_PEAK);
+        track
+    }
+
+    /// The four mirrored fields as one comparable tuple.
+    fn mirrored(metadata: &TrackMetadata) -> (Option<f32>, Option<f32>, Option<f32>, Option<f32>) {
+        (
+            metadata.replaygain_track_gain,
+            metadata.replaygain_track_peak,
+            metadata.replaygain_album_gain,
+            metadata.replaygain_album_peak,
+        )
+    }
+
+    /// The analyzer: one canned measurement for any file.
+    struct CannedAnalyzer;
+
+    impl LoudnessAnalyzer for CannedAnalyzer {
+        fn measure_track(&self, _path: &Path) -> Result<TrackLoudness, LibraryError> {
+            Ok(TrackLoudness {
+                track_gain_db: MEASURED_GAIN_DB,
+                track_peak: MEASURED_PEAK,
+            })
+        }
+    }
+
+    /// A mutation store that records the Pass's batch commits beside
+    /// everything [`MockLibraryMutationStore`] already records. Cloning hands
+    /// out another view of the same records, so both write paths can hold one
+    /// while the test reads it back.
+    #[derive(Clone)]
+    struct RecordingMutations {
+        store: MockLibraryMutationStore,
+        batches: Arc<Mutex<Vec<Track>>>,
+    }
+
+    impl RecordingMutations {
+        fn new() -> Self {
+            Self {
+                store: MockLibraryMutationStore::new(),
+                batches: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        /// Every Track handed to `apply_scan_batch`, flat, in order.
+        fn batched(&self) -> Vec<Track> {
+            self.batches.lock().unwrap().clone()
+        }
+
+        /// Every Track handed to `apply_tag_refresh`, in call order.
+        fn refreshed(&self) -> Vec<Track> {
+            self.store.refreshed()
+        }
+    }
+
+    impl LibraryMutationStore for RecordingMutations {
+        fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, StoreError> {
+            self.batches.lock().unwrap().extend(tracks.iter().cloned());
+            self.store.apply_scan_batch(tracks)
+        }
+
+        fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), StoreError> {
+            self.store.apply_tag_refresh(track)
+        }
+
+        fn record_track_played(
+            &mut self,
+            id: &TrackId,
+            played_at: SystemTime,
+        ) -> Result<bool, StoreError> {
+            self.store.record_track_played(id, played_at)
+        }
+
+        fn set_track_favorite(&mut self, id: &TrackId, favorite: bool) -> Result<bool, StoreError> {
+            self.store.set_track_favorite(id, favorite)
+        }
+
+        fn remove_library_path(&mut self, root: &Path) -> Result<usize, StoreError> {
+            self.store.remove_library_path(root)
+        }
+
+        fn clear_library(&mut self) -> Result<usize, StoreError> {
+            self.store.clear_library()
+        }
+
+        fn stamp_metadata_version(&mut self, version: u32) -> Result<(), StoreError> {
+            self.store.stamp_metadata_version(version)
+        }
+
+        fn record_full_scan_completed(
+            &mut self,
+            summary: riff_backend::app::store::FullScanSummary,
+        ) -> Result<(), StoreError> {
+            self.store.record_full_scan_completed(summary)
+        }
+    }
+
+    /// The Pass path: measure one Track and let the pass commit its batch.
+    fn pass_path_metadata() -> TrackMetadata {
+        let track = manually_edited_track();
+        let queries = MockLibraryQueryStore {
+            library: std::collections::HashMap::from([(track.id.clone(), track.clone())]),
+            ..Default::default()
+        };
+        let mutations = RecordingMutations::new();
+        let mut pass = ReplayGainPass::new(
+            Box::new(CannedAnalyzer),
+            Box::new(MockMetadataWriter::recording()),
+            Box::new(queries),
+            Box::new(mutations.clone()),
+        );
+
+        let report = pass.run(
+            &PassCommand::Track(track.id.clone()),
+            &AtomicBool::new(false),
+            |_, _| {},
+        );
+        assert_eq!(report.measured, 1, "the pass measured and committed once");
+
+        mutations
+            .batched()
+            .into_iter()
+            .next()
+            .expect("the pass committed the mirrored Track")
+            .metadata
+    }
+
+    /// The Tag Edit path: save an edit carrying the same `ReplayGain` facts.
+    fn tag_edit_path_metadata() -> TrackMetadata {
+        let track = manually_edited_track();
+        let track_id = track.id.clone();
+        let queries = MockLibraryQueryStore {
+            library: std::collections::HashMap::from([(track_id.clone(), track)]),
+            ..Default::default()
+        };
+        let mutations = RecordingMutations::new();
+        let (service, worker) = TagEditService::new(
+            Box::new(MockMetadataWriter::recording()),
+            Box::new(queries),
+            Box::new(mutations.clone()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        std::thread::spawn(move || worker.run());
+
+        service.submit(TagEditRequest {
+            track_id,
+            path: std::path::PathBuf::from("/music/t1.mp3"),
+            edit: TagEdit::default(),
+            replaygain: mirror_tags(),
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let outcome = loop {
+            if let Some(outcome) = service.poll() {
+                break outcome;
+            }
+            assert!(Instant::now() < deadline, "the worker never reported");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert_eq!(outcome, TagEditOutcome::Saved);
+
+        mutations
+            .refreshed()
+            .into_iter()
+            .next()
+            .expect("the tag edit committed the mirrored Track")
+            .metadata
+    }
+
+    #[test]
+    fn both_write_paths_mirror_the_same_four_fields() {
+        let from_pass = pass_path_metadata();
+        let from_tag_edit = tag_edit_path_metadata();
+
+        assert_eq!(
+            mirrored(&from_pass),
+            mirrored(&from_tag_edit),
+            "the pass and the tag edit mirror the same four fields"
+        );
+
+        // `Some` fields moved, in both paths...
+        assert_eq!(from_pass.replaygain_track_gain, Some(MEASURED_GAIN_DB));
+        assert_eq!(from_pass.replaygain_track_peak, Some(MEASURED_PEAK));
+        // ...and `None` fields never cleared the manual edits.
+        assert_eq!(from_pass.replaygain_album_gain, Some(MANUAL_ALBUM_GAIN));
+        assert_eq!(from_pass.replaygain_album_peak, Some(MANUAL_ALBUM_PEAK));
+        assert_eq!(
+            tag_edit_path_metadata().replaygain_track_gain,
+            from_pass.replaygain_track_gain
         );
     }
 }

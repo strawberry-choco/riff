@@ -11,13 +11,7 @@ use super::*;
 
 #[test]
 fn test_store_fresh_start_creates_file_and_applies_initial_migration_once() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
-        .expect("fresh store must open and migrate");
+    let (_dir, _, store, _changes_rx) = open_store_with_path();
 
     let applied: Vec<(i64, String)> = store
         .with_connection(|conn| {
@@ -49,12 +43,7 @@ fn test_store_fresh_start_creates_file_and_applies_initial_migration_once() {
 
 #[test]
 fn test_store_reopen_reuses_migrated_store_without_reapplying() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, db_path, store, _changes_rx) = open_store_with_path();
     store
         .with_connection(|conn| conn.execute("UPDATE schema_migrations SET applied_at = 12345", []))
         .expect("marking applied_at must work");
@@ -130,13 +119,8 @@ fn test_store_double_apply_is_idempotent() {
 /// over untouched.
 #[test]
 fn test_store_migration_010_drops_the_missing_artwork_strategy_column() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-
     // A fully migrated fresh store is the base: every scalar at defaults.
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, db_path, store, _changes_rx) = open_store_with_path();
 
     // Roll back to the 009-era state: forget migration 010 and restore the
     // columns exactly as migrations 007/008 created them, plus some
@@ -209,13 +193,8 @@ fn test_store_migration_010_drops_the_missing_artwork_strategy_column() {
 /// backfilled lowercased.
 #[test]
 fn test_store_migration_011_backfills_lowercased_entity_search_keys() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-
     // A fully migrated fresh store is the base.
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, db_path, store, _changes_rx) = open_store_with_path();
 
     // Roll back to the 010-era schema: forget migration 011 and drop its
     // columns, then seed entity rows exactly as a pre-011 scan would have.
@@ -396,13 +375,7 @@ fn test_store_checksum_tamper_is_fatal() {
 /// recorded value against the SQL it was supposed to describe.
 #[test]
 fn test_store_records_each_migrations_own_derived_checksum() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
-        .expect("fresh store must open and migrate");
+    let (_dir, _, store, _changes_rx) = open_store_with_path();
 
     let recorded: Vec<(i64, String)> = store
         .with_connection(|conn| {
@@ -493,11 +466,7 @@ fn test_derived_digest(sql: &str) -> String {
 fn test_metadata_version_lags_a_freshly_migrated_store_and_stamps_durably() {
     use riff_persistence::track::METADATA_VERSION;
 
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, db_path, mut store, _changes_rx) = open_store_with_path();
 
     // A store that has never completed a scan under this build sits behind the
     // binary — that gap is what makes the scan's freshness filter re-read
@@ -588,15 +557,11 @@ fn test_store_busy_timeout_is_about_five_seconds() {
 
 #[test]
 fn test_store_corrupt_db_reopens_as_fresh_store_with_siblings_renamed_aside() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
+    let (dir, db_path, store, _changes_rx) = open_store_with_path();
     let wal_path = dir.path().join("riff.sqlite3-wal");
     let shm_path = dir.path().join("riff.sqlite3-shm");
 
     // Build a healthy store with data, then close it so the WAL is
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
     store
         .with_connection(|conn| {
             conn.execute(
@@ -899,13 +864,8 @@ fn test_store_migration_019_adds_the_reduce_motion_column() {
 /// carries over exactly.
 #[test]
 fn test_store_migration_012_drops_the_browser_layout_column() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-
     // A fully migrated fresh store is the base: every scalar at defaults.
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, db_path, store, _changes_rx) = open_store_with_path();
 
     // Roll back to the 011-era state: forget migration 012 and restore the
     // column exactly as migration 007 created it, plus a non-default grid
@@ -1492,11 +1452,7 @@ fn test_store_reorder_unknown_playlist_is_a_noop_and_other_playlists_are_untouch
 
 #[test]
 fn test_store_playlist_entries_report_library_validity_via_left_join() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, _, mut store, _changes_rx) = open_store_with_path();
 
     // Two scanned tracks plus a dangling reference that was never scanned.
     store
@@ -1623,11 +1579,26 @@ fn open_store() -> (
     SqliteStore,
     crossbeam_channel::Receiver<StoreChanged>,
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let (changes_tx, changes_rx) = crossbeam_channel::unbounded::<StoreChanged>();
-    let store =
-        SqliteStore::open_and_migrate(&dir.path().join("riff.sqlite3"), changes_tx).unwrap();
+    let (dir, _, store, changes_rx) = open_store_with_path();
     (dir, store, changes_rx)
+}
+
+/// [`open_store`] plus the database path the open actually used — for tests
+/// that need the file itself: reopening the same path on a later handle,
+/// reading or rewriting it, or deriving sibling paths beside it. The path
+/// comes from the same place the open took it, so callers never re-spell the
+/// store filename.
+fn open_store_with_path() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    SqliteStore,
+    crossbeam_channel::Receiver<StoreChanged>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (changes_tx, changes_rx) = crossbeam_channel::unbounded::<StoreChanged>();
+    let store = SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    (dir, db_path, store, changes_rx)
 }
 
 /// The flat library listing's window, from its Listing Page.
@@ -2187,11 +2158,7 @@ fn test_flat_list_orders_land_in_sql_per_track_list_order() {
 
 #[test]
 fn test_all_track_ids_are_canonically_path_ordered() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, db_path, store, _changes_rx) = open_store_with_path();
 
     // A fresh store has no ids to fill a queue with.
     assert_eq!(
@@ -2420,11 +2387,7 @@ use std::time::SystemTime;
 
 #[test]
 fn test_record_track_played_persists_immediately_across_reopen() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, db_path, mut store, _changes_rx) = open_store_with_path();
 
     let batch = vec![
         library_track("m:\\music\\a.mp3", "A", Some("Artist A"), "Album A", None),
@@ -2478,11 +2441,7 @@ fn test_record_track_played_persists_immediately_across_reopen() {
 
 #[test]
 fn test_tag_refresh_preserves_history_and_updates_album_derivation() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, db_path, mut store, _changes_rx) = open_store_with_path();
 
     // Track A carries the album's derivation (first-added); B is newer.
     let mut track_a = library_track(
@@ -2578,11 +2537,7 @@ fn test_tag_refresh_preserves_history_and_updates_album_derivation() {
 
 #[test]
 fn test_tag_refresh_moving_between_albums_cleans_orphans() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, db_path, mut store, _changes_rx) = open_store_with_path();
 
     let original = library_track("f:\\x\\a.mp3", "A", Some("Solo"), "X", None);
     store
@@ -2663,11 +2618,7 @@ fn test_tag_refresh_moving_between_albums_cleans_orphans() {
 
 #[test]
 fn test_remove_library_path_is_atomic_and_keeps_playlists_dangling() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, db_path, mut store, _changes_rx) = open_store_with_path();
 
     // Two roots share artist "Shared"; "m:\one2" guards against prefix traps.
     let batch = vec![
@@ -2774,6 +2725,217 @@ fn test_remove_library_path_is_atomic_and_keeps_playlists_dangling() {
         .find(|p| p.id == playlist_id)
         .expect("playlist survives");
     assert_eq!(mix.tracks, vec![removed_id], "dangling entry stays listed");
+}
+
+/// Record `root` as a library path the way a scan registration does: the raw
+/// spelling, because the `library_paths` row is keyed on the text the caller
+/// passed and `remove_library_path` deletes that same text.
+fn register_library_path(store: &SqliteStore, root: &str) {
+    store
+        .with_connection(|conn| conn.execute("INSERT INTO library_paths(path) VALUES (?1)", [root]))
+        .expect("registering the path must work");
+}
+
+/// Every surviving track path, in path order — the whole post-removal truth.
+fn remaining_track_paths(store: &SqliteStore) -> Vec<String> {
+    store
+        .with_connection(|conn| {
+            let mut stmt = conn.prepare("SELECT path FROM tracks ORDER BY path")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect()
+        })
+        .expect("listing tracks must work")
+}
+
+/// A root spelled with a trailing separator names the same folder as the bare
+/// spelling, so it must remove the same subtree. The trailing separator is
+/// part of the spelling, not part of the membership rule.
+#[test]
+fn remove_library_path_removes_the_subtree_under_a_trailing_separator_root() {
+    let (_dir, mut store, _changes_rx) = open_store();
+    store
+        .apply_scan_batch(&[
+            library_track("m:\\music\\a.mp3", "A", None, "Music", None),
+            library_track("m:\\music\\sub\\b.mp3", "B", None, "Music", None),
+            library_track("m:\\music2\\c.mp3", "C", None, "Other", None),
+            library_track("n:\\elsewhere\\d.mp3", "D", None, "Elsewhere", None),
+        ])
+        .unwrap();
+    register_library_path(&store, "m:\\music\\");
+
+    let removed = store
+        .remove_library_path(std::path::Path::new("m:\\music\\"))
+        .expect("removal works");
+
+    assert_eq!(
+        removed, 2,
+        "the trailing-separator root's whole subtree goes, nested files included"
+    );
+    assert_eq!(
+        remaining_track_paths(&store),
+        vec!["m:\\music2\\c.mp3", "n:\\elsewhere\\d.mp3"],
+        "the byte-prefix sibling and the unrelated root both survive"
+    );
+    // The read path agrees the folder is now empty, so removal and the folder
+    // reads name the same subtree.
+    assert!(
+        !store
+            .folder_has_audio(std::path::Path::new("m:\\music"))
+            .unwrap(),
+        "the removed folder reports no audio"
+    );
+    assert!(
+        store
+            .folder_has_audio(std::path::Path::new("m:\\music2"))
+            .unwrap(),
+        "the prefix sibling still reports its audio"
+    );
+    let paths: Vec<String> = store
+        .with_connection(|conn| {
+            let mut stmt = conn.prepare("SELECT path FROM library_paths ORDER BY path")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect()
+        })
+        .expect("listing library paths must work");
+    assert!(paths.is_empty(), "the exact spelling's own record goes");
+}
+
+/// A bare root (`m:\`) already ends in its own separator, so every path under
+/// that drive belongs to it: the whole drive's subtree goes in one removal.
+#[test]
+fn remove_library_path_removes_the_subtree_under_a_bare_root() {
+    let (_dir, mut store, _changes_rx) = open_store();
+    store
+        .apply_scan_batch(&[
+            library_track("m:\\a.mp3", "A", None, "Root", None),
+            library_track("m:\\sub\\b.mp3", "B", None, "Nested", None),
+            library_track("m:\\sub\\deep\\c.mp3", "C", None, "Deep", None),
+            library_track("n:\\d.mp3", "D", None, "Other", None),
+        ])
+        .unwrap();
+
+    let removed = store
+        .remove_library_path(std::path::Path::new("m:\\"))
+        .expect("removal works");
+
+    assert_eq!(
+        removed, 3,
+        "every path under the bare root goes, at every depth"
+    );
+    assert_eq!(
+        remaining_track_paths(&store),
+        vec!["n:\\d.mp3".to_string()],
+        "the other drive's track survives"
+    );
+}
+
+/// A root carrying LIKE metacharacters matches them literally: the one folder
+/// whose name contains them is removed, while the spellings an unescaped
+/// wildcard would also match survive.
+#[test]
+fn remove_library_path_matches_like_metacharacters_literally() {
+    let (_dir, mut store, _changes_rx) = open_store();
+    store
+        .apply_scan_batch(&[
+            library_track("m:\\chart\\50%_off\\01.mp3", "A", None, "Literal", None),
+            // What an unescaped `%` / `_` pair would also match.
+            library_track("m:\\chart\\50%_offer\\02.mp3", "B", None, "Decoy", None),
+            library_track("m:\\chart\\50%_offx\\03.mp3", "C", None, "Sibling", None),
+            library_track("m:\\chart2\\04.mp3", "D", None, "Other", None),
+        ])
+        .unwrap();
+    let root = std::path::Path::new("m:\\chart\\50%_off");
+    assert_eq!(
+        store.folder_track_count(root).unwrap(),
+        1,
+        "the read path reports exactly the literal match"
+    );
+
+    let removed = store.remove_library_path(root).expect("removal works");
+
+    assert_eq!(removed, 1, "only the literal match is removed");
+    assert_eq!(
+        remaining_track_paths(&store),
+        vec![
+            "m:\\chart2\\04.mp3",
+            "m:\\chart\\50%_offer\\02.mp3",
+            "m:\\chart\\50%_offx\\03.mp3",
+        ],
+        "wildcard-expanded and byte-prefix spellings all survive"
+    );
+}
+
+/// A root whose trailing separator differs from the separators in the stored
+/// paths must remove exactly the subtree the folder reads report for it —
+/// the delete and the reads are one rule.
+#[test]
+fn remove_library_path_agrees_with_the_folder_reads_for_a_mixed_separator_root() {
+    let (_dir, mut store, _changes_rx) = open_store();
+    store
+        .apply_scan_batch(&[
+            library_track("m:\\one\\a.mp3", "A", None, "One", None),
+            library_track("m:\\one\\sub\\b.mp3", "B", None, "One", None),
+            library_track("m:\\one2\\c.mp3", "C", None, "Two", None),
+            library_track("n:\\d.mp3", "D", None, "Other", None),
+        ])
+        .unwrap();
+    let root = std::path::Path::new("m:\\one/");
+    let reported = store
+        .folder_track_count(root)
+        .expect("the read path answers for the mixed separator root");
+    assert_eq!(reported, 2, "the read path reports the whole subtree");
+
+    let removed = store.remove_library_path(root).expect("removal works");
+
+    assert_eq!(
+        removed, reported,
+        "the delete removes exactly what the folder reads report"
+    );
+    assert_eq!(
+        remaining_track_paths(&store),
+        vec!["m:\\one2\\c.mp3", "n:\\d.mp3"],
+        "the byte-prefix sibling and the unrelated root both survive"
+    );
+}
+
+/// The sibling-prefix trap, proved on both sides of the removal: the tracks
+/// under `m:\music` go, and every track under `m:\music2` — including a nested
+/// one — stays, as the folder reads continue to report.
+#[test]
+fn remove_library_path_never_swallows_a_prefix_sibling_root() {
+    let (_dir, mut store, _changes_rx) = open_store();
+    store
+        .apply_scan_batch(&[
+            library_track("m:\\music\\a.mp3", "A", None, "Music", None),
+            library_track("m:\\music\\sub\\b.mp3", "B", None, "Music", None),
+            library_track("m:\\music2\\c.mp3", "C", None, "Other", None),
+            library_track("m:\\music2\\deep\\d.mp3", "D", None, "Deep", None),
+        ])
+        .unwrap();
+    let root = std::path::Path::new("m:\\music");
+    let sibling = std::path::Path::new("m:\\music2");
+    assert_eq!(store.folder_track_count(root).unwrap(), 2);
+    assert_eq!(store.folder_track_count(sibling).unwrap(), 2);
+
+    let removed = store.remove_library_path(root).expect("removal works");
+
+    assert_eq!(removed, 2, "only the root's own tracks go");
+    assert!(
+        !store.folder_has_audio(root).unwrap(),
+        "the removed root reports no audio"
+    );
+    assert!(
+        store.folder_has_audio(sibling).unwrap(),
+        "the prefix sibling keeps reporting its audio, nested tracks included"
+    );
+    assert_eq!(
+        store.track_ids_in_folder_tree(sibling).unwrap(),
+        vec![
+            TrackId("m:\\music2\\c.mp3".to_string()),
+            TrackId("m:\\music2\\deep\\d.mp3".to_string()),
+        ],
+        "the prefix sibling's whole subtree survives"
+    );
 }
 
 // --- Application Store: artist/album browsing queries (ticket 07) ------------
@@ -3695,11 +3857,7 @@ fn test_artist_albums_in_genre_returns_matching_albums_with_matching_track_ids()
 
 #[test]
 fn test_album_tracks_in_genre_returns_matching_tracks_in_canonical_order() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, _, mut store, _changes_rx) = open_store_with_path();
 
     // Insertion order deliberately scrambled relative to track number; the
     // genre-filtered query must impose the canonical album-track order.
@@ -3828,11 +3986,7 @@ fn entity_hit_fixtures() -> Vec<Track> {
 
 /// Seed the entity-hit fixture library and return the store.
 fn seeded_entity_hit_store() -> (tempfile::TempDir, riff_infra::store::SqliteStore) {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (dir, _, mut store, _changes_rx) = open_store_with_path();
     store
         .apply_scan_batch(&entity_hit_fixtures())
         .expect("fixtures apply");
@@ -4194,6 +4348,60 @@ fn test_album_is_name_hit_distinguishes_name_hits_from_track_hits() {
     );
 }
 
+#[test]
+fn test_artist_is_name_hit_distinguishes_name_hits_from_album_and_track_hits() {
+    let (_dir, store) = seeded_entity_hit_store();
+
+    // The artist's own name matching is a name hit, in either case fold.
+    assert!(
+        store
+            .artist_is_name_hit("Zeta", "zeta")
+            .expect("name hit query")
+    );
+    assert!(
+        store
+            .artist_is_name_hit("Zeta", "ZETA")
+            .expect("name hit query")
+    );
+    // A non-Latin artist name folded by the write-time lowercased column.
+    assert!(
+        store
+            .artist_is_name_hit("Чайковский", "чайковский")
+            .expect("name hit query")
+    );
+
+    // A member track matching is NOT a name hit.
+    assert!(
+        !store
+            .artist_is_name_hit("Zeta", "opening")
+            .expect("name hit query")
+    );
+    // A member album matching by its own title is NOT a name hit either: the
+    // drill must keep to the hit albums for that query.
+    assert!(
+        !store
+            .artist_is_name_hit("Zeta", "wave")
+            .expect("name hit query")
+    );
+    assert!(
+        !store
+            .artist_is_name_hit("Alpha", "alpha one")
+            .expect("name hit query")
+    );
+
+    // Unknown artists and no-match queries answer false.
+    assert!(
+        !store
+            .artist_is_name_hit("Zeta", "zzz")
+            .expect("name hit query")
+    );
+    assert!(
+        !store
+            .artist_is_name_hit("Nobody", "wave")
+            .expect("name hit query")
+    );
+}
+
 /// The genre-hit fixture library: multiple artists and albums with explicit
 /// per-track genres, including a semicolon-separated multi-genre track and a
 /// name-hit album whose tracks do NOT match the query.
@@ -4260,11 +4468,7 @@ fn genre_hit_fixtures() -> Vec<Track> {
 
 /// Seed the genre-hit fixture library and return the store.
 fn seeded_genre_hit_store() -> (tempfile::TempDir, riff_infra::store::SqliteStore) {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (dir, _, mut store, _changes_rx) = open_store_with_path();
     store
         .apply_scan_batch(&genre_hit_fixtures())
         .expect("fixtures apply");
@@ -5445,12 +5649,7 @@ fn test_smart_playlists_match_independent_reference_logic() {
 
 #[test]
 fn test_recently_played_orders_newest_first_excludes_never_played_and_bounds() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
-        .expect("fresh store must open");
+    let (_dir, _, mut store, _changes_rx) = open_store_with_path();
 
     let at = |secs: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
     let fixtures = vec![
@@ -6309,11 +6508,7 @@ fn removing_and_clearing_the_library_drop_their_favorites() {
 
 #[test]
 fn committing_a_favorite_toggle_bumps_library_generation_and_emits_once() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, changes_rx) =
-        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
-    let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, _, mut store, changes_rx) = open_store_with_path();
 
     store
         .apply_scan_batch(&[library_track(
@@ -6386,10 +6581,7 @@ fn a_page_read_never_mixes_generations_with_a_concurrent_writer() {
     const MIN_FRAMES: usize = 400;
     const WINDOW: usize = MIN_WRITES * 4;
 
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (changes_tx, _changes_rx) = crossbeam_channel::unbounded::<StoreChanged>();
-    let store = SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+    let (_dir, _, store, _changes_rx) = open_store_with_path();
 
     let frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let writing = Arc::new(AtomicBool::new(true));
@@ -6448,4 +6640,409 @@ fn a_page_read_never_mixes_generations_with_a_concurrent_writer() {
         .unwrap();
     assert_eq!(page.total(), written, "the writer's batches all committed");
     assert_eq!(page.rows().len(), written, "and every one is listed");
+}
+
+// --- Application Store: the one folded mutation prologue (deepen-iter1 01) --
+//
+// Every mutating store method runs the same prologue: take the connection
+// lock, run ONE immediate durable transaction, wrap a failure in the
+// operation's own context, and bump the session generation the mutation
+// names exactly when it committed. These tests lock that rule site by site
+// so folding the 17 hand-written prologues into one helper cannot drift from
+// it: a committing site is durable AND bumps with exactly one notice beside
+// the bump, while the writes that deliberately do NOT bump
+// (`stamp_metadata_version` and the Settings setters) stay durable with both
+// generations unmoved.
+
+/// Every notice the change channel has queued so far, in arrival order.
+fn drain_changes(rx: &crossbeam_channel::Receiver<StoreChanged>) -> Vec<StoreChanged> {
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
+/// The Library mutations: each one is durable across a reopen and bumps the
+/// session Library generation exactly once, with that one notice beside it.
+#[test]
+fn library_mutations_are_durable_and_bump_the_library_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let track = library_track(
+        "m:\\music\\folded\\01.mp3",
+        "Song",
+        Some("Artist"),
+        "Album",
+        Some("Album Artist"),
+    );
+    let summary = FullScanSummary {
+        at: SystemTime::now(),
+        files: 1,
+        errors: 0,
+    };
+
+    {
+        let (changes_tx, changes_rx) = crossbeam_channel::unbounded::<StoreChanged>();
+        let mut store = SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+        let library_gen = store.library_generation();
+        let playlist_gen = store.playlist_generation();
+        assert_eq!(library_gen.current(), 0, "a fresh session starts at zero");
+        assert_eq!(playlist_gen.current(), 0);
+
+        // Five committing mutations, each one a bump of the Library
+        // generation and nothing else.
+        assert_eq!(
+            store
+                .apply_scan_batch(std::slice::from_ref(&track))
+                .unwrap(),
+            1
+        );
+        assert_eq!(library_gen.current(), 1, "apply_scan_batch commit bumps");
+        assert!(store.record_track_played(&track.id, summary.at).unwrap());
+        assert_eq!(library_gen.current(), 2, "record_track_played commit bumps");
+        assert!(store.set_track_favorite(&track.id, true).unwrap());
+        assert_eq!(library_gen.current(), 3, "set_track_favorite commit bumps");
+        store.apply_tag_refresh(&track).unwrap();
+        assert_eq!(library_gen.current(), 4, "apply_tag_refresh commit bumps");
+        store.record_full_scan_completed(summary).unwrap();
+        assert_eq!(
+            library_gen.current(),
+            5,
+            "record_full_scan_completed commit bumps"
+        );
+
+        assert_eq!(
+            drain_changes(&changes_rx),
+            vec![
+                StoreChanged::Library(1),
+                StoreChanged::Library(2),
+                StoreChanged::Library(3),
+                StoreChanged::Library(4),
+                StoreChanged::Library(5),
+            ],
+            "each bump carries exactly one Library notice, in commit order"
+        );
+        assert_eq!(
+            playlist_gen.current(),
+            0,
+            "no Library mutation moves the playlist generation"
+        );
+    }
+
+    // The "restart": every one of those mutations committed, so the reopened
+    // store reads them all back.
+    let (reopen_tx, _reopen_rx) = crossbeam_channel::unbounded::<StoreChanged>();
+    let reopened = SqliteStore::open_and_migrate(&db_path, reopen_tx).unwrap();
+    assert_eq!(
+        reopened.all_track_ids().unwrap(),
+        vec![track.id.clone()],
+        "the scan batch committed"
+    );
+    let stored = reopened
+        .get_track(&track.id)
+        .unwrap()
+        .expect("the track resolves");
+    assert_eq!(stored.play_count, 1, "the recorded play committed");
+    assert!(stored.favorite, "the favorite toggle committed");
+    assert_eq!(
+        reopened.last_full_scan().unwrap(),
+        Some(summary),
+        "the recorded scan summary committed"
+    );
+}
+
+/// The playlist mutations: each one is durable across a reopen and bumps the
+/// session playlist generation exactly once, with that one notice beside it.
+#[test]
+fn playlist_mutations_are_durable_and_bump_the_playlist_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+
+    {
+        let (changes_tx, changes_rx) = crossbeam_channel::unbounded::<StoreChanged>();
+        let mut store = SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+        let library_gen = store.library_generation();
+        let playlist_gen = store.playlist_generation();
+        assert_eq!(playlist_gen.current(), 0, "a fresh session starts at zero");
+
+        // Six committing mutations, each one a bump of the playlist
+        // generation and nothing else.
+        let first = TrackId("first.mp3".to_string());
+        let second = TrackId("second.mp3".to_string());
+        let third = TrackId("third.mp3".to_string());
+        let playlist_id = store
+            .create_playlist("Folded", &[first.clone(), second.clone()])
+            .unwrap();
+        assert_eq!(playlist_gen.current(), 1, "create_playlist commit bumps");
+        assert!(store.rename_playlist(&playlist_id, "Folded Again").unwrap());
+        assert_eq!(playlist_gen.current(), 2, "rename_playlist commit bumps");
+        assert!(store.add_playlist_entry(&playlist_id, &third).unwrap());
+        assert_eq!(playlist_gen.current(), 3, "add_playlist_entry commit bumps");
+        assert!(
+            store
+                .reorder_playlist_entries(
+                    &playlist_id,
+                    &[third.clone(), first.clone(), second.clone()]
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            playlist_gen.current(),
+            4,
+            "reorder_playlist_entries commit bumps"
+        );
+        assert!(store.remove_playlist_entries(&playlist_id, &first).unwrap());
+        assert_eq!(
+            playlist_gen.current(),
+            5,
+            "remove_playlist_entries commit bumps"
+        );
+        assert!(store.delete_playlist(&playlist_id).unwrap());
+        assert_eq!(playlist_gen.current(), 6, "delete_playlist commit bumps");
+
+        assert_eq!(
+            drain_changes(&changes_rx),
+            vec![
+                StoreChanged::Playlists(1),
+                StoreChanged::Playlists(2),
+                StoreChanged::Playlists(3),
+                StoreChanged::Playlists(4),
+                StoreChanged::Playlists(5),
+                StoreChanged::Playlists(6),
+            ],
+            "each bump carries exactly one Playlists notice, in commit order"
+        );
+        assert_eq!(
+            library_gen.current(),
+            0,
+            "no playlist mutation moves the Library generation"
+        );
+    }
+
+    // The "restart": the whole sequence committed, and the delete that ended
+    // it is what the reopened store sees — a playlist that was created,
+    // renamed, reordered and deleted is gone, so the delete committed.
+    let (reopen_tx, _reopen_rx) = crossbeam_channel::unbounded::<StoreChanged>();
+    let reopened = SqliteStore::open_and_migrate(&db_path, reopen_tx).unwrap();
+    assert!(
+        reopened.load_playlists().unwrap().is_empty(),
+        "the deleted playlist committed"
+    );
+}
+
+/// The two destructive Library sweeps: each commits its whole sweep and
+/// bumps the Library generation once for it.
+#[test]
+fn clear_library_and_remove_library_path_commit_and_bump_once_each() {
+    let (_dir, mut store, changes_rx) = open_store();
+    let library_gen = store.library_generation();
+    let root = std::path::Path::new("m:\\music\\sweep");
+    let kept = library_track("m:\\music\\keep\\01.mp3", "Keep", None, "Keep", None);
+    let gone = library_track("m:\\music\\sweep\\01.mp3", "Gone", None, "Gone", None);
+
+    store
+        .apply_scan_batch(&[kept.clone(), gone.clone()])
+        .unwrap();
+    assert_eq!(library_gen.current(), 1, "the seeding batch bumps");
+    assert_eq!(
+        drain_changes(&changes_rx),
+        vec![StoreChanged::Library(1)],
+        "the seeding batch emits one notice"
+    );
+
+    assert_eq!(
+        store.clear_library().unwrap(),
+        2,
+        "clear removes every track"
+    );
+    assert_eq!(library_gen.current(), 2, "clear_library commit bumps");
+    assert!(
+        store.all_track_ids().unwrap().is_empty(),
+        "the clear committed"
+    );
+
+    store
+        .apply_scan_batch(&[kept.clone(), gone.clone()])
+        .unwrap();
+    assert_eq!(library_gen.current(), 3, "the re-seeded batch bumps");
+
+    assert_eq!(
+        store.remove_library_path(root).unwrap(),
+        1,
+        "only the root's own tracks go"
+    );
+    assert_eq!(library_gen.current(), 4, "remove_library_path commit bumps");
+    assert_eq!(
+        store.all_track_ids().unwrap(),
+        vec![kept.id.clone()],
+        "the remove committed"
+    );
+
+    assert_eq!(
+        drain_changes(&changes_rx),
+        vec![
+            StoreChanged::Library(2),
+            StoreChanged::Library(3),
+            StoreChanged::Library(4),
+        ],
+        "each sweep's commit emits exactly one notice beside its bump"
+    );
+}
+
+/// `stamp_metadata_version` is the one durable mutation that deliberately
+/// does NOT bump: the version describes how the collection was read, so no
+/// Session Projection has to refetch for it. The write is durable, both
+/// generations stay unmoved, no notice rides out — and a later commit still
+/// bumps, so the exception is per call rather than sticky.
+#[test]
+fn stamping_the_metadata_version_commits_without_bumping_either_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+
+    {
+        let (changes_tx, changes_rx) = crossbeam_channel::unbounded::<StoreChanged>();
+        let mut store = SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+        let library_gen = store.library_generation();
+        let playlist_gen = store.playlist_generation();
+
+        store.stamp_metadata_version(42).unwrap();
+
+        assert_eq!(
+            library_gen.current(),
+            0,
+            "the stamp does not bump the Library generation"
+        );
+        assert_eq!(
+            playlist_gen.current(),
+            0,
+            "the stamp does not bump the playlist generation"
+        );
+        assert!(changes_rx.is_empty(), "the stamp emits no notice");
+
+        // The exception belongs to that one call, not to the store: the next
+        // committed playlist mutation still bumps.
+        store.create_playlist("After the Stamp", &[]).unwrap();
+        assert_eq!(playlist_gen.current(), 1, "a later commit still bumps");
+        assert_eq!(
+            drain_changes(&changes_rx),
+            vec![StoreChanged::Playlists(1)],
+            "only the commit's notice rides out"
+        );
+    }
+
+    // The stamp itself is durable: the reopened store reads the version back
+    // from a fresh session whose counters still start at zero.
+    let (reopen_tx, _reopen_rx) = crossbeam_channel::unbounded::<StoreChanged>();
+    let reopened = SqliteStore::open_and_migrate(&db_path, reopen_tx).unwrap();
+    assert_eq!(
+        reopened.metadata_version().unwrap(),
+        42,
+        "the stamp is durable"
+    );
+    assert_eq!(
+        reopened.playlist_generation().current(),
+        0,
+        "the stamping session's counter is unmoved, and a new one starts at zero"
+    );
+}
+
+/// The three Settings setters commit like every other mutation but bump
+/// neither generation: Settings reads are not generation-keyed projections.
+#[test]
+fn settings_setters_commit_without_bumping_either_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+
+    {
+        let (changes_tx, changes_rx) = crossbeam_channel::unbounded::<StoreChanged>();
+        let mut store = SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+        let library_gen = store.library_generation();
+        let playlist_gen = store.playlist_generation();
+
+        store
+            .save_scalars(&ScalarSettings {
+                volume: Some(0.5),
+                ..ScalarSettings::default()
+            })
+            .unwrap();
+        store
+            .save_library_paths(&[PathBuf::from("m:\\music")])
+            .unwrap();
+        let mut watch_states = HashMap::new();
+        watch_states.insert(PathBuf::from("m:\\music"), WatchState::Enabled);
+        store.save_watch_states(&watch_states).unwrap();
+
+        assert_eq!(
+            library_gen.current(),
+            0,
+            "settings writes do not bump the Library generation"
+        );
+        assert_eq!(
+            playlist_gen.current(),
+            0,
+            "settings writes do not bump the playlist generation"
+        );
+        assert!(changes_rx.is_empty(), "settings writes emit no notice");
+    }
+
+    let (reopen_tx, _reopen_rx) = crossbeam_channel::unbounded::<StoreChanged>();
+    let reopened = SqliteStore::open_and_migrate(&db_path, reopen_tx).unwrap();
+    let settings = reopened.load_settings().unwrap();
+    assert_eq!(
+        settings.scalars.volume,
+        Some(0.5),
+        "the scalar block committed"
+    );
+    assert_eq!(
+        settings.library_paths,
+        vec![PathBuf::from("m:\\music")],
+        "the library paths committed"
+    );
+    assert_eq!(
+        settings.watch_states.get(&PathBuf::from("m:\\music")),
+        Some(&WatchState::Enabled),
+        "the watch states committed"
+    );
+}
+
+/// A mutation that aborts mid-transaction surfaces its own operation's
+/// context: the folded prologue wraps the failure through the same
+/// per-operation error wrapping the sites spelled out by hand.
+#[test]
+fn a_failed_mutation_reports_its_own_operation_context() {
+    let (_dir, mut store, changes_rx) = open_store();
+    let id = store.create_playlist("Known", &[]).unwrap();
+    let library_gen = store.library_generation();
+    let playlist_gen = store.playlist_generation();
+    assert_eq!(playlist_gen.current(), 1, "the seeding commit bumps");
+    assert_eq!(
+        drain_changes(&changes_rx),
+        vec![StoreChanged::Playlists(1)],
+        "the seeding commit emits its one notice"
+    );
+
+    exec_batch(
+        &store,
+        "CREATE TRIGGER fail_rename BEFORE UPDATE ON playlists
+         BEGIN SELECT RAISE(ABORT, 'simulated rename failure'); END;",
+    );
+    let err = store.rename_playlist(&id, "Broken").unwrap_err();
+    exec_batch(&store, "DROP TRIGGER fail_rename;");
+
+    assert!(
+        err.to_string().contains("failed to rename playlist"),
+        "the failure carries the operation's own context: {err}"
+    );
+    assert_eq!(
+        playlist_gen.current(),
+        1,
+        "a failed mutation does not bump the generation it names"
+    );
+    assert_eq!(
+        library_gen.current(),
+        0,
+        "and it leaves the other generation alone"
+    );
+    assert!(changes_rx.is_empty(), "a failed mutation emits no notice");
 }

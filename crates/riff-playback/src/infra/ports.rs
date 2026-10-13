@@ -227,8 +227,13 @@ pub trait AudioOutput: Send {
     fn start(&mut self, format: AudioFormatInfo) -> Result<(), crate::app::errors::PlaybackError>;
 
     /// Write decoded audio samples to the output.
-    /// Returns the number of samples accepted (may be less than input if buffer is full).
-    fn write(&mut self, samples: &[f32]) -> usize;
+    ///
+    /// How much of `samples` the port actually took is not the caller's
+    /// business: every implementation either accepts the whole chunk or reports
+    /// a failure, and nothing upstream may act on a partial write. The
+    /// backpressure policy — the bounded ring, the stall deadline, what a
+    /// choked device costs — belongs to the adapter that owns the ring.
+    fn write(&mut self, samples: &[f32]);
 
     /// Stop the output stream.
     fn stop(&mut self);

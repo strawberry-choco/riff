@@ -21,6 +21,13 @@
 //!
 //! Pure-Rust: uses only the port traits. Concrete decoder/output
 //! implementations live in `riff-infra`.
+//!
+//! Stream ownership: `output_started` is engine-local state with ONE owning
+//! pair — [`start_stream`] for the up transition, [`stop_stream`] for the
+//! down one — and it is true **iff** a cpal output stream is running. Because
+//! the flag is written only there, a `start` that fails leaves it false: the
+//! stream is down, so the next command tears its own stream down again
+//! instead of trusting a stale flag and writing into a dead stream.
 
 use crate::app::state::{PlaybackSession, replaygain_factor};
 use crate::domain::continuation::{Continuation, Trigger};
@@ -123,6 +130,9 @@ impl AudioEngine {
     #[allow(clippy::too_many_lines)]
     pub fn run(mut self) {
         let mut primary_decoder: Option<Box<dyn AudioDecoder>> = None;
+        // The one flag both stream transitions own: true iff a cpal output
+        // stream is running. Written only by `start_stream`/`stop_stream`,
+        // so a failed start cannot leave it stale-true.
         let mut output_started = false;
         let mut current_format: Option<AudioFormatInfo> = None;
         let mut current_track_id: Option<TrackId> = None;
@@ -210,13 +220,16 @@ impl AudioEngine {
                         // Start output if format changed
                         if current_format.as_ref() != Some(&format) {
                             if output_started {
-                                self.output.stop();
+                                stop_stream(self.output.as_mut(), &mut output_started);
                             }
-                            if let Err(e) = self.output.start(format.clone()) {
+                            if let Err(e) = start_stream(
+                                self.output.as_mut(),
+                                format.clone(),
+                                &mut output_started,
+                            ) {
                                 let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
                                 continue;
                             }
-                            output_started = true;
                             current_format = Some(format.clone());
                         }
 
@@ -259,10 +272,13 @@ impl AudioEngine {
 
                     PlaybackCommand::Resume => {
                         if let Some(ref format) = current_format {
-                            if let Err(e) = self.output.start(format.clone()) {
+                            if let Err(e) = start_stream(
+                                self.output.as_mut(),
+                                format.clone(),
+                                &mut output_started,
+                            ) {
                                 let _ = self.update_tx.send(PlaybackUpdate::Error(e.to_string()));
                             } else {
-                                output_started = true;
                                 // Re-open the decoder and seek back to the
                                 // recorded pause position, so the pre-pause
                                 // audio is not replayed.
@@ -363,12 +379,15 @@ impl AudioEngine {
                             }
                             PlaybackState::Paused => {
                                 if let Some(ref format) = current_format {
-                                    if let Err(e) = self.output.start(format.clone()) {
+                                    if let Err(e) = start_stream(
+                                        self.output.as_mut(),
+                                        format.clone(),
+                                        &mut output_started,
+                                    ) {
                                         let _ = self
                                             .update_tx
                                             .send(PlaybackUpdate::Error(e.to_string()));
                                     } else {
-                                        output_started = true;
                                         let _ = self.update_tx.send(PlaybackUpdate::StateChanged(
                                             PlaybackState::Playing,
                                         ));
@@ -599,6 +618,33 @@ impl AudioEngine {
 fn stop_stream(output: &mut dyn AudioOutput, output_started: &mut bool) {
     output.stop();
     *output_started = false;
+}
+
+/// Start the output stream for `format` and record that it is running — the
+/// one spelling of the engine's "the stream is up" bookkeeping, symmetric
+/// with [`stop_stream`].
+///
+/// The flag is written only from this pair, which is what makes the
+/// invariant hold: `output_started` is true **iff** a cpal output stream is
+/// running. The failure half is the reason the flag is folded in here
+/// rather than left to the caller's `else` branch — a `start` that returns
+/// an error leaves the stream down, so the flag is set false and can never
+/// stay stale-true from a previous run.
+fn start_stream(
+    output: &mut dyn AudioOutput,
+    format: AudioFormatInfo,
+    output_started: &mut bool,
+) -> Result<(), crate::app::errors::PlaybackError> {
+    match output.start(format) {
+        Ok(()) => {
+            *output_started = true;
+            Ok(())
+        }
+        Err(e) => {
+            *output_started = false;
+            Err(e)
+        }
+    }
 }
 
 /// Re-announce the current track and `Playing` after a pause ends: a paused

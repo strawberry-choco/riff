@@ -15,10 +15,8 @@
 use eframe::egui;
 
 use super::icons::{Icon, IconCache};
+use super::now_playing::styled_font;
 use super::theme::{self, Palette};
-
-/// Full-texture UV rect for [`egui::Painter::image`] (sidebar precedent).
-const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
 /// An icon button's allocated target and this frame's interaction state,
 /// handed to the variant so its body can paint from `hovered` / `pressed` /
@@ -230,18 +228,6 @@ pub struct TextButton<'a> {
     pub enabled: bool,
 }
 
-/// A design-scale [`egui::FontId`] at `size`, riding the family the installed
-/// token style mapped onto `Button` (so weight families resolve even before
-/// the vendored fonts are installed).
-fn button_font(ui: &egui::Ui, size: f32) -> egui::FontId {
-    let family = ui
-        .style()
-        .text_styles
-        .get(&egui::TextStyle::Button)
-        .map_or(egui::FontFamily::Proportional, |font| font.family.clone());
-    egui::FontId::new(size, family)
-}
-
 /// The size a [`paint_text_button`] block needs for `label`: the measured
 /// galley in the same font the button paints with, plus the style's own button
 /// padding, at the style's button height. For a call site that flows its
@@ -254,9 +240,11 @@ pub fn text_button_size(ui: &egui::Ui, palette: &Palette, label: &str, small: bo
         theme::TEXT_SM
     };
     // The ink is irrelevant to the measurement; it is the font that matters.
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_owned(), button_font(ui, size), palette.ink);
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        styled_font(ui, egui::TextStyle::Button, size),
+        palette.ink,
+    );
     egui::vec2(
         galley.size().x + 2.0 * ui.spacing().button_padding.x,
         ui.spacing().interact_size.y,
@@ -472,7 +460,11 @@ pub fn paint_text_button(
     } else {
         theme::TEXT_SM
     };
-    let galley = painter.layout_no_wrap(label.to_owned(), button_font(ui, size), ink);
+    let galley = painter.layout_no_wrap(
+        label.to_owned(),
+        styled_font(ui, egui::TextStyle::Button, size),
+        ink,
+    );
     let icon_w: f32 = if icon.is_some() { 16.0 + 8.0 } else { 0.0 };
     let mut x = rect.center().x - icon_w.midpoint(galley.size().x);
     if let Some(icon) = icon {
@@ -481,7 +473,7 @@ pub fn paint_text_button(
             egui::pos2(x + 8.0, rect.center().y),
             egui::vec2(16.0, 16.0),
         );
-        painter.image(tex_id, icon_rect, UV_FULL, ink);
+        painter.image(tex_id, icon_rect, super::artwork::UV_FULL, ink);
         x += icon_w;
     }
     painter.galley(

@@ -574,6 +574,20 @@ impl SessionViews {
             })
     }
 
+    /// Whether `artist` is itself a name hit for `query` (its own name
+    /// matched), cached per (artist, query) per generation. `false` on a
+    /// store error or for unknown artists.
+    pub fn artist_is_name_hit(&mut self, artist: &str, query: &str) -> bool {
+        self.hits
+            .artist_is_name_hit(artist, query, &mut |a, q| self.queries.artist_is_name_hit(a, q))
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to check whether {artist} is a name hit (query {query:?}) in the store: {e}"
+                );
+                false
+            })
+    }
+
     /// One album's tracks that match `query` among its `genre`-bearing
     /// tracks, in canonical album-track order, cached per
     /// (album, genre, query) per generation. Scoped like

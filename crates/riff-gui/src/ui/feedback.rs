@@ -61,44 +61,20 @@ pub struct FeedbackBoard {
 }
 
 impl FeedbackBoard {
-    /// Record one Library Scan notice into the scan slot.
-    pub fn set_scan(&mut self, message: impl Into<String>, severity: NoticeSeverity) {
-        self.scan = Some(Feedback {
+    /// Record one notice with no recovery intent: the board routes its
+    /// [`NoticeSource`] to the slot that source owns, so no stream can write
+    /// over another's status line. One alias deserves a flag —
+    /// [`NoticeSource::Library`] reports through the scan slot, the same
+    /// status line the scan uses.
+    pub fn set(
+        &mut self,
+        source: NoticeSource,
+        message: impl Into<String>,
+        severity: NoticeSeverity,
+    ) {
+        self.put(Feedback {
             severity,
-            source: NoticeSource::Scan,
-            message: message.into(),
-            recovery: None,
-        });
-    }
-
-    /// Record a Library mutation (Clear Library) notice into the scan slot —
-    /// the same status line the scan reports through.
-    pub fn set_library(&mut self, message: impl Into<String>, severity: NoticeSeverity) {
-        self.scan = Some(Feedback {
-            severity,
-            source: NoticeSource::Library,
-            message: message.into(),
-            recovery: None,
-        });
-    }
-
-    /// Record a Tag Edit notice (single success/failure or a partial batch)
-    /// into the tag-edit slot.
-    pub fn set_tag_edit(&mut self, message: impl Into<String>, severity: NoticeSeverity) {
-        self.tag_edit = Some(Feedback {
-            severity,
-            source: NoticeSource::TagEdit,
-            message: message.into(),
-            recovery: None,
-        });
-    }
-
-    /// Record a `ReplayGain` Pass notice (a settled pass's outcome, or its
-    /// running progress line) into the pass's own slot.
-    pub fn set_replaygain(&mut self, message: impl Into<String>, severity: NoticeSeverity) {
-        self.replaygain = Some(Feedback {
-            severity,
-            source: NoticeSource::ReplayGain,
+            source,
             message: message.into(),
             recovery: None,
         });

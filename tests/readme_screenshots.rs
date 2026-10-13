@@ -35,35 +35,36 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::determinism::{
+        assert_settled_on_both_slots, distinct_colors, inter_only_font_definitions,
+        pin_settled_time,
+    };
     use egui_kittest::kittest::Queryable;
     use riff_backend::app::cover_service::Covers;
     use riff_backend::app::state::{
         BrowserSelection, LibrarySection, LibrarySession, PlaybackSession, ViewMode,
     };
-    use riff_backend::app::store::{
-        LibraryQueryStore, PlaylistStore as PlaylistStoreTrait, StoreGeneration,
-    };
+    use riff_backend::app::store::{PlaylistStore as PlaylistStoreTrait, StoreGeneration};
     use riff_backend::app::views::SessionViews;
     use riff_backend::domain::{
         Album, Artist, GenreCount, PlaybackPosition, PlaybackQueue, PlaybackState, Playlist,
         PlaylistId, RepeatMode, SmartPlaylistKind, Track, TrackId,
     };
     use riff_gui::ui::RiffApp;
-    use riff_gui::ui::fonts::{self, INTER_FACES};
     use riff_library::app::traits::{DecodedCover, RequestedSize};
     use riff_persistence::errors::StoreError;
-    use riff_persistence::store::{Page, PlaylistEntry, TrackListOrder};
+    use riff_persistence::store::PlaylistEntry;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    // Note: `MockCovers` is deliberately NOT used here — its empty `poll`
+    // Note: `RecordingCovers` is deliberately NOT used here — its empty `poll`
     // would paint no cover art at all. `ProceduralCovers` below takes its
     // place in the composed shell.
     use crate::mocks::{
-        MockLibraryMutationStore, MockLibraryQueryStore, MockScans, MockSettingsStore,
-        MockTagEdits, MockTransport,
+        FakeTagEdits, MockLibraryMutationStore, MockLibraryQueryStore, MockScans,
+        MockSettingsStore, MockTransport,
     };
 
     /// Where the PNGs land: `docs/assets/readme/` in the workspace root. The
@@ -77,55 +78,6 @@ mod tests {
     /// `README_SHOTS=1`, on top of `#[ignore]`.
     fn shots_enabled() -> bool {
         std::env::var_os("README_SHOTS").is_some_and(|v| v == "1")
-    }
-
-    // --- Harness helpers (copied verbatim from golden_tests.rs) ------------------
-
-    /// Deterministic font definitions for headless rendering: the vendored
-    /// Inter faces only. Never scans system CJK fonts, whose presence varies
-    /// per machine — output must rasterize identically everywhere.
-    fn inter_only_font_definitions() -> egui::FontDefinitions {
-        let mut fonts = egui::FontDefinitions::default();
-        for (key, bytes) in INTER_FACES {
-            fonts
-                .font_data
-                .insert((*key).to_owned(), egui::FontData::from_static(bytes).into());
-        }
-        if let Some(chain) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-            chain.insert(0, fonts::INTER_PRIMARY_KEY.to_owned());
-        }
-        fonts
-            .families
-            .insert(fonts::family_medium(), vec!["inter-medium".to_owned()]);
-        fonts
-            .families
-            .insert(fonts::family_semibold(), vec!["inter-semibold".to_owned()]);
-        fonts
-            .families
-            .insert(fonts::family_bold(), vec!["inter-bold".to_owned()]);
-        fonts
-    }
-
-    /// Pin the three time-driven `egui::Style` fields on **both** theme slots:
-    /// tween duration, programmatic scroll animation, cursor blink. Copied
-    /// verbatim from `golden_tests.rs`; see the rationale there.
-    fn pin_settled_time(ctx: &egui::Context) {
-        ctx.all_styles_mut(|style| {
-            style.animation_time = 0.0;
-            style.scroll_animation = egui::style::ScrollAnimation::none();
-            style.visuals.text_cursor.blink = false;
-        });
-    }
-
-    /// How many distinct RGBA colors a frame painted — the blankness check the
-    /// golden composed-shell assertions use (a real frame paints far more than
-    /// 40 distinct colors).
-    fn distinct_colors(image: &image::RgbaImage) -> usize {
-        let mut seen = std::collections::HashSet::new();
-        for pixel in image.pixels() {
-            seen.insert(pixel.0);
-        }
-        seen.len()
     }
 
     // --- Demo collection ---------------------------------------------------------
@@ -353,273 +305,10 @@ mod tests {
 
     // --- Fake ports ----------------------------------------------------------------
 
-    /// A `LibraryQueryStore` that answers per artist and per album — the one
-    /// thing the shared [`MockLibraryQueryStore`] cannot do (its canned
-    /// `albums`/`album_tracks` answers are artist- and album-independent, so
-    /// every artist column row would list the same album). Everything else
-    /// delegates to the seeded inner mock untouched.
-    struct DemoQueryStore {
-        inner: MockLibraryQueryStore,
-        albums_by_artist: HashMap<String, Vec<Album>>,
-        tracks_by_album: HashMap<(String, String), Vec<Track>>,
-    }
-
-    impl LibraryQueryStore for DemoQueryStore {
-        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
-            self.inner.get_track(id)
-        }
-
-        fn metadata_version(&self) -> Result<u32, StoreError> {
-            self.inner.metadata_version()
-        }
-
-        fn tracks_page(
-            &self,
-            order: TrackListOrder,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Page<Track>, StoreError> {
-            self.inner.tracks_page(order, offset, limit)
-        }
-
-        fn library_counts(&self) -> Result<riff_persistence::store::LibraryCounts, StoreError> {
-            self.inner.library_counts()
-        }
-
-        fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
-            self.inner.all_track_ids()
-        }
-
-        fn search_page(
-            &self,
-            query: &str,
-            order: TrackListOrder,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Page<Track>, StoreError> {
-            self.inner.search_page(query, order, offset, limit)
-        }
-
-        fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
-            self.inner.all_artists()
-        }
-
-        fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, StoreError> {
-            Ok(self
-                .albums_by_artist
-                .get(artist)
-                .cloned()
-                .unwrap_or_default())
-        }
-
-        fn album_tracks(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(self
-                .tracks_by_album
-                .get(&(album_artist.to_string(), album_title.to_string()))
-                .cloned()
-                .unwrap_or_default())
-        }
-
-        fn folder_has_audio(&self, folder: &Path) -> Result<bool, StoreError> {
-            self.inner.folder_has_audio(folder)
-        }
-
-        fn folder_has_search_match(&self, folder: &Path, query: &str) -> Result<bool, StoreError> {
-            self.inner.folder_has_search_match(folder, query)
-        }
-
-        fn track_ids_in_folder_tree(&self, folder: &Path) -> Result<Vec<TrackId>, StoreError> {
-            self.inner.track_ids_in_folder_tree(folder)
-        }
-
-        fn tracks_in_folder(&self, folder: &Path) -> Result<Vec<Track>, StoreError> {
-            self.inner.tracks_in_folder(folder)
-        }
-
-        fn folder_track_count(&self, folder: &Path) -> Result<usize, StoreError> {
-            self.inner.folder_track_count(folder)
-        }
-
-        fn last_full_scan(
-            &self,
-        ) -> Result<Option<riff_backend::app::store::FullScanSummary>, StoreError> {
-            self.inner.last_full_scan()
-        }
-
-        fn subdirs_with_audio(&self, folder: &Path) -> Result<Vec<PathBuf>, StoreError> {
-            self.inner.subdirs_with_audio(folder)
-        }
-
-        fn smart_playlist(
-            &self,
-            kind: SmartPlaylistKind,
-            limit: usize,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.inner.smart_playlist(kind, limit)
-        }
-
-        fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
-            self.inner.smart_list_counts()
-        }
-
-        fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
-            self.inner.genre_counts()
-        }
-
-        fn artists_in_genre(&self, genre: &str) -> Result<Vec<Artist>, StoreError> {
-            self.inner.artists_in_genre(genre)
-        }
-
-        fn artist_albums_in_genre(
-            &self,
-            artist: &str,
-            genre: &str,
-        ) -> Result<Vec<Album>, StoreError> {
-            self.inner.artist_albums_in_genre(artist, genre)
-        }
-
-        fn album_tracks_in_genre(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-            genre: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.inner
-                .album_tracks_in_genre(album_artist, album_title, genre)
-        }
-
-        fn hit_albums_page(
-            &self,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Page<Album>, StoreError> {
-            self.inner.hit_albums_page(query, offset, limit)
-        }
-
-        fn hit_artists_page(
-            &self,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Page<Artist>, StoreError> {
-            self.inner.hit_artists_page(query, offset, limit)
-        }
-
-        fn album_hit_tracks(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-            query: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.inner
-                .album_hit_tracks(album_artist, album_title, query)
-        }
-
-        fn album_is_name_hit(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-            query: &str,
-        ) -> Result<bool, StoreError> {
-            self.inner
-                .album_is_name_hit(album_artist, album_title, query)
-        }
-
-        fn hit_albums_in_genre(
-            &self,
-            genre: &str,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            self.inner.hit_albums_in_genre(genre, query, offset, limit)
-        }
-
-        fn hit_artists_in_genre(
-            &self,
-            genre: &str,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
-            self.inner.hit_artists_in_genre(genre, query, offset, limit)
-        }
-
-        fn album_hit_tracks_in_genre(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-            genre: &str,
-            query: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.inner
-                .album_hit_tracks_in_genre(album_artist, album_title, genre, query)
-        }
-
-        fn hit_genre_counts(&self, query: &str) -> Result<Vec<GenreCount>, StoreError> {
-            self.inner.hit_genre_counts(query)
-        }
-
-        fn artists_page(
-            &self,
-            direction: riff_backend::app::store::SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Page<Artist>, StoreError> {
-            self.inner.artists_page(direction, offset, limit)
-        }
-
-        fn albums_page(
-            &self,
-            direction: riff_backend::app::store::SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Page<Album>, StoreError> {
-            self.inner.albums_page(direction, offset, limit)
-        }
-
-        fn genres_page(
-            &self,
-            direction: riff_backend::app::store::SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Page<GenreCount>, StoreError> {
-            self.inner.genres_page(direction, offset, limit)
-        }
-
-        fn artists_in_genre_page(
-            &self,
-            genre: &str,
-            direction: riff_backend::app::store::SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Page<Artist>, StoreError> {
-            self.inner
-                .artists_in_genre_page(genre, direction, offset, limit)
-        }
-
-        fn artist_albums_in_genre_page(
-            &self,
-            artist: &str,
-            genre: &str,
-            direction: riff_backend::app::store::SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Page<Album>, StoreError> {
-            self.inner
-                .artist_albums_in_genre_page(artist, genre, direction, offset, limit)
-        }
-    }
-
-    /// Seed the demo collection into a [`DemoQueryStore`]: the library map,
-    /// the flat page, the artist/album/genre read models, the sidebar counts,
-    /// and the per-artist / per-album drill answers the wrapper serves.
-    fn seeded_query_store() -> DemoQueryStore {
+    /// Seed the demo collection into a [`MockLibraryQueryStore`]: the library
+    /// map, the flat page, the artist/album/genre read models, the sidebar
+    /// counts, and the per-artist / per-album keyed drill answers.
+    fn seeded_query_store() -> MockLibraryQueryStore {
         let tracks = demo_tracks();
         let mut albums_by_artist: HashMap<String, Vec<Album>> = HashMap::new();
         let mut tracks_by_album: HashMap<(String, String), Vec<Track>> = HashMap::new();
@@ -694,11 +383,9 @@ mod tests {
             (SmartPlaylistKind::LostGems, 1),
         ];
 
-        DemoQueryStore {
-            inner,
-            albums_by_artist,
-            tracks_by_album,
-        }
+        inner.albums_by_artist = albums_by_artist;
+        inner.tracks_by_album = tracks_by_album;
+        inner
     }
 
     /// Read-only `PlaylistStore` fake serving the one "Night Drive" playlist
@@ -957,7 +644,7 @@ mod tests {
     /// harness plus the two session handles so tests can move the UI's state
     /// between frames.
     fn build_shell(
-        queries: DemoQueryStore,
+        queries: MockLibraryQueryStore,
         playback: Arc<Mutex<PlaybackSession>>,
         library: Arc<Mutex<LibrarySession>>,
     ) -> egui_kittest::Harness<'static, RiffApp> {
@@ -980,8 +667,8 @@ mod tests {
                         StoreGeneration::new(),
                         StoreGeneration::new(),
                     ),
-                    Box::new(MockTagEdits),
-                    Box::new(crate::mocks::MockPasses),
+                    Box::new(FakeTagEdits::new()),
+                    Box::new(crate::mocks::RecordingPasses::default()),
                     Box::new(ProceduralCovers::default()),
                     Arc::new(Mutex::new(
                         riff_backend::app::events::BackendEvents::default(),
@@ -996,6 +683,9 @@ mod tests {
         // screenshot frames because `apply_theme` short-circuits on an
         // unchanged selection).
         pin_settled_time(&harness.ctx);
+        // Ride the same settled-time invariant the golden suite asserts, so the
+        // README generator shares that guard rather than trusting the copy.
+        assert_settled_on_both_slots(&harness.ctx);
         harness
     }
 

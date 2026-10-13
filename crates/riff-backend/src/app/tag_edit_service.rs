@@ -25,7 +25,6 @@ use crate::app::traits::{MetadataWriter, ReplayGainTags, ReplayGainWriter, TagEd
 use crate::domain::{Track, TrackId};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use riff_library::app::errors::LibraryError;
-use riff_persistence::track::TrackMetadata;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,24 +58,6 @@ impl<W: MetadataWriter + ReplayGainWriter + Send + Sync> ReplayGainWriter
         tags: &ReplayGainTags,
     ) -> Result<(), LibraryError> {
         self.0.write_replaygain(path, tags)
-    }
-}
-
-/// Mirror a written `ReplayGainTags` into the Track's stored metadata —
-/// the same facts the file now carries, so the Store commit lands them as
-/// one durable change with the rest of the edit.
-fn apply_replaygain_to_metadata(metadata: &mut TrackMetadata, tags: &ReplayGainTags) {
-    if let Some(gain) = tags.track_gain {
-        metadata.replaygain_track_gain = Some(gain);
-    }
-    if let Some(peak) = tags.track_peak {
-        metadata.replaygain_track_peak = Some(peak);
-    }
-    if let Some(gain) = tags.album_gain {
-        metadata.replaygain_album_gain = Some(gain);
-    }
-    if let Some(peak) = tags.album_peak {
-        metadata.replaygain_album_peak = Some(peak);
     }
 }
 
@@ -274,7 +255,7 @@ impl TagEditWorker {
 
         // Apply the edit to the fresh copy; play history fields are untouched.
         request.edit.apply_to(&mut track.metadata);
-        apply_replaygain_to_metadata(&mut track.metadata, &request.replaygain);
+        request.replaygain.apply_to(&mut track.metadata);
 
         // Persist the Store facts as one durable transaction. A failed
         // commit collapses the whole save into a failure — never a silent

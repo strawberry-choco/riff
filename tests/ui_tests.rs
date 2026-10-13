@@ -1339,17 +1339,6 @@ mod tests {
             .expect("the artwork block renders headlessly")
     }
 
-    fn count_frame_pixels(image: &image::RgbaImage, color: egui::Color32) -> usize {
-        image
-            .pixels()
-            .filter(|p| {
-                p.0[0].abs_diff(color.r()) <= 4
-                    && p.0[1].abs_diff(color.g()) <= 4
-                    && p.0[2].abs_diff(color.b()) <= 4
-            })
-            .count()
-    }
-
     /// A square texture stretched over a 200x50 block covers the whole block;
     /// the same texture letterboxed covers only the 50x50 it can keep. The
     /// expected counts are the block's own geometry, not a re-run of the
@@ -1383,7 +1372,7 @@ mod tests {
                     },
                 );
             });
-            count_frame_pixels(&frame, red)
+            crate::test_utils::count_near(&frame, red, 4)
         };
 
         let stretched = red_pixels_for(Fit::Fill);
@@ -1425,7 +1414,7 @@ mod tests {
                     },
                 );
             });
-            count_frame_pixels(&frame, palette.surface_2)
+            crate::test_utils::count_near(&frame, palette.surface_2, 4)
         };
 
         // The block is 80x80 = 6,400 px on a 120x120 canvas, so well-colored
@@ -1466,7 +1455,7 @@ mod tests {
                     },
                 );
             });
-        let glyphed_well = count_frame_pixels(&glyphed, Palette::dark().surface_2);
+        let glyphed_well = crate::test_utils::count_near(&glyphed, Palette::dark().surface_2, 4);
         assert!(
             glyphed_well < dark_well - 200,
             "the glyph well carries the music mark, not just a flat block: {glyphed_well} vs {dark_well}"
@@ -1510,7 +1499,7 @@ mod tests {
     #[test]
     fn test_clear_library_confirmation_presents_its_action_as_destructive() {
         use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::prompts::{CLEAR_LIBRARY_CONFIRM_COPY, clear_library_confirm};
+        use riff_gui::ui::prompts::{CLEAR_LIBRARY_CONFIRM_COPY, destructive_confirm};
         use riff_gui::ui::theme::Palette;
 
         let palette = Palette::dark();
@@ -1521,7 +1510,14 @@ mod tests {
                 let background = ui.ctx().layer_painter(egui::LayerId::background());
                 background.rect_filled(ui.ctx().content_rect(), 0.0, palette.background);
                 let mut cache = riff_gui::ui::icons::IconCache::new();
-                let _ = clear_library_confirm(ui, &mut cache, &palette, false);
+                let _ = destructive_confirm(
+                    ui,
+                    &mut cache,
+                    &palette,
+                    false,
+                    CLEAR_LIBRARY_CONFIRM_COPY,
+                    egui::Id::new("clear_library_confirm_action"),
+                );
             });
         harness.run();
 
@@ -1531,11 +1527,11 @@ mod tests {
         );
         let frame = harness.render().expect("the confirmation renders");
         assert!(
-            count_frame_pixels(&frame, palette.error) > 0,
+            crate::test_utils::count_near(&frame, palette.error, 4) > 0,
             "the destructive action carries the error ink"
         );
         assert_eq!(
-            count_frame_pixels(&frame, palette.brand_primary),
+            crate::test_utils::count_near(&frame, palette.brand_primary, 4),
             0,
             "a destructive confirmation is never brand-filled"
         );
@@ -4228,13 +4224,147 @@ mod tests {
         playerbar::show_player_bar(ui, cache, palette, content, readouts, buf);
     }
 
-    /// Run a playerbar harness against `content` and click each label in
-    /// turn, asserting its expected action was reported (actions accumulate
-    /// across frames; `harness.run()` settles between clicks).
+    /// One driving input in a [`click_playerbar_sequence`] run. A step either
+    /// drives a widget (pointer or keyboard) and asserts the action the
+    /// settled frame reports, or asserts that a label is present in the
+    /// accessibility tree without driving anything. Each focus is an
+    /// `Option` so one run can mix a click with a keyboard activation of the
+    /// same control.
+    struct Step<'a> {
+        /// The accessible label this step is about.
+        label: &'a str,
+        /// The action a pointer click on the widget must report.
+        clicked: Option<PlayerBarAction>,
+        /// The action activating the widget from the keyboard must report.
+        keyed: Option<PlayerBarAction>,
+        /// When set, the label must simply be in the tree (a presence probe).
+        present: bool,
+        /// The caller's own failure wording for this step, when one is worth
+        /// more than the generic "clicking X must report Y".
+        complaint: Option<&'static str>,
+        /// Set when the click's outcome is a computed value that cannot be
+        /// pinned by exact equality: the reported actions are judged by this
+        /// predicate instead (the volume slider reports a fraction of its own
+        /// rect, so its level rides a tolerance).
+        matches: Option<fn(&[PlayerBarAction]) -> bool>,
+    }
+
+    /// A click on `label` that must report `expected`.
+    fn click(label: &str, expected: PlayerBarAction) -> Step<'_> {
+        Step {
+            label,
+            clicked: Some(expected),
+            keyed: None,
+            present: false,
+            complaint: None,
+            matches: None,
+        }
+    }
+
+    /// A click on `label` that must report `expected`, with the caller's own
+    /// failure wording: the two halves of a paired assertion (the same button
+    /// in two states) each name the state they pin.
+    fn click_saying<'a>(
+        label: &'a str,
+        expected: PlayerBarAction,
+        complaint: &'static str,
+    ) -> Step<'a> {
+        Step {
+            label,
+            clicked: Some(expected),
+            keyed: None,
+            present: false,
+            complaint: Some(complaint),
+            matches: None,
+        }
+    }
+
+    /// A click on `label` whose outcome is a computed value, judged by
+    /// `matches` rather than exact equality: the slider reports a fraction of
+    /// its own rect, so a level read off that rect rides its tolerance.
+    fn click_matching<'a>(
+        label: &'a str,
+        expected: PlayerBarAction,
+        matches: fn(&[PlayerBarAction]) -> bool,
+        complaint: &'static str,
+    ) -> Step<'a> {
+        Step {
+            label,
+            clicked: Some(expected),
+            keyed: None,
+            present: false,
+            complaint: Some(complaint),
+            matches: Some(matches),
+        }
+    }
+
+    /// A keyboard activation with the caller's own failure wording, for the
+    /// controls whose Enter path is the property under test.
+    fn key_press_saying<'a>(
+        label: &'a str,
+        expected: PlayerBarAction,
+        complaint: &'static str,
+    ) -> Step<'a> {
+        Step {
+            label,
+            clicked: None,
+            keyed: Some(expected),
+            present: false,
+            complaint: Some(complaint),
+            matches: None,
+        }
+    }
+
+    /// A presence probe: `label` must be in the accessibility tree, with no
+    /// input driven at all.
+    fn labelled(label: &str) -> Step<'_> {
+        Step {
+            label,
+            clicked: None,
+            keyed: None,
+            present: true,
+            complaint: None,
+            matches: None,
+        }
+    }
+
+    /// An absence probe: `label` must NOT be in the accessibility tree.
+    ///
+    /// A whole separate harness, because the affordance's absence is exactly
+    /// what the frame must show: there is nothing to click, so a click step
+    /// against that label would panic rather than report the regression this
+    /// pins.
+    fn absent(
+        content: &playerbar::PlayerBarContent<'static>,
+        palette: &theme::Palette,
+        label: &str,
+    ) -> bool {
+        use egui_kittest::kittest::Queryable;
+
+        let mut cache = icons::IconCache::new();
+        let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
+        let mut buf = Vec::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, _actions: &mut Vec<PlayerBarAction>| {
+                    buf.clear();
+                    draw_playerbar_frame(ui, &mut cache, palette, content, &mut readouts, &mut buf);
+                },
+                Vec::new(),
+            );
+        harness.run();
+        harness.query_by_label(label).is_none()
+    }
+
+    /// Run a playerbar harness against `content`, driving each step in turn
+    /// and asserting its expected action was reported (actions accumulate
+    /// across frames; `harness.run()` settles between inputs).
     fn click_playerbar_sequence(
         palette: &theme::Palette,
         content: &playerbar::PlayerBarContent<'static>,
-        clicks: &[(&str, PlayerBarAction)],
+        steps: &[Step<'_>],
     ) {
         use egui_kittest::kittest::Queryable;
 
@@ -4253,14 +4383,53 @@ mod tests {
                 Vec::new(),
             );
         harness.run();
-        for (label, expected) in clicks {
-            harness.get_by_label(label).click();
-            harness.run();
-            assert!(
-                harness.state().contains(expected),
-                "clicking {label:?} must report {expected:?}, got {:?}",
-                harness.state()
-            );
+        for step in steps {
+            if step.present {
+                assert!(
+                    harness.query_by_label(step.label).is_some(),
+                    "{:?} must carry its full accessible label",
+                    step.label
+                );
+            }
+            if let Some(expected) = &step.clicked {
+                harness.get_by_label(step.label).click();
+                harness.run();
+                let state = harness.state();
+                let hit = match step.matches {
+                    Some(matches) => matches(state),
+                    None => state.contains(expected),
+                };
+                if let Some(complaint) = step.complaint {
+                    assert!(hit, "{complaint}, got {state:?}");
+                } else {
+                    assert!(
+                        hit,
+                        "clicking {:?} must report {expected:?}, got {state:?}",
+                        step.label
+                    );
+                }
+            }
+            if let Some(expected) = &step.keyed {
+                harness.get_by_label(step.label).focus();
+                harness.run();
+                assert!(
+                    harness.get_by_label(step.label).is_focused(),
+                    "{:?} must take keyboard focus",
+                    step.label
+                );
+                harness.key_press(egui::Key::Enter);
+                harness.run();
+                let state = harness.state();
+                if let Some(complaint) = step.complaint {
+                    assert!(state.contains(expected), "{complaint}, got {state:?}");
+                } else {
+                    assert!(
+                        state.contains(expected),
+                        "Enter on the focused {:?} must report {expected:?}, got {state:?}",
+                        step.label
+                    );
+                }
+            }
         }
     }
 
@@ -4275,7 +4444,7 @@ mod tests {
         click_playerbar_sequence(
             &palette,
             &playing_content(),
-            &[(
+            &[click(
                 "Roygbiv — Boards of Canada",
                 PlayerBarAction::ToggleExpanded,
             )],
@@ -4290,7 +4459,7 @@ mod tests {
         click_playerbar_sequence(
             &palette,
             &idle,
-            &[("Nothing playing", PlayerBarAction::ToggleExpanded)],
+            &[click("Nothing playing", PlayerBarAction::ToggleExpanded)],
         );
     }
 
@@ -4403,42 +4572,16 @@ mod tests {
     /// carries the full, untruncated string.
     #[test]
     fn test_elided_title_keeps_full_accessible_label() {
-        use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::icons::IconCache;
-        use riff_gui::ui::playerbar::PlayerBarAction;
-
         let long_title = "Riffmixtape_2026_".repeat(12);
         let content = playerbar::PlayerBarContent {
             title: Some(long_title.as_str().into()),
             ..playing_content()
         };
         let palette = theme::Palette::dark();
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<PlayerBarAction>| {
-                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
-                    let mut buf = Vec::new();
-                    playerbar::show_player_bar(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        &content,
-                        &mut readouts,
-                        &mut buf,
-                    );
-                    actions.extend(buf);
-                },
-                Vec::new(),
-            );
-        harness.run();
-        assert!(
-            harness
-                .query_by_label(&format!("{long_title} \u{2014} Boards of Canada"))
-                .is_some(),
-            "the zone's accessible name must be the full un-elided title + meta"
+        click_playerbar_sequence(
+            &palette,
+            &content,
+            &[labelled(&format!("{long_title} \u{2014} Boards of Canada"))],
         );
     }
 
@@ -4453,9 +4596,9 @@ mod tests {
             &palette,
             &playing_content(),
             &[
-                ("Previous track", PlayerBarAction::Previous),
-                ("Pause", PlayerBarAction::Pause),
-                ("Next track", PlayerBarAction::Next),
+                click("Previous track", PlayerBarAction::Previous),
+                click("Pause", PlayerBarAction::Pause),
+                click("Next track", PlayerBarAction::Next),
             ],
         );
 
@@ -4464,7 +4607,7 @@ mod tests {
             playback: PlaybackState::Paused,
             ..playing_content()
         };
-        click_playerbar_sequence(&palette, &paused, &[("Play", PlayerBarAction::Resume)]);
+        click_playerbar_sequence(&palette, &paused, &[click("Play", PlayerBarAction::Resume)]);
 
         // Stopped: the primary button asks the app to play the selection.
         let stopped = playerbar::PlayerBarContent {
@@ -4474,165 +4617,71 @@ mod tests {
         click_playerbar_sequence(
             &palette,
             &stopped,
-            &[("Play", PlayerBarAction::PlaySelected)],
+            &[click("Play", PlayerBarAction::PlaySelected)],
         );
     }
     #[test]
     fn test_stop_button_only_exists_in_advanced_mode() {
-        use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::playerbar::PlayerBarAction;
 
         let palette = theme::Palette::dark();
-        let mut cache = IconCache::new();
 
         // Advanced mode: Stop is present and reports Stop.
         let advanced = playerbar::PlayerBarContent {
             advanced: true,
             ..playing_content()
         };
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<PlayerBarAction>| {
-                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
-                    let mut buf = Vec::new();
-                    playerbar::show_player_bar(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        &advanced,
-                        &mut readouts,
-                        &mut buf,
-                    );
-                    actions.extend(buf);
-                },
-                Vec::new(),
-            );
-        harness.run();
-        harness.get_by_label("Stop").click();
-        harness.run();
-        assert!(harness.state().contains(&PlayerBarAction::Stop));
+        click_playerbar_sequence(&palette, &advanced, &[click("Stop", PlayerBarAction::Stop)]);
 
         // Minimal mode: no Stop affordance at all (REQ-UI-006).
         let minimal = playing_content();
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<PlayerBarAction>| {
-                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
-                    let mut buf = Vec::new();
-                    playerbar::show_player_bar(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        &minimal,
-                        &mut readouts,
-                        &mut buf,
-                    );
-                    actions.extend(buf);
-                },
-                Vec::new(),
-            );
-        harness.run();
         assert!(
-            harness.query_by_label("Stop").is_none(),
+            absent(&minimal, &palette, "Stop"),
             "Stop stays an advanced-only affordance"
         );
     }
 
     #[test]
     fn test_shuffle_repeat_mute_report_toggle_actions() {
-        use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::playerbar::PlayerBarAction;
 
         let content = playing_content();
         let palette = theme::Palette::dark();
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<PlayerBarAction>| {
-                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
-                    let mut buf = Vec::new();
-                    playerbar::show_player_bar(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        &content,
-                        &mut readouts,
-                        &mut buf,
-                    );
-                    actions.extend(buf);
-                },
-                Vec::new(),
-            );
-        harness.run();
-
-        harness.get_by_label("Toggle shuffle").click();
-        harness.run();
-        assert!(harness.state().contains(&PlayerBarAction::ToggleShuffle));
-
-        harness.get_by_label("Cycle repeat mode").click();
-        harness.run();
-        assert!(harness.state().contains(&PlayerBarAction::ToggleRepeat));
-
-        harness.get_by_label("Mute").click();
-        harness.run();
-        assert!(harness.state().contains(&PlayerBarAction::ToggleMute));
+        click_playerbar_sequence(
+            &palette,
+            &content,
+            &[
+                click("Toggle shuffle", PlayerBarAction::ToggleShuffle),
+                click("Cycle repeat mode", PlayerBarAction::ToggleRepeat),
+                click("Mute", PlayerBarAction::ToggleMute),
+            ],
+        );
     }
 
     #[test]
     fn test_queue_open_and_expand_buttons_report_toggle_actions() {
-        use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::playerbar::PlayerBarAction;
+
+        let palette = theme::Palette::dark();
 
         // Closed/rested bar: the queue button opens the queue panel and the
         // expand button enlarges the player view (handoff issue 13).
         let closed = playing_content();
-        let palette = theme::Palette::dark();
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<PlayerBarAction>| {
-                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
-                    let mut buf = Vec::new();
-                    playerbar::show_player_bar(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        &closed,
-                        &mut readouts,
-                        &mut buf,
-                    );
-                    actions.extend(buf);
-                },
-                Vec::new(),
-            );
-        harness.run();
-
-        harness.get_by_label("Open queue").click();
-        harness.run();
-        assert!(
-            harness.state().contains(&PlayerBarAction::ToggleQueue),
-            "the queue-open button must report ToggleQueue, got {:?}",
-            harness.state()
-        );
-
-        harness.get_by_label("Expand player").click();
-        harness.run();
-        assert!(
-            harness.state().contains(&PlayerBarAction::ToggleExpanded),
-            "the expand button must report ToggleExpanded, got {:?}",
-            harness.state()
+        click_playerbar_sequence(
+            &palette,
+            &closed,
+            &[
+                click_saying(
+                    "Open queue",
+                    PlayerBarAction::ToggleQueue,
+                    "the queue-open button must report ToggleQueue",
+                ),
+                click_saying(
+                    "Expand player",
+                    PlayerBarAction::ToggleExpanded,
+                    "the expand button must report ToggleExpanded",
+                ),
+            ],
         );
 
         // Open/expanded bar: the same controls flip their labels with their
@@ -4642,89 +4691,40 @@ mod tests {
             expanded: true,
             ..playing_content()
         };
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<PlayerBarAction>| {
-                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
-                    let mut buf = Vec::new();
-                    playerbar::show_player_bar(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        &open,
-                        &mut readouts,
-                        &mut buf,
-                    );
-                    actions.extend(buf);
-                },
-                Vec::new(),
-            );
-        harness.run();
-
-        harness.get_by_label("Close queue").click();
-        harness.run();
-        assert!(harness.state().contains(&PlayerBarAction::ToggleQueue));
-
-        harness.get_by_label("Exit expanded player").click();
-        harness.run();
-        assert!(harness.state().contains(&PlayerBarAction::ToggleExpanded));
+        click_playerbar_sequence(
+            &palette,
+            &open,
+            &[
+                click("Close queue", PlayerBarAction::ToggleQueue),
+                click("Exit expanded player", PlayerBarAction::ToggleExpanded),
+            ],
+        );
     }
 
     #[test]
     fn test_keyboard_focus_reaches_the_queue_and_expand_buttons() {
-        use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::playerbar::PlayerBarAction;
 
         let content = playing_content();
         let palette = theme::Palette::dark();
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<PlayerBarAction>| {
-                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
-                    let mut buf = Vec::new();
-                    playerbar::show_player_bar(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        &content,
-                        &mut readouts,
-                        &mut buf,
-                    );
-                    actions.extend(buf);
-                },
-                Vec::new(),
-            );
-        harness.run();
 
         // Both new controls are individually focusable and Enter activates
         // them — same report as a click (settings-nav precedent).
-        harness.get_by_label("Open queue").focus();
-        harness.run();
-        assert!(harness.get_by_label("Open queue").is_focused());
-        harness.key_press(egui::Key::Enter);
-        harness.run();
-        assert!(
-            harness.state().contains(&PlayerBarAction::ToggleQueue),
-            "Enter on the focused queue button must toggle the queue, got {:?}",
-            harness.state()
-        );
-
-        harness.get_by_label("Expand player").focus();
-        harness.run();
-        assert!(harness.get_by_label("Expand player").is_focused());
-        harness.key_press(egui::Key::Enter);
-        harness.run();
-        assert!(
-            harness.state().contains(&PlayerBarAction::ToggleExpanded),
-            "Enter on the focused expand button must toggle the expanded view, got {:?}",
-            harness.state()
+        click_playerbar_sequence(
+            &palette,
+            &content,
+            &[
+                key_press_saying(
+                    "Open queue",
+                    PlayerBarAction::ToggleQueue,
+                    "Enter on the focused queue button must toggle the queue",
+                ),
+                key_press_saying(
+                    "Expand player",
+                    PlayerBarAction::ToggleExpanded,
+                    "Enter on the focused expand button must toggle the expanded view",
+                ),
+            ],
         );
     }
 
@@ -4855,121 +4855,54 @@ mod tests {
 
     #[test]
     fn test_seek_click_reports_seek_to_clicked_fraction() {
-        use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::playerbar::PlayerBarAction;
 
         let content = playing_content(); // total 245s
         let palette = theme::Palette::dark();
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<PlayerBarAction>| {
-                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
-                    let mut buf = Vec::new();
-                    playerbar::show_player_bar(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        &content,
-                        &mut readouts,
-                        &mut buf,
-                    );
-                    actions.extend(buf);
-                },
-                Vec::new(),
-            );
-        harness.run();
 
         // A center click lands halfway along the bar.
-        harness.get_by_label("Seek").click();
-        harness.run();
-        let expected = std::time::Duration::from_secs_f32(122.5);
-        assert!(
-            harness.state().contains(&PlayerBarAction::Seek(expected)),
-            "clicking the seek row must report Seek at the clicked fraction, got {:?}",
-            harness.state()
+        click_playerbar_sequence(
+            &palette,
+            &content,
+            &[click_saying(
+                "Seek",
+                PlayerBarAction::Seek(std::time::Duration::from_secs_f32(122.5)),
+                "clicking the seek row must report Seek at the clicked fraction",
+            )],
         );
     }
 
     #[test]
     fn test_volume_click_reports_set_volume_at_clicked_fraction() {
-        use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::playerbar::PlayerBarAction;
 
         let content = playing_content();
         let palette = theme::Palette::dark();
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<PlayerBarAction>| {
-                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
-                    let mut buf = Vec::new();
-                    playerbar::show_player_bar(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        &content,
-                        &mut readouts,
-                        &mut buf,
-                    );
-                    actions.extend(buf);
-                },
-                Vec::new(),
-            );
-        harness.run();
 
-        // A center click sets volume to one half.
-        harness.get_by_label("Volume").click();
-        harness.run();
-        assert!(
-            harness
-                .state()
-                .iter()
-                .any(|a| matches!(a, PlayerBarAction::SetVolume(v) if (*v - 0.5).abs() < 1e-3)),
-            "clicking the volume slider must report SetVolume at the clicked fraction, got {:?}",
-            harness.state()
+        // A center click sets volume to one half. The reported level is a
+        // fraction of the slider's own rect, so the outcome rides the same
+        // tolerance the inline site carried rather than an exact float.
+        click_playerbar_sequence(
+            &palette,
+            &content,
+            &[click_matching(
+                "Volume",
+                PlayerBarAction::SetVolume(0.5),
+                |actions| {
+                    actions.iter().any(
+                        |a| matches!(a, PlayerBarAction::SetVolume(v) if (*v - 0.5).abs() < 1e-3),
+                    )
+                },
+                "clicking the volume slider must report SetVolume at the clicked fraction",
+            )],
         );
     }
 
     #[test]
     fn test_queue_position_label_renders() {
-        use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::icons::IconCache;
-
         let content = playing_content(); // "3/12"
         let palette = theme::Palette::dark();
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, actions: &mut Vec<riff_gui::ui::playerbar::PlayerBarAction>| {
-                    let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
-                    let mut buf = Vec::new();
-                    playerbar::show_player_bar(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        &content,
-                        &mut readouts,
-                        &mut buf,
-                    );
-                    actions.extend(buf);
-                },
-                Vec::new(),
-            );
-        harness.run();
-
-        assert!(
-            harness.query_by_label("3/12").is_some(),
-            "the queue position label renders where the mockup places it"
-        );
+        click_playerbar_sequence(&palette, &content, &[labelled("3/12")]);
     }
 
     // --- Player bar actions drive the transport intents (Issue 08) ---------------
@@ -5845,11 +5778,20 @@ mod tests {
         content: &SettingsContent,
         current: riff_gui::ui::settings::SettingsSection,
     ) -> egui_kittest::Harness<'_, Vec<SettingsAction>> {
+        settings_modal_harness_sized(content, current, egui::vec2(800.0, 720.0))
+    }
+
+    /// [`settings_modal_harness`] at a caller-chosen viewport size.
+    pub(super) fn settings_modal_harness_sized(
+        content: &SettingsContent,
+        current: riff_gui::ui::settings::SettingsSection,
+        size: egui::Vec2,
+    ) -> egui_kittest::Harness<'_, Vec<SettingsAction>> {
         use riff_gui::ui::settings::show_settings_modal;
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
         egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, 720.0))
+            .with_size(size)
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 move |ui, actions: &mut Vec<SettingsAction>| {
@@ -6246,8 +6188,7 @@ mod tests {
     #[test]
     fn test_settings_pane_focus_order_is_reading_order_in_both_branches() {
         use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
-        use riff_gui::ui::theme::Palette;
+        use riff_gui::ui::settings::SettingsSection;
 
         // One probe per focusable pane widget, in reading order. These four are
         // the *whole* of the pane's tab chain: the format chips and the
@@ -6264,24 +6205,11 @@ mod tests {
 
         let walk_order = |width: f32| {
             let content = sample_content();
-            let palette = Palette::dark();
-            let mut cache = icons::IconCache::new();
-            let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
-                egui_kittest::Harness::builder()
-                    .with_size(egui::vec2(width, 900.0))
-                    .with_pixels_per_point(1.0)
-                    .build_ui_state(
-                        move |ui, actions: &mut Vec<SettingsAction>| {
-                            actions.extend(show_settings_modal(
-                                ui,
-                                &mut cache,
-                                &palette,
-                                &content,
-                                SettingsSection::Library,
-                            ));
-                        },
-                        Vec::new(),
-                    );
+            let mut harness = settings_modal_harness_sized(
+                &content,
+                SettingsSection::Library,
+                egui::vec2(width, 900.0),
+            );
             harness.run();
 
             let mut seen: Vec<String> = Vec::new();
@@ -6381,10 +6309,7 @@ mod tests {
     #[test]
     fn test_minimum_stage_library_row_has_no_overlap_or_clipping() {
         use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::settings::{
-            RowFlow, SettingsSection, row_flow, row_height, show_settings_modal,
-        };
-        use riff_gui::ui::theme::Palette;
+        use riff_gui::ui::settings::{RowFlow, SettingsSection, row_flow, row_height};
         use riff_gui::ui::theme::geometry::window::MIN_STAGE_SIZE;
 
         let path = sample_content().libraries[0]
@@ -6392,24 +6317,8 @@ mod tests {
             .to_string_lossy()
             .to_string();
         let content = sample_content();
-        let palette = Palette::dark();
-        let mut cache = icons::IconCache::new();
-        let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
-            egui_kittest::Harness::builder()
-                .with_size(MIN_STAGE_SIZE)
-                .with_pixels_per_point(1.0)
-                .build_ui_state(
-                    move |ui, actions: &mut Vec<SettingsAction>| {
-                        actions.extend(show_settings_modal(
-                            ui,
-                            &mut cache,
-                            &palette,
-                            &content,
-                            SettingsSection::Library,
-                        ));
-                    },
-                    Vec::new(),
-                );
+        let mut harness =
+            settings_modal_harness_sized(&content, SettingsSection::Library, MIN_STAGE_SIZE);
         harness.run();
 
         // The row must have reflowed: the min-stage pane is far below the
@@ -6715,8 +6624,7 @@ mod tests {
     #[test]
     fn test_settings_pane_columns_read_left_then_right() {
         use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
-        use riff_gui::ui::theme::Palette;
+        use riff_gui::ui::settings::SettingsSection;
 
         /// Tall enough that the whole pane is laid out unclipped, so every
         /// probed widget is visible in the first frame.
@@ -6732,24 +6640,11 @@ mod tests {
 
         let render = |width: f32| {
             let content = sample_content();
-            let palette = Palette::dark();
-            let mut cache = icons::IconCache::new();
-            let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
-                egui_kittest::Harness::builder()
-                    .with_size(egui::vec2(width, PANE_PROBE_H))
-                    .with_pixels_per_point(1.0)
-                    .build_ui_state(
-                        move |ui, actions: &mut Vec<SettingsAction>| {
-                            actions.extend(show_settings_modal(
-                                ui,
-                                &mut cache,
-                                &palette,
-                                &content,
-                                SettingsSection::Library,
-                            ));
-                        },
-                        Vec::new(),
-                    );
+            let mut harness = settings_modal_harness_sized(
+                &content,
+                SettingsSection::Library,
+                egui::vec2(width, PANE_PROBE_H),
+            );
             harness.run();
             // All four rects are read in ONE frame, at ONE scroll position.
             // Scrolling each label into view first would move the pane between
@@ -6896,27 +6791,14 @@ mod tests {
     #[test]
     fn test_artwork_card_holds_only_the_read_embedded_preference() {
         use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
+        use riff_gui::ui::settings::SettingsSection;
 
         let content = sample_content();
-        let palette = theme::Palette::dark();
-        let mut cache = icons::IconCache::new();
-        let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
-            egui_kittest::Harness::builder()
-                .with_size(egui::vec2(1280.0, 840.0))
-                .with_pixels_per_point(1.0)
-                .build_ui_state(
-                    move |ui, actions: &mut Vec<SettingsAction>| {
-                        actions.extend(show_settings_modal(
-                            ui,
-                            &mut cache,
-                            &palette,
-                            &content,
-                            SettingsSection::Library,
-                        ));
-                    },
-                    Vec::new(),
-                );
+        let mut harness = settings_modal_harness_sized(
+            &content,
+            SettingsSection::Library,
+            egui::vec2(1280.0, 840.0),
+        );
         harness.run();
 
         assert!(
@@ -6949,20 +6831,22 @@ mod tests {
     fn test_scan_card_height_is_stable_across_error_counts() {
         use riff_gui::ui::settings::{
             SettingsSection, scan_card_height, scan_card_lines, scan_line_color,
-            show_settings_modal,
         };
         use riff_gui::ui::theme::Palette;
         use riff_gui::ui::theme::geometry::settings::SCAN_CARD_H;
 
-        // The pure seam: three lines always, the error line's colour keyed to
-        // whether the count is non-zero.
+        // Pin the clock seam the pure-seam checks read: the scan card's
+        // "Last full scan" stamp is measured against this fixed instant
+        // (`RiffApp::now`'s twin), so the assertions no longer race the wall
+        // clock the way the old `at: SystemTime::now()` fixture did.
+        let fixed_now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_706_000_000);
         let summary = |errors: usize| riff_backend::app::store::FullScanSummary {
-            at: std::time::SystemTime::now(),
+            at: fixed_now,
             files: 1284,
             errors,
         };
         for errors in [0_usize, 1, 3, 999] {
-            let lines = scan_card_lines(Some(&summary(errors)));
+            let lines = scan_card_lines(Some(&summary(errors)), Some(fixed_now));
             assert_eq!(
                 lines.iter().count(),
                 riff_gui::ui::settings::ScanCardLines::LINES,
@@ -6978,7 +6862,7 @@ mod tests {
         // No scan recorded still paints three lines, so the card cannot
         // collapse on the very first run either.
         assert_eq!(
-            scan_card_lines(None).iter().count(),
+            scan_card_lines(None, Some(fixed_now)).iter().count(),
             riff_gui::ui::settings::ScanCardLines::LINES,
             "a page with no scan recorded still paints three lines"
         );
@@ -6986,7 +6870,7 @@ mod tests {
         // The error line wears the error role exactly when the count is
         // non-zero, and the muted ink rung otherwise — including at zero.
         for errors in [0_usize, 1, 3, 999] {
-            let lines = scan_card_lines(Some(&summary(errors)));
+            let lines = scan_card_lines(Some(&summary(errors)), Some(fixed_now));
             let dark = Palette::dark();
             assert_eq!(
                 scan_line_color(&lines.error, &dark),
@@ -7005,14 +6889,17 @@ mod tests {
         // The height the card allocates is a function of the line count and
         // nothing else: every outcome allocates the same height.
         for errors in [0_usize, 1, 3, 999] {
-            let lines = scan_card_lines(Some(&summary(errors)));
+            let lines = scan_card_lines(Some(&summary(errors)), Some(fixed_now));
             assert_eq!(
                 scan_card_height(&lines),
                 SCAN_CARD_H,
                 "the card must allocate SCAN_CARD_H whatever the counts (errors = {errors})"
             );
         }
-        assert_eq!(scan_card_height(&scan_card_lines(None)), SCAN_CARD_H);
+        assert_eq!(
+            scan_card_height(&scan_card_lines(None, Some(fixed_now))),
+            SCAN_CARD_H
+        );
 
         // The rendered card: identical rect for a zero-error and a
         // many-error scan.
@@ -7021,24 +6908,11 @@ mod tests {
                 last_scan: Some(summary(errors)),
                 ..sample_content()
             };
-            let palette = Palette::dark();
-            let mut cache = icons::IconCache::new();
-            let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
-                egui_kittest::Harness::builder()
-                    .with_size(egui::vec2(1280.0, 840.0))
-                    .with_pixels_per_point(1.0)
-                    .build_ui_state(
-                        move |ui, actions: &mut Vec<SettingsAction>| {
-                            actions.extend(show_settings_modal(
-                                ui,
-                                &mut cache,
-                                &palette,
-                                &content,
-                                SettingsSection::Library,
-                            ));
-                        },
-                        Vec::new(),
-                    );
+            let mut harness = settings_modal_harness_sized(
+                &content,
+                SettingsSection::Library,
+                egui::vec2(1280.0, 840.0),
+            );
             harness.run();
             use egui_kittest::kittest::Queryable;
             let rect = harness.get_by_label("Rescan now").rect();
@@ -7078,24 +6952,12 @@ mod tests {
     #[test]
     fn test_clear_library_is_reachable_from_every_settings_section() {
         use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
+        use riff_gui::ui::settings::SettingsSection;
 
         for section in SettingsSection::ALL {
             let content = sample_content();
-            let palette = theme::Palette::dark();
-            let mut cache = icons::IconCache::new();
-            let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
-                egui_kittest::Harness::builder()
-                    .with_size(egui::vec2(1280.0, 840.0))
-                    .with_pixels_per_point(1.0)
-                    .build_ui_state(
-                        move |ui, actions: &mut Vec<SettingsAction>| {
-                            actions.extend(show_settings_modal(
-                                ui, &mut cache, &palette, &content, section,
-                            ));
-                        },
-                        Vec::new(),
-                    );
+            let mut harness =
+                settings_modal_harness_sized(&content, section, egui::vec2(1280.0, 840.0));
             harness.run();
 
             assert!(
@@ -7122,28 +6984,12 @@ mod tests {
     #[test]
     fn test_clear_thumbnail_cache_is_reachable_from_the_library_section() {
         use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
+        use riff_gui::ui::settings::SettingsSection;
 
         for size in [egui::vec2(1280.0, 840.0), egui::vec2(920.0, 840.0)] {
             let content = sample_content();
-            let palette = theme::Palette::dark();
-            let mut cache = icons::IconCache::new();
-            let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
-                egui_kittest::Harness::builder()
-                    .with_size(size)
-                    .with_pixels_per_point(1.0)
-                    .build_ui_state(
-                        move |ui, actions: &mut Vec<SettingsAction>| {
-                            actions.extend(show_settings_modal(
-                                ui,
-                                &mut cache,
-                                &palette,
-                                &content,
-                                SettingsSection::Library,
-                            ));
-                        },
-                        Vec::new(),
-                    );
+            let mut harness =
+                settings_modal_harness_sized(&content, SettingsSection::Library, size);
             harness.run();
 
             harness
@@ -7788,7 +7634,7 @@ mod tests {
     #[test]
     fn test_playlist_entry_rows_keep_click_and_context_menu_while_reorderable() {
         use crate::mocks::{
-            MockLibraryMutationStore, MockPlaylistStore, MockTagEdits, MockTransport,
+            FakeTagEdits, MockLibraryMutationStore, MockPlaylistStore, MockTransport,
         };
         use egui_kittest::kittest::Queryable;
         use riff_gui::ui::app::{InlineTagEditor, TrackMenuHost, TrackMenuSubject};
@@ -7805,7 +7651,7 @@ mod tests {
             events: Vec<&'static str>,
             selected: Option<TrackId>,
             transport: MockTransport,
-            passes: crate::mocks::MockPasses,
+            passes: crate::mocks::RecordingPasses,
             playlist_store: MockPlaylistStore,
             library_mutations: MockLibraryMutationStore,
             tag_editor: InlineTagEditor,
@@ -7817,10 +7663,10 @@ mod tests {
                     events: Vec::new(),
                     selected: None,
                     transport: MockTransport::new(),
-                    passes: crate::mocks::MockPasses,
+                    passes: crate::mocks::RecordingPasses::default(),
                     playlist_store: MockPlaylistStore::default(),
                     library_mutations: MockLibraryMutationStore::new(),
-                    tag_editor: InlineTagEditor::new(Box::new(MockTagEdits)),
+                    tag_editor: InlineTagEditor::new(Box::new(FakeTagEdits::new())),
                 }
             }
 
@@ -8153,9 +7999,7 @@ mod tests {
 #[cfg(test)]
 mod settings_scalar_handler_tests {
     use super::*;
-    use riff_gui::ui::settings::{
-        LibraryRow, SettingsAction, SettingsContent, SettingsSection, show_settings_modal,
-    };
+    use riff_gui::ui::settings::{LibraryRow, SettingsContent, SettingsSection};
     use std::path::PathBuf;
 
     /// The "Reset to defaults" button was removed (plan #2): the action must
@@ -8166,7 +8010,6 @@ mod settings_scalar_handler_tests {
     #[test]
     fn test_settings_modal_does_not_render_reset_to_defaults() {
         use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::theme::Palette;
 
         let content = SettingsContent {
             libraries: vec![LibraryRow {
@@ -8177,24 +8020,11 @@ mod settings_scalar_handler_tests {
             }],
             ..SettingsContent::default()
         };
-        let palette = Palette::dark();
-        let mut cache = riff_gui::ui::icons::IconCache::new();
-        let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
-            egui_kittest::Harness::builder()
-                .with_size(egui::vec2(800.0, 720.0))
-                .with_pixels_per_point(1.0)
-                .build_ui_state(
-                    |ui, actions: &mut Vec<SettingsAction>| {
-                        actions.extend(show_settings_modal(
-                            ui,
-                            &mut cache,
-                            &palette,
-                            &content,
-                            SettingsSection::Library,
-                        ));
-                    },
-                    Vec::new(),
-                );
+        let mut harness = super::tests::settings_modal_harness_sized(
+            &content,
+            SettingsSection::Library,
+            egui::vec2(800.0, 720.0),
+        );
         harness.run();
 
         // The label must not be painted anywhere in the modal.
@@ -8222,8 +8052,9 @@ mod settings_scalar_handler_tests {
 #[cfg(test)]
 mod background_service_ui_tests {
     use super::*;
+    use crate::mocks::{FakeTagEdits, RecordingCovers};
     use riff_backend::app::cover_service::{ClearCacheOutcome, Covers};
-    use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
+    use riff_backend::app::tag_edit_service::TagEditOutcome;
     use riff_gui::ui::app::CoverCacheKey;
     use riff_gui::ui::app::{
         COVER_CACHE_CAP, COVER_HERO, COVER_TEXTURE_BYTE_BUDGET, InlineTagEditor, InspectorContent,
@@ -8234,109 +8065,8 @@ mod background_service_ui_tests {
     use riff_gui::ui::cover_cache::CoverCache;
     use riff_gui::ui::selection::{TagField, TagRow, TagRowState};
     use riff_library::app::traits::{DecodedCover, RequestedSize};
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
-
-    /// Recording [`TagEdits`] fake: captures every submitted request and
-    /// yields scripted outcomes from `poll` in order. `Clone` is a second
-    /// inspection handle over the same shared state, so the controller can
-    /// own one while the test inspects the other.
-    #[derive(Clone)]
-    struct FakeTagEdits {
-        submitted: Arc<Mutex<Vec<TagEditRequest>>>,
-        outcomes: Arc<Mutex<std::collections::VecDeque<TagEditOutcome>>>,
-    }
-
-    impl FakeTagEdits {
-        fn new() -> Self {
-            Self {
-                submitted: Arc::new(Mutex::new(Vec::new())),
-                outcomes: Arc::new(Mutex::new(std::collections::VecDeque::new())),
-            }
-        }
-
-        /// A fake that yields `outcomes` from `poll` in order.
-        fn with_outcomes(outcomes: Vec<TagEditOutcome>) -> Self {
-            let fake = Self::new();
-            *fake.outcomes.lock().unwrap() = outcomes.into();
-            fake
-        }
-
-        fn requests(&self) -> Vec<TagEditRequest> {
-            self.submitted.lock().unwrap().clone()
-        }
-    }
-
-    impl TagEdits for FakeTagEdits {
-        fn submit(&self, request: TagEditRequest) {
-            self.submitted.lock().unwrap().push(request);
-        }
-
-        fn poll(&self) -> Option<TagEditOutcome> {
-            self.outcomes.lock().unwrap().pop_front()
-        }
-    }
-
-    /// Recording [`Covers`] fake: captures request intent, serves nothing.
-    /// Records cache-clear requests too, and can be handed a scripted clear
-    /// outcome, so the in-progress → settled transition is driven without a thread.
-    struct RecordingCovers {
-        requested: Mutex<Vec<(TrackId, PathBuf, RequestedSize)>>,
-        clears: AtomicUsize,
-        clear_outcomes: Mutex<VecDeque<ClearCacheOutcome>>,
-    }
-
-    impl RecordingCovers {
-        fn new() -> Self {
-            Self {
-                requested: Mutex::new(Vec::new()),
-                clears: AtomicUsize::new(0),
-                clear_outcomes: Mutex::new(VecDeque::new()),
-            }
-        }
-
-        fn requested(&self) -> Vec<(TrackId, PathBuf, RequestedSize)> {
-            self.requested.lock().unwrap().clone()
-        }
-
-        fn clear_calls(&self) -> usize {
-            self.clears.load(Ordering::SeqCst)
-        }
-
-        /// Queue one settled outcome for the next `poll_cache_clear`.
-        fn serve_clear(&self, outcome: ClearCacheOutcome) {
-            self.clear_outcomes.lock().unwrap().push_back(outcome);
-        }
-    }
-
-    impl Covers for RecordingCovers {
-        fn request(&self, track_id: TrackId, path: PathBuf, size: RequestedSize) {
-            self.requested.lock().unwrap().push((track_id, path, size));
-        }
-
-        /// A folder request lands in the same recording: its identity is its
-        /// directory path, so the entries are told apart by what a caller puts
-        /// in the slot, not by which method arrived.
-        fn request_folder(&self, folder: &std::path::Path, size: RequestedSize) {
-            let folder = folder.to_path_buf();
-            let id = TrackId::from_path(&folder);
-            self.requested.lock().unwrap().push((id, folder, size));
-        }
-
-        fn poll(&self) -> Vec<(TrackId, RequestedSize, Option<DecodedCover>)> {
-            Vec::new()
-        }
-
-        fn clear_cache(&self) {
-            self.clears.fetch_add(1, Ordering::SeqCst);
-        }
-
-        fn poll_cache_clear(&self) -> Option<ClearCacheOutcome> {
-            self.clear_outcomes.lock().unwrap().pop_front()
-        }
-    }
 
     /// Fill the texture map the way a live frame does, placeholder tile included.
     fn fill_texture_map(
@@ -8819,7 +8549,8 @@ mod background_service_ui_tests {
         let mut editor = track_editor(&edits);
         editor.save();
         let mut board = riff_gui::ui::feedback::FeedbackBoard::default();
-        board.set_tag_edit(
+        board.set(
+            riff_backend::app::events::NoticeSource::TagEdit,
             "earlier message",
             riff_backend::app::events::NoticeSeverity::Info,
         );
@@ -9010,7 +8741,8 @@ mod background_service_ui_tests {
         let mut editor = album_editor(&edits);
         editor.save();
         let mut board = riff_gui::ui::feedback::FeedbackBoard::default();
-        board.set_tag_edit(
+        board.set(
+            riff_backend::app::events::NoticeSource::TagEdit,
             "earlier message",
             riff_backend::app::events::NoticeSeverity::Info,
         );
@@ -9455,7 +9187,11 @@ mod playback_notice_ui_tests {
     #[test]
     fn test_empty_notice_batch_and_clear_leave_the_line_empty() {
         let mut board = FeedbackBoard::default();
-        board.set_scan("Scanning 12 files", NoticeSeverity::Info);
+        board.set(
+            NoticeSource::Scan,
+            "Scanning 12 files",
+            NoticeSeverity::Info,
+        );
         assert!(!board.is_empty());
 
         // An empty drained batch changes nothing.
@@ -11438,40 +11174,11 @@ mod browser_column_ui_tests {
             .expect("the row band must render headlessly")
     }
 
-    /// Count frame pixels within a hair of `color` (rounded corners antialias,
-    /// so the interior is what matters).
-    fn count_band_color(image: &image::RgbaImage, color: egui::Color32) -> usize {
-        image
-            .pixels()
-            .filter(|p| {
-                p.0[0].abs_diff(color.r()) <= 2
-                    && p.0[1].abs_diff(color.g()) <= 2
-                    && p.0[2].abs_diff(color.b()) <= 2
-            })
-            .count()
-    }
-
-    /// Count frame pixels within a hair of `color` inside `rect`, at the same
-    /// +/-2 tolerance as [`count_band_color`] but scoped to one area, so a
-    /// test can ask what a plane painted over a specific region.
+    /// Count frame pixels within a hair of `color` inside `rect` — scoped to
+    /// one area, so a test can ask what a plane painted over a specific
+    /// region.
     fn count_color_in(image: &image::RgbaImage, color: egui::Color32, rect: egui::Rect) -> usize {
-        let (width, height) = image.dimensions();
-        let x0 = rect.min.x.floor().max(0.0) as u32;
-        let y0 = rect.min.y.floor().max(0.0) as u32;
-        let x1 = (rect.max.x.ceil().max(0.0) as u32).min(width);
-        let y1 = (rect.max.y.ceil().max(0.0) as u32).min(height);
-        image
-            .enumerate_pixels()
-            .filter(|(x, y, p)| {
-                *x >= x0
-                    && *x < x1
-                    && *y >= y0
-                    && *y < y1
-                    && p.0[0].abs_diff(color.r()) <= 2
-                    && p.0[1].abs_diff(color.g()) <= 2
-                    && p.0[2].abs_diff(color.b()) <= 2
-            })
-            .count()
+        crate::test_utils::count_near_in(image, color, rect, 2)
     }
 
     /// Render one browser column of idle rows over the card plane the shell
@@ -11597,40 +11304,46 @@ mod browser_column_ui_tests {
 
         let selected = render_row_band(true, false, false);
         assert!(
-            count_band_color(&selected, palette.surface_3) > 1_000,
+            crate::test_utils::count_near(&selected, palette.surface_3, 2) > 1_000,
             "a selected row paints the selected fill"
         );
         assert_eq!(
-            count_band_color(&selected, palette.row_hover),
+            crate::test_utils::count_near(&selected, palette.row_hover, 2),
             0,
             "a selected row never also paints the hover wash"
         );
 
         let hovered = render_row_band(false, true, false);
         assert!(
-            count_band_color(&hovered, palette.row_hover) > 1_000,
+            crate::test_utils::count_near(&hovered, palette.row_hover, 2) > 1_000,
             "a hovered row paints the hover wash"
         );
         assert_eq!(
-            count_band_color(&hovered, palette.surface_3),
+            crate::test_utils::count_near(&hovered, palette.surface_3, 2),
             0,
             "a hovered (not selected) row paints no selected fill"
         );
 
         let idle = render_row_band(false, false, false);
-        assert_eq!(count_band_color(&idle, palette.surface_3), 0);
-        assert_eq!(count_band_color(&idle, palette.row_hover), 0);
+        assert_eq!(
+            crate::test_utils::count_near(&idle, palette.surface_3, 2),
+            0
+        );
+        assert_eq!(
+            crate::test_utils::count_near(&idle, palette.row_hover, 2),
+            0
+        );
 
         let ring = riff_gui::ui::theme::focus_ring_stroke(&palette, true)
             .expect("a focused row has a ring stroke")
             .color;
         let focused = render_row_band(false, false, true);
         assert!(
-            count_band_color(&focused, ring) > 0,
+            crate::test_utils::count_near(&focused, ring, 2) > 0,
             "a focused row paints its focus ring"
         );
         assert_eq!(
-            count_band_color(&idle, ring),
+            crate::test_utils::count_near(&idle, ring, 2),
             0,
             "an unfocused row paints no ring"
         );
@@ -12038,20 +11751,20 @@ mod browser_column_ui_tests {
 
         let focused = render_icon_button(true, false);
         assert!(
-            count_band_color(&focused, ring) > 0,
+            crate::test_utils::count_near(&focused, ring, 2) > 0,
             "a focused icon button paints the shared focus ring"
         );
 
         let unfocused = render_icon_button(false, false);
         assert_eq!(
-            count_band_color(&unfocused, ring),
+            crate::test_utils::count_near(&unfocused, ring, 2),
             0,
             "an unfocused icon button paints no ring"
         );
 
         let disabled_focused = render_icon_button(true, true);
         assert_eq!(
-            count_band_color(&disabled_focused, ring),
+            crate::test_utils::count_near(&disabled_focused, ring, 2),
             0,
             "a disabled icon button cannot take focus, so it never rings"
         );
@@ -12663,31 +12376,31 @@ mod browser_column_ui_tests {
 
         let destructive = render_text_button(Variant::Destructive, false, false);
         assert!(
-            count_band_color(&destructive, palette.error) > 0,
+            crate::test_utils::count_near(&destructive, palette.error, 2) > 0,
             "Destructive paints the error ink"
         );
         assert_eq!(
-            count_band_color(&destructive, palette.brand_primary),
+            crate::test_utils::count_near(&destructive, palette.brand_primary, 2),
             0,
             "Destructive is never brand-filled"
         );
 
         let focused = render_text_button(Variant::Secondary, true, false);
         assert!(
-            count_band_color(&focused, ring) > 0,
+            crate::test_utils::count_near(&focused, ring, 2) > 0,
             "a focused enabled button paints the shared focus ring"
         );
 
         let unfocused = render_text_button(Variant::Secondary, false, false);
         assert_eq!(
-            count_band_color(&unfocused, ring),
+            crate::test_utils::count_near(&unfocused, ring, 2),
             0,
             "an unfocused button paints no ring"
         );
 
         let disabled_focused = render_text_button(Variant::Primary, true, true);
         assert_eq!(
-            count_band_color(&disabled_focused, ring),
+            crate::test_utils::count_near(&disabled_focused, ring, 2),
             0,
             "a disabled button cannot take focus, so it never rings"
         );
@@ -12821,12 +12534,12 @@ mod browser_column_ui_tests {
         let ring_color = riff_gui::ui::sidebar::search_ring_stroke(&palette, true).color;
         let focused_img = run_text_field(true);
         assert!(
-            count_band_color(&focused_img, ring_color) > 0,
+            crate::test_utils::count_near(&focused_img, ring_color, 2) > 0,
             "a focused text field paints the search ring"
         );
         let idle_img = run_text_field(false);
         assert_eq!(
-            count_band_color(&idle_img, ring_color),
+            crate::test_utils::count_near(&idle_img, ring_color, 2),
             0,
             "an idle text field paints no focus ring"
         );
@@ -13954,7 +13667,7 @@ mod browser_column_ui_tests {
             }],
             ..riff_backend::app::state::LibrarySession::default()
         };
-        let content = resolve_inspector(&mut views, &library);
+        let content = resolve_inspector(&mut views, &library, None);
         assert!(content.visible, "an album selection shows the inspector");
         assert_eq!(content.kind, InspectorKind::Album);
         assert_eq!(
@@ -14062,7 +13775,7 @@ mod browser_column_ui_tests {
             browser_path: vec![BrowserSelection::Artist("Boards of Canada".to_string())],
             ..riff_backend::app::state::LibrarySession::default()
         };
-        let content = resolve_inspector(&mut views, &library);
+        let content = resolve_inspector(&mut views, &library, None);
         assert!(content.visible, "an artist selection shows the inspector");
         assert_eq!(content.kind, InspectorKind::Artist);
         assert_eq!(content.title.as_deref(), Some("Boards of Canada"));
@@ -14078,7 +13791,7 @@ mod browser_column_ui_tests {
             browser_path: vec![BrowserSelection::Genre("Electronic".to_string())],
             ..riff_backend::app::state::LibrarySession::default()
         };
-        let content = resolve_inspector(&mut views, &library);
+        let content = resolve_inspector(&mut views, &library, None);
         assert!(content.visible, "a genre selection shows the inspector");
         assert_eq!(content.kind, InspectorKind::Genre);
         assert_eq!(content.title.as_deref(), Some("Electronic"));
@@ -14098,7 +13811,7 @@ mod browser_column_ui_tests {
             selected_track: Some(t1.id.clone()),
             ..riff_backend::app::state::LibrarySession::default()
         };
-        let content = resolve_inspector(&mut views, &library);
+        let content = resolve_inspector(&mut views, &library, None);
         assert!(content.visible, "a selected track shows the inspector");
         assert_eq!(content.kind, InspectorKind::Track);
         assert_eq!(content.title.as_deref(), Some("Magic Window"));
@@ -14120,7 +13833,7 @@ mod browser_column_ui_tests {
             selected_track: Some(t1.id.clone()),
             ..riff_backend::app::state::LibrarySession::default()
         };
-        let content = resolve_inspector(&mut views, &library);
+        let content = resolve_inspector(&mut views, &library, None);
         assert!(
             content.visible,
             "a track clicked in the Tracks column shows the inspector"
@@ -14139,7 +13852,7 @@ mod browser_column_ui_tests {
         // No selection at all: the inspector is fully hidden.
         let empty = riff_backend::app::state::LibrarySession::default();
         assert!(
-            !resolve_inspector(&mut views, &empty).visible,
+            !resolve_inspector(&mut views, &empty, None).visible,
             "no selection hides the inspector"
         );
 
@@ -14153,7 +13866,7 @@ mod browser_column_ui_tests {
             ..riff_backend::app::state::LibrarySession::default()
         };
         assert!(
-            !resolve_inspector(&mut views, &gone).visible,
+            !resolve_inspector(&mut views, &gone, None).visible,
             "an unresolvable album hides the inspector"
         );
     }
@@ -14239,6 +13952,7 @@ mod browser_column_ui_tests {
                     selected_track: Some(id),
                     ..LibrarySession::default()
                 },
+                None,
             )
         };
 
@@ -14305,6 +14019,7 @@ mod browser_column_ui_tests {
                     }],
                     ..LibrarySession::default()
                 },
+                None,
             );
             content
                 .tags
@@ -14357,7 +14072,7 @@ mod browser_column_ui_tests {
             }],
             ..riff_backend::app::state::LibrarySession::default()
         };
-        let content = resolve_inspector(&mut views, &library);
+        let content = resolve_inspector(&mut views, &library, None);
         assert!(content.visible, "the varied album shows the inspector");
         assert_eq!(content.kind, InspectorKind::Album);
         let labels: Vec<&str> = content.tags.iter().map(|r| r.field.label()).collect();
@@ -14453,7 +14168,7 @@ mod browser_column_ui_tests {
             selected_track: Some(t3.id.clone()),
             ..riff_backend::app::state::LibrarySession::default()
         };
-        let content = resolve_inspector(&mut views, &library);
+        let content = resolve_inspector(&mut views, &library, None);
         assert!(content.visible, "the selected track shows the inspector");
         assert_eq!(content.kind, InspectorKind::Track);
         let row = |field: TagField| content.tags.iter().find(|r| r.field == field).unwrap();
@@ -14492,7 +14207,7 @@ mod browser_column_ui_tests {
             browser_path: vec![BrowserSelection::Artist("Mixed".to_string())],
             ..riff_backend::app::state::LibrarySession::default()
         };
-        let content = resolve_inspector(&mut views, &library);
+        let content = resolve_inspector(&mut views, &library, None);
         assert!(content.visible);
         assert!(
             content.tags.is_empty(),
@@ -14503,7 +14218,7 @@ mod browser_column_ui_tests {
             ..riff_backend::app::state::LibrarySession::default()
         };
         assert!(
-            !resolve_inspector(&mut views, &library).visible,
+            !resolve_inspector(&mut views, &library, None).visible,
             "a genre with no tracks resolves hidden"
         );
 
@@ -14518,7 +14233,7 @@ mod browser_column_ui_tests {
             selected_track: Some(t1.id.clone()),
             ..riff_backend::app::state::LibrarySession::default()
         };
-        let content = resolve_inspector(&mut views, &library);
+        let content = resolve_inspector(&mut views, &library, None);
         assert_eq!(content.kind, InspectorKind::Track);
         assert_eq!(
             content
@@ -14972,17 +14687,19 @@ mod whole_frame_tests {
     use std::sync::{Arc, Mutex};
 
     use crate::mocks::{
-        MockLibraryMutationStore, MockLibraryQueryStore, MockPlaylistStore, MockScans,
-        MockSettingsStore, MockTagEdits, MockTransport, SettingsCall, TransportIntent,
+        FailingQuery, FakeTagEdits, MockLibraryMutationStore, MockLibraryQueryStore,
+        MockPlaylistStore, MockScans, MockSettingsStore, MockTransport, SettingsCall,
+        TransportIntent,
     };
     use crate::test_utils::{create_test_track_with_metadata, float_close};
 
     /// The [`Covers`] seam every [`Shell`] is wired with. Track requests are
-    /// dropped exactly as `MockCovers` always did; folder requests are recorded
-    /// by identity — the directory they were asked for — and `poll` serves
-    /// nothing back. An empty poll means the app's texture cache never fills, so
-    /// a frame keeps asking for every visible folder just as it would on a cold
-    /// start, which is what a test of *what the row asks for* needs.
+    /// dropped and never answered — the same nothing-arrives arm the composed
+    /// goldens' `RecordingCovers` gives their no-art case; folder requests are
+    /// recorded by identity — the directory they were asked for — and `poll`
+    /// serves nothing back. An empty poll means the app's texture cache never
+    /// fills, so a frame keeps asking for every visible folder just as it would
+    /// on a cold start, which is what a test of *what the row asks for* needs.
     struct ShellCovers(Arc<Mutex<Vec<(TrackId, RequestedSize)>>>);
 
     impl Covers for ShellCovers {
@@ -15101,8 +14818,8 @@ mod whole_frame_tests {
             playlist_store,
             library_mutations,
             views,
-            Box::new(MockTagEdits),
-            Box::new(crate::mocks::MockPasses),
+            Box::new(FakeTagEdits::new()),
+            Box::new(crate::mocks::RecordingPasses::default()),
             Box::new(ShellCovers(Arc::clone(&folder_covers))),
             Arc::clone(&backend_events),
         );
@@ -15168,66 +14885,10 @@ mod whole_frame_tests {
         step_dt: f32,
     ) -> (Shell, Arc<MockTransport>) {
         let transport = Arc::new(MockTransport::new());
-        #[derive(Clone)]
-        struct SharedTransport(Arc<MockTransport>);
-        impl Transport for SharedTransport {
-            fn play(&self, track: riff_backend::domain::TrackId) {
-                self.0.play(track);
-            }
-            fn pause(&self) {
-                self.0.pause();
-            }
-            fn resume(&self) {
-                self.0.resume();
-            }
-            fn stop(&self) {
-                self.0.stop();
-            }
-            fn seek(&self, session: &PlaybackSession, secs: f32) {
-                self.0.seek(session, secs);
-            }
-            fn set_volume(&self, session: &mut PlaybackSession, vol: f32) {
-                self.0.set_volume(session, vol);
-            }
-            fn toggle_mute(&self, session: &mut PlaybackSession) {
-                self.0.toggle_mute(session);
-            }
-            fn next(&self) {
-                self.0.next();
-            }
-            fn previous(&self) {
-                self.0.previous();
-            }
-            fn play_next(&self, track: riff_backend::domain::TrackId) {
-                self.0.play_next(track);
-            }
-            fn add_to_queue(&self, track: riff_backend::domain::TrackId) {
-                self.0.add_to_queue(track);
-            }
-            fn add_many(&self, tracks: Vec<riff_backend::domain::TrackId>) {
-                self.0.add_many(tracks);
-            }
-            fn play_many(
-                &self,
-                first: riff_backend::domain::TrackId,
-                rest: Vec<riff_backend::domain::TrackId>,
-            ) {
-                self.0.play_many(first, rest);
-            }
-            fn toggle_shuffle(&self, session: &mut PlaybackSession) {
-                self.0.toggle_shuffle(session);
-            }
-            fn toggle_repeat(&self, session: &mut PlaybackSession) {
-                self.0.toggle_repeat(session);
-            }
-            fn play_pause(&self, session: &PlaybackSession) {
-                self.0.play_pause(session);
-            }
-        }
 
         let settings_calls = Arc::new(Mutex::new(Vec::new()));
         let shell = build_at_step(
-            Box::new(SharedTransport(Arc::clone(&transport))),
+            Box::new(transport.as_ref().clone()),
             MockScans::default(),
             Box::new(MockSettingsStore::with_shared_calls(Arc::clone(
                 &settings_calls,
@@ -16031,6 +15692,9 @@ mod whole_frame_tests {
                 album("Campfire Headphase", "Boards of Canada", 2005),
             ],
             hit_artists: vec![artist("Boards of Canada", &["geogaddi"])],
+            // The artist is a name hit for "boards": the drill asks the store
+            // seam for that decision, so the fixture must seed the answer.
+            artist_name_hits: vec!["Boards of Canada".to_string()],
             album_name_hits: vec!["Boards of Canada - Geogaddi".to_string()],
             matching_searches: vec!["boards".to_string()],
             ..Default::default()
@@ -16072,6 +15736,10 @@ mod whole_frame_tests {
                 album("Third", "Portishead", 2021),
             ],
             hit_artists: vec![artist("Portishead", &["dummy"])],
+            // The artist is NOT a name hit for "roads": the drill asks the
+            // store seam, and the fixture pins the answer that keeps a
+            // track-hit artist's drill to its hit albums.
+            artist_name_hits: Vec::new(),
             // Only Dummy carries the matching member track.
             album_name_hits: vec!["Portishead - Dummy".to_string()],
             matching_searches: vec!["roads".to_string()],
@@ -16098,6 +15766,55 @@ mod whole_frame_tests {
                 .query_by_label("Third (Portishead \u{b7} 2021)")
                 .is_none(),
             "a track-hit artist's non-hit albums stay out of the drill"
+        );
+    }
+
+    /// A store error on the artist name-hit read degrades to the safe answer:
+    /// the seam logs and answers `false`, so the drill treats the artist as a
+    /// track-hit artist and still renders the hit albums rather than going
+    /// blank. Prior art: the album path's failing-query variant in the shared
+    /// mock (`FailingQuery::AlbumIsNameHit`), mirrored here for the artist
+    /// read (`FailingQuery::ArtistIsNameHit`).
+    #[test]
+    fn test_artist_name_hit_store_error_still_renders_the_hit_albums() {
+        use riff_backend::app::state::{BrowserSelection, LibrarySection};
+
+        let (mut shell, _transport) = recording_transport_shell(MockLibraryQueryStore {
+            artists: vec![artist("Boards of Canada", &["geogaddi", "campfire"])],
+            albums: vec![
+                album("Geogaddi", "Boards of Canada", 2002),
+                album("Campfire Headphase", "Boards of Canada", 2005),
+            ],
+            hit_artists: vec![artist("Boards of Canada", &["geogaddi"])],
+            // The name-hit read fails on every call — the drill must degrade,
+            // not blank.
+            failing: vec![FailingQuery::ArtistIsNameHit],
+            album_name_hits: vec!["Boards of Canada - Geogaddi".to_string()],
+            matching_searches: vec!["boards".to_string()],
+            ..Default::default()
+        });
+        {
+            let mut library = shell.library.lock_or_recover();
+            library.library_section = LibrarySection::Artists;
+            library.search_query = "boards".to_string();
+            // Drill into the artist.
+            library.browser_path = vec![BrowserSelection::Artist("Boards of Canada".to_string())];
+        }
+        shell.harness.step();
+
+        assert!(
+            shell
+                .harness
+                .query_by_label("Geogaddi (Boards of Canada \u{b7} 2002)")
+                .is_some(),
+            "a failed name-hit read degrades to the hit albums, never to an empty drill"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("Campfire Headphase (Boards of Canada \u{b7} 2005)")
+                .is_none(),
+            "the safe answer is false, so a failed read never wrongly expands the drill"
         );
     }
 
@@ -16370,274 +16087,6 @@ mod whole_frame_tests {
     // past it. The shared query handle lets a test assert exactly which
     // windows the pane fetched.
 
-    use riff_backend::app::errors::StoreError;
-    use riff_backend::app::store::SortDirection;
-    use riff_backend::domain::{Album, Artist, GenreCount, SmartPlaylistKind, Track};
-
-    /// [`LibraryQueryStore`] view over one shared [`MockLibraryQueryStore`]
-    /// behind a mutex: the shell takes ownership of the port, the test keeps
-    /// the handle for recordings and post-wire configuration changes.
-    #[derive(Clone)]
-    struct SharedQueries(Arc<Mutex<MockLibraryQueryStore>>);
-
-    impl LibraryQueryStore for SharedQueries {
-        fn get_track(
-            &self,
-            id: &riff_backend::domain::TrackId,
-        ) -> Result<Option<Track>, StoreError> {
-            self.0.lock().unwrap().get_track(id)
-        }
-        fn metadata_version(&self) -> Result<u32, StoreError> {
-            Ok(riff_persistence::track::METADATA_VERSION)
-        }
-        fn tracks_page(
-            &self,
-            order: riff_persistence::store::TrackListOrder,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            self.0.lock().unwrap().tracks_page(order, offset, limit)
-        }
-        fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
-            self.0.lock().unwrap().library_counts()
-        }
-        fn all_track_ids(&self) -> Result<Vec<riff_backend::domain::TrackId>, StoreError> {
-            self.0.lock().unwrap().all_track_ids()
-        }
-        fn search_page(
-            &self,
-            query: &str,
-            order: riff_persistence::store::TrackListOrder,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .search_page(query, order, offset, limit)
-        }
-        fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
-            self.0.lock().unwrap().all_artists()
-        }
-        fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, StoreError> {
-            self.0.lock().unwrap().artist_albums(artist)
-        }
-        fn album_tracks(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .album_tracks(album_artist, album_title)
-        }
-        fn folder_has_audio(&self, folder: &std::path::Path) -> Result<bool, StoreError> {
-            self.0.lock().unwrap().folder_has_audio(folder)
-        }
-        fn folder_has_search_match(
-            &self,
-            folder: &std::path::Path,
-            query: &str,
-        ) -> Result<bool, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .folder_has_search_match(folder, query)
-        }
-        fn track_ids_in_folder_tree(
-            &self,
-            folder: &std::path::Path,
-        ) -> Result<Vec<riff_backend::domain::TrackId>, StoreError> {
-            self.0.lock().unwrap().track_ids_in_folder_tree(folder)
-        }
-        fn tracks_in_folder(&self, folder: &std::path::Path) -> Result<Vec<Track>, StoreError> {
-            self.0.lock().unwrap().tracks_in_folder(folder)
-        }
-        fn folder_track_count(&self, folder: &std::path::Path) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().folder_track_count(folder)
-        }
-        fn last_full_scan(
-            &self,
-        ) -> Result<Option<riff_backend::app::store::FullScanSummary>, StoreError> {
-            self.0.lock().unwrap().last_full_scan()
-        }
-        fn subdirs_with_audio(
-            &self,
-            folder: &std::path::Path,
-        ) -> Result<Vec<std::path::PathBuf>, StoreError> {
-            self.0.lock().unwrap().subdirs_with_audio(folder)
-        }
-        fn smart_playlist(
-            &self,
-            kind: SmartPlaylistKind,
-            limit: usize,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0.lock().unwrap().smart_playlist(kind, limit)
-        }
-        fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
-            self.0.lock().unwrap().smart_list_counts()
-        }
-        fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
-            self.0.lock().unwrap().genre_counts()
-        }
-        fn artists_in_genre(&self, genre: &str) -> Result<Vec<Artist>, StoreError> {
-            self.0.lock().unwrap().artists_in_genre(genre)
-        }
-        fn artist_albums_in_genre(
-            &self,
-            artist: &str,
-            genre: &str,
-        ) -> Result<Vec<Album>, StoreError> {
-            self.0.lock().unwrap().artist_albums_in_genre(artist, genre)
-        }
-        fn album_tracks_in_genre(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-            genre: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .album_tracks_in_genre(album_artist, album_title, genre)
-        }
-        fn hit_albums_page(
-            &self,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            self.0.lock().unwrap().hit_albums_page(query, offset, limit)
-        }
-        fn hit_artists_page(
-            &self,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .hit_artists_page(query, offset, limit)
-        }
-        fn album_hit_tracks(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-            query: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .album_hit_tracks(album_artist, album_title, query)
-        }
-        fn album_is_name_hit(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-            query: &str,
-        ) -> Result<bool, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .album_is_name_hit(album_artist, album_title, query)
-        }
-        fn hit_albums_in_genre(
-            &self,
-            genre: &str,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .hit_albums_in_genre(genre, query, offset, limit)
-        }
-        fn hit_artists_in_genre(
-            &self,
-            genre: &str,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .hit_artists_in_genre(genre, query, offset, limit)
-        }
-        fn album_hit_tracks_in_genre(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-            genre: &str,
-            query: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0.lock().unwrap().album_hit_tracks_in_genre(
-                album_artist,
-                album_title,
-                genre,
-                query,
-            )
-        }
-        fn hit_genre_counts(&self, query: &str) -> Result<Vec<GenreCount>, StoreError> {
-            self.0.lock().unwrap().hit_genre_counts(query)
-        }
-        fn artists_page(
-            &self,
-            direction: SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .artists_page(direction, offset, limit)
-        }
-        fn albums_page(
-            &self,
-            direction: SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            self.0.lock().unwrap().albums_page(direction, offset, limit)
-        }
-        fn genres_page(
-            &self,
-            direction: SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<GenreCount>, StoreError> {
-            self.0.lock().unwrap().genres_page(direction, offset, limit)
-        }
-        fn artists_in_genre_page(
-            &self,
-            genre: &str,
-            direction: SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .artists_in_genre_page(genre, direction, offset, limit)
-        }
-        fn artist_albums_in_genre_page(
-            &self,
-            artist: &str,
-            genre: &str,
-            direction: SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .artist_albums_in_genre_page(artist, genre, direction, offset, limit)
-        }
-    }
-
     /// A shell over a shared query mock, returning the shared handle so the
     /// test can assert exactly which store reads the pane performed.
     fn shared_query_shell(
@@ -16655,7 +16104,7 @@ mod whole_frame_tests {
             Box::new(MockPlaylistStore::default()),
             Box::new(MockLibraryMutationStore::new()),
             SessionViews::new(
-                Box::new(SharedQueries(Arc::clone(&shared))),
+                Box::new(crate::mocks::SharedQueryStore(Arc::clone(&shared))),
                 Box::new(MockPlaylistStore::default()),
                 StoreGeneration::new(),
                 StoreGeneration::new(),
@@ -18213,7 +17662,9 @@ mod whole_frame_tests {
     /// outside the Settings panel's visible area.
     #[test]
     fn test_clear_library_confirmation_reports_confirm_and_cancel() {
-        use riff_gui::ui::prompts::{PromptOutcome, clear_library_confirm};
+        use riff_gui::ui::prompts::{
+            CLEAR_LIBRARY_CONFIRM_COPY, PromptOutcome, destructive_confirm,
+        };
 
         let palette = riff_gui::ui::theme::Palette::dark();
         let mut harness = egui_kittest::Harness::builder()
@@ -18222,7 +17673,14 @@ mod whole_frame_tests {
             .build_ui_state(
                 |ui, outcomes: &mut Vec<PromptOutcome>| {
                     let mut cache = riff_gui::ui::icons::IconCache::new();
-                    outcomes.extend(clear_library_confirm(ui, &mut cache, &palette, false));
+                    outcomes.extend(destructive_confirm(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        false,
+                        CLEAR_LIBRARY_CONFIRM_COPY,
+                        egui::Id::new("clear_library_confirm_action"),
+                    ));
                 },
                 Vec::new(),
             );
@@ -18254,7 +17712,7 @@ mod whole_frame_tests {
     #[test]
     fn test_clear_thumbnail_cache_confirmation_reports_confirm_and_cancel() {
         use riff_gui::ui::prompts::{
-            CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY, PromptOutcome, clear_thumbnail_cache_confirm,
+            CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY, PromptOutcome, destructive_confirm,
         };
 
         let palette = riff_gui::ui::theme::Palette::dark();
@@ -18264,8 +17722,13 @@ mod whole_frame_tests {
             .build_ui_state(
                 |ui, outcomes: &mut Vec<PromptOutcome>| {
                     let mut cache = riff_gui::ui::icons::IconCache::new();
-                    outcomes.extend(clear_thumbnail_cache_confirm(
-                        ui, &mut cache, &palette, false,
+                    outcomes.extend(destructive_confirm(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        false,
+                        CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY,
+                        egui::Id::new("clear_thumbnail_cache_confirm_action"),
                     ));
                 },
                 Vec::new(),
@@ -18293,6 +17756,165 @@ mod whole_frame_tests {
             harness.state(),
             &vec![PromptOutcome::Confirm],
             "the destructive Confirm is reported, not applied"
+        );
+    }
+
+    /// The two Settings clear actions are ONE confirmation surface, so what
+    /// keeps them apart is entirely what each call site passes: its own copy and
+    /// its own widget id. Both are laid out in one frame here — as the Settings
+    /// pane lays them out when both flags are live — so a click on one
+    /// confirmation's Confirm must answer only for that confirmation, never for
+    /// the one a gap below.
+    ///
+    /// Widget ids are egui's stable keys for hit-testing, focus and the a11y
+    /// tree, and all three are keyed by that id: give both confirmations one id
+    /// and their two Confirm buttons become one widget — a single a11y node for
+    /// the pair, and one set of per-id state, so whichever confirmation laid out
+    /// last would answer for both. That is the drift this test guards.
+    #[test]
+    fn test_the_two_destructive_confirmations_keep_their_own_id_and_copy() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::prompts::{
+            CLEAR_LIBRARY_CONFIRM_COPY, CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY, PromptOutcome,
+            destructive_confirm,
+        };
+        use riff_gui::ui::theme::Palette;
+
+        /// Which confirmation reported, and what it reported. The caller
+        /// (`settings.rs`) owns the effect; this records the report alone.
+        type Reported = Vec<(&'static str, PromptOutcome)>;
+
+        let palette = Palette::dark();
+        // The ids the two call sites pass, exactly as the app frames them.
+        let library_id = egui::Id::new("clear_library_confirm_action");
+        let thumbnail_id = egui::Id::new("clear_thumbnail_cache_confirm_action");
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(420.0, 200.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, reported: &mut Reported| {
+                    let mut cache = riff_gui::ui::icons::IconCache::new();
+                    let library = destructive_confirm(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        false,
+                        CLEAR_LIBRARY_CONFIRM_COPY,
+                        library_id,
+                    );
+                    let thumbnail = destructive_confirm(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        false,
+                        CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY,
+                        thumbnail_id,
+                    );
+                    reported.extend(library.map(|it| ("library", it)));
+                    reported.extend(thumbnail.map(|it| ("thumbnail", it)));
+                },
+                Reported::new(),
+            );
+        harness.run();
+
+        // Each confirmation says its own consequence, and only its own: the
+        // two wipes sit one gap apart in the same footer, so their copy must not
+        // read alike — and neither may borrow the other's.
+        assert!(
+            harness.query_by_label(CLEAR_LIBRARY_CONFIRM_COPY).is_some(),
+            "the Clear Library confirmation names what the wipe keeps"
+        );
+        assert!(
+            harness
+                .query_by_label(CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY)
+                .is_some(),
+            "the Clear Thumbnail cache confirmation names what the clear costs"
+        );
+
+        // Two Confirm buttons, laid out one above the other: each offers its own
+        // affirmative action, and the same label at the same scale is the fold's
+        // pixel contract — the label is shared, the ids are not.
+        let confirms = {
+            let mut rects = harness
+                .query_all_by_label("Confirm")
+                .map(|node| node.rect())
+                .collect::<Vec<_>>();
+            assert_eq!(rects.len(), 2, "one Confirm per confirmation");
+            assert_eq!(
+                rects[0].size(),
+                rects[1].size(),
+                "the two confirmations paint the same action"
+            );
+            rects.sort_by(|a, b| a.top().total_cmp(&b.top()));
+            rects[0].center()
+        };
+
+        // A click on the Clear Library confirmation's Confirm answers for Clear
+        // Library only. Sharing a widget id would make this click answer for the
+        // other confirmation too.
+        harness.hover_at(confirms);
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos: confirms,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            });
+        }
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![("library", PromptOutcome::Confirm)],
+            "one widget id per confirmation: the click reached exactly one of them"
+        );
+    }
+
+    /// The Thumbnail-cache confirmation, driven through the real Settings frame:
+    /// the row raises the confirmation, the confirmation says what the clear
+    /// costs — its own copy, not the Clear Library one a gap above — and asking
+    /// commits nothing.
+    ///
+    /// The copy and the widget id are supplied by the call site now, so this is
+    /// the seam that notices a call site borrowing the wrong one.
+    #[test]
+    fn test_clearing_the_thumbnail_cache_asks_first_with_its_own_copy() {
+        use egui_kittest::kittest::Queryable;
+        use riff_gui::ui::prompts::{
+            CLEAR_LIBRARY_CONFIRM_COPY, CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY,
+            CLEAR_THUMBNAIL_CACHE_LABEL,
+        };
+
+        let (mut shell, _dir, _pid, store) = store_shell();
+        shell.harness.step();
+        shell.library.lock_or_recover().view_mode = ViewMode::Settings;
+        shell.harness.step();
+
+        shell
+            .harness
+            .get_by_label(CLEAR_THUMBNAIL_CACHE_LABEL)
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            shell
+                .harness
+                .query_by_label(CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY)
+                .is_some(),
+            "the Thumbnail clear asks first, and its copy says what the clear costs"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label(CLEAR_LIBRARY_CONFIRM_COPY)
+                .is_none(),
+            "it does not borrow the Clear Library confirmation's copy"
+        );
+        assert_eq!(
+            store.all_track_ids().expect("the listing reads").len(),
+            3,
+            "asking for confirmation removes nothing from the collection"
         );
     }
 
@@ -18606,8 +18228,8 @@ mod whole_frame_tests {
                 StoreGeneration::new(),
                 StoreGeneration::new(),
             ),
-            Box::new(MockTagEdits),
-            Box::new(crate::mocks::MockPasses),
+            Box::new(FakeTagEdits::new()),
+            Box::new(crate::mocks::RecordingPasses::default()),
             Box::new(ShellCovers(Arc::clone(&folder_covers))),
             Arc::clone(&backend_events),
         );
@@ -18824,13 +18446,14 @@ mod whole_frame_tests {
 mod context_menu_ui_tests {
     use crate::mocks::RecordingPasses;
     use egui_kittest::kittest::{NodeT, Queryable};
+    use riff_backend::app::pass_service::Passes;
     use riff_backend::app::state::{
         BrowserSelection, LibrarySection, LibrarySession, PlaybackSession,
     };
     use riff_backend::app::store::{LibraryMutationStore, PlaylistStore};
     use riff_backend::domain::{PlaylistId, TrackId};
     use riff_gui::ui::app::{
-        CollectionMenuEffects, InlineTagEditor, TrackMenuHost, TrackMenuSubject,
+        CollectionMenuHost, InlineTagEditor, TrackMenuHost, TrackMenuSubject,
         apply_collection_menu, apply_list_menu_intent, entity_track_ids,
     };
     use riff_gui::ui::column::ColumnIdentity;
@@ -18840,7 +18463,7 @@ mod context_menu_ui_tests {
     use riff_gui::ui::theme::Palette;
 
     use crate::mocks::{
-        MockLibraryQueryStore, MockPlaylistStore, MockTagEdits, MockTransport, TransportIntent,
+        FakeTagEdits, MockLibraryQueryStore, MockPlaylistStore, MockTransport, TransportIntent,
     };
     use crate::test_utils::create_test_track_with_metadata;
 
@@ -18987,7 +18610,7 @@ mod context_menu_ui_tests {
         let transport = MockTransport::new();
         let mut playlist_store = MockPlaylistStore::default();
         let mut library_mutations = MockLibraryMutationStore::new();
-        let mut tag_editor = InlineTagEditor::new(Box::new(crate::mocks::MockTagEdits));
+        let mut tag_editor = InlineTagEditor::new(Box::new(crate::mocks::FakeTagEdits::new()));
         let mut selected: Option<TrackId> = None;
 
         // Track identity is the full file path, so the fixture's id and path
@@ -19034,25 +18657,13 @@ mod context_menu_ui_tests {
             "Boards of Canada\u{1f}Geogaddi",
             &[ListMenuIntent::MeasureAlbumAggregate],
             ColumnIdentity::root(LibrarySection::Albums),
-            CollectionMenuEffects {
-                library: &mut library,
-                playback: &mut playback,
-                transport: &transport,
-                passes: &passes,
-                views: &mut views,
-            },
+            CollectionMenuHost::new(&mut library, &mut playback, &transport, &passes, &mut views),
         );
         apply_collection_menu(
             "Boards of Canada\u{1f}Geogaddi",
             &[ListMenuIntent::MeasureAlbumTracks],
             ColumnIdentity::root(LibrarySection::Albums),
-            CollectionMenuEffects {
-                library: &mut library,
-                playback: &mut playback,
-                transport: &transport,
-                passes: &passes,
-                views: &mut views,
-            },
+            CollectionMenuHost::new(&mut library, &mut playback, &transport, &passes, &mut views),
         );
 
         assert_eq!(
@@ -19787,13 +19398,13 @@ mod context_menu_ui_tests {
             "Boards of Canada\u{1f}Geogaddi",
             &[],
             ColumnIdentity::root(LibrarySection::Albums),
-            CollectionMenuEffects {
-                library: &mut library,
-                playback: &mut playback,
-                transport: &transport,
-                passes: &crate::mocks::MockPasses,
-                views: &mut views,
-            },
+            CollectionMenuHost::new(
+                &mut library,
+                &mut playback,
+                &transport,
+                &crate::mocks::RecordingPasses::default(),
+                &mut views,
+            ),
         );
 
         assert_eq!(
@@ -19871,13 +19482,13 @@ mod context_menu_ui_tests {
                 "Boards of Canada\u{1f}Geogaddi",
                 &[intent],
                 ColumnIdentity::root(LibrarySection::Albums),
-                CollectionMenuEffects {
-                    library: &mut library,
-                    playback: &mut playback,
-                    transport: &transport,
-                    passes: &crate::mocks::MockPasses,
-                    views: &mut views,
-                },
+                CollectionMenuHost::new(
+                    &mut library,
+                    &mut playback,
+                    &transport,
+                    &crate::mocks::RecordingPasses::default(),
+                    &mut views,
+                ),
             );
 
             assert_eq!(
@@ -19925,13 +19536,13 @@ mod context_menu_ui_tests {
             "Boards of Canada\u{1f}Geogaddi",
             &[ListMenuIntent::Play],
             ColumnIdentity::drill(LibrarySection::Artists, 1, DrillSlot::ArtistAlbums),
-            CollectionMenuEffects {
-                library: &mut library,
-                playback: &mut playback,
-                transport: &transport,
-                passes: &crate::mocks::MockPasses,
-                views: &mut views,
-            },
+            CollectionMenuHost::new(
+                &mut library,
+                &mut playback,
+                &transport,
+                &crate::mocks::RecordingPasses::default(),
+                &mut views,
+            ),
         );
 
         assert_eq!(
@@ -19974,13 +19585,13 @@ mod context_menu_ui_tests {
             // entity-Column identity — this is the defensive shape, spelled
             // the way the shape that has no rows still has to be spelled.
             ColumnIdentity::root(LibrarySection::AllTracks),
-            CollectionMenuEffects {
-                library: &mut library,
-                playback: &mut playback,
-                transport: &transport,
-                passes: &crate::mocks::MockPasses,
-                views: &mut views,
-            },
+            CollectionMenuHost::new(
+                &mut library,
+                &mut playback,
+                &transport,
+                &crate::mocks::RecordingPasses::default(),
+                &mut views,
+            ),
         );
 
         assert!(
@@ -19994,6 +19605,75 @@ mod context_menu_ui_tests {
         assert!(
             !playback.queue.shuffle,
             "shuffle is never so much as engaged"
+        );
+    }
+
+    /// The host's handle set, proved whole. Each arm of a collection menu's
+    /// report is asserted on its own elsewhere; what only this test can show is
+    /// that ONE host built through `CollectionMenuHost::new` from five locals
+    /// answers every kind of item — a selection, two batch items, and an Album
+    /// measure item — so the five handles the app declares are exactly the five
+    /// the host dispatches through, and none of them is reachable by any other
+    /// route.
+    ///
+    /// The construction is the point: the test suite names the same handle set
+    /// `RiffApp::collection_menu` does, through the same constructor, so a
+    /// production site that dropped a handle would now fail to compile instead
+    /// of leaving this mirror green against a host the app did not have.
+    #[test]
+    fn one_built_host_dispatches_every_handle_the_app_declares() {
+        use riff_backend::app::replaygain_pass::PassCommand;
+
+        let transport = MockTransport::new();
+        let passes = RecordingPasses::default();
+        let mut playback = PlaybackSession::default();
+        let mut library = LibrarySession {
+            library_section: LibrarySection::Albums,
+            ..Default::default()
+        };
+        let mut views = entity_views();
+        let album_key = "Boards of Canada\u{1f}Geogaddi";
+        let ids = [TrackId("g1".to_string()), TrackId("g2".to_string())];
+
+        apply_collection_menu(
+            album_key,
+            &[
+                ListMenuIntent::Play,
+                ListMenuIntent::Shuffle,
+                ListMenuIntent::MeasureAlbumAggregate,
+            ],
+            ColumnIdentity::root(LibrarySection::Albums),
+            CollectionMenuHost::new(&mut library, &mut playback, &transport, &passes, &mut views),
+        );
+
+        assert_eq!(
+            library.browser_path,
+            vec![BrowserSelection::Album {
+                artist: "Boards of Canada".to_string(),
+                title: "Geogaddi".to_string(),
+            }],
+            "the library handle carried the selection opening the menu caused"
+        );
+        assert_eq!(
+            transport.recorded(),
+            vec![
+                TransportIntent::PlayMany(ids[0].clone(), vec![ids[1].clone()]),
+                TransportIntent::PlayMany(ids[0].clone(), vec![ids[1].clone()]),
+            ],
+            "the transport and views handles answered both batch items, never a \
+             command per Track"
+        );
+        assert!(
+            playback.queue.shuffle,
+            "the playback handle carries the Shuffle item's flag"
+        );
+        assert_eq!(
+            passes.submitted.lock().unwrap().clone(),
+            vec![PassCommand::AlbumAggregate {
+                album_artist: "Boards of Canada".to_string(),
+                album_title: "Geogaddi".to_string(),
+            }],
+            "the passes handle took the Album measure item as a submission"
         );
     }
 
@@ -20059,14 +19739,16 @@ mod context_menu_ui_tests {
         let (_dir, mut store, pid) = seeded_store();
         let mut mutations = store.clone();
         let transport = MockTransport::new();
+        let passes = RecordingPasses::default();
         let mut selected = None;
-        let mut editor = InlineTagEditor::new(Box::new(MockTagEdits));
+        let mut editor = InlineTagEditor::new(Box::new(FakeTagEdits::new()));
         let item = track("/music/a.mp3");
 
         {
             let subject = TrackMenuSubject::resolved(&item, None);
             let mut host = host(
                 &transport,
+                &passes,
                 &mut store,
                 &mut mutations,
                 &mut editor,
@@ -20120,7 +19802,7 @@ mod context_menu_ui_tests {
     fn test_a_frame_that_painted_a_track_menu_moves_nothing() {
         let (_dir, store, pid) = seeded_store();
         let transport = MockTransport::new();
-        let editor = InlineTagEditor::new(Box::new(MockTagEdits));
+        let editor = InlineTagEditor::new(Box::new(FakeTagEdits::new()));
         let already = track("/music/b.mp3");
         let mut selected = None;
 
@@ -20233,22 +19915,11 @@ mod context_menu_ui_tests {
                 )
         };
 
-        let count = |image: &image::RgbaImage, color: egui::Color32| {
-            image
-                .pixels()
-                .filter(|p| {
-                    p.0[0].abs_diff(color.r()) <= 4
-                        && p.0[1].abs_diff(color.g()) <= 4
-                        && p.0[2].abs_diff(color.b()) <= 4
-                })
-                .count()
-        };
-
         let mut enabled = render(ItemState::Normal);
         enabled.run();
         let enabled_frame = enabled.render().expect("the row renders");
         assert_eq!(
-            count(&enabled_frame, palette.error),
+            crate::test_utils::count_near(&enabled_frame, palette.error, 4),
             0,
             "an ordinary row never borrows the destructive ink"
         );
@@ -20257,7 +19928,7 @@ mod context_menu_ui_tests {
         destructive.run();
         let destructive_frame = destructive.render().expect("the row renders");
         assert!(
-            count(&destructive_frame, palette.error) > 0,
+            crate::test_utils::count_near(&destructive_frame, palette.error, 4) > 0,
             "a destructive row carries the error ink"
         );
 
@@ -20366,6 +20037,7 @@ mod context_menu_ui_tests {
     /// caught.
     fn host<'a>(
         transport: &'a MockTransport,
+        passes: &'a dyn Passes,
         store: &'a mut riff_infra::store::SqliteStore,
         library_mutations: &'a mut dyn LibraryMutationStore,
         editor: &'a mut InlineTagEditor,
@@ -20374,7 +20046,7 @@ mod context_menu_ui_tests {
         let playlist_store: &'a mut dyn PlaylistStore = store;
         TrackMenuHost::new(
             transport,
-            &crate::mocks::MockPasses,
+            passes,
             playlist_store,
             library_mutations,
             editor,
@@ -20391,8 +20063,9 @@ mod context_menu_ui_tests {
         // would prove the arm, not the durability.
         let mut mutations = store.clone();
         let transport = MockTransport::new();
+        let passes = RecordingPasses::default();
         let mut selected = None;
-        let mut editor = InlineTagEditor::new(Box::new(MockTagEdits));
+        let mut editor = InlineTagEditor::new(Box::new(FakeTagEdits::new()));
         let item = track("/music/a.mp3");
 
         let entries = |store: &riff_infra::store::SqliteStore| {
@@ -20411,6 +20084,7 @@ mod context_menu_ui_tests {
             let subject = TrackMenuSubject::resolved(&item, Some(&pid));
             let mut host = host(
                 &transport,
+                &passes,
                 &mut store,
                 &mut mutations,
                 &mut editor,
@@ -20428,6 +20102,7 @@ mod context_menu_ui_tests {
             let subject = TrackMenuSubject::resolved(&item, Some(&pid));
             let mut host = host(
                 &transport,
+                &passes,
                 &mut store,
                 &mut mutations,
                 &mut editor,
@@ -20456,8 +20131,9 @@ mod context_menu_ui_tests {
 
         let (_dir, mut store, pid) = seeded_store();
         let transport = MockTransport::new();
+        let passes = RecordingPasses::default();
         let mut selected = None;
-        let mut editor = InlineTagEditor::new(Box::new(MockTagEdits));
+        let mut editor = InlineTagEditor::new(Box::new(FakeTagEdits::new()));
         let mut mutations = MockLibraryMutationStore::new();
         let item = track("/music/a.mp3");
 
@@ -20471,6 +20147,7 @@ mod context_menu_ui_tests {
                 let subject = TrackMenuSubject::resolved(&item, Some(&pid));
                 let mut host = host(
                     &transport,
+                    &passes,
                     &mut store,
                     &mut mutations,
                     &mut editor,
@@ -20515,14 +20192,16 @@ mod context_menu_ui_tests {
         let (_dir, mut store, pid) = seeded_store();
         let mut mutations = store.clone();
         let transport = MockTransport::new();
+        let passes = RecordingPasses::default();
         let mut selected = None;
-        let mut editor = InlineTagEditor::new(Box::new(MockTagEdits));
+        let mut editor = InlineTagEditor::new(Box::new(FakeTagEdits::new()));
         let item = track("/music/a.mp3");
 
         {
             let subject = TrackMenuSubject::resolved(&item, Some(&pid));
             let mut host = host(
                 &transport,
+                &passes,
                 &mut store,
                 &mut mutations,
                 &mut editor,
@@ -20710,14 +20389,16 @@ mod context_menu_ui_tests {
         let (_dir, mut store, _pid) = seeded_store();
         let mut mutations = store.clone();
         let transport = MockTransport::new();
+        let passes = RecordingPasses::default();
         let mut selected = None;
-        let mut editor = InlineTagEditor::new(Box::new(MockTagEdits));
+        let mut editor = InlineTagEditor::new(Box::new(FakeTagEdits::new()));
         let item = track("/music/a.mp3");
 
         {
             let subject = TrackMenuSubject::resolved(&item, None);
             let mut host = host(
                 &transport,
+                &passes,
                 &mut store,
                 &mut mutations,
                 &mut editor,
@@ -21536,33 +21217,14 @@ mod press_feedback_tests {
         state: PressProbe,
     }
 
-    /// Count frame pixels within a hair of `color` inside `rect` — the same
-    /// +/-2 tolerance and the same shape as the row-band counter in
-    /// `browser_column_ui_tests`, which is the idiom for asking *which fill a
-    /// painter chose*. That counter is private to its module, so this probe
-    /// carries its own.
+    /// Count frame pixels within a hair of `color` inside `rect` — the idiom
+    /// for asking *which fill a painter chose* over a specific patch.
     fn press_count_color(
         image: &image::RgbaImage,
         color: egui::Color32,
         rect: egui::Rect,
     ) -> usize {
-        let (width, height) = image.dimensions();
-        let x0 = rect.min.x.floor().max(0.0) as u32;
-        let y0 = rect.min.y.floor().max(0.0) as u32;
-        let x1 = (rect.max.x.ceil().max(0.0) as u32).min(width);
-        let y1 = (rect.max.y.ceil().max(0.0) as u32).min(height);
-        image
-            .enumerate_pixels()
-            .filter(|(x, y, p)| {
-                *x >= x0
-                    && *x < x1
-                    && *y >= y0
-                    && *y < y1
-                    && p.0[0].abs_diff(color.r()) <= 2
-                    && p.0[1].abs_diff(color.g()) <= 2
-                    && p.0[2].abs_diff(color.b()) <= 2
-            })
-            .count()
+        crate::test_utils::count_near_in(image, color, rect, 2)
     }
 
     /// The framework's own active fill, as the theme store publishes it: read
@@ -22097,19 +21759,6 @@ mod seek_affordance_tests {
     use riff_gui::ui::theme::geometry::seek::{THUMB_D, TRACK_H, TRACK_H_ACTIVE};
     use std::collections::BTreeSet;
 
-    /// Frame pixels within a hair of `color`, at the same +/-2 tolerance the rest
-    /// of this suite uses because rounded edges antialias.
-    fn count_near(image: &image::RgbaImage, color: egui::Color32) -> usize {
-        image
-            .pixels()
-            .filter(|p| {
-                p.0[0].abs_diff(color.r()) <= 2
-                    && p.0[1].abs_diff(color.g()) <= 2
-                    && p.0[2].abs_diff(color.b()) <= 2
-            })
-            .count()
-    }
-
     /// How many distinct pixel rows carry `color` anywhere in the frame — the
     /// painted *height* of a band, read straight off the pixels rather than off
     /// the caller's own rect. A row count is used instead of a pixel count
@@ -22117,11 +21766,7 @@ mod seek_affordance_tests {
     fn rows_carrying(image: &image::RgbaImage, color: egui::Color32) -> usize {
         image
             .enumerate_pixels()
-            .filter(|(_, _, p)| {
-                p.0[0].abs_diff(color.r()) <= 2
-                    && p.0[1].abs_diff(color.g()) <= 2
-                    && p.0[2].abs_diff(color.b()) <= 2
-            })
+            .filter(|(_, _, p)| crate::test_utils::near(p, color, 2))
             .map(|(_, y, _)| y)
             .collect::<BTreeSet<_>>()
             .len()
@@ -22233,7 +21878,7 @@ mod seek_affordance_tests {
 
         let seek = render_at_rest(true, false);
         assert_eq!(
-            count_near(&seek, palette.ink),
+            crate::test_utils::count_near(&seek, palette.ink, 2),
             0,
             "a seek bar the pointer is not over paints no thumb — the affordance \
              that says where the pointer is must be absent, not dimmed"
@@ -22249,7 +21894,7 @@ mod seek_affordance_tests {
         // wears unconditionally, exactly like the volume slider's.
         let always = render_at_rest(false, true);
         assert!(
-            count_near(&always, palette.ink) > 0,
+            crate::test_utils::count_near(&always, palette.ink, 2) > 0,
             "the same counter finds the volume slider's always-visible thumb, so \
              the resting assertion above is about the hover gate and not about a \
              frame that renders nothing"

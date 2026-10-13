@@ -158,7 +158,7 @@ impl InlineTagEditor {
         let Some(draft) = self.draft.as_mut() else {
             return;
         };
-        let replaygain = match parse_replaygain(draft) {
+        let replaygain = match parse_replaygain(draft, |_| true) {
             Ok(tags) => tags,
             Err(error) => {
                 draft.error = Some(error);
@@ -235,7 +235,7 @@ impl InlineTagEditor {
         } else {
             None
         };
-        let replaygain = match parse_dirty_replaygain(draft) {
+        let replaygain = match parse_replaygain(draft, |field| draft.is_dirty(field)) {
             Ok(tags) => tags,
             Err(error) => {
                 draft.error = Some(error);
@@ -304,7 +304,8 @@ impl InlineTagEditor {
                     || path.to_string_lossy().to_string(),
                     |n| n.to_string_lossy().to_string(),
                 );
-                feedback.set_tag_edit(
+                feedback.set(
+                    riff_backend::app::events::NoticeSource::TagEdit,
                     format!("Tags saved for {name}"),
                     riff_backend::app::events::NoticeSeverity::Info,
                 );
@@ -355,7 +356,8 @@ impl InlineTagEditor {
                     || path.to_string_lossy().to_string(),
                     |n| n.to_string_lossy().to_string(),
                 );
-                feedback.set_tag_edit(
+                feedback.set(
+                    riff_backend::app::events::NoticeSource::TagEdit,
                     format!("Tags saved for {name}"),
                     riff_backend::app::events::NoticeSeverity::Info,
                 );
@@ -365,7 +367,11 @@ impl InlineTagEditor {
                 in_flight.first_failure.get_or_insert(reason.clone());
                 // A partial batch failure is a distinct Warning notice (unlike
                 // a single failed save, which stays inline).
-                feedback.set_tag_edit(reason, riff_backend::app::events::NoticeSeverity::Warning);
+                feedback.set(
+                    riff_backend::app::events::NoticeSource::TagEdit,
+                    reason,
+                    riff_backend::app::events::NoticeSeverity::Warning,
+                );
             }
         }
         if let Some(d) = self.draft.as_mut() {
@@ -454,9 +460,19 @@ fn parse_replaygain_field(field: TagField, raw: &str) -> Result<Option<f32>, Str
     }))
 }
 
-/// The four `ReplayGain` buffers of a draft, parsed and validated together
-/// so one bad field fails the whole save with its inline reason.
-fn parse_replaygain(draft: &TagDraft) -> Result<ReplayGainTags, String> {
+/// The draft's `ReplayGain` buffers, parsed and validated together so one
+/// bad field fails the whole save with its inline reason. `writes` is the
+/// submitting flow's own rule for which buffers it may write: a single-Track
+/// save writes every buffer the draft holds — the value the file already
+/// carries is rewritten back as the measurement it is — while an album batch
+/// writes only the dirty ones, so an untouched buffer stays `None` in every
+/// request rather than being rewritten across the batch. The rule is stated
+/// once here, which is why the four buffers and the four slots have exactly
+/// one spelling.
+fn parse_replaygain(
+    draft: &TagDraft,
+    writes: impl Fn(TagField) -> bool,
+) -> Result<ReplayGainTags, String> {
     let mut tags = ReplayGainTags::default();
     for field in [
         TagField::ReplayGainTrackGain,
@@ -464,32 +480,7 @@ fn parse_replaygain(draft: &TagDraft) -> Result<ReplayGainTags, String> {
         TagField::ReplayGainAlbumGain,
         TagField::ReplayGainAlbumPeak,
     ] {
-        if let Some(value) = parse_replaygain_field(field, &draft.fields[field.index()])? {
-            match field {
-                TagField::ReplayGainTrackGain => tags.track_gain = Some(value),
-                TagField::ReplayGainTrackPeak => tags.track_peak = Some(value),
-                TagField::ReplayGainAlbumGain => tags.album_gain = Some(value),
-                TagField::ReplayGainAlbumPeak => tags.album_peak = Some(value),
-                _ => {}
-            }
-        }
-    }
-    Ok(tags)
-}
-
-/// The dirty subset of a draft's `ReplayGain` buffers, parsed and validated:
-/// an untouched buffer stays `None` in every request rather than being
-/// rewritten — the Album batch's rule, applied to the values that travel
-/// `ReplayGain`'s own path.
-fn parse_dirty_replaygain(draft: &TagDraft) -> Result<ReplayGainTags, String> {
-    let mut tags = ReplayGainTags::default();
-    for field in [
-        TagField::ReplayGainTrackGain,
-        TagField::ReplayGainTrackPeak,
-        TagField::ReplayGainAlbumGain,
-        TagField::ReplayGainAlbumPeak,
-    ] {
-        if !draft.is_dirty(field) {
+        if !writes(field) {
             continue;
         }
         if let Some(value) = parse_replaygain_field(field, &draft.fields[field.index()])? {
@@ -508,6 +499,8 @@ fn parse_dirty_replaygain(draft: &TagDraft) -> Result<ReplayGainTags, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::selection::TagRowState;
+    use std::sync::{Arc, Mutex};
 
     /// Gains are validated as numbers and clamped into the ±51 dB range, so
     /// a typo cannot command an extreme playback factor.
@@ -567,5 +560,156 @@ mod tests {
             parse_replaygain_field(TagField::ReplayGainTrackGain, "+99").unwrap(),
             Some(51.0)
         );
+    }
+
+    // --- Which `ReplayGain` buffers each submission writes --------------------
+    //
+    // The two submissions read the same four buffers but write different
+    // subsets of them: a single-Track save rewrites every buffer the draft
+    // holds (the file's own measured values included), while an Album save
+    // writes only the dirty ones so an untouched buffer is never rewritten
+    // across every member of the batch. These drive the public `save()`, so
+    // they characterize the submissions rather than the parse helpers.
+
+    /// A Tag Edits front-end that records every submitted request: the test
+    /// sees exactly which `ReplayGain` facts each submission carried.
+    #[derive(Default, Clone)]
+    struct RecordingTagEdits {
+        requests: Arc<Mutex<Vec<TagEditRequest>>>,
+    }
+
+    impl RecordingTagEdits {
+        /// The requests submitted so far, in submission order.
+        fn requests(&self) -> Vec<TagEditRequest> {
+            self.requests.lock().expect("unpoisoned").clone()
+        }
+    }
+
+    impl TagEdits for RecordingTagEdits {
+        fn submit(&self, request: TagEditRequest) {
+            self.requests.lock().expect("unpoisoned").push(request);
+        }
+
+        fn poll(&self) -> Option<TagEditOutcome> {
+            None
+        }
+    }
+
+    /// A readout row carrying a shared value across the draft's Tracks.
+    fn value_row(field: TagField, text: &str) -> TagRow {
+        TagRow {
+            field,
+            state: TagRowState::Value,
+            text: text.to_string(),
+            originals: vec![Some(text.to_string())],
+        }
+    }
+
+    /// The seven metadata rows plus the four measured `ReplayGain` rows a
+    /// readout resolves, so a draft prefills every buffer from the value the
+    /// readout showed.
+    fn replaygain_tags() -> Vec<TagRow> {
+        vec![
+            value_row(TagField::Title, "Old Title"),
+            value_row(TagField::Artist, "Artist"),
+            value_row(TagField::Album, "Album"),
+            value_row(TagField::AlbumArtist, "Album Artist"),
+            value_row(TagField::Genre, "Genre"),
+            value_row(TagField::Year, "2001"),
+            value_row(TagField::TrackNumber, "7"),
+            value_row(TagField::ReplayGainTrackGain, "-6.54"),
+            value_row(TagField::ReplayGainTrackPeak, "0.98"),
+            value_row(TagField::ReplayGainAlbumGain, "-7.12"),
+            value_row(TagField::ReplayGainAlbumPeak, "1.02"),
+        ]
+    }
+
+    /// A single-Track draft whose four `ReplayGain` buffers are all typed
+    /// over their readout values — every one of them dirty.
+    fn replaygain_track_editor(edits: &RecordingTagEdits) -> InlineTagEditor {
+        let mut editor = InlineTagEditor::new(Box::new(edits.clone()));
+        editor.open_track(
+            TrackId("/music/t1.mp3".to_string()),
+            PathBuf::from("/music/t1.mp3"),
+            &replaygain_tags(),
+        );
+        if let Some(draft) = editor.draft_mut() {
+            draft.fields[TagField::ReplayGainTrackGain.index()] = "-9.00".to_string();
+            draft.fields[TagField::ReplayGainTrackPeak.index()] = "0.50".to_string();
+            draft.fields[TagField::ReplayGainAlbumGain.index()] = "-9.50".to_string();
+            draft.fields[TagField::ReplayGainAlbumPeak.index()] = "1.10".to_string();
+        }
+        editor
+    }
+
+    /// An album draft over one Track whose four `ReplayGain` buffers are
+    /// prefilled from the readout, with only the Track Gain and the Album
+    /// Peak typed over — so exactly those two are dirty.
+    fn replaygain_album_editor(edits: &RecordingTagEdits) -> InlineTagEditor {
+        let mut editor = InlineTagEditor::new(Box::new(edits.clone()));
+        editor.open_album(
+            vec![(
+                TrackId("/music/a1.mp3".to_string()),
+                PathBuf::from("/music/a1.mp3"),
+            )],
+            &replaygain_tags(),
+        );
+        if let Some(draft) = editor.draft_mut() {
+            draft.fields[TagField::ReplayGainTrackGain.index()] = "-9.00".to_string();
+            draft.fields[TagField::ReplayGainAlbumPeak.index()] = "1.10".to_string();
+        }
+        editor
+    }
+
+    /// A single-Track save writes every `ReplayGain` buffer the draft holds,
+    /// dirty or not: the buffer prefilled from the file is rewritten back as
+    /// the measurement it already carries.
+    #[test]
+    fn a_track_save_writes_all_four_replaygain_buffers() {
+        let edits = RecordingTagEdits::default();
+        let mut editor = replaygain_track_editor(&edits);
+
+        editor.save();
+
+        let requests = edits.requests();
+        assert_eq!(requests.len(), 1, "a single-track save is one request");
+        assert_eq!(
+            requests[0].replaygain,
+            ReplayGainTags {
+                track_gain: Some(-9.0),
+                track_peak: Some(0.5),
+                album_gain: Some(-9.5),
+                album_peak: Some(1.1),
+            },
+            "the track submission writes all four buffers"
+        );
+        let draft = editor.draft().expect("the submitted save keeps the draft");
+        assert!(draft.error.is_none(), "a valid draft submits cleanly");
+    }
+
+    /// An album save writes only the dirty `ReplayGain` buffers: an untouched
+    /// buffer stays `None` in every request rather than being rewritten on
+    /// every member of the batch.
+    #[test]
+    fn an_album_save_writes_only_the_dirty_replaygain_buffers() {
+        let edits = RecordingTagEdits::default();
+        let mut editor = replaygain_album_editor(&edits);
+
+        editor.save();
+
+        let requests = edits.requests();
+        assert_eq!(requests.len(), 1, "a one-track album is one request");
+        assert_eq!(
+            requests[0].replaygain,
+            ReplayGainTags {
+                track_gain: Some(-9.0),
+                track_peak: None,
+                album_gain: None,
+                album_peak: Some(1.1),
+            },
+            "the album submission writes only the dirty buffers"
+        );
+        let draft = editor.draft().expect("the submitted save keeps the draft");
+        assert!(draft.error.is_none(), "a valid draft submits cleanly");
     }
 }

@@ -421,9 +421,7 @@ fn test_lofty_writer_missing_file_returns_graceful_error() {
 
 #[test]
 fn test_symphonia_decoder_new() {
-    let mut codec_registry = symphonia::core::codecs::registry::CodecRegistry::new();
-    symphonia::default::register_enabled_codecs(&mut codec_registry);
-    let _decoder = SymphoniaDecoder::new(codec_registry);
+    let _decoder = SymphoniaDecoder::new();
     // Decoder creation test - we can't test much more without actual audio files
 }
 
@@ -847,6 +845,41 @@ fn test_debounced_audio_paths_filters_and_dedupes_a_batch() {
     assert_eq!(
         riff_infra::filesystem::watcher::debounced_audio_paths(&events),
         vec![PathBuf::from("/lib/a.mp3"), PathBuf::from("/lib/b.FLAC")]
+    );
+}
+
+#[test]
+fn test_debounced_audio_paths_keeps_every_canonical_extension() {
+    use notify::event::{CreateKind, EventKind};
+    use riff_persistence::store::AUDIO_EXTENSIONS;
+    use std::path::Path;
+
+    // Anti-drift: the watcher's filter must survive one path per canonical
+    // entry. The expectation is read from the canonical constant — the one
+    // house — so a format added there reaches the watcher automatically
+    // and a reintroduced private copy cannot drift silently. Names are
+    // distinct so deduplication cannot collapse two entries, and the order
+    // is the constant's own, so first-seen order is what survives.
+    let events: Vec<_> = AUDIO_EXTENSIONS
+        .iter()
+        .enumerate()
+        .map(|(index, extension)| {
+            debounced_event(
+                EventKind::Create(CreateKind::File),
+                Path::new(&format!("/lib/track-{index}.{extension}")),
+            )
+        })
+        .collect();
+    let expected: Vec<PathBuf> = AUDIO_EXTENSIONS
+        .iter()
+        .enumerate()
+        .map(|(index, extension)| PathBuf::from(format!("/lib/track-{index}.{extension}")))
+        .collect();
+
+    assert_eq!(
+        riff_infra::filesystem::watcher::debounced_audio_paths(&events),
+        expected,
+        "every canonical extension must survive the batch filter"
     );
 }
 

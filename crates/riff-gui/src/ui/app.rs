@@ -1,9 +1,11 @@
 mod browser_pane;
+mod collection_menu;
 mod library_picker;
 mod selection_pane;
 mod tag_editor;
 mod track_menu;
 
+pub use collection_menu::{CollectionMenuHost, apply_collection_menu};
 pub use library_picker::register_library_path;
 pub use tag_editor::InlineTagEditor;
 pub use track_menu::{TrackMenuHost, TrackMenuOpen, TrackMenuSubject};
@@ -43,7 +45,6 @@ pub use riff_backend::app::cover_service::{
     COVER_CACHE_CAP, ClearCacheOutcome, Covers, lru_insert,
 };
 use riff_backend::app::pass_service::Passes;
-use riff_backend::app::replaygain_pass::PassCommand;
 use riff_backend::app::replaygain_pass::PassReport;
 // The artwork cache-key space moved to `ui::artwork` with the artwork primitive
 // (issue 13); these keep the historical `ui::app::` paths resolving.
@@ -142,7 +143,7 @@ type NowPlayingLabels = (Option<Arc<str>>, Option<Arc<str>>);
 /// This bundle is the ownership shape that removes the threading: it is built
 /// once per listing and handed down, so a row site reads four arguments instead
 /// of nine and the "which session does a row write to" question has one answer.
-/// Precedent: `PlaylistPromptSlots`, `CollectionMenuEffects`, `TrackMenuHost`.
+/// Precedent: `PlaylistPromptSlots`, `CollectionMenuHost`, `TrackMenuHost`.
 ///
 /// `library` is the one mutable field, and deliberately so: the row's clicks
 /// write selection straight into the session, and threading that back through a
@@ -390,6 +391,15 @@ pub struct RiffApp {
     /// wrapper and the tray thread record dispatched commands onto, and the
     /// inbox the UI drains at the start of every frame.
     backend_events: Arc<Mutex<BackendEvents>>,
+    /// The app's ONE "what time is it" seam, so the golden-image harness can
+    /// PIN the clock and stop recurring baseline drift. `None` — what every
+    /// [`RiffApp::new`] path sets, including production — reads the real wall
+    /// clock per frame through [`elapsed_since`], byte-for-byte the behaviour
+    /// before this seam existed. `Some(t)` measures every relative stamp from
+    /// the fixed instant `t` instead, so a fixture renders an identical
+    /// "just now" / "1d ago" on every machine. Production never sets it; only
+    /// the golden harness does, through [`RiffApp::set_now_for_test`].
+    pub(crate) now: Option<std::time::SystemTime>,
 }
 
 impl RiffApp {
@@ -487,6 +497,7 @@ impl RiffApp {
             #[cfg(target_os = "macos")]
             quit_flag,
             backend_events,
+            now: None,
         }
     }
 
@@ -575,6 +586,18 @@ impl RiffApp {
         (app, visibility_tx)
     }
 
+    /// Test-only: pin the app's "what time is it" seam to a fixed instant so a
+    /// golden render reads a stable, machine-independent time-of-run string.
+    ///
+    /// Production leaves `now` at `None` (the real clock); nothing but a test
+    /// sets this. It is `doc(hidden)` like [`RiffApp::new_for_test`] — the
+    /// golden harness builds the whole shell over mock ports, then pins the
+    /// clock through here before it steps frames.
+    #[doc(hidden)]
+    pub fn set_now_for_test(&mut self, now: std::time::SystemTime) {
+        self.now = Some(now);
+    }
+
     /// Apply the active theme to the context (REQ-UI-007, Issue 01).
     ///
     /// The *decision* half — resolve the palette, notice the flip, install the
@@ -636,7 +659,8 @@ impl RiffApp {
     /// the frame only ever says "clearing" and never waits.
     pub(crate) fn request_thumbnail_cache_clear(&mut self) {
         if request_cache_clear(self.covers.as_ref(), &mut self.clear_cache_in_flight) {
-            self.feedback.set_library(
+            self.feedback.set(
+                riff_backend::app::events::NoticeSource::Library,
                 "Clearing the thumbnail cache\u{2026}".to_string(),
                 riff_backend::app::events::NoticeSeverity::Info,
             );
@@ -732,6 +756,36 @@ impl RiffApp {
             self.library_mutations.as_mut(),
             &mut self.tag_editor,
             selected_track,
+        )
+    }
+
+    /// The **per-app Collection-menu host**, borrowed for the length of one
+    /// gesture: the counterpart of [`RiffApp::track_menu`] for an entity row.
+    ///
+    /// This is the app's single declaration of the handle set a right-click on
+    /// an entity row answers through, and the only place any of it is named.
+    /// A Column's dispatch binding calls [`apply_collection_menu`] with this
+    /// host and supplies a Column's identity — never a handle — so a new
+    /// Column cannot forget to wire one, and cannot wire a different set than
+    /// the app has. The test suite calls the same constructor, which is what
+    /// replaced a field-for-field mirror of two assembly sites that could
+    /// drift from both without anything failing.
+    ///
+    /// Borrowed rather than stored, for the same reason as the Track menu's:
+    /// the library and playback sessions are the frame's own borrows, threaded
+    /// into the stage per gesture, and this host is built inside that same
+    /// frame. It takes the two slots it was already handed, not the stage.
+    pub(crate) fn collection_menu<'a>(
+        &'a mut self,
+        library: &'a mut LibrarySession,
+        playback: &'a mut PlaybackSession,
+    ) -> CollectionMenuHost<'a> {
+        CollectionMenuHost::new(
+            library,
+            playback,
+            self.transport.as_ref(),
+            self.passes.as_ref(),
+            &mut self.views,
         )
     }
 
@@ -1452,8 +1506,11 @@ pub fn close_resolution(
 /// where the row's selection lands and which Tracks the row denotes, read the
 /// row's kind from here, so a row can never be SELECTED as one thing and PLAYED
 /// as another.
+/// [`crate::ui::app::collection_menu`]'s applier is the third reader: it asks
+/// whether the row is an Album before it dispatches that Album's two measure
+/// items, and whether a play batch is a whole-Album play.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum EntityRow {
+pub(super) enum EntityRow {
     /// An Album, named by the store's own `(album artist, title)` identity.
     Album { artist: String, title: String },
     /// An Artist, named by its own name.
@@ -1479,7 +1536,7 @@ impl EntityRow {
 /// The entity a row at `level` of `section` denotes. `None` where the section
 /// lists no entity rows — the All Tracks listing, and any depth that does not
 /// exist — so a key that could mean nothing selects nothing and plays nothing.
-fn entity_row(key: &str, section: LibrarySection, level: usize) -> Option<EntityRow> {
+pub(super) fn entity_row(key: &str, section: LibrarySection, level: usize) -> Option<EntityRow> {
     match (section, level) {
         (LibrarySection::Albums, 0)
         | (LibrarySection::Artists, 1)
@@ -1644,7 +1701,7 @@ pub fn apply_detail_action(
 /// shared pair across it (per-Track fallback where the Album value is
 /// absent), while every other batch — a folder, a playlist, an Artist or
 /// Genre — levels each Track's own pair.
-fn play_batch(album_tracks: &[TrackId], whole_album: bool, transport: &dyn Transport) {
+pub(super) fn play_batch(album_tracks: &[TrackId], whole_album: bool, transport: &dyn Transport) {
     let Some(first) = album_tracks.first() else {
         return;
     };
@@ -1853,6 +1910,29 @@ pub struct InspectorContent {
     pub tags: Vec<crate::ui::selection::TagRow>,
 }
 
+/// The app's one "what time is it" seam, read by every relative stamp the UI
+/// paints ("Last played", "Last scan", "Last full scan").
+///
+/// `now = None` — the production case — reads the real wall clock exactly as
+/// the code did before the seam existed: `at.elapsed().unwrap_or(ZERO)`, which
+/// is `SystemTime::now().duration_since(at)` clamped to zero when `at` is in
+/// the future. `now = Some(t)` measures from the pinned instant `t` instead,
+/// clamped to zero when `t` is ahead of `at`, so the golden harness gets the
+/// same string on every machine and a pinned clock never yields a future
+/// duration (`Duration::saturating_since` spelled stably: `duration_since`
+/// errs, and its `Err` is exactly the "earlier" case that saturates to zero).
+/// Callers thread [`RiffApp::now`] in; the None path is byte-for-byte today's
+/// behaviour.
+pub(crate) fn elapsed_since(
+    at: std::time::SystemTime,
+    now: Option<std::time::SystemTime>,
+) -> std::time::Duration {
+    match now {
+        None => at.elapsed().unwrap_or(std::time::Duration::ZERO),
+        Some(now) => now.duration_since(at).unwrap_or(std::time::Duration::ZERO),
+    }
+}
+
 /// Resolve what the inspector renders for the session: the selected track —
 /// single-clicking a track row in any track listing sets it, so the detail
 /// panel follows the click into the track's readout — or, when no track is
@@ -1866,7 +1946,11 @@ pub struct InspectorContent {
 /// through the Session Views seam, so scans and tag edits can never leave
 /// stale rows. Any selection the store no longer carries resolves hidden,
 /// never a stale readout.
-pub fn resolve_inspector(views: &mut SessionViews, library: &LibrarySession) -> InspectorContent {
+pub fn resolve_inspector(
+    views: &mut SessionViews,
+    library: &LibrarySession,
+    now: Option<std::time::SystemTime>,
+) -> InspectorContent {
     use riff_backend::app::state::BrowserSelection;
 
     // The selected track wins: single-clicking a track in the flat list,
@@ -1876,13 +1960,16 @@ pub fn resolve_inspector(views: &mut SessionViews, library: &LibrarySession) -> 
     if let Some(track_id) = library.selected_track.clone()
         && let Some(track) = views.selected_track(&track_id)
     {
-        return track_inspector(track);
+        return track_inspector(track, now);
     }
     let Some(selection) = library.current_selection() else {
         return InspectorContent::default();
     };
     match selection {
-        BrowserSelection::Album { artist, title } => album_inspector(views, artist, title),
+        BrowserSelection::Album { artist, title } => album_inspector(views, artist, title, now),
+        // The Artist and Genre readouts paint no time-of-run string, so they
+        // take no `now` — threading it here would only be a clippy-unused
+        // argument. The seam reaches them through the builders that read it.
         BrowserSelection::Artist(name) => artist_inspector(views, name),
         BrowserSelection::Genre(genre) => genre_inspector(views, genre),
     }
@@ -1985,17 +2072,17 @@ fn detail(label: &str, value: impl Into<String>) -> crate::ui::selection::Select
 
 /// The compact track readout: title, artist, album, metadata, and the
 /// single-track batch the Play/Queue actions start.
-fn track_inspector(track: riff_backend::domain::Track) -> InspectorContent {
+fn track_inspector(
+    track: riff_backend::domain::Track,
+    now: Option<std::time::SystemTime>,
+) -> InspectorContent {
     let details = vec![
         detail("Plays", track.play_count.to_string()),
         detail(
             "Last played",
             track.last_played.map_or_else(
                 || "Never".to_string(),
-                |at| {
-                    let elapsed = at.elapsed().unwrap_or(std::time::Duration::ZERO);
-                    crate::ui::sidebar::format_last_scan_ago(elapsed)
-                },
+                |at| crate::ui::sidebar::format_last_scan_ago(elapsed_since(at, now)),
             ),
         ),
         detail("Path", track.file_path.to_string_lossy().to_string()),
@@ -2020,7 +2107,12 @@ fn track_inspector(track: riff_backend::domain::Track) -> InspectorContent {
 /// The album readout: cover, title, artist · year line, the aggregated tag
 /// section, and the details grid (artist, track count · total time, plays,
 /// last played, path). Hidden when the store no longer carries the album.
-fn album_inspector(views: &mut SessionViews, artist: &str, title: &str) -> InspectorContent {
+fn album_inspector(
+    views: &mut SessionViews,
+    artist: &str,
+    title: &str,
+    now: Option<std::time::SystemTime>,
+) -> InspectorContent {
     let tracks = views.album_tracks(artist, title);
     if tracks.is_empty() {
         // The album is gone from the store (a rescan dropped it) — the
@@ -2055,7 +2147,7 @@ fn album_inspector(views: &mut SessionViews, artist: &str, title: &str) -> Inspe
                 .sum::<u32>()
                 .to_string(),
         ),
-        detail("Last played", last_played_label(&tracks)),
+        detail("Last played", last_played_label(&tracks, now)),
         detail(
             "Path",
             tracks[0]
@@ -2171,14 +2263,14 @@ fn total_duration(tracks: &[riff_backend::domain::Track]) -> Option<std::time::D
 /// The most recent play time across the album's tracks, as a coarse
 /// relative readout (`5m ago` — the sidebar footer's buckets); `Never`
 /// before the first play.
-fn last_played_label(tracks: &[riff_backend::domain::Track]) -> String {
+fn last_played_label(
+    tracks: &[riff_backend::domain::Track],
+    now: Option<std::time::SystemTime>,
+) -> String {
     let latest = tracks.iter().filter_map(|track| track.last_played).max();
     latest.map_or_else(
         || "Never".to_string(),
-        |at| {
-            let elapsed = at.elapsed().unwrap_or(std::time::Duration::ZERO);
-            crate::ui::sidebar::format_last_scan_ago(elapsed)
-        },
+        |at| crate::ui::sidebar::format_last_scan_ago(elapsed_since(at, now)),
     )
 }
 
@@ -2692,9 +2784,12 @@ impl RiffApp {
                     egui::Sense::click(),
                 );
                 let tex_id = self.icons.texture(ui.ctx(), chevron, 16.0, tint);
-                let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                ui.painter_at(chevron_rect)
-                    .image(tex_id, chevron_rect.shrink(4.0), uv_full, tint);
+                ui.painter_at(chevron_rect).image(
+                    tex_id,
+                    chevron_rect.shrink(4.0),
+                    crate::ui::artwork::UV_FULL,
+                    tint,
+                );
                 response.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label)
                 });
@@ -2762,8 +2857,11 @@ impl RiffApp {
     ) {
         use crate::ui::sidebar;
 
+        // Copy the pinned "now" out of `self` first, so the `map` closure below
+        // captures the Option rather than re-borrowing `self` while it runs.
+        let now = self.now;
         let stamp = self.views.last_scan().map(|scan| {
-            let elapsed = scan.elapsed().unwrap_or_default();
+            let elapsed = elapsed_since(scan, now);
             format!("Last scan {}", sidebar::format_last_scan_ago(elapsed))
         });
         if sidebar::sidebar_footer(
@@ -2854,18 +2952,12 @@ impl RiffApp {
             // bookkeeping here.
         }
 
-        // `.animated(false)`: this list is driven by a `ScrollControl`, so it
-        // jumps to a named offset (a restored position, or the top after a
-        // selection change) and a keep-in-view jump must not lerp. The flag
-        // governs programmatic scroll-to offsets only, not wheel feel — the
-        // reason is written once on
-        // [`ScrollControl`](crate::ui::scroll_memory::ScrollControl). The other
-        // `ScrollArea`s in this file (and elsewhere) leave the flag on on
-        // purpose; do not "fix" the inconsistency by flipping them.
-        let scroll_area = egui::ScrollArea::vertical()
-            .id_salt(control.salt)
-            .animated(false)
-            .vertical_scroll_offset(control.start.unwrap_or(0.0));
+        // Built by
+        // [`crate::ui::scroll_area::controlled_scroll_area`] (no `auto_shrink`
+        // here); the reason it is unanimated — and why the other `ScrollArea`s
+        // in this file are not flipped to match — is written once on
+        // [`ScrollControl`](crate::ui::scroll_memory::ScrollControl).
+        let scroll_area = crate::ui::scroll_area::controlled_scroll_area(control, true);
         let output = scroll_area.show_rows(
             ui,
             theme::geometry::sidebar::ROW_H,
@@ -3211,26 +3303,26 @@ impl RiffApp {
         // a drag-and-drop on a sorted view would persist positions read off
         // the wrong order — so while sorted the rows render plain and the
         // canonical index still travels with each row.
-        let sorted = match library.track_sort {
-            TrackSort::NumberAsc => (0..entries.len()).collect::<Vec<_>>(),
-            TrackSort::NumberDesc => (0..entries.len()).rev().collect(),
-            TrackSort::TitleAsc | TrackSort::TitleDesc => {
-                let desc = library.track_sort == TrackSort::TitleDesc;
-                let key = |i: usize| {
-                    entries[i].1.as_ref().map_or_else(
-                        || entries[i].0.0.to_lowercase(),
-                        |t| t.metadata.display_title(&t.file_path).to_lowercase(),
-                    )
-                };
-                let mut order: Vec<usize> = (0..entries.len()).collect();
-                if desc {
-                    order.sort_by_key(|&i| std::cmp::Reverse(key(i)));
-                } else {
-                    order.sort_by_key(|&i| key(i));
-                }
-                order
-            }
-        };
+        //
+        // The ordering rule itself is NOT spelled here — it is the one generic
+        // in-memory ordering the crate already owns, `browser_pane::sort_tracks`,
+        // applied to the `(0..n)` index permutation so a flipped sort stays a
+        // true permutation: each canonical index keeps naming the same row, in
+        // both directions. Passing the RAW title (the resolved Track's display
+        // title, else the entry id) lets `sort_tracks` own the single
+        // case-insensitive compare and the reverse arm, exactly as the owned
+        // `&Track` listings above and the smart-playlist view already do.
+        let mut sorted: Vec<usize> = (0..entries.len()).collect();
+        crate::ui::app::browser_pane::sort_tracks(
+            &mut sorted,
+            |&i| {
+                entries[i].1.as_ref().map_or_else(
+                    || entries[i].0.0.clone(),
+                    |t| t.metadata.display_title(&t.file_path),
+                )
+            },
+            library.track_sort,
+        );
         let reorderable = library.track_sort == TrackSort::NumberAsc;
 
         // One row per entry: the store-resolved track (if any) plus the
@@ -3887,107 +3979,6 @@ fn show_list_context_menu(
     });
     for intent in intents {
         apply_list_menu_intent(intent, track_ids, transport, playback);
-    }
-}
-
-/// The host slots one collection menu's effects answer to — assembled by the
-/// attach site and applied by [`apply_collection_menu`], the counterpart of
-/// [`TrackMenuHost`] for the Track menu. Nothing in here is reachable while
-/// the menu is being painted: the renderer only reports a choice, or the fact
-/// that the menu was opened at all.
-pub struct CollectionMenuEffects<'a> {
-    /// The library session: opening an entity row's menu selects it, so the
-    /// menu just opened and the Detail Panel describe the same entity.
-    pub library: &'a mut LibrarySession,
-    /// The playback session: the Shuffle item's flag lives on its queue, and
-    /// the batch intents go to the engine from there.
-    pub playback: &'a mut PlaybackSession,
-    /// The playback command port the batch intents go through.
-    pub transport: &'a dyn Transport,
-    /// The `ReplayGain` Pass service: the Album menu's two measure items are
-    /// submissions here, never runs — the pass owns its worker thread.
-    pub passes: &'a dyn Passes,
-    /// The Session Views seam, which resolves the row's Track batch at
-    /// dispatch time.
-    pub views: &'a mut SessionViews,
-}
-
-/// Apply one entity row's context-menu report: the selection, then whatever the
-/// listener chose.
-///
-/// `column` is the identity of the Column the row was clicked in — its Section,
-/// its depth, its Scroll Memory slot — which the Column stated once and this
-/// function reads. A Section root and a Drill Column therefore cannot disagree
-/// with a plain click on the same row: it is the same identity, reached through
-/// the same two calls.
-///
-/// The selection is applied FIRST and unconditionally, before the intents are
-/// looked at: OPENING the menu is what moves it, so a right-click that chooses
-/// nothing still leaves the readout agreeing with the menu on screen. That is
-/// also why the selection is an argument here rather than something read back
-/// off the click — this whole function is reachable, and provable, without a
-/// pointer.
-///
-/// Each intent then goes through [`apply_list_menu_intent`], the same applier a
-/// playlist header, a smart playlist header, and a folder node use, so the four
-/// items mean one thing on all six set-of-Tracks surfaces and their effect logic
-/// is written once rather than twice.
-pub fn apply_collection_menu(
-    key: &str,
-    intents: &[crate::ui::menu::ListMenuIntent],
-    column: ColumnIdentity,
-    effects: CollectionMenuEffects<'_>,
-) {
-    apply_entity_selection(key, column, effects.library);
-    for intent in intents {
-        // The Album menu's two measure items are not batch actions over a
-        // Track set — they name the Album itself. The other four go through
-        // the shared list-intent applier.
-        // An Album row's play/shuffle is a **whole-Album play** — the
-        // `ReplayGain` queue provenance — while an Artist or Genre row is a
-        // batch of Albums and a folder or playlist is neither.
-        let whole_album = matches!(
-            entity_row(key, column.section(), column.level()),
-            Some(EntityRow::Album { .. })
-        );
-        match intent {
-            crate::ui::menu::ListMenuIntent::MeasureAlbumAggregate => {
-                if let Some(EntityRow::Album { artist, title }) =
-                    entity_row(key, column.section(), column.level())
-                {
-                    effects.passes.submit(PassCommand::AlbumAggregate {
-                        album_artist: artist,
-                        album_title: title,
-                    });
-                }
-            }
-            crate::ui::menu::ListMenuIntent::MeasureAlbumTracks => {
-                if let Some(EntityRow::Album { artist, title }) =
-                    entity_row(key, column.section(), column.level())
-                {
-                    effects.passes.submit(PassCommand::AlbumTracks {
-                        album_artist: artist,
-                        album_title: title,
-                    });
-                }
-            }
-            crate::ui::menu::ListMenuIntent::Play => {
-                let batch = entity_track_ids(key, column, effects.views);
-                play_batch(&batch, whole_album, effects.transport);
-            }
-            crate::ui::menu::ListMenuIntent::Shuffle => {
-                let batch = entity_track_ids(key, column, effects.views);
-                if batch.is_empty() {
-                    continue;
-                }
-                effects.playback.queue.set_shuffle(true);
-                play_batch(&batch, whole_album, effects.transport);
-            }
-            intent => {
-                let batch = entity_track_ids(key, column, effects.views);
-                apply_list_menu_intent(*intent, &batch, effects.transport, effects.playback);
-            }
-        }
     }
 }
 

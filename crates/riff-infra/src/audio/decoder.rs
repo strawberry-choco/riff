@@ -40,19 +40,27 @@ pub struct SymphoniaDecoder {
     scratch: Vec<f32>,
 }
 
-/// Build the shared codec registry: symphonia's enabled defaults plus the
-/// Opus adapter. The native codec dependencies live in this crate, so the
-/// registry is built here and the composition root never names symphonia.
-#[must_use]
-pub fn default_codec_registry() -> CodecRegistry {
-    let mut registry = CodecRegistry::new();
-    symphonia::default::register_enabled_codecs(&mut registry);
-    registry.register_audio_decoder::<symphonia_adapter_libopus::OpusDecoder>();
-    registry
+impl Default for SymphoniaDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SymphoniaDecoder {
-    pub fn new(codec_registry: CodecRegistry) -> Self {
+    /// Build a decoder together with the codec registry it decodes through:
+    /// symphonia's enabled defaults plus the Opus adapter.
+    ///
+    /// This is the one place that knows which codecs riff registers — the
+    /// same list the Library Scan's format set mirrors, declared once here
+    /// rather than rebuilt by every caller. The registry is deliberately not
+    /// shared: it is not `Clone`, so a fresh one is built per decoder instead
+    /// of handed around, which is also what keeps `riff-backend` — a crate
+    /// that declares no native dependency — from ever holding, naming, or
+    /// rebuilding one.
+    pub fn new() -> Self {
+        let mut codec_registry = CodecRegistry::new();
+        symphonia::default::register_enabled_codecs(&mut codec_registry);
+        codec_registry.register_audio_decoder::<symphonia_adapter_libopus::OpusDecoder>();
         Self {
             codec_registry,
             format_reader: None,
@@ -296,5 +304,128 @@ impl EngineAudioDecoder for SymphoniaDecoder {
 
     fn duration(&self) -> Option<Duration> {
         self.duration
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+    use symphonia::core::codecs::audio::well_known::{
+        CODEC_ID_AAC, CODEC_ID_AC3, CODEC_ID_ADPCM_G726, CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS,
+        CODEC_ID_ALAC, CODEC_ID_DCA, CODEC_ID_FLAC, CODEC_ID_MP1, CODEC_ID_MP2, CODEC_ID_MP3,
+        CODEC_ID_OPUS, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_F32LE, CODEC_ID_PCM_F64LE,
+        CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S16BE, CODEC_ID_PCM_S16LE, CODEC_ID_PCM_S24LE,
+        CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8, CODEC_ID_VORBIS, CODEC_ID_WAVPACK, CODEC_ID_WMA,
+    };
+    // The one codec id the module itself already names; `well_known` does not
+    // carry it.
+    use symphonia::core::codecs::audio::AudioCodecId;
+
+    /// The registry the composition root built by hand before `new()` took
+    /// the job over: symphonia's enabled defaults plus the Opus adapter. It is
+    /// the oracle the constructor is held against, so a codec added or dropped
+    /// inside `new()` fails here rather than silently changing what riff can
+    /// play.
+    fn hand_built_registry() -> CodecRegistry {
+        let mut registry = CodecRegistry::new();
+        symphonia::default::register_enabled_codecs(&mut registry);
+        registry.register_audio_decoder::<symphonia_adapter_libopus::OpusDecoder>();
+        registry
+    }
+
+    /// Every audio codec a file the Library Scan indexes can present, keyed by
+    /// the extension that brings it in: `.mp3` is the MPEG audio family,
+    /// `.aac` and `.m4a` are AAC or ALAC, `.opus` is Opus, `.ogg` is Vorbis,
+    /// `.flac` is FLAC, and `.wav` is one of the PCM, A-law, μ-law, or ADPCM
+    /// families. This is what the registry is *for* as far as riff is
+    /// concerned, so it is what the lock probes.
+    const INDEXED_FORMAT_CODECS: &[(&str, &[AudioCodecId])] = &[
+        ("mp3", &[CODEC_ID_MP1, CODEC_ID_MP2, CODEC_ID_MP3]),
+        ("aac", &[CODEC_ID_AAC]),
+        ("m4a", &[CODEC_ID_AAC, CODEC_ID_ALAC]),
+        ("opus", &[CODEC_ID_OPUS]),
+        ("ogg", &[CODEC_ID_VORBIS]),
+        ("flac", &[CODEC_ID_FLAC]),
+        (
+            "wav",
+            &[
+                CODEC_ID_PCM_S16LE,
+                CODEC_ID_PCM_S16BE,
+                CODEC_ID_PCM_S24LE,
+                CODEC_ID_PCM_S32LE,
+                CODEC_ID_PCM_U8,
+                CODEC_ID_PCM_F32LE,
+                CODEC_ID_PCM_F64LE,
+                CODEC_ID_PCM_ALAW,
+                CODEC_ID_PCM_MULAW,
+                CODEC_ID_ADPCM_IMA_WAV,
+                CODEC_ID_ADPCM_MS,
+            ],
+        ),
+    ];
+
+    /// Codecs symphonia knows about that this build deliberately does not
+    /// register — the other half of "same codecs": a widened registration must
+    /// not pass either.
+    const UNREGISTERED_CODECS: &[(&str, AudioCodecId)] = &[
+        ("null audio", CODEC_ID_NULL_AUDIO),
+        ("WavPack", CODEC_ID_WAVPACK),
+        ("G.726 ADPCM", CODEC_ID_ADPCM_G726),
+        ("AC-3", CODEC_ID_AC3),
+        ("DCA", CODEC_ID_DCA),
+        ("WMA", CODEC_ID_WMA),
+    ];
+
+    /// Whether `decoder`'s registry can mint a decoder for `id`.
+    fn resolves(decoder: &SymphoniaDecoder, id: AudioCodecId) -> bool {
+        decoder.codec_registry.get_audio_decoder(id).is_some()
+    }
+
+    /// `new()` builds, privately, exactly the registry the composition root
+    /// used to build by hand — no codec added, none dropped, and none
+    /// invented.
+    #[test]
+    fn new_builds_the_registry_the_composition_root_used_to_build() {
+        let decoder = SymphoniaDecoder::new();
+        let expected = hand_built_registry();
+
+        for (extension, ids) in INDEXED_FORMAT_CODECS {
+            for id in *ids {
+                assert_eq!(
+                    resolves(&decoder, *id),
+                    expected.get_audio_decoder(*id).is_some(),
+                    "the registry `new()` builds must answer {id} ({extension}) \
+                     exactly as the hand-built registry does"
+                );
+                assert!(
+                    resolves(&decoder, *id),
+                    "a {extension} file's codec {id} must resolve"
+                );
+            }
+        }
+
+        for (name, id) in UNREGISTERED_CODECS {
+            assert_eq!(
+                resolves(&decoder, *id),
+                expected.get_audio_decoder(*id).is_some(),
+                "the registry `new()` builds must answer {name} ({id}) exactly \
+                 as the hand-built registry does"
+            );
+            assert!(!resolves(&decoder, *id), "{name} must stay unregistered");
+        }
+    }
+
+    /// Every extension the Library Scan indexes resolves at least one decoder,
+    /// so no indexed format is silently unplayable.
+    #[test]
+    fn every_indexed_format_resolves_a_decoder() {
+        let decoder = SymphoniaDecoder::new();
+
+        for (extension, ids) in INDEXED_FORMAT_CODECS {
+            assert!(
+                ids.iter().any(|id| resolves(&decoder, *id)),
+                "at least one of {extension}'s codecs must resolve: {ids:?}"
+            );
+        }
     }
 }

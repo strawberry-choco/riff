@@ -155,11 +155,9 @@ impl PassWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::store::FullScanSummary;
     use riff_library::app::errors::LibraryError;
     use riff_library::app::traits::{ReplayGainTags, TrackLoudness};
-    use riff_persistence::errors::StoreError;
-    use riff_persistence::test_support::StubLibraryQueryStore;
+    use riff_persistence::test_support::{StubLibraryMutationStore, StubLibraryQueryStore};
     use riff_persistence::track::{Track, TrackId, TrackMetadata};
     use std::path::Path;
     use std::thread;
@@ -221,46 +219,6 @@ mod tests {
         }
     }
 
-    struct FakeMutations;
-
-    impl LibraryMutationStore for FakeMutations {
-        fn apply_scan_batch(&mut self, _tracks: &[Track]) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-        fn record_track_played(
-            &mut self,
-            _id: &TrackId,
-            _played_at: std::time::SystemTime,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-        fn set_track_favorite(
-            &mut self,
-            _id: &TrackId,
-            _favorite: bool,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-        fn apply_tag_refresh(&mut self, _track: &Track) -> Result<(), StoreError> {
-            Ok(())
-        }
-        fn remove_library_path(&mut self, _root: &Path) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-        fn clear_library(&mut self) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-        fn record_full_scan_completed(
-            &mut self,
-            _summary: FullScanSummary,
-        ) -> Result<(), StoreError> {
-            Ok(())
-        }
-        fn stamp_metadata_version(&mut self, _version: u32) -> Result<(), StoreError> {
-            Ok(())
-        }
-    }
-
     /// A library of `count` unmeasured tracks for the library-wide command.
     fn library_of(count: usize) -> StubLibraryQueryStore {
         let tracks: Arc<Vec<String>> =
@@ -306,7 +264,7 @@ mod tests {
             Box::new(SharedAnalyzer(Arc::clone(&analyzer))),
             Box::new(FakeWriter),
             Box::new(library_of(tracks)),
-            Box::new(FakeMutations),
+            Box::new(StubLibraryMutationStore),
             Arc::clone(&cancel),
             Arc::clone(&stop),
             Arc::clone(&progress),

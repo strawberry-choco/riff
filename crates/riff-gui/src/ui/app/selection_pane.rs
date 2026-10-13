@@ -42,7 +42,7 @@ impl RiffApp {
     /// context menu. The stage gates visibility: this method only runs when
     /// [`resolve_inspector`] resolved a readout.
     pub(super) fn render_inspector(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
-        let content = resolve_inspector(&mut self.views, library);
+        let content = resolve_inspector(&mut self.views, library, self.now);
         // The draft never outlives its selection: the controller discards a
         // changed selection (or a readout the store no longer carries) this
         // frame, so a stale half-typed edit can never leak onto a different

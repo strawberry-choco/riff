@@ -983,89 +983,83 @@ impl PlaylistStore for SqliteStore {
         name: &str,
         initial_tracks: &[TrackId],
     ) -> Result<PlaylistId, StoreError> {
-        let created = self
-            .with_connection(|conn| {
-                in_tx(conn, |conn| {
-                    Self::create_playlist_in_tx(conn, name, initial_tracks)
-                })
-            })
-            .map_err(|e| op_error("failed to create playlist", e));
-        self.bump_playlist_generation_on_commit(created.is_ok());
-        created
+        self.mutate(
+            SessionGeneration::Playlists,
+            Result::is_ok,
+            "failed to create playlist",
+            |conn| Self::create_playlist_in_tx(conn, name, initial_tracks),
+        )
     }
 
     /// One immediate durable transaction: only the renamed row is written.
     fn rename_playlist(&mut self, id: &PlaylistId, new_name: &str) -> Result<bool, StoreError> {
-        let renamed = self
-            .with_connection(|conn| {
-                in_tx(conn, |conn| {
-                    conn.execute(
-                        "UPDATE playlists SET name = ?2 WHERE id = ?1",
-                        rusqlite::params![id.0, new_name.trim()],
-                    )
-                })
-            })
-            .map(|rows| rows > 0)
-            .map_err(|e| op_error("failed to rename playlist", e));
-        self.bump_playlist_generation_on_commit(matches!(renamed, Ok(true)));
-        renamed
+        self.mutate(
+            SessionGeneration::Playlists,
+            |renamed| matches!(renamed, Ok(true)),
+            "failed to rename playlist",
+            |conn| {
+                conn.execute(
+                    "UPDATE playlists SET name = ?2 WHERE id = ?1",
+                    rusqlite::params![id.0, new_name.trim()],
+                )
+                .map(|rows| rows > 0)
+            },
+        )
     }
 
     /// One immediate durable transaction: the playlist row goes and its
     /// entries cascade; no other playlist's data is rewritten.
     fn delete_playlist(&mut self, id: &PlaylistId) -> Result<bool, StoreError> {
-        let deleted = self
-            .with_connection(|conn| {
-                in_tx(conn, |conn| {
-                    conn.execute("DELETE FROM playlists WHERE id = ?1", [&id.0])
-                })
-            })
-            .map(|rows| rows > 0)
-            .map_err(|e| op_error("failed to delete playlist", e));
-        self.bump_playlist_generation_on_commit(matches!(deleted, Ok(true)));
-        deleted
+        self.mutate(
+            SessionGeneration::Playlists,
+            |deleted| matches!(deleted, Ok(true)),
+            "failed to delete playlist",
+            |conn| {
+                conn.execute("DELETE FROM playlists WHERE id = ?1", [&id.0])
+                    .map(|rows| rows > 0)
+            },
+        )
     }
 
     /// One immediate durable transaction: a single appended entry row, or
     /// nothing when the playlist is unknown or the entry already exists.
     fn add_playlist_entry(&mut self, id: &PlaylistId, track: &TrackId) -> Result<bool, StoreError> {
-        let added = self
-            .with_connection(|conn| {
-                in_tx(conn, |conn| {
-                    let known: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM playlists WHERE id = ?1",
-                        [&id.0],
-                        |row| row.get(0),
-                    )?;
-                    if known == 0 {
-                        return Ok(false);
-                    }
-                    let duplicate: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM playlist_entries
-                         WHERE playlist_id = ?1 AND track_id = ?2",
-                        rusqlite::params![id.0, track.0],
-                        |row| row.get(0),
-                    )?;
-                    if duplicate > 0 {
-                        return Ok(false);
-                    }
-                    let next: i64 = conn.query_row(
-                        "SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_entries
-                         WHERE playlist_id = ?1",
-                        [&id.0],
-                        |row| row.get(0),
-                    )?;
-                    conn.execute(
-                        "INSERT INTO playlist_entries(playlist_id, position, track_id)
-                         VALUES (?1, ?2, ?3)",
-                        rusqlite::params![id.0, next, track.0],
-                    )?;
-                    Ok(true)
-                })
-            })
-            .map_err(|e| op_error("failed to add playlist entry", e));
-        self.bump_playlist_generation_on_commit(matches!(added, Ok(true)));
-        added
+        self.mutate(
+            SessionGeneration::Playlists,
+            |added| matches!(added, Ok(true)),
+            "failed to add playlist entry",
+            |conn| {
+                let known: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM playlists WHERE id = ?1",
+                    [&id.0],
+                    |row| row.get(0),
+                )?;
+                if known == 0 {
+                    return Ok(false);
+                }
+                let duplicate: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM playlist_entries
+                     WHERE playlist_id = ?1 AND track_id = ?2",
+                    rusqlite::params![id.0, track.0],
+                    |row| row.get(0),
+                )?;
+                if duplicate > 0 {
+                    return Ok(false);
+                }
+                let next: i64 = conn.query_row(
+                    "SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_entries
+                     WHERE playlist_id = ?1",
+                    [&id.0],
+                    |row| row.get(0),
+                )?;
+                conn.execute(
+                    "INSERT INTO playlist_entries(playlist_id, position, track_id)
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![id.0, next, track.0],
+                )?;
+                Ok(true)
+            },
+        )
     }
 
     /// One immediate durable transaction removing every occurrence of the
@@ -1075,19 +1069,18 @@ impl PlaylistStore for SqliteStore {
         id: &PlaylistId,
         track: &TrackId,
     ) -> Result<bool, StoreError> {
-        let removed = self
-            .with_connection(|conn| {
-                in_tx(conn, |conn| {
-                    conn.execute(
-                        "DELETE FROM playlist_entries WHERE playlist_id = ?1 AND track_id = ?2",
-                        rusqlite::params![id.0, track.0],
-                    )
-                })
-            })
-            .map(|rows| rows > 0)
-            .map_err(|e| op_error("failed to remove playlist entries", e));
-        self.bump_playlist_generation_on_commit(matches!(removed, Ok(true)));
-        removed
+        self.mutate(
+            SessionGeneration::Playlists,
+            |removed| matches!(removed, Ok(true)),
+            "failed to remove playlist entries",
+            |conn| {
+                conn.execute(
+                    "DELETE FROM playlist_entries WHERE playlist_id = ?1 AND track_id = ?2",
+                    rusqlite::params![id.0, track.0],
+                )
+                .map(|rows| rows > 0)
+            },
+        )
     }
 
     /// One immediate durable transaction rewriting the playlist's entries to
@@ -1099,38 +1092,37 @@ impl PlaylistStore for SqliteStore {
         id: &PlaylistId,
         ordered: &[TrackId],
     ) -> Result<bool, StoreError> {
-        let reordered = self
-            .with_connection(|conn| {
-                in_tx(conn, |conn| {
-                    let known: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM playlists WHERE id = ?1",
-                        [&id.0],
-                        |row| row.get(0),
-                    )?;
-                    if known == 0 {
-                        return Ok(false);
-                    }
+        self.mutate(
+            SessionGeneration::Playlists,
+            |reordered| matches!(reordered, Ok(true)),
+            "failed to reorder playlist entries",
+            |conn| {
+                let known: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM playlists WHERE id = ?1",
+                    [&id.0],
+                    |row| row.get(0),
+                )?;
+                if known == 0 {
+                    return Ok(false);
+                }
+                conn.execute(
+                    "DELETE FROM playlist_entries WHERE playlist_id = ?1",
+                    [&id.0],
+                )?;
+                for (position, track) in ordered.iter().enumerate() {
                     conn.execute(
-                        "DELETE FROM playlist_entries WHERE playlist_id = ?1",
-                        [&id.0],
+                        "INSERT INTO playlist_entries(playlist_id, position, track_id)
+                         VALUES (?1, ?2, ?3)",
+                        rusqlite::params![
+                            id.0,
+                            i64::try_from(position).unwrap_or(i64::MAX),
+                            track.0
+                        ],
                     )?;
-                    for (position, track) in ordered.iter().enumerate() {
-                        conn.execute(
-                            "INSERT INTO playlist_entries(playlist_id, position, track_id)
-                             VALUES (?1, ?2, ?3)",
-                            rusqlite::params![
-                                id.0,
-                                i64::try_from(position).unwrap_or(i64::MAX),
-                                track.0
-                            ],
-                        )?;
-                    }
-                    Ok(true)
-                })
-            })
-            .map_err(|e| op_error("failed to reorder playlist entries", e));
-        self.bump_playlist_generation_on_commit(matches!(reordered, Ok(true)));
-        reordered
+                }
+                Ok(true)
+            },
+        )
     }
 }
 
@@ -1141,11 +1133,12 @@ impl LibraryMutationStore for SqliteStore {
     /// history columns excluded from the update branch, so rescans refresh
     /// metadata without ever touching history.
     fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, StoreError> {
-        let written = self
-            .with_connection(|conn| in_tx(conn, |conn| Self::apply_scan_batch_in_tx(conn, tracks)))
-            .map_err(|e| op_error("failed to apply scan batch", e));
-        self.bump_library_generation_on_commit(written.is_ok());
-        written
+        self.mutate(
+            SessionGeneration::Library,
+            Result::is_ok,
+            "failed to apply scan batch",
+            |conn| Self::apply_scan_batch_in_tx(conn, tracks),
+        )
     }
 
     /// One immediate durable transaction per finished play: a single-row
@@ -1156,20 +1149,19 @@ impl LibraryMutationStore for SqliteStore {
         id: &TrackId,
         played_at: SystemTime,
     ) -> Result<bool, StoreError> {
-        let recorded = self
-            .with_connection(|conn| {
-                in_tx(conn, |conn| {
-                    conn.execute(
-                        "UPDATE tracks SET play_count = play_count + 1, last_played_nanos = ?1
-                         WHERE path = ?2",
-                        rusqlite::params![nanos_from_system_time(played_at), id.0],
-                    )
-                    .map(|rows| rows > 0)
-                })
-            })
-            .map_err(|e| op_error("failed to record played track", e));
-        self.bump_library_generation_on_commit(matches!(recorded, Ok(true)));
-        recorded
+        self.mutate(
+            SessionGeneration::Library,
+            |recorded| matches!(recorded, Ok(true)),
+            "failed to record played track",
+            |conn| {
+                conn.execute(
+                    "UPDATE tracks SET play_count = play_count + 1, last_played_nanos = ?1
+                     WHERE path = ?2",
+                    rusqlite::params![nanos_from_system_time(played_at), id.0],
+                )
+                .map(|rows| rows > 0)
+            },
+        )
     }
 
     /// One immediate durable transaction per favorite toggle: the
@@ -1177,62 +1169,65 @@ impl LibraryMutationStore for SqliteStore {
     /// cannot lose it. The `favorite != ?1` guard makes a redundant set a
     /// no-op — nothing is written and no projection is invalidated.
     fn set_track_favorite(&mut self, id: &TrackId, favorite: bool) -> Result<bool, StoreError> {
-        let set = self
-            .with_connection(|conn| {
-                in_tx(conn, |conn| {
-                    conn.execute(
-                        "UPDATE tracks SET favorite = ?1
-                         WHERE path = ?2 AND favorite != ?1",
-                        rusqlite::params![favorite, id.0],
-                    )
-                    .map(|rows| rows > 0)
-                })
-            })
-            .map_err(|e| op_error("failed to set the favorite flag", e));
-        self.bump_library_generation_on_commit(matches!(set, Ok(true)));
-        set
+        self.mutate(
+            SessionGeneration::Library,
+            |set| matches!(set, Ok(true)),
+            "failed to set the favorite flag",
+            |conn| {
+                conn.execute(
+                    "UPDATE tracks SET favorite = ?1
+                     WHERE path = ?2 AND favorite != ?1",
+                    rusqlite::params![favorite, id.0],
+                )
+                .map(|rows| rows > 0)
+            },
+        )
     }
 
     /// One immediate durable transaction for a tag edit: the metadata upsert
     /// (history columns excluded) plus the album year/genre re-derivation and
     /// orphan cleanup commit together or not at all.
     fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), StoreError> {
-        let applied = self
-            .with_connection(|conn| in_tx(conn, |conn| Self::apply_tag_refresh_in_tx(conn, track)))
-            .map_err(|e| op_error("failed to apply tag refresh", e));
-        self.bump_library_generation_on_commit(applied.is_ok());
-        applied
+        self.mutate(
+            SessionGeneration::Library,
+            Result::is_ok,
+            "failed to apply tag refresh",
+            |conn| Self::apply_tag_refresh_in_tx(conn, track),
+        )
     }
 
     /// One immediate durable transaction removing exactly the root's tracks,
     /// their orphaned parents, and the root's own library-path record.
     /// Playlist entries are deliberately untouched — dangling references are
     /// valid product behavior.
+    ///
+    /// Which stored paths belong to the root is the module's one folder-prefix
+    /// rule, [`FOLDER_PREFIX_SQL`] bound through [`folder_prefix_params`] —
+    /// the same membership the folder reads (`folder_has_audio`,
+    /// `folder_track_count`, `tracks_in_folder`, ...) answer. Folding the
+    /// delete onto it is what keeps the two in agreement: a trailing-separator
+    /// (`m:\one\`), bare (`m:\`), or metacharacter-bearing (`%`, `_`, `#`) root
+    /// spelling removes the subtree the reads report, while a root that is a
+    /// sibling's byte-prefix (`m:\music` vs `m:\music2\...`) never does.
     fn remove_library_path(&mut self, root: &std::path::Path) -> Result<usize, StoreError> {
         let root_text = root.to_string_lossy().into_owned();
-        let removed = self
-            .with_connection(|conn| {
-                in_tx(conn, |conn| {
-                    // Byte-prefix match mirroring `Path::starts_with`: the root
-                    // itself (exact match) or the root followed by a path
-                    // separator, so "m:\music" can never swallow "m:\music2\...".
-                    conn.execute(
-                        "DELETE FROM tracks
-                         WHERE path = ?1
-                            OR (substr(path, 1, length(?1)) = ?1
-                                AND substr(path, length(?1) + 1, 1) IN ('\\', '/'))",
-                        [&root_text],
-                    )
-                    .and_then(|count| {
-                        Self::delete_orphaned_parents(conn)?;
-                        conn.execute("DELETE FROM library_paths WHERE path = ?1", [&root_text])?;
-                        Ok(count)
-                    })
+        let params = folder_prefix_params(&root_text);
+        self.mutate(
+            SessionGeneration::Library,
+            Result::is_ok,
+            "failed to remove library path",
+            |conn| {
+                conn.execute(
+                    &format!("DELETE FROM tracks WHERE {FOLDER_PREFIX_SQL}"),
+                    rusqlite::params![params[0], params[1], params[2]],
+                )
+                .and_then(|count| {
+                    Self::delete_orphaned_parents(conn)?;
+                    conn.execute("DELETE FROM library_paths WHERE path = ?1", [&root_text])?;
+                    Ok(count)
                 })
-            })
-            .map_err(|e| op_error("failed to remove library path", e));
-        self.bump_library_generation_on_commit(removed.is_ok());
-        removed
+            },
+        )
     }
 
     /// One immediate durable transaction: all tracks (history included),
@@ -1240,18 +1235,17 @@ impl LibraryMutationStore for SqliteStore {
     /// orphan cleanup. Playlists and Settings tables are never touched. Any
     /// failure rolls the whole wipe back — nothing partially clears.
     fn clear_library(&mut self) -> Result<usize, StoreError> {
-        let cleared = self
-            .with_connection(|conn| {
-                in_tx(conn, |conn| {
-                    conn.execute("DELETE FROM tracks", []).and_then(|count| {
-                        Self::delete_orphaned_parents(conn)?;
-                        Ok(count)
-                    })
+        self.mutate(
+            SessionGeneration::Library,
+            Result::is_ok,
+            "failed to clear the library",
+            |conn| {
+                conn.execute("DELETE FROM tracks", []).and_then(|count| {
+                    Self::delete_orphaned_parents(conn)?;
+                    Ok(count)
                 })
-            })
-            .map_err(|e| op_error("failed to clear the library", e));
-        self.bump_library_generation_on_commit(cleared.is_ok());
-        cleared
+            },
+        )
     }
 
     /// Overwrite the last-scan summary in `store_metadata` as ONE immediate
@@ -1262,34 +1256,37 @@ impl LibraryMutationStore for SqliteStore {
     fn record_full_scan_completed(&mut self, summary: FullScanSummary) -> Result<(), StoreError> {
         let nanos = nanos_from_system_time(summary.at);
         let value = format!("{}:{}:{}", nanos, summary.files, summary.errors);
-        let committed = self
-            .with_connection(|conn| {
-                in_tx(conn, |conn| {
-                    conn.execute(
-                        "INSERT INTO store_metadata (key, value) VALUES ('last_full_scan', ?1)
-                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        [value],
-                    )
-                    .map(|_| ())
-                })
-            })
-            .map_err(|e| op_error("failed to record the last scan", e));
-        self.bump_library_generation_on_commit(committed.is_ok());
-        committed
+        self.mutate(
+            SessionGeneration::Library,
+            Result::is_ok,
+            "failed to record the last scan",
+            |conn| {
+                conn.execute(
+                    "INSERT INTO store_metadata (key, value) VALUES ('last_full_scan', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    [value],
+                )
+                .map(|_| ())
+            },
+        )
     }
 
     /// One durable write of the metadata version. Deliberately NOT a
     /// generation bump: the column describes how the collection was read, not
     /// any of its facts, so no Session Projection has to refetch for it.
     fn stamp_metadata_version(&mut self, version: u32) -> Result<(), StoreError> {
-        self.with_connection(|conn| {
-            conn.execute(
-                "UPDATE app_settings SET metadata_version = ?1 WHERE id = 1",
-                [i64::from(version)],
-            )
-        })
-        .map_err(|e| op_error("failed to stamp the metadata version", e))?;
-        Ok(())
+        self.mutate(
+            SessionGeneration::None,
+            |_| false,
+            "failed to stamp the metadata version",
+            |conn| {
+                conn.execute(
+                    "UPDATE app_settings SET metadata_version = ?1 WHERE id = 1",
+                    [i64::from(version)],
+                )
+                .map(|_| ())
+            },
+        )
     }
 }
 
@@ -1337,6 +1334,70 @@ fn in_tx<T>(
 /// method, over either a rusqlite error or an already-wrapped store error.
 fn op_error(context: &str, e: impl std::fmt::Display) -> StoreError {
     StoreError::InvalidOperation(format!("{context}: {e}"))
+}
+
+/// Which session generation a committed store mutation moves, and which
+/// [`StoreChanged`] notice rides out beside that bump (ADR 0002).
+///
+/// The store's two counters are independent on purpose — a playlist entry
+/// edit must never invalidate a Library projection — so the target is named
+/// by each mutation instead of being derived from it.
+/// [`None`](Self::None) is the durable write no Session Projection keys on.
+#[derive(Clone, Copy)]
+enum SessionGeneration {
+    /// The session Library generation
+    /// ([`SqliteStore::library_generation`]), whose notice is
+    /// [`StoreChanged::Library`].
+    Library,
+    /// The session playlist generation
+    /// ([`SqliteStore::playlist_generation`]), whose notice is
+    /// [`StoreChanged::Playlists`].
+    Playlists,
+    /// Neither counter: the write commits durably and nothing refetches for
+    /// it — the Settings block and the metadata version stamp.
+    None,
+}
+
+impl SqliteStore {
+    /// One mutating store write, end to end: take the connection lock, run
+    /// `f` as ONE immediate durable transaction ([`in_tx`]), wrap any failure
+    /// in the operation's own context ([`op_error`]), and — when `committed`
+    /// reports that the write landed — move the session generation
+    /// `generation` names and push its [`StoreChanged`] notice beside the
+    /// bump.
+    ///
+    /// Every mutating store method folds its prologue through this one, so
+    /// the lock, the transaction, the failure wrapping, and the bump-or-not
+    /// rule are each written exactly once.
+    ///
+    /// `committed` is the write's own answer to "did this land anything?": a
+    /// mutation that can no-op answers `matches!(written, Ok(true))`, and one
+    /// that bumps on any successful commit answers `Result::is_ok` (clippy
+    /// rejects the `matches!(written, Ok(_))` spelling as a redundant
+    /// pattern). The writes that must NOT bump say so twice over —
+    /// [`SessionGeneration::None`] and an always-false predicate — so the
+    /// exception is stated rather than implied by a line that is not there.
+    fn mutate<T>(
+        &mut self,
+        generation: SessionGeneration,
+        committed: impl FnOnce(&Result<T, StoreError>) -> bool,
+        context: &'static str,
+        f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, StoreError> {
+        let written = self
+            .with_connection(|conn| in_tx(conn, f))
+            .map_err(|e| op_error(context, e));
+        match generation {
+            SessionGeneration::Library => {
+                self.bump_library_generation_on_commit(committed(&written));
+            }
+            SessionGeneration::Playlists => {
+                self.bump_playlist_generation_on_commit(committed(&written));
+            }
+            SessionGeneration::None => {}
+        }
+        written
+    }
 }
 
 /// Widen a SQL `COUNT(*)` to `usize`, saturating at `usize::MAX` on the
@@ -1653,6 +1714,59 @@ fn escape_like_pattern(text: &str) -> String {
 /// `ab\...`).
 const FOLDER_PREFIX_SQL: &str = "(path = ?1 OR path LIKE ?2 ESCAPE '#' OR path LIKE ?3 ESCAPE '#')";
 
+/// A track carries a genre: the column is not `NULL` and not the empty
+/// string. Every genre read filters on this one predicate — a missing genre
+/// and an empty one both aggregate into nothing — and it reads the same
+/// whether it opens a `WHERE` or joins an `AND`.
+const HAS_GENRE_SQL: &str = "genre IS NOT NULL AND genre != ''";
+
+/// An album's tracks come back in canonical album-track order: track number
+/// ascending with missing numbers first (the legacy `unwrap_or(0)` slot), then
+/// the path as tiebreak. It is the key list a plain `ORDER BY` takes, so a
+/// read that sorts by something more (`artist_albums_in_genre`'s
+/// `album_artist_key ASC, ...`) prefixes its own keys and appends this.
+const ALBUM_TRACK_ORDER_SQL: &str = "COALESCE(track_number, 0) ASC, path ASC";
+
+/// The album-hit predicate's one literal spelling, shared by
+/// [`ALBUM_HIT_SQL`] and [`ARTIST_HIT_SQL`]. It is a macro because stable
+/// Rust has no const string concatenation: `concat!` accepts only literals,
+/// so this is the form both consts can splice without a second copy.
+macro_rules! album_hit_sql_lit {
+    () => {
+        "(instr(a.album_artist_lower, ?1) > 0
+     OR instr(a.title_lower, ?1) > 0
+     OR EXISTS (
+          SELECT 1 FROM tracks t
+          WHERE t.album_artist_key = a.album_artist
+            AND t.album_title_key = a.title
+            AND instr(t.search_text, ?1) > 0
+        ))"
+    };
+}
+
+/// The hit-album predicate, spelled once: `hit_albums_page` pairs a count
+/// with a window, `hit_artists_window_on` joins with it after an `AND`, and
+/// [`ARTIST_HIT_SQL`] nests it inside its own. Copies that drift make a
+/// Page's total disagree with its rows or attach the wrong albums, and the
+/// tests exercise count and window apart, so drift compiles silently.
+/// Parenthesised so it reads the same opening a `WHERE` or joining an `AND`.
+const ALBUM_HIT_SQL: &str = album_hit_sql_lit!();
+
+/// The hit-artist predicate, spelled once for the couplings
+/// [`ALBUM_HIT_SQL`] names: its count must agree with its window, and its
+/// window's CTE `WHERE` must agree with its `LEFT JOIN … ON`. It splices
+/// [`ALBUM_HIT_SQL`]'s literal, so the nested album half cannot drift from
+/// the album queries either. Parenthesised for the same `WHERE`/`AND` duality.
+const ARTIST_HIT_SQL: &str = concat!(
+    "(instr(ar.name_lower, ?1) > 0
+        OR EXISTS (
+             SELECT 1 FROM albums a
+             WHERE a.album_artist = ar.name
+               AND ",
+    album_hit_sql_lit!(),
+    "))"
+);
+
 /// Bind `[FOLDER_PREFIX_SQL]`'s three parameters for `folder`.
 fn folder_prefix_params(folder_text: &str) -> [String; 3] {
     // Path parsing ignores trailing separators ("dir\" ≡ "dir") for
@@ -1861,11 +1975,11 @@ impl LibraryQueryStore for SqliteStore {
 
             // Membership arrives globally ordered by number-then-path;
             // appending per album preserves that order inside each album.
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare(&format!(
                 "SELECT album_title_key, path FROM tracks
                  WHERE album_artist_key = ?1
-                 ORDER BY COALESCE(track_number, 0) ASC, path ASC",
-            )?;
+                 ORDER BY {ALBUM_TRACK_ORDER_SQL}"
+            ))?;
             let members = stmt.query_map([artist], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
@@ -1895,7 +2009,7 @@ impl LibraryQueryStore for SqliteStore {
             let mut stmt = conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS} FROM tracks
                  WHERE album_artist_key = ?1 AND album_title_key = ?2
-                 ORDER BY COALESCE(track_number, 0) ASC, path ASC"
+                 ORDER BY {ALBUM_TRACK_ORDER_SQL}"
             ))?;
             let rows =
                 stmt.query_map(rusqlite::params![album_artist, album_title], track_from_row)?;
@@ -1921,7 +2035,7 @@ impl LibraryQueryStore for SqliteStore {
             // Genre totals cannot be a scalar subselect: the distinct count
             // is over the split entries, so the raw tags aggregate in Rust.
             let mut stmt =
-                conn.prepare("SELECT genre FROM tracks WHERE genre IS NOT NULL AND genre != ''")?;
+                conn.prepare(&format!("SELECT genre FROM tracks WHERE {HAS_GENRE_SQL}"))?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             let mut genres = std::collections::HashSet::new();
             for row in rows {
@@ -1949,10 +2063,10 @@ impl LibraryQueryStore for SqliteStore {
         self.with_connection(|conn| {
             // `GROUP BY` over the raw column would keep `"Rock; Jazz"` as one
             // row; the entries split in Rust instead.
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare(&format!(
                 "SELECT genre FROM tracks
-                 WHERE genre IS NOT NULL AND genre != ''",
-            )?;
+                 WHERE {HAS_GENRE_SQL}"
+            ))?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             sorted_genre_counts(rows)
         })
@@ -2005,11 +2119,11 @@ impl LibraryQueryStore for SqliteStore {
                     .push(format!("{} - {}", key.0, key.1));
             }
 
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare(&format!(
                 "SELECT DISTINCT album_artist_key FROM tracks
-                 WHERE genre IS NOT NULL AND genre != ''
-                 ORDER BY album_artist_key ASC",
-            )?;
+                 WHERE {HAS_GENRE_SQL}
+                 ORDER BY album_artist_key ASC"
+            ))?;
             let names = stmt
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -2055,11 +2169,11 @@ impl LibraryQueryStore for SqliteStore {
             // Matching membership arrives globally ordered by number-then-
             // path; appending per album preserves that order inside each
             // album.
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare(&format!(
                 "SELECT album_title_key, path, genre FROM tracks
-                 WHERE album_artist_key = ?1 AND genre IS NOT NULL AND genre != ''
-                 ORDER BY COALESCE(track_number, 0) ASC, path ASC",
-            )?;
+                 WHERE album_artist_key = ?1 AND {HAS_GENRE_SQL}
+                 ORDER BY {ALBUM_TRACK_ORDER_SQL}"
+            ))?;
             let members = stmt.query_map(rusqlite::params![artist], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -2097,8 +2211,8 @@ impl LibraryQueryStore for SqliteStore {
             let mut stmt = conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS} FROM tracks
                  WHERE album_artist_key = ?1 AND album_title_key = ?2
-                   AND genre IS NOT NULL AND genre != ''
-                 ORDER BY COALESCE(track_number, 0) ASC, path ASC"
+                   AND {HAS_GENRE_SQL}
+                 ORDER BY {ALBUM_TRACK_ORDER_SQL}"
             ))?;
             let rows =
                 stmt.query_map(rusqlite::params![album_artist, album_title], track_from_row)?;
@@ -2160,7 +2274,7 @@ impl LibraryQueryStore for SqliteStore {
                 "SELECT {TRACK_COLUMNS} FROM tracks
                  WHERE album_artist_key = ?1 AND album_title_key = ?2
                    AND instr(search_text, ?3) > 0
-                 ORDER BY COALESCE(track_number, 0) ASC, path ASC"
+                 ORDER BY {ALBUM_TRACK_ORDER_SQL}"
             ))?;
             let rows = stmt.query_map(
                 rusqlite::params![album_artist, album_title, needle],
@@ -2195,6 +2309,22 @@ impl LibraryQueryStore for SqliteStore {
             Ok(hit > 0)
         })
         .map_err(|e| op_error("failed to check album name hit", e))
+    }
+
+    fn artist_is_name_hit(&self, artist: &str, query: &str) -> Result<bool, StoreError> {
+        self.with_connection(|conn| {
+            let needle = query.to_lowercase();
+            let hit: i64 = conn
+                .prepare_cached(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM artists
+                         WHERE name = ?1 AND instr(name_lower, ?2) > 0
+                      )",
+                )?
+                .query_row(rusqlite::params![artist, needle], |row| row.get(0))?;
+            Ok(hit > 0)
+        })
+        .map_err(|e| op_error("failed to check artist name hit", e))
     }
 
     fn hit_albums_in_genre(
@@ -2261,8 +2391,8 @@ impl LibraryQueryStore for SqliteStore {
                 "SELECT {TRACK_COLUMNS} FROM tracks
                  WHERE album_artist_key = ?1 AND album_title_key = ?2
                    AND instr(search_text, ?3) > 0
-                   AND genre IS NOT NULL AND genre != ''
-                 ORDER BY COALESCE(track_number, 0) ASC, path ASC"
+                   AND {HAS_GENRE_SQL}
+                 ORDER BY {ALBUM_TRACK_ORDER_SQL}"
             ))?;
             let rows = stmt.query_map(
                 rusqlite::params![album_artist, album_title, needle],
@@ -2288,11 +2418,11 @@ impl LibraryQueryStore for SqliteStore {
             let needle = query.to_lowercase();
             // Exactly `genre_counts` semantics over the hit subset: the SQL
             // keeps every hit genre-bearing track, the segments split in Rust.
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare(&format!(
                 "SELECT genre FROM tracks
                  WHERE instr(search_text, ?1) > 0
-                   AND genre IS NOT NULL AND genre != ''",
-            )?;
+                   AND {HAS_GENRE_SQL}"
+            ))?;
             let rows = stmt.query_map([needle], |row| row.get::<_, String>(0))?;
             sorted_genre_counts(rows)
         })
@@ -2500,7 +2630,7 @@ impl LibraryQueryStore for SqliteStore {
                    AND length(path) > length(?1) + 1
                    AND instr(substr(path, length(?1) + 2), '\\') = 0
                    AND instr(substr(path, length(?1) + 2), '/') = 0
-                 ORDER BY COALESCE(track_number, 0) ASC, path ASC"
+                 ORDER BY {ALBUM_TRACK_ORDER_SQL}"
             ))?;
             let rows = stmt.query_map(
                 rusqlite::params![params[0], params[1], params[2]],
@@ -2827,11 +2957,11 @@ impl SqliteStore {
     ) -> rusqlite::Result<Vec<Album>> {
         // One pass over the genre-bearing tracks: every (artist, title) that
         // holds `genre`, plus the subset whose search text also hits.
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT album_artist_key, album_title_key, genre, search_text
              FROM tracks
-             WHERE genre IS NOT NULL AND genre != ''",
-        )?;
+             WHERE {HAS_GENRE_SQL}"
+        ))?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -2904,13 +3034,13 @@ impl SqliteStore {
         if albums.is_empty() {
             return Ok(());
         }
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT album_artist_key, album_title_key, genre, path
              FROM tracks
-             WHERE genre IS NOT NULL AND genre != ''
+             WHERE {HAS_GENRE_SQL}
                AND instr(search_text, ?1) > 0
-             ORDER BY album_artist_key ASC, COALESCE(track_number, 0) ASC, path ASC",
-        )?;
+             ORDER BY album_artist_key ASC, {ALBUM_TRACK_ORDER_SQL}"
+        ))?;
         let rows = stmt.query_map([needle], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -2945,15 +3075,7 @@ impl SqliteStore {
     fn hit_albums_count_on(conn: &Connection, query: &str) -> rusqlite::Result<usize> {
         let needle = query.to_lowercase();
         conn.query_row(
-            "SELECT COUNT(*) FROM albums a
-             WHERE instr(a.album_artist_lower, ?1) > 0
-                OR instr(a.title_lower, ?1) > 0
-                OR EXISTS (
-                     SELECT 1 FROM tracks t
-                     WHERE t.album_artist_key = a.album_artist
-                       AND t.album_title_key = a.title
-                       AND instr(t.search_text, ?1) > 0
-                   )",
+            &format!("SELECT COUNT(*) FROM albums a WHERE {ALBUM_HIT_SQL}"),
             [needle],
             |row| row.get::<_, i64>(0),
         )
@@ -2975,18 +3097,11 @@ impl SqliteStore {
         // hit predicate is the union of the album's own name match and a
         // member-track match, both literal `instr` over the
         // write-time-lowercased columns.
-        let mut stmt = conn.prepare_cached(
+        let mut stmt = conn.prepare_cached(&format!(
             "WITH window AS (
                 SELECT a.album_artist, a.title, a.year, a.genre
                 FROM albums a
-                WHERE instr(a.album_artist_lower, ?1) > 0
-                   OR instr(a.title_lower, ?1) > 0
-                   OR EXISTS (
-                        SELECT 1 FROM tracks t
-                        WHERE t.album_artist_key = a.album_artist
-                          AND t.album_title_key = a.title
-                          AND instr(t.search_text, ?1) > 0
-                      )
+                WHERE {ALBUM_HIT_SQL}
                 ORDER BY a.album_artist ASC, COALESCE(a.year, 0) DESC, a.title ASC
                 LIMIT ?2 OFFSET ?3
              )
@@ -2999,7 +3114,7 @@ impl SqliteStore {
               AND instr(t.search_text, ?1) > 0
              ORDER BY w.album_artist ASC, COALESCE(w.year, 0) DESC, w.title ASC,
                       COALESCE(t.track_number, 0) ASC, t.path ASC",
-        )?;
+        ))?;
         let rows = stmt.query_map(
             rusqlite::params![
                 needle,
@@ -3032,20 +3147,7 @@ impl SqliteStore {
     fn hit_artists_count_on(conn: &Connection, query: &str) -> rusqlite::Result<usize> {
         let needle = query.to_lowercase();
         conn.query_row(
-            "SELECT COUNT(*) FROM artists ar
-             WHERE instr(ar.name_lower, ?1) > 0
-                OR EXISTS (
-                     SELECT 1 FROM albums a
-                     WHERE a.album_artist = ar.name
-                       AND (instr(a.album_artist_lower, ?1) > 0
-                            OR instr(a.title_lower, ?1) > 0
-                            OR EXISTS (
-                                 SELECT 1 FROM tracks t
-                                 WHERE t.album_artist_key = a.album_artist
-                                   AND t.album_title_key = a.title
-                                   AND instr(t.search_text, ?1) > 0
-                               ))
-                   )",
+            &format!("SELECT COUNT(*) FROM artists ar WHERE {ARTIST_HIT_SQL}"),
             [needle],
             |row| row.get::<_, i64>(0),
         )
@@ -3065,23 +3167,11 @@ impl SqliteStore {
         // to their hit albums, so each artist's hit-album keys arrive in
         // canonical browsing order and a name-hit artist whose albums are
         // not themselves hits still appears with an empty key list.
-        let mut stmt = conn.prepare_cached(
+        let mut stmt = conn.prepare_cached(&format!(
             "WITH window AS (
                 SELECT ar.name
                 FROM artists ar
-                WHERE instr(ar.name_lower, ?1) > 0
-                   OR EXISTS (
-                        SELECT 1 FROM albums a
-                        WHERE a.album_artist = ar.name
-                          AND (instr(a.album_artist_lower, ?1) > 0
-                               OR instr(a.title_lower, ?1) > 0
-                               OR EXISTS (
-                                    SELECT 1 FROM tracks t
-                                    WHERE t.album_artist_key = a.album_artist
-                                      AND t.album_title_key = a.title
-                                      AND instr(t.search_text, ?1) > 0
-                                  ))
-                      )
+                WHERE {ARTIST_HIT_SQL}
                 ORDER BY ar.name ASC
                 LIMIT ?2 OFFSET ?3
              )
@@ -3089,16 +3179,9 @@ impl SqliteStore {
              FROM window w
              LEFT JOIN albums a
                ON a.album_artist = w.name
-              AND (instr(a.album_artist_lower, ?1) > 0
-                   OR instr(a.title_lower, ?1) > 0
-                   OR EXISTS (
-                        SELECT 1 FROM tracks t
-                        WHERE t.album_artist_key = a.album_artist
-                          AND t.album_title_key = a.title
-                          AND instr(t.search_text, ?1) > 0
-                      ))
+              AND {ALBUM_HIT_SQL}
              ORDER BY w.name ASC, COALESCE(a.year, 0) DESC, a.title ASC",
-        )?;
+        ))?;
         let rows = stmt.query_map(
             rusqlite::params![
                 needle,
@@ -3238,10 +3321,10 @@ impl SqliteStore {
     /// [`LibraryQueryStore::genres_count`], which would take the
     /// non-reentrant connection lock a second time.
     fn genres_count_on(conn: &Connection) -> rusqlite::Result<usize> {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT genre FROM tracks
-             WHERE genre IS NOT NULL AND genre != ''",
-        )?;
+             WHERE {HAS_GENRE_SQL}"
+        ))?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut genres = std::collections::HashSet::new();
         for row in rows {
@@ -3263,10 +3346,10 @@ impl SqliteStore {
         // The entries split in Rust (exactly like `genre_counts`); the
         // window slices the sorted entries afterwards, so the direction
         // reversal is a Rust reorder of the pre-window entries.
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT genre FROM tracks
-             WHERE genre IS NOT NULL AND genre != ''",
-        )?;
+             WHERE {HAS_GENRE_SQL}"
+        ))?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut entries = sorted_genre_counts(rows)?;
         match direction {
@@ -3281,10 +3364,10 @@ impl SqliteStore {
     /// instead of [`LibraryQueryStore::artists_in_genre_count`], which would
     /// take the non-reentrant connection lock a second time.
     fn artists_in_genre_count_on(conn: &Connection, genre: &str) -> rusqlite::Result<usize> {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT DISTINCT album_artist_key, genre FROM tracks
-             WHERE genre IS NOT NULL AND genre != ''",
-        )?;
+             WHERE {HAS_GENRE_SQL}"
+        ))?;
         let pairs = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -3312,11 +3395,11 @@ impl SqliteStore {
         // The genre-scoped (artist, album) membership splits in Rust like
         // `artists_in_genre`; the window slices the name-ascending artists
         // afterwards, so the direction reversal is a Rust reorder.
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT album_artist_key, album_title_key, genre
              FROM tracks
-             WHERE genre IS NOT NULL AND genre != ''",
-        )?;
+             WHERE {HAS_GENRE_SQL}"
+        ))?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -3361,11 +3444,11 @@ impl SqliteStore {
         artist: &str,
         genre: &str,
     ) -> rusqlite::Result<usize> {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT album_title_key, genre FROM tracks
-             WHERE album_artist_key = ?1 AND genre IS NOT NULL AND genre != ''
-             ORDER BY COALESCE(track_number, 0) ASC, path ASC",
-        )?;
+             WHERE album_artist_key = ?1 AND {HAS_GENRE_SQL}
+             ORDER BY {ALBUM_TRACK_ORDER_SQL}"
+        ))?;
         let members = stmt.query_map(rusqlite::params![artist], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -3589,8 +3672,11 @@ impl SettingsStore for SqliteStore {
 
     /// One small durable transaction for the scalar block.
     fn save_scalars(&mut self, scalars: &ScalarSettings) -> Result<(), StoreError> {
-        self.with_connection(|conn| {
-            in_tx(conn, |conn| {
+        self.mutate(
+            SessionGeneration::None,
+            |_| false,
+            "failed to save settings",
+            |conn| {
                 conn.execute(
                     "UPDATE app_settings
                      SET volume = ?1, advanced_mode = ?2, high_contrast = ?3,
@@ -3621,15 +3707,17 @@ impl SettingsStore for SqliteStore {
                     ],
                 )
                 .map(|_| ())
-            })
-        })
-        .map_err(|e| op_error("failed to save settings", e))
+            },
+        )
     }
 
     /// Replace the library-path list in one small durable transaction.
     fn save_library_paths(&mut self, paths: &[std::path::PathBuf]) -> Result<(), StoreError> {
-        self.with_connection(|conn| {
-            in_tx(conn, |conn| {
+        self.mutate(
+            SessionGeneration::None,
+            |_| false,
+            "failed to save library paths",
+            |conn| {
                 conn.execute("DELETE FROM library_paths", [])?;
                 for p in paths {
                     conn.execute(
@@ -3638,9 +3726,8 @@ impl SettingsStore for SqliteStore {
                     )?;
                 }
                 Ok(())
-            })
-        })
-        .map_err(|e| op_error("failed to save library paths", e))
+            },
+        )
     }
 
     /// Replace the whole watch-state map in one small durable transaction.
@@ -3648,8 +3735,11 @@ impl SettingsStore for SqliteStore {
         &mut self,
         states: &HashMap<PathBuf, WatchState>,
     ) -> Result<(), StoreError> {
-        self.with_connection(|conn| {
-            in_tx(conn, |conn| {
+        self.mutate(
+            SessionGeneration::None,
+            |_| false,
+            "failed to save watch states",
+            |conn| {
                 conn.execute("DELETE FROM watch_states", [])?;
                 for (path, state) in states {
                     let (state_text, warning_message) = match state {
@@ -3667,8 +3757,7 @@ impl SettingsStore for SqliteStore {
                     )?;
                 }
                 Ok(())
-            })
-        })
-        .map_err(|e| op_error("failed to save watch states", e))
+            },
+        )
     }
 }

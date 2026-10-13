@@ -278,23 +278,10 @@ fn track_list(
         palette.surface_row,
     );
     let total = tracks.len();
-    // `.animated(false)`: the track list is driven by a `ScrollControl`, so it
-    // jumps to a named offset (a restored position, or the top after a
-    // selection change) and a keep-in-view jump must not lerp. The flag
-    // governs programmatic scroll-to offsets only, not wheel feel — the reason
+    // Built by [`super::scroll_area::optional_scroll_area`]; the reason it is
+    // unanimated — and why the other `ScrollArea`s are not flipped to match —
     // is written once on [`ScrollControl`](super::scroll_memory::ScrollControl).
-    let mut scroll_area = egui::ScrollArea::vertical()
-        .auto_shrink(false)
-        .animated(false);
-    match scroll {
-        Some(control) => {
-            scroll_area = scroll_area.id_salt(control.salt);
-            if let Some(offset) = control.start {
-                scroll_area = scroll_area.vertical_scroll_offset(offset);
-            }
-        }
-        None => scroll_area = scroll_area.id_salt("tracks_column_list"),
-    }
+    let scroll_area = super::scroll_area::optional_scroll_area(scroll, "tracks_column_list", false);
     scroll_area.show_rows(
         ui,
         theme::geometry::sidebar::ROW_H,

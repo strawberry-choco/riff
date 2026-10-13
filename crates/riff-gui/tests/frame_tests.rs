@@ -51,7 +51,7 @@ use riff_gui::ui::prompts::PromptOutcome;
 use riff_gui::ui::scroll_memory::ScrollMemory;
 use riff_gui::ui::sidebar::PlaylistRowAction;
 use riff_gui::ui::theme;
-use riff_persistence::test_support::FailingLibraryQueryStore;
+use riff_persistence::test_support::StubLibraryQueryStore;
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -388,7 +388,7 @@ impl Harness {
             playlist_store: QuietPlaylistStore::default(),
             tag_edits: InlineTagEditor::new(Box::new(QuietTagEdits)),
             views: SessionViews::new(
-                Box::new(FailingLibraryQueryStore::new(
+                Box::new(StubLibraryQueryStore::failing(
                     "headless frame test: no store behind this seam",
                 )),
                 Box::new(QuietPlaylistStore::default()),

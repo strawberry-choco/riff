@@ -11,3 +11,5 @@
 pub mod app;
 pub mod composition;
 pub mod domain;
+#[cfg(test)]
+mod native_dependency_sweep;

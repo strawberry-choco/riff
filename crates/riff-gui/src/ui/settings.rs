@@ -470,6 +470,12 @@ pub struct SettingsContent {
     pub pass_outcome: Option<String>,
     /// The last completed full scan's summary, `None` when never scanned.
     pub last_scan: Option<FullScanSummary>,
+    /// The app's "what time is it" seam, threaded from `RiffApp::now` so a
+    /// golden render reads a stable relative stamp. `None` — the production
+    /// value — reads the real wall clock (byte-for-byte the behaviour before
+    /// the seam); `Some(t)` measures from the pinned instant. Only the scan
+    /// card's "Last full scan" line consumes it.
+    pub now: Option<std::time::SystemTime>,
 }
 
 /// What the user did to the Settings stage this frame. The app applies these
@@ -528,9 +534,6 @@ pub enum SettingsAction {
     /// the tray.
     SetCloseQuitsApp(bool),
 }
-
-/// Full-texture UV rect for [`egui::Painter::image`] (sidebar precedent).
-const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
 // --- Pure helpers ------------------------------------------------------------------
 
@@ -1006,7 +1009,12 @@ fn library_row_path(
     let folder_tex_id = cache.texture(ui.ctx(), Icon::Folder, 16.0, palette.ink_3);
     let folder_rect =
         egui::Rect::from_center_size(egui::pos2(rect.left() + 24.0, cy), egui::vec2(16.0, 16.0));
-    painter.image(folder_tex_id, folder_rect, UV_FULL, palette.ink_3);
+    painter.image(
+        folder_tex_id,
+        folder_rect,
+        super::artwork::UV_FULL,
+        palette.ink_3,
+    );
 
     let body_font = styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM).clone();
     let path_color = if is_unavailable {
@@ -1136,9 +1144,12 @@ fn library_row_controls(
             palette.ink_3
         };
         let trash_tex_id = cache.texture(strip_ui.ctx(), Icon::Trash, 16.0, trash_tint);
-        strip_ui
-            .painter()
-            .image(trash_tex_id, trash_rect.shrink(6.0), UV_FULL, trash_tint);
+        strip_ui.painter().image(
+            trash_tex_id,
+            trash_rect.shrink(6.0),
+            super::artwork::UV_FULL,
+            trash_tint,
+        );
         trash_response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Remove library")
         });
@@ -1549,10 +1560,13 @@ impl ScanCardLines {
 /// without rendering: see
 /// `test_scan_card_height_is_stable_across_error_counts`.
 #[must_use]
-pub fn scan_card_lines(summary: Option<&FullScanSummary>) -> ScanCardLines {
+pub fn scan_card_lines(
+    summary: Option<&FullScanSummary>,
+    now: Option<std::time::SystemTime>,
+) -> ScanCardLines {
     match summary {
         Some(summary) => {
-            let elapsed = summary.at.elapsed().unwrap_or_default();
+            let elapsed = crate::ui::app::elapsed_since(summary.at, now);
             let errors = summary.errors;
             ScanCardLines {
                 stamp: ScanCardLine {
@@ -1630,7 +1644,7 @@ fn scan_status_card(
     actions: &mut Vec<SettingsAction>,
 ) {
     settings_card(ui, palette, None, |ui| {
-        let lines = scan_card_lines(content.last_scan.as_ref());
+        let lines = scan_card_lines(content.last_scan.as_ref(), content.now);
         // The card always allocates `scan_card_height`, sized for three
         // lines, so a scan whose error count changes never resizes it.
         let (rect, _) = ui.allocate_exact_size(
@@ -2286,6 +2300,127 @@ fn paint_preference_text(
     }
 }
 
+/// How a shared preference row's own allocation responds to the pointer.
+///
+/// Two facts that travel together because both rows that run the shared
+/// preamble pair them the same way: a clickable toggle row senses clicks and
+/// paints a hover highlight; the `ReplayGain` mode card's row is inert
+/// (hover-sensed, no highlight) and its chips carry the interaction. Bundled so
+/// the fold preserves each row's behaviour rather than averaging the two.
+#[derive(Clone, Copy)]
+enum PreferenceRowAffordance {
+    /// The row senses clicks and paints a hover highlight (`preference_row`).
+    Clickable,
+    /// The row is hover-sensed with no highlight; its trailing chips are the
+    /// only interactive part (`replaygain_mode_card`).
+    Chipped,
+}
+
+impl PreferenceRowAffordance {
+    /// The allocation sense for the row.
+    fn sense(self) -> egui::Sense {
+        match self {
+            Self::Clickable => egui::Sense::click(),
+            Self::Chipped => egui::Sense::hover(),
+        }
+    }
+
+    /// Whether hover paints the row's `surface_2` highlight.
+    fn highlights_on_hover(self) -> bool {
+        matches!(self, Self::Clickable)
+    }
+}
+
+/// The shared preference-row preamble the toggle rows and the `ReplayGain` mode
+/// card both run: measure the copy, pick the layout flow, allocate the row,
+/// paint its text, and hand back the row rect the caller paints its trailing
+/// control onto.
+///
+/// The parameters are EXACTLY the places the two rows differ — everything else
+/// in the layout is identical, which is what makes the two bodies below the
+/// same call. The candidate called two of these out ("inline-galley-or-none"
+/// and the control painter); the fold is faithful to all of them so each row
+/// renders byte-identically:
+///
+/// * `stack_inline_copy` — the single-line (`Inline`) arm. A toggle row leaves
+///   its description to be pinned to the row's bottom edge (`false` → no
+///   galley); the mode card lays its copy top-down under the title (`true` → a
+///   no-wrap galley). The wrapped (`Stacked`) arm is identical, so it is not a
+///   parameter.
+/// * `affordance` — the row's pointer sense and hover highlight (above).
+/// * `text_width` — the width the `Stacked` description wraps to: the preference
+///   rows give it the whole free column, the mode card the width its chips
+///   leave.
+///
+/// The trailing control (a toggle vs a chip pair) stays at the call site and
+/// paints onto the returned rect — it is the one difference that is not a
+/// *layout* input.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one shared preference row's preamble"
+)]
+fn paint_preference_row(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    copy: &(&str, &str),
+    title_font: egui::FontId,
+    desc_font: egui::FontId,
+    stack_inline_copy: bool,
+    affordance: PreferenceRowAffordance,
+    text_width: f32,
+) -> egui::Rect {
+    let flow = row_flow(ui.available_width());
+    // The title's own measured height drives the stacked layout, so the row
+    // grows to fit its text rather than to a guessed line count.
+    let title_h = ui
+        .painter()
+        .layout_no_wrap(copy.0.to_owned(), title_font.clone(), palette.ink)
+        .size()
+        .y;
+    let (row_h, desc_galley) = match flow {
+        RowFlow::Inline => (
+            PREF_ROW_H,
+            stack_inline_copy.then(|| {
+                ui.painter()
+                    .layout_no_wrap(copy.1.to_owned(), desc_font.clone(), palette.ink_3)
+            }),
+        ),
+        RowFlow::Stacked => {
+            let wrapped = ui.painter().layout(
+                copy.1.to_owned(),
+                desc_font.clone(),
+                palette.ink_3,
+                text_width,
+            );
+            (
+                preference_row_height(flow, title_h, wrapped.size().y),
+                Some(wrapped),
+            )
+        }
+    };
+
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), affordance.sense());
+    if affordance.highlights_on_hover() {
+        let painter = ui.painter_at(rect);
+        if rect.contains(ui.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
+            painter.rect_filled(rect, theme::RADIUS_MD, palette.surface_2);
+        }
+    }
+
+    paint_preference_text(
+        ui,
+        palette,
+        rect,
+        copy,
+        title_font,
+        desc_font,
+        desc_galley,
+        title_h,
+    );
+    rect
+}
+
 // --- Library Path input (Linux text flow) -----------------------------------------
 //
 // What the input draws and what the listener chose; the filesystem probe, the
@@ -2354,56 +2489,25 @@ fn preference_row(
     actions: &mut Vec<SettingsAction>,
 ) {
     let copy = pref.copy();
-    let flow = row_flow(ui.available_width());
     let title_font = styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM).clone();
     let desc_font = styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS).clone();
 
-    // The text column is whatever the row has left once the toggle is placed.
-    // In the single-line form the description is painted whole and the row
-    // keeps its fixed height; in the stacked form the description wraps to this
-    // width and the row grows to whatever the wrapped text needs, so it is
-    // never truncated mid-word.
+    // The text column is whatever the row has left once the toggle is placed:
+    // the single-line form paints the description whole against the row's fixed
+    // height; the stacked form wraps it to this width and the row grows to the
+    // wrapped text. The shared preamble owns the flow, the allocation, the
+    // hover highlight, and the text paint; the toggle below is the trailing
+    // control it hands the row back for.
     let text_width = preference_text_width(ui.available_width());
-    // The title's own measured height drives the stacked layout, so the row
-    // grows to fit its text rather than to a guessed line count.
-    let title_galley =
-        ui.painter()
-            .layout_no_wrap(copy.0.to_owned(), title_font.clone(), palette.ink);
-    let title_h = title_galley.size().y;
-    let (row_h, desc_galley) = match flow {
-        RowFlow::Inline => (PREF_ROW_H, None),
-        RowFlow::Stacked => {
-            let wrapped = ui.painter().layout(
-                copy.1.to_owned(),
-                desc_font.clone(),
-                palette.ink_3,
-                text_width,
-            );
-            (
-                preference_row_height(flow, title_h, wrapped.size().y),
-                Some(wrapped),
-            )
-        }
-    };
-
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), row_h),
-        egui::Sense::click(),
-    );
-    let painter = ui.painter_at(rect);
-    if rect.contains(ui.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
-        painter.rect_filled(rect, theme::RADIUS_MD, palette.surface_2);
-    }
-
-    paint_preference_text(
+    let rect = paint_preference_row(
         ui,
         palette,
-        rect,
         &copy,
         title_font,
         desc_font,
-        desc_galley,
-        title_h,
+        false,
+        PreferenceRowAffordance::Clickable,
+        text_width,
     );
 
     let pill_rect = egui::Rect::from_center_size(
@@ -2586,7 +2690,6 @@ fn replaygain_mode_card(
             ("Track", ReplayGainMode::Track),
             ("Album", ReplayGainMode::Album),
         ];
-        let flow = row_flow(ui.available_width());
         let title_font = styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM).clone();
         let desc_font = styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS).clone();
         // Measured rather than assumed, as the format chips are: the text
@@ -2608,51 +2711,21 @@ fn replaygain_mode_card(
         // Two chips, so exactly one gap between them — no index arithmetic.
         let chips_w = chip_widths.iter().sum::<f32>() + CHIP_GAP;
 
+        // The text column is what the two chips leave. The card now runs the
+        // SAME shared preference-row preamble the toggle rows do — its copy
+        // laid top-down under the title in both flows (the stacked-inline arm)
+        // — rather than spelling its own; the chip pair on the right edge is the
+        // only difference from a toggle row.
         let text_width = ui.available_width() - 2.0 * PREF_ROW_PAD - chips_w - PREF_ROW_TEXT_GAP;
-        let title_galley =
-            ui.painter()
-                .layout_no_wrap(copy.0.to_owned(), title_font.clone(), palette.ink);
-        let title_h = title_galley.size().y;
-        let (row_h, desc_galley) = match flow {
-            // The copy runs top-down in both flows — the description sits
-            // under the title rather than pinned to the row's bottom edge,
-            // the way the pass card's rows lay theirs out — and only the
-            // stacked form trades row height for a wrapped column.
-            RowFlow::Inline => (
-                PREF_ROW_H,
-                Some(ui.painter().layout_no_wrap(
-                    copy.1.to_owned(),
-                    desc_font.clone(),
-                    palette.ink_3,
-                )),
-            ),
-            RowFlow::Stacked => {
-                let wrapped = ui.painter().layout(
-                    copy.1.to_owned(),
-                    desc_font.clone(),
-                    palette.ink_3,
-                    text_width,
-                );
-                (
-                    preference_row_height(flow, title_h, wrapped.size().y),
-                    Some(wrapped),
-                )
-            }
-        };
-
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), row_h),
-            egui::Sense::hover(),
-        );
-        paint_preference_text(
+        let rect = paint_preference_row(
             ui,
             palette,
-            rect,
             &copy,
             title_font,
             desc_font,
-            desc_galley,
-            title_h,
+            true,
+            PreferenceRowAffordance::Chipped,
+            text_width,
         );
 
         // Right-aligned as a pair, so the row's right edge is the chips' even
@@ -3036,12 +3109,20 @@ impl super::app::RiffApp {
     fn render_clear_library_confirm(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
         // The composition is the pure widget seam in [`crate::ui::prompts`]
         // (golden-image gap audit P1-7): the same pixels the golden pins.
+        //
+        // The confirmation's own copy and its own widget id are this call
+        // site's, because both belong to the action being confirmed: the copy
+        // is what Clear Library costs, and the id is what keeps this
+        // confirmation's affirmative action distinct from Clear Thumbnail
+        // cache's, one gap below in the same footer.
         let palette = self.theme.active;
-        let outcome = crate::ui::prompts::clear_library_confirm(
+        let outcome = crate::ui::prompts::destructive_confirm(
             ui,
             &mut self.icons,
             &palette,
             library.ui_flags.reduce_motion,
+            crate::ui::prompts::CLEAR_LIBRARY_CONFIRM_COPY,
+            egui::Id::new("clear_library_confirm_action"),
         );
         match outcome {
             Some(crate::ui::prompts::PromptOutcome::Confirm) => {
@@ -3053,7 +3134,8 @@ impl super::app::RiffApp {
                         // fact-set is told too, so no root keeps claiming it
                         // is indexed after the wipe.
                         library.library_paths.clear_collection_data();
-                        self.feedback.set_library(
+                        self.feedback.set(
+                            riff_backend::app::events::NoticeSource::Library,
                             format!(
                                 "Library cleared ({removed} tracks removed). Rescan to rebuild."
                             ),
@@ -3063,7 +3145,8 @@ impl super::app::RiffApp {
                     }
                     Err(e) => {
                         tracing::error!("Failed to clear the library: {e}");
-                        self.feedback.set_library(
+                        self.feedback.set(
+                            riff_backend::app::events::NoticeSource::Library,
                             "Failed to clear the library \u{2014} nothing was changed.".to_string(),
                             riff_backend::app::events::NoticeSeverity::Error,
                         );
@@ -3085,11 +3168,13 @@ impl super::app::RiffApp {
     /// takes seconds and a frame may not wait for it.
     fn render_clear_thumbnail_cache_confirm(&mut self, ui: &mut egui::Ui, reduce_motion: bool) {
         let palette = self.theme.active;
-        let outcome = crate::ui::prompts::clear_thumbnail_cache_confirm(
+        let outcome = crate::ui::prompts::destructive_confirm(
             ui,
             &mut self.icons,
             &palette,
             reduce_motion,
+            crate::ui::prompts::CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY,
+            egui::Id::new("clear_thumbnail_cache_confirm_action"),
         );
         match outcome {
             Some(crate::ui::prompts::PromptOutcome::Confirm) => {
@@ -3149,6 +3234,7 @@ impl super::app::RiffApp {
                 .as_ref()
                 .map(crate::ui::frame::pass_outcome_line),
             last_scan: self.views.last_full_scan_summary(),
+            now: self.now,
         };
 
         let palette = self.theme.active;

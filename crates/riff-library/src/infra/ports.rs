@@ -115,6 +115,25 @@ impl ReplayGainTags {
             && self.album_gain.is_none()
             && self.album_peak.is_none()
     }
+
+    /// Mirror these facts into a Track's stored metadata: only the fields this
+    /// write carries move, and a field it does not carry never clears what is
+    /// there. The Store commit of a `ReplayGain` write lands the same four
+    /// fields the file now holds, so the two stay one fact.
+    pub fn apply_to(&self, metadata: &mut TrackMetadata) {
+        if let Some(gain) = self.track_gain {
+            metadata.replaygain_track_gain = Some(gain);
+        }
+        if let Some(peak) = self.track_peak {
+            metadata.replaygain_track_peak = Some(peak);
+        }
+        if let Some(gain) = self.album_gain {
+            metadata.replaygain_album_gain = Some(gain);
+        }
+        if let Some(peak) = self.album_peak {
+            metadata.replaygain_album_peak = Some(peak);
+        }
+    }
 }
 
 /// Trait for `ReplayGain` tag writers (implemented by infrastructure).

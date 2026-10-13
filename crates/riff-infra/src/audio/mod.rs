@@ -7,5 +7,5 @@ pub mod decoder;
 pub mod loudness_analyzer;
 
 pub use audio_output::CpalAudioOutput;
-pub use decoder::{SymphoniaDecoder, default_codec_registry};
+pub use decoder::SymphoniaDecoder;
 pub use loudness_analyzer::Ebur128LoudnessAnalyzer;

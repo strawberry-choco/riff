@@ -2,10 +2,9 @@ use crossbeam_channel::Sender;
 use notify_debouncer_full::{DebouncedEvent, Debouncer, RecommendedCache, new_debouncer};
 use riff_library::app::errors::LibraryError;
 use riff_library::infra::ports::FilesystemWatch;
+use riff_persistence::store::AUDIO_EXTENSIONS;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-const AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "aac", "opus", "ogg", "flac", "wav"];
 
 /// How long the filesystem must stay quiet before a burst of changes is
 /// flushed downstream as one debounced batch (the coalescing window).

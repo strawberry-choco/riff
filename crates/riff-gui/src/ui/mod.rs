@@ -17,6 +17,7 @@ pub mod now_playing;
 pub mod playerbar;
 pub mod prompts;
 pub mod row;
+pub mod scroll_area;
 pub mod scroll_memory;
 pub mod selection;
 pub mod settings;

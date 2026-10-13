@@ -583,12 +583,13 @@ impl<'a> Frame<'a> {
     /// touched: the values themselves are Store facts the read models pick
     /// up through the session generation.
     fn poll_pass_outcome(&mut self) {
-        use riff_backend::app::events::NoticeSeverity;
+        use riff_backend::app::events::{NoticeSeverity, NoticeSource};
         let passes = self.parts.passes;
         if passes.is_running() {
             let (done, total) = passes.poll_progress();
             if total > 0 {
-                self.parts.feedback.set_replaygain(
+                self.parts.feedback.set(
+                    NoticeSource::ReplayGain,
                     format!("Measuring ReplayGain ({done}/{total})\u{2026}"),
                     NoticeSeverity::Info,
                 );
@@ -603,7 +604,9 @@ impl<'a> Frame<'a> {
             } else {
                 NoticeSeverity::Info
             };
-            self.parts.feedback.set_replaygain(message, severity);
+            self.parts
+                .feedback
+                .set(NoticeSource::ReplayGain, message, severity);
         }
     }
 
@@ -621,15 +624,18 @@ impl<'a> Frame<'a> {
                     self.library
                         .library_paths
                         .report_readiness(&path, LibraryStatus::Scanning { files_found });
-                    self.parts
-                        .feedback
-                        .set_scan(format!("{files_found} files"), NoticeSeverity::Info);
+                    self.parts.feedback.set(
+                        NoticeSource::Scan,
+                        format!("{files_found} files"),
+                        NoticeSeverity::Info,
+                    );
                 }
                 ScanOutcome::Complete { path, total_files } => {
                     self.library
                         .library_paths
                         .report_readiness(&path, LibraryStatus::Scanned(total_files));
-                    self.parts.feedback.set_scan(
+                    self.parts.feedback.set(
+                        NoticeSource::Scan,
                         format!("Scan complete: {total_files} tracks"),
                         NoticeSeverity::Info,
                     );
@@ -698,14 +704,16 @@ impl<'a> Frame<'a> {
         out.cache_clear = Some(outcome.clone());
         match &outcome {
             ClearCacheOutcome::Cleared => {
-                self.parts.feedback.set_library(
+                self.parts.feedback.set(
+                    riff_backend::app::events::NoticeSource::Library,
                     "Thumbnail cache cleared. Covers rebuild as you browse.".to_string(),
                     riff_backend::app::events::NoticeSeverity::Info,
                 );
             }
             ClearCacheOutcome::Failed { reason } => {
                 tracing::warn!("Failed to clear the Thumbnail cache: {reason}");
-                self.parts.feedback.set_library(
+                self.parts.feedback.set(
+                    riff_backend::app::events::NoticeSource::Library,
                     "Failed to clear the Thumbnail cache \u{2014} nothing was changed.".to_string(),
                     riff_backend::app::events::NoticeSeverity::Error,
                 );

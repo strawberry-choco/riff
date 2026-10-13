@@ -10,7 +10,7 @@
 //! reports as no energy at all — lands the domain's no-verdict pair instead of
 //! an infinite gain, so what this port hands back is always finite and writable.
 
-use crate::audio::decoder::{SymphoniaDecoder, default_codec_registry};
+use crate::audio::decoder::SymphoniaDecoder;
 use riff_library::app::errors::LibraryError;
 use riff_library::app::replaygain::{
     REPLAYGAIN_FALLBACK_GAIN_DB, REPLAYGAIN_FALLBACK_PEAK, REPLAYGAIN_REFERENCE_LUFS,
@@ -39,7 +39,7 @@ impl LoudnessAnalyzer for Ebur128LoudnessAnalyzer {
         let failure =
             |context: String, e: String| move || LibraryError::Loudness(format!("{context}: {e}"));
 
-        let mut decoder = SymphoniaDecoder::new(default_codec_registry());
+        let mut decoder = SymphoniaDecoder::new();
         let format = decoder
             .open(path)
             .map_err(|e| failure("decode failed".to_string(), e.to_string())())?;

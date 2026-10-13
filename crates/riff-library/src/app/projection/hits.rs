@@ -1,7 +1,7 @@
 //! The scoped-hit Session Projection (ADR 0002): the non-paged entity hit
-//! reads — an album's hit tracks, the album name-hit boolean, hit-scoped
-//! genre-scoped hit tracks — cached per generation like the
-//! browsing/genre projections.
+//! reads — an album's hit tracks, the album name-hit boolean, the artist
+//! name-hit boolean, hit-scoped genre-scoped hit tracks — cached per
+//! generation like the browsing/genre projections.
 
 use crate::app::store::{GenerationCache, StoreError, StoreGeneration};
 use crate::domain::{GenreCount, Track};
@@ -14,6 +14,7 @@ struct HitLevels {
     album_tracks: HashMap<(String, String, String), Arc<[Track]>>,
     genre_album_tracks: HashMap<(String, String, String, String), Arc<[Track]>>,
     album_name_hits: HashMap<(String, String, String), bool>,
+    artist_name_hits: HashMap<(String, String), bool>,
     genre_counts: HashMap<String, Arc<[GenreCount]>>,
 }
 
@@ -28,6 +29,9 @@ type GenreAlbumHitTracksLoader<'a> =
 
 /// Loader for the album name-hit boolean (factored out for readability).
 type AlbumNameHitLoader<'a> = &'a mut dyn FnMut(&str, &str, &str) -> Result<bool, StoreError>;
+
+/// Loader for the artist name-hit boolean (factored out for readability).
+type ArtistNameHitLoader<'a> = &'a mut dyn FnMut(&str, &str) -> Result<bool, StoreError>;
 
 /// Loader for the hit-scoped genre counts (factored out for readability).
 type GenreCountsLoader<'a> = &'a mut dyn FnMut(&str) -> Result<Vec<GenreCount>, StoreError>;
@@ -150,6 +154,31 @@ impl HitProjection {
             || loader(album_artist, album_title, query),
             |levels, answer| {
                 levels.album_name_hits.insert(key.clone(), answer);
+                answer
+            },
+        )
+    }
+
+    /// Whether `artist` is itself a name hit for `query`, cached per
+    /// (artist, query) per generation. The same shape as
+    /// [`Self::album_is_name_hit`], one noun phrase lighter: the artist has
+    /// no title of its own to match.
+    ///
+    /// # Errors
+    /// Propagates loader failures without touching the cache.
+    pub fn artist_is_name_hit(
+        &mut self,
+        artist: &str,
+        query: &str,
+        loader: ArtistNameHitLoader<'_>,
+    ) -> Result<bool, StoreError> {
+        let key = (artist.to_string(), query.to_string());
+        self.cache.level(
+            &(),
+            |levels| levels.artist_name_hits.get(&key).copied(),
+            || loader(artist, query),
+            |levels, answer| {
+                levels.artist_name_hits.insert(key.clone(), answer);
                 answer
             },
         )

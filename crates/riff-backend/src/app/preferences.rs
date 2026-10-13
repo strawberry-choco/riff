@@ -107,11 +107,7 @@ impl Preferences {
             session.ui_flags.smart_lists_collapsed = settings.scalars.smart_lists_collapsed;
             session.ui_flags.close_quits_app = settings.scalars.close_quits_app;
             session.ui_flags.reduce_motion = settings.scalars.reduce_motion;
-            session.scan_prefs = ScanPrefs {
-                skip_hidden_files: settings.scalars.skip_hidden_files,
-                scan_formats: settings.scalars.scan_formats.clone(),
-                read_embedded_artwork: settings.scalars.read_embedded_artwork,
-            };
+            session.scan_prefs = ScanPrefs::from(&settings.scalars);
             session.pass_prefs = PassPrefs {
                 track_values: settings.scalars.replaygain_pass_track,
                 album_values: settings.scalars.replaygain_pass_album,
@@ -162,6 +158,12 @@ fn scalar_settings(playback: &PlaybackSession, library: &LibrarySession) -> Scal
         replaygain_mode: replaygain_mode_to_store_code(playback.replaygain_mode),
         shuffle: playback.queue.shuffle,
         repeat_mode: repeat_mode_to_store_code(playback.queue.repeat),
+        // The Library Scan columns read back off the session prefs: the
+        // reverse of the hydrate mapping above. They stay spelled here
+        // because this is the ONE canonical write for the whole row — a
+        // `From` that filled the other eleven columns with their defaults
+        // would let a future column be added to the row and saved unset,
+        // which is the drift this builder exists to make impossible.
         skip_hidden_files: library.scan_prefs.skip_hidden_files,
         scan_formats: library.scan_prefs.scan_formats.clone(),
         read_embedded_artwork: library.scan_prefs.read_embedded_artwork,

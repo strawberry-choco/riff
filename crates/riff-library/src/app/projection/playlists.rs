@@ -155,18 +155,22 @@ impl PlaylistProjection {
         self.views.peek().and_then(|views| views.get(id)).cloned()
     }
 
-    /// Map store entries to ready-to-render rows: each entry rides its
-    /// LEFT-JOIN validity plus the read-time filesystem check, and missing
-    /// tracks stay listed as `(id, None, false)` (ADR 0001).
+    /// Map store entries to ready-to-render rows: each entry keeps its
+    /// store-resolved Track and the playability verdict
+    /// [`playlist_manager::valid_tracks`] decided, and missing tracks stay
+    /// listed as `(id, None, false)` (ADR 0001).
     fn resolve(entries: Vec<PlaylistEntry>) -> PlaylistView {
-        let mut valid_ids = Vec::new();
+        // `valid_tracks` is the one owner of the playable-ids rule: it answers
+        // which entries can play, in playlist order. The rows ride that same
+        // answer — an entry's row is playable exactly when its id is the next
+        // playable one — so this level spells no validity rule of its own and
+        // the read-time check runs once per entry rather than once per row.
+        let valid_ids = playlist_manager::valid_tracks(&entries);
+        let mut playable = valid_ids.iter().peekable();
         let rows: Vec<PlaylistEntryRow> = entries
             .into_iter()
             .map(|entry| {
-                let valid = playlist_manager::track_is_valid(&entry);
-                if valid {
-                    valid_ids.push(entry.id.clone());
-                }
+                let valid = playable.next_if(|id| *id == &entry.id).is_some();
                 (entry.id, entry.track, valid)
             })
             .collect();

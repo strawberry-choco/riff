@@ -250,23 +250,10 @@ fn show_browser_list(
         0.0,
         palette.surface_row,
     );
-    // `.animated(false)`: this column is driven by a `ScrollControl`, so it
-    // jumps to a named offset (a restored position, or the top after a
-    // selection change) and a keep-in-view jump must not lerp. The flag governs
-    // programmatic scroll-to offsets only, not wheel feel — the reason is
-    // written once on [`ScrollControl`](super::scroll_memory::ScrollControl).
-    let mut scroll_area = egui::ScrollArea::vertical()
-        .auto_shrink(false)
-        .animated(false);
-    match scroll {
-        Some(control) => {
-            scroll_area = scroll_area.id_salt(control.salt);
-            if let Some(offset) = control.start {
-                scroll_area = scroll_area.vertical_scroll_offset(offset);
-            }
-        }
-        None => scroll_area = scroll_area.id_salt("browser_list_rows"),
-    }
+    // Built by [`super::scroll_area::optional_scroll_area`]; the reason it is
+    // unanimated — and why the other `ScrollArea`s are not flipped to match —
+    // is written once on [`ScrollControl`](super::scroll_memory::ScrollControl).
+    let scroll_area = super::scroll_area::optional_scroll_area(scroll, "browser_list_rows", false);
     let output = scroll_area.show_viewport(ui, |ui, viewport| {
         let total = column.total;
         let mut y = 0.0_f32;

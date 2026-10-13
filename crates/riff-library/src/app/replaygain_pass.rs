@@ -28,10 +28,10 @@
 //! - Measurement always wins over manual edits: the next measurement simply
 //!   overwrites, which is why no flag tracks "manually edited".
 
-use crate::app::replaygain::album_aggregate;
+use crate::app::replaygain::{AlbumAggregate, MeasuredMember, album_aggregate};
 use crate::app::store::{LibraryMutationStore, LibraryQueryStore};
 use crate::app::traits::{LoudnessAnalyzer, ReplayGainTags, ReplayGainWriter, TrackLoudness};
-use riff_persistence::track::{Track, TrackId, TrackMetadata};
+use riff_persistence::track::{Track, TrackId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -283,19 +283,19 @@ impl ReplayGainPass {
                     .iter()
                     .map(|m| (m.loudness, duration_seconds(&m.track)))
                     .collect();
-                let Some(aggregate) = album_aggregate(&contributions) else {
+                if self
+                    .write_album_pair(
+                        &contributions,
+                        measured.into_iter().map(|measurement| measurement.track),
+                        &mut batch,
+                        cancel,
+                        report,
+                    )
+                    .is_none()
+                {
                     // Every measurement failed (already reported); the file
                     // writes below must not run on nothing.
                     return;
-                };
-                let tags =
-                    ReplayGainTags::album_pair(aggregate.album_gain_db, aggregate.album_peak);
-                for measurement in measured {
-                    if cancel.load(Ordering::Relaxed) {
-                        report.cancelled = true;
-                        break;
-                    }
-                    self.write_commit(measurement.track, &tags, &mut batch, report);
                 }
             }
         }
@@ -446,17 +446,15 @@ impl ReplayGainPass {
                         .then_some((loudness, duration_seconds(member)))
                 })
                 .collect();
-            let Some(aggregate) = album_aggregate(&contributions) else {
-                continue;
-            };
-            let tags = ReplayGainTags::album_pair(aggregate.album_gain_db, aggregate.album_peak);
-            for member in &members {
-                if cancel.load(Ordering::Relaxed) {
-                    report.cancelled = true;
-                    break;
-                }
-                self.write_commit(member.clone(), &tags, &mut batch, report);
-            }
+            // Nothing to aggregate over: no member of this Album carried a
+            // usable value, so nothing is written for it either.
+            self.write_album_pair(
+                &contributions,
+                members.iter().cloned(),
+                &mut batch,
+                cancel,
+                report,
+            );
         }
         self.flush(&mut batch, report);
     }
@@ -504,7 +502,7 @@ impl ReplayGainPass {
             return false;
         }
         let mut updated = track;
-        apply_replaygain_to_metadata(&mut updated.metadata, tags);
+        tags.apply_to(&mut updated.metadata);
         batch.push(updated);
         if batch.len() >= PASS_BATCH_SIZE {
             self.flush(batch, report);
@@ -533,6 +531,39 @@ impl ReplayGainPass {
         }
         batch.clear();
     }
+
+    /// Aggregate `contributions` into the Album's shared pair and write it to
+    /// every member, file first then store, cancel-guarded at each member.
+    ///
+    /// The Album's two write shapes share this step: a targeted Album command
+    /// hands it the members it just measured, and the library-wide pass's
+    /// recompute hands it the members it resolved from the Store. Both differ
+    /// only in where their contributions came from and in what a missing
+    /// aggregate means — this module's two callers keep both of those outside
+    /// the fold, which is why the aggregate comes back rather than being
+    /// turned into a report entry here.
+    ///
+    /// `None` means there was nothing to aggregate: no member carried a
+    /// positive duration, so no member is written at all.
+    fn write_album_pair(
+        &mut self,
+        contributions: &[MeasuredMember],
+        members: impl Iterator<Item = Track>,
+        batch: &mut Vec<Track>,
+        cancel: &AtomicBool,
+        report: &mut PassReport,
+    ) -> Option<AlbumAggregate> {
+        let aggregate = album_aggregate(contributions)?;
+        let tags = ReplayGainTags::album_pair(aggregate.album_gain_db, aggregate.album_peak);
+        for member in members {
+            if cancel.load(Ordering::Relaxed) {
+                report.cancelled = true;
+                break;
+            }
+            self.write_commit(member, &tags, batch, report);
+        }
+        Some(aggregate)
+    }
 }
 
 /// Which values an Album command writes: the members' own pairs, or the
@@ -551,30 +582,13 @@ fn duration_seconds(track: &Track) -> f32 {
     track.duration.map_or(0.0, |d| d.as_secs_f32())
 }
 
-/// Mirror the written tags into the Track's stored metadata. Only `Some`
-/// fields move, and measurement always wins: whatever a manual edit held is
-/// simply overwritten.
-fn apply_replaygain_to_metadata(metadata: &mut TrackMetadata, tags: &ReplayGainTags) {
-    if let Some(gain) = tags.track_gain {
-        metadata.replaygain_track_gain = Some(gain);
-    }
-    if let Some(peak) = tags.track_peak {
-        metadata.replaygain_track_peak = Some(peak);
-    }
-    if let Some(gain) = tags.album_gain {
-        metadata.replaygain_album_gain = Some(gain);
-    }
-    if let Some(peak) = tags.album_peak {
-        metadata.replaygain_album_peak = Some(peak);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::errors::LibraryError;
     use crate::app::store::{FullScanSummary, StoreError};
-    use riff_persistence::test_support::StubLibraryQueryStore;
+    use riff_persistence::test_support::{StubLibraryMutationStore, StubLibraryQueryStore};
+    use riff_persistence::track::TrackMetadata;
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -802,7 +816,7 @@ mod tests {
             Box::new(SharedAnalyzer(analyzer.clone())),
             Box::new(SharedWriter(writer.clone())),
             Box::new(library.stub()),
-            Box::new(SharedMutations(mutations.clone())),
+            Box::new(SharedMutations::new(mutations.clone())),
         );
         Wired {
             pass,
@@ -817,6 +831,12 @@ mod tests {
     // an `Arc` cannot be its own `Box<dyn Port>` because the ports take
     // `&self` while the store mutations take `&mut self` — only the
     // mutations need the mutex they already carry.)
+    //
+    // `SharedMutations` composes the shared no-op
+    // [`StubLibraryMutationStore`]: the recording/failing `apply_scan_batch`
+    // is the one write this suite exercises, and the seven writes it never
+    // makes delegate to the stub, so those no-op bodies are spelled once, in
+    // `riff-persistence`, instead of once per suite.
     struct SharedAnalyzer(Arc<FakeAnalyzer>);
     impl LoudnessAnalyzer for SharedAnalyzer {
         fn measure_track(&self, path: &std::path::Path) -> Result<TrackLoudness, LibraryError> {
@@ -833,46 +853,57 @@ mod tests {
             self.0.write_replaygain(path, tags)
         }
     }
-    struct SharedMutations(Arc<FakeMutations>);
+    /// The recording mutations shared with the test, over the shared no-op
+    /// stub for every write this pass does not exercise.
+    struct SharedMutations {
+        recorded: Arc<FakeMutations>,
+        noop: StubLibraryMutationStore,
+    }
+
+    impl SharedMutations {
+        fn new(recorded: Arc<FakeMutations>) -> Self {
+            Self {
+                recorded,
+                noop: StubLibraryMutationStore,
+            }
+        }
+    }
+
     impl LibraryMutationStore for SharedMutations {
         fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, StoreError> {
-            self.0.batches.lock().unwrap().push(tracks.to_vec());
-            if self.0.fail.load(Ordering::Relaxed) {
+            self.recorded.batches.lock().unwrap().push(tracks.to_vec());
+            if self.recorded.fail.load(Ordering::Relaxed) {
                 return Err(StoreError::InvalidOperation("store is dead".to_string()));
             }
             Ok(tracks.len())
         }
         fn record_track_played(
             &mut self,
-            _id: &TrackId,
-            _played_at: std::time::SystemTime,
+            id: &TrackId,
+            played_at: std::time::SystemTime,
         ) -> Result<bool, StoreError> {
-            Ok(false)
+            self.noop.record_track_played(id, played_at)
         }
-        fn set_track_favorite(
-            &mut self,
-            _id: &TrackId,
-            _favorite: bool,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
+        fn set_track_favorite(&mut self, id: &TrackId, favorite: bool) -> Result<bool, StoreError> {
+            self.noop.set_track_favorite(id, favorite)
         }
-        fn apply_tag_refresh(&mut self, _track: &Track) -> Result<(), StoreError> {
-            Ok(())
+        fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), StoreError> {
+            self.noop.apply_tag_refresh(track)
         }
-        fn remove_library_path(&mut self, _root: &std::path::Path) -> Result<usize, StoreError> {
-            Ok(0)
+        fn remove_library_path(&mut self, root: &std::path::Path) -> Result<usize, StoreError> {
+            self.noop.remove_library_path(root)
         }
         fn clear_library(&mut self) -> Result<usize, StoreError> {
-            Ok(0)
+            self.noop.clear_library()
         }
         fn record_full_scan_completed(
             &mut self,
-            _summary: FullScanSummary,
+            summary: FullScanSummary,
         ) -> Result<(), StoreError> {
-            Ok(())
+            self.noop.record_full_scan_completed(summary)
         }
-        fn stamp_metadata_version(&mut self, _version: u32) -> Result<(), StoreError> {
-            Ok(())
+        fn stamp_metadata_version(&mut self, version: u32) -> Result<(), StoreError> {
+            self.noop.stamp_metadata_version(version)
         }
     }
 
@@ -1001,6 +1032,313 @@ mod tests {
             assert!((tags.album_peak.unwrap() - 0.5).abs() < 1e-6, "on {path}");
         }
         assert_eq!(wired.analyzer.calls().len(), 3, "one decode per member");
+    }
+
+    /// A writer that records its writes and arms a cancel flag once `after`
+    /// writes have landed, so a test can interrupt a write loop mid-flight —
+    /// after the member then in flight, never before it.
+    struct CancellingWriter {
+        writes: Mutex<Vec<String>>,
+        cancel: Arc<AtomicBool>,
+        after: usize,
+    }
+
+    impl CancellingWriter {
+        fn new(cancel: Arc<AtomicBool>, after: usize) -> Self {
+            Self {
+                writes: Mutex::new(Vec::new()),
+                cancel,
+                after,
+            }
+        }
+
+        fn paths(&self) -> Vec<String> {
+            self.writes.lock().unwrap().clone()
+        }
+    }
+
+    impl ReplayGainWriter for CancellingWriter {
+        fn write_replaygain(
+            &self,
+            path: &std::path::Path,
+            _tags: &ReplayGainTags,
+        ) -> Result<(), LibraryError> {
+            self.writes
+                .lock()
+                .unwrap()
+                .push(path.to_string_lossy().to_string());
+            if self.writes.lock().unwrap().len() >= self.after {
+                self.cancel.store(true, Ordering::Relaxed);
+            }
+            Ok(())
+        }
+    }
+
+    struct SharedCancellingWriter(Arc<CancellingWriter>);
+
+    impl ReplayGainWriter for SharedCancellingWriter {
+        fn write_replaygain(
+            &self,
+            path: &std::path::Path,
+            tags: &ReplayGainTags,
+        ) -> Result<(), LibraryError> {
+            self.0.write_replaygain(path, tags)
+        }
+    }
+
+    /// The wired pass with a cancelling writer: the album-pair write loops
+    /// can be interrupted from inside the file write, the only place a
+    /// cancellation mid-loop can come from.
+    fn wire_cancelling(
+        library: FakeLibrary,
+        cancel: Arc<AtomicBool>,
+        after: usize,
+    ) -> (
+        ReplayGainPass,
+        Arc<FakeAnalyzer>,
+        Arc<CancellingWriter>,
+        Arc<FakeMutations>,
+    ) {
+        let analyzer = Arc::new(FakeAnalyzer::new(HashMap::new()));
+        let writer = Arc::new(CancellingWriter::new(Arc::clone(&cancel), after));
+        let mutations = Arc::new(FakeMutations::new());
+        let pass = ReplayGainPass::new(
+            Box::new(SharedAnalyzer(analyzer.clone())),
+            Box::new(SharedCancellingWriter(writer.clone())),
+            Box::new(library.stub()),
+            Box::new(SharedMutations::new(mutations.clone())),
+        );
+        (pass, analyzer, writer, mutations)
+    }
+
+    /// The album-pair write reaches every member, and each member is committed
+    /// only once its own file write landed: with the middle member's file
+    /// write failing, that member is absent from the Store commit while the
+    /// other two are there. File first, store second, per member.
+    #[test]
+    fn an_album_pairs_write_commits_a_member_only_after_its_file_write_lands() {
+        let (library, canned) = fixture();
+        let mut writer = FakeWriter::new();
+        writer.fail.insert("music/a2.flac".to_string());
+        let mut wired = wire_with(library, FakeAnalyzer::new(canned), writer);
+
+        let report = wired.pass.run(
+            &PassCommand::AlbumAggregate {
+                album_artist: "Artist A".to_string(),
+                album_title: "Album A".to_string(),
+            },
+            &AtomicBool::new(false),
+            no_progress(),
+        );
+
+        assert_eq!(report.failed, 1, "the failed file write is reported");
+        assert_eq!(report.measured, 2, "the other two members land");
+        let written: Vec<String> = wired
+            .writer
+            .writes()
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+        assert_eq!(
+            written,
+            vec!["music/a1.flac".to_string(), "music/a3.flac".to_string()],
+            "every member whose file write landed is written"
+        );
+        let committed: Vec<String> = wired
+            .mutations
+            .committed_flat()
+            .into_iter()
+            .map(|track| track.id.0)
+            .collect();
+        assert_eq!(
+            committed,
+            vec!["music/a1.flac".to_string(), "music/a3.flac".to_string()],
+            "and only those members are committed"
+        );
+    }
+
+    /// Cancelling mid album-pair write stops after the member then in flight:
+    /// that member's file write and its Store commit both land, and no later
+    /// member is written. The measurement phase runs first and is not cut
+    /// short — cancellation is observed at the write loop, as today.
+    #[test]
+    fn cancelling_mid_album_pair_write_stops_after_the_member_in_flight() {
+        let (library, _canned) = fixture();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (mut pass, analyzer, writer, mutations) =
+            wire_cancelling(library, Arc::clone(&cancel), 1);
+
+        let report = pass.run(
+            &PassCommand::AlbumAggregate {
+                album_artist: "Artist A".to_string(),
+                album_title: "Album A".to_string(),
+            },
+            &cancel,
+            no_progress(),
+        );
+
+        assert!(report.cancelled, "the pass reports its interruption");
+        assert_eq!(
+            analyzer.calls().len(),
+            3,
+            "every member is still measured — the cut lands in the write loop"
+        );
+        assert_eq!(
+            writer.paths(),
+            vec!["music/a1.flac".to_string()],
+            "exactly the member then in flight is written; the next is not"
+        );
+        let committed = mutations.committed_flat();
+        assert_eq!(committed.len(), 1, "only the member then in flight commits");
+        assert_eq!(committed[0].id.0, "music/a1.flac");
+        assert_eq!(report.measured, 1, "and only it is counted");
+    }
+
+    /// The library-wide pass's album step honours the same granularity:
+    /// cancelling mid-recompute stops after the member then in flight, and the
+    /// remaining Albums are not visited either.
+    #[test]
+    fn cancelling_mid_recompute_write_stops_after_the_member_in_flight() {
+        let (library, _canned) = fixture();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (mut pass, _analyzer, writer, mutations) =
+            wire_cancelling(library, Arc::clone(&cancel), 1);
+
+        let report = pass.run(
+            &PassCommand::LibraryWide {
+                track_values: false,
+                album_values: true,
+                force: false,
+            },
+            &cancel,
+            no_progress(),
+        );
+
+        assert!(report.cancelled, "the pass reports its interruption");
+        assert_eq!(
+            writer.paths(),
+            vec!["music/a1.flac".to_string()],
+            "exactly the member then in flight is written"
+        );
+        let committed = mutations.committed_flat();
+        assert_eq!(committed.len(), 1, "and only it is committed");
+        assert_eq!(committed[0].id.0, "music/a1.flac");
+        assert_eq!(report.measured, 1, "and only it is counted");
+    }
+
+    /// A targeted Album command whose every member fails to measure writes
+    /// nothing: the aggregate has nothing to describe, so no file write and no
+    /// Store commit happen, and each failure is reported on its own. This is
+    /// the targeted command's aggregate-failure branch, which ends the command
+    /// rather than skipping to the next Album.
+    #[test]
+    fn an_album_aggregate_command_whose_every_measurement_fails_writes_nothing() {
+        let (library, canned) = fixture();
+        let mut analyzer = FakeAnalyzer::new(canned);
+        for path in ["music/a1.flac", "music/a2.flac", "music/a3.flac"] {
+            analyzer.fail.insert(path.to_string());
+        }
+        let mut wired = wire(library, analyzer);
+
+        let report = wired.pass.run(
+            &PassCommand::AlbumAggregate {
+                album_artist: "Artist A".to_string(),
+                album_title: "Album A".to_string(),
+            },
+            &AtomicBool::new(false),
+            no_progress(),
+        );
+
+        assert_eq!(report.measured, 0, "nothing lands");
+        assert_eq!(report.failed, 3, "each failed measurement is reported");
+        assert!(
+            wired.writer.writes().is_empty(),
+            "no file write runs on nothing"
+        );
+        assert!(
+            wired.mutations.committed().is_empty(),
+            "and no Store commit happens"
+        );
+    }
+
+    /// The library-wide pass's recompute skips an Album whose aggregate comes
+    /// back empty — every member carries no duration, so there is no energy to
+    /// weigh — and still writes the Albums around it. This is the recompute
+    /// step's aggregate-failure branch, which continues rather than ending the
+    /// pass.
+    #[test]
+    fn a_library_wide_pass_skips_an_album_with_nothing_to_aggregate() {
+        let mut library = FakeLibrary::default();
+        for path in ["music/a1.flac", "music/a2.flac", "music/a3.flac"] {
+            library
+                .tracks
+                .push(track(path, Some(("Artist A", "Album A"))));
+        }
+        // Album B's only member declares no duration, so it weighs nothing.
+        let mut b1 = track("music/b1.flac", Some(("Artist B", "Album B")));
+        b1.duration = None;
+        library.tracks.push(b1);
+        library.albums.insert(
+            ("Artist A".to_string(), "Album A".to_string()),
+            vec![
+                "music/a1.flac".to_string(),
+                "music/a2.flac".to_string(),
+                "music/a3.flac".to_string(),
+            ],
+        );
+        library.albums.insert(
+            ("Artist B".to_string(), "Album B".to_string()),
+            vec!["music/b1.flac".to_string()],
+        );
+        let mut wired = wire(library, FakeAnalyzer::new(HashMap::new()));
+
+        let report = wired.pass.run(
+            &PassCommand::LibraryWide {
+                track_values: true,
+                album_values: true,
+                force: false,
+            },
+            &AtomicBool::new(false),
+            no_progress(),
+        );
+
+        // Four track pairs, then Album A's three album pairs; Album B's
+        // aggregate is empty so it is skipped.
+        assert_eq!(report.measured, 7, "4 track pairs + Album A's 3 members");
+        assert_eq!(report.failed, 0);
+        let written: Vec<String> = wired
+            .writer
+            .writes()
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+        assert_eq!(
+            written
+                .iter()
+                .filter(|path| path.starts_with("music/a"))
+                .count(),
+            6,
+            "Album A's members carry both their own pair and the album pair"
+        );
+        assert_eq!(
+            written
+                .iter()
+                .filter(|path| path.starts_with("music/b"))
+                .count(),
+            1,
+            "Album B's member carries only its own pair — its aggregate is empty"
+        );
+        let batches: Vec<usize> = wired
+            .mutations
+            .committed()
+            .into_iter()
+            .map(|batch| batch.len())
+            .collect();
+        assert_eq!(
+            batches,
+            vec![4, 3],
+            "the track pairs commit as one batch, Album A's aggregate as the next"
+        );
     }
 
     /// An Album tracks command fills in every member's own pair and writes
@@ -1550,7 +1888,7 @@ mod tests {
             Box::new(SharedAnalyzer(analyzer.clone())),
             Box::new(SharedWriter(writer.clone())),
             Box::new(library.stub()),
-            Box::new(SharedMutations(mutations.clone())),
+            Box::new(SharedMutations::new(mutations.clone())),
         );
         Wired {
             pass,

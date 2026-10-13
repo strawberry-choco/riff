@@ -23,7 +23,6 @@ use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::unbounded;
 
-use riff_infra::audio::decoder::default_codec_registry;
 use riff_infra::audio::loudness_analyzer::Ebur128LoudnessAnalyzer;
 use riff_infra::audio::{CpalAudioOutput, SymphoniaDecoder};
 use riff_infra::filesystem::{AudioFileScanner, FilesystemWatcher};
@@ -598,9 +597,9 @@ fn spawn_background_services(
 }
 
 /// Composition-root wiring for the audio engine thread: construct the real
-/// adapters (symphonia decoder factory, cpal output, store query port) and
-/// run the engine loop on the calling thread. `CodecRegistry` is not `Clone`,
-/// so the factory builds a fresh registry for every decoder it mints.
+/// adapters (decoder factory, cpal output, store query port) and run the
+/// engine loop on the calling thread. Every decoder mints its own codec
+/// registry, so the factory needs nothing but `new()`.
 fn run_engine_thread(
     cmd_rx: crossbeam_channel::Receiver<riff_playback::domain::PlaybackCommand>,
     cmd_tx: crossbeam_channel::Sender<riff_playback::domain::PlaybackCommand>,
@@ -609,8 +608,7 @@ fn run_engine_thread(
     library_queries: SqliteStore,
     stop: Arc<AtomicBool>,
 ) {
-    let decoder_factory: DecoderFactory =
-        Box::new(|| Box::new(SymphoniaDecoder::new(default_codec_registry())));
+    let decoder_factory: DecoderFactory = Box::new(|| Box::new(SymphoniaDecoder::new()));
     let engine = AudioEngine::new(
         cmd_rx,
         cmd_tx,

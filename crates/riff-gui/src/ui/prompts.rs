@@ -167,24 +167,46 @@ pub const CLEAR_LIBRARY_CONFIRM_COPY: &str = "Remove every indexed track? Playli
      rebuilds on the next scan.";
 
 /// The confirming action's copy, distinct from the plain "Cancel" beside it.
+///
+/// One label for every destructive confirmation here: each offers exactly this
+/// one affirmative action, so a second confirmation sitting in the same pane is
+/// distinguished by its [`destructive_confirm`] widget id, never by re-spelling
+/// the label.
 pub const CLEAR_LIBRARY_CONFIRM_LABEL: &str = "Confirm";
 
-/// The inline confirmation for the destructive Clear Library action, rendered
-/// beneath the stage until confirmed or cancelled. The warning line carries
-/// the palette's warning token — the destructive copy's `--riff-state-warning`
-/// — and the affirmative action paints through the shared
-/// [`button::Variant::Destructive`], so it is recognizably the dangerous one
-/// and never a brand-filled primary.
-pub fn clear_library_confirm(
+/// The one destructive-confirmation surface: the warning line over one
+/// affirmative action beside a Cancel, reported as a [`PromptOutcome`] the
+/// caller applies. `copy` is the consequence the listener is asked to accept,
+/// and `id` is the widget id that keeps this confirmation's affirmative action
+/// distinct from any other on screen. Both belong to the call site, because the
+/// copy belongs to the action and the id belongs to the ui stack that raised it
+/// — so the Settings pane's two clear actions distinguish themselves by what
+/// they pass here and nothing else.
+///
+/// The warning line carries the palette's warning token — the destructive
+/// copy's `--riff-state-warning` — and the affirmative action paints through
+/// the shared [`button::Variant::Destructive`], so it is recognizably the
+/// dangerous one and never a brand-filled primary. It is rendered beneath the
+/// stage until confirmed or cancelled, and it commits nothing: the wipe belongs
+/// to whoever holds the ports ([ADR 0002](docs/adr/0002)).
+///
+/// Asking first is this surface's policy, not a judgement each caller re-makes.
+/// Clear Thumbnail cache is not a data-loss event — the sources are untouched
+/// and the cache rebuilds as you browse — but it is irreversible in the moment
+/// and slow to undo, so it asks like Clear Library does, one gap below in the
+/// same pane.
+pub fn destructive_confirm(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
     reduce_motion: bool,
+    copy: &str,
+    id: egui::Id,
 ) -> Option<PromptOutcome> {
     let mut confirmed = false;
     let mut cancelled = false;
     ui.add_space(8.0);
-    ui.label(egui::RichText::new(CLEAR_LIBRARY_CONFIRM_COPY).color(palette.warning));
+    ui.label(egui::RichText::new(copy).color(palette.warning));
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(
             button::text_button_size(ui, palette, CLEAR_LIBRARY_CONFIRM_LABEL, false),
@@ -196,7 +218,7 @@ pub fn clear_library_confirm(
             palette,
             reduce_motion,
             &button::TextButton {
-                id: egui::Id::new("clear_library_confirm_action"),
+                id,
                 rect,
                 label: CLEAR_LIBRARY_CONFIRM_LABEL,
                 a11y: CLEAR_LIBRARY_CONFIRM_LABEL,
@@ -230,58 +252,3 @@ pub const CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY: &str = "Delete every cached cover 
 /// The action's own label, kept distinct from "Clear Library" — the two sit in the
 /// same pane and wipe very different things.
 pub const CLEAR_THUMBNAIL_CACHE_LABEL: &str = "Clear Thumbnail cache";
-
-/// The inline confirmation for the destructive Clear Thumbnail cache action,
-/// rendered beneath the stage until confirmed or cancelled. Same shape and same
-/// tokens as [`clear_library_confirm`]: the warning line in the palette's warning
-/// colour, the affirmative action in [`button::Variant::Destructive`].
-///
-/// Deleting the rungs is not a data-loss event — the sources are untouched and the
-/// cache rebuilds as you browse — but it is irreversible in the moment and slow to
-/// undo, so it asks first like every other destructive row here.
-pub fn clear_thumbnail_cache_confirm(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    reduce_motion: bool,
-) -> Option<PromptOutcome> {
-    let mut confirmed = false;
-    let mut cancelled = false;
-    ui.add_space(8.0);
-    ui.label(egui::RichText::new(CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY).color(palette.warning));
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(
-            button::text_button_size(ui, palette, CLEAR_LIBRARY_CONFIRM_LABEL, false),
-            egui::Sense::hover(),
-        );
-        if button::text_button(
-            ui,
-            cache,
-            palette,
-            reduce_motion,
-            &button::TextButton {
-                id: egui::Id::new("clear_thumbnail_cache_confirm_action"),
-                rect,
-                label: CLEAR_LIBRARY_CONFIRM_LABEL,
-                a11y: CLEAR_LIBRARY_CONFIRM_LABEL,
-                tooltip: None,
-                icon: None,
-                small: false,
-                variant: button::Variant::Destructive,
-                enabled: true,
-            },
-        ) {
-            confirmed = true;
-        }
-        if ui.button("Cancel").clicked() {
-            cancelled = true;
-        }
-    });
-    if confirmed {
-        Some(PromptOutcome::Confirm)
-    } else if cancelled {
-        Some(PromptOutcome::Cancel)
-    } else {
-        None
-    }
-}

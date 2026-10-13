@@ -23,9 +23,13 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::determinism::{
+        assert_settled_on_both_slots, distinct_colors, inter_only_font_definitions,
+        pin_settled_time,
+    };
     use crate::mocks::{MockLibraryQueryStore, MockPlaylistStore, MockSettingsStore};
     use riff_backend::app::state::{LibrarySession, PlaybackSession};
-    use riff_gui::ui::fonts::{self, INTER_FACES};
+    use riff_gui::ui::fonts;
     use riff_gui::ui::theme::{self, Palette};
 
     // --- Harness plumbing ------------------------------------------------------
@@ -74,103 +78,6 @@ mod tests {
         }
         *in_flight += 1;
         HarnessSlot
-    }
-
-    /// Deterministic font definitions for golden rendering: the vendored
-    /// Inter faces only. Unlike [`riff_gui::ui::fonts::font_definitions`] this
-    /// never scans system CJK fonts, whose presence varies per machine —
-    /// a golden must rasterize identically everywhere the suite runs.
-    fn inter_only_font_definitions() -> egui::FontDefinitions {
-        let mut fonts = egui::FontDefinitions::default();
-        for (key, bytes) in INTER_FACES {
-            fonts
-                .font_data
-                .insert((*key).to_owned(), egui::FontData::from_static(bytes).into());
-        }
-        if let Some(chain) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-            chain.insert(0, fonts::INTER_PRIMARY_KEY.to_owned());
-        }
-        fonts
-            .families
-            .insert(fonts::family_medium(), vec!["inter-medium".to_owned()]);
-        fonts
-            .families
-            .insert(fonts::family_semibold(), vec!["inter-semibold".to_owned()]);
-        fonts
-            .families
-            .insert(fonts::family_bold(), vec!["inter-bold".to_owned()]);
-        fonts
-    }
-
-    /// Pin the three time-driven [`egui::Style`] fields on **both** theme
-    /// slots: tween duration, programmatic scroll animation, cursor blink.
-    ///
-    /// egui 0.35 has no `Context::set_animation_time` and no
-    /// `Context::disable_scroll_animation` — these are plain fields on
-    /// `Style`, so the style is the only lever and the whole install has to be
-    /// re-asserted, not patched field-by-field before someone else's install
-    /// runs.
-    ///
-    /// **Both** slots, even though [`theme::install`] writes one: it calls
-    /// `set_style_of`, which replaces that theme's whole `Arc<Style>` with a
-    /// `Style::default()`-derived build, silently restoring egui's 0.2 s tween,
-    /// its 0.1–0.3 s scroll tween and a blinking cursor for that slot; the
-    /// other slot keeps whatever egui shipped. Asserting this *after* the
-    /// install is the whole point — "baselines capture settled state" has to
-    /// be a decision the suite makes, not an accident of call order.
-    fn pin_settled_time(ctx: &egui::Context) {
-        ctx.all_styles_mut(|style| {
-            style.animation_time = 0.0;
-            style.scroll_animation = egui::style::ScrollAnimation::none();
-            style.visuals.text_cursor.blink = false;
-        });
-    }
-
-    /// Assert [`pin_settled_time`]'s invariant on both theme slots.
-    ///
-    /// The failure this guards is silent: a `style_from` that grew a motion
-    /// field, or a `set_style_of` moved ahead of the re-assert, would shift
-    /// every affected baseline by a fraction of a tween and fail nothing until
-    /// someone diffed eighty PNGs. So the invariant is asserted, not just
-    /// commented — and the assertion is about the *style*, which is the
-    /// decision input, not about a pixel.
-    fn assert_settled_on_both_slots(ctx: &egui::Context) {
-        for theme in [egui::Theme::Dark, egui::Theme::Light] {
-            let style = ctx.style_of(theme);
-            assert_eq!(
-                style.animation_time, 0.0,
-                "{theme:?} slot: tweened values must snap, so a golden never \
-                 captures a mid-flight value"
-            );
-            assert_eq!(
-                style.scroll_animation.duration,
-                egui::Rangef::new(0.0, 0.0),
-                "{theme:?} slot: a scroll-to offset must land in one frame, not lerp"
-            );
-            assert!(
-                style.scroll_animation.points_per_second.is_infinite()
-                    && style.scroll_animation.points_per_second.is_sign_positive(),
-                "{theme:?} slot: `ScrollAnimation::none()` spells 'no animation' as \
-                 an infinite speed — anything finite reintroduces a distance-scaled \
-                 duration"
-            );
-            assert!(
-                !style.visuals.text_cursor.blink,
-                "{theme:?} slot: a blinking caret is a function of the clock, not of \
-                 the frame, and would make every focused-text golden a coin flip"
-            );
-        }
-    }
-
-    /// Count the distinct 8-bit RGBA colors in a rendered frame. A composed
-    /// shell that actually painted chrome, text, and separators has many; a
-    /// blank, clipped-to-nothing, or unpainted render collapses to a handful.
-    fn distinct_colors(image: &image::RgbaImage) -> usize {
-        let mut seen = std::collections::HashSet::new();
-        for pixel in image.pixels() {
-            seen.insert(pixel.0);
-        }
-        seen.len()
     }
 
     // --- Composed-golden harness (Issue 05) -------------------------------------
@@ -390,7 +297,7 @@ mod tests {
         /// Scan outcomes the app's first frame drains into the status line.
         scans: Vec<riff_library::app::scan_service::ScanOutcome>,
         /// Answer cover requests with deterministic pixels (`StubCovers`)
-        /// rather than nothing (`MockCovers`).
+        /// rather than nothing (`RecordingCovers`).
         art: bool,
     }
 
@@ -410,7 +317,7 @@ mod tests {
     /// faces installed and the determinism pass pinned.
     fn composed(seed: Seed) -> egui_kittest::Harness<'static, riff_gui::ui::RiffApp> {
         use crate::mocks::{
-            MockLibraryMutationStore, MockScans, MockTagEdits, MockTransport, StubCovers,
+            FakeTagEdits, MockLibraryMutationStore, MockScans, MockTransport, StubCovers,
         };
         use riff_backend::app::events::BackendEvents;
         use riff_backend::app::store::StoreGeneration;
@@ -443,7 +350,7 @@ mod tests {
         let covers: Box<dyn riff_library::app::cover_service::Covers> = if art {
             Box::new(StubCovers::default())
         } else {
-            Box::new(crate::mocks::MockCovers)
+            Box::new(crate::mocks::RecordingCovers::new())
         };
 
         let harness = egui_kittest::Harness::builder()
@@ -451,7 +358,7 @@ mod tests {
             .with_pixels_per_point(1.0)
             .build_eframe(move |cc| {
                 cc.egui_ctx.set_fonts(inter_only_font_definitions());
-                let (app, _visibility_tx) = RiffApp::new_for_test(
+                let (mut app, _visibility_tx) = RiffApp::new_for_test(
                     Arc::new(Mutex::new(playback)),
                     Arc::new(Mutex::new(library)),
                     Box::new(MockTransport::new()),
@@ -465,11 +372,15 @@ mod tests {
                         StoreGeneration::new(),
                         StoreGeneration::new(),
                     ),
-                    Box::new(MockTagEdits),
-                    Box::new(crate::mocks::MockPasses),
+                    Box::new(FakeTagEdits::new()),
+                    Box::new(crate::mocks::RecordingPasses::default()),
                     covers,
                     Arc::new(Mutex::new(BackendEvents::default())),
                 );
+                // PIN the clock (the F1 seam): every composed golden reads its
+                // "Last played" / "Last scan" / "Last full scan" stamps against
+                // this fixed instant, so a baseline bakes no time-of-run string.
+                app.set_now_for_test(golden_now());
                 app
             });
 
@@ -604,6 +515,18 @@ mod tests {
     /// machine that renders the baseline and the one that reads it.
     fn canned_instant(secs: u64) -> std::time::SystemTime {
         std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+    }
+
+    /// The ONE pinned "now" every composed golden reads its time-of-run stamps
+    /// against, installed through [`RiffApp::set_now_for_test`] in [`composed`]
+    /// — the seam that ends the recurring golden drift. A constant, exactly one
+    /// day after the canned play history (`canned_instant(1_700_000_000)`), so
+    /// the Track and Album inspectors' "Last played" reads `1d ago` and the
+    /// sidebar footer / Settings scan card stamp — whose fixtures are set to
+    /// this same instant — reads `just now`. Both strings are now identical on
+    /// every machine and every run.
+    fn golden_now() -> std::time::SystemTime {
+        canned_instant(1_700_086_400)
     }
 
     /// One track of the canned library. The path IS the id (production's own
@@ -871,9 +794,11 @@ mod tests {
                     .filter(|t| t.metadata.album.as_deref() == Some(Self::ALBUM_TITLE))
                     .cloned()
                     .collect(),
-                // Read back as an elapsed time, so `now` is what makes the
-                // stamp render as "just now" whatever the machine's clock says.
-                last_full_scan: Some(std::time::SystemTime::now()),
+                // Read back as an elapsed time, so the pinned [`composed`]
+                // clock is what makes the stamp render as "just now": the
+                // fixture stamp and the app's `now` are the SAME fixed instant,
+                // so the elapsed is exactly zero on every machine and run.
+                last_full_scan: Some(golden_now()),
                 ..MockLibraryQueryStore::default()
             };
 
@@ -2898,17 +2823,6 @@ mod tests {
         use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::sidebar::{TreeRow, tree_row};
 
-        fn count_pixels(image: &image::RgbaImage, color: egui::Color32) -> usize {
-            image
-                .pixels()
-                .filter(|p| {
-                    p.0[0].abs_diff(color.r()) <= 2
-                        && p.0[1].abs_diff(color.g()) <= 2
-                        && p.0[2].abs_diff(color.b()) <= 2
-                })
-                .count()
-        }
-
         let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(280.0, 48.0))
@@ -2944,7 +2858,7 @@ mod tests {
         harness.run();
         let idle = harness.render().unwrap();
         assert_eq!(
-            count_pixels(&idle, theme::ROW_HOVER),
+            crate::test_utils::count_near(&idle, theme::ROW_HOVER, 2),
             0,
             "no amber wash while the row is not hovered"
         );
@@ -2954,7 +2868,7 @@ mod tests {
         harness.run();
         let hovered = harness.render().unwrap();
         assert!(
-            count_pixels(&hovered, theme::ROW_HOVER) > 0,
+            crate::test_utils::count_near(&hovered, theme::ROW_HOVER, 2) > 0,
             "hovered tree row paints the amber wash"
         );
     }
@@ -2975,17 +2889,6 @@ mod tests {
         use riff_gui::ui::theme::{SURFACE_BG, TEXTURE_TINT};
 
         const IDENTITY: &str = "f:\\music\\artless golden.mp3";
-
-        fn count_pixels(image: &image::RgbaImage, color: egui::Color32) -> usize {
-            image
-                .pixels()
-                .filter(|p| {
-                    p.0[0].abs_diff(color.r()) <= 2
-                        && p.0[1].abs_diff(color.g()) <= 2
-                        && p.0[2].abs_diff(color.b()) <= 2
-                })
-                .count()
-        }
 
         let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
@@ -3022,12 +2925,12 @@ mod tests {
         let frame = harness.render().unwrap();
         let palette = Palette::dark();
         assert!(
-            count_pixels(&frame, palette.surface_2) > 0,
+            crate::test_utils::count_near(&frame, palette.surface_2, 2) > 0,
             "the placeholder well's surface fill must appear in the headless \
              render — user-loaded textures must not be dropped"
         );
         assert!(
-            count_pixels(&frame, palette.ink_3) > 0,
+            crate::test_utils::count_near(&frame, palette.ink_3, 2) > 0,
             "the placeholder's music glyph (ink_3) must appear in the headless \
              render — user-loaded textures must not be dropped"
         );

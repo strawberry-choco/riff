@@ -1,15 +1,19 @@
-//! Shared [`LibraryQueryStore`] test doubles for the cross-crate suites.
+//! Shared [`LibraryQueryStore`] and [`LibraryMutationStore`] test doubles
+//! for the cross-crate suites: [`StubLibraryQueryStore`] (whose failure mode
+//! is a configuration, not a second type) and [`StubLibraryMutationStore`].
 //!
-//! Both doubles implement the whole port so a suite that needs "a seam that
-//! answers" or "a seam that fails" never re-implements thirty no-op methods
-//! per mock. They are test-only by convention — nothing in production
-//! constructs either.
+//! Every double implements the whole port so a suite that needs "a seam that
+//! answers", "a seam that fails", or "a seam that writes nothing" never
+//! re-implements thirty no-op methods per mock. They are test-only by
+//! convention — nothing in production constructs one.
 
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use crate::errors::StoreError;
 use crate::store::{
-    FullScanSummary, LibraryCounts, LibraryQueryStore, Page, SortDirection, TrackListOrder,
+    FullScanSummary, LibraryCounts, LibraryMutationStore, LibraryQueryStore, Page, SortDirection,
+    TrackListOrder,
 };
 use crate::track::{
     Album, Artist, GenreCount, METADATA_VERSION, SmartPlaylistKind, Track, TrackId,
@@ -35,6 +39,7 @@ type AllIdsResolver = Box<dyn Fn() -> Vec<TrackId> + Send + Sync>;
 /// album-membership or flat-listing reads sets them via
 /// [`Self::with_album_tracks`] / [`Self::with_all_track_ids`].
 pub struct StubLibraryQueryStore {
+    failure: Option<String>,
     get_track: TrackResolver,
     album_tracks: AlbumResolver,
     all_track_ids: AllIdsResolver,
@@ -44,6 +49,7 @@ impl StubLibraryQueryStore {
     /// A stub whose `get_track` answers with `resolve`.
     pub fn new(resolve: impl Fn(&TrackId) -> Option<Track> + Send + Sync + 'static) -> Self {
         Self {
+            failure: None,
             get_track: Box::new(resolve),
             album_tracks: Box::new(|_, _| Vec::new()),
             all_track_ids: Box::new(Vec::new),
@@ -53,6 +59,15 @@ impl StubLibraryQueryStore {
     /// A stub with the default `get_track` (`None` for every id).
     pub fn empty() -> Self {
         Self::new(|_| None)
+    }
+
+    /// A stub whose every read reports `message` — the double for suites whose
+    /// UI under test must degrade gracefully over a dead store.
+    pub fn failing(message: impl Into<String>) -> Self {
+        Self {
+            failure: Some(message.into()),
+            ..Self::empty()
+        }
     }
 
     /// Also answer `album_tracks` with `resolve`.
@@ -74,6 +89,15 @@ impl StubLibraryQueryStore {
         self.all_track_ids = Box::new(resolve);
         self
     }
+
+    /// One read against this stub: the uniform failure when one is configured,
+    /// otherwise the stub's own answer.
+    fn answer<T>(&self, ok: impl FnOnce() -> Answer<T>) -> Answer<T> {
+        match &self.failure {
+            Some(message) => Err(StoreError::InvalidOperation(message.clone())),
+            None => ok(),
+        }
+    }
 }
 
 impl Default for StubLibraryQueryStore {
@@ -84,11 +108,11 @@ impl Default for StubLibraryQueryStore {
 
 impl LibraryQueryStore for StubLibraryQueryStore {
     fn get_track(&self, id: &TrackId) -> Answer<Option<Track>> {
-        Ok((self.get_track)(id))
+        self.answer(|| Ok((self.get_track)(id)))
     }
 
     fn metadata_version(&self) -> Answer<u32> {
-        Ok(METADATA_VERSION)
+        self.answer(|| Ok(METADATA_VERSION))
     }
 
     fn tracks_page(
@@ -97,19 +121,19 @@ impl LibraryQueryStore for StubLibraryQueryStore {
         _offset: usize,
         _limit: usize,
     ) -> Answer<Page<Track>> {
-        Ok(Page::new(0, Vec::new()))
+        self.answer(|| Ok(Page::new(0, Vec::new())))
     }
 
     fn library_counts(&self) -> Answer<LibraryCounts> {
-        Ok(LibraryCounts::default())
+        self.answer(|| Ok(LibraryCounts::default()))
     }
 
     fn smart_list_counts(&self) -> Answer<Vec<(SmartPlaylistKind, usize)>> {
-        Ok(Vec::new())
+        self.answer(|| Ok(Vec::new()))
     }
 
     fn all_track_ids(&self) -> Answer<Vec<TrackId>> {
-        Ok((self.all_track_ids)())
+        self.answer(|| Ok((self.all_track_ids)()))
     }
 
     fn search_page(
@@ -119,429 +143,237 @@ impl LibraryQueryStore for StubLibraryQueryStore {
         _offset: usize,
         _limit: usize,
     ) -> Answer<Page<Track>> {
-        Ok(Page::new(0, Vec::new()))
+        self.answer(|| Ok(Page::new(0, Vec::new())))
     }
 
     fn all_artists(&self) -> Answer<Vec<Artist>> {
-        Ok(Vec::new())
+        self.answer(|| Ok(Vec::new()))
     }
 
     fn artist_albums(&self, _artist: &str) -> Answer<Vec<Album>> {
-        Ok(Vec::new())
+        self.answer(|| Ok(Vec::new()))
     }
 
     fn album_tracks(&self, album_artist: &str, album_title: &str) -> Answer<Vec<Track>> {
-        Ok((self.album_tracks)(album_artist, album_title))
+        self.answer(|| Ok((self.album_tracks)(album_artist, album_title)))
     }
 
     fn folder_has_audio(&self, _folder: &std::path::Path) -> Answer<bool> {
-        Ok(false)
+        self.answer(|| Ok(false))
     }
 
     fn folder_has_search_match(&self, _folder: &std::path::Path, _query: &str) -> Answer<bool> {
-        Ok(false)
+        self.answer(|| Ok(false))
     }
 
     fn track_ids_in_folder_tree(&self, _folder: &std::path::Path) -> Answer<Vec<TrackId>> {
-        Ok(Vec::new())
+        self.answer(|| Ok(Vec::new()))
     }
 
     fn tracks_in_folder(&self, _folder: &std::path::Path) -> Answer<Vec<Track>> {
-        Ok(Vec::new())
+        self.answer(|| Ok(Vec::new()))
     }
 
     fn folder_track_count(&self, _folder: &std::path::Path) -> Answer<usize> {
+        self.answer(|| Ok(0))
+    }
+
+    fn last_full_scan(&self) -> Answer<Option<FullScanSummary>> {
+        self.answer(|| Ok(None))
+    }
+
+    fn subdirs_with_audio(&self, _folder: &std::path::Path) -> Answer<Vec<PathBuf>> {
+        self.answer(|| Ok(Vec::new()))
+    }
+
+    fn smart_playlist(&self, _kind: SmartPlaylistKind, _limit: usize) -> Answer<Vec<Track>> {
+        self.answer(|| Ok(Vec::new()))
+    }
+
+    fn genre_counts(&self) -> Answer<Vec<GenreCount>> {
+        self.answer(|| Ok(Vec::new()))
+    }
+
+    fn artists_in_genre(&self, _genre: &str) -> Answer<Vec<Artist>> {
+        self.answer(|| Ok(Vec::new()))
+    }
+
+    fn artist_albums_in_genre(&self, _artist: &str, _genre: &str) -> Answer<Vec<Album>> {
+        self.answer(|| Ok(Vec::new()))
+    }
+
+    fn album_tracks_in_genre(
+        &self,
+        _album_artist: &str,
+        _album_title: &str,
+        _genre: &str,
+    ) -> Answer<Vec<Track>> {
+        self.answer(|| Ok(Vec::new()))
+    }
+
+    fn hit_albums_page(&self, _query: &str, _offset: usize, _limit: usize) -> Answer<Page<Album>> {
+        self.answer(|| Ok(Page::new(0, Vec::new())))
+    }
+
+    fn hit_artists_page(
+        &self,
+        _query: &str,
+        _offset: usize,
+        _limit: usize,
+    ) -> Answer<Page<Artist>> {
+        self.answer(|| Ok(Page::new(0, Vec::new())))
+    }
+
+    fn album_hit_tracks(
+        &self,
+        _album_artist: &str,
+        _album_title: &str,
+        _query: &str,
+    ) -> Answer<Vec<Track>> {
+        self.answer(|| Ok(Vec::new()))
+    }
+
+    fn album_is_name_hit(
+        &self,
+        _album_artist: &str,
+        _album_title: &str,
+        _query: &str,
+    ) -> Answer<bool> {
+        self.answer(|| Ok(false))
+    }
+
+    fn artist_is_name_hit(&self, _artist: &str, _query: &str) -> Answer<bool> {
+        self.answer(|| Ok(false))
+    }
+
+    fn hit_albums_in_genre(
+        &self,
+        _genre: &str,
+        _query: &str,
+        _offset: usize,
+        _limit: usize,
+    ) -> Answer<Vec<Album>> {
+        self.answer(|| Ok(Vec::new()))
+    }
+
+    fn hit_artists_in_genre(
+        &self,
+        _genre: &str,
+        _query: &str,
+        _offset: usize,
+        _limit: usize,
+    ) -> Answer<Vec<Artist>> {
+        self.answer(|| Ok(Vec::new()))
+    }
+
+    fn album_hit_tracks_in_genre(
+        &self,
+        _album_artist: &str,
+        _album_title: &str,
+        _genre: &str,
+        _query: &str,
+    ) -> Answer<Vec<Track>> {
+        self.answer(|| Ok(Vec::new()))
+    }
+
+    fn hit_genre_counts(&self, _query: &str) -> Answer<Vec<GenreCount>> {
+        self.answer(|| Ok(Vec::new()))
+    }
+
+    fn artists_page(
+        &self,
+        _direction: SortDirection,
+        _offset: usize,
+        _limit: usize,
+    ) -> Answer<Page<Artist>> {
+        self.answer(|| Ok(Page::new(0, Vec::new())))
+    }
+
+    fn albums_page(
+        &self,
+        _direction: SortDirection,
+        _offset: usize,
+        _limit: usize,
+    ) -> Answer<Page<Album>> {
+        self.answer(|| Ok(Page::new(0, Vec::new())))
+    }
+
+    fn genres_page(
+        &self,
+        _direction: SortDirection,
+        _offset: usize,
+        _limit: usize,
+    ) -> Answer<Page<GenreCount>> {
+        self.answer(|| Ok(Page::new(0, Vec::new())))
+    }
+
+    fn artists_in_genre_page(
+        &self,
+        _genre: &str,
+        _direction: SortDirection,
+        _offset: usize,
+        _limit: usize,
+    ) -> Answer<Page<Artist>> {
+        self.answer(|| Ok(Page::new(0, Vec::new())))
+    }
+
+    fn artist_albums_in_genre_page(
+        &self,
+        _artist: &str,
+        _genre: &str,
+        _direction: SortDirection,
+        _offset: usize,
+        _limit: usize,
+    ) -> Answer<Page<Album>> {
+        self.answer(|| Ok(Page::new(0, Vec::new())))
+    }
+}
+
+/// A [`LibraryMutationStore`] whose every write is a no-op — the double for
+/// suites exercising logic that writes nothing, or whose write behavior the
+/// suite owns itself and reports through its own recording.
+///
+/// A suite that needs the scan-batch commit to record or to fail composes it:
+/// hold this stub beside the recording state and delegate every method to it
+/// except the one write the suite actually exercises, so the seven other
+/// no-op bodies are never re-implemented per mock.
+#[derive(Default)]
+pub struct StubLibraryMutationStore;
+
+impl LibraryMutationStore for StubLibraryMutationStore {
+    fn apply_scan_batch(&mut self, _tracks: &[Track]) -> Result<usize, StoreError> {
         Ok(0)
     }
 
-    fn last_full_scan(&self) -> Answer<Option<FullScanSummary>> {
-        Ok(None)
-    }
-
-    fn subdirs_with_audio(&self, _folder: &std::path::Path) -> Answer<Vec<PathBuf>> {
-        Ok(Vec::new())
-    }
-
-    fn smart_playlist(&self, _kind: SmartPlaylistKind, _limit: usize) -> Answer<Vec<Track>> {
-        Ok(Vec::new())
-    }
-
-    fn genre_counts(&self) -> Answer<Vec<GenreCount>> {
-        Ok(Vec::new())
-    }
-
-    fn artists_in_genre(&self, _genre: &str) -> Answer<Vec<Artist>> {
-        Ok(Vec::new())
-    }
-
-    fn artist_albums_in_genre(&self, _artist: &str, _genre: &str) -> Answer<Vec<Album>> {
-        Ok(Vec::new())
-    }
-
-    fn album_tracks_in_genre(
-        &self,
-        _album_artist: &str,
-        _album_title: &str,
-        _genre: &str,
-    ) -> Answer<Vec<Track>> {
-        Ok(Vec::new())
-    }
-
-    fn hit_albums_page(&self, _query: &str, _offset: usize, _limit: usize) -> Answer<Page<Album>> {
-        Ok(Page::new(0, Vec::new()))
-    }
-
-    fn hit_artists_page(
-        &self,
-        _query: &str,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Page<Artist>> {
-        Ok(Page::new(0, Vec::new()))
-    }
-
-    fn album_hit_tracks(
-        &self,
-        _album_artist: &str,
-        _album_title: &str,
-        _query: &str,
-    ) -> Answer<Vec<Track>> {
-        Ok(Vec::new())
-    }
-
-    fn album_is_name_hit(
-        &self,
-        _album_artist: &str,
-        _album_title: &str,
-        _query: &str,
-    ) -> Answer<bool> {
+    fn record_track_played(
+        &mut self,
+        _id: &TrackId,
+        _played_at: SystemTime,
+    ) -> Result<bool, StoreError> {
         Ok(false)
     }
 
-    fn hit_albums_in_genre(
-        &self,
-        _genre: &str,
-        _query: &str,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Vec<Album>> {
-        Ok(Vec::new())
+    fn set_track_favorite(&mut self, _id: &TrackId, _favorite: bool) -> Result<bool, StoreError> {
+        Ok(false)
     }
 
-    fn hit_artists_in_genre(
-        &self,
-        _genre: &str,
-        _query: &str,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Vec<Artist>> {
-        Ok(Vec::new())
+    fn apply_tag_refresh(&mut self, _track: &Track) -> Result<(), StoreError> {
+        Ok(())
     }
 
-    fn album_hit_tracks_in_genre(
-        &self,
-        _album_artist: &str,
-        _album_title: &str,
-        _genre: &str,
-        _query: &str,
-    ) -> Answer<Vec<Track>> {
-        Ok(Vec::new())
+    fn remove_library_path(&mut self, _root: &std::path::Path) -> Result<usize, StoreError> {
+        Ok(0)
     }
 
-    fn hit_genre_counts(&self, _query: &str) -> Answer<Vec<GenreCount>> {
-        Ok(Vec::new())
+    fn clear_library(&mut self) -> Result<usize, StoreError> {
+        Ok(0)
     }
 
-    fn artists_page(
-        &self,
-        _direction: SortDirection,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Page<Artist>> {
-        Ok(Page::new(0, Vec::new()))
+    fn record_full_scan_completed(&mut self, _summary: FullScanSummary) -> Result<(), StoreError> {
+        Ok(())
     }
 
-    fn albums_page(
-        &self,
-        _direction: SortDirection,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Page<Album>> {
-        Ok(Page::new(0, Vec::new()))
-    }
-
-    fn genres_page(
-        &self,
-        _direction: SortDirection,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Page<GenreCount>> {
-        Ok(Page::new(0, Vec::new()))
-    }
-
-    fn artists_in_genre_page(
-        &self,
-        _genre: &str,
-        _direction: SortDirection,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Page<Artist>> {
-        Ok(Page::new(0, Vec::new()))
-    }
-
-    fn artist_albums_in_genre_page(
-        &self,
-        _artist: &str,
-        _genre: &str,
-        _direction: SortDirection,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Page<Album>> {
-        Ok(Page::new(0, Vec::new()))
-    }
-}
-
-/// A [`LibraryQueryStore`] that fails every read with one uniform message —
-/// the double for suites whose UI under test must degrade gracefully over a
-/// dead store.
-pub struct FailingLibraryQueryStore {
-    message: String,
-}
-
-impl FailingLibraryQueryStore {
-    /// A failing store whose every read reports `message`.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-
-    fn failure(&self) -> StoreError {
-        StoreError::InvalidOperation(self.message.clone())
-    }
-}
-
-impl Default for FailingLibraryQueryStore {
-    fn default() -> Self {
-        Self::new("no store behind this seam")
-    }
-}
-
-impl LibraryQueryStore for FailingLibraryQueryStore {
-    fn get_track(&self, _id: &TrackId) -> Answer<Option<Track>> {
-        Err(self.failure())
-    }
-
-    fn metadata_version(&self) -> Answer<u32> {
-        Err(self.failure())
-    }
-
-    fn tracks_page(
-        &self,
-        _order: TrackListOrder,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Page<Track>> {
-        Err(self.failure())
-    }
-
-    fn library_counts(&self) -> Answer<LibraryCounts> {
-        Err(self.failure())
-    }
-
-    fn smart_list_counts(&self) -> Answer<Vec<(SmartPlaylistKind, usize)>> {
-        Err(self.failure())
-    }
-
-    fn all_track_ids(&self) -> Answer<Vec<TrackId>> {
-        Err(self.failure())
-    }
-
-    fn search_page(
-        &self,
-        _query: &str,
-        _order: TrackListOrder,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Page<Track>> {
-        Err(self.failure())
-    }
-
-    fn all_artists(&self) -> Answer<Vec<Artist>> {
-        Err(self.failure())
-    }
-
-    fn artist_albums(&self, _artist: &str) -> Answer<Vec<Album>> {
-        Err(self.failure())
-    }
-
-    fn album_tracks(&self, _album_artist: &str, _album_title: &str) -> Answer<Vec<Track>> {
-        Err(self.failure())
-    }
-
-    fn folder_has_audio(&self, _folder: &std::path::Path) -> Answer<bool> {
-        Err(self.failure())
-    }
-
-    fn folder_has_search_match(&self, _folder: &std::path::Path, _query: &str) -> Answer<bool> {
-        Err(self.failure())
-    }
-
-    fn track_ids_in_folder_tree(&self, _folder: &std::path::Path) -> Answer<Vec<TrackId>> {
-        Err(self.failure())
-    }
-
-    fn tracks_in_folder(&self, _folder: &std::path::Path) -> Answer<Vec<Track>> {
-        Err(self.failure())
-    }
-
-    fn folder_track_count(&self, _folder: &std::path::Path) -> Answer<usize> {
-        Err(self.failure())
-    }
-
-    fn last_full_scan(&self) -> Answer<Option<FullScanSummary>> {
-        Err(self.failure())
-    }
-
-    fn subdirs_with_audio(&self, _folder: &std::path::Path) -> Answer<Vec<PathBuf>> {
-        Err(self.failure())
-    }
-
-    fn smart_playlist(&self, _kind: SmartPlaylistKind, _limit: usize) -> Answer<Vec<Track>> {
-        Err(self.failure())
-    }
-
-    fn genre_counts(&self) -> Answer<Vec<GenreCount>> {
-        Err(self.failure())
-    }
-
-    fn artists_in_genre(&self, _genre: &str) -> Answer<Vec<Artist>> {
-        Err(self.failure())
-    }
-
-    fn artist_albums_in_genre(&self, _artist: &str, _genre: &str) -> Answer<Vec<Album>> {
-        Err(self.failure())
-    }
-
-    fn album_tracks_in_genre(
-        &self,
-        _album_artist: &str,
-        _album_title: &str,
-        _genre: &str,
-    ) -> Answer<Vec<Track>> {
-        Err(self.failure())
-    }
-
-    fn hit_albums_page(&self, _query: &str, _offset: usize, _limit: usize) -> Answer<Page<Album>> {
-        Err(self.failure())
-    }
-
-    fn hit_artists_page(
-        &self,
-        _query: &str,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Page<Artist>> {
-        Err(self.failure())
-    }
-
-    fn album_hit_tracks(
-        &self,
-        _album_artist: &str,
-        _album_title: &str,
-        _query: &str,
-    ) -> Answer<Vec<Track>> {
-        Err(self.failure())
-    }
-
-    fn album_is_name_hit(
-        &self,
-        _album_artist: &str,
-        _album_title: &str,
-        _query: &str,
-    ) -> Answer<bool> {
-        Err(self.failure())
-    }
-
-    fn hit_albums_in_genre(
-        &self,
-        _genre: &str,
-        _query: &str,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Vec<Album>> {
-        Err(self.failure())
-    }
-
-    fn hit_artists_in_genre(
-        &self,
-        _genre: &str,
-        _query: &str,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Vec<Artist>> {
-        Err(self.failure())
-    }
-
-    fn album_hit_tracks_in_genre(
-        &self,
-        _album_artist: &str,
-        _album_title: &str,
-        _genre: &str,
-        _query: &str,
-    ) -> Answer<Vec<Track>> {
-        Err(self.failure())
-    }
-
-    fn hit_genre_counts(&self, _query: &str) -> Answer<Vec<GenreCount>> {
-        Err(self.failure())
-    }
-
-    fn artists_page(
-        &self,
-        _direction: SortDirection,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Page<Artist>> {
-        Err(self.failure())
-    }
-
-    fn albums_page(
-        &self,
-        _direction: SortDirection,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Page<Album>> {
-        Err(self.failure())
-    }
-
-    fn genres_page(
-        &self,
-        _direction: SortDirection,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Page<GenreCount>> {
-        Err(self.failure())
-    }
-
-    fn artists_in_genre_page(
-        &self,
-        _genre: &str,
-        _direction: SortDirection,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Page<Artist>> {
-        Err(self.failure())
-    }
-
-    fn artist_albums_in_genre_page(
-        &self,
-        _artist: &str,
-        _genre: &str,
-        _direction: SortDirection,
-        _offset: usize,
-        _limit: usize,
-    ) -> Answer<Page<Album>> {
-        Err(self.failure())
+    fn stamp_metadata_version(&mut self, _version: u32) -> Result<(), StoreError> {
+        Ok(())
     }
 }

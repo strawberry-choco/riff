@@ -415,14 +415,14 @@ impl ScanWorker {
 mod tests {
     use super::*;
     use crate::app::errors::LibraryError;
-    use crate::app::store::{LibraryMutationStore, StoreError};
     use crate::app::traits::{AudioFormatInfo, MetadataReader};
     use crate::domain::CoverSource;
+    use riff_persistence::test_support::StubLibraryMutationStore;
     use riff_persistence::track::{Track, TrackId, TrackMetadata};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     fn make_track(id: &str) -> Track {
         Track {
@@ -477,46 +477,6 @@ mod tests {
         })
     }
 
-    struct MockMutations;
-    impl LibraryMutationStore for MockMutations {
-        fn apply_scan_batch(&mut self, _tracks: &[Track]) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-        fn stamp_metadata_version(&mut self, _version: u32) -> Result<(), StoreError> {
-            Ok(())
-        }
-        fn record_track_played(
-            &mut self,
-            _id: &TrackId,
-            _played_at: SystemTime,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-        fn apply_tag_refresh(&mut self, _track: &Track) -> Result<(), StoreError> {
-            Ok(())
-        }
-        fn set_track_favorite(
-            &mut self,
-            _id: &TrackId,
-            _favorite: bool,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-        fn remove_library_path(&mut self, _root: &Path) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-        fn clear_library(&mut self) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn record_full_scan_completed(
-            &mut self,
-            _summary: FullScanSummary,
-        ) -> Result<(), StoreError> {
-            Ok(())
-        }
-    }
-
     #[allow(
         clippy::type_complexity,
         reason = "mirrors the walk-closure parameter type of ScanService::new"
@@ -531,7 +491,7 @@ mod tests {
         let (service, _worker) = ScanService::new(
             Box::new(MockReader),
             Box::new(stub_queries(Arc::new(Mutex::new(HashSet::new())))),
-            Box::new(MockMutations),
+            Box::new(StubLibraryMutationStore),
             Arc::clone(&cancel),
             Arc::new(AtomicBool::new(false)),
             make_walk(),
@@ -547,7 +507,7 @@ mod tests {
         let (service, _worker) = ScanService::new(
             Box::new(MockReader),
             Box::new(stub_queries(Arc::new(Mutex::new(HashSet::new())))),
-            Box::new(MockMutations),
+            Box::new(StubLibraryMutationStore),
             Arc::clone(&cancel),
             Arc::new(AtomicBool::new(false)),
             make_walk(),

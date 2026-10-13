@@ -31,12 +31,6 @@ use super::theme::{self, Palette};
 use eframe::egui;
 use riff_backend::app::state::{BrowseMode, ViewMode};
 
-/// Full-texture UV rect for [`egui::Painter::image`] (sidebar precedent).
-/// Only the caption cluster's glyphs use it here; that cluster is not
-/// compiled on macOS, so neither is this.
-#[cfg(not(target_os = "macos"))]
-const UV_FULL: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-
 /// The static normalized bar heights of the wordmark's equalizer glyph — a
 /// fixed brand mark that moved into the titlebar from the content top bar.
 const WORDMARK_BARS: [f32; 4] = [0.55, 0.95, 0.7, 0.4];
@@ -656,7 +650,7 @@ fn window_control_button(
     };
     let tex_id = cache.texture(ui.ctx(), icon, 16.0, tint);
     let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
-    painter.image(tex_id, icon_rect, UV_FULL, tint);
+    painter.image(tex_id, icon_rect, super::artwork::UV_FULL, tint);
 
     super::button::finish_icon_button(ui, palette, &button, label)
 }

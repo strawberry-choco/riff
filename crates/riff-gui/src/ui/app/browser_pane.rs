@@ -45,11 +45,12 @@ use riff_backend::app::state::{
 
 use super::super::browser;
 use super::super::column::ColumnIdentity;
-use super::super::scroll_memory::DrillSlot;
+use super::super::scroll_memory::{DrillSlot, ScrollMemory};
+use super::super::theme::Palette;
 use super::{
-    COVER_THUMB, CollectionMenuEffects, ColumnKind, RiffApp, apply_collection_menu,
-    apply_detail_action, apply_entity_selection, column_plan, cover_texture_for,
-    resolve_detail_content, resolve_inspector, smart_list_openable,
+    COVER_THUMB, ColumnKind, RiffApp, apply_collection_menu, apply_detail_action,
+    apply_entity_selection, column_plan, cover_texture_for, resolve_detail_content,
+    resolve_inspector, smart_list_openable,
 };
 
 /// The stage's single-column states: stages that are not a LIBRARY section's
@@ -108,7 +109,7 @@ impl RiffApp {
         // a track row was single-clicked (in any track listing), otherwise
         // the deepest path entity — and collapses away completely when
         // nothing is selected.
-        let inspector = resolve_inspector(&mut self.views, library);
+        let inspector = resolve_inspector(&mut self.views, library, self.now);
         let inspector_visible = inspector.visible;
 
         // The stage's width allocation, separator accounting, zero-gap
@@ -234,9 +235,15 @@ impl RiffApp {
     /// expansion); a track-hit artist's hit albums show — the albums that
     /// are themselves name-hits or carry a matching track. With no query the
     /// full album table serves unchanged.
+    ///
+    /// The name-hit decision is the store's, asked through the read seam
+    /// beside the album name-hit read it already uses — the drill holds no
+    /// hit rule of its own. The empty-query short-circuit stays *before* the
+    /// read, exactly like the album drill's, so an empty query spends no
+    /// store read and no cache entry.
     fn artist_drill_albums(&mut self, artist: &str, query: &str) -> Vec<Album> {
         let all: Vec<Album> = self.views.artist_albums(artist).to_vec();
-        if query.is_empty() || artist_name_hits(artist, query) {
+        if query.is_empty() || self.views.artist_is_name_hit(artist, query) {
             return all;
         }
         // Track-hit artist: every album that is itself a hit (its own name
@@ -278,7 +285,6 @@ impl RiffApp {
         empty_hint: &str,
     ) {
         let palette = self.theme.active;
-        let mut actions: Vec<browser::BrowserAction> = Vec::new();
         let covers = &self.covers;
         let cover_cache = &mut self.cover_cache;
         let textures = &mut self.cover_textures;
@@ -339,19 +345,14 @@ impl RiffApp {
         // that knows this slot's selections are drill bookkeeping. Between
         // changes its scroll is egui's natural state under the drill's own
         // stable salt. That is the guard's other half: `note_scroll_for` below.
-        let control = self.scroll_memory.begin_drill(
-            column_id
-                .drill_slot()
-                .expect("a drill Column has a drill slot"),
-        );
-        let _actual = browser::show_browser_column_scrolled(
+        let actions = render_drill_column(
             ui,
             &mut self.icons,
             &palette,
             library.ui_flags.reduce_motion,
             column,
-            Some(control),
-            &mut actions,
+            column_id,
+            &mut self.scroll_memory,
         );
         self.drain_drill_actions(column_id, actions, library, playback);
     }
@@ -368,7 +369,6 @@ impl RiffApp {
         genre: &str,
     ) {
         let palette = self.theme.active;
-        let mut actions: Vec<browser::BrowserAction> = Vec::new();
         let views = &mut self.views;
         let covers = &self.covers;
         let cover_cache = &mut self.cover_cache;
@@ -438,19 +438,14 @@ impl RiffApp {
         let column_id = ColumnIdentity::drill(LibrarySection::Genres, 1, DrillSlot::GenreArtists);
         // A drill column resets to the top on every selection change (no
         // per-selection memory); egui's natural state between changes.
-        let control = self.scroll_memory.begin_drill(
-            column_id
-                .drill_slot()
-                .expect("a drill Column has a drill slot"),
-        );
-        let _actual = browser::show_browser_column_scrolled(
+        let actions = render_drill_column(
             ui,
             &mut self.icons,
             &palette,
             library.ui_flags.reduce_motion,
             column,
-            Some(control),
-            &mut actions,
+            column_id,
+            &mut self.scroll_memory,
         );
         self.drain_drill_actions(column_id, actions, library, playback);
     }
@@ -472,7 +467,6 @@ impl RiffApp {
         genre: &str,
     ) {
         let palette = self.theme.active;
-        let mut actions: Vec<browser::BrowserAction> = Vec::new();
         let views = &mut self.views;
         let covers = &self.covers;
         let cover_cache = &mut self.cover_cache;
@@ -535,19 +529,14 @@ impl RiffApp {
             ColumnIdentity::drill(LibrarySection::Genres, 2, DrillSlot::GenreArtistAlbums);
         // A drill column resets to the top on every selection change (no
         // per-selection memory); egui's natural state between changes.
-        let control = self.scroll_memory.begin_drill(
-            column_id
-                .drill_slot()
-                .expect("a drill Column has a drill slot"),
-        );
-        let _actual = browser::show_browser_column_scrolled(
+        let actions = render_drill_column(
             ui,
             &mut self.icons,
             &palette,
             library.ui_flags.reduce_motion,
             column,
-            Some(control),
-            &mut actions,
+            column_id,
+            &mut self.scroll_memory,
         );
         self.drain_drill_actions(column_id, actions, library, playback);
     }
@@ -762,7 +751,6 @@ impl RiffApp {
             _ => None,
         };
 
-        let mut actions: Vec<browser::BrowserAction> = Vec::new();
         let views = &mut self.views;
         let covers = &self.covers;
         let cover_cache = &mut self.cover_cache;
@@ -836,22 +824,17 @@ impl RiffApp {
         // Scroll Memory slot it owns. The handshake below and the drain after it
         // read the same value, so the two cannot name different lists.
         let column_id = ColumnIdentity::root(LibrarySection::Artists);
-        // Section root list: the site declares WHERE it renders and passes its
-        // content; the Scroll Memory composes the identity and picks the shape
-        // — saved offset when it matches, else a reset (issue 02).
-        let (control, visit) =
-            self.scroll_memory
-                .begin_section(column_id.section(), query, u8::from(sort_desc));
-        let actual = browser::show_browser_column_scrolled(
+        let actions = render_root_column(
             ui,
             &mut self.icons,
             &palette,
             library.ui_flags.reduce_motion,
             column,
-            Some(control),
-            &mut actions,
+            column_id,
+            query,
+            sort_desc,
+            &mut self.scroll_memory,
         );
-        self.scroll_memory.end_section(visit, actual);
         self.drain_root_actions(column_id, actions, library, playback);
     }
 
@@ -908,7 +891,6 @@ impl RiffApp {
             _ => None,
         };
 
-        let mut actions: Vec<browser::BrowserAction> = Vec::new();
         let views = &mut self.views;
         let covers = &self.covers;
         let cover_cache = &mut self.cover_cache;
@@ -989,22 +971,17 @@ impl RiffApp {
         // WHAT this Column is, stated ONCE — the same three facts the Artists
         // root states, differing only as data.
         let column_id = ColumnIdentity::root(LibrarySection::Albums);
-        // Section root list: the site declares WHERE it renders and passes its
-        // content; the Scroll Memory composes the identity and picks the shape
-        // — saved offset when it matches, else a reset (issue 02).
-        let (control, visit) =
-            self.scroll_memory
-                .begin_section(column_id.section(), query, u8::from(sort_desc));
-        let actual = browser::show_browser_column_scrolled(
+        let actions = render_root_column(
             ui,
             &mut self.icons,
             &palette,
             library.ui_flags.reduce_motion,
             column,
-            Some(control),
-            &mut actions,
+            column_id,
+            query,
+            sort_desc,
+            &mut self.scroll_memory,
         );
-        self.scroll_memory.end_section(visit, actual);
         self.drain_root_actions(column_id, actions, library, playback);
     }
 
@@ -1035,7 +1012,6 @@ impl RiffApp {
             _ => None,
         };
 
-        let mut actions: Vec<browser::BrowserAction> = Vec::new();
         let views = &mut self.views;
         // The count read: its own store read, the value to size the row
         // range with.
@@ -1065,22 +1041,17 @@ impl RiffApp {
         };
         // WHAT this Column is, stated ONCE.
         let column_id = ColumnIdentity::root(LibrarySection::Genres);
-        // Section root list: the site declares WHERE it renders; the Scroll
-        // Memory picks the shape — saved offset when the fingerprint matches,
-        // else a reset (issue 02).
-        let (control, visit) =
-            self.scroll_memory
-                .begin_section(column_id.section(), query, u8::from(sort_desc));
-        let actual = browser::show_browser_column_scrolled(
+        let actions = render_root_column(
             ui,
             &mut self.icons,
             &palette,
             library.ui_flags.reduce_motion,
             column,
-            Some(control),
-            &mut actions,
+            column_id,
+            query,
+            sort_desc,
+            &mut self.scroll_memory,
         );
-        self.scroll_memory.end_section(visit, actual);
         self.drain_root_actions(column_id, actions, library, playback);
     }
 
@@ -1122,13 +1093,7 @@ impl RiffApp {
                         &key,
                         &intents,
                         column,
-                        CollectionMenuEffects {
-                            library,
-                            playback,
-                            transport: self.transport.as_ref(),
-                            passes: self.passes.as_ref(),
-                            views: &mut self.views,
-                        },
+                        self.collection_menu(library, playback),
                     );
                 }
                 browser::BrowserAction::Select(key) => {
@@ -1171,13 +1136,7 @@ impl RiffApp {
                         &key,
                         &intents,
                         column,
-                        CollectionMenuEffects {
-                            library,
-                            playback,
-                            transport: self.transport.as_ref(),
-                            passes: self.passes.as_ref(),
-                            views: &mut self.views,
-                        },
+                        self.collection_menu(library, playback),
                     );
                 }
                 browser::BrowserAction::Select(key) => {
@@ -1194,14 +1153,117 @@ impl RiffApp {
     }
 }
 
-/// Whether `artist`'s name is itself a hit for `query` — the literal,
-/// case-insensitive substring rule (the query lowercased in Rust) the store
-/// applies to its write-time-lowercased `name_lower` column. The artist
-/// drill column needs the name-hit decision to pick its listing: a name-hit
-/// artist expands into all its albums; a track-hit artist shows only its
-/// hit albums.
-fn artist_name_hits(artist: &str, query: &str) -> bool {
-    !query.is_empty() && artist.to_lowercase().contains(&query.to_lowercase())
+// --- The two entity-Column render protocols ----------------------------
+//
+// Each of the six entity-Columns closes its render with the same
+// scroll-handshake, and the handshake is where the protocol can be spelled
+// wrong in ways nothing catches: a site that forgets `end_section` loses
+// its scroll position silently, a site that hands back an offset it never
+// rendered with saves it under the wrong content, and a drill site that
+// reaches for a slot it has no claim on panics at runtime rather than at
+// compile time. So the four statements are written twice — once per Column
+// kind — and a Column states WHERE it is and WHAT it renders while these
+// two answer HOW.
+//
+// The action half is not here. [`RiffApp::drain_root_actions`] and
+// [`RiffApp::drain_drill_actions`] own it, and they must run AFTER the
+// column is painted: they take `&mut self`, and the `item` closure inside
+// a [`browser::BrowserColumn`] holds `&mut self.views`,
+// `&mut self.cover_cache`, `&mut self.cover_textures`,
+// `&mut self.cover_lru_keys` and `&self.covers` at once, so no `&mut self`
+// method is reachable while it is alive. Both functions therefore report
+// the actions out and the caller drains them on the next statement.
+//
+// Both are free functions over explicit disjoint borrows rather than
+// methods on `RiffApp`, for the same reason `cover_texture_for` and the
+// Frame's `FrameParts` are: the render borrows the icons, the palette and
+// the Scroll Memory, none of which the caller can hand over as a whole.
+
+/// Paint one **Section root** column and report its actions.
+///
+/// The scroll-handshake for a Section root, in one place: the site declares
+/// its [`ColumnIdentity`] and passes its content (the current query and
+/// sort direction), the Scroll Memory composes the content identity and
+/// answers with the offset to start at, and the offset the list actually
+/// ended at travels straight back to [`ScrollMemory::end_section`] under
+/// the visit the start call returned — so a site cannot record an offset
+/// under content other than what it rendered with.
+///
+/// The actions come back out rather than being drained here: see the
+/// module section above for why the drains must run after the paint.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_root_column(
+    ui: &mut egui::Ui,
+    icons: &mut crate::ui::icons::IconCache,
+    palette: &Palette,
+    reduce_motion: bool,
+    column: browser::BrowserColumn<'_>,
+    column_id: ColumnIdentity,
+    query: &str,
+    sort_desc: bool,
+    scroll_memory: &mut ScrollMemory,
+) -> Vec<browser::BrowserAction> {
+    let mut actions = Vec::new();
+    let (control, visit) =
+        scroll_memory.begin_section(column_id.section(), query, u8::from(sort_desc));
+    let actual = browser::show_browser_column_scrolled(
+        ui,
+        icons,
+        palette,
+        reduce_motion,
+        column,
+        Some(control),
+        &mut actions,
+    );
+    scroll_memory.end_section(visit, actual);
+    actions
+}
+
+/// Paint one **Drill Column** and report its actions.
+///
+/// The same handshake shape, with the two differences a drill's own: it
+/// takes no content identity, because a drill column resets to the top on
+/// every selection change and the Scroll Memory holds no drill offsets by
+/// design; and it hands the actual offset back to nobody.
+///
+/// The discard is the protocol, not an oversight. Nothing downstream reads
+/// a drill's offset — [`RiffApp::drain_drill_actions`] resets this
+/// Column's own slot on a sort flip, and every other frame leaves egui's
+/// natural state under the drill's stable salt to continue — so the
+/// returned offset is dropped on purpose. A drill that started recording
+/// would grow a per-selection memory the module deliberately does not
+/// have, and would do it under a Section's slot it has no claim on.
+///
+/// The drill slot is asked of the identity the site stated, and the
+/// `expect` is the One place that claim is made: every drill site states
+/// a drill identity, and a root reaching this function is a compile-time
+/// impossibility rather than a runtime surprise.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_drill_column(
+    ui: &mut egui::Ui,
+    icons: &mut crate::ui::icons::IconCache,
+    palette: &Palette,
+    reduce_motion: bool,
+    column: browser::BrowserColumn<'_>,
+    column_id: ColumnIdentity,
+    scroll_memory: &mut ScrollMemory,
+) -> Vec<browser::BrowserAction> {
+    let mut actions = Vec::new();
+    let control = scroll_memory.begin_drill(
+        column_id
+            .drill_slot()
+            .expect("a drill Column has a drill slot"),
+    );
+    let _actual = browser::show_browser_column_scrolled(
+        ui,
+        icons,
+        palette,
+        reduce_motion,
+        column,
+        Some(control),
+        &mut actions,
+    );
+    actions
 }
 
 /// The sort toggle's bool as the store's sort direction — the one spelling
@@ -1241,5 +1303,94 @@ pub(super) fn sort_albums_by_title(albums: &mut [riff_backend::domain::Album], d
         albums.sort_by_key(|album| std::cmp::Reverse(album.title.to_lowercase()));
     } else {
         albums.sort_by_key(|album| album.title.to_lowercase());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use riff_backend::app::state::TrackSort;
+
+    use super::sort_tracks;
+
+    /// The display→canonical index permutation [`sort_tracks`] produces over
+    /// the `(0..n)` indices — the EXACT shape the user-playlist view feeds it
+    /// after the S1 fold (`let mut sorted = (0..entries.len()).collect();
+    /// sort_tracks(&mut sorted, |&i| title(i), sort)`), so ordering the playlist
+    /// and ordering this owner are one fact, not two.
+    ///
+    /// `title_key` returns the RAW title and lets [`sort_tracks`] own the single
+    /// case-insensitive compare, matching the playlist's raw-title hand-off.
+    fn order_for(titles: &[&str], sort: TrackSort) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..titles.len()).collect();
+        sort_tracks(&mut order, |&i| titles[i].to_owned(), sort);
+        order
+    }
+
+    /// The number modes are the canonical order and its exact mirror.
+    #[test]
+    fn number_modes_are_the_identity_and_its_exact_reverse() {
+        let titles = ["Solo", "Duo", "Trio", "Quartet"];
+        assert_eq!(order_for(&titles, TrackSort::NumberAsc), vec![0, 1, 2, 3]);
+        assert_eq!(order_for(&titles, TrackSort::NumberDesc), vec![3, 2, 1, 0]);
+    }
+
+    /// Every mode is a PERMUTATION of the canonical indices, and — the
+    /// invariant the playlist view's drag-to-reorder rests on — a sort FLIP
+    /// keeps each canonical row naming the same row: the row rendered at
+    /// display `pos` under Asc is the row rendered at the mirror position under
+    /// Desc. Nothing is lost, duplicated, or re-homed to a different track.
+    #[test]
+    fn a_sort_flip_keeps_every_order_entry_pointing_at_the_same_row() {
+        let titles = ["a", "b", "c", "d", "e"];
+        let asc = order_for(&titles, TrackSort::NumberAsc);
+        let desc = order_for(&titles, TrackSort::NumberDesc);
+        for (pos, &canonical_under_asc) in asc.iter().enumerate() {
+            assert_eq!(
+                desc[asc.len() - 1 - pos],
+                canonical_under_asc,
+                "flipping the sort mirrors every row's position; the canonical \
+                 index it carries is unchanged"
+            );
+        }
+        // Both orders cover the canonical set exactly once — each `order[i]` is
+        // a real row, and each row is addressed by exactly one position.
+        for order in [asc, desc] {
+            let mut as_set = order.clone();
+            as_set.sort_unstable();
+            assert_eq!(as_set, (0..titles.len()).collect::<Vec<_>>());
+        }
+    }
+
+    /// The title modes compare case-insensitively — a lower-case-first title
+    /// sorts ahead of an upper-case one that would win a byte-order compare —
+    /// and ties keep the canonical order (stable) under BOTH directions.
+    #[test]
+    fn title_modes_are_case_insensitive_and_stable_on_ties() {
+        // Case-insensitivity: `apple` (lower) sorts before `Banana` (upper),
+        // where a byte compare would put `Banana` ('B' = 66) first.
+        let titles = ["Banana", "apple"];
+        assert_eq!(
+            order_for(&titles, TrackSort::TitleAsc),
+            vec![1, 0],
+            "the compare is case-insensitive, not byte-order"
+        );
+
+        // Stability: two entries share the title "Echo" and keep their canonical
+        // relative order in each direction (a stable sort preserves input order
+        // among equal keys, even under the reversed comparator).
+        let tied = ["Delta", "Echo", "echo", "Alpha"];
+        // lower = [delta, echo, echo, alpha]; asc = alpha, delta, echo, echo.
+        assert_eq!(
+            order_for(&tied, TrackSort::TitleAsc),
+            vec![3, 0, 1, 2],
+            "case-folded ties keep canonical order"
+        );
+        // Reverse comparator: the two echoes lead (keeping input order 1 before
+        // 2), then delta, then alpha.
+        assert_eq!(
+            order_for(&tied, TrackSort::TitleDesc),
+            vec![1, 2, 0, 3],
+            "the reverse arm mirrors the compare but still keeps ties stable"
+        );
     }
 }

@@ -135,21 +135,23 @@ impl TagField {
         )
     }
 
-    /// The field's index into draft buffers and the model's stable order.
-    pub const fn index(self) -> usize {
-        match self {
-            TagField::Title => 0,
-            TagField::Artist => 1,
-            TagField::Album => 2,
-            TagField::AlbumArtist => 3,
-            TagField::Genre => 4,
-            TagField::Year => 5,
-            TagField::TrackNumber => 6,
-            TagField::ReplayGainTrackGain => 7,
-            TagField::ReplayGainTrackPeak => 8,
-            TagField::ReplayGainAlbumGain => 9,
-            TagField::ReplayGainAlbumPeak => 10,
-        }
+    /// The field's index into draft buffers and the model's stable order —
+    /// derived from [`Self::ALL`], the ONE spelling of the order. A hand-
+    /// written 11-arm `match` used to restate it, and nothing failed when
+    /// the two drifted; this derivation makes that impossible by
+    /// construction, and `every_tag_fields_index_is_its_position_in_all`
+    /// keeps the two agreeing.
+    ///
+    /// A runtime lookup, not a `const fn` match: the canonical order is an
+    /// array, so walking it is the one form that stays in step with it. The
+    /// call sites index draft buffers in event handlers, never in a hot
+    /// loop, and a `const fn` spelled out by hand would reintroduce the
+    /// second spelling this fold deletes.
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|field| *field == self)
+            .expect("every TagField variant is listed in TagField::ALL")
     }
 }
 
@@ -737,4 +739,41 @@ fn save_bar(
             ui.spinner();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The buffer positions come from ONE spelling — `TagField::ALL` — so a
+    /// field's place in the order and its resolved index can never drift
+    /// apart. The hand-written 11-arm `match` this replaced was a second
+    /// spelling of the same order, and nothing failed when the two
+    /// disagreed; this is the guard that would have caught it.
+    #[test]
+    fn every_tag_fields_index_is_its_position_in_all() {
+        for (expected, field) in TagField::ALL.iter().enumerate() {
+            assert_eq!(
+                field.index(),
+                expected,
+                "{field:?} must resolve to its own place in `TagField::ALL`"
+            );
+        }
+    }
+
+    /// `ALL` is the canonical order, so it must name each variant once: a
+    /// field listed twice would resolve two buffer positions to one index
+    /// and leave the other unwritten. (A variant *missing* from `ALL`
+    /// fails louder still — [`TagField::index`] panics rather than
+    /// inventing a position.)
+    #[test]
+    fn all_names_every_variant_exactly_once() {
+        let mut positions: Vec<usize> = TagField::ALL.iter().map(|f| f.index()).collect();
+        positions.sort_unstable();
+        assert_eq!(
+            positions,
+            (0..TagField::ALL.len()).collect::<Vec<_>>(),
+            "every variant resolves to a distinct position, so `ALL` holds no duplicates"
+        );
+    }
 }

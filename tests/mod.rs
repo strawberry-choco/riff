@@ -29,6 +29,115 @@ pub mod integration_tests;
 pub mod readme_screenshots;
 pub mod ui_tests;
 
+// --- Shared rendering-determinism contract ------------------------------------
+//
+// The ONE home for the determinism knobs every headless frame this crate paints
+// rides — the golden baselines in `golden_tests` and the README screenshot
+// assets in `readme_screenshots`. Both suites used to hold their own copies of
+// the first three helpers; the README generator's were unguarded (it asserted
+// nothing). Sharing one module means the two can never drift, and the README
+// generator now rides the same settled-time assertion the goldens do.
+pub(crate) mod determinism {
+    use riff_gui::ui::fonts::{self, INTER_FACES};
+
+    /// Deterministic font definitions for rendering: the vendored Inter faces
+    /// only. Unlike [`riff_gui::ui::fonts::font_definitions`] this never scans
+    /// system CJK fonts, whose presence varies per machine — a rendered frame
+    /// must rasterize identically everywhere the suite runs.
+    pub(crate) fn inter_only_font_definitions() -> egui::FontDefinitions {
+        let mut fonts = egui::FontDefinitions::default();
+        for (key, bytes) in INTER_FACES {
+            fonts
+                .font_data
+                .insert((*key).to_owned(), egui::FontData::from_static(bytes).into());
+        }
+        if let Some(chain) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            chain.insert(0, fonts::INTER_PRIMARY_KEY.to_owned());
+        }
+        fonts
+            .families
+            .insert(fonts::family_medium(), vec!["inter-medium".to_owned()]);
+        fonts
+            .families
+            .insert(fonts::family_semibold(), vec!["inter-semibold".to_owned()]);
+        fonts
+            .families
+            .insert(fonts::family_bold(), vec!["inter-bold".to_owned()]);
+        fonts
+    }
+
+    /// Pin the three time-driven [`egui::Style`] fields on **both** theme
+    /// slots: tween duration, programmatic scroll animation, cursor blink.
+    ///
+    /// egui 0.35 has no `Context::set_animation_time` and no
+    /// `Context::disable_scroll_animation` — these are plain fields on
+    /// `Style`, so the style is the only lever and the whole install has to be
+    /// re-asserted, not patched field-by-field before someone else's install
+    /// runs.
+    ///
+    /// **Both** slots, even though `theme::install` writes one: it calls
+    /// `set_style_of`, which replaces that theme's whole `Arc<Style>` with a
+    /// `Style::default()`-derived build, silently restoring egui's 0.2 s tween,
+    /// its 0.1–0.3 s scroll tween and a blinking cursor for that slot; the
+    /// other slot keeps whatever egui shipped. Asserting this *after* the
+    /// install is the whole point — "baselines capture settled state" has to
+    /// be a decision the suite makes, not an accident of call order.
+    pub(crate) fn pin_settled_time(ctx: &egui::Context) {
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+            style.visuals.text_cursor.blink = false;
+        });
+    }
+
+    /// Assert [`pin_settled_time`]'s invariant on both theme slots.
+    ///
+    /// The failure this guards is silent: a `style_from` that grew a motion
+    /// field, or a `set_style_of` moved ahead of the re-assert, would shift
+    /// every affected baseline by a fraction of a tween and fail nothing until
+    /// someone diffed eighty PNGs. So the invariant is asserted, not just
+    /// commented — and the assertion is about the *style*, which is the
+    /// decision input, not about a pixel.
+    pub(crate) fn assert_settled_on_both_slots(ctx: &egui::Context) {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let style = ctx.style_of(theme);
+            assert_eq!(
+                style.animation_time, 0.0,
+                "{theme:?} slot: tweened values must snap, so a golden never \
+                 captures a mid-flight value"
+            );
+            assert_eq!(
+                style.scroll_animation.duration,
+                egui::Rangef::new(0.0, 0.0),
+                "{theme:?} slot: a scroll-to offset must land in one frame, not lerp"
+            );
+            assert!(
+                style.scroll_animation.points_per_second.is_infinite()
+                    && style.scroll_animation.points_per_second.is_sign_positive(),
+                "{theme:?} slot: `ScrollAnimation::none()` spells 'no animation' as \
+                 an infinite speed — anything finite reintroduces a distance-scaled \
+                 duration"
+            );
+            assert!(
+                !style.visuals.text_cursor.blink,
+                "{theme:?} slot: a blinking caret is a function of the clock, not of \
+                 the frame, and would make every focused-text golden a coin flip"
+            );
+        }
+    }
+
+    /// Count the distinct 8-bit RGBA colors in a rendered frame. A composed
+    /// shell that actually painted chrome, text, and separators has many; a
+    /// blank, clipped-to-nothing, or unpainted render collapses to a handful.
+    pub(crate) fn distinct_colors(image: &image::RgbaImage) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        for pixel in image.pixels() {
+            seen.insert(pixel.0);
+        }
+        seen.len()
+    }
+}
+
 // --- Library re-exports ---------------------------------------------------
 //
 // Bring the library modules into the test crate root so qualified paths such as
@@ -165,6 +274,49 @@ pub mod test_utils {
             search_text: String::new(),
         }
     }
+
+    /// Is pixel `p` within `tol` of every channel of `color`?
+    ///
+    /// The ONE per-channel tolerance rule every pixel counter in this crate
+    /// shares. A rendered frame antialiases rounded corners and dithers flat
+    /// fills, so a channel lands a hair off the design token; `tol` absorbs
+    /// that hair. Each caller passes its own tolerance, which keeps every
+    /// assertion's slack visible at the call instead of held by prose.
+    #[must_use]
+    pub fn near(p: &image::Rgba<u8>, color: egui::Color32, tol: u8) -> bool {
+        p.0[0].abs_diff(color.r()) <= tol
+            && p.0[1].abs_diff(color.g()) <= tol
+            && p.0[2].abs_diff(color.b()) <= tol
+    }
+
+    /// Count the pixels of `image` within `tol` of every channel of `color`.
+    #[must_use]
+    pub fn count_near(image: &image::RgbaImage, color: egui::Color32, tol: u8) -> usize {
+        image.pixels().filter(|p| near(p, color, tol)).count()
+    }
+
+    /// [`count_near`] scoped to `rect`.
+    ///
+    /// The rect's edges are floored/ceiled onto whole pixels and clamped to
+    /// the image bounds; the counted range is the half-open
+    /// `[x0, x1) * [y0, y1)`.
+    #[must_use]
+    pub fn count_near_in(
+        image: &image::RgbaImage,
+        color: egui::Color32,
+        rect: egui::Rect,
+        tol: u8,
+    ) -> usize {
+        let (width, height) = image.dimensions();
+        let x0 = rect.min.x.floor().max(0.0) as u32;
+        let y0 = rect.min.y.floor().max(0.0) as u32;
+        let x1 = (rect.max.x.ceil().max(0.0) as u32).min(width);
+        let y1 = (rect.max.y.ceil().max(0.0) as u32).min(height);
+        image
+            .enumerate_pixels()
+            .filter(|(x, y, p)| *x >= x0 && *x < x1 && *y >= y0 && *y < y1 && near(p, color, tol))
+            .count()
+    }
 }
 
 /// Shared fakes for exercising the port boundaries without real audio
@@ -177,11 +329,13 @@ pub mod test_utils {
 /// of: the engine takes ownership of one clone and the test keeps another, so
 /// the counters stay readable while and after it runs.
 pub mod mocks {
+    use riff_backend::app::cover_service::{ClearCacheOutcome, Covers};
     use riff_backend::app::state::PlaybackSession;
     use riff_backend::app::store::{
         LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings, SettingsStore,
         SortDirection,
     };
+    use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
     use riff_backend::app::traits::{
         CoverLoader, DecodedCover, MetadataReader, MetadataWriter, RequestedSize, TagEdit,
     };
@@ -194,7 +348,9 @@ pub mod mocks {
     use riff_persistence::errors::StoreError;
     use riff_playback::app::errors::PlaybackError;
     use riff_playback::infra::ports::{AudioDecoder, AudioFormatInfo, AudioOutput};
+    use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -314,9 +470,15 @@ pub mod mocks {
     struct OutputState {
         /// The `(sample rate, channels)` of each stream the engine started.
         started: Vec<(u32, u16)>,
+        /// The `(sample rate, channels)` of each `start` call that failed and
+        /// therefore never opened a stream.
+        failed_starts: Vec<(u32, u16)>,
         stop_count: usize,
         written: Vec<Vec<f32>>,
         volumes: Vec<f32>,
+        /// When set, every `start` fails instead of opening a stream — the
+        /// engine's failure path, driven on demand.
+        fail_starts: bool,
     }
 
     impl MockAudioOutput {
@@ -324,17 +486,33 @@ pub mod mocks {
             Self {
                 state: Arc::new(Mutex::new(OutputState {
                     started: Vec::new(),
+                    failed_starts: Vec::new(),
                     stop_count: 0,
                     written: Vec::new(),
                     volumes: Vec::new(),
+                    fail_starts: false,
                 })),
             }
+        }
+
+        /// Make every later `start` fail (or succeed again) — the one switch
+        /// that drives the engine's failed-stream-start path.
+        pub fn set_fail_starts(&self, fail: bool) {
+            self.state.lock().unwrap().fail_starts = fail;
         }
 
         /// The format each started stream was built with, in order.
         #[must_use]
         pub fn started(&self) -> Vec<(u32, u16)> {
             self.state.lock().unwrap().started.clone()
+        }
+
+        /// The format each failed `start` asked for, in order — attempts that
+        /// never opened a stream, so they are absent from
+        /// [`MockAudioOutput::started`].
+        #[must_use]
+        pub fn failed_starts(&self) -> Vec<(u32, u16)> {
+            self.state.lock().unwrap().failed_starts.clone()
         }
 
         /// How many streams were started in total.
@@ -369,18 +547,22 @@ pub mod mocks {
 
     impl AudioOutput for MockAudioOutput {
         fn start(&mut self, format: AudioFormatInfo) -> Result<(), PlaybackError> {
-            self.state
-                .lock()
-                .unwrap()
-                .started
-                .push((format.sample_rate, format.channels));
+            let mut state = self.state.lock().unwrap();
+            if state.fail_starts {
+                state
+                    .failed_starts
+                    .push((format.sample_rate, format.channels));
+                return Err(PlaybackError::AudioOutput(
+                    "mock refuses to open a stream".to_string(),
+                ));
+            }
+            state.started.push((format.sample_rate, format.channels));
             Ok(())
         }
 
-        fn write(&mut self, samples: &[f32]) -> usize {
+        fn write(&mut self, samples: &[f32]) {
             let mut state = self.state.lock().unwrap();
             state.written.push(samples.to_vec());
-            samples.len()
         }
 
         fn stop(&mut self) {
@@ -513,16 +695,27 @@ pub mod mocks {
     /// Canned [`CoverLoader`]: returns a configured decoded cover, `None`, or
     /// an injected `LibraryError::CoverLoad`. The port belongs to the library
     /// slice, so it answers in that slice's error type.
+    ///
+    /// It records too: every `load_cover` bumps [`Self::calls`] first, then
+    /// pushes the [`CoverSource`] onto [`Self::seen`], then returns
+    /// [`Self::result`] — so a test can pin which source reached the loader
+    /// and how often it was asked, through handles it keeps itself.
     pub struct MockCoverLoader {
         pub result: Result<Option<DecodedCover>, String>,
+        /// Every source `load_cover` was handed, in call order.
+        pub seen: Arc<Mutex<Vec<CoverSource>>>,
+        /// How many times `load_cover` was entered.
+        pub calls: Arc<AtomicUsize>,
     }
 
     impl CoverLoader for MockCoverLoader {
         fn load_cover(
             &self,
-            _source: &CoverSource,
+            source: &CoverSource,
             _size: RequestedSize,
         ) -> Result<Option<DecodedCover>, LibraryError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.seen.lock().unwrap().push(source.clone());
             self.result.clone().map_err(LibraryError::CoverLoad)
         }
 
@@ -756,17 +949,26 @@ pub mod mocks {
     /// `(id, played_at)` pair (so playback-continuation tests can pin the
     /// committed plays); the remaining mutations are no-ops returning benign
     /// defaults.
+    ///
+    /// `Clone` hands out another handle on the SAME recordings: the mock is
+    /// the shared recording handle, so a component that takes ownership of
+    /// the port and the test that reads the recordings each hold one clone
+    /// and neither wraps the other. The failure flag is the one thing a clone
+    /// does not carry — it is fixed at construction (`new` records and never
+    /// fails, `failing_refresh` always fails), which is what makes a
+    /// shareable mock possible.
+    #[derive(Clone)]
     pub struct MockLibraryMutationStore {
         /// When set, `apply_tag_refresh` fails with an `InvalidOperation`
         /// error and records nothing.
         pub fail_tag_refresh: bool,
-        refreshed: Mutex<Vec<Track>>,
-        played: Mutex<Vec<(TrackId, std::time::SystemTime)>>,
-        favorites: Mutex<Vec<(TrackId, bool)>>,
+        refreshed: Arc<Mutex<Vec<Track>>>,
+        played: Arc<Mutex<Vec<(TrackId, std::time::SystemTime)>>>,
+        favorites: Arc<Mutex<Vec<(TrackId, bool)>>>,
         /// Every root passed to `remove_library_path`, in call order.
-        removed: Mutex<Vec<PathBuf>>,
+        removed: Arc<Mutex<Vec<PathBuf>>>,
         /// How many `clear_library` calls landed.
-        clears: Mutex<usize>,
+        clears: Arc<Mutex<usize>>,
     }
 
     impl Default for MockLibraryMutationStore {
@@ -781,11 +983,11 @@ pub mod mocks {
         pub fn new() -> Self {
             Self {
                 fail_tag_refresh: false,
-                refreshed: Mutex::new(Vec::new()),
-                played: Mutex::new(Vec::new()),
-                favorites: Mutex::new(Vec::new()),
-                removed: Mutex::new(Vec::new()),
-                clears: Mutex::new(0),
+                refreshed: Arc::new(Mutex::new(Vec::new())),
+                played: Arc::new(Mutex::new(Vec::new())),
+                favorites: Arc::new(Mutex::new(Vec::new())),
+                removed: Arc::new(Mutex::new(Vec::new())),
+                clears: Arc::new(Mutex::new(0)),
             }
         }
 
@@ -796,11 +998,11 @@ pub mod mocks {
         pub fn failing_refresh() -> Self {
             Self {
                 fail_tag_refresh: true,
-                refreshed: Mutex::new(Vec::new()),
-                played: Mutex::new(Vec::new()),
-                favorites: Mutex::new(Vec::new()),
-                removed: Mutex::new(Vec::new()),
-                clears: Mutex::new(0),
+                refreshed: Arc::new(Mutex::new(Vec::new())),
+                played: Arc::new(Mutex::new(Vec::new())),
+                favorites: Arc::new(Mutex::new(Vec::new())),
+                removed: Arc::new(Mutex::new(Vec::new())),
+                clears: Arc::new(Mutex::new(0)),
             }
         }
 
@@ -1041,15 +1243,17 @@ pub mod mocks {
     /// every issued intent behind an internal mutex so UI-layer tests can
     /// assert on playback intents instead of raw channel bytes. The
     /// state-coupled methods reuse the production clamp/volume math, exactly
-    /// like the real adapter.
+    /// like the real adapter. `Clone` shares the recording cell, so a wired
+    /// clone and the test's own handle see the same intents.
+    #[derive(Clone)]
     pub struct MockTransport {
-        intents: Mutex<Vec<TransportIntent>>,
+        intents: Arc<Mutex<Vec<TransportIntent>>>,
     }
 
     impl MockTransport {
         pub fn new() -> Self {
             Self {
-                intents: Mutex::new(Vec::new()),
+                intents: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -1182,6 +1386,7 @@ pub mod mocks {
         HitArtistsPage(String, usize, usize),
         AlbumHitTracks(String, String),
         AlbumIsNameHit(String, String),
+        ArtistIsNameHit(String),
         HitAlbumsInGenre(String, usize, usize),
         HitArtistsInGenre(String, usize, usize),
         AlbumHitTracksInGenre(String, String, String),
@@ -1222,6 +1427,7 @@ pub mod mocks {
         HitArtistsCount,
         AlbumHitTracks,
         AlbumIsNameHit,
+        ArtistIsNameHit,
         HitAlbumsInGenre,
         HitAlbumsInGenreCount,
         HitArtistsInGenre,
@@ -1249,7 +1455,7 @@ pub mod mocks {
     /// Configuration happens before wiring; recordings accumulate behind an
     /// internal mutex because the port takes `&self`. Tests that must hand
     /// ownership to the seam keep a shared handle (see
-    /// `SharedMock` in the app tests) or lock through the `Arc`.
+    /// [`SharedQueryStore`]) or lock through the `Arc`.
     pub struct MockLibraryQueryStore {
         // --- canned answers -------------------------------------------------
         /// `get_track` answers keyed by id.
@@ -1268,6 +1474,13 @@ pub mod mocks {
         pub albums: Vec<Album>,
         /// Tracks served by `album_tracks`.
         pub album_tracks: Vec<Track>,
+        /// `artist_albums` answers keyed by artist. Consulted first; a miss
+        /// falls through to the flat `albums` answer.
+        pub albums_by_artist: std::collections::HashMap<String, Vec<Album>>,
+        /// `album_tracks` answers keyed by `(album artist, album title)`.
+        /// Consulted first; a miss falls through to the flat `album_tracks`
+        /// answer.
+        pub tracks_by_album: std::collections::HashMap<(String, String), Vec<Track>>,
         /// Tracks served by `smart_playlist`.
         pub smart: Vec<Track>,
         /// Answer served by `library_counts`.
@@ -1296,6 +1509,8 @@ pub mod mocks {
         pub album_hit_tracks: Vec<Track>,
         /// Albums whose `album_is_name_hit` answers `true` (keys "artist - title").
         pub album_name_hits: Vec<String>,
+        /// Artists whose `artist_is_name_hit` answers `true`.
+        pub artist_name_hits: Vec<String>,
         /// Albums served by `hit_albums_in_genre`, in canonical order.
         pub hit_albums_in_genre: Vec<Album>,
         /// Artists served by `hit_artists_in_genre`, name-ascending.
@@ -1356,6 +1571,8 @@ pub mod mocks {
                 artists: Vec::new(),
                 albums: Vec::new(),
                 album_tracks: Vec::new(),
+                albums_by_artist: std::collections::HashMap::new(),
+                tracks_by_album: std::collections::HashMap::new(),
                 smart: Vec::new(),
                 library_counts: riff_backend::app::store::LibraryCounts::default(),
                 smart_list_counts: Vec::new(),
@@ -1369,6 +1586,7 @@ pub mod mocks {
                 hit_artists: Vec::new(),
                 album_hit_tracks: Vec::new(),
                 album_name_hits: Vec::new(),
+                artist_name_hits: Vec::new(),
                 hit_albums_in_genre: Vec::new(),
                 hit_artists_in_genre: Vec::new(),
                 album_hit_tracks_in_genre: Vec::new(),
@@ -1599,6 +1817,9 @@ pub mod mocks {
             if self.failing.contains(&FailingQuery::ArtistAlbums) {
                 return Err(StoreError::InvalidOperation("albums boom".to_string()));
             }
+            if let Some(albums) = self.albums_by_artist.get(artist) {
+                return Ok(albums.clone());
+            }
             Ok(self.albums.clone())
         }
 
@@ -1611,6 +1832,12 @@ pub mod mocks {
                 album_artist.to_string(),
                 album_title.to_string(),
             ));
+            if let Some(tracks) = self
+                .tracks_by_album
+                .get(&(album_artist.to_string(), album_title.to_string()))
+            {
+                return Ok(tracks.clone());
+            }
             Ok(self.album_tracks.clone())
         }
 
@@ -1835,6 +2062,19 @@ pub mod mocks {
                 .contains(&format!("{album_artist} - {album_title}")))
         }
 
+        fn artist_is_name_hit(&self, artist: &str, query: &str) -> Result<bool, StoreError> {
+            self.record(LibraryQueryCall::ArtistIsNameHit(artist.to_string()));
+            if self.failing.contains(&FailingQuery::ArtistIsNameHit) {
+                return Err(StoreError::InvalidOperation(
+                    "artist name hit boom".to_string(),
+                ));
+            }
+            if !self.search_matches(query) {
+                return Ok(false);
+            }
+            Ok(self.artist_name_hits.contains(&artist.to_string()))
+        }
+
         fn hit_albums_in_genre(
             &self,
             genre: &str,
@@ -2041,6 +2281,308 @@ pub mod mocks {
         }
     }
 
+    /// [`LibraryQueryStore`] view over one shared [`MockLibraryQueryStore`]
+    /// behind a mutex: the seam under test takes ownership of the port, so the
+    /// test keeps the other handle for assertions and for post-wire
+    /// configuration changes (failure flags, mutated canned data).
+    ///
+    /// Every suite wiring a query-backed seam needs this pair: the
+    /// `SessionViews` app seam and the whole-`RiffApp` shell both own their
+    /// query port, so a test cannot reach the mock it handed over. Cloning
+    /// this is the other half — the boxed clone answers through the same mock,
+    /// and the test keeps the `Arc` it was built from.
+    pub struct SharedQueryStore(pub Arc<Mutex<MockLibraryQueryStore>>);
+
+    impl LibraryQueryStore for SharedQueryStore {
+        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
+            self.0.lock().unwrap().get_track(id)
+        }
+
+        fn metadata_version(&self) -> Result<u32, StoreError> {
+            Ok(riff_persistence::track::METADATA_VERSION)
+        }
+
+        fn tracks_page(
+            &self,
+            order: riff_persistence::store::TrackListOrder,
+            offset: usize,
+            limit: usize,
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            self.0.lock().unwrap().tracks_page(order, offset, limit)
+        }
+
+        fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
+            self.0.lock().unwrap().library_counts()
+        }
+
+        fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
+            self.0.lock().unwrap().all_track_ids()
+        }
+
+        fn search_page(
+            &self,
+            query: &str,
+            order: riff_persistence::store::TrackListOrder,
+            offset: usize,
+            limit: usize,
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .search_page(query, order, offset, limit)
+        }
+
+        fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
+            self.0.lock().unwrap().all_artists()
+        }
+
+        fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, StoreError> {
+            self.0.lock().unwrap().artist_albums(artist)
+        }
+
+        fn album_tracks(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .album_tracks(album_artist, album_title)
+        }
+
+        fn folder_has_audio(&self, folder: &std::path::Path) -> Result<bool, StoreError> {
+            self.0.lock().unwrap().folder_has_audio(folder)
+        }
+
+        fn folder_has_search_match(
+            &self,
+            folder: &std::path::Path,
+            query: &str,
+        ) -> Result<bool, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .folder_has_search_match(folder, query)
+        }
+
+        fn track_ids_in_folder_tree(
+            &self,
+            folder: &std::path::Path,
+        ) -> Result<Vec<TrackId>, StoreError> {
+            self.0.lock().unwrap().track_ids_in_folder_tree(folder)
+        }
+
+        fn tracks_in_folder(&self, folder: &std::path::Path) -> Result<Vec<Track>, StoreError> {
+            self.0.lock().unwrap().tracks_in_folder(folder)
+        }
+
+        fn folder_track_count(&self, folder: &std::path::Path) -> Result<usize, StoreError> {
+            self.0.lock().unwrap().folder_track_count(folder)
+        }
+
+        fn last_full_scan(
+            &self,
+        ) -> Result<Option<riff_backend::app::store::FullScanSummary>, StoreError> {
+            self.0.lock().unwrap().last_full_scan()
+        }
+
+        fn subdirs_with_audio(&self, folder: &std::path::Path) -> Result<Vec<PathBuf>, StoreError> {
+            self.0.lock().unwrap().subdirs_with_audio(folder)
+        }
+
+        fn smart_playlist(
+            &self,
+            kind: SmartPlaylistKind,
+            limit: usize,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.0.lock().unwrap().smart_playlist(kind, limit)
+        }
+
+        fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
+            self.0.lock().unwrap().smart_list_counts()
+        }
+
+        fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
+            self.0.lock().unwrap().genre_counts()
+        }
+
+        fn artists_in_genre(&self, genre: &str) -> Result<Vec<Artist>, StoreError> {
+            self.0.lock().unwrap().artists_in_genre(genre)
+        }
+
+        fn artist_albums_in_genre(
+            &self,
+            artist: &str,
+            genre: &str,
+        ) -> Result<Vec<Album>, StoreError> {
+            self.0.lock().unwrap().artist_albums_in_genre(artist, genre)
+        }
+
+        fn album_tracks_in_genre(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+            genre: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .album_tracks_in_genre(album_artist, album_title, genre)
+        }
+
+        fn hit_albums_page(
+            &self,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            self.0.lock().unwrap().hit_albums_page(query, offset, limit)
+        }
+
+        fn hit_artists_page(
+            &self,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .hit_artists_page(query, offset, limit)
+        }
+
+        fn album_hit_tracks(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+            query: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .album_hit_tracks(album_artist, album_title, query)
+        }
+
+        fn album_is_name_hit(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+            query: &str,
+        ) -> Result<bool, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .album_is_name_hit(album_artist, album_title, query)
+        }
+
+        fn artist_is_name_hit(&self, artist: &str, query: &str) -> Result<bool, StoreError> {
+            self.0.lock().unwrap().artist_is_name_hit(artist, query)
+        }
+
+        fn hit_albums_in_genre(
+            &self,
+            genre: &str,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Album>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .hit_albums_in_genre(genre, query, offset, limit)
+        }
+
+        fn hit_artists_in_genre(
+            &self,
+            genre: &str,
+            query: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<Artist>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .hit_artists_in_genre(genre, query, offset, limit)
+        }
+
+        fn album_hit_tracks_in_genre(
+            &self,
+            album_artist: &str,
+            album_title: &str,
+            genre: &str,
+            query: &str,
+        ) -> Result<Vec<Track>, StoreError> {
+            self.0.lock().unwrap().album_hit_tracks_in_genre(
+                album_artist,
+                album_title,
+                genre,
+                query,
+            )
+        }
+
+        fn hit_genre_counts(&self, query: &str) -> Result<Vec<GenreCount>, StoreError> {
+            self.0.lock().unwrap().hit_genre_counts(query)
+        }
+
+        fn artists_page(
+            &self,
+            direction: SortDirection,
+            offset: usize,
+            limit: usize,
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .artists_page(direction, offset, limit)
+        }
+
+        fn albums_page(
+            &self,
+            direction: SortDirection,
+            offset: usize,
+            limit: usize,
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            self.0.lock().unwrap().albums_page(direction, offset, limit)
+        }
+
+        fn genres_page(
+            &self,
+            direction: SortDirection,
+            offset: usize,
+            limit: usize,
+        ) -> Result<riff_persistence::store::Page<GenreCount>, StoreError> {
+            self.0.lock().unwrap().genres_page(direction, offset, limit)
+        }
+
+        fn artists_in_genre_page(
+            &self,
+            genre: &str,
+            direction: SortDirection,
+            offset: usize,
+            limit: usize,
+        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .artists_in_genre_page(genre, direction, offset, limit)
+        }
+
+        fn artist_albums_in_genre_page(
+            &self,
+            artist: &str,
+            genre: &str,
+            direction: SortDirection,
+            offset: usize,
+            limit: usize,
+        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .artist_albums_in_genre_page(artist, genre, direction, offset, limit)
+        }
+    }
+
     /// Scripted [`Scans`] front end for UI tests that drive `RiffApp`: the
     /// test queues the outcomes the app will poll, and the mock records the
     /// paths the app asked for. `request`/`cancel` stay fire-and-forget;
@@ -2077,16 +2619,51 @@ pub mod mocks {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// No-op [`TagEdits`] for UI tests that exercise `RiffApp` but never submit
-    /// a tag edit. `submit` discards; `poll` always returns `None`.
-    #[derive(Default)]
-    pub struct MockTagEdits;
+    /// Recording [`TagEdits`] fake: captures every submitted request and
+    /// yields scripted outcomes from `poll` in order. `Clone` is a second
+    /// inspection handle over the same shared state, so the controller can
+    /// own one while the test inspects the other.
+    #[derive(Clone)]
+    pub struct FakeTagEdits {
+        submitted: Arc<Mutex<Vec<TagEditRequest>>>,
+        outcomes: Arc<Mutex<std::collections::VecDeque<TagEditOutcome>>>,
+    }
 
-    /// No-op [`Passes`](riff_backend::app::pass_service::Passes) for UI tests
-    /// that exercise menus but never submit a pass. `submit` discards; every
-    /// poll answers idle.
-    #[derive(Default)]
-    pub struct MockPasses;
+    impl FakeTagEdits {
+        pub fn new() -> Self {
+            Self {
+                submitted: Arc::new(Mutex::new(Vec::new())),
+                outcomes: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            }
+        }
+
+        /// A fake that yields `outcomes` from `poll` in order.
+        pub fn with_outcomes(outcomes: Vec<TagEditOutcome>) -> Self {
+            let fake = Self::new();
+            *fake.outcomes.lock().unwrap() = outcomes.into();
+            fake
+        }
+
+        pub fn requests(&self) -> Vec<TagEditRequest> {
+            self.submitted.lock().unwrap().clone()
+        }
+    }
+
+    impl Default for FakeTagEdits {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl TagEdits for FakeTagEdits {
+        fn submit(&self, request: TagEditRequest) {
+            self.submitted.lock().unwrap().push(request);
+        }
+
+        fn poll(&self) -> Option<TagEditOutcome> {
+            self.outcomes.lock().unwrap().pop_front()
+        }
+    }
 
     /// A [`Passes`](riff_backend::app::pass_service::Passes) that records every
     /// submission, so a menu test can assert exactly which pass command its
@@ -2112,10 +2689,70 @@ pub mod mocks {
         }
     }
 
-    /// No-op [`Covers`] for UI tests that exercise `RiffApp` but never request
-    /// a cover. `request` discards; `poll` always returns an empty Vec.
-    #[derive(Default)]
-    pub struct MockCovers;
+    /// Recording [`Covers`] fake: captures request intent, serves nothing.
+    /// Records cache-clear requests too, and can be handed a scripted clear
+    /// outcome, so the in-progress → settled transition is driven without a thread.
+    pub struct RecordingCovers {
+        requested: Mutex<Vec<(TrackId, PathBuf, RequestedSize)>>,
+        clears: AtomicUsize,
+        clear_outcomes: Mutex<VecDeque<ClearCacheOutcome>>,
+    }
+
+    impl RecordingCovers {
+        pub fn new() -> Self {
+            Self {
+                requested: Mutex::new(Vec::new()),
+                clears: AtomicUsize::new(0),
+                clear_outcomes: Mutex::new(VecDeque::new()),
+            }
+        }
+
+        pub fn requested(&self) -> Vec<(TrackId, PathBuf, RequestedSize)> {
+            self.requested.lock().unwrap().clone()
+        }
+
+        pub fn clear_calls(&self) -> usize {
+            self.clears.load(Ordering::SeqCst)
+        }
+
+        /// Queue one settled outcome for the next `poll_cache_clear`.
+        pub fn serve_clear(&self, outcome: ClearCacheOutcome) {
+            self.clear_outcomes.lock().unwrap().push_back(outcome);
+        }
+    }
+
+    impl Default for RecordingCovers {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Covers for RecordingCovers {
+        fn request(&self, track_id: TrackId, path: PathBuf, size: RequestedSize) {
+            self.requested.lock().unwrap().push((track_id, path, size));
+        }
+
+        /// A folder request lands in the same recording: its identity is its
+        /// directory path, so the entries are told apart by what a caller puts
+        /// in the slot, not by which method arrived.
+        fn request_folder(&self, folder: &std::path::Path, size: RequestedSize) {
+            let folder = folder.to_path_buf();
+            let id = TrackId::from_path(&folder);
+            self.requested.lock().unwrap().push((id, folder, size));
+        }
+
+        fn poll(&self) -> Vec<(TrackId, RequestedSize, Option<DecodedCover>)> {
+            Vec::new()
+        }
+
+        fn clear_cache(&self) {
+            self.clears.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn poll_cache_clear(&self) -> Option<ClearCacheOutcome> {
+            self.clear_outcomes.lock().unwrap().pop_front()
+        }
+    }
 
     /// [`Covers`] fake that answers every request with deterministic RGBA
     /// pixels, so a composed golden can show a real cover through the real
@@ -2193,58 +2830,6 @@ impl riff_library::app::scan_service::Scans for crate::mocks::MockScans {
 
     fn is_scanning(&self, _path: &std::path::Path) -> bool {
         false
-    }
-}
-
-impl riff_backend::app::pass_service::Passes for crate::mocks::MockPasses {
-    fn submit(&self, _command: riff_backend::app::replaygain_pass::PassCommand) {}
-    fn cancel(&self) {}
-    fn is_running(&self) -> bool {
-        false
-    }
-    fn poll(&self) -> Option<riff_backend::app::replaygain_pass::PassReport> {
-        None
-    }
-    fn poll_progress(&self) -> (usize, usize) {
-        (0, 0)
-    }
-}
-
-impl riff_backend::app::tag_edit_service::TagEdits for crate::mocks::MockTagEdits {
-    fn submit(&self, _request: riff_backend::app::tag_edit_service::TagEditRequest) {}
-    fn poll(&self) -> Option<riff_backend::app::tag_edit_service::TagEditOutcome> {
-        None
-    }
-}
-
-impl riff_library::app::cover_service::Covers for crate::mocks::MockCovers {
-    fn request(
-        &self,
-        _track_id: riff_backend::domain::TrackId,
-        _path: std::path::PathBuf,
-        _size: riff_library::app::traits::RequestedSize,
-    ) {
-    }
-    fn request_folder(
-        &self,
-        _folder: &std::path::Path,
-        _size: riff_library::app::traits::RequestedSize,
-    ) {
-    }
-    fn poll(
-        &self,
-    ) -> Vec<(
-        riff_backend::domain::TrackId,
-        riff_library::app::traits::RequestedSize,
-        Option<riff_library::app::traits::DecodedCover>,
-    )> {
-        Vec::new()
-    }
-
-    fn clear_cache(&self) {}
-
-    fn poll_cache_clear(&self) -> Option<riff_library::app::cover_service::ClearCacheOutcome> {
-        None
     }
 }
 

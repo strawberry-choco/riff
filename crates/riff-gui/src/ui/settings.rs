@@ -1,6 +1,7 @@
 use crate::ui::button::{self as button, TextButton, Variant};
 use crate::ui::icons::{Icon, IconCache};
 use crate::ui::now_playing::styled_font;
+use crate::ui::prompts::{self as prompts, PromptOutcome};
 use crate::ui::theme::geometry::settings::WATCH_BOX;
 use crate::ui::theme::geometry::settings::{
     ACTION_BTN_H, ACTIONS_ROW_GAP, ACTIONS_ROW_H, CARD_BORDER_W, CHIP_GAP, CHIP_H, CHIP_LABEL_PAD,
@@ -1797,7 +1798,7 @@ fn library_footer(
         palette,
         reduce_motion,
         &painter,
-        crate::ui::prompts::CLEAR_THUMBNAIL_CACHE_LABEL,
+        prompts::CLEAR_THUMBNAIL_CACHE_LABEL,
         library_left,
         cy,
         egui::Id::new("settings_clear_thumbnail_cache"),
@@ -3104,28 +3105,53 @@ impl super::app::RiffApp {
         }
     }
 
+    /// Ask one wipe for consent through the Settings pane's shared destructive
+    /// surface, and report what the listener did.
+    ///
+    /// The surface is one thing and it is not a wipe's to describe: the
+    /// palette it paints from, the icon cache its affirmative button draws
+    /// through, the temporal policy, and the pure widget seam in
+    /// [`crate::ui::prompts`] (golden-image gap audit P1-7) that composes them.
+    /// Everything that makes one wipe different from the next stays at the call
+    /// site, because each is that wipe's own fact: the consequence copy, which
+    /// is what the clear costs, and the widget id, which is what keeps this
+    /// confirmation's affirmative action distinct from the other's one gap
+    /// below in the same pane. So a third wipe names those two and inherits
+    /// the surface — it cannot render a different one by spelling its own
+    /// plumbing, and it cannot forget to render one at all.
+    ///
+    /// The outcome is reported untouched: [`PromptOutcome::Confirm`] when the
+    /// listener committed, [`PromptOutcome::Cancel`] when they dismissed, and
+    /// `None` while the prompt is still open. Which of the app's flags each of
+    /// those clears is the caller's too, because that flag is the site's own
+    /// fact — this is the render, not the decision.
+    fn destructive_confirm_outcome(
+        &mut self,
+        ui: &mut egui::Ui,
+        reduce_motion: bool,
+        copy: &str,
+        id: egui::Id,
+    ) -> Option<PromptOutcome> {
+        let palette = self.theme.active;
+        prompts::destructive_confirm(ui, &mut self.icons, &palette, reduce_motion, copy, id)
+    }
+
     /// The inline confirmation for the destructive Clear Library action,
     /// rendered beneath the stage until confirmed or cancelled.
+    ///
+    /// What is left here is the Clear Library decision and nothing else: the
+    /// copy and the widget id that make this confirmation this action's, and
+    /// the wipe. The composition the prompt renders through is
+    /// [`Self::destructive_confirm_outcome`] — the same pixels the golden pins,
+    /// shared with Clear Thumbnail cache rather than spelled twice.
     fn render_clear_library_confirm(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
-        // The composition is the pure widget seam in [`crate::ui::prompts`]
-        // (golden-image gap audit P1-7): the same pixels the golden pins.
-        //
-        // The confirmation's own copy and its own widget id are this call
-        // site's, because both belong to the action being confirmed: the copy
-        // is what Clear Library costs, and the id is what keeps this
-        // confirmation's affirmative action distinct from Clear Thumbnail
-        // cache's, one gap below in the same footer.
-        let palette = self.theme.active;
-        let outcome = crate::ui::prompts::destructive_confirm(
+        match self.destructive_confirm_outcome(
             ui,
-            &mut self.icons,
-            &palette,
             library.ui_flags.reduce_motion,
-            crate::ui::prompts::CLEAR_LIBRARY_CONFIRM_COPY,
+            prompts::CLEAR_LIBRARY_CONFIRM_COPY,
             egui::Id::new("clear_library_confirm_action"),
-        );
-        match outcome {
-            Some(crate::ui::prompts::PromptOutcome::Confirm) => {
+        ) {
+            Some(PromptOutcome::Confirm) => {
                 self.clear_library_confirm = false;
                 match self.library_mutations.clear_library() {
                     Ok(removed) => {
@@ -3154,34 +3180,40 @@ impl super::app::RiffApp {
                     }
                 }
             }
-            Some(crate::ui::prompts::PromptOutcome::Cancel) => {
+            Some(PromptOutcome::Cancel) => {
                 self.clear_library_confirm = false;
             }
             None => {}
         }
     }
 
-    /// The inline confirmation for the destructive Clear Thumbnail cache action,
-    /// shaped like [`Self::render_clear_library_confirm`]. What differs is what
-    /// Confirm does: the deletion is handed to the cover worker rather than run on
-    /// this thread, because `remove_dir_all` over a few hundred thousand entries
-    /// takes seconds and a frame may not wait for it.
-    fn render_clear_thumbnail_cache_confirm(&mut self, ui: &mut egui::Ui, reduce_motion: bool) {
-        let palette = self.theme.active;
-        let outcome = crate::ui::prompts::destructive_confirm(
+    /// The inline confirmation for the destructive Clear Thumbnail cache
+    /// action, shaped like [`Self::render_clear_library_confirm`] over the same
+    /// [`Self::destructive_confirm_outcome`] surface. What differs is what
+    /// Confirm does: the deletion is handed to the cover worker rather than run
+    /// on this thread, because `remove_dir_all` over a few hundred thousand
+    /// entries takes seconds and a frame may not wait for it.
+    ///
+    /// It takes the library session rather than one flag off it — the same
+    /// shape as its sibling — and reads the temporal policy from it, so the
+    /// two confirmations resolve that policy from one place instead of one of
+    /// them being handed the bool.
+    fn render_clear_thumbnail_cache_confirm(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+    ) {
+        match self.destructive_confirm_outcome(
             ui,
-            &mut self.icons,
-            &palette,
-            reduce_motion,
-            crate::ui::prompts::CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY,
+            library.ui_flags.reduce_motion,
+            prompts::CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY,
             egui::Id::new("clear_thumbnail_cache_confirm_action"),
-        );
-        match outcome {
-            Some(crate::ui::prompts::PromptOutcome::Confirm) => {
+        ) {
+            Some(PromptOutcome::Confirm) => {
                 self.clear_thumbnail_cache_confirm = false;
                 self.request_thumbnail_cache_clear();
             }
-            Some(crate::ui::prompts::PromptOutcome::Cancel) => {
+            Some(PromptOutcome::Cancel) => {
                 self.clear_thumbnail_cache_confirm = false;
             }
             None => {}
@@ -3255,7 +3287,7 @@ impl super::app::RiffApp {
             self.render_clear_library_confirm(ui, library);
         }
         if self.clear_thumbnail_cache_confirm {
-            self.render_clear_thumbnail_cache_confirm(ui, library.ui_flags.reduce_motion);
+            self.render_clear_thumbnail_cache_confirm(ui, library);
         }
     }
 }

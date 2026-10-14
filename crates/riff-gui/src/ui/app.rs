@@ -1251,17 +1251,21 @@ impl RiffApp {
         self.frame(playback, library).apply_titlebar(out, &report);
     }
 
-    /// Draw the left 280px column and report what the user did on it.
+    /// Draw the left column: the shell's panel geometry, and nothing else.
     ///
-    /// The library browser (search, Library/Folders nav, playlists). Shared
-    /// chrome per the mockup — present on every view; only the main stage
-    /// switches. The restyled content (issue 07) keeps a 12px inset from the
-    /// panel edge, and the panel carries the surface token itself rather than
-    /// inheriting a default.
+    /// This method is the frame's third slot by name, and its whole body is
+    /// the panel that slot is drawn in — the exact width, the non-resizable
+    /// flag, the surface fill, and the inset. That is the seam, not a
+    /// forwarder to hide: the four panels each have their geometry where their
+    /// content boundary is, and for this one the boundary is
+    /// [`Self::render_library_sidebar`].
     ///
-    /// The panel mutates NOTHING: every nav click, every smart-list row, every
-    /// playlist row and every prompt resolution is a [`SidebarAction`], and
-    /// [`Frame::apply_sidebar`] is the only writer of the library session.
+    /// `render_library_sidebar` does not report back the way the other three
+    /// slots do — it answers each of its own sub-section reports through
+    /// [`Frame::apply_sidebar`] as it paints, because each sub-section reads
+    /// what the one above it decided (see its doc). So there is no report to
+    /// carry and no `apply_sidebar` call here: this slot's frame-ordering is
+    /// entirely in `ui()`, where `draw_sidebar` sits third.
     fn draw_sidebar(
         &mut self,
         ui: &mut egui::Ui,

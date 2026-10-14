@@ -5,11 +5,13 @@ use crate::ui::prompts::{self as prompts, PromptOutcome};
 use crate::ui::theme::geometry::settings::WATCH_BOX;
 use crate::ui::theme::geometry::settings::{
     ACTION_BTN_H, ACTIONS_ROW_GAP, ACTIONS_ROW_H, CARD_BORDER_W, CHIP_GAP, CHIP_H, CHIP_LABEL_PAD,
-    CHIP_ROW_NO_WRAP_W, COLUMN_GAP, DOT_SIZE, FOOTER_ACTION_GAP, FOOTER_H, HEADER_GAP,
-    LIBRARY_ROW_H, LIBRARY_ROW_STACK_W, LIBRARY_ROW_TEXT_GAP, MIN_TWO_COL_W, NAV_GAP,
-    NAV_HAIRLINE_W, NAV_ITEM_H, NAV_TOP_INSET, NAV_W, PAGE_HEADER_H, PAGE_PAD, PANE_PAD,
-    PREF_ROW_H, PREF_ROW_PAD, PREF_ROW_TEXT_GAP, PREF_ROW_TEXT_INSET, READINESS_GAP, ROW_BTN_PAD,
-    SCAN_CARD_H, SCAN_CARD_PAD, SECTION_GAP, SMALL_BTN_H, SMALL_BTN_LABEL_PAD, TRASH_BTN,
+    CHIP_ROW_NO_WRAP_W, COLUMN_GAP, DONE_BTN_LABEL_PAD, DOT_SIZE, FOOTER_ACTION_GAP,
+    FOOTER_EDGE_GAP, FOOTER_H, HEADER_GAP, LIBRARY_ROW_H, LIBRARY_ROW_STACK_W,
+    LIBRARY_ROW_STRIP_GAP, LIBRARY_ROW_TEXT_GAP, MIN_TWO_COL_W, NAV_GAP, NAV_HAIRLINE_W,
+    NAV_ITEM_H, NAV_TOP_INSET, NAV_W, PAGE_HEADER_H, PAGE_PAD, PANE_PAD, PASS_BTN_W, PASS_CANCEL_W,
+    PASS_ROW_TEXT_GAP, PASS_ROW_TEXT_INSET, PREF_ROW_H, PREF_ROW_PAD, PREF_ROW_TEXT_GAP,
+    PREF_ROW_TEXT_INSET, READINESS_GAP, ROW_BTN_PAD, SCAN_CARD_H, SCAN_CARD_PAD, SECTION_GAP,
+    SMALL_BTN_H, SMALL_BTN_LABEL_PAD, TRASH_BTN,
 };
 use crate::ui::theme::{self, Palette};
 use eframe::egui;
@@ -1130,8 +1132,9 @@ fn library_row_controls(
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
         strip_ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-        // 16px right padding (the original `rect.right() - 16.0`).
-        strip_ui.add_space(16.0);
+        // The strip's own right inset — the one value that makes the chain
+        // read as evenly spaced, since it is also the gap after each control.
+        strip_ui.add_space(LIBRARY_ROW_STRIP_GAP);
 
         // --- Trash (rightmost) ---
         let (trash_rect, mut trash_response) =
@@ -1157,7 +1160,7 @@ fn library_row_controls(
         if trash_response.clicked() {
             actions.push(SettingsAction::Remove(row.path.clone()));
         }
-        strip_ui.add_space(16.0);
+        strip_ui.add_space(LIBRARY_ROW_STRIP_GAP);
 
         // --- Watch (label + checkbox) ---
         watch_control(
@@ -1168,7 +1171,7 @@ fn library_row_controls(
             watch_label,
             actions,
         );
-        strip_ui.add_space(16.0);
+        strip_ui.add_space(LIBRARY_ROW_STRIP_GAP);
 
         // --- Scan (leftmost in the strip) ---
         let scan_font = styled_font(&strip_ui, egui::TextStyle::Button, theme::TEXT_XS);
@@ -1767,9 +1770,12 @@ fn library_footer(
         .layout_no_wrap(DONE_LABEL.to_owned(), done_font, palette.on_brand)
         .size()
         .x
-        + 32.0;
+        + DONE_BTN_LABEL_PAD;
     let done_rect = egui::Rect::from_min_size(
-        egui::pos2(rect.right() - done_w - 4.0, cy - ACTION_BTN_H / 2.0),
+        egui::pos2(
+            rect.right() - done_w - FOOTER_EDGE_GAP,
+            cy - ACTION_BTN_H / 2.0,
+        ),
         egui::vec2(done_w, ACTION_BTN_H),
     );
 
@@ -2852,12 +2858,15 @@ fn replaygain_pass_check_row(
     let text_left = box_rect.right() + PREF_ROW_TEXT_GAP;
     let painter = ui.painter_at(rect);
     painter.galley(
-        egui::pos2(text_left, rect.top() + 4.0),
+        egui::pos2(text_left, rect.top() + PASS_ROW_TEXT_INSET),
         painter.layout_no_wrap(label.to_owned(), check_font.clone(), palette.ink),
         palette.ink,
     );
     painter.galley(
-        egui::pos2(text_left, rect.top() + 4.0 + check_font.size + 2.0),
+        egui::pos2(
+            text_left,
+            rect.top() + PASS_ROW_TEXT_INSET + check_font.size + PASS_ROW_TEXT_GAP,
+        ),
         painter.layout_no_wrap(desc.to_owned(), desc_font, palette.ink_3),
         palette.ink_3,
     );
@@ -2889,7 +2898,7 @@ fn replaygain_pass_action_row(
         egui::vec2(ui.available_width(), SMALL_BTN_H),
         egui::Sense::hover(),
     );
-    let button_w = 128.0;
+    let button_w = PASS_BTN_W;
     let button_rect = egui::Rect::from_min_size(
         egui::pos2(rect.right() - PREF_ROW_PAD - button_w, rect.top()),
         egui::vec2(button_w, SMALL_BTN_H),
@@ -2946,7 +2955,7 @@ fn replaygain_pass_action_row(
         // runs: it asks, never forces — the pass stops at its next
         // measurement boundary and keeps what it committed.
         if running {
-            let cancel_w = 60.0;
+            let cancel_w = PASS_CANCEL_W;
             let cancel_rect = egui::Rect::from_min_size(
                 egui::pos2(
                     button_rect.left() - 8.0 - cancel_w,

@@ -557,6 +557,13 @@ pub fn hover_duration(reduce_motion: bool) -> f32 {
 pub const TITLEBAR_H: f32 = 56.0;
 /// `--riff-sidebar-w` — 280 px sidebar.
 pub const SIDEBAR_W: f32 = 280.0;
+/// Inset from the sidebar panel's edge to its content, on all four sides.
+/// Previously a bare `12` at the panel's `inner_margin`; value unchanged.
+///
+/// An `i8` rather than the `f32` every other geometry token carries, because
+/// `egui::Margin::same` takes one — this token exists only to feed that call,
+/// so it carries the API's own type rather than being cast on the way in.
+pub const SIDEBAR_PANEL_PAD: i8 = 12;
 
 /// Preferred width of an entity list column in the elastic column stage
 /// (the elastic-column spec): every non-last list column keeps this width
@@ -1032,6 +1039,17 @@ pub mod geometry {
         /// description wraps onto more than one line. New with the narrow-width
         /// reflow; the single-line form does not read it.
         pub const PREF_ROW_TEXT_GAP: f32 = 4.0;
+        /// Vertical inset from the `ReplayGain` pass card's checkbox row to its
+        /// label. The row is the compact half-height form — `PREF_ROW_H / 2` —
+        /// so it carries its own tighter inset rather than preference row's
+        /// [`PREF_ROW_TEXT_INSET`]. Previously a bare `4.0`.
+        pub const PASS_ROW_TEXT_INSET: f32 = 4.0;
+        /// Gap between the `ReplayGain` pass card's checkbox-row label and the
+        /// description under it. Deliberately tighter than
+        /// [`PREF_ROW_TEXT_GAP`]: the compact row runs its two lines closer so
+        /// the label + description pair stays inside the half-height band.
+        /// Previously a bare `2.0`.
+        pub const PASS_ROW_TEXT_GAP: f32 = 2.0;
         /// Status-dot diameter (`w-2 h-2`): 8px.
         pub const DOT_SIZE: f32 = 8.0;
         /// Gap inside a readiness pair, between the dot and its label, and
@@ -1041,6 +1059,13 @@ pub mod geometry {
         /// Gap between a library row's path and the track count beside it.
         /// Previously a bare `12.0`; value unchanged.
         pub const LIBRARY_ROW_TEXT_GAP: f32 = 12.0;
+        /// The library row's right-hand control strip's own 16px rhythm: the
+        /// strip's inset from the row's right edge, and the gap after each
+        /// control in it (trash, then watch, then scan). One value because they
+        /// are one rhythm — the strip reads as evenly spaced only when its edge
+        /// inset and its inter-control gaps are the same step. Previously three
+        /// bare `16.0` literals; value unchanged.
+        pub const LIBRARY_ROW_STRIP_GAP: f32 = 16.0;
         /// Secondary-button height (`px-3 py-1.5` at `text-xs`).
         pub const SMALL_BTN_H: f32 = 27.0;
         /// Primary/secondary action-button height (`px-4 py-2` at `text-sm`).
@@ -1096,6 +1121,27 @@ pub mod geometry {
         /// Gap between the page footer's two right-hand actions. New with the
         /// destructive ghost joining Done in the footer.
         pub const FOOTER_ACTION_GAP: f32 = 12.0;
+        /// Width of the `ReplayGain` pass card's primary action — its
+        /// "Measure Library" / "Measuring…" control. Fixed rather than measured
+        /// off the label because the label itself changes with the pass state,
+        /// and a button that resized as it started would move the progress line
+        /// beside it. Previously a bare `128.0`.
+        pub const PASS_BTN_W: f32 = 128.0;
+        /// Width of the `ReplayGain` pass card's Cancel control, the ghost that
+        /// sits between the progress line and the primary action while a pass
+        /// runs. Fixed for the same reason as [`PASS_BTN_W`]. Previously a bare
+        /// `60.0`.
+        pub const PASS_CANCEL_W: f32 = 60.0;
+        /// Horizontal padding inside the page footer's primary Done action,
+        /// around its label. Wider than a small button's
+        /// [`SMALL_BTN_LABEL_PAD`] because Done is the primary action at
+        /// [`ACTION_BTN_H`]. Previously a bare `32.0`, summed into the measured
+        /// Done width.
+        pub const DONE_BTN_LABEL_PAD: f32 = 32.0;
+        /// How far the page footer's primary Done action sits from the pane's
+        /// right edge. Distinct from [`FOOTER_ACTION_GAP`], which separates the
+        /// footer's actions from each other. Previously a bare `4.0`.
+        pub const FOOTER_EDGE_GAP: f32 = 4.0;
         /// Height of the page footer's action row. Revalued 48 -> 36 for the
         /// full-stage footer, which carries the destructive Clear Library
         /// ghost beside Done at `ACTION_BTN_H` and so needs less band than

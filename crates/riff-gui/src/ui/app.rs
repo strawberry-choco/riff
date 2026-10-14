@@ -1109,18 +1109,9 @@ impl RiffApp {
     /// is visible (eframe 0.35 keeps calling `ui` for a hidden window). Linux
     /// has no hidden state, so it keeps the unconditional tick.
     fn enact_frame_tail(&mut self, ctx: &egui::Context, out: &mut FrameOutput) {
-        for command in out.viewport.drain(..) {
-            let command = match command {
-                FrameViewport::Minimize => {
-                    crate::ui::chrome::WindowControl::Minimize.viewport_command()
-                }
-                FrameViewport::Maximized(value) => egui::ViewportCommand::Maximized(value),
-                FrameViewport::Close => egui::ViewportCommand::Close,
-                FrameViewport::CancelClose => egui::ViewportCommand::CancelClose,
-                FrameViewport::Title(title) => egui::ViewportCommand::Title(title),
-            };
-            ctx.send_viewport_cmd(command);
-        }
+        // The Frame's decisions-only vocabulary becomes egui's here, through
+        // the one conversion that is allowed to name `ViewportCommand`.
+        Self::enact_viewports(ctx, &out.viewport);
         if out.pick_folder {
             // The platform folder picker: an OS dialog, performed here because
             // it is not a decision. Nothing left in this frame reads the
@@ -1159,6 +1150,35 @@ impl RiffApp {
         }
         #[cfg(target_os = "linux")]
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+
+    /// Send this frame's OS-level intents, in the order the Frame decided them.
+    ///
+    /// The ONE place `ui::frame`'s vocabulary becomes egui's.
+    /// [`FrameOutput`] deliberately names no egui type — that discipline is
+    /// what keeps the whole frame protocol assertable with no `Context` and no
+    /// window — so the conversion has to live somewhere, and it lives here
+    /// rather than in each of the intents' producers: the tray Quit's close and
+    /// the titlebar's minimize have nothing to say to each other, and they
+    /// should not be the reason a second arm appears in some other method.
+    ///
+    /// Each intent is sent as it is translated, so the enqueue order is the
+    /// order the Frame pushed them in. Two intents of the same kind do not
+    /// coalesce — a `Title` pushed twice is sent twice — which is what keeps
+    /// this from inventing a policy the Frame never had.
+    fn enact_viewports(ctx: &egui::Context, intents: &[FrameViewport]) {
+        for intent in intents.iter().cloned() {
+            let command = match intent {
+                FrameViewport::Minimize => {
+                    crate::ui::chrome::WindowControl::Minimize.viewport_command()
+                }
+                FrameViewport::Maximized(value) => egui::ViewportCommand::Maximized(value),
+                FrameViewport::Close => egui::ViewportCommand::Close,
+                FrameViewport::CancelClose => egui::ViewportCommand::CancelClose,
+                FrameViewport::Title(title) => egui::ViewportCommand::Title(title),
+            };
+            ctx.send_viewport_cmd(command);
+        }
     }
 
     /// Draw the top 56px strip and report what the user did on it.
@@ -2490,27 +2510,11 @@ impl RiffApp {
             cover = Some(self.track_cover(ui.ctx(), &id, &file_path, COVER_THUMB));
         }
 
-        // The `{index}/{len}` queue-position label, formatted fresh each
-        // frame from the live queue shape.
-        let queue_position = format!(
-            "{}/{}",
-            playback.queue.current_index.map_or(0, |i| i + 1),
-            playback.queue.tracks.len()
-        );
-        // The current track's display lines, resolved once per frame here —
-        // the bar renders before every stage — and returned for the Now
-        // Playing stage so the two surfaces never build the strings twice.
-        let (title, meta_line) = match self.views.playback_current() {
-            Some(track) => (
-                Some(Arc::from(track.metadata.display_title(&track.file_path))),
-                Some(Arc::from(format!(
-                    "{} - {}",
-                    track.metadata.display_artist(),
-                    track.metadata.display_album()
-                ))),
-            ),
-            None => (None, None),
-        };
+        // The `{index}/{len}` queue-position label and the current track's
+        // display lines: the bar's only per-frame formatting, resolved through
+        // the same two methods the bar's surfaces would otherwise each build.
+        let queue_position = queue_position_label(playback);
+        let (title, meta_line) = self.current_track_labels();
         self.playerbar_readouts.sync(
             playback.current_position.current,
             playback.current_position.total,
@@ -2570,6 +2574,42 @@ impl RiffApp {
             actions: std::mem::take(&mut self.playerbar_actions),
         }
     }
+
+    /// The current track's display lines: the title, and the
+    /// `Artist - Album` meta line under it.
+    ///
+    /// Both are resolved through the Session Views seam over the store's
+    /// `get_track` query — never the mirror — and returned as `Arc<str>` so the
+    /// bar and the Now Playing stage each hand the same bytes to their widget
+    /// seams without building the strings twice. `None` on both when nothing
+    /// plays, which is what keeps a stopped stage's copy honest.
+    fn current_track_labels(&self) -> NowPlayingLabels {
+        let Some(track) = self.views.playback_current() else {
+            return (None, None);
+        };
+        (
+            Some(Arc::from(track.metadata.display_title(&track.file_path))),
+            Some(Arc::from(format!(
+                "{} - {}",
+                track.metadata.display_artist(),
+                track.metadata.display_album()
+            ))),
+        )
+    }
+}
+
+/// The `{index}/{len}` queue-position label, formatted fresh each frame from
+/// the live queue shape.
+///
+/// Pure over the playback snapshot: the index is 1-based for a listener and
+/// `0/0` while the queue is empty, which is what the bar shows between tracks
+/// rather than a placeholder.
+fn queue_position_label(playback: &PlaybackSession) -> String {
+    format!(
+        "{}/{}",
+        playback.queue.current_index.map_or(0, |i| i + 1),
+        playback.queue.tracks.len()
+    )
 }
 
 // --- Helper methods factored out to avoid borrow conflicts ---

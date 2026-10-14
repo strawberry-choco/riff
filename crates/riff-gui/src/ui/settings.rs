@@ -1978,6 +1978,11 @@ impl Preference {
 /// A card of preference rows, each driven by the reusable
 /// [`super::toggle_switch::toggle_switch`]. `prefs` selects which rows the
 /// caller's section shows (one card can hold any subset).
+///
+/// This is the ONE way a Settings preference card is written: the Artwork
+/// card's single row is its one-element case, not a second card. Both produce
+/// the same widget sequence for one row — same row, same id, no separator —
+/// so the two could not drift into different geometry.
 fn preferences_card(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -1988,27 +1993,10 @@ fn preferences_card(
     settings_card(ui, palette, Some(4), |ui| {
         for (i, pref) in prefs.iter().enumerate() {
             if i > 0 {
-                row_separator(ui, palette, 16.0);
+                row_separator(ui, palette, PREF_ROW_PAD);
             }
             preference_row(ui, palette, *pref, pref.checked(content), actions);
         }
-    });
-}
-
-fn artwork_card(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    content: &SettingsContent,
-    actions: &mut Vec<SettingsAction>,
-) {
-    settings_card(ui, palette, Some(4), |ui| {
-        preference_row(
-            ui,
-            palette,
-            Preference::ReadEmbedded,
-            content.read_embedded_artwork,
-            actions,
-        );
     });
 }
 fn info_lines(ui: &mut egui::Ui, palette: &Palette) {
@@ -2067,7 +2055,7 @@ fn library_lower_sections(
     ui.add_space(SECTION_GAP);
     section_header(ui, palette, SECTION_ARTWORK);
     ui.add_space(HEADER_GAP);
-    artwork_card(ui, palette, content, actions);
+    preferences_card(ui, palette, content, actions, &[Preference::ReadEmbedded]);
 }
 fn library_pane(
     ui: &mut egui::Ui,
@@ -2145,7 +2133,13 @@ fn library_pane(
                         ui.add_space(SECTION_GAP);
                         section_header(ui, palette, SECTION_ARTWORK);
                         ui.add_space(HEADER_GAP);
-                        artwork_card(ui, palette, content, actions);
+                        preferences_card(
+                            ui,
+                            palette,
+                            content,
+                            actions,
+                            &[Preference::ReadEmbedded],
+                        );
                     },
                 );
             });
@@ -2513,7 +2507,7 @@ fn preference_row(
 
     let pill_rect = egui::Rect::from_center_size(
         egui::pos2(
-            rect.right() - 16.0 - theme::geometry::toggle::TOGGLE_W / 2.0,
+            rect.right() - PREF_ROW_PAD - theme::geometry::toggle::TOGGLE_W / 2.0,
             rect.center().y,
         ),
         egui::vec2(

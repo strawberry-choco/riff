@@ -306,23 +306,12 @@ impl RiffApp {
                 .tracks
                 .first()
                 .map(|tid| covers.thumbnail(tid, COVER_THUMB));
-            let detail = album.year.map_or_else(
-                || album.artist.clone(),
-                |y| format!("{} \u{b7} {y}", album.artist),
-            );
             let selected = matches!(
                 library.browser_path.get(column_id.level()),
                 Some(BrowserSelection::Album { artist, title })
                     if artist == &album.artist && title == &album.title
             );
-            Some(browser::BrowserItem {
-                key: format!("{}\u{1f}{}", album.artist, album.title),
-                label: album.title.clone(),
-                detail: Some(detail),
-                thumbnail,
-                selected,
-                now_playing: false,
-            })
+            Some(album_item(album, selected, thumbnail))
         };
         let column = browser::BrowserColumn {
             sort_desc: library.drill_sort_desc,
@@ -467,23 +456,12 @@ impl RiffApp {
                 .tracks
                 .first()
                 .map(|tid| covers.thumbnail(tid, COVER_THUMB));
-            let detail = album.year.map_or_else(
-                || album.artist.clone(),
-                |y| format!("{} \u{b7} {y}", album.artist),
-            );
             let selected = matches!(
                 library.browser_path.get(2),
                 Some(BrowserSelection::Album { artist, title })
                     if artist == &album.artist && title == &album.title
             );
-            Some(browser::BrowserItem {
-                key: format!("{}\u{1f}{}", album.artist, album.title),
-                label: album.title.clone(),
-                detail: Some(detail),
-                thumbnail,
-                selected,
-                now_playing: false,
-            })
+            Some(album_item(&album, selected, thumbnail))
         };
         let column = browser::BrowserColumn {
             sort_desc: library.drill_sort_desc,
@@ -881,20 +859,13 @@ impl RiffApp {
                 .first()
                 .map(|tid| covers.thumbnail(tid, COVER_THUMB).into())
                 .unwrap_or_default();
-            let detail = album.year.map_or_else(
-                || album.artist.clone(),
-                |y| format!("{} \u{b7} {y}", album.artist),
-            );
-            Some(browser::BrowserItem {
-                key: format!("{}\u{1f}{}", album.artist, album.title),
-                label: album.title.clone(),
-                detail: Some(detail),
-                thumbnail,
-                selected: selected
+            Some(album_item(
+                &album,
+                selected
                     .as_ref()
                     .is_some_and(|(a, t)| *a == album.artist && *t == album.title),
-                now_playing: false,
-            })
+                thumbnail,
+            ))
         };
         let (empty_title, empty_hint): (&str, String) = if hit {
             (
@@ -1294,6 +1265,56 @@ pub(super) fn sort_tracks<T>(rows: &mut [T], title_key: impl Fn(&T) -> String, s
         TrackSort::TitleDesc => {
             rows.sort_by_key(|row| std::cmp::Reverse(title_key(row).to_lowercase()));
         }
+    }
+}
+
+/// One album row: the store's identity key, its label, its year detail, and
+/// the caller's thumbnail and selection.
+///
+/// The key's `\u{1f}` separator is not a formatting choice. It **is** the
+/// store's album identity — `(album artist, title)` joined — and it is what
+/// [`super::entity_row`] splits to classify this row as an Album, which is why
+/// the three album listings (the Albums root, an artist's Albums drill, and a
+/// genre's Albums drill) build their rows here rather than each spelling the
+/// format itself. One construction is what keeps a row's identity and its
+/// consumer linked: the key a click selects by and the key the collection menu
+/// dispatches on are then the same bytes by construction, not by convention.
+///
+/// That is what preserves the invariant [`super::entity_row`]'s doc states —
+/// a row can never be SELECTED as one thing and PLAYED as another. Were the
+/// construction and the split to drift, an Album's right-click would offer
+/// Track actions and an Artist's would offer Album measure items, and nothing
+/// in the type system would say so.
+///
+/// `selected` and `thumbnail` stay the caller's, because they are the two
+/// facts a listing knows and an Album does not: which row the drill-down path
+/// is on, and which cover has landed for this frame. Everything else about
+/// the row is a fact about the Album, so it is derived here.
+///
+/// Pure over its arguments, which is why it is a free function rather than a
+/// method: it reads no listing state, so the three columns can share it while
+/// their `item` closures hold `&mut self.views` and the Cover Cache's two
+/// halves (the same borrow shape [`RowCovers`](super::RowCovers) documents).
+fn album_item(
+    album: &Album,
+    selected: bool,
+    thumbnail: Option<egui::TextureHandle>,
+) -> browser::BrowserItem {
+    browser::BrowserItem {
+        key: format!("{}\u{1f}{}", album.artist, album.title),
+        label: album.title.clone(),
+        // The artist · year line, as the albums column and the inspector's
+        // album readout both read it: the artist alone before a year, and the
+        // year joined to it once there is one.
+        detail: Some(album.year.map_or_else(
+            || album.artist.clone(),
+            |y| format!("{} \u{b7} {y}", album.artist),
+        )),
+        thumbnail,
+        selected,
+        // An album row is never the track currently loaded: `now_playing` is a
+        // Track-row fact, and an album listing's rows carry it as false.
+        now_playing: false,
     }
 }
 

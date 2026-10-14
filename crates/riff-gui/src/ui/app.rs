@@ -262,7 +262,9 @@ pub struct RiffApp {
     /// Which user playlist is open in the library explorer, if any.
     playlist_view: Option<PlaylistId>,
     /// The playing track's id whose cover the Now Playing stage last
-    /// requested/rendered; only re-cloned when the track moves.
+    /// requested/rendered; only re-cloned when the track moves. Read and
+    /// written only by [`Self::now_playing_cover`], which owns the key-change
+    /// policy — a render asks for the stage's cover and never for this slot.
     now_playing_cover_key: Option<String>,
     /// This frame's resolved current-track `(title, meta_line)` lines:
     /// stashed once by `render_control_bar` (the bar renders before every
@@ -3533,6 +3535,50 @@ impl RiffApp {
         );
     }
 
+    /// The Now Playing stage's hero cover, in one place.
+    ///
+    /// This is the stage's ONE cover policy, and it is a policy rather than a
+    /// lookup: the hero is asked for through the Cover Cache **when the playing
+    /// Track's identity moves** and resolved from the View half every frame, so
+    /// a stage frame spends nothing on a cover it already holds. The request
+    /// still precedes its resolve — the marker set is what makes the next frame
+    /// see the arrival — and the sequence is the same one every other view
+    /// runs, only keyed on an identity instead of a listing.
+    ///
+    /// The current Track is read through the Session Views seam over the
+    /// store's `get_track` query, never the mirror, and the identity the stage
+    /// keys on is that Track's id — which is why the request carries the
+    /// Track's own path and the resolve carries the id string.
+    ///
+    /// The take/restore around the resolve keeps the borrow checker happy
+    /// **without copying the key on fresh frames**: `resolve_cover_texture`
+    /// takes `&mut self`, so the key must leave the field for the duration of
+    /// the call and come straight back. It looks like the method is doing
+    /// something with it and is not — the value is untouched on the way out.
+    fn now_playing_cover(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        let identity_moved = match self.views.playback_current() {
+            Some(track) => self.now_playing_cover_key.as_deref() != Some(track.id.0.as_str()),
+            None => self.now_playing_cover_key.is_some(),
+        };
+        if identity_moved {
+            if let Some(track) = self.views.playback_current() {
+                let (id, file_path) = (track.id.clone(), track.file_path.clone());
+                self.request_cover(&id, &file_path, COVER_HERO);
+                self.now_playing_cover_key = Some(id.0);
+            } else {
+                // Playback stopped: no hero, and the stage's slot says so, so
+                // the next track's arrival is not mistaken for this one's.
+                self.now_playing_cover_key = None;
+            }
+        }
+        let cover_key = self.now_playing_cover_key.take();
+        let cover = cover_key
+            .as_ref()
+            .map(|key| self.resolve_cover_texture(ctx, key, COVER_HERO));
+        self.now_playing_cover_key = cover_key;
+        cover
+    }
+
     /// The restyled Now Playing stage (Issue 10): the 240px cover with its
     /// extra-large radius and brand glow, the 3xl title, the meta line, the
     /// in-view seek row, and the Up Next queue rows in Playback Queue order.
@@ -3555,29 +3601,10 @@ impl RiffApp {
         // Current track + cover from the LRU texture cache; misses enqueue a
         // background resolve exactly like the other views. Both the current
         // Track and the Up Next window come from the Session Views seam
-        // over the store's `get_track` query — never the mirror. The cover
-        // key is only re-cloned when the playing track moves, so fresh
-        // frames allocate nothing here.
+        // over the store's `get_track` query — never the mirror.
         self.views
             .sync_playback(&playback.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
-        let cover_key_changed = self.now_playing_cover_key.as_deref()
-            != self.views.playback_current().map(|t| t.id.0.as_str());
-        if cover_key_changed {
-            if let Some(track) = self.views.playback_current() {
-                let (id, file_path) = (track.id.clone(), track.file_path.clone());
-                self.request_cover(&id, &file_path, COVER_HERO);
-                self.now_playing_cover_key = Some(id.0);
-            } else {
-                self.now_playing_cover_key = None;
-            }
-        }
-        // Take/restore keeps the borrow checker happy without copying the
-        // key on fresh frames.
-        let cover_key = self.now_playing_cover_key.take();
-        let cover = cover_key
-            .as_ref()
-            .map(|key| self.resolve_cover_texture(ui.ctx(), key, COVER_HERO));
-        self.now_playing_cover_key = cover_key;
+        let cover = self.now_playing_cover(ui.ctx());
         // The title and meta lines ride the bar's once-per-frame handout;
         // only the details line is stage-only, resolved here from the
         // playback projection (staleness is the projection's job, not the

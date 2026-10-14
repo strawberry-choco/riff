@@ -600,34 +600,6 @@ impl RiffApp {
         self.now = Some(now);
     }
 
-    /// Apply the active theme to the context (REQ-UI-007, Issue 01).
-    ///
-    /// The *decision* half — resolve the palette, notice the flip, install the
-    /// resolved palette on [`ThemeState`] — belongs to the Frame (step 2 of
-    /// `Frame::advance`); this is the one act the draw half performs on its
-    /// answer: pushing it onto the egui context. Installation happens once at
-    /// init and again only when the selection changes, not every frame.
-    ///
-    /// The palette-family flip invalidates the shared placeholder tile: its
-    /// well and glyph colours were derived for the old family's tokens, so it
-    /// re-renders under the new one on its next lookup. The eviction is
-    /// View-half work (it touches the texture map), so the Frame decides it and
-    /// this performs it — in the frame's order, before any row looks a cover up.
-    fn enact_theme_palette(
-        &mut self,
-        ctx: &egui::Context,
-        out: &mut FrameOutput,
-        reduce_motion: bool,
-    ) {
-        let Some(palette) = out.palette.take() else {
-            return;
-        };
-        theme::install(ctx, &palette, reduce_motion);
-        if out.evict_generated {
-            crate::ui::artwork::evict_generated(&mut self.cover_textures, &mut self.cover_lru_keys);
-        }
-    }
-
     /// Send cover intent for one track to the Cover Service. The Cover Cache
     /// owns the whole decision — the composite key, the marker set, and
     /// whether a request is due at all — so this reaches the service only
@@ -867,15 +839,31 @@ impl RiffApp {
         );
     }
 
-    /// A track row's leading cover tile: ask for the art at the row's own
-    /// thumbnail box and resolve the texture to paint — the real Cover when one
-    /// has landed, the shared music-icon placeholder when it has not. The two
-    /// statements this replaced were spelled at both track-row sites, and the
-    /// request half is only meaningful beside the resolve half it feeds.
-    fn track_row_cover(&mut self, ctx: &egui::Context, track: &Track) -> egui::TextureId {
-        self.request_cover(&track.id, &track.file_path, COVER_THUMB);
-        self.resolve_cover_texture(ctx, &track.id.0, COVER_THUMB)
-            .id()
+    /// One track's cover at `size`, asked for and resolved in one statement.
+    ///
+    /// The two halves of that pair cannot be sequenced by a caller without
+    /// this: the request must precede its resolve, because the marker set it
+    /// plants is what makes the NEXT frame see the arrival. Split into two
+    /// statements at a call site, the order is a convention nothing enforces
+    /// and the symptom — a row that stays on the placeholder until something
+    /// else invalidates the cache — is far from the cause. So the pair has one
+    /// method, and the box is named at the call site beside the surface that
+    /// paints it.
+    ///
+    /// The caller passes the Track's id and path rather than the Track because
+    /// the seam borrows `self` for the ask: the sites that read the Track
+    /// through `self.views` must copy the two facts out first, and that
+    /// borrow-escape is the site's own business rather than something this
+    /// method can hide.
+    fn track_cover(
+        &mut self,
+        ctx: &egui::Context,
+        track_id: &TrackId,
+        file_path: &Path,
+        size: RequestedSize,
+    ) -> egui::TextureHandle {
+        self.request_cover(track_id, file_path, size);
+        self.resolve_cover_texture(ctx, &track_id.0, size)
     }
 
     /// Shared clickable track row behind every track listing: restyled 40px
@@ -921,7 +909,10 @@ impl RiffApp {
         // placeholder — artless tracks read as a uniform tile instead of an
         // empty gap. The request keeps filling the cache with real art as it
         // lands (the placeholder lives under a separate key).
-        let cover = Some(self.track_row_cover(ui.ctx(), track));
+        let cover = Some(
+            self.track_cover(ui.ctx(), &track.id, &track.file_path, COVER_THUMB)
+                .id(),
+        );
 
         let row = sidebar::tree_row(
             ui,
@@ -1052,13 +1043,41 @@ impl RiffApp {
     /// disk is genuinely empty, so it is the moment the screen can be emptied
     /// with it. A `Failed` clear leaves every texture in place, because nothing
     /// was removed and so nothing has to be re-derived.
+    ///
+    /// `reduce_motion` is read by the palette install alone and by nothing else
+    /// in this method, so it arrives as the one parameter that is not a handle:
+    /// the session's temporal policy is the draw half's own fact, and the Frame
+    /// never decided it.
     fn enact_frame_head(
         &mut self,
         ctx: &egui::Context,
         out: &mut FrameOutput,
         reduce_motion: bool,
     ) {
-        self.enact_theme_palette(ctx, out, reduce_motion);
+        // The theme install: the *decision* half — resolve the palette, notice
+        // the flip, mark the resolved palette on `ThemeState` — is the Frame's
+        // (step 2 of `Frame::advance`), and this is the one act the draw half
+        // performs on its answer: pushing it onto the egui context.
+        // Installation happens once at init and again only when the selection
+        // changes, not every frame, which is why `out.palette` is `None` on a
+        // frame that did not move.
+        //
+        // A palette-family flip also invalidates the shared placeholder tile:
+        // its well and glyph colours were derived for the old family's tokens,
+        // so it re-renders under the new one on its next lookup. The eviction
+        // is View-half work (it touches the texture map), so the Frame decides
+        // it and this performs it — in the frame's order, before any row looks
+        // a cover up. First, because a row painted under the new palette must
+        // not find a tile derived from the old one.
+        if let Some(palette) = out.palette.take() {
+            theme::install(ctx, &palette, reduce_motion);
+            if out.evict_generated {
+                crate::ui::artwork::evict_generated(
+                    &mut self.cover_textures,
+                    &mut self.cover_lru_keys,
+                );
+            }
+        }
         if let Some(outcome) = out.cache_clear.clone() {
             flush_cleared_cache(&outcome, &mut self.cover_textures, &mut self.cover_lru_keys);
         }
@@ -2457,14 +2476,18 @@ impl RiffApp {
         // misses enqueue a background resolve exactly like the other views.
         // The current Track comes from the Session Views seam over the
         // store's `get_track` query — never the in-memory mirror.
+        //
+        // The ask and the resolve are one statement, the same one the track
+        // rows use, so the request-here-resolve-next-frame order they depend on
+        // is the same order this bar depends on. The Track is read through the
+        // seam, so its two facts travel as copies rather than as a borrow —
+        // the seam borrow lasts the call, and `&mut self` does not outlive it.
         let mut cover = None;
         self.views
             .sync_playback(&playback.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
         if let Some(track) = self.views.playback_current() {
-            let id = track.id.clone();
-            let file_path = track.file_path.clone();
-            self.request_cover(&id, &file_path, COVER_THUMB);
-            cover = Some(self.resolve_cover_texture(ui.ctx(), &id.0, COVER_THUMB));
+            let (id, file_path) = (track.id.clone(), track.file_path.clone());
+            cover = Some(self.track_cover(ui.ctx(), &id, &file_path, COVER_THUMB));
         }
 
         // The `{index}/{len}` queue-position label, formatted fresh each
@@ -3470,7 +3493,10 @@ impl RiffApp {
 
         // Same leading cover tile as the library rows: real art when cached,
         // otherwise the shared music-icon placeholder for artless tracks.
-        let cover = Some(self.track_row_cover(ui.ctx(), track));
+        let cover = Some(
+            self.track_cover(ui.ctx(), &track.id, &track.file_path, COVER_THUMB)
+                .id(),
+        );
 
         let row = TreeRow::track(
             &label,

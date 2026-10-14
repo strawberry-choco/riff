@@ -18,7 +18,7 @@ assignees: []
 
 **What happened instead?** The exact error text, panic message, or wrong behavior. Paste it rather than paraphrasing.
 
-**Is a library scan involved?** A bug in scanning is a different bug from a bug in playback, and it is worth saying which one you hit. Specifically:
+**Is a library scan involved?** A bug in scanning is a different bug from a bug in playback, so say which one you hit. Specifically:
 
 - Did the problem appear during or after a scan, on a freshly added folder, or only after restarting?
 - Is a scan status or error message showing in the UI? If so, copy it exactly — it is usually the most diagnostic thing in the report.

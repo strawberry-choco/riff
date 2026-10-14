@@ -3,7 +3,7 @@
 **Status**: Accepted
 **Date**: 2026-09-19
 
-The global "Search or jump to…" field used to live in a dedicated content strip — the content top bar — squeezed between the window titlebar and the Library stage: a second 48px bar that only existed on the Library View. The same strip held a list/grid toggle whose grid mode duplicated the list in a less useful form and added a persisted Settings branch nobody used. With grid gone, the strip's only remaining content was the search field, and a bar holding a single field had no value of its own: it consumed vertical space on the most-used View, forked every chrome decision, and forced the Library stage to grow at the top for no reason.
+The global "Search or jump to…" field used to live in a dedicated content strip — the content top bar — sat between the window titlebar and the Library stage: a second 48px bar that only existed on the Library View. The same strip held a list/grid toggle whose grid mode duplicated the list in a less useful form and added a persisted Settings branch nobody used. With grid gone, the strip's only remaining content was the search field, and a bar holding a single field had no value of its own: it consumed vertical space on the most-used View, forked every chrome decision, and forced the Library stage to grow at the top for no reason.
 
 ## Decision
 

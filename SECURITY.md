@@ -4,7 +4,7 @@
 
 **Use [GitHub's private vulnerability reporting](https://github.com/strawberry-choco/riff/security/advisories/new)** — the Security tab on the repository, then **Report a vulnerability**. It opens a private advisory that only the maintainer can read, which leaves room for a fix before anything is public.
 
-**Do not open a public issue for a suspected vulnerability.** A public issue discloses the details to everyone before a fix exists, and issues are indexed and cached by third parties. Send it privately, and let the maintainer decide when it becomes public.
+**Do not open a public issue for a suspected vulnerability.** A public issue discloses the details to everyone before a fix exists, and third parties index and cache issues. Send it privately, and let the maintainer decide when it becomes public.
 
 This route exists because riff parses untrusted input by design: it decodes the media files you point it at, reads and rewrites their tags, and decodes their embedded cover images. A bug in a decoder, in the tag writer, or in image parsing is a plausible attack surface, and riff also writes back into your files, so a malformed-file bug can do damage as well as disclose.
 
@@ -33,7 +33,7 @@ riff has not reached 1.0 and has no published release cadence. Fixes land on `ma
 
 ## What to expect
 
-An acknowledgement that the report arrived, and then investigation. There is no guaranteed response time and no service-level agreement — this is a small project maintained in the open, not a vendor with a security response team. If a report turns out to be a bug rather than a vulnerability, it will be handled as a bug, and the advisory will be closed with an explanation.
+An acknowledgement that the report arrived, and then investigation. There is no guaranteed response time and no service-level agreement — this is a small project maintained in the open, not a vendor with a security response team. If a report turns out to be a bug rather than a vulnerability, the maintainer will handle it as a bug and close the advisory with an explanation.
 
 ## Security-relevant architecture
 

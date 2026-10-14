@@ -30,7 +30,7 @@ The equalizer is the one exception that is riff's: it drives its own 50 ms `requ
 - **A `Palette` field (rejected).** Mechanically the cheapest diff — the painters already hold `&Palette`, so `palette.reduce_motion` would cost zero new parameters, and `high_contrast` is a standing precedent for an accessibility bool on the bus.
 But `Palette` is documented as a colour set, and `high_contrast` earns its slot by re-picking colours, which reduce motion cannot borrow.
 It would also widen `resolve` into a temporal axis and make two colour-identical palettes compare unequal on a motion-only toggle.
-The churn it saves is paid back in a permanently blurrier token concept.
+The work it saves costs a permanently less precise token concept.
 - **A `MotionMode` enum (rejected).** The input is one boolean with a finite consumer set; an enum buys a third state nobody has a requirement for and a match at every call site.
 
 ## Consequences

@@ -18,7 +18,7 @@ This decision is enforced via conditional compilation (`#[cfg(target_os = "linux
 **Positive**:
 - No runtime dependency on `libayatana-appindicator` or a specific desktop environment.
 - No partial or broken tray behavior (missing icon, non-functional menu).
-- Consistent experience on Linux: what you see is what you get.
+- Consistent experience on Linux, with no hidden behavior.
 - Simpler binary: fewer conditional branches and platform-specific error paths.
 
 **Negative**:

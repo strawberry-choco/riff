@@ -4,7 +4,7 @@ This document describes the concrete types that make up riff's state: the stored
 
 ## Stored Entities (`riff-persistence`)
 
-The persistence contract has no dependencies at all — no serde, no I/O. Its types are plain data plus pure logic.
+The persistence contract has no dependencies — no serde, no I/O. Its types are plain data plus pure logic.
 
 ### TrackId
 

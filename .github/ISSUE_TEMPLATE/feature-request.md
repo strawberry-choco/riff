@@ -9,7 +9,7 @@ labels: ["enhancement"]
 
 **What would riff do instead?** The behavior you are asking for, concretely enough that someone could decide whether it was implemented. If it touches the UI, a sentence about where it would live is enough.
 
-**What have you already tried?** Existing riff features that come close, workarounds you are using, or other players whose approach you would want.
+**What have you already tried?** Existing riff features that come close, workarounds you are using, or other players whose approach you would want to follow.
 
 **What else did you consider?** Other ways to solve the same problem, and why they are worse. If the honest answer is "nothing, there is no alternative", say that too.
 

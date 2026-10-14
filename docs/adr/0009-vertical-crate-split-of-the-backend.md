@@ -43,12 +43,12 @@ their ports. `riff-backend` depends on all four. The frontend depends only on
   leak into every build and test of pure business logic; the Composition Root stays in
   the binary crate.
 - **Horizontal layer split — separate domain / app / infra crates (rejected)**: too
-  fine-grained, and the "domain" crate becomes a dumping ground for ports, errors, and
+  fine-grained, and the "domain" crate ends up holding ports, errors, and
   settings DTOs that are not domain entities. It also gives no compile isolation
   between capabilities.
 - **Vertical capability split with a persistence contract crate (chosen)**: each crate
   owns the types and ports it consumes; the two capabilities are independent siblings;
-  native dependencies are quarantined in one adapter crate; the persistence contract is
+  native dependencies are isolated in one adapter crate; the persistence contract is
   a small std-only crate both slices share without depending on each other.
 
 ## Consequences
@@ -92,7 +92,7 @@ as-built truth:
   contents; as built, `riff-library` owns the underlying use cases and ports
   (Session Projections, the Library Scan Service, playlist management, cover
   resolution and service, the `MetadataWriter`/`TagEdit`, `CoverLoader`, and
-  `FilesystemWatch` ports), while the orchestration the frontend actually holds —
+  `FilesystemWatch` ports), while the orchestration the frontend holds —
   the Session Views read facade (`views.rs`), the Tag Edit service
   (`tag_edit_service.rs`), the Watcher Manager (`watcher_manager.rs`), and the
   library half of the session state (`LibrarySession` in `state.rs`) — remained in

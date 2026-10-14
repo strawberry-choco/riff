@@ -68,7 +68,7 @@ A mismatch fails the test and prints the absolute path of the diff image.
 6. **Open the PNG and review it** before committing. A golden that renders
    blank, clipped, or with harness artifacts (see determinism rules below) is
    worse than no golden. A single-colour baseline is the strongest possible
-   smell — it usually means the widget rendered nothing at all.
+   warning sign — it usually means the widget rendered nothing at all.
 
 ## Re-baselining
 
@@ -226,7 +226,7 @@ run. The harness enforces several rules; keep them when adding goldens:
   the composite claims in ADR 0005 and the pixel claims here as two different
   kinds of evidence, because they are.
 
-  **And that is now a demonstrated property of a change, not only a limitation.**
+  **And that is now a proven property of a change, not only a limitation.**
   Re-centring the traffic lights in the strip — see
   [ADR 0005](../adr/0005-frameless-window-chrome-on-all-platforms.md)'s second
   amendment — moved **zero** golden bytes, and the reason is structural rather
@@ -276,7 +276,7 @@ run. The harness enforces several rules; keep them when adding goldens:
   is a deliberate, accepted tradeoff, not an oversight.
 
   Consequences to keep in mind:
-  - Any ticket claiming byte-identity must demonstrate it on macOS with the
+  - Any ticket claiming byte-identity must show it on macOS with the
     `git diff --exit-code tests/snapshots/` check above. A green CI run is not
     evidence.
   - If this machine's adapter or GPU changes, every golden fails at 0. That

@@ -8,7 +8,7 @@ An architecture review proposed mirroring `SessionViews` on the write side: a si
 `PlaylistStore`, `LibraryMutationStore`) behind one handle, "symmetric to reads".
 
 Rejected. A facade only earns its place when there is behaviour to hide behind the
-smaller interface — otherwise it fails the deletion test: deleting it just moves its
+smaller interface — otherwise it fails the deletion test: deleting it moves its
 pass-through body back into callers, losing nothing.
 
 At the time of this decision there is no such behaviour left to absorb:

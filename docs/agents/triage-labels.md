@@ -18,4 +18,4 @@ Because the tracker is local markdown, a role is recorded as a `Status:` line ne
 Status: ready-for-agent
 ```
 
-Edit the right-hand column to match whatever vocabulary you actually use.
+Edit the right-hand column to match whatever vocabulary you use.

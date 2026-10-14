@@ -33,23 +33,23 @@ It is built for people who treat their music as a collection: the ones who tag t
 
 **Your files stay your files.** riff indexes what is on disk. It never copies, converts, renames, or reorganizes anything, and removing a library folder deletes only the index entries — not a single byte of your collection.
 
-**It notices what you add.** Turn on folder watching and a new album you drop into a directory indexes itself a couple of seconds later. Delete a file and it leaves the index too, so search never points at something that isn't there.
+**Folder watching.** Turn it on and a new album you drop into a directory indexes itself a couple of seconds later. Delete a file and it leaves the index too, so search never points at something that isn't there.
 
-**It opens instantly.** The library is indexed once and kept in a local store, so a launch lands on a browsable collection instead of re-walking every drive you own.
+**It opens instantly.** riff indexes the library once and keeps it in a local store, so a launch lands on a browsable collection instead of re-walking every drive you own.
 
-**Browse the way you think.** Artists into albums into tracks. Genres into artists into albums into tracks. Or the Folders view, which mirrors your disk exactly. One search box — `Ctrl+K` — finds an artist, an album, or a track from anywhere in the app.
+**Browse by artist, genre, or folder.** Artists into albums into tracks. Genres into artists into albums into tracks. Or the Folders view, which mirrors your disk exactly. One search box — `Ctrl+K` — finds an artist, an album, or a track from anywhere in the app.
 
-**Playlists that hold their own.** Name one, add tracks from any listing, reorder it, rename it. A track whose file has gone missing stays visible, struck through, and is skipped on playback rather than breaking the list.
+**Playlists.** Name one, add tracks from any listing, reorder it, rename it. A track whose file has gone missing stays visible, struck through, and is skipped on playback rather than breaking the list.
 
-**Lists that build themselves.** The sidebar's discovery lists are computed on your machine from what you have actually listened to. [docs/product/features.md](docs/product/features.md) is the canonical feature catalog for them.
+**Discovery lists.** riff builds the sidebar's discovery lists on your machine from what you have listened to. [docs/product/features.md](docs/product/features.md) is the canonical feature catalog for them.
 
-**Made for continuous listening.** Gapless playback across an album, and opt-in `ReplayGain` so a quiet folk pressing and a hot master sit at the same level inside the same playlist.
+**Continuous playback.** Gapless playback across an album, and opt-in `ReplayGain` so a quiet track and a loud one play at the same level inside the same playlist.
 
 **Fix a tag without leaving the app.** Right-click a track and correct its title, artist, album, genre, year, or track number. riff writes the tag back into the file and updates the library without a rescan; an album's readout edits its whole set of tracks at once.
 
-**Compilations stay where you put them.** Albums group by *album artist*, so a various-artists collection reads as one album instead of scattering across the library.
+**Compilations.** Albums group by *album artist*, so a various-artists collection reads as one album instead of scattering across the library.
 
-**Out of the way.** Playback carries on with the window hidden, and the tray menu holds play/pause, next, and previous. The whole app works from the keyboard, with a visible focus ring and a high-contrast theme.
+**Runs in the background.** Playback carries on with the window hidden, and the tray menu holds play/pause, next, and previous. The whole app works from the keyboard, with a visible focus ring and a high-contrast theme.
 
 **Plays:** MP3 · FLAC · AAC (M4A) · Opus · OGG Vorbis · WAV
 
@@ -69,7 +69,7 @@ Saying this plainly saves everyone a conversation:
 - **No artwork or metadata lookup.** Tags and covers come from your files, the way you wrote them.
 - **No DRM files, no CDs, no conversion.** riff decodes; it does not encode, rip, or burn.
 
-And what a curator will miss on day one, because it is genuinely not built yet: the full catalog of what ships and what is deliberately deferred lives in [docs/product/features.md](docs/product/features.md), § Deferred / Future.
+And what a curator will miss on day one, because it is not built yet: the full catalog of what ships and what is deliberately deferred lives in [docs/product/features.md](docs/product/features.md), § Deferred / Future.
 
 ## Your listening stays yours
 
@@ -94,11 +94,11 @@ cargo run -p riff-gui
 
 ## Contributing
 
-**[CONTRIBUTING.md](CONTRIBUTING.md) is the front door** — it has the prerequisites, the exact build and verify commands, the pull request checklist, and the honest warning that the committed golden-image baselines are byte-exact and can fail on different hardware.
+**[CONTRIBUTING.md](CONTRIBUTING.md) is the starting point** — it has the prerequisites, the exact build and verify commands, the pull request checklist, and the honest warning that the committed golden-image baselines are byte-exact and can fail on different hardware.
 
-Bug reports and feature requests go to [the issue tracker](https://github.com/strawberry-choco/riff/issues). [docs/README.md](docs/README.md) indexes the product specs, the architecture reference, and the engineering conventions the project holds itself to.
+Bug reports and feature requests go to [the issue tracker](https://github.com/strawberry-choco/riff/issues). [docs/README.md](docs/README.md) indexes the product specs, the architecture reference, and the engineering conventions the project follows.
 
-The design has a hard boundary worth knowing about: riff stays offline. Features that would need a server, an account, or a network call are out of scope, and [docs/product/decisions/001-offline-first.md](docs/product/decisions/001-offline-first.md) records why.
+The design has a hard boundary: riff stays offline. Features that would need a server, an account, or a network call are out of scope, and [docs/product/decisions/001-offline-first.md](docs/product/decisions/001-offline-first.md) records why.
 
 ## License
 

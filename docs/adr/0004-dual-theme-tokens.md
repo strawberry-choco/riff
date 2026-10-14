@@ -63,9 +63,9 @@ set *contains*, so they are recorded here.
   own row hex was **not** adopted: read against the ramp it is lighter than
   `surface`, so it would have inverted the very slot it populates. The adopted
   value splits the existing background→surface step in half rather than opening
-  a new cadence, which is why no previously-pinned step moved. Note the
-  practical consequence: the contrast test's fill list went from five entries to
-  seven, because a row is now a fill that text can land on and the hover wash
+  a new cadence, which is why no previously-pinned step moved. The practical
+  consequence: the contrast test's fill list went from five entries to seven,
+  because a row is now a fill that text can land on and the hover wash
   composites differently over the row plane than over the card plane.
 - **Some effect strengths are family-split even though every colour is not.**
   Brand amber stays family-invariant, but a *translucent wash over a plane* is

@@ -70,7 +70,7 @@ recorded here.
   already exists behind the Windows-convention ones. A gate that has never
   fired is not evidence the fallback was unnecessary.
 - **Fact (d), verified windowed: the tray's Quit quits, and the reason it
-  nearly did not is the sharpest edge in this amendment.** Adopting a native
+  nearly did not is the trickiest part of this amendment.** Adopting a native
   close request created a bug no test could catch. The tray's Quit and the red
   traffic light both reach eframe as `ViewportEvent::Close` — one variant, no
   payload, bit-for-bit identical at the point riff decides. So the new
@@ -115,7 +115,7 @@ placement is recorded here now, including the parts of it no test can see.
 - **The cluster was about 14pt too high, and the first amendment's "and nowhere
   else" no longer holds.** `AppKit` lays the standard buttons out for *its own*
   titlebar — 28pt, 32pt on macOS 26 Tahoe, with 16pt/14pt button frames — while
-  riff's strip is 56pt, so the lights rode roughly 14pt above the strip's centre.
+  riff's strip is 56pt, so the lights sat roughly 14pt above the strip's centre.
   That was read as "native, therefore correct"; in a strip twice the system's
   own titlebar it is not, and a custom-height strip that strands the system's
   buttons high-left reads as broken to a mac user rather than as native. The
@@ -125,14 +125,14 @@ placement is recorded here now, including the parts of it no test can see.
   they differ in **three** places, the third being the lights' vertical
   placement. Nothing else about the two branches changed, and the strip itself
   remains one piece of shared chrome.
-- **Y only, never x, and that is load-bearing.** The re-centring writes
+- **Y only, never x, and that is essential.** The re-centring writes
   `origin.y` and leaves `origin.x` exactly as `AppKit` put it, because eframe
   derives `traffic_lights_size.x` from the close button's `origin.x`, which feeds
   `measured_traffic_lights_width` → `traffic_light_clearance` →
   `titlebar_left_inset` → the wordmark's position in the strip. Writing `y` alone
   leaves the measured clearance bit-identical, which is why the change is
   invisible to the committed goldens; moving `x` would shift the wordmark and
-  churn every baseline. This is a standing constraint on any future work in
+  change every baseline. This is a standing constraint on any future work in
   this area, not a detail of this change: if a future change needs to move the
   cluster horizontally, it re-records the goldens deliberately or it does not
   move `x`.
@@ -142,7 +142,7 @@ placement is recorded here now, including the parts of it no test can see.
   `superview` twice — button → titlebar container → the titlebar view — so no
   private class is ever *named*. There is no API that declares a traffic-light
   position and no public titlebar-height setter, which is why the container's
-  frame, resized to the strip's height, is what actually gives the strip its
+  frame, resized to the strip's height, is what gives the strip its
   height. Doing that needed a native binding, so `riff-gui` gained
   `objc2-app-kit` 0.3.2 under a `[target.'cfg(target_os = "macos")'.dependencies]`
   section — pinned to the version eframe 0.35 already resolves, so `NSWindow`
@@ -180,7 +180,7 @@ placement is recorded here now, including the parts of it no test can see.
   path fails safe into AppKit's own default placement: a window without the three
   standard buttons, a fullscreen window whose whole frame is animating, or a
   titlebar hierarchy a future macOS reshuffles (the `superview`-twice chain
-  resolves to `None`) all simply stop riff interfering.
+  resolves to `None`) all stop riff interfering.
 - **The button height is measured, never hardcoded, and there is no OS-version
   branch.** Apple publishes none of these numbers, and they have already changed
   twice — the titlebar 22pt→28pt at Big Sur and 28pt→32pt at Tahoe, the button

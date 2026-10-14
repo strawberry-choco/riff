@@ -9,7 +9,7 @@
 
 The library needs to persist between launches so that a large collection is browsable instantly instead of re-scanning the disk on every start. The options considered were:
 
-- **SQLite database**: robust, but adds a dependency and migration complexity.
+- **SQLite database**: reliable, but adds a dependency and migration complexity.
 - **Binary serialization (e.g. bincode)**: smaller files, but not human-readable.
 - **JSON file**: human-readable, portable, simple to serialize with serde.
 

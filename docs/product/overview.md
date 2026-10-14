@@ -6,7 +6,7 @@ riff is a lightweight, offline-first desktop music player written in Rust. It pl
 
 riff is a player for local music collections. You point it at one or more folders — your main music directory, an external SSD, a mounted NAS share — and it scans them, reads the tags, resolves the cover art, and gives you a fast, searchable library. Playback runs on a dedicated audio thread with standard transport controls, a queue, shuffle and repeat, and cover art display. A system tray icon (on macOS and Windows) lets it keep playing while the window is hidden.
 
-Everything happens on your machine. The library, playlists, and settings live in one embedded SQLite database — the Application Store (`riff.sqlite3`) — in your local data directory. Nothing is uploaded, nothing is fetched, and nothing phones home. If you disconnect the network cable, riff behaves exactly the same as it did before.
+Everything happens on your machine. The library, playlists, and settings live in one embedded SQLite database — the Application Store (`riff.sqlite3`) — in your local data directory. Nothing is uploaded, nothing is fetched, and nothing is sent out. If you disconnect the network cable, riff behaves exactly the same as it did before.
 
 ## Design Philosophy
 
@@ -16,11 +16,11 @@ Everything happens on your machine. The library, playlists, and settings live in
 
 **Lightweight by construction.** One binary, immediate-mode UI, and a workspace that keeps the core logic in pure-Rust crates. The Application Store means the library is browsable on the first frame of a launch instead of re-walking the disk on every start. Decoding streams packet by packet rather than loading whole files into memory, and cover art is decoded on a background thread, with each display size kept as a Thumbnail on disk so a relaunch does not re-decode the album.
 
-**Cross-platform without lowest-common-denominator.** The core experience — scanning, browsing, playing — is identical everywhere. Platform integration is adapted rather than faked: macOS and Windows get a native folder picker and a system tray icon; Linux gets a plain text path input and runs window-only.
+**Cross-platform without cutting features.** The core experience — scanning, browsing, playing — is identical everywhere. Platform integration is adapted rather than faked: macOS and Windows get a native folder picker and a system tray icon; Linux gets a plain text path input and runs window-only.
 
 ## Who It's For
 
-riff is for people who have a real music collection on disk and want a fast, quiet, respectful player for it. The [personas document](./personas.md) describes the target users in detail: the collector with music spread across several drives, the minimalist who wants a small fast player with no cloud entanglements, and the archivist who needs lossless formats and metadata to be treated with care.
+riff is for people who have a real music collection on disk and want a fast, quiet, respectful player for it. The [personas document](./personas.md) describes the target users in detail: the collector with music spread across several drives, the minimalist who wants a small fast player with no cloud dependencies, and the archivist who needs lossless formats and metadata to be treated with care.
 
 ## What riff Is Not
 

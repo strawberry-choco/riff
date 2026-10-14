@@ -13,7 +13,7 @@ We will extract two modules into the application layer, spawned by the compositi
 ## Considered Options
 
 - **Keep both workers inline in `RiffApp`**: no new code, but the seam stays missing and the tag-edit → store-refresh flow stays untestable.
-- **One combined "background jobs" module**: fewer moving parts, but a shallow grab-bag whose interface mentions two unrelated concerns (a read-side cache warmer vs a durability-sensitive write path).
+- **One combined "background jobs" module**: fewer moving parts, but a shallow module that mixes two unrelated concerns (a read-side cache warmer vs a durability-sensitive write path).
 - **Two service modules behind trait handles (chosen)**: each interface is small and honest; mocks become the second adapter at each seam, making the seams real rather than hypothetical.
 
 ## Consequences

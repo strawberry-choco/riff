@@ -21,7 +21,7 @@ Every worker thread is spawned and joined by the Composition Root — `AppRuntim
 | ReplayGain Pass worker | Runs the `ReplayGainPass` use case: receives pass commands (a targeted Track or Album command, or a library-wide run), measures each target through the loudness analyzer (one decode per Track), writes the file tags first and commits the Store facts as one durable batched change, and reports progress and a settled outcome. A pass honours its cancel flag at measurement boundaries and keeps every batch already committed. | `composition.rs` (`PassService::new` + worker run) |
 | Tray event thread (non-Linux) | Dispatches system tray menu events (play/pause, next, previous, show/hide, quit) through the tray's recording `ChannelTransport`. | `riff-gui/src/ui/tray.rs` |
 
-The audio engine thread is the heart of playback. It is a single long-lived loop that polls `cmd_rx` for a `PlaybackCommand` — on the 10 ms `COMMAND_POLL` interval, whether or not a track is loaded, so that an idle engine can still observe a stop request. When it receives `Play(TrackId)` it resolves the Track through the store query port, opens a decoder through the injected `DecoderFactory` (which mints a fresh symphonia `CodecRegistry` per decoder, so the Opus adapter decodes correctly), starts the cpal stream, and enters an inner decode loop that runs until the track ends or a command interrupts it.
+The audio engine thread is central to playback. It is a single long-lived loop that polls `cmd_rx` for a `PlaybackCommand` — on the 10 ms `COMMAND_POLL` interval, whether or not a track is loaded, so that an idle engine can still observe a stop request. When it receives `Play(TrackId)` it resolves the Track through the store query port, opens a decoder through the injected `DecoderFactory` (which mints a fresh symphonia `CodecRegistry` per decoder, so the Opus adapter decodes correctly), starts the cpal stream, and enters an inner decode loop that runs until the track ends or a command interrupts it.
 
 ## Wiring at Startup
 
@@ -50,7 +50,7 @@ The coordinator is a thin loop: `while let Ok(update) = update_rx.recv()`, then 
 2. Drop the lock before doing anything else.
 3. If there is a next track, send `PlaybackCommand::Play(next_id)`; on repeat-one, replay the current track; otherwise re-lock and set the state to `Stopped`.
 
-Play history is committed through the `LibraryMutationStore` port before the advance, so a crash between the two steps records the track that actually played. Playback errors surface as typed notices: the coordinator sends a pre-formatted message over the notice channel, and BackendEvents stamps it with playback source and error severity — no cross-slice state write ever happens.
+Play history is committed through the `LibraryMutationStore` port before the advance, so a crash between the two steps records the track that played. Playback errors surface as typed notices: the coordinator sends a pre-formatted message over the notice channel, and BackendEvents stamps it with playback source and error severity — no cross-slice state write ever happens.
 
 This drop-then-reacquire pattern is the canonical example of the "no nested locking / no long-held lock" rule: the lock is never held while sending on a channel, and each critical section is as short as possible.
 
@@ -87,7 +87,7 @@ The two session mutexes are independent: code must never hold one while acquirin
 
 ## Constraints
 
-These constraints are load-bearing. Violating any of them causes audio glitches, deadlocks, or a frozen UI.
+These constraints are essential. Violating any of them causes audio glitches, deadlocks, or a frozen UI.
 
 ### The cpal callback never blocks
 

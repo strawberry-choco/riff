@@ -16,7 +16,7 @@ This decision is enforced via conditional compilation: the native-picker path is
 ## Consequences
 
 **Positive**:
-- Best UX on macOS and Windows: familiar native dialog that the user already knows.
+- Best experience on macOS and Windows: familiar native dialog that the user already knows.
 - Linux implementation is reliable: no dependency on a specific desktop environment or library.
 - Simpler Linux binary: fewer platform-specific dependencies.
 - Clear platform separation: the two code paths do not interfere with each other.

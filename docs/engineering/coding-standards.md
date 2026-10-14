@@ -1,8 +1,8 @@
 # Coding Standards
 
-This document describes the conventions that keep riff's codebase consistent and maintainable. It covers the layered architecture rules, the lint and formatting configuration, the error-handling pattern, and the implementation gotchas that trip up contributors. Read this before writing any non-trivial change, and pair it with [development-setup.md](./development-setup.md) for the commands that enforce these standards.
+This document describes the conventions that keep riff's codebase consistent and maintainable. It covers the layered architecture rules, the lint and formatting configuration, the error-handling pattern, and the implementation gotchas that catch contributors. Read this before writing any non-trivial change, and pair it with [development-setup.md](./development-setup.md) for the commands that enforce these standards.
 
-riff is organized as a Cargo workspace of capability crates. The single most important rule is that dependencies follow the crate chain: `riff-persistence` ← `riff-library`/`riff-playback` ← `riff-infra` ← `riff-backend` ← `riff-gui`, with the two capability slices as siblings and no edge between them. The compiler enforces this chain, so a misplaced dependency fails the build rather than rotting silently.
+riff is organized as a Cargo workspace of capability crates. The single most important rule is that dependencies follow the crate chain: `riff-persistence` ← `riff-library`/`riff-playback` ← `riff-infra` ← `riff-backend` ← `riff-gui`, with the two capability slices as siblings and no edge between them. The compiler enforces this chain, so a misplaced dependency fails the build rather than passing unnoticed.
 
 ## Architecture Layering
 
@@ -29,7 +29,7 @@ Where behavior must differ by OS, the difference is **one pure decision function
 
 The reason is testability, not tidiness. A `cfg` branch is invisible to every machine that is not the target OS, so on Linux and Windows CI the macOS branch can never be compiled — and therefore can never be asserted. A function that *returns* the decision as data is assertable everywhere: the unreachable half of a platform split becomes a value any test can name on any runner. Keep the wrapper (`chrome_mode()`) separate from the consumers that take the decision as a parameter (`viewport_builder_for(mode)`), so the parameterised half stays executable and testable on every host — the "assert both branches as data" test only exists because of that split.
 
-Residual `#[cfg]`s are for **compilation, not for decisions**. They compile a branch's code out where it cannot run and carry a comment saying why — the unreachable match arm, a native-only API, a tray handle. A `cfg` that picks *behavior* (a different widget, a string, a layout) is the smell this rule exists to catch: it is only acceptable when the code cannot exist on the other platform at all, and then it belongs at the adapter edge, not in a view.
+Residual `#[cfg]`s are for **compilation, not for decisions**. They compile a branch's code out where it cannot run and carry a comment saying why — the unreachable match arm, a native-only API, a tray handle. A `cfg` that picks *behavior* (a different widget, a string, a layout) is the pattern this rule exists to catch: it is only acceptable when the code cannot exist on the other platform at all, and then it belongs at the adapter edge, not in a view.
 
 Design values that differ per platform are still design values, so they still live in `theme.rs`: the macOS traffic-light clearance is a token like any other, and the fixed constant is the floor a runtime measurement may raise, not a second number kept beside it.
 
@@ -65,7 +65,7 @@ Three mechanical sweeps in `tests/ui_tests.rs` enforce the first two rules again
 
 ## Linting with Clippy
 
-Lint levels are configured in `Cargo.toml` under `[lints.clippy]`, and tool-level options live in `clippy.toml`. The configuration enables the pedantic group as warnings, explicitly allows the nursery group, and carves out a small set of additional allowances.
+Lint levels are configured in `Cargo.toml` under `[lints.clippy]`, and tool-level options live in `clippy.toml`. The configuration enables the pedantic group as warnings, explicitly allows the nursery group, and allows a small set of extra allowances.
 
 The five individually allowed lints are worth understanding, because they reflect deliberate project choices:
 
@@ -93,7 +93,7 @@ The conversion flow runs outward: `riff-infra` maps external crate errors into t
 
 ## Key Gotchas
 
-These implementation details are easy to get wrong and worth internalizing before editing the relevant code.
+These implementation details are easy to get wrong and worth learning before editing the relevant code.
 
 - **Session state is two structs, each behind its own `Arc<Mutex<>>`.** `PlaybackSession` (in `riff-playback`) holds the queue, playback state, position, volume, and mute; `LibrarySession` (in `riff-backend`) holds selection, views, search, library paths and statuses, scan status, and watch states. There is no nested locking, and that must stay true: never acquire a second lock while holding a session lock.
 - **There is no decoded-cover cache in `riff-library`.** The `CoverService` keeps only `negative`, an artless-verdict LRU; `COVER_CACHE_CAP` (200) bounds that *and* the GUI's `cover_textures` map, which holds `egui::TextureHandle`s with LRU order tracked in `cover_lru_keys` — so one constant serves two unrelated structures, and a new cache bound gets its own name rather than joining them: the texture map is bounded twice over, by that entry count and by `COVER_TEXTURE_BYTE_BUDGET` (64 MB), because the three canonical boxes span 80x in bytes and a count alone bounds nothing the user can feel. The thing that survives a restart is the Thumbnail cache on disk (`<data_local_dir>/covers/`), which is bounded by nothing at all: entries are named for their source's `(mtime, len)`, so growth is reclaimed only by Settings → Clear Thumbnail cache. Do not add an eviction policy to it without a reason that survives the argument in `.scratch/thumbnail-cache/spec.md`.

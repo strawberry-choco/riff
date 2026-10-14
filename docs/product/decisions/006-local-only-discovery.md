@@ -6,9 +6,9 @@ Accepted
 
 ## Context
 
-The music player pain points research identified that users want both the zero-friction experience of streaming AND the ownership/control of local files, but no product delivers both. Streaming services degrade over time (feature removal, rising prices, algorithmic manipulation), while local players have sustainability issues (outdated UI, plugin breakage, Windows-only).
+Research into music player problems identified that users want both the effortless experience of streaming AND the ownership/control of local files, but no product delivers both. Streaming services degrade over time (feature removal, rising prices, algorithmic manipulation), while local players have sustainability issues (outdated UI, plugin breakage, Windows-only).
 
-Under riff's constraints (local-only, multi-platform), we cannot replicate online discovery or auto-tagging from external databases. However, we can address the core pain points by leveraging the inherent advantages of local ownership while providing streaming-like UX polish.
+Under riff's constraints (local-only, multi-platform), we cannot replicate online discovery or auto-tagging from external databases. However, we can address the core problems by using the advantages of local ownership while providing streaming-like polish.
 
 ## Decision
 
@@ -22,19 +22,19 @@ We will build for the **"owner" persona** — someone with a local collection wh
 
 4. **Linux first-class support** - Treat Linux as equal to Windows/macOS, providing polished experiences even where native dialogs aren't available.
 
-5. **Accessibility from day one** - Address the research's blind spot by supporting keyboard navigation, high contrast, screen readers, and cognitive load reduction.
+5. **Accessibility from day one** - Address the gap in the research by supporting keyboard navigation, high contrast, screen readers, and cognitive load reduction.
 
 ## Rationale
 
-- **Tag writing** eliminates the "needs external tools" pain point (#24) while staying local-only. Using file tags as source of truth avoids creating another disagreeing metadata source (#30).
+- **Tag writing** eliminates the "needs external tools" problem (#24) while staying local-only. Using file tags as source of truth avoids creating another disagreeing metadata source (#30).
 
-- **Smart playlists** provide offline discovery that mimics streaming UX without requiring internet. This directly addresses the Academic's "paradox of choice" finding and the Practitioner's desire for navigation without server dependency.
+- **Smart playlists** provide offline discovery that mimics the streaming experience without requiring internet. This directly addresses the Academic's "paradox of choice" finding and the Practitioner's desire for navigation without server dependency.
 
-- **Progressive disclosure** solves the core cross-cutting pain (#29) of no player balancing simplicity AND power. It's the streaming UX principle applied to local-only context.
+- **Progressive disclosure** solves the core cross-cutting problem (#29) of no player balancing simplicity AND power. It's the streaming design principle applied to a local-only context.
 
-- **Linux first-class** addresses the High severity pain (#34) of poor Linux support across commercial players. The research specifically calls out cross-platform as eliminating 80% of competitors.
+- **Linux first-class** addresses the High severity problem (#34) of poor Linux support across commercial players. The research specifically calls out cross-platform as eliminating 80% of competitors.
 
-- **Accessibility** addresses the research's blind spot where all 35 pain points ignored users with disabilities. This is a differentiator and the right thing to do.
+- **Accessibility** addresses the gap in the research where all 35 problems ignored users with disabilities. This is a differentiator and the right thing to do.
 
 ## Consequences
 

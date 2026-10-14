@@ -9,7 +9,7 @@ Commits are adopted going forward was a promise, not a mechanism: a
 well-formed message was a matter of memory, and nothing anywhere could
 reject a malformed one. From the next commit forward, every commit message
 in riff follows Conventional Commits 1.0.0 under a riff-specific profile,
-and the reason is not style: the format is load-bearing.
+and the reason is not style: the format does real work.
 
 ## Decision
 
@@ -63,7 +63,7 @@ messages that land on the default branch. There is no rewrite step between
 the branch and the history, therefore no pull-request title check anywhere,
 and no automated pull request needs an exemption from the message rules —
 the dependency bot's existing `build`/`ci` prefixes reach the default
-branch intact and become load-bearing for the first time. The accepted
+branch intact and start doing real work for the first time. The accepted
 cost is real: every commit receives a new SHA in the replay, so commit-SHA
 references in review comments and issues point at commits that will not
 exist after the merge. The pull request number is the durable reference.

@@ -14,7 +14,7 @@ Every track in the library needs a stable identity for deduplication, queue mana
 
 ## Decision
 
-A track's identity (`TrackId`) is its full file path as a string. The same file on disk always has the same identity, regardless of which library path it was scanned through.
+A track's identity (`TrackId`) is its full file path as a string. The same file on disk always has the same identity, no matter which library path scanned it.
 
 ## Consequences
 

@@ -125,7 +125,7 @@ The module that owns the Settings round-trip — hydrating Settings into the ses
 _Avoid_: settings sync, persist helper
 
 **Library Path**:
-A root folder the Library is discovered from, registered by the user. It is one fact-set, not a string: the path, its Readiness, its Watch State, its running filesystem watcher, and its rows in the Application Store. One operation owns each edge: retiring a Library Path retires all five, and restoring one takes them back — the restored Watch State is acted on rather than copied in, so Enabled starts its watcher, Disabled starts nothing, and a Warning is retried so the verdict is the current one. The App Runtime restores them at launch, so a Library Path the user enabled watching on is watched before any frame is drawn.
+A root folder the Library is discovered from, registered by the user. It is one fact-set, not a string: the path, its Readiness, its Watch State, its running filesystem watcher, and its rows in the Application Store. One operation owns each transition: retiring a Library Path retires all five, and restoring one takes them back — the restored Watch State is acted on rather than copied in, so Enabled starts its watcher, Disabled starts nothing, and a Warning is retried so the verdict is the current one. The App Runtime restores them at launch, so a Library Path the user enabled watching on is watched before any frame is drawn.
 _Avoid_: root, directory, watched folder
 
 **Watch State**:
@@ -145,7 +145,7 @@ The single read interface over all Session Projections; UI code asks it for read
 _Avoid_: projection manager, view cache
 
 **Audio Engine**:
-The module that turns Playback Commands into decoded audio and Playback Updates, owning decode scheduling, output startup, and gapless handoff. It decides nothing about queue order: the Queue Fill's content and both skips are answered by **Continuation**, and the engine only performs the load. What the engine does own is the *when* — that an empty Playback Queue triggers a Queue Fill, and that idleness (nothing is currently playing) starts playback exactly once — and it is one operation every Playback Command that can start or grow the Playback Queue goes through.
+The module that turns Playback Commands into decoded audio and Playback Updates, owning decode scheduling, output startup, and gapless handoff. It decides nothing about queue order: **Continuation** answers the Queue Fill's content and both skips, and the engine only performs the load. What the engine does own is the *when* — that an empty Playback Queue triggers a Queue Fill, and that idleness (nothing is currently playing) starts playback exactly once — and it is one operation every Playback Command that can start or grow the Playback Queue goes through.
 _Avoid_: playback thread, sound server
 
 **Transport**:
@@ -169,7 +169,7 @@ The rightmost selection readout showing the currently selected entity or Track �
 _Avoid_: inspector, selection panel, readout column
 
 **Inline Tag Editor**:
-The tag editing surface that lives inside the Detail Panel, replacing the retired Edit Tags modal. It renders one row per editable field — Metadata or ReplayGain; editing happens in place and saving commits through the Tag Edit service. It has exactly **one door**: the **Track-menu host** opens it, from whichever surface the gesture came from, and the Detail Panel's tag rows open the same draft through the same controller. A Track row's "Edit Tags" item is therefore not a second way in — it is that one opening, reached from a row.
+The tag editing surface that lives inside the Detail Panel, replacing the retired Edit Tags modal. It renders one row per editable field — Metadata or ReplayGain; editing happens in place and saving commits through the Tag Edit service. It has exactly **one entry point**: the **Track-menu host** opens it, from whichever surface the gesture came from, and the Detail Panel's tag rows open the same draft through the same controller. A Track row's "Edit Tags" item is therefore not a second way in — it is that one opening, reached from a row.
 _Avoid_: edit dialog, tag modal, second tag editor
 
 **Track-menu host**:

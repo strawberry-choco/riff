@@ -11,7 +11,7 @@ The implementation is the pure-Rust [`ebur128` crate](https://crates.io/crates/e
 
 ## Considered Options
 
-- **ReplayGain 1.0 (rejected)**: the legacy formula still rides inside many old tags, and riff keeps *reading* those (the gain-string parser accepts whatever the file carries). But producing 1.0 would bake an obsolete psychoacoustic model into new files, and the values do not interoperate with the R128-convention Opus tags the RFC mandates.
+- **ReplayGain 1.0 (rejected)**: the legacy formula still sits inside many old tags, and riff keeps *reading* those (the gain-string parser accepts whatever the file carries). But producing 1.0 would write an obsolete psychoacoustic model into new files, and the values do not interoperate with the R128-convention Opus tags the RFC mandates.
 - **A different reference than −18 LUFS (rejected)**: ReplayGain 2.0's reference is −18 LUFS and the R128 convention hardcodes it; any other reference would make riff's written tags measure differently in every other player.
 - **Sample peak instead of true peak (rejected)**: sample peak misses inter-sample overshoots, which is exactly the case clipping prevention exists for; the cost is one 4× oversampling filter pass inside the meter.
 

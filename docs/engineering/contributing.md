@@ -12,7 +12,7 @@ Before writing code, read these in order:
 
 ## The Crate Architecture
 
-Every contribution must respect the crate split and its dependency chain (see [ADR 0009](../adr/0009-vertical-crate-split-of-the-backend.md) and [../technical/architecture.md](../technical/architecture.md)). This is the single most reviewed aspect of a change, so internalize it before you start. The short form: dependencies follow the chain with no bypasses, the slices stay pure Rust and reach external crates only through port traits they define, and only `riff-backend/src/composition.rs` constructs and wires concrete adapters. Which crate a new piece of code belongs in is decided by the membership criteria in [../technical/architecture.md](../technical/architecture.md#crate-definitions-and-membership-criteria).
+Every contribution must respect the crate split and its dependency chain (see [ADR 0009](../adr/0009-vertical-crate-split-of-the-backend.md) and [../technical/architecture.md](../technical/architecture.md)). This is the single most reviewed aspect of a change, so learn it before you start. The short form: dependencies follow the chain with no bypasses, the slices stay pure Rust and reach external crates only through port traits they define, and only `riff-backend/src/composition.rs` constructs and wires concrete adapters. Which crate a new piece of code belongs in is decided by the membership criteria in [../technical/architecture.md](../technical/architecture.md#crate-definitions-and-membership-criteria).
 
 ## Working on a Change
 

@@ -8,7 +8,7 @@ for a while the log itself carried the exception: everything before the
 first conventional commit stayed freeform on purpose, the changelog said
 so, and the conventions document said "do not fix old messages". This
 record reverses that policy. The reversal is dated and stands on its own;
-nothing in it is smuggled backwards into the history it describes.
+nothing in it rewrites the history it describes.
 
 ## Decision
 
@@ -20,7 +20,7 @@ junk-only commits are gone, multi-feature commits are split, and the
 changelog is generated from the rewritten log.
 
 The constraint that made the rewrite worth paying for: the message format
-is load-bearing (ADR 0015). A freeform era in the log is not a cosmetic
+does real work (ADR 0015). A freeform era in the log is not a cosmetic
 blemish — it is a range the changelog generator cannot parse, a range the
 gates cannot judge, and a standing instruction to every future reader that
 the format is optional. Keeping the exemption meant keeping three classes

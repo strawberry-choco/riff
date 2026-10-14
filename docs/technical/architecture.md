@@ -1,6 +1,6 @@
 # Architecture
 
-riff is a lightweight, offline-first desktop music player written in Rust on top of the egui immediate-mode UI framework. It ships as a Cargo **workspace** with no code-generation step and no plugin system; persistence runs through ordered, checksummed SQLite migrations. The architecture is a **vertical capability split**: the headless backend is divided into crates by capability with a strict, compiler-enforced dependency chain, infrastructure adapters that wrap external crates sit in one dedicated crate at the edge, and a single composition root wires everything together at startup.
+riff is a lightweight, offline-first desktop music player written in Rust on top of the egui immediate-mode UI framework. It is a Cargo **workspace** with no code-generation step and no plugin system; persistence runs through ordered, checksummed SQLite migrations. The architecture is a **vertical capability split**: the headless backend is divided into crates by capability with a strict, compiler-enforced dependency chain, infrastructure adapters that wrap external crates sit in one dedicated crate at the edge, and a single composition root wires everything together at startup.
 
 This document is the reference for how the workspace is organized, how the crates are allowed to depend on one another, and what belongs where. For the runtime view of the system see [./threading-model.md](./threading-model.md) and [./data-flow.md](./data-flow.md); for the concrete types that flow between layers see [./data-model.md](./data-model.md). The split decision and its rationale are recorded in [ADR 0009](../adr/0009-vertical-crate-split-of-the-backend.md).
 
@@ -48,7 +48,7 @@ The arrows point inward in the inversion-of-control sense: slices define ports a
 
 ## Crate Definitions and Membership Criteria
 
-Each crate owns the types and ports it consumes; there is no shared dumping-ground crate.
+Each crate owns the types and ports it consumes; there is no shared catch-all crate.
 
 ### `riff-persistence` — types that cross the persistence boundary
 
@@ -78,7 +78,7 @@ It owns the Playback Queue and repeat mode (`domain/queue.rs`), the playback com
 
 **Membership rule**: an item belongs here iff it implements a port defined in another crate or wraps a native/external dependency — nothing else.
 
-Concretely: the SQLite Application Store (`store/`: `SqliteStore`, migrations, corruption recovery, plus `StorePlaybackLibrary` — the store's read side narrowed to the Audio Engine's two queries, a named adapter rather than a blanket impl so the port stays fakeable, ADR 0012), the symphonia decoder and cpal output (`audio/`), the lofty metadata reader/writer and image cover loader (`media/`), and the walkdir scanner and notify watcher (`filesystem/`). The rationale is quarantine: bundled SQLite needs a C compiler and cpal needs platform audio libraries (ALSA on Linux), so keeping adapters out of the slices is what makes the slices pure Rust and testable anywhere. The crate preserves clean internal module seams (store / audio / media / filesystem) so it can be split further later without redesign if compile times ever demand it.
+Concretely: the SQLite Application Store (`store/`: `SqliteStore`, migrations, corruption recovery, plus `StorePlaybackLibrary` — the store's read side narrowed to the Audio Engine's two queries, a named adapter rather than a blanket impl so the port stays fakeable, ADR 0012), the symphonia decoder and cpal output (`audio/`), the lofty metadata reader/writer and image cover loader (`media/`), and the walkdir scanner and notify watcher (`filesystem/`). The reason is isolation: bundled SQLite needs a C compiler and cpal needs platform audio libraries (ALSA on Linux), so keeping adapters out of the slices is what makes the slices pure Rust and testable anywhere. The crate preserves clean internal module seams (store / audio / media / filesystem) so it can be split further later without redesign if compile times ever demand it.
 
 ### `riff-backend` — the application API
 
@@ -100,9 +100,9 @@ It owns egui widget code, the main window and its views, fonts and icon rasteriz
 - **Feature composites** — the recognizably riff-specific views: they combine primitives with content, and they are where application state is legitimately held.
 - **Host adapters** — the `impl RiffApp` blocks (including `app/library_picker.rs` and `app/tag_editor.rs`) plus `tray` and `window_visibility`. They resolve the props, map emitted intents onto `Transport` / store / session / native effects, and keep platform behavior (the folder picker, Linux's text-path flow, the no-tray policy) explicit rather than hidden inside a generic widget.
 
-`app/track_menu.rs` is the one place in that layer where the mapping is *shared* rather than per-site. A right-click on a Track is one gesture, and it used to be answered through an eight-field effects bag that each Track-row surface assembled by hand — one attach point for the six flat/smart/folder/playlist listings, and a second, differently-populated copy in the Tracks Column that intercepted a report the detail-action applier could not answer. The **Track-menu host** now owns those handles and answers exactly two questions (*a right-click happened on this Track*, *this item was chosen*), and a surface supplies only a `TrackMenuSubject` — which Track, and the one fact about where its row sits. `RiffApp::track_menu` is the app's single declaration of the handle set, and the test suite calls that same constructor, so a handle added to or dropped from the host breaks the app and its tests together rather than leaving a mirror to drift.
+`app/track_menu.rs` is the one place in that layer where the mapping is *shared* rather than per-site. A right-click on a Track is one gesture, and it used to be answered through an eight-field effects bundle that each Track-row surface assembled by hand — one attach point for the six flat/smart/folder/playlist listings, and a second, differently-populated copy in the Tracks Column that intercepted a report the detail-action applier could not answer. The **Track-menu host** now owns those handles and answers exactly two questions (*a right-click happened on this Track*, *this item was chosen*), and a surface supplies only a `TrackMenuSubject` — which Track, and the one fact about where its row sits. `RiffApp::track_menu` is the app's single declaration of the handle set, and the test suite calls that same constructor, so a handle added to or dropped from the host breaks the app and its tests together rather than leaving a mirror to drift.
 
-The host is **borrowed per gesture, not stored on the app**: storing it would mean moving four handles out of `RiffApp` and re-reaching them at every other site in a 4,000-line file to save a borrow that costs nothing. The scope that matters is where the handles are *named*, and that is one function. A **per-row host was rejected** for the reason that makes the per-app one worth having: a per-row host is the bag again with a constructor, so every surface would still name what the host needs, and one that named it wrong would fail the same way and go unnoticed the same way.
+The host is **borrowed per gesture, not stored on the app**: storing it would mean moving four handles out of `RiffApp` and re-reaching them at every other site in a 4,000-line file to save a borrow that costs nothing. The scope that matters is where the handles are *named*, and that is one function. A **per-row host was rejected** for the reason that makes the per-app one worth having: a per-row host is that bundle again with a constructor, so every surface would still name what the host needs, and one that named it wrong would fail the same way and go unnoticed the same way.
 
 ### Inside the browser stage: one Column identity, two drains
 
@@ -174,7 +174,7 @@ Use this checklist when adding or reviewing a component:
 - [ ] **Crate placement**: each module is in the crate whose membership criterion it satisfies (see above), and in the conventional `domain/`/`app/`/`infra/` layer for its responsibility.
 - [ ] **Dependency direction**: the crate's `Cargo.toml` gains no edge that violates the chain. The slices never gain a dependency on `riff-infra`, on each other, or on any native crate.
 - [ ] **Trait abstraction**: every external dependency of a slice crosses a port trait defined in that slice and is implemented in `riff-infra`.
-- [ ] **Purity**: `riff-persistence` builds with no dependencies at all; the slices stay pure Rust. If a change needs a C compiler or platform audio libraries, it belongs in `riff-infra`.
+- [ ] **Purity**: `riff-persistence` builds with no dependencies; the slices stay pure Rust. If a change needs a C compiler or platform audio libraries, it belongs in `riff-infra`.
 - [ ] **Thread safety**: shared state between threads is synchronized with `Arc<Mutex<_>>` (one mutex per session — never nested), and cross-thread communication uses channels.
 - [ ] **Error handling**: errors are owned by the crate that raises them; `riff-infra` maps external errors into the owning port's error; the UI shows user-friendly messages.
 - [ ] **No UI in logic**: there is no `egui` code outside `riff-gui`, and no audio decoding in the UI.

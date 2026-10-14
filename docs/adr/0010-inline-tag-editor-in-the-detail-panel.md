@@ -19,7 +19,7 @@ Agreed rules:
 - **Commit model**: inline fields with a Save bar; **Enter** saves, **Esc** cancels, Tab moves between fields; Save is disabled while a write is in flight; switching the selection mid-edit discards the draft (the modal's Cancel semantics, kept).
 - **Album save payload (dirty-only)**: only fields whose typed text differs from the row's original displayed value are submitted (the `TagEdit` contract "only `Some` fields are written" applies directly). A `(different)` row left with an empty input is treated as untouched and skipped — a shared field cannot be blanked across the Album by accident; clearing a shared tag stays a single-Track action. Save is disabled when nothing is dirty, so an empty batch submits nothing and writes no files.
 - **Batch outcome surfacing**: the Save bar shows a spinner while any request is in flight; when all outcomes land, a line under the bar reports "Saved N of M tracks", or "Saved N of M tracks — k failed: <reason>" (first failure reason, orange). The titlebar status line keeps its per-request outcome reporting.
-- **Background completion**: requests already submitted keep completing even if the selection moves away; each outcome lands in the titlebar status line as today, whether or not the Detail Panel still shows that Track or Album. The editor simply stops rendering when its selection leaves; it is never resurrected.
+- **Background completion**: requests already submitted keep completing even if the selection moves away; each outcome lands in the titlebar status line as today, whether or not the Detail Panel still shows that Track or Album. The editor stops rendering when its selection leaves; it is never resurrected.
 - **Modal retirement**: the Edit Tags modal is deleted — the modal state struct, the `prompts.rs` modal seam, and its golden image. The context-menu item becomes an entry point into the inline editor (select the Track and focus the editor).
 - **Editing is un-gated**: tag editing is available to every user, not behind the advanced toggle. The advanced-only gating of the "Edit Tags" context-menu item is removed; the tag section in the Detail Panel is editable for all.
 
@@ -28,8 +28,8 @@ The single durable change per `TagEditRequest` (ADR 0006) is unchanged; a batch 
 ## Considered Options
 
 - **Keep the modal, add a read-only tag display (rejected)**: two tag-editing surfaces for one feature, and no path from seeing a `(different)` Album field to fixing it. The modal stays the single entry point only in name; the display and the edit surface drift apart.
-- **Album readout display-only; edit Track by Track (rejected)**: the whole point of surfacing aggregation is to fix a wrong Year or Genre in one gesture. Making `(different)` a dead end forces the user to enter each Track's readout.
-- **Album save writes every field to every Track (rejected)**: rewrites untouched shared values, and an empty `(different)` input would silently blank a field on every Track. Edits instead submit only what the user actually changed (the `TagEdit` contract "only `Some` fields are written" supports this directly).
+- **Album readout display-only; edit Track by Track (rejected)**: the whole point of surfacing aggregation is to fix a wrong Year or Genre in one gesture. Treating `(different)` as display-only forces the user to enter each Track's readout.
+- **Album save writes every field to every Track (rejected)**: rewrites untouched shared values, and an empty `(different)` input would silently blank a field on every Track. Edits instead submit only what the user changed (the `TagEdit` contract "only `Some` fields are written" supports this directly).
 - **Chosen**: inline seven-field editor on both readouts, aggregation rules above, batch save through one request per Track.
 - **Duration as an aggregated tag row (rejected)**: it is derived, not editable; a multi-Track Album would render `(different)` nearly always, which is noise.
 
@@ -38,7 +38,7 @@ The single durable change per `TagEditRequest` (ADR 0006) is unchanged; a batch 
 The decision stands. Two claims it makes about the editor's *entry* are now
 backed by a named owner rather than by a routing convention.
 
-- **The editor has one door, and the Track-menu host is it.** This record said
+- **The editor has one entry point, and the Track-menu host is it.** This record said
   the context-menu item "becomes an entry point into the inline editor (select
   the Track and focus the editor)". That is now true of *every* surface: a
   Track row's "Edit Tags" item is answered by the per-app Track-menu host

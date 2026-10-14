@@ -47,7 +47,7 @@ User clicks "Play" in the UI (riff-gui/src/ui/)
      and any notice message
 ```
 
-The `Resume` path reuses the same machinery: the engine remembers the current track id and the paused position, and on resume it re-issues `Play(track_id)` and seeks to the stored position before continuing.
+The `Resume` path works the same way: the engine remembers the current track id and the paused position, and on resume it re-issues `Play(track_id)` and seeks to the stored position before continuing.
 
 ## Flow 2: Scan a Library
 
@@ -133,7 +133,7 @@ A track becomes current or is selected for display (riff-gui/src/ui/)
      a request that the disk already answers costs one stat and one open
 ```
 
-If resolution fails at any point, the worker logs a warning and reports no image, so the UI simply displays no cover rather than surfacing an error; the service's negative cache prevents retry storms for artless tracks.
+If resolution fails at any point, the worker logs a warning and reports no image, so the UI displays no cover rather than surfacing an error; the service's negative cache keeps artless tracks from being retried over and over.
 
 ## Flow 4: Read a Paged Listing
 

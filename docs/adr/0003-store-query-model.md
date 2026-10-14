@@ -34,7 +34,7 @@ recorded explicitly:
 - The genre-scoped hit reads (`hit_albums_in_genre`, `hit_artists_in_genre`,
   `album_hit_tracks_in_genre`, `hit_genre_counts`) are **not** covered by this
   record's bounded-window description. They materialise every genre-bearing
-  track and every album and filter in Rust, with no offset-and-total twin at all.
+  track and every album and filter in Rust, with no offset-and-total counterpart at all.
   Making them bounded is a separately tracked query optimisation with its own
   result-set semantics, deliberately not part of the Listing Page change.
 
@@ -58,7 +58,7 @@ for the seam side.
 - A **row read** asks for one window at the window size the Session Projection
   owns. The port's own rule is unchanged and still binding: a page read takes
   an offset, never a window length it invents.
-- The consequence, stated rather than papered over: a count and a window are now
+- The consequence, stated rather than concealed: a count and a window are now
   two reads, so a committed write can land between them. The guarantee that
   survives is at the seam — both reads are stamped at the same generation — not
   here. A caller relying on the old "one fact" pairing must now read them

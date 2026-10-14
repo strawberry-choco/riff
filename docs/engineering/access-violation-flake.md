@@ -34,7 +34,7 @@ in the app code is implicated.
 ## Open questions
 
 - Whether lowering `MAX_CONCURRENT_HARNESSES` changes the rate. The cap is
-  currently not sufficient, and the documented next move (lower the cap rather
+  currently not enough, and the documented next move (lower the cap rather
   than chase pixels) has not been tried since.
 - Whether the crash needs concurrency at all — a `--test-threads=1` golden run
   has not been recorded.

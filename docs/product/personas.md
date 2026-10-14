@@ -18,7 +18,7 @@ Maya has been accumulating music for twenty years. Her collection lives in sever
 
 - Players that assume one music folder and fall apart when the collection spans drives.
 - Having to trigger a full rescan by hand after every download, or living with stale entries for files she deleted months ago.
-- Cloud-first players that treat local files as a second-class afterthought, or demand an account and an upload step for music she already owns.
+- Cloud-first players that treat local files as an afterthought, or demand an account and an upload step for music she already owns.
 - Libraries that take minutes to appear after launch because the player re-walks every disk on startup.
 
 ## The Minimalist
@@ -30,7 +30,7 @@ Jonas wants a music player the way he wants a text editor: small, fast, and quie
 - Play local files with standard controls and no ceremony.
 - A single small binary he can install, update, and remove cleanly.
 - Fast startup and low resource use on modest hardware.
-- No network activity, no accounts, no "smart" features that phone home.
+- No network activity, no accounts, no "smart" features that send data anywhere.
 
 **Frustrations**
 
@@ -40,7 +40,7 @@ Jonas wants a music player the way he wants a text editor: small, fast, and quie
 
 ## The Archivist
 
-Priya's collection is a preservation project. Everything is FLAC or lossless, ripped carefully and tagged by hand: album artist on compilations, correct track numbers, genre and year filled in, front cover embedded in every file. She has strong opinions about metadata fidelity and has been burned by players that silently ignored her tags, misgrouped compilations under the wrong artist, or displayed the wrong artwork because a stray `folder.jpg` outranked the embedded image she curated.
+Priya's collection is a preservation project. Everything is FLAC or lossless, ripped carefully and tagged by hand: album artist on compilations, correct track numbers, genre and year filled in, front cover embedded in every file. She has strong opinions about metadata fidelity and has been let down by players that silently ignored her tags, misgrouped compilations under the wrong artist, or displayed the wrong artwork because a stray `folder.jpg` outranked the embedded image she curated.
 
 **Goals**
 

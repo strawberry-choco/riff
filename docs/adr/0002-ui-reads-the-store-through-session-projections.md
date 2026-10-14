@@ -30,7 +30,7 @@ describes; the decision itself stands.
   capability: the module name and every import path are unchanged, and the UI still
   holds only `SessionViews`.
 - **One canonical staleness contract**: the generation-keyed cache each Session
-  Projection rides on exists exactly once, in the Application Store contract beside
+  Projection relies on exists exactly once, in the Application Store contract beside
   the generation counter it keys on. Its `peek` answers the stale-but-present value
   regardless of epoch — freshness is a caller-side check, explicit at every read that
   needs it. Stale-but-present reads, the bug class this contract prevents, now have a
@@ -71,15 +71,14 @@ an intention.
 
 ## Amendment (2026-09-23)
 
-The decision above stands. One mechanism the previous amendment asserted turned out to
-carry no weight, and one thing it claimed about the playback caches understated the case.
+The decision above stands. One mechanism the previous amendment asserted turned out not to matter, and one thing it claimed about the playback caches understated the case.
 Both are corrected here rather than left as descriptions of an intention.
 
 - **The page's generation stamp is deleted.** `Page<T>` carried a private, accessorless
   `stamp` captured inside the store's connection acquisition. Nothing in the workspace
   ever read it: `GenerationCache::level` observes the counter itself before loading and
   commits at *that* epoch, so the store's stamp was inert data across the seam. What a
-  Listing Page actually guarantees, and what remains true, is that its total and its
+  Listing Page guarantees, and what remains true, is that its total and its
   visible window are taken under **one connection acquisition**, so no committed write can
   interleave them. Which generation a cached level was filled at is the cache's business,
   not the page's. `CONTEXT.md`'s Listing Page entry now says so.
@@ -128,7 +127,7 @@ two of this record's amendments described it as though it were.
   within one frame; and each read keeps its **last good** answer on failure, so a header
   never blanks over rows still on screen. The store's `Page<T>` and its nine `*_page` port
   methods are unchanged and still read a total and a window under one connection
-  acquisition — a seam count read simply reaches one of them asking for **zero** rows, so
+  acquisition — a seam count read reaches one of them asking for **zero** rows, so
   the total costs no window and nothing is fetched and thrown away. `Page<T>` has left
   `CONTEXT.md`'s vocabulary and stays in the glossary and the architecture reference as the
   store adapter's own read shape.

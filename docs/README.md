@@ -1,6 +1,6 @@
 # riff Documentation
 
-Welcome to the documentation for **riff** — a lightweight, offline-first desktop music player built in Rust with egui. This is the single home for everything you need to understand the product, its architecture, and how to work on it.
+Welcome to the documentation for **riff** — a lightweight, offline-first desktop music player built in Rust with egui. This is the single place for everything about the product, its architecture, and how to work on it.
 
 riff is a Cargo workspace that plays local audio files (MP3, AAC, Opus, FLAC, OGG Vorbis, WAV) using pure-Rust libraries, manages a music library from one or more folders, and runs cross-platform on Linux, Windows, and macOS. It keeps no cloud dependencies by design.
 
@@ -51,7 +51,7 @@ What riff is, what it does, and how to use it.
 - [ADR 0012: A narrow port gets a real adapter, not a blanket impl](adr/0012-narrow-port-gets-a-real-adapter.md) — `StorePlaybackLibrary` replaces the blanket impl so the engine's port stays fakeable.
 - [ADR 0013: ReplayGain 2.0 via BS.1770, never 1.0](adr/0013-replaygain-2-via-bs1770-never-1.md) — the measurement standard, the −18 LUFS reference, and the `ebur128` adapter behind the `LoudnessAnalyzer` port.
 - [ADR 0014: File tags are the source of truth; the Store mirrors them](adr/0014-file-tags-are-the-source-of-truth.md) — file-first write ordering and the Library Scan as the reconciler of external edits, made the general rule of the scan's and Tag Edit's semantics.
-- [ADR 0015: Commit messages are a machine-read interface](adr/0015-commit-messages-are-a-machine-read-interface.md) — the message format is load-bearing because the release-notes generator parses it; one validator, generated release notes, rebase-and-merge only, and the pinned pre-1.0 bump semantics in `cliff.toml`.
+- [ADR 0015: Commit messages are a machine-read interface](adr/0015-commit-messages-are-a-machine-read-interface.md) — the message format matters because the release-notes generator parses it; one validator, generated release notes, rebase-and-merge only, and the pinned pre-1.0 bump semantics in `cliff.toml`.
 - [ADR 0016: The commit history was retrofitted to conform](adr/0016-history-retrofit.md) — the 2026-10-07 one-time rewrite that made the whole log satisfy the commit profile, what it destroyed (pre-rewrite SHAs, the merge structure), and the constraint that justified it.
 - [ADR 0017: Reduce motion resolves to tempo, not palette](adr/0017-reduce-motion-resolves-to-tempo-not-palette.md) — the Reduce motion setting is a `UiFlags` peer of High contrast but resolves into a temporal policy at the theme boundary; `Palette` stays a pure colour set and the `0.0` sentinel snaps washes to their settled tint with no repaint loop.
 

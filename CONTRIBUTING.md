@@ -2,7 +2,7 @@
 
 Thanks for helping. riff is a lightweight, offline-first desktop music player written in Rust and egui, and a contribution can be any size — a bug report, a one-line fix, a test, or a feature. Bug reports and feature requests go to [the issue tracker](https://github.com/strawberry-choco/riff/issues).
 
-This file is a front door, not a manual. The detail lives in [`docs/`](docs/README.md), which indexes every document in the repository. Two of them matter most before you write code: [docs/engineering/contributing.md](docs/engineering/contributing.md) (how to orient yourself, the crate architecture, and the rules a change must respect) and [docs/engineering/coding-standards.md](docs/engineering/coding-standards.md) (layering rules, lint configuration, and the implementation gotchas that trip contributors up).
+This file is a starting point, not a manual. The detail lives in [`docs/`](docs/README.md), which indexes every document in the repository. Two of them matter most before you write code: [docs/engineering/contributing.md](docs/engineering/contributing.md) (how to orient yourself, the crate architecture, and the rules a change must respect) and [docs/engineering/coding-standards.md](docs/engineering/coding-standards.md) (layering rules, lint configuration, and the implementation gotchas that trip contributors up).
 
 ## Code of Conduct
 
@@ -44,7 +44,7 @@ Run all of these before you open a pull request — it is the same gate CI runs 
 
 For UI changes, also run `cargo run -p riff-gui` and check the behavior by hand — much of the interface is exercised manually rather than by an automated test. New logic should come with new tests; [docs/engineering/testing-strategy.md](docs/engineering/testing-strategy.md) says which suite a given change belongs in.
 
-Commit messages are validated at commit time, so you learn about a malformed message before CI does. One command wires the hook in:
+A local hook validates commit messages at commit time, so you learn about a malformed message before CI does. One command wires the hook in:
 
 ```bash
 git config core.hooksPath .githooks

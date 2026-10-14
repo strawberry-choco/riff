@@ -4,7 +4,7 @@ This guide gets a new contributor from a fresh machine to a running build of rif
 
 ## Prerequisites
 
-The only hard requirement is a Rust toolchain. Every crate declares `rust-version = "1.95"` in its manifest, so you want a toolchain at or above that version. Note that this MSRV is informational only; there is no CI job that enforces it, so a slightly older compiler may happen to work but is not supported.
+The only hard requirement is a Rust toolchain. Every crate declares `rust-version = "1.95"` in its manifest, so you want a toolchain at or above that version. Note that this MSRV is informational only; there is no CI job that enforces it, so a slightly older compiler may work but is not supported.
 
 Install Rust via [rustup](https://rustup.rs/), which manages the compiler, `cargo`, `rustfmt`, and `clippy`:
 

@@ -18683,6 +18683,90 @@ mod context_menu_ui_tests {
         assert!(transport.recorded().is_empty());
     }
 
+    /// The merged measure arm's Album guard: a measure item on a row that is
+    /// NOT an Album submits nothing.
+    ///
+    /// The two measure items share one arm now, and the Album guard is exactly
+    /// the part a future edit could quietly break — matching on
+    /// `row.is_some()`, or dropping it because "the menu only offers these on
+    /// albums". The menu's offer is decided in `browser.rs` by a key-CONTAINS
+    /// check, which is a different question from whether this Column's
+    /// classifier reads the same key as an Album: an Artist row in the Artists
+    /// section carries no separator and is still a real row. So the negative is
+    /// pinned here, at the applier, where its only consequence lives.
+    ///
+    /// The Album side is pinned by
+    /// `the_album_measure_items_submit_album_pass_commands`; this test needs
+    /// only the negative.
+    #[test]
+    fn a_measure_item_on_a_non_album_row_submits_nothing() {
+        let mut playback = PlaybackSession::default();
+
+        // An Artist row: a real entity row, classified by the Artists section
+        // at its own depth — so the guard has an entity to reject rather than
+        // an unclassifiable key, which is the case a `row.is_some()` rewrite
+        // would wrongly admit.
+        let mut artist_library = LibrarySession {
+            library_section: LibrarySection::Artists,
+            ..Default::default()
+        };
+        let mut views = entity_views();
+        let transport = MockTransport::new();
+        let passes = RecordingPasses::default();
+        for intent in [
+            ListMenuIntent::MeasureAlbumAggregate,
+            ListMenuIntent::MeasureAlbumTracks,
+        ] {
+            apply_collection_menu(
+                "Boards of Canada",
+                &[intent],
+                ColumnIdentity::root(LibrarySection::Artists),
+                CollectionMenuHost::new(
+                    &mut artist_library,
+                    &mut playback,
+                    &transport,
+                    &passes,
+                    &mut views,
+                ),
+            );
+        }
+        assert!(
+            passes.submitted.lock().unwrap().is_empty(),
+            "an Artist row submits no Album pass command, got {:?}",
+            passes.submitted.lock().unwrap()
+        );
+        assert!(
+            transport.recorded().is_empty(),
+            "a measure item starts no playback, whatever the row is"
+        );
+
+        // The other way the guard is reached: a key the section cannot classify
+        // at its own depth. The Albums section at level 0 expects the
+        // `(artist, title)` composite, so a bare name reads as no row at all.
+        let mut album_library = LibrarySession {
+            library_section: LibrarySection::Albums,
+            ..Default::default()
+        };
+        let mut views = entity_views();
+        apply_collection_menu(
+            "Boards of Canada",
+            &[ListMenuIntent::MeasureAlbumAggregate],
+            ColumnIdentity::root(LibrarySection::Albums),
+            CollectionMenuHost::new(
+                &mut album_library,
+                &mut playback,
+                &transport,
+                &passes,
+                &mut views,
+            ),
+        );
+        assert!(
+            passes.submitted.lock().unwrap().is_empty(),
+            "a key the section cannot classify submits nothing either, got {:?}",
+            passes.submitted.lock().unwrap()
+        );
+    }
+
     /// The menu's content policy is unchanged by the extraction: a Track whose
     /// file is gone offers neither playback actions nor the tag editor — and no
     /// Favourite either, because the Favourite item sits inside the very same

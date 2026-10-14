@@ -1274,7 +1274,7 @@ impl RiffApp {
             .resizable(false)
             .frame(
                 egui::Frame::new()
-                    .inner_margin(egui::Margin::same(12))
+                    .inner_margin(egui::Margin::same(theme::SIDEBAR_PANEL_PAD))
                     .fill(self.theme.active.surface),
             )
             .show(ui, |ui| {
@@ -2554,7 +2554,7 @@ impl RiffApp {
         // floating sheet above the bar's right edge; its rows report
         // `PlayNext` through the same action drain as the bar itself.
         if library.queue_open {
-            let up_next = self.queue_panel_rows(playback);
+            let up_next = self.up_next_rows(playback, crate::ui::playerbar::QUEUE_PANEL_LIMIT);
             crate::ui::playerbar::show_queue_panel(
                 ui,
                 &mut self.icons,
@@ -2611,29 +2611,31 @@ impl RiffApp {
             .map(Arc::from)
     }
 
-    /// The queue panel's rows, resolved from the playback projection.
+    /// The Up Next rows for one window, resolved from the playback projection.
     ///
-    /// The bar is the only surface that paints this panel, so the window
-    /// assembly is its own: sync the projection at the panel's own limit, then
-    /// read the rows back out. Both reads go through the Session Views seam
-    /// over the store's `get_track` query — never the mirror — and the ORDER
-    /// between them is load-bearing: syncing first is what makes the rows the
-    /// panel reads be the rows for the queue the bar is showing. Extracted so
-    /// the bar's render calls one place for a panel's content rather than
-    /// spelling the two-step against the seam inline.
+    /// One routine for the two surfaces that show an Up Next window, because
+    /// both do the same two seam reads and differ only in how wide a window
+    /// they ask for: the queue panel beside the player bar and the stage under
+    /// the Now Playing cover. Each names its own limit at its call site, so the
+    /// window width stays a fact about the surface rather than a parameter
+    /// somebody has to remember to pass.
     ///
-    /// Takes `&mut self` because the sync writes the projection's state; it
-    /// borrows only the views, so it coexists with the caller's `icons`.
-    fn queue_panel_rows(
+    /// The ORDER of the two reads is load-bearing and identical at both sites:
+    /// the sync comes first, because [`SessionViews::playback_current`] and
+    /// [`SessionViews::playback_up_next`] are both documented as reads to make
+    /// *after* a sync — the stage resolves the cover and the details line
+    /// between them, and those must see the same refreshed projection the rows
+    /// do. Cheap when nothing moved (the projection stamps the comparison).
+    ///
+    /// Returns the seam's own `Vec` because that is what it produces; each
+    /// caller converts to its consumer's shape rather than this adopting one.
+    fn up_next_rows(
         &mut self,
         playback: &PlaybackSession,
+        limit: usize,
     ) -> Vec<crate::ui::sidebar::UpNextEntry> {
-        self.views
-            .sync_playback(&playback.queue, crate::ui::playerbar::QUEUE_PANEL_LIMIT);
-        crate::ui::sidebar::up_next_entries(
-            self.views.playback_up_next(),
-            crate::ui::playerbar::QUEUE_PANEL_LIMIT,
-        )
+        self.views.sync_playback(&playback.queue, limit);
+        crate::ui::sidebar::up_next_entries(self.views.playback_up_next(), limit)
     }
 }
 
@@ -3707,19 +3709,20 @@ impl RiffApp {
         // background resolve exactly like the other views. Both the current
         // Track and the Up Next window come from the Session Views seam
         // over the store's `get_track` query — never the mirror.
-        self.views
-            .sync_playback(&playback.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
+        //
+        // The rows are resolved FIRST, ahead of the cover and the details
+        // line, because that call is what syncs the playback projection and
+        // `playback_current` is documented as a read to make after it. They
+        // are converted to the stage's own shape at the content assembly
+        // below — the same window, only wrapped later.
+        let up_next_rows = self.up_next_rows(playback, crate::ui::now_playing::UP_NEXT_LIMIT);
         let cover = self.now_playing_cover(ui.ctx());
         // The title and meta lines ride the bar's once-per-frame handout;
         // only the details line is stage-only, resolved through the same
         // playback projection the cover and the labels read (staleness is the
         // projection's job, not the widget layer's).
         let details = self.current_track_details();
-        let up_next: Arc<[UpNextEntry]> = crate::ui::sidebar::up_next_entries(
-            self.views.playback_up_next(),
-            crate::ui::now_playing::UP_NEXT_LIMIT,
-        )
-        .into();
+        let up_next: Arc<[UpNextEntry]> = up_next_rows.into();
 
         let content = crate::ui::now_playing::NowPlayingContent {
             cover,

@@ -109,36 +109,39 @@ pub fn apply_collection_menu(
 ) {
     apply_entity_selection(key, column, host.library);
     for intent in intents {
+        // The row's identity, resolved ONCE for every arm that needs it:
+        // `entity_row` is pure over the key and the Column's own identity, so
+        // the whole-Album play provenance below and the two measure items all
+        // read one answer instead of re-splitting the key at each use.
+        //
         // The Album menu's two measure items are not batch actions over a
         // Track set — they name the Album itself. The other four go through
         // the shared list-intent applier.
         // An Album row's play/shuffle is a **whole-Album play** — the
         // `ReplayGain` queue provenance — while an Artist or Genre row is a
         // batch of Albums and a folder or playlist is neither.
-        let whole_album = matches!(
-            entity_row(key, column.section(), column.level()),
-            Some(EntityRow::Album { .. })
-        );
+        let row = entity_row(key, column.section(), column.level());
+        let whole_album = matches!(row, Some(EntityRow::Album { .. }));
         match intent {
-            crate::ui::menu::ListMenuIntent::MeasureAlbumAggregate => {
-                if let Some(EntityRow::Album { artist, title }) =
-                    entity_row(key, column.section(), column.level())
-                {
-                    host.passes.submit(PassCommand::AlbumAggregate {
+            crate::ui::menu::ListMenuIntent::MeasureAlbumAggregate
+            | crate::ui::menu::ListMenuIntent::MeasureAlbumTracks => {
+                // Only the value kind differs between the two, so they share
+                // the guard and the submission and pick a command by intent.
+                let Some(EntityRow::Album { artist, title }) = row else {
+                    continue;
+                };
+                host.passes.submit(match intent {
+                    crate::ui::menu::ListMenuIntent::MeasureAlbumAggregate => {
+                        PassCommand::AlbumAggregate {
+                            album_artist: artist,
+                            album_title: title,
+                        }
+                    }
+                    _ => PassCommand::AlbumTracks {
                         album_artist: artist,
                         album_title: title,
-                    });
-                }
-            }
-            crate::ui::menu::ListMenuIntent::MeasureAlbumTracks => {
-                if let Some(EntityRow::Album { artist, title }) =
-                    entity_row(key, column.section(), column.level())
-                {
-                    host.passes.submit(PassCommand::AlbumTracks {
-                        album_artist: artist,
-                        album_title: title,
-                    });
-                }
+                    },
+                });
             }
             crate::ui::menu::ListMenuIntent::Play => {
                 let batch = entity_track_ids(key, column, host.views);

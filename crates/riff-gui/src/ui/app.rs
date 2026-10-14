@@ -2554,12 +2554,7 @@ impl RiffApp {
         // floating sheet above the bar's right edge; its rows report
         // `PlayNext` through the same action drain as the bar itself.
         if library.queue_open {
-            self.views
-                .sync_playback(&playback.queue, crate::ui::playerbar::QUEUE_PANEL_LIMIT);
-            let up_next = crate::ui::sidebar::up_next_entries(
-                self.views.playback_up_next(),
-                crate::ui::playerbar::QUEUE_PANEL_LIMIT,
-            );
+            let up_next = self.queue_panel_rows(playback);
             crate::ui::playerbar::show_queue_panel(
                 ui,
                 &mut self.icons,
@@ -2594,6 +2589,50 @@ impl RiffApp {
                 track.metadata.display_artist(),
                 track.metadata.display_album()
             ))),
+        )
+    }
+
+    /// The Now Playing stage's secondary details line for the current track.
+    ///
+    /// A third read of the same projection the bar's labels and the stage's
+    /// cover already go through, and deliberately its own read rather than a
+    /// parameter the caller threads in: the stage is the only surface that
+    /// paints a details line, so there is no handout to ride and nothing to
+    /// share. Taken as `&self` and resolved here so the stage's render is left
+    /// assembling [`crate::ui::now_playing::NowPlayingContent`] and nothing
+    /// else.
+    ///
+    /// `None` when nothing plays — the stage renders the cover block with no
+    /// line under it rather than an empty one.
+    fn current_track_details(&self) -> Option<Arc<str>> {
+        self.views
+            .playback_current()
+            .and_then(|track| crate::ui::now_playing::metadata_details(&track.metadata))
+            .map(Arc::from)
+    }
+
+    /// The queue panel's rows, resolved from the playback projection.
+    ///
+    /// The bar is the only surface that paints this panel, so the window
+    /// assembly is its own: sync the projection at the panel's own limit, then
+    /// read the rows back out. Both reads go through the Session Views seam
+    /// over the store's `get_track` query — never the mirror — and the ORDER
+    /// between them is load-bearing: syncing first is what makes the rows the
+    /// panel reads be the rows for the queue the bar is showing. Extracted so
+    /// the bar's render calls one place for a panel's content rather than
+    /// spelling the two-step against the seam inline.
+    ///
+    /// Takes `&mut self` because the sync writes the projection's state; it
+    /// borrows only the views, so it coexists with the caller's `icons`.
+    fn queue_panel_rows(
+        &mut self,
+        playback: &PlaybackSession,
+    ) -> Vec<crate::ui::sidebar::UpNextEntry> {
+        self.views
+            .sync_playback(&playback.queue, crate::ui::playerbar::QUEUE_PANEL_LIMIT);
+        crate::ui::sidebar::up_next_entries(
+            self.views.playback_up_next(),
+            crate::ui::playerbar::QUEUE_PANEL_LIMIT,
         )
     }
 }
@@ -3672,14 +3711,10 @@ impl RiffApp {
             .sync_playback(&playback.queue, crate::ui::now_playing::UP_NEXT_LIMIT);
         let cover = self.now_playing_cover(ui.ctx());
         // The title and meta lines ride the bar's once-per-frame handout;
-        // only the details line is stage-only, resolved here from the
-        // playback projection (staleness is the projection's job, not the
-        // widget layer's).
-        let details = self
-            .views
-            .playback_current()
-            .and_then(|track| crate::ui::now_playing::metadata_details(&track.metadata))
-            .map(Arc::from);
+        // only the details line is stage-only, resolved through the same
+        // playback projection the cover and the labels read (staleness is the
+        // projection's job, not the widget layer's).
+        let details = self.current_track_details();
         let up_next: Arc<[UpNextEntry]> = crate::ui::sidebar::up_next_entries(
             self.views.playback_up_next(),
             crate::ui::now_playing::UP_NEXT_LIMIT,

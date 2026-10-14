@@ -865,6 +865,17 @@ impl RiffApp {
         );
     }
 
+    /// A track row's leading cover tile: ask for the art at the row's own
+    /// thumbnail box and resolve the texture to paint — the real Cover when one
+    /// has landed, the shared music-icon placeholder when it has not. The two
+    /// statements this replaced were spelled at both track-row sites, and the
+    /// request half is only meaningful beside the resolve half it feeds.
+    fn track_row_cover(&mut self, ctx: &egui::Context, track: &Track) -> egui::TextureId {
+        self.request_cover(&track.id, &track.file_path, COVER_THUMB);
+        self.resolve_cover_texture(ctx, &track.id.0, COVER_THUMB)
+            .id()
+    }
+
     /// Shared clickable track row behind every track listing: restyled 40px
     /// tree row + selection/play/context-menu wiring. `label` lets callers
     /// keep their display formats ("Artist - Title", "01. Title").
@@ -906,12 +917,9 @@ impl RiffApp {
         // Every library track row carries a leading cover tile: the real
         // cover when one is cached, otherwise the shared music-icon
         // placeholder — artless tracks read as a uniform tile instead of an
-        // empty gap. The request above keeps filling the cache with real art
-        // as it lands (the placeholder lives under a separate key).
-        let cover = Some(
-            self.resolve_cover_texture(ui.ctx(), &track.id.0, COVER_THUMB)
-                .id(),
-        );
+        // empty gap. The request keeps filling the cache with real art as it
+        // lands (the placeholder lives under a separate key).
+        let cover = Some(self.track_row_cover(ui.ctx(), track));
 
         let row = sidebar::tree_row(
             ui,
@@ -3458,14 +3466,9 @@ impl RiffApp {
         let playing = playback.playback_state == PlaybackState::Playing;
         let label = label_artist_title(track);
 
-        self.request_cover(&track.id, &track.file_path, COVER_THUMB);
-
         // Same leading cover tile as the library rows: real art when cached,
         // otherwise the shared music-icon placeholder for artless tracks.
-        let cover = Some(
-            self.resolve_cover_texture(ui.ctx(), &track.id.0, COVER_THUMB)
-                .id(),
-        );
+        let cover = Some(self.track_row_cover(ui.ctx(), track));
 
         let row = TreeRow::track(
             &label,
@@ -3811,38 +3814,84 @@ impl RiffApp {
     }
 }
 
-/// Where the two halves of the Cover Cache meet for a Track row: the cache
-/// decides whether this `(identity, box)` needs a request, and the View half
-/// answers with the texture to paint — the real Cover, or the shared
-/// placeholder tile on a full miss. The one place a row needs both, so a render
-/// site asks for a cover texture rather than assembling the decision out of
-/// fields it has no business knowing.
+/// Both halves of the Cover Cache plus the two facts a lookup needs that
+/// belong to neither: where a placeholder tile is uploaded, and the tokens it
+/// is derived from.
 ///
-/// A free function so the browser columns' per-row closures can reach it: those
-/// closures already hold a mutable borrow of the session Views, so `&mut self`
-/// is not available to them, and the handles they were re-splatting — the
-/// marker set, the marker set's LRU order — are now inside the cache.
-#[allow(clippy::too_many_arguments)]
-pub fn cover_texture_for<S: std::hash::BuildHasher>(
-    cache: &mut crate::ui::cover_cache::CoverCache,
-    covers: &dyn Covers,
-    textures: &mut std::collections::HashMap<CoverCacheKey, egui::TextureHandle, S>,
-    lru_keys: &mut Vec<CoverCacheKey>,
-    ctx: &egui::Context,
-    palette: &Palette,
-    track_id: &TrackId,
-    size: RequestedSize,
-) -> egui::TextureHandle {
-    cache.want_track(covers, track_id.clone(), PathBuf::from(&track_id.0), size);
-    crate::ui::artwork::lookup_cover_texture(
-        cache,
-        textures,
-        lru_keys,
-        ctx,
-        palette,
-        &track_id.0,
-        size,
-    )
+/// A Track row's cover is the ONE place the two halves meet, and it used to be
+/// reached by naming five borrows out of [`RiffApp`] and then spelling a
+/// nine-argument call with them — once per listing for the borrows, and once
+/// per row for the call. This is that handle set as one value with one method:
+/// a listing states what it holds and a row asks for a texture by track id.
+///
+/// It deliberately holds no session, no service and no stage state, which is
+/// what lets a row closure call [`Self::thumbnail`] while it already holds
+/// `&mut SessionViews` — the same disjoint-borrow shape [`FrameParts`] and
+/// [`TrackRowContext`] use. The struct is the artwork seam's argument bundle,
+/// not a cache: it owns no pixels and no markers of its own.
+pub struct RowCovers<'a> {
+    /// The Cover Service front end (ADR 0006): the request goes out through
+    /// it, behind the decision half's own "is this due" answer.
+    covers: &'a dyn Covers,
+    /// The decision half: what is wanted, what is in flight, what arrived.
+    cache: &'a mut crate::ui::cover_cache::CoverCache,
+    /// The View half's `egui::TextureHandle` map.
+    textures: &'a mut std::collections::HashMap<CoverCacheKey, egui::TextureHandle>,
+    /// The View half's LRU order for the map above — the other bound the map
+    /// is held by.
+    lru_keys: &'a mut Vec<CoverCacheKey>,
+    /// The context the shared placeholder tile is uploaded on, for a full
+    /// miss.
+    ctx: egui::Context,
+    /// The tokens the tile is derived from (ADR 0004): a palette-family flip
+    /// evicts it, so it is read fresh per lookup rather than held per tile.
+    palette: Palette,
+}
+
+impl<'a> RowCovers<'a> {
+    /// Take the four handles the artwork seam reads and writes, plus the
+    /// context and the tokens a miss needs. The only place any of them is
+    /// named — every row site that used to list them itself goes through here.
+    pub fn new(
+        covers: &'a dyn Covers,
+        cache: &'a mut crate::ui::cover_cache::CoverCache,
+        textures: &'a mut std::collections::HashMap<CoverCacheKey, egui::TextureHandle>,
+        lru_keys: &'a mut Vec<CoverCacheKey>,
+        ctx: &egui::Context,
+        palette: Palette,
+    ) -> Self {
+        Self {
+            covers,
+            cache,
+            textures,
+            lru_keys,
+            ctx: ctx.clone(),
+            palette,
+        }
+    }
+
+    /// One row's cover at `size`: the request is asked for through the
+    /// decision half — which is what knows whether it is due — and the texture
+    /// to paint comes back from the View one. Real art when it has landed, the
+    /// shared music-icon placeholder tile on a miss; either way this is the
+    /// texture the row paints, and the LRU is touched while resolving it.
+    pub fn thumbnail(&mut self, track_id: &TrackId, size: RequestedSize) -> egui::TextureHandle {
+        self.cache.want_track(
+            self.covers,
+            track_id.clone(),
+            PathBuf::from(&track_id.0),
+            size,
+        );
+        crate::ui::artwork::lookup_cover_texture(
+            self.cache,
+            self.textures,
+            self.lru_keys,
+            &self.ctx,
+            &self.palette,
+            &track_id.0,
+            size,
+        )
+    }
 }
 
 /// The Folders tree's half of the same responsibility (ADR 0006): a folder row
@@ -3854,9 +3903,9 @@ pub fn cover_texture_for<S: std::hash::BuildHasher>(
 /// music-note placeholder the artless track rows get: a folder with no cover of
 /// its own is an ordinary folder, not an artless album.
 ///
-/// Which is why this is not [`cover_texture_for`]: a folder row has to be told
-/// art exists before it decides between the two, while a Track row paints the
-/// placeholder until real pixels land and asks for neither.
+/// Which is why this is not [`RowCovers::thumbnail`]: a folder row has to be
+/// told art exists before it decides between the two, while a Track row paints
+/// the placeholder until real pixels land and asks for neither.
 pub fn folder_cover_texture<S: std::hash::BuildHasher>(
     cache: &mut crate::ui::cover_cache::CoverCache,
     covers: &dyn Covers,

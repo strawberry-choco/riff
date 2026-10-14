@@ -48,9 +48,9 @@ use super::super::column::ColumnIdentity;
 use super::super::scroll_memory::{DrillSlot, ScrollMemory};
 use super::super::theme::Palette;
 use super::{
-    COVER_THUMB, ColumnKind, RiffApp, apply_collection_menu, apply_detail_action,
-    apply_entity_selection, column_plan, cover_texture_for, resolve_detail_content,
-    resolve_inspector, smart_list_openable,
+    COVER_THUMB, ColumnKind, RiffApp, RowCovers, apply_collection_menu, apply_detail_action,
+    apply_entity_selection, column_plan, resolve_detail_content, resolve_inspector,
+    smart_list_openable,
 };
 
 /// The stage's single-column states: stages that are not a LIBRARY section's
@@ -285,29 +285,27 @@ impl RiffApp {
         empty_hint: &str,
     ) {
         let palette = self.theme.active;
-        let covers = &self.covers;
-        let cover_cache = &mut self.cover_cache;
-        let textures = &mut self.cover_textures;
-        let lru_keys = &mut self.cover_lru_keys;
-        let ctx = ui.ctx().clone();
+        // The four handles this column's rows ask for art through, named once
+        // for the whole listing: a row calls `thumbnail` with a track id and
+        // never names the Cover Cache's halves.
+        let mut covers = RowCovers::new(
+            self.covers.as_ref(),
+            &mut self.cover_cache,
+            &mut self.cover_textures,
+            &mut self.cover_lru_keys,
+            ui.ctx(),
+            palette,
+        );
         let total = albums.len();
         let mut item = |i: usize| -> Option<browser::BrowserItem> {
             let album = albums.get(i)?;
             // The album's cover, requested through its first track — the
             // same flow the root columns use; a full miss resolves the
             // music-icon placeholder tile.
-            let thumbnail = album.tracks.first().map(|tid| {
-                cover_texture_for(
-                    cover_cache,
-                    covers.as_ref(),
-                    textures,
-                    lru_keys,
-                    &ctx,
-                    &palette,
-                    tid,
-                    COVER_THUMB,
-                )
-            });
+            let thumbnail = album
+                .tracks
+                .first()
+                .map(|tid| covers.thumbnail(tid, COVER_THUMB));
             let detail = album.year.map_or_else(
                 || album.artist.clone(),
                 |y| format!("{} \u{b7} {y}", album.artist),
@@ -370,11 +368,14 @@ impl RiffApp {
     ) {
         let palette = self.theme.active;
         let views = &mut self.views;
-        let covers = &self.covers;
-        let cover_cache = &mut self.cover_cache;
-        let textures = &mut self.cover_textures;
-        let lru_keys = &mut self.cover_lru_keys;
-        let ctx = ui.ctx().clone();
+        let mut covers = RowCovers::new(
+            self.covers.as_ref(),
+            &mut self.cover_cache,
+            &mut self.cover_textures,
+            &mut self.cover_lru_keys,
+            ui.ctx(),
+            palette,
+        );
         // The drill sort's direction is part of the listing's query
         // signature — the store applies it in SQL, so a row index names the
         // same row before and after the flip (no in-memory reversal of an
@@ -399,18 +400,7 @@ impl RiffApp {
             let thumbnail = albums
                 .first()
                 .and_then(|album| album.tracks.first())
-                .map(|tid| {
-                    cover_texture_for(
-                        cover_cache,
-                        covers.as_ref(),
-                        textures,
-                        lru_keys,
-                        &ctx,
-                        &palette,
-                        tid,
-                        COVER_THUMB,
-                    )
-                });
+                .map(|tid| covers.thumbnail(tid, COVER_THUMB));
             let selected = matches!(
                 library.browser_path.get(1),
                 Some(BrowserSelection::Artist(name)) if name == &artist.name
@@ -468,11 +458,14 @@ impl RiffApp {
     ) {
         let palette = self.theme.active;
         let views = &mut self.views;
-        let covers = &self.covers;
-        let cover_cache = &mut self.cover_cache;
-        let textures = &mut self.cover_textures;
-        let lru_keys = &mut self.cover_lru_keys;
-        let ctx = ui.ctx().clone();
+        let mut covers = RowCovers::new(
+            self.covers.as_ref(),
+            &mut self.cover_cache,
+            &mut self.cover_textures,
+            &mut self.cover_lru_keys,
+            ui.ctx(),
+            palette,
+        );
         // The drill sort's direction is part of the listing's query
         // signature — the store applies it in SQL, so a row index names the
         // same row before and after the flip (no in-memory reversal of an
@@ -484,18 +477,10 @@ impl RiffApp {
             // The album's cover, requested through its first track — the
             // same flow the root columns use; a full miss resolves the
             // music-icon placeholder tile.
-            let thumbnail = album.tracks.first().map(|tid| {
-                cover_texture_for(
-                    cover_cache,
-                    covers.as_ref(),
-                    textures,
-                    lru_keys,
-                    &ctx,
-                    &palette,
-                    tid,
-                    COVER_THUMB,
-                )
-            });
+            let thumbnail = album
+                .tracks
+                .first()
+                .map(|tid| covers.thumbnail(tid, COVER_THUMB));
             let detail = album.year.map_or_else(
                 || album.artist.clone(),
                 |y| format!("{} \u{b7} {y}", album.artist),
@@ -752,11 +737,14 @@ impl RiffApp {
         };
 
         let views = &mut self.views;
-        let covers = &self.covers;
-        let cover_cache = &mut self.cover_cache;
-        let textures = &mut self.cover_textures;
-        let lru_keys = &mut self.cover_lru_keys;
-        let ctx = ui.ctx().clone();
+        let mut covers = RowCovers::new(
+            self.covers.as_ref(),
+            &mut self.cover_cache,
+            &mut self.cover_textures,
+            &mut self.cover_lru_keys,
+            ui.ctx(),
+            palette,
+        );
         // The count read, taken before the closure borrows `views` mutably:
         // its own store read, the value to size the row range with.
         let total = if hit {
@@ -784,18 +772,10 @@ impl RiffApp {
                 1 => "1 album".to_string(),
                 n => format!("{n} albums"),
             };
-            let thumbnail = views.artist_first_track(&name).as_ref().map(|tid| {
-                cover_texture_for(
-                    cover_cache,
-                    covers.as_ref(),
-                    textures,
-                    lru_keys,
-                    &ctx,
-                    &palette,
-                    tid,
-                    COVER_THUMB,
-                )
-            });
+            let thumbnail = views
+                .artist_first_track(&name)
+                .as_ref()
+                .map(|tid| covers.thumbnail(tid, COVER_THUMB));
             Some(browser::BrowserItem {
                 key: name.clone(),
                 label: name.clone(),
@@ -892,11 +872,14 @@ impl RiffApp {
         };
 
         let views = &mut self.views;
-        let covers = &self.covers;
-        let cover_cache = &mut self.cover_cache;
-        let textures = &mut self.cover_textures;
-        let lru_keys = &mut self.cover_lru_keys;
-        let ctx = ui.ctx().clone();
+        let mut covers = RowCovers::new(
+            self.covers.as_ref(),
+            &mut self.cover_cache,
+            &mut self.cover_textures,
+            &mut self.cover_lru_keys,
+            ui.ctx(),
+            palette,
+        );
         // The count read, taken before the closure borrows `views` mutably:
         // its own store read, the value to size the row range with.
         let total = if hit {
@@ -919,19 +902,7 @@ impl RiffApp {
             let thumbnail = album
                 .tracks
                 .first()
-                .map(|tid| {
-                    cover_texture_for(
-                        cover_cache,
-                        covers.as_ref(),
-                        textures,
-                        lru_keys,
-                        &ctx,
-                        &palette,
-                        tid,
-                        COVER_THUMB,
-                    )
-                    .into()
-                })
+                .map(|tid| covers.thumbnail(tid, COVER_THUMB).into())
                 .unwrap_or_default();
             let detail = album.year.map_or_else(
                 || album.artist.clone(),
@@ -1175,9 +1146,10 @@ impl RiffApp {
 // the actions out and the caller drains them on the next statement.
 //
 // Both are free functions over explicit disjoint borrows rather than
-// methods on `RiffApp`, for the same reason `cover_texture_for` and the
-// Frame's `FrameParts` are: the render borrows the icons, the palette and
-// the Scroll Memory, none of which the caller can hand over as a whole.
+// methods on `RiffApp`, for the same reason [`RowCovers`](super::RowCovers)
+// and the Frame's `FrameParts` are: the render borrows the icons, the
+// palette and the Scroll Memory, none of which the caller can hand over as a
+// whole.
 
 /// Paint one **Section root** column and report its actions.
 ///

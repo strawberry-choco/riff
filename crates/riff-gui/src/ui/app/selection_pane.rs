@@ -18,7 +18,7 @@ use eframe::egui;
 use riff_backend::app::state::LibrarySession;
 
 use super::super::selection;
-use super::{COVER_CARD, InspectorKind, RiffApp, cover_texture_for, resolve_inspector};
+use super::{COVER_CARD, InspectorKind, RiffApp, RowCovers, resolve_inspector};
 
 /// The readout KIND's display name, for the header chip. The widget seam takes
 /// the name rather than the kind so it never has to know the app's own type —
@@ -49,23 +49,22 @@ impl RiffApp {
         // Track. An already-submitted request keeps completing; only the
         // editor stops rendering once its selection leaves.
         self.tag_editor.reconcile(&content);
-        let art = content.art_track.as_ref().map(|tid| {
-            // The cover intent goes through the selection's cover track —
-            // same flow the browser column's thumbnails use; the Cover Cache
-            // decides whether a request is due and the View half answers with
-            // the texture, which on a full miss is the shared music-icon
-            // placeholder tile.
-            cover_texture_for(
-                &mut self.cover_cache,
-                self.covers.as_ref(),
-                &mut self.cover_textures,
-                &mut self.cover_lru_keys,
-                ui.ctx(),
-                &self.theme.active,
-                tid,
-                COVER_CARD,
-            )
-        });
+        // The cover intent goes through the selection's cover track — the same
+        // flow the browser columns' thumbnails use; the Cover Cache decides
+        // whether a request is due and the View half answers with the texture,
+        // which on a full miss is the shared music-icon placeholder tile.
+        let mut covers = RowCovers::new(
+            self.covers.as_ref(),
+            &mut self.cover_cache,
+            &mut self.cover_textures,
+            &mut self.cover_lru_keys,
+            ui.ctx(),
+            self.theme.active,
+        );
+        let art = content
+            .art_track
+            .as_ref()
+            .map(|tid| covers.thumbnail(tid, COVER_CARD));
         let panel = selection::SelectionPanel {
             art: art.as_ref(),
             title: content.title.as_deref(),

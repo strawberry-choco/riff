@@ -343,15 +343,8 @@ impl RiffApp {
         // that knows this slot's selections are drill bookkeeping. Between
         // changes its scroll is egui's natural state under the drill's own
         // stable salt. That is the guard's other half: `note_scroll_for` below.
-        let actions = render_drill_column(
-            ui,
-            &mut self.icons,
-            &palette,
-            library.ui_flags.reduce_motion,
-            column,
-            column_id,
-            &mut self.scroll_memory,
-        );
+        let mut paint = column_paint(ui, &mut self.icons, palette, library.ui_flags.reduce_motion);
+        let actions = render_drill_column(&mut paint, column, column_id, &mut self.scroll_memory);
         self.drain_drill_actions(column_id, actions, library, playback);
     }
 
@@ -428,15 +421,8 @@ impl RiffApp {
         let column_id = ColumnIdentity::drill(LibrarySection::Genres, 1, DrillSlot::GenreArtists);
         // A drill column resets to the top on every selection change (no
         // per-selection memory); egui's natural state between changes.
-        let actions = render_drill_column(
-            ui,
-            &mut self.icons,
-            &palette,
-            library.ui_flags.reduce_motion,
-            column,
-            column_id,
-            &mut self.scroll_memory,
-        );
+        let mut paint = column_paint(ui, &mut self.icons, palette, library.ui_flags.reduce_motion);
+        let actions = render_drill_column(&mut paint, column, column_id, &mut self.scroll_memory);
         self.drain_drill_actions(column_id, actions, library, playback);
     }
 
@@ -514,15 +500,8 @@ impl RiffApp {
             ColumnIdentity::drill(LibrarySection::Genres, 2, DrillSlot::GenreArtistAlbums);
         // A drill column resets to the top on every selection change (no
         // per-selection memory); egui's natural state between changes.
-        let actions = render_drill_column(
-            ui,
-            &mut self.icons,
-            &palette,
-            library.ui_flags.reduce_motion,
-            column,
-            column_id,
-            &mut self.scroll_memory,
-        );
+        let mut paint = column_paint(ui, &mut self.icons, palette, library.ui_flags.reduce_motion);
+        let actions = render_drill_column(&mut paint, column, column_id, &mut self.scroll_memory);
         self.drain_drill_actions(column_id, actions, library, playback);
     }
 
@@ -804,11 +783,9 @@ impl RiffApp {
         // Scroll Memory slot it owns. The handshake below and the drain after it
         // read the same value, so the two cannot name different lists.
         let column_id = ColumnIdentity::root(LibrarySection::Artists);
+        let mut paint = column_paint(ui, &mut self.icons, palette, library.ui_flags.reduce_motion);
         let actions = render_root_column(
-            ui,
-            &mut self.icons,
-            &palette,
-            library.ui_flags.reduce_motion,
+            &mut paint,
             column,
             column_id,
             query,
@@ -942,11 +919,9 @@ impl RiffApp {
         // WHAT this Column is, stated ONCE — the same three facts the Artists
         // root states, differing only as data.
         let column_id = ColumnIdentity::root(LibrarySection::Albums);
+        let mut paint = column_paint(ui, &mut self.icons, palette, library.ui_flags.reduce_motion);
         let actions = render_root_column(
-            ui,
-            &mut self.icons,
-            &palette,
-            library.ui_flags.reduce_motion,
+            &mut paint,
             column,
             column_id,
             query,
@@ -1012,11 +987,9 @@ impl RiffApp {
         };
         // WHAT this Column is, stated ONCE.
         let column_id = ColumnIdentity::root(LibrarySection::Genres);
+        let mut paint = column_paint(ui, &mut self.icons, palette, library.ui_flags.reduce_motion);
         let actions = render_root_column(
-            ui,
-            &mut self.icons,
-            &palette,
-            library.ui_flags.reduce_motion,
+            &mut paint,
             column,
             column_id,
             query,
@@ -1151,6 +1124,60 @@ impl RiffApp {
 // palette and the Scroll Memory, none of which the caller can hand over as a
 // whole.
 
+/// What one Column paints with, stated once per listing and passed in.
+///
+/// The six entity-Column render sites each spelled the same four handles for
+/// a column they were about to describe: the ui, the icon cache, the palette,
+/// and the session's temporal policy. That prefix is identical at all six and
+/// is not the interesting part of any of them, so it becomes one value — a site
+/// states WHAT its column is, and this carries HOW it paints.
+///
+/// It is built per listing and passed **into** the paint, never shared across a
+/// call that closes over `&mut self`: the `item` closure inside a
+/// [`browser::BrowserColumn`] already holds `&mut self.views`, the Cover
+/// Cache's two halves and the LRU keys at once, so a bundle that outlived that
+/// closure would need a field of `self` the closure already holds. See the
+/// module section above, and the precedent [`RowCovers`](super::RowCovers)
+/// documents for the same reason.
+///
+/// The Scroll Memory is deliberately NOT in here: it is the one handle the
+/// paint hands to [`ScrollMemory::begin_section`] and then takes straight back,
+/// so keeping it outside the bundle is what keeps the handshake's borrow short
+/// and the drain's `&mut self` reachable afterwards.
+pub(super) struct ColumnPaint<'a> {
+    /// The column's own ui.
+    pub(super) ui: &'a mut egui::Ui,
+    /// The glyph cache the rows and the sort control draw through.
+    pub(super) icons: &'a mut crate::ui::icons::IconCache,
+    /// The tokens the column paints from (ADR 0004).
+    pub(super) palette: Palette,
+    /// Whether hover washes and tweens snap to their settled state.
+    pub(super) reduce_motion: bool,
+}
+
+/// Build the paint bundle out of the four handles every site already holds.
+///
+/// A free function rather than a `&mut self` method for the same reason
+/// [`RowCovers::new`] is one: the call sites are inside listings whose `item`
+/// closures already borrow `self.views`, `self.cover_cache`,
+/// `self.cover_textures` and `self.cover_lru_keys`, so a `&mut self` builder
+/// would ask for a second whole-`self` borrow the closures cannot release.
+/// Explicit disjoint field borrows are the shape that compiles, and naming the
+/// set here means a seventh column site passes four fields and never lists them.
+pub(super) fn column_paint<'a>(
+    ui: &'a mut egui::Ui,
+    icons: &'a mut crate::ui::icons::IconCache,
+    palette: Palette,
+    reduce_motion: bool,
+) -> ColumnPaint<'a> {
+    ColumnPaint {
+        ui,
+        icons,
+        palette,
+        reduce_motion,
+    }
+}
+
 /// Paint one **Section root** column and report its actions.
 ///
 /// The scroll-handshake for a Section root, in one place: the site declares
@@ -1163,12 +1190,8 @@ impl RiffApp {
 ///
 /// The actions come back out rather than being drained here: see the
 /// module section above for why the drains must run after the paint.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_root_column(
-    ui: &mut egui::Ui,
-    icons: &mut crate::ui::icons::IconCache,
-    palette: &Palette,
-    reduce_motion: bool,
+    paint: &mut ColumnPaint<'_>,
     column: browser::BrowserColumn<'_>,
     column_id: ColumnIdentity,
     query: &str,
@@ -1176,13 +1199,19 @@ pub(super) fn render_root_column(
     scroll_memory: &mut ScrollMemory,
 ) -> Vec<browser::BrowserAction> {
     let mut actions = Vec::new();
+    let ColumnPaint {
+        ui,
+        icons,
+        palette,
+        reduce_motion,
+    } = paint;
     let (control, visit) =
         scroll_memory.begin_section(column_id.section(), query, u8::from(sort_desc));
     let actual = browser::show_browser_column_scrolled(
         ui,
         icons,
         palette,
-        reduce_motion,
+        *reduce_motion,
         column,
         Some(control),
         &mut actions,
@@ -1210,17 +1239,19 @@ pub(super) fn render_root_column(
 /// `expect` is the One place that claim is made: every drill site states
 /// a drill identity, and a root reaching this function is a compile-time
 /// impossibility rather than a runtime surprise.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_drill_column(
-    ui: &mut egui::Ui,
-    icons: &mut crate::ui::icons::IconCache,
-    palette: &Palette,
-    reduce_motion: bool,
+    paint: &mut ColumnPaint<'_>,
     column: browser::BrowserColumn<'_>,
     column_id: ColumnIdentity,
     scroll_memory: &mut ScrollMemory,
 ) -> Vec<browser::BrowserAction> {
     let mut actions = Vec::new();
+    let ColumnPaint {
+        ui,
+        icons,
+        palette,
+        reduce_motion,
+    } = paint;
     let control = scroll_memory.begin_drill(
         column_id
             .drill_slot()
@@ -1230,7 +1261,7 @@ pub(super) fn render_drill_column(
         ui,
         icons,
         palette,
-        reduce_motion,
+        *reduce_motion,
         column,
         Some(control),
         &mut actions,

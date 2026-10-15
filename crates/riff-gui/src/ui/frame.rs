@@ -62,17 +62,19 @@
 //!
 //! [`Frame`] names no egui type, [`FrameInput`] is pure data, and
 //! [`FrameOutput`] is decisions only — a palette, a viewport intent, a
-//! tooltip, a Cover arrival. Everything egui-shaped (installing the palette,
-//! uploading arrivals, sending viewport commands, requesting a repaint) is a
-//! leaf the draw half performs on the way past, which is why
-//! `crates/riff-gui/tests/frame_tests.rs` can drive the whole protocol and
-//! assert its order with no `Context`, no `build_eframe` and no kittest.
+//! tooltip, a Cover arrival, a drop to register. Everything egui-shaped
+//! (installing the palette, uploading arrivals, sending viewport commands,
+//! requesting a repaint) is a leaf the draw half performs on the way past,
+//! which is why `crates/riff-gui/tests/frame_tests.rs` can drive the whole
+//! protocol and assert its order with no `Context`, no `build_eframe` and no
+//! kittest.
 //!
 //! `FrameOutput` staying decisions-only is a discipline, not a convenience: an
 //! output that accreted widget-ready values would be a shallower module than
 //! the function it replaced, and **nothing would fail**. Keep the draw half
 //! out of it.
 
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use riff_backend::app::cover_service::{ClearCacheOutcome, Covers};
@@ -110,18 +112,21 @@ use riff_gui_theme::theme::{self, Palette};
 ///
 /// The **only** thing the Frame reads from the draw half, and it is pure data:
 /// every fact here is something egui owns (a viewport flag, a key press, a
-/// window metric), read once by `RiffApp::read_frame_input` before the frame
-/// starts. That is what lets [`Frame::advance`] run with no egui context at
-/// all — the decision half never reaches back for one.
+/// window metric, a drop's candidate paths), read once by
+/// `RiffApp::read_frame_input` before the frame starts. That is what lets
+/// [`Frame::advance`] run with no egui context at all — the decision half
+/// never reaches back for one.
 ///
 /// Field order mirrors the order the frame consumes it in.
 ///
-/// Four of the six fields are genuinely two-state — a request is either
+/// Four of the seven fields are genuinely two-state — a request is either
 /// raised this frame or it is not — so the struct's bool count is a property of
 /// egui's input vocabulary rather than of this type, and the lint that counts
-/// them fires here.
+/// them fires here. The dropped paths are why the struct is no longer `Copy`:
+/// several folders ride one gesture, and the input is only ever passed by
+/// reference.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct FrameInput {
     /// Whether eframe reported a close request this frame (the macOS red
     /// traffic light).
@@ -142,6 +147,13 @@ pub struct FrameInput {
     pub traffic_lights_width: Option<f32>,
     /// The context's zoom factor, the other half of that policy.
     pub zoom_factor: f32,
+    /// The candidate paths of the files the windowing system dropped onto the
+    /// window this frame, with pathless `DroppedFile`s already skipped by the
+    /// read. egui-winit accumulates a drag's files and `RawInput::take` moves
+    /// them out per pass, so a drop arrives on exactly one frame's input —
+    /// this is the whole drop, not a delta, and the Frame's decision needs no
+    /// dedupe of its own.
+    pub dropped_paths: Vec<PathBuf>,
 }
 
 /// One OS-level intent the draw half enacts on the frame's behalf.
@@ -183,10 +195,10 @@ pub enum NativeClose {
 /// What the frame decided, for the draw half to enact.
 ///
 /// Decisions only: a palette to install, viewport intents, a tray tooltip, the
-/// Cover arrivals to upload, whether to ask for another frame. No
-/// `Context`, no `TextureHandle`, no `Response`, no `Ui`, no `Painter`, no
-/// `Rect`, no `TextureId` — see this module's docs for why that is the
-/// discipline worth keeping.
+/// Cover arrivals to upload, a drop to register, whether to ask for another
+/// frame. No `Context`, no `TextureHandle`, no `Response`, no `Ui`, no
+/// `Painter`, no `Rect`, no `TextureId` — see this module's docs for why that
+/// is the discipline worth keeping.
 ///
 /// `Default` only, not `Debug`/`Clone`: the Cover arrivals carry decoded
 /// pixels, and a frame's decisions are consumed once, on the way past.
@@ -224,6 +236,12 @@ pub struct FrameOutput {
     /// dialog belongs to the platform rather than to a decision. Nothing in
     /// this frame depends on its result, so it rides the tail.
     pub pick_folder: bool,
+    /// The candidate paths of the drop this frame decided to register, when
+    /// one landed. The decision IS the carry: the acceptance, the scan
+    /// requests, and the report are the Library Path adapter's one operation,
+    /// which the draw half enacts at the tail — where the folder picker is
+    /// already performed.
+    pub dropped_paths: Vec<PathBuf>,
 }
 
 impl FrameOutput {
@@ -378,6 +396,7 @@ impl<'a> Frame<'a> {
         out.cover_arrivals = self.settle_covers();
         self.poll_watchers();
         self.read_keyboard(input);
+        self.decide_drop(input, &mut out);
         self.update_window_title(&mut out);
 
         out
@@ -756,6 +775,21 @@ impl<'a> Frame<'a> {
             self.parts.global_search_focus,
             self.parts.transport,
         );
+    }
+
+    // --- The drop -----------------------------------------------------------
+
+    /// Decide what this frame's dropped files mean: a non-empty drop becomes
+    /// the register decision, carried for the draw half's frame-tail
+    /// enactment. The decision is the carry itself — no per-candidate probing
+    /// happens here, because the acceptance is the Library Path adapter's
+    /// judgment, and the delivery is once-only (`RawInput::take` moves the
+    /// drop out per pass), so there is nothing to dedupe and nothing to
+    /// suppress.
+    fn decide_drop(&mut self, input: &FrameInput, out: &mut FrameOutput) {
+        if !input.dropped_paths.is_empty() {
+            out.dropped_paths = input.dropped_paths.clone();
+        }
     }
 
     // --- Step 9: the OS title and tray tooltip -----------------------------

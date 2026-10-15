@@ -1017,6 +1017,7 @@ fn frame_output_carries_decisions_and_no_egui_handles() {
     let _: Option<String> = output.tray_tooltip;
     let _: Option<ClearCacheOutcome> = output.cache_clear;
     let _: bool = output.pick_folder;
+    let _: Vec<PathBuf> = output.dropped_paths;
     let _: usize = output.cover_arrivals.len();
     // NativeClose is reachable only through a named predicate, so the draw half
     // never matches on the type itself.
@@ -1025,6 +1026,40 @@ fn frame_output_carries_decisions_and_no_egui_handles() {
     // And the vocabulary it speaks is the frame's own: the viewport intents are
     // frame-level decisions, not egui commands.
     assert_eq!(FrameViewport::Minimize, FrameViewport::Minimize);
+}
+
+/// A drop that landed this frame becomes the Frame's register decision: the
+/// candidates ride the output for the draw half's frame-tail enactment, in
+/// drop order. The input is a struct literal — pure data, `Copy` or not.
+#[test]
+fn a_non_empty_drop_becomes_a_register_decision_carrying_the_candidates() {
+    let mut harness = Harness::new();
+    let input = FrameInput {
+        dropped_paths: vec![PathBuf::from("/music/a"), PathBuf::from("/music/b")],
+        ..FrameInput::default()
+    };
+
+    let out = harness.advance(&input);
+
+    assert_eq!(
+        out.dropped_paths,
+        vec![PathBuf::from("/music/a"), PathBuf::from("/music/b")],
+        "the decision carries every candidate the frame received"
+    );
+}
+
+/// A frame without a drop decides nothing: the default output carries no
+/// candidates, so the tail's enactment is a no-op on a steady-state frame.
+#[test]
+fn a_frame_without_a_drop_decides_nothing_about_drops() {
+    let mut harness = Harness::new();
+
+    let out = harness.advance(&FrameInput::default());
+
+    assert!(
+        out.dropped_paths.is_empty(),
+        "no drop, no register decision"
+    );
 }
 
 /// The close decision is data on every platform, so CI's Linux and Windows legs

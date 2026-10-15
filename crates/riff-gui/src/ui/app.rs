@@ -960,10 +960,10 @@ impl RiffApp {
     /// Read this frame's egui-owned facts into a [`FrameInput`].
     ///
     /// The one place the draw half reaches into egui on the Frame's behalf, and
-    /// it only *reads*: a viewport flag, two key presses, and the window
-    /// metric the native chrome branch lays out against. Everything else the
-    /// frame decides is decided from these, which is what keeps
-    /// `ui::frame` free of any egui type at all.
+    /// it only *reads*: a viewport flag, two key presses, a drop's candidate
+    /// paths, and the window metric the native chrome branch lays out against.
+    /// Everything else the frame decides is decided from these, which is what
+    /// keeps `ui::frame` free of any egui type at all.
     fn read_frame_input(ui: &egui::Ui, frame: &eframe::Frame) -> FrameInput {
         let ctx = ui.ctx();
         // Order matters and mirrors the pre-frame code exactly: the "no widget
@@ -979,6 +979,18 @@ impl RiffApp {
             toggle_playback,
             traffic_lights_width: crate::ui::chrome::measured_traffic_lights_width(frame),
             zoom_factor: ctx.zoom_factor(),
+            // egui-winit accumulates a drag's dropped files and
+            // `RawInput::take` moves them out per pass, so a drop lands on
+            // exactly one frame's input — no frame-level dedupe is needed. A
+            // `DroppedFile` without a path has no candidate to probe; it is
+            // skipped here.
+            dropped_paths: ctx.input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|file| file.path.clone())
+                    .collect()
+            }),
         }
     }
 

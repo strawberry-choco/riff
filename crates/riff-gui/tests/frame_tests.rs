@@ -36,7 +36,7 @@ use riff_backend::app::traits::{DecodedCover, RequestedSize};
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
 use riff_backend::domain::{Playlist, PlaylistId, TrackId};
-use riff_gui::ui::app::{InlineTagEditor, ThemeInputs, ThemeState};
+use riff_gui::ui::app::{InlineTagEditor, ThemeInputs, ThemeState, resolve_dropped_paths};
 use riff_gui::ui::artwork::COVER_THUMB;
 use riff_gui::ui::chrome::TitleBarAction;
 use riff_gui::ui::cover_cache::CoverCache;
@@ -81,20 +81,29 @@ impl Transport for SilentTransport {
     fn play_pause(&self, _session: &PlaybackSession) {}
 }
 
-/// A Library Scan Service that serves whatever outcomes a test queued, once.
+/// A Library Scan Service that serves whatever outcomes a test queued, once,
+/// and records every scan request so a test can see what asked for a scan.
 #[derive(Default)]
 struct ScriptedScans {
     pending: Mutex<Vec<ScanOutcome>>,
+    requested: Mutex<Vec<PathBuf>>,
 }
 
 impl ScriptedScans {
     fn serve(&self, outcome: ScanOutcome) {
         self.pending.lock().expect("unpoisoned").push(outcome);
     }
+
+    /// The paths `request` was called with, in call order.
+    fn requested(&self) -> Vec<PathBuf> {
+        self.requested.lock().expect("unpoisoned").clone()
+    }
 }
 
 impl Scans for ScriptedScans {
-    fn request(&self, _path: PathBuf) {}
+    fn request(&self, path: PathBuf) {
+        self.requested.lock().expect("unpoisoned").push(path);
+    }
     fn cancel(&self) {}
     fn poll(&self) -> Vec<ScanOutcome> {
         std::mem::take(&mut *self.pending.lock().expect("unpoisoned"))
@@ -1059,6 +1068,44 @@ fn a_frame_without_a_drop_decides_nothing_about_drops() {
     assert!(
         out.dropped_paths.is_empty(),
         "no drop, no register decision"
+    );
+}
+
+/// The drop's report rides the EXISTING board slot and the frame's compose —
+/// no new surface. The Library Path adapter's drop resolution writes the
+/// Library notice (the scan slot), and the frame's step-5 compose feeds it to
+/// the titlebar line exactly like any other scan update; an all-rejected drop
+/// leaves the standard refusal standing there.
+#[test]
+fn a_drops_refusal_composes_onto_the_scan_line_like_any_library_notice() {
+    let mut harness = Harness::new();
+    // No filesystem: both candidates are missing, so nothing can register and
+    // every candidate is refused.
+    let candidates = vec![PathBuf::from("/nowhere-a"), PathBuf::from("/nowhere-b")];
+
+    let resolution = resolve_dropped_paths(
+        &candidates,
+        &mut harness.library,
+        &mut harness.settings_store,
+        &harness.scans,
+        &mut harness.feedback,
+    );
+
+    assert!(
+        resolution.registered.is_empty(),
+        "a missing path registers nothing"
+    );
+    assert!(
+        harness.scans.requested().is_empty(),
+        "a refused candidate requests no scan"
+    );
+
+    harness.advance(&FrameInput::default());
+
+    assert_eq!(
+        harness.library.scan_status.as_deref(),
+        Some("Path does not exist: /nowhere-b"),
+        "the last refusal stands on the line the frame composes — one slot, no new surface"
     );
 }
 

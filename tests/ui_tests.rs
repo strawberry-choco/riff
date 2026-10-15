@@ -20287,6 +20287,250 @@ mod library_path_ui_tests {
     }
 }
 
+/// The drop flow: the Library Path adapter's third entry point, resolved by
+/// one headless operation — accept through the shared rules, scan each newly
+/// registered root once, report on the structured board. The filesystem
+/// appears only where acceptance genuinely probes it: tempdirs for real
+/// candidates, missing paths for the refusals.
+#[cfg(test)]
+mod library_path_drop_tests {
+    use riff_backend::app::state::{LibrarySession, LibraryStatus};
+    use riff_backend::app::store::WatchState;
+    use riff_gui::ui::app::resolve_dropped_paths;
+    use riff_gui::ui::feedback::FeedbackBoard;
+    use std::sync::{Arc, Mutex};
+
+    use crate::mocks::{MockScans, MockSettingsStore, SettingsCall};
+
+    /// A Library Session, a recording settings store, a recording scan front
+    /// end, the structured board, and the shared log handle — the pieces one
+    /// drop resolution runs against.
+    fn drop_scratch() -> (
+        LibrarySession,
+        MockSettingsStore,
+        MockScans,
+        FeedbackBoard,
+        Arc<Mutex<Vec<SettingsCall>>>,
+    ) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        (
+            LibrarySession::default(),
+            MockSettingsStore::with_shared_calls(Arc::clone(&calls)),
+            MockScans::default(),
+            FeedbackBoard::default(),
+            calls,
+        )
+    }
+
+    #[test]
+    fn test_a_dropped_directory_registers_persists_and_scans_once() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let root = dir.path().join("music");
+        std::fs::create_dir(&root).expect("a scratch library directory");
+        let canonical = root.canonicalize().expect("the canonical root");
+        let (mut library, mut store, scans, mut feedback, calls) = drop_scratch();
+
+        let resolution = resolve_dropped_paths(
+            std::slice::from_ref(&root),
+            &mut library,
+            &mut store,
+            &scans,
+            &mut feedback,
+        );
+
+        assert_eq!(
+            resolution.registered,
+            vec![canonical.clone()],
+            "the canonical root is what the drop registered"
+        );
+        assert!(resolution.rejections.is_empty());
+        assert_eq!(
+            library.library_paths.paths(),
+            std::slice::from_ref(&canonical),
+            "the root becomes a fact of the session, visible to Settings and the sidebar"
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![SettingsCall::LibraryPaths],
+            "the typed settings row is the only durable write, like every entry point's"
+        );
+        assert_eq!(
+            scans.requested_paths(),
+            vec![canonical.clone()],
+            "indexing starts at drop time: exactly one scan request for the new root"
+        );
+        assert_eq!(
+            library.library_paths.watch_state(&canonical),
+            WatchState::Disabled,
+            "a drop never enrolls the listener in filesystem watching"
+        );
+        assert_eq!(
+            library.library_paths.readiness(&canonical),
+            LibraryStatus::Idle,
+            "the fresh root claims no readiness until the scan reports"
+        );
+        assert_eq!(
+            feedback.display_message(),
+            Some("Added library path, scanning\u{2026}".to_string()),
+            "the confirmation rides the Library notice — the scan slot the status line composes"
+        );
+    }
+
+    #[test]
+    fn test_a_dropped_file_and_a_missing_path_are_refused_without_registering() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let file = dir.path().join("song.mp3");
+        std::fs::write(&file, b"not a directory").expect("a scratch file");
+        let missing = dir.path().join("nowhere");
+        let (mut library, mut store, scans, mut feedback, calls) = drop_scratch();
+
+        let resolution = resolve_dropped_paths(
+            &[file.clone(), missing.clone()],
+            &mut library,
+            &mut store,
+            &scans,
+            &mut feedback,
+        );
+
+        assert!(
+            resolution.registered.is_empty(),
+            "neither candidate registers anything"
+        );
+        assert_eq!(
+            resolution.rejections,
+            vec![
+                format!("Not a directory: {}", file.display()),
+                format!("Path does not exist: {}", missing.display()),
+            ],
+            "each refusal is the standard sentence, in drop order"
+        );
+        assert!(
+            library.library_paths.paths().is_empty(),
+            "nothing was registered"
+        );
+        assert!(
+            scans.requested_paths().is_empty(),
+            "a refused candidate requests no scan"
+        );
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "a refused candidate writes no settings"
+        );
+        assert_eq!(
+            feedback.display_message(),
+            Some(format!("Path does not exist: {}", missing.display())),
+            "an all-rejected drop leaves the last standard refusal standing"
+        );
+    }
+
+    #[test]
+    fn test_a_dropped_registered_root_is_a_silent_no_op() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let canonical = dir.path().canonicalize().expect("the canonical root");
+        let (mut library, mut store, scans, mut feedback, calls) = drop_scratch();
+
+        resolve_dropped_paths(
+            std::slice::from_ref(&dir.path().to_path_buf()),
+            &mut library,
+            &mut store,
+            &scans,
+            &mut feedback,
+        );
+        let first_writes = calls.lock().unwrap().len();
+
+        let second = resolve_dropped_paths(
+            std::slice::from_ref(&dir.path().to_path_buf()),
+            &mut library,
+            &mut store,
+            &scans,
+            &mut feedback,
+        );
+
+        assert!(
+            second.registered.is_empty(),
+            "an already-registered root registers nothing again"
+        );
+        assert_eq!(
+            library.library_paths.paths(),
+            vec![canonical.clone()],
+            "the session's fact-set is unchanged"
+        );
+        assert_eq!(
+            scans.requested_paths(),
+            vec![canonical],
+            "no scan request rides a re-drop — an accidental re-drop can never rescan"
+        );
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            first_writes,
+            "and the adapter's own dedupe writes no settings twice"
+        );
+    }
+
+    #[test]
+    fn test_a_mixed_drop_registers_the_folders_and_reports_each_non_directory() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let folder_a = dir.path().join("albums");
+        let folder_b = dir.path().join("soundtracks");
+        std::fs::create_dir(&folder_a).expect("a scratch library directory");
+        std::fs::create_dir(&folder_b).expect("a scratch library directory");
+        let file_a = dir.path().join("song.mp3");
+        let file_b = dir.path().join("notes.txt");
+        std::fs::write(&file_a, b"not a directory").expect("a scratch file");
+        std::fs::write(&file_b, b"not a directory").expect("a scratch file");
+        let (mut library, mut store, scans, mut feedback, calls) = drop_scratch();
+
+        let resolution = resolve_dropped_paths(
+            &[
+                folder_a.clone(),
+                file_a.clone(),
+                file_b.clone(),
+                folder_b.clone(),
+            ],
+            &mut library,
+            &mut store,
+            &scans,
+            &mut feedback,
+        );
+
+        let canonical_a = folder_a.canonicalize().expect("the canonical folder");
+        let canonical_b = folder_b.canonicalize().expect("the canonical folder");
+        assert_eq!(
+            resolution.registered,
+            vec![canonical_a.clone(), canonical_b.clone()],
+            "one stray file does not stop the folders from registering, in drop order"
+        );
+        assert_eq!(
+            resolution.rejections,
+            vec![
+                format!("Not a directory: {}", file_a.display()),
+                format!("Not a directory: {}", file_b.display()),
+            ],
+            "every non-directory is reported with the standard sentence"
+        );
+        assert_eq!(
+            library.library_paths.paths(),
+            vec![canonical_a.clone(), canonical_b.clone()]
+        );
+        assert_eq!(
+            scans.requested_paths(),
+            vec![canonical_a, canonical_b],
+            "each newly registered root gets exactly one scan request"
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![SettingsCall::LibraryPaths, SettingsCall::LibraryPaths],
+            "one durable write per registered root"
+        );
+        assert_eq!(
+            feedback.display_message(),
+            Some("Added library path, scanning\u{2026}".to_string()),
+            "a drop that registered anything leaves the confirmation standing for the \
+             live scan progress to overwrite moments later"
+        );
+    }
+}
+
 // --- The component boundary, as a standing gate --------------------------------
 //
 // The widgetry split made the boundary a manifest edge: a crate that cannot

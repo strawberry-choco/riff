@@ -8,7 +8,7 @@ mod tag_editor;
 pub mod track_menu;
 
 pub use collection_menu::{CollectionMenuHost, apply_collection_menu};
-pub use library_picker::register_library_path;
+pub use library_picker::{DropResolution, register_library_path, resolve_dropped_paths};
 pub use tag_editor::InlineTagEditor;
 pub use track_menu::{TrackMenuHost, TrackMenuOpen, TrackMenuSubject};
 

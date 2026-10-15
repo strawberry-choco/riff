@@ -22,6 +22,7 @@ use super::super::feedback::FeedbackBoard;
 use super::super::settings;
 #[cfg(target_os = "linux")]
 use super::super::settings::PathInputAction;
+use riff_backend::app::MutexExt;
 use riff_backend::app::scan_service::Scans;
 use riff_backend::app::state::LibrarySession;
 use riff_backend::app::store::SettingsStore;
@@ -125,6 +126,22 @@ pub fn resolve_dropped_paths(
 }
 
 impl super::RiffApp {
+    /// Enact the frame's drop decision: lock the Library Session once — the
+    /// frame's own guard is already dropped by the time the tail runs — and
+    /// hand every candidate to [`resolve_dropped_paths`], the one operation
+    /// the flow's application work lives in.
+    pub(crate) fn enact_dropped_library_paths(&mut self, candidates: &[PathBuf]) {
+        let library_arc = self.library.clone();
+        let mut guard = library_arc.lock_or_recover();
+        resolve_dropped_paths(
+            candidates,
+            &mut guard,
+            self.settings_store.as_mut(),
+            self.scans.as_ref(),
+            &mut self.feedback,
+        );
+    }
+
     /// Register a new library root through the platform picker: the native
     /// folder dialog everywhere except Linux, which opens the text-input row
     /// rendered beneath the stage. Also called from the sidebar footer

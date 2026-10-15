@@ -1137,6 +1137,15 @@ impl RiffApp {
             let mut guard = library_arc.lock_or_recover();
             self.add_library_via_platform_picker(&mut guard);
         }
+        if !out.dropped_paths.is_empty() {
+            // The drop flow rides the tail beside the picker: the frame's own
+            // library guard is already dropped, so the session locks here once
+            // and the adapter operation does the whole resolution — the shared
+            // acceptance, one scan request per newly registered root, and the
+            // report. Nothing here judges a path: that is the adapter's job,
+            // which is what keeps this glue thin.
+            self.enact_dropped_library_paths(&out.dropped_paths);
+        }
         if out.hide_window {
             // The custom titlebar X is the only hide gesture on macOS/Windows,
             // and it hides through this same channel rather than sending a

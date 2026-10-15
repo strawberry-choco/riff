@@ -22,9 +22,9 @@ use eframe::egui;
 use riff_backend::domain::TrackId;
 use std::path::PathBuf;
 
-use super::icons::IconCache;
-use super::theme::geometry::inspector::{ART_H, TAG_FIELD_H};
-use super::theme::{self, Palette};
+use riff_gui_theme::icons::IconCache;
+use riff_gui_theme::theme::geometry::inspector::{ART_H, TAG_FIELD_H};
+use riff_gui_theme::theme::{self, Palette};
 
 /// What the user did to the selection panel this frame; `app.rs` applies
 /// these to the sessions.
@@ -480,7 +480,7 @@ fn album_art(ui: &mut egui::Ui, palette: &Palette, art: Option<&egui::TextureHan
             fit: super::artwork::Fit::Fill,
             tint: palette.ink,
             placeholder: Some(super::artwork::Placeholder::Well {
-                radius: super::theme::RADIUS_MD,
+                radius: riff_gui_theme::theme::RADIUS_MD,
             }),
             border: None,
         },
@@ -528,12 +528,12 @@ fn editor_section(
             egui::vec2(ui.available_width(), TAG_FIELD_H),
             egui::Sense::hover(),
         );
-        let response = super::text_field::text_field(
+        let response = riff_gui_components::text_field::text_field(
             ui,
             cache,
             palette,
             &mut draft.fields[field.index()],
-            &super::text_field::TextField {
+            &riff_gui_components::text_field::TextField {
                 id: egui::Id::new(("tag_editor_field", field.index())),
                 rect,
                 hint: "",
@@ -690,15 +690,15 @@ fn save_bar(
         // One button owner: an affirmative Primary save that a disabled state
         // strips of both click and focus, and a neutral Cancel.
         let (rect, _) = ui.allocate_exact_size(
-            super::button::text_button_size(ui, palette, "Save", false),
+            riff_gui_components::button::text_button_size(ui, palette, "Save", false),
             egui::Sense::hover(),
         );
-        if super::button::text_button(
+        if riff_gui_components::button::text_button(
             ui,
             cache,
             palette,
             reduce_motion,
-            &super::button::TextButton {
+            &riff_gui_components::button::TextButton {
                 id: egui::Id::new("tag_editor_save"),
                 rect,
                 label: "Save",
@@ -706,22 +706,22 @@ fn save_bar(
                 tooltip: None,
                 icon: None,
                 small: false,
-                variant: super::button::Variant::Primary,
+                variant: riff_gui_components::button::Variant::Primary,
                 enabled: save_enabled,
             },
         ) {
             actions.push(SelectionAction::SaveTagEdit);
         }
         let (rect, _) = ui.allocate_exact_size(
-            super::button::text_button_size(ui, palette, "Cancel", false),
+            riff_gui_components::button::text_button_size(ui, palette, "Cancel", false),
             egui::Sense::hover(),
         );
-        if super::button::text_button(
+        if riff_gui_components::button::text_button(
             ui,
             cache,
             palette,
             reduce_motion,
-            &super::button::TextButton {
+            &riff_gui_components::button::TextButton {
                 id: egui::Id::new("tag_editor_cancel"),
                 rect,
                 label: "Cancel",
@@ -729,7 +729,7 @@ fn save_bar(
                 tooltip: None,
                 icon: None,
                 small: false,
-                variant: super::button::Variant::Caption,
+                variant: riff_gui_components::button::Variant::Caption,
                 enabled: true,
             },
         ) {

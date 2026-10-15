@@ -19,18 +19,19 @@ use eframe::egui;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::icons::{Icon, IconCache};
-use super::linear;
 use super::playerbar;
 use super::sidebar;
-use super::theme::geometry::glow;
-use super::theme::geometry::now_playing::{
+use riff_backend::domain::{TrackId, TrackMetadata};
+use riff_gui_components::ghost_icon_button::ghost_icon_button;
+use riff_gui_components::linear;
+use riff_gui_theme::icons::{Icon, IconCache};
+use riff_gui_theme::theme::geometry::glow;
+use riff_gui_theme::theme::geometry::now_playing::{
     CLOSE_BTN, CLOSE_INSET, COPY_GAP, COVER_SIZE, HEADER_H, META_DETAILS_GAP, SECTION_GAP,
     SEEK_GAP, SEEK_H, STAGE_INSET, TITLE_META_GAP,
 };
-use super::theme::geometry::seek::{TIME_LABEL_SPACE, TRACK_H};
-use super::theme::{self, Palette};
-use riff_backend::domain::{TrackId, TrackMetadata};
+use riff_gui_theme::theme::geometry::seek::{TIME_LABEL_SPACE, TRACK_H};
+use riff_gui_theme::theme::{self, Palette, styled_font};
 
 /// How many Up Next rows the stage previews (pre-restyle behavior). A read
 /// model bound the view asks for, not a dimension it paints, so it stays here.
@@ -137,7 +138,7 @@ pub fn show_now_playing(
         stage.right() - CLOSE_INSET - CLOSE_BTN / 2.0,
         stage.top() + CLOSE_INSET + CLOSE_BTN / 2.0,
     );
-    if sidebar::ghost_icon_button(
+    if ghost_icon_button(
         ui,
         cache,
         palette,
@@ -399,7 +400,7 @@ fn up_next_section(
     );
 
     if content.up_next.is_empty() {
-        super::empty_state::empty_state_in_rect(
+        riff_gui_components::empty_state::empty_state_in_rect(
             &painter,
             palette,
             list_rect,
@@ -432,17 +433,4 @@ fn up_next_section(
                 },
             );
     });
-}
-
-/// A design-scale [`egui::FontId`] at `size`, riding the family the installed
-/// token style mapped onto `key` (so weight families resolve even before the
-/// vendored fonts are installed). Shared with the player bar's now-playing
-/// zone, which paints at the same scale.
-pub(crate) fn styled_font(ui: &egui::Ui, key: egui::TextStyle, size: f32) -> egui::FontId {
-    let family = ui
-        .style()
-        .text_styles
-        .get(&key)
-        .map_or(egui::FontFamily::Proportional, |font| font.family.clone());
-    egui::FontId::new(size, family)
 }

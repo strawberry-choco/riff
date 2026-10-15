@@ -13,12 +13,12 @@
 use eframe::egui;
 
 use riff_backend::app::state::TrackSort;
-
-use super::icons::IconCache;
-use super::theme::geometry::browser::{
+use riff_gui_components::menu::SortKey;
+use riff_gui_theme::icons::IconCache;
+use riff_gui_theme::theme::geometry::browser::{
     HEADER_H, MIN_TEXT_W, ROW_H, TEXT_GAP, TEXT_INSET_Y, TEXT_RIGHT_PAD, THUMB_SIZE, THUMB_TEXT_GAP,
 };
-use super::theme::{self, Palette};
+use riff_gui_theme::theme::{self, Palette};
 
 /// One row/tile of the browser column.
 #[derive(Clone)]
@@ -62,7 +62,7 @@ pub enum BrowserAction {
         /// The row's key: the same identity a [`BrowserAction::Select`] carries.
         key: String,
         /// Whatever the listener chose before the menu closed, in click order.
-        intents: Vec<super::menu::ListMenuIntent>,
+        intents: Vec<riff_gui_components::menu::ListMenuIntent>,
     },
     /// The A–Z sort control was clicked; the caller flips the session's
     /// sort direction.
@@ -134,7 +134,7 @@ pub fn show_browser_column_scrolled(
     palette: &Palette,
     reduce_motion: bool,
     mut column: BrowserColumn<'_>,
-    scroll: Option<super::scroll_memory::ScrollControl>,
+    scroll: Option<riff_gui_components::ScrollControl>,
     actions: &mut Vec<BrowserAction>,
 ) -> f32 {
     // The sort control only orders entries, so an empty listing hides it —
@@ -163,8 +163,8 @@ pub fn show_browser_column_scrolled(
 /// The friendly empty state — the shared composition now owned by
 /// [`super::empty_state`] and re-exported here so the explorer's call sites and
 /// the historical `browser::empty_state` path keep resolving. See
-/// [`super::empty_state::empty_state`].
-pub use super::empty_state::empty_state;
+/// [`riff_gui_components::empty_state::empty_state`].
+pub use riff_gui_components::empty_state::empty_state;
 
 /// The A–Z sort control: a small ghost button at the column's top-right.
 /// Ascending offers the Z–A flip and vice versa — the label names what the
@@ -185,7 +185,7 @@ fn sort_button(ui: &mut egui::Ui, palette: &Palette, sort_desc: bool) -> bool {
                     .color(palette.ink_2),
             )
             .fill(palette.surface_2)
-            .corner_radius(super::theme::RADIUS_SM);
+            .corner_radius(riff_gui_theme::theme::RADIUS_SM);
             let response = ui.add(button).on_hover_text(label);
             response
                 .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
@@ -196,9 +196,55 @@ fn sort_button(ui: &mut egui::Ui, palette: &Palette, sort_desc: bool) -> bool {
     .inner
 }
 
+// --- The sort control's display↔business crossing -----------------------------------
+//
+// The sort widget's vocabulary is the component crate's [`SortKey`]; the
+// session's is [`TrackSort`]. The frontend owns every crossing between them
+// (ticket 03; ADR 0018), and these two functions are that crossing — kept
+// beside the wrapper that renders the control so the boundary and its only
+// painter sit in one place.
+
+/// The display vocabulary translated onto the business sort mode: the
+/// direction that must be **total, with no wildcard arm**. A display member
+/// with no business meaning is a compile error here, which is what stops the
+/// component crate from ever offering a choice the session cannot answer.
+/// The totality is pinned by `tests/menu_transform_tests.rs`.
+#[must_use]
+pub fn sort_key_to_track_sort(key: SortKey) -> TrackSort {
+    match key {
+        SortKey::NumberAsc => TrackSort::NumberAsc,
+        SortKey::NumberDesc => TrackSort::NumberDesc,
+        SortKey::TitleAsc => TrackSort::TitleAsc,
+        SortKey::TitleDesc => TrackSort::TitleDesc,
+    }
+}
+
+/// The business sort mode translated onto the display vocabulary:
+/// deliberately **partial** — the `Option` says not every business mode is
+/// offered, so a mode nobody displays is simply absent from the control and
+/// the component crate never hears of it. Every mode the session has today is
+/// displayed, so the arms are exhaustive now; a future mode that stays
+/// undisplayed maps to `None` here, and the round-trip test is extended with
+/// that honest expectation rather than the display vocabulary widened.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the business→display direction is deliberately partial: the Option \
+              is the contract a mode nobody displays maps into, even while every \
+              mode the session has today is displayed"
+)]
+#[must_use]
+pub fn track_sort_to_sort_key(sort: TrackSort) -> Option<SortKey> {
+    match sort {
+        TrackSort::NumberAsc => Some(SortKey::NumberAsc),
+        TrackSort::NumberDesc => Some(SortKey::NumberDesc),
+        TrackSort::TitleAsc => Some(SortKey::TitleAsc),
+        TrackSort::TitleDesc => Some(SortKey::TitleDesc),
+    }
+}
+
 /// The track listings' sort control, laid out as a full-width header row at
 /// the column's top-right — the same slot the A–Z toggle occupies on the
-/// entity columns. [`super::menu::track_sort_control`] paints the button and
+/// entity columns. [`riff_gui_components::menu::track_sort_control`] paints the button and
 /// its popup; this wrapper only reserves the row so call sites that are not
 /// a [`BrowserColumn`] (the Tracks column, the flat All Tracks list) get the
 /// identical header geometry. Returns the newly chosen sort mode, if any.
@@ -207,10 +253,14 @@ pub fn track_sort_row(
     palette: &Palette,
     current: TrackSort,
 ) -> Option<TrackSort> {
+    // The widget speaks display vocabulary; a business mode with no display
+    // key has no control row to offer a choice from.
+    let current_key = track_sort_to_sort_key(current)?;
     ui.allocate_ui(egui::vec2(ui.available_width(), HEADER_H), |ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
-            super::menu::track_sort_control(ui, palette, current)
+            riff_gui_components::menu::track_sort_control(ui, palette, current_key)
+                .map(sort_key_to_track_sort)
         })
         .inner
     })
@@ -233,7 +283,7 @@ fn show_browser_list(
     palette: &Palette,
     reduce_motion: bool,
     column: &mut BrowserColumn<'_>,
-    scroll: Option<super::scroll_memory::ScrollControl>,
+    scroll: Option<riff_gui_components::ScrollControl>,
     actions: &mut Vec<BrowserAction>,
 ) -> f32 {
     // The list is a field, and the field belongs to the list rather than to
@@ -250,10 +300,11 @@ fn show_browser_list(
         0.0,
         palette.surface_row,
     );
-    // Built by [`super::scroll_area::optional_scroll_area`]; the reason it is
+    // Built by [`riff_gui_components::scroll_area::optional_scroll_area`]; the reason it is
     // unanimated — and why the other `ScrollArea`s are not flipped to match —
-    // is written once on [`ScrollControl`](super::scroll_memory::ScrollControl).
-    let scroll_area = super::scroll_area::optional_scroll_area(scroll, "browser_list_rows", false);
+    // is written once on [`ScrollControl`](riff_gui_components::ScrollControl).
+    let scroll_area =
+        riff_gui_components::scroll_area::optional_scroll_area(scroll, "browser_list_rows", false);
     let output = scroll_area.show_viewport(ui, |ui, viewport| {
         let total = column.total;
         let mut y = 0.0_f32;
@@ -325,9 +376,9 @@ fn show_browser_list(
                 // Artist or Genre row still gets the shared collection menu.
                 let menu_body = |ui: &mut egui::Ui| {
                     if item.key.contains('\u{1f}') {
-                        super::menu::album_menu(ui, palette, &mut intents);
+                        riff_gui_components::menu::album_menu(ui, palette, &mut intents);
                     } else {
-                        super::menu::collection_menu(ui, palette, &mut intents);
+                        riff_gui_components::menu::collection_menu(ui, palette, &mut intents);
                     }
                 };
                 if response.context_menu(menu_body).is_some() {
@@ -371,8 +422,14 @@ fn layout_row_text(ui: &egui::Ui, palette: &Palette, item: &BrowserItem) -> RowT
     } else {
         palette.ink
     };
-    let label_font = egui::FontId::new(super::theme::TEXT_SM, egui::FontFamily::Proportional);
-    let detail_font = egui::FontId::new(super::theme::TEXT_XS, egui::FontFamily::Proportional);
+    let label_font = egui::FontId::new(
+        riff_gui_theme::theme::TEXT_SM,
+        egui::FontFamily::Proportional,
+    );
+    let detail_font = egui::FontId::new(
+        riff_gui_theme::theme::TEXT_XS,
+        egui::FontFamily::Proportional,
+    );
     let wrap = text_w(ui.available_width());
     ui.fonts_mut(|f| RowText {
         label: f.layout(item.label.clone(), label_font, ink, wrap),
@@ -441,7 +498,7 @@ fn browser_row(
     let painter = ui.painter_at(rect);
 
     let focused = ui.memory(|m| m.has_focus(response.id));
-    super::row::paint_row_band(
+    riff_gui_components::row::paint_row_band(
         ui,
         &painter,
         palette,
@@ -467,13 +524,18 @@ fn browser_row(
             rect: thumb_rect,
             texture: item.thumbnail.as_ref().map(egui::TextureHandle::id),
             fit: super::artwork::Fit::Fill,
-            tint: super::theme::TEXTURE_TINT,
+            tint: riff_gui_theme::theme::TEXTURE_TINT,
             placeholder: item
                 .thumbnail
                 .is_none()
                 .then(|| super::artwork::Placeholder::GlyphWell {
-                    radius: super::theme::RADIUS_SM,
-                    glyph: cache.texture(ui.ctx(), super::icons::Icon::Music, 16.0, palette.ink_3),
+                    radius: riff_gui_theme::theme::RADIUS_SM,
+                    glyph: cache.texture(
+                        ui.ctx(),
+                        riff_gui_theme::icons::Icon::Music,
+                        16.0,
+                        palette.ink_3,
+                    ),
                     inset: 10.0,
                 }),
             border: None,
@@ -489,7 +551,7 @@ fn browser_row(
     };
     paint_row_text(painter, palette, item, &text, rect, text_x, ink, wraps);
 
-    super::row::register_row_a11y(&response, item.selected, accessible_label(item));
+    riff_gui_components::row::register_row_a11y(&response, item.selected, accessible_label(item));
     response
 }
 
@@ -526,14 +588,20 @@ fn paint_row_text(
                     egui::pos2(text_x, rect.center().y - 8.0),
                     egui::Align2::LEFT_CENTER,
                     &item.label,
-                    egui::FontId::new(super::theme::TEXT_SM, egui::FontFamily::Proportional),
+                    egui::FontId::new(
+                        riff_gui_theme::theme::TEXT_SM,
+                        egui::FontFamily::Proportional,
+                    ),
                     ink,
                 );
                 painter.text(
                     egui::pos2(text_x, rect.center().y + 9.0),
                     egui::Align2::LEFT_CENTER,
                     detail,
-                    egui::FontId::new(super::theme::TEXT_XS, egui::FontFamily::Proportional),
+                    egui::FontId::new(
+                        riff_gui_theme::theme::TEXT_XS,
+                        egui::FontFamily::Proportional,
+                    ),
                     palette.ink_3,
                 );
             }
@@ -542,7 +610,10 @@ fn paint_row_text(
                     egui::pos2(text_x, rect.center().y),
                     egui::Align2::LEFT_CENTER,
                     &item.label,
-                    egui::FontId::new(super::theme::TEXT_SM, egui::FontFamily::Proportional),
+                    egui::FontId::new(
+                        riff_gui_theme::theme::TEXT_SM,
+                        egui::FontFamily::Proportional,
+                    ),
                     ink,
                 );
             }

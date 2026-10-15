@@ -19,8 +19,8 @@
 use riff_backend::app::state::LibrarySection;
 use riff_gui::ui::browser::BrowserAction;
 use riff_gui::ui::column::ColumnIdentity;
-use riff_gui::ui::menu::ListMenuIntent;
 use riff_gui::ui::scroll_memory::{DrillSlot, ListSlot};
+use riff_gui_components::menu::ListMenuIntent;
 
 /// Every entity-Column in the app, with the identity it states once.
 ///

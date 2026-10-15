@@ -1,9 +1,15 @@
-use crate::ui::button::{self as button, TextButton, Variant};
-use crate::ui::icons::{Icon, IconCache};
-use crate::ui::now_playing::styled_font;
-use crate::ui::prompts::{self as prompts, PromptOutcome};
-use crate::ui::theme::geometry::settings::WATCH_BOX;
-use crate::ui::theme::geometry::settings::{
+use eframe::egui;
+use riff_backend::app::MutexExt;
+use riff_backend::app::replaygain_pass::PassCommand;
+use riff_backend::app::state::{
+    LibrarySession, LibraryStatus, PlaybackSession, ReplayGainMode, ViewMode, WatchState,
+};
+use riff_backend::app::store::{AUDIO_EXTENSIONS, FullScanSummary};
+use riff_gui_components::button::{self as button, TextButton, Variant};
+use riff_gui_components::prompts::{self as prompts, PromptOutcome};
+use riff_gui_theme::icons::{Icon, IconCache};
+use riff_gui_theme::theme::geometry::settings::WATCH_BOX;
+use riff_gui_theme::theme::geometry::settings::{
     ACTION_BTN_H, ACTIONS_ROW_GAP, ACTIONS_ROW_H, CARD_BORDER_W, CHIP_GAP, CHIP_H, CHIP_LABEL_PAD,
     CHIP_ROW_NO_WRAP_W, COLUMN_GAP, DONE_BTN_LABEL_PAD, DOT_SIZE, FOOTER_ACTION_GAP,
     FOOTER_EDGE_GAP, FOOTER_H, HEADER_GAP, LIBRARY_ROW_H, LIBRARY_ROW_STACK_W,
@@ -13,14 +19,8 @@ use crate::ui::theme::geometry::settings::{
     PREF_ROW_TEXT_INSET, READINESS_GAP, ROW_BTN_PAD, SCAN_CARD_H, SCAN_CARD_PAD, SECTION_GAP,
     SMALL_BTN_H, SMALL_BTN_LABEL_PAD, TRASH_BTN,
 };
-use crate::ui::theme::{self, Palette};
-use eframe::egui;
-use riff_backend::app::MutexExt;
-use riff_backend::app::replaygain_pass::PassCommand;
-use riff_backend::app::state::{
-    LibrarySession, LibraryStatus, PlaybackSession, ReplayGainMode, ViewMode, WatchState,
-};
-use riff_backend::app::store::{AUDIO_EXTENSIONS, FullScanSummary};
+use riff_gui_theme::theme::styled_font;
+use riff_gui_theme::theme::{self, Palette};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -1248,14 +1248,19 @@ fn watch_control(
         palette.ink_3,
     );
     let watch_focused = can_watch && ui.memory(|m| m.has_focus(watch_response.id));
-    super::toggle_switch::paint_checkbox_with_focus(
+    riff_gui_components::toggle_switch::paint_checkbox_with_focus(
         ui.painter(),
         palette,
         box_rect,
         watching && can_watch,
         watch_focused,
     );
-    super::toggle_switch::register_checkbox_a11y(&watch_response, can_watch, watching, watch_label);
+    riff_gui_components::toggle_switch::register_checkbox_a11y(
+        &watch_response,
+        can_watch,
+        watching,
+        watch_label,
+    );
     if can_watch && watch_response.clicked() {
         actions.push(SettingsAction::SetWatch(row.path.clone(), !watching));
     }
@@ -1982,7 +1987,7 @@ impl Preference {
 }
 
 /// A card of preference rows, each driven by the reusable
-/// [`super::toggle_switch::toggle_switch`]. `prefs` selects which rows the
+/// [`riff_gui_components::toggle_switch::toggle_switch`]. `prefs` selects which rows the
 /// caller's section shows (one card can hold any subset).
 ///
 /// This is the ONE way a Settings preference card is written: the Artwork
@@ -2521,7 +2526,7 @@ fn preference_row(
             theme::geometry::toggle::TOGGLE_H,
         ),
     );
-    let toggled = super::toggle_switch::toggle_switch_at(
+    let toggled = riff_gui_components::toggle_switch::toggle_switch_at(
         ui,
         palette,
         egui::Id::new(pref.id()),
@@ -2871,14 +2876,14 @@ fn replaygain_pass_check_row(
         palette.ink_3,
     );
     let focused = ui.memory(|m| m.has_focus(response.id));
-    super::toggle_switch::paint_square_checkbox_with_focus(
+    riff_gui_components::toggle_switch::paint_square_checkbox_with_focus(
         ui.painter(),
         palette,
         box_rect,
         checked,
         focused,
     );
-    super::toggle_switch::register_checkbox_a11y(&response, true, checked, label);
+    riff_gui_components::toggle_switch::register_checkbox_a11y(&response, true, checked, label);
     if response.clicked() {
         actions.push(action);
     }
@@ -3114,7 +3119,7 @@ impl super::app::RiffApp {
     /// The surface is one thing and it is not a wipe's to describe: the
     /// palette it paints from, the icon cache its affirmative button draws
     /// through, the temporal policy, and the pure widget seam in
-    /// [`crate::ui::prompts`] (golden-image gap audit P1-7) that composes them.
+    /// [`riff_gui_components::prompts`] (golden-image gap audit P1-7) that composes them.
     /// Everything that makes one wipe different from the next stays at the call
     /// site, because each is that wipe's own fact: the consequence copy, which
     /// is what the clear costs, and the widget id, which is what keeps this

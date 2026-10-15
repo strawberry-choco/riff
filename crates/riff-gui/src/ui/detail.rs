@@ -14,7 +14,7 @@
 //!
 //! # The Track menu, and this column's one accepted rough edge
 //!
-//! Every track row anchors the shared Track menu ([`super::menu::track_menu`]),
+//! Every track row anchors the shared Track menu ([`riff_gui_components::menu::track_menu`]),
 //! so a Track's actions do not depend on which Column happens to be showing
 //! it. The popup is egui's own transient one, keyed by the row's own response
 //! identity rather than by an index, so these virtualized rows need no per-row
@@ -30,7 +30,7 @@
 //!
 //! What the menu reports is that it OPENED, and opening is what makes the
 //! Track the selection — the same report every other Track row's menu makes
-//! ([`super::menu::TrackMenuReport`]), answered by the same per-app Track-menu
+//! ([`riff_gui_components::menu::TrackMenuReport`]), answered by the same per-app Track-menu
 //! host every other Track row reaches. It travels in its own channel
 //! ([`DetailReport::TrackMenu`]) rather than as a [`DetailAction`], because
 //! answering it needs the Playlist Store and the Inline Tag Editor, which the
@@ -53,8 +53,9 @@
 
 use eframe::egui;
 
-use super::icons::IconCache;
-use super::theme::{self, Palette};
+use riff_gui_components::menu::{TrackKey, TrackMenuReport};
+use riff_gui_theme::icons::IconCache;
+use riff_gui_theme::theme::{self, Palette};
 
 /// What the user did to the detail column this frame that `app.rs` answers
 /// through [`apply_detail_action`](crate::ui::app::apply_detail_action): the
@@ -83,7 +84,7 @@ pub enum DetailAction {
 ///
 /// One channel, two kinds, because the two kinds are answered by two different
 /// owners and must not be confused for each other: a [`DetailAction`] goes to
-/// the detail-action applier, and a [`super::menu::TrackMenuReport`] goes to
+/// the detail-action applier, and a [`riff_gui_components::menu::TrackMenuReport`] goes to
 /// the per-app Track-menu host. Keeping them in one `Vec` preserves the order
 /// the user acted in, which a pair of separate channels would not.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +92,7 @@ pub enum DetailReport {
     /// A report the detail-action applier answers.
     Action(DetailAction),
     /// A Track row's menu report, for the per-app Track-menu host.
-    TrackMenu(super::menu::TrackMenuReport),
+    TrackMenu(riff_gui_components::menu::TrackMenuReport),
 }
 
 impl From<DetailAction> for DetailReport {
@@ -134,7 +135,7 @@ impl TrackRow {
 /// it binds (`'a`, the column's own) is the whole point of it: the menu a row
 /// paints borrows the frame's resolved playlist targets for as long as the
 /// column lives, and gets its own per-row facts handed in as the argument.
-pub type TrackMenuFactory<'a> = dyn Fn(&TrackRow) -> super::menu::TrackMenu<'a> + 'a;
+pub type TrackMenuFactory<'a> = dyn Fn(&TrackRow) -> riff_gui_components::menu::TrackMenu<'a> + 'a;
 
 /// One frame of the detail column: what to render and how.
 pub struct DetailColumn<'a> {
@@ -200,7 +201,7 @@ pub fn show_detail_column_scrolled(
     palette: &Palette,
     reduce_motion: bool,
     column: DetailColumn<'_>,
-    scroll: Option<super::scroll_memory::ScrollControl>,
+    scroll: Option<riff_gui_components::ScrollControl>,
     reports: &mut Vec<DetailReport>,
 ) {
     // Asked up front, because the fallback at the end of this function is what
@@ -259,7 +260,7 @@ fn track_list(
     cache: &mut IconCache,
     palette: &Palette,
     reduce_motion: bool,
-    scroll: Option<super::scroll_memory::ScrollControl>,
+    scroll: Option<riff_gui_components::ScrollControl>,
     tracks: &[TrackRow],
     track_menu: Option<&TrackMenuFactory<'_>>,
     reports: &mut Vec<DetailReport>,
@@ -278,10 +279,11 @@ fn track_list(
         palette.surface_row,
     );
     let total = tracks.len();
-    // Built by [`super::scroll_area::optional_scroll_area`]; the reason it is
+    // Built by [`riff_gui_components::scroll_area::optional_scroll_area`]; the reason it is
     // unanimated — and why the other `ScrollArea`s are not flipped to match —
-    // is written once on [`ScrollControl`](super::scroll_memory::ScrollControl).
-    let scroll_area = super::scroll_area::optional_scroll_area(scroll, "tracks_column_list", false);
+    // is written once on [`ScrollControl`](riff_gui_components::ScrollControl).
+    let scroll_area =
+        riff_gui_components::scroll_area::optional_scroll_area(scroll, "tracks_column_list", false);
     scroll_area.show_rows(
         ui,
         theme::geometry::sidebar::ROW_H,
@@ -339,7 +341,7 @@ fn track_list(
                     if row
                         .response
                         .context_menu(|ui| {
-                            super::menu::track_menu(ui, palette, &menu, &mut intents);
+                            riff_gui_components::menu::track_menu(ui, palette, &menu, &mut intents);
                         })
                         .is_some()
                     {
@@ -349,8 +351,8 @@ fn track_list(
                         // report with the key still attached. It is the HOST's
                         // channel, not the detail applier's — answering it needs
                         // handles this column does not hold.
-                        reports.push(DetailReport::TrackMenu(super::menu::TrackMenuReport {
-                            key: track.key.clone(),
+                        reports.push(DetailReport::TrackMenu(TrackMenuReport {
+                            key: TrackKey(track.key.clone()),
                             intents,
                         }));
                     }

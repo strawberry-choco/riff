@@ -65,7 +65,7 @@ fn main() {
         "riff",
         options,
         Box::new(move |cc| {
-            riff_gui::ui::fonts::configure_fonts(&cc.egui_ctx);
+            riff_gui_theme::fonts::configure_fonts(&cc.egui_ctx);
 
             // The egui context exists only inside this closure, and the tray
             // needs a clone of it on its own thread to wake a sleeping event

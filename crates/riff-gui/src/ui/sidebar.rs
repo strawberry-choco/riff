@@ -18,14 +18,15 @@
 use eframe::egui;
 use std::time::Duration;
 
-use super::icons::{Icon, IconCache};
-use super::menu::{FAVORITE_ADD_LABEL, FAVORITE_REMOVE_LABEL};
-use super::theme::geometry::sidebar::{
+use riff_backend::domain::{Track, TrackId};
+use riff_gui_components::ghost_icon_button::ghost_icon_button;
+use riff_gui_components::menu::{FAVORITE_ADD_LABEL, FAVORITE_REMOVE_LABEL};
+use riff_gui_theme::icons::{Icon, IconCache};
+use riff_gui_theme::theme::geometry::sidebar::{
     EQ_BAR_COUNT, FAVORITE_COL_W, HEART_SIZE, ICON_GAP, INDENT_BASE, INDENT_SCALE, INDENT_STEP,
     MIN_LABEL_FREE_W, ROW_COVER, ROW_H,
 };
-use super::theme::{self, Palette};
-use riff_backend::domain::{Track, TrackId};
+use riff_gui_theme::theme::{self, Palette};
 
 /// The three-level indent scale: 12/28/44px for levels 0/1/2, one step per
 /// level. Levels beyond the pinned three keep stepping (see [`INDENT_STEP`])
@@ -201,60 +202,6 @@ fn paint_equalizer(
             color,
         );
     }
-}
-
-// --- Search ring -------------------------------------------------------------------
-
-/// The search field border: the hairline border token when idle, the palette's
-/// focus ring (thicker) once the field has keyboard focus — the mockup's
-/// "focus-ring border".
-#[must_use]
-pub fn search_ring_stroke(palette: &Palette, focused: bool) -> egui::Stroke {
-    if focused {
-        egui::Stroke::new(1.5_f32, palette.focus_ring)
-    } else {
-        egui::Stroke::new(1.0_f32, palette.border)
-    }
-}
-
-/// A ghost icon button: an invisible click target with a tinted glyph. With
-/// `hover_reveal` the glyph appears only while hovered (the mockup's
-/// playlist-row affordances); otherwise it is always painted (the top bar's
-/// search clear button). The hit area and accessibility label are registered every
-/// frame regardless, so assistive tech and the kittest harness can reach it
-/// whether or not it is currently painted. The label also shows as a tooltip
-/// on hover — icon-only buttons explain themselves (Issue 12).
-#[allow(clippy::too_many_arguments)]
-pub fn ghost_icon_button(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    rect: egui::Rect,
-    id: egui::Id,
-    icon: Icon,
-    label: &str,
-    hover_reveal: bool,
-) -> bool {
-    let button = super::button::begin_icon_button(ui, rect, id, false);
-    // A ghost button has no hover *fill* — hovering only reveals the glyph at
-    // full ink — so the press is the first thing it ever paints behind that
-    // glyph: a held ghost button wears the framework's active fill, which is
-    // what a stock egui button of the same size would wear, and the glyph goes
-    // to full ink with it. Press replaces hover here rather than adding to it
-    // for the same reason it does everywhere else (rule 4 of the motion rule in
-    // `theme`): the two are states, not strengths, and this one is instant.
-    let lit = button.hovered || button.pressed;
-    if button.pressed {
-        ui.painter_at(rect)
-            .rect_filled(rect, theme::RADIUS_SM, super::button::active_fill(ui));
-    }
-    if !hover_reveal || lit {
-        let tint = if lit { palette.ink } else { palette.ink_3 };
-        let tex_id = cache.texture(ui.ctx(), icon, 16.0, tint);
-        ui.painter_at(rect)
-            .image(tex_id, rect.shrink(4.0), super::artwork::UV_FULL, tint);
-    }
-    super::button::finish_icon_button(ui, palette, &button, label)
 }
 
 // --- Tree rows --------------------------------------------------------------------
@@ -547,7 +494,7 @@ fn paint_row_band(
     painter: &egui::Painter,
 ) {
     let focused = ui.memory(|m| m.has_focus(cells.response.id));
-    super::row::paint_row_band(
+    riff_gui_components::row::paint_row_band(
         ui,
         painter,
         palette,
@@ -744,7 +691,7 @@ fn paint_row_label(
         Some(count) => format!("{} ({count})", row.label),
         None => row.label.to_owned(),
     };
-    super::row::register_row_a11y(&cells.response, row.selected, labeled);
+    riff_gui_components::row::register_row_a11y(&cells.response, row.selected, labeled);
 }
 
 /// Draw one tree row and return what it reported — clicks, double-clicks,
@@ -870,7 +817,7 @@ pub fn playlist_row(
     let painter = ui.painter_at(rect);
 
     let focused = ui.memory(|m| m.has_focus(response.id));
-    super::row::paint_row_band(
+    riff_gui_components::row::paint_row_band(
         ui,
         &painter,
         palette,
@@ -929,7 +876,7 @@ pub fn playlist_row(
         action = Some(PlaylistRowAction::Rename);
     }
 
-    super::row::register_row_a11y(&response, selected, name);
+    riff_gui_components::row::register_row_a11y(&response, selected, name);
     if response.clicked() {
         action = Some(PlaylistRowAction::Open);
     }

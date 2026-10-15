@@ -3,7 +3,9 @@ mod collection_menu;
 mod library_picker;
 mod selection_pane;
 mod tag_editor;
-mod track_menu;
+// Public so the display↔business crossing functions this module owns
+// (`track_key_to_id` and friends) are reachable from the per-crate test suite.
+pub mod track_menu;
 
 pub use collection_menu::{CollectionMenuHost, apply_collection_menu};
 pub use library_picker::register_library_path;
@@ -16,7 +18,7 @@ use crate::ui::now_playing::NowPlayingAction;
 use crate::ui::playerbar::PlayerBarAction;
 use crate::ui::settings::SettingsSection;
 use crate::ui::sidebar::UpNextEntry;
-use crate::ui::theme::{self, Palette};
+use riff_gui_theme::theme::{self, Palette};
 // Ungated, unlike the visibility *channel* fields: `CUSTOM_TITLEBAR_CLOSE` is
 // compiled on every platform (it is the pure data `close_resolution` hands
 // back, which is deliberately ungated so the close decision stays assertable
@@ -25,6 +27,7 @@ use crate::ui::theme::{self, Palette};
 // const unnameable there.
 use crate::ui::window_visibility::VisibilityMessage;
 use eframe::egui;
+use riff_gui_components::menu::PlaylistKey;
 // The Frame (ui-frame-deepening issue 04) owns the frame's order: its
 // decision half, the three panel reports, and the six-field write-back. This
 // file draws what those decisions hand it and enacts what the frame decided.
@@ -52,9 +55,9 @@ pub use crate::ui::artwork::{
     COVER_CARD, COVER_HERO, COVER_IN_FLIGHT_CAP, COVER_TEXTURE_BYTE_BUDGET, COVER_THUMB,
     CoverCacheKey, cover_cache_key,
 };
-// The elastic stage's sizing policy moved in with the stage geometry itself;
-// this keeps the historical `ui::app::column_widths` path resolving.
-pub use crate::ui::stage::column_widths;
+// The elastic stage's sizing policy moved into the component library with the
+// stage geometry itself; this keeps the historical `ui::app::column_widths`
+// path resolving.
 use riff_backend::app::events::BackendEvents;
 use riff_backend::app::preferences::Preferences;
 use riff_backend::app::scan_service::Scans;
@@ -67,6 +70,7 @@ use riff_backend::app::traits::RequestedSize;
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
 use riff_backend::domain::{PlaybackState, PlaylistId, SmartPlaylistKind, Track, TrackId};
+pub use riff_gui_components::stage::column_widths;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 // The app-wide quit intent, read by the macOS close block below. Gated to
@@ -337,7 +341,7 @@ pub struct RiffApp {
     pub(crate) views: SessionViews,
     pub(crate) theme: ThemeState,
     /// Vendored-glyph texture cache for the shell's icon controls (Issue 06).
-    pub(crate) icons: crate::ui::icons::IconCache,
+    pub(crate) icons: riff_gui_theme::icons::IconCache,
     /// The section the Settings modal's left nav currently shows (Issue 11).
     /// Opens on Library, the pane the Library settings rewire builds on.
     pub(crate) settings_section: SettingsSection,
@@ -477,7 +481,7 @@ impl RiffApp {
                 active: theme::Palette::dark(),
                 last_applied: None,
             },
-            icons: crate::ui::icons::IconCache::new(),
+            icons: riff_gui_theme::icons::IconCache::new(),
             settings_section: SettingsSection::Library,
             feedback: crate::ui::feedback::FeedbackBoard::default(),
             #[cfg(target_os = "linux")]
@@ -790,9 +794,9 @@ impl RiffApp {
         // Arc clone out of the seam first: no `&self.views` borrow may live
         // across widget rendering.
         let playlists = self.views.playlists();
-        let options: Vec<(PlaylistId, String)> = playlists
+        let options: Vec<(PlaylistKey, String)> = playlists
             .iter()
-            .map(|p| (p.id.clone(), p.name.clone()))
+            .map(|p| (track_menu::playlist_id_to_key(&p.id), p.name.clone()))
             .collect();
         let palette = self.theme.active;
         // Paint first and answer afterwards: nothing can act while the popup
@@ -1701,7 +1705,7 @@ fn genre_track_ids(views: &mut SessionViews, genre: &str) -> Vec<TrackId> {
 ///
 /// A Track row's **menu** report is not one of these, and that is structural
 /// rather than a no-op arm's worth of documentation: a menu report is a
-/// [`crate::ui::menu::TrackMenuReport`] travelling in
+/// [`riff_gui_components::menu::TrackMenuReport`] travelling in
 /// [`crate::ui::detail::DetailReport`]'s other variant, answered by the
 /// per-app [`TrackMenuHost`]. This applier cannot be handed one, so it needs
 /// no arm to discard it.
@@ -2792,29 +2796,29 @@ impl RiffApp {
         } = nav;
         let palette = self.theme.active;
         sidebar::section_header(ui, &palette, "Library");
-        let library_rows: [(LibrarySection, &str, crate::ui::icons::Icon, usize); 4] = [
+        let library_rows: [(LibrarySection, &str, riff_gui_theme::icons::Icon, usize); 4] = [
             (
                 LibrarySection::AllTracks,
                 "All Tracks",
-                crate::ui::icons::Icon::ListMusic,
+                riff_gui_theme::icons::Icon::ListMusic,
                 counts.tracks,
             ),
             (
                 LibrarySection::Artists,
                 "Artists",
-                crate::ui::icons::Icon::Library,
+                riff_gui_theme::icons::Icon::Library,
                 counts.artists,
             ),
             (
                 LibrarySection::Albums,
                 "Albums",
-                crate::ui::icons::Icon::Disc,
+                riff_gui_theme::icons::Icon::Disc,
                 counts.albums,
             ),
             (
                 LibrarySection::Genres,
                 "Genres",
-                crate::ui::icons::Icon::Music,
+                riff_gui_theme::icons::Icon::Music,
                 counts.genres,
             ),
         ];
@@ -2844,7 +2848,7 @@ impl RiffApp {
             library.ui_flags.reduce_motion,
             TreeRow::nav(
                 "Folders",
-                Some(crate::ui::icons::Icon::Folder),
+                Some(riff_gui_theme::icons::Icon::Folder),
                 Some(counts.folder_roots),
                 folder_section_live,
             ),
@@ -2869,8 +2873,8 @@ impl RiffApp {
         collapsed: bool,
         report: &mut SidebarReport,
     ) {
-        use crate::ui::icons::Icon;
         use crate::ui::sidebar;
+        use riff_gui_theme::icons::Icon;
 
         let palette = self.theme.active;
         ui.horizontal(|ui| {
@@ -2952,7 +2956,7 @@ impl RiffApp {
                 library.ui_flags.reduce_motion,
                 TreeRow::nav(
                     kind.display_name(),
-                    Some(crate::ui::icons::Icon::Sparkles),
+                    Some(riff_gui_theme::icons::Icon::Sparkles),
                     Some(smart_count(kind)),
                     self.smart_playlist_view == Some(kind),
                 ),
@@ -3071,11 +3075,11 @@ impl RiffApp {
         }
 
         // Built by
-        // [`crate::ui::scroll_area::controlled_scroll_area`] (no `auto_shrink`
+        // [`riff_gui_components::scroll_area::controlled_scroll_area`] (no `auto_shrink`
         // here); the reason it is unanimated — and why the other `ScrollArea`s
         // in this file are not flipped to match — is written once on
         // [`ScrollControl`](crate::ui::scroll_memory::ScrollControl).
-        let scroll_area = crate::ui::scroll_area::controlled_scroll_area(control, true);
+        let scroll_area = riff_gui_components::scroll_area::controlled_scroll_area(control, true);
         let output = scroll_area.show_rows(
             ui,
             theme::geometry::sidebar::ROW_H,
@@ -3137,11 +3141,17 @@ impl RiffApp {
             ui.weak(format!("({} tracks, read-only)", tracks.len()));
             if !tracks.is_empty() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(sort) = crate::ui::menu::track_sort_control(
-                        ui,
-                        &self.theme.active,
+                    if let Some(sort) = crate::ui::browser::track_sort_to_sort_key(
                         library.track_sort,
-                    ) {
+                    )
+                    .and_then(|current| {
+                        riff_gui_components::menu::track_sort_control(
+                            ui,
+                            &self.theme.active,
+                            current,
+                        )
+                        .map(crate::ui::browser::sort_key_to_track_sort)
+                    }) {
                         library.track_sort = sort;
                     }
                 });
@@ -3207,8 +3217,8 @@ impl RiffApp {
     /// [`PlaylistStore`] port as one immediate durable transaction; reads
     /// come from the seam's playlist projection.
     fn render_playlists_header(&mut self, ui: &mut egui::Ui, report: &mut SidebarReport) {
-        use crate::ui::icons::Icon;
         use crate::ui::sidebar;
+        use riff_gui_theme::icons::Icon;
 
         let palette = self.theme.active;
         ui.horizontal(|ui| {
@@ -3219,7 +3229,7 @@ impl RiffApp {
                     egui::pos2(ui.max_rect().right() - 12.0, ui.cursor().center().y),
                     egui::vec2(24.0, 24.0),
                 );
-                if sidebar::ghost_icon_button(
+                if riff_gui_components::ghost_icon_button::ghost_icon_button(
                     ui,
                     &mut self.icons,
                     &palette,
@@ -3302,7 +3312,7 @@ impl RiffApp {
         };
         // The pure widget seam (golden-image gap audit P1-7) reports the
         // outcome; the store flow below is unchanged.
-        if let Some(outcome) = crate::ui::prompts::playlist_create_prompt(ui, draft) {
+        if let Some(outcome) = riff_gui_components::prompts::playlist_create_prompt(ui, draft) {
             report.push(SidebarAction::PlaylistCreate(outcome));
         }
     }
@@ -3330,7 +3340,7 @@ impl RiffApp {
         };
         // The pure widget seam (golden-image gap audit P1-7), same shape as
         // the create prompt.
-        if let Some(outcome) = crate::ui::prompts::playlist_rename_prompt(ui, draft) {
+        if let Some(outcome) = riff_gui_components::prompts::playlist_rename_prompt(ui, draft) {
             report.push(SidebarAction::PlaylistRename {
                 id: pid.clone(),
                 outcome,
@@ -3385,11 +3395,17 @@ impl RiffApp {
             ui.weak(format!("({track_count} tracks)"));
             if track_count > 0 {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(sort) = crate::ui::menu::track_sort_control(
-                        ui,
-                        &self.theme.active,
+                    if let Some(sort) = crate::ui::browser::track_sort_to_sort_key(
                         library.track_sort,
-                    ) {
+                    )
+                    .and_then(|current| {
+                        riff_gui_components::menu::track_sort_control(
+                            ui,
+                            &self.theme.active,
+                            current,
+                        )
+                        .map(crate::ui::browser::sort_key_to_track_sort)
+                    }) {
                         library.track_sort = sort;
                     }
                 });
@@ -3798,9 +3814,9 @@ impl RiffApp {
         level: usize,
         query: &str,
     ) {
-        use crate::ui::icons::Icon;
         use crate::ui::sidebar::{self, TreeRow};
         use egui::collapsing_header::CollapsingState;
+        use riff_gui_theme::icons::Icon;
 
         if !self.views.folder_has_audio(path) {
             return;
@@ -4159,7 +4175,7 @@ fn show_list_context_menu(
 ) {
     let mut intents = Vec::new();
     response.context_menu(|ui| {
-        crate::ui::menu::list_menu(ui, palette, &mut intents);
+        riff_gui_components::menu::list_menu(ui, palette, &mut intents);
     });
     for intent in intents {
         apply_list_menu_intent(intent, track_ids, transport, playback);
@@ -4173,12 +4189,12 @@ fn show_list_context_menu(
 /// `playback` is the session the shuffle flag lives on, borrowed only by that
 /// one arm.
 pub fn apply_list_menu_intent(
-    intent: crate::ui::menu::ListMenuIntent,
+    intent: riff_gui_components::menu::ListMenuIntent,
     track_ids: &[TrackId],
     transport: &dyn Transport,
     playback: &mut PlaybackSession,
 ) {
-    use crate::ui::menu::ListMenuIntent;
+    use riff_gui_components::menu::ListMenuIntent;
     match intent {
         // The collection's Play is the SAME helper the album header's and the
         // Detail Panel's Play use, so a Track menu and a collection menu cannot

@@ -46,16 +46,50 @@
 //! collection menus — to save a borrow that costs nothing. The scope that
 //! matters is where the handles are *named*, and that is one function.
 
-use crate::ui::menu::{TrackMenu, TrackMenuIntent};
-use crate::ui::theme::Palette;
 use riff_backend::app::Transport;
 use riff_backend::app::pass_service::Passes;
 use riff_backend::app::replaygain_pass::PassCommand;
 use riff_backend::app::store::{LibraryMutationStore, PlaylistStore};
 use riff_backend::domain::{PlaylistId, Track, TrackId};
+use riff_gui_components::menu::{PlaylistKey, TrackKey, TrackMenu, TrackMenuIntent};
+use riff_gui_theme::theme::Palette;
 
 use super::InlineTagEditor;
 use super::tag_rows;
+
+// --- The menu boundary's display↔business crossing -----------------------------------
+//
+// The menu's vocabulary is the component crate's ([`TrackKey`],
+// [`PlaylistKey`]); the host's ports speak [`TrackId`] and [`PlaylistId`].
+// The frontend owns every crossing between the two (ticket 03; ADR 0018),
+// and these four functions are that crossing — kept beside the host that
+// answers the menu so the boundary and its only interpreter sit in one place.
+// The key string is the identity on both sides, so each conversion is the
+// same fact wearing the other crate's name.
+
+/// The display vocabulary's track identity as the host's [`TrackId`].
+#[must_use]
+pub fn track_key_to_id(key: TrackKey) -> TrackId {
+    TrackId(key.0)
+}
+
+/// The host's [`TrackId`] as the display vocabulary's track identity.
+#[must_use]
+pub fn track_id_to_key(id: &TrackId) -> TrackKey {
+    TrackKey(id.0.clone())
+}
+
+/// The display vocabulary's playlist identity as the host's [`PlaylistId`].
+#[must_use]
+pub fn playlist_key_to_id(key: PlaylistKey) -> PlaylistId {
+    PlaylistId(key.0)
+}
+
+/// The host's [`PlaylistId`] as the display vocabulary's playlist identity.
+#[must_use]
+pub fn playlist_id_to_key(id: &PlaylistId) -> PlaylistKey {
+    PlaylistKey(id.0.clone())
+}
 
 /// Which Track a right-click landed on, and the one fact about where that row
 /// sits that its menu needs.
@@ -139,7 +173,7 @@ impl<'a> TrackMenuSubject<'a> {
     /// answer per row: the Favourite item's label flips on `track.favorite`,
     /// and a listing may hold a mix of Favourited and un-Favourited rows in
     /// the same frame.
-    fn menu(self, playlists: &[(PlaylistId, String)]) -> TrackMenu<'_> {
+    fn menu(self, playlists: &[(PlaylistKey, String)]) -> TrackMenu<'_> {
         TrackMenu {
             playable: self.track.is_some(),
             editable: self.track.is_some(),
@@ -226,11 +260,14 @@ impl<'a> TrackMenuHost<'a> {
             TrackMenuIntent::Play => self.transport.play(track_id),
             TrackMenuIntent::PlayNext => self.transport.play_next(track_id),
             TrackMenuIntent::AddToQueue => self.transport.add_to_queue(track_id),
-            TrackMenuIntent::AddToPlaylist(playlist) => {
+            TrackMenuIntent::AddToPlaylist(key) => {
                 // One immediate durable transaction; the committed mutation
                 // bumps the playlist generation, so the seam's next read
                 // reflects it with zero caller action (ADR 0002).
-                if let Err(e) = self.playlist_store.add_playlist_entry(&playlist, &track_id) {
+                if let Err(e) = self
+                    .playlist_store
+                    .add_playlist_entry(&playlist_key_to_id(key), &track_id)
+                {
                     tracing::warn!("Failed to add playlist entry: {e}");
                 }
             }
@@ -307,7 +344,8 @@ pub enum TrackMenuOpen {
 /// Paint one Track row's menu and report what happened: whether the popup
 /// opened, and every intent the listener chose from it.
 ///
-/// The rows and their meanings belong to [`crate::ui::menu`]; this decides
+/// The rows and their meanings belong to [`riff_gui_components::menu`]; this
+/// decides
 /// which rows exist from the subject, renders them inside egui's popup, and
 /// hands the choices back. **No Transport command, store write, or editor
 /// draft can happen while the menu is being painted** — the host is not even
@@ -323,14 +361,14 @@ pub enum TrackMenuOpen {
 pub(crate) fn paint_track_menu(
     response: &egui::Response,
     palette: &Palette,
-    playlists: &[(PlaylistId, String)],
+    playlists: &[(PlaylistKey, String)],
     subject: TrackMenuSubject<'_>,
 ) -> (TrackMenuOpen, Vec<TrackMenuIntent>) {
     let menu = subject.menu(playlists);
     let mut intents = Vec::new();
     let open = response
         .context_menu(|ui| {
-            crate::ui::menu::track_menu(ui, palette, &menu, &mut intents);
+            riff_gui_components::menu::track_menu(ui, palette, &menu, &mut intents);
         })
         .is_some();
     let open = if open {

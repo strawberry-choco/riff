@@ -36,22 +36,23 @@
 
 use eframe::egui;
 use riff_backend::app::store::SortDirection;
-use riff_backend::domain::{Album, PlaylistId, SmartPlaylistKind, TrackId};
+use riff_backend::domain::{Album, PlaylistId, SmartPlaylistKind};
 use std::sync::Arc;
 
 use riff_backend::app::state::{
     BrowseMode, BrowserSelection, LibrarySection, LibrarySession, PlaybackSession, TrackSort,
 };
+use riff_gui_components::menu::{PlaylistKey, TrackMenu};
 
 use super::super::browser;
 use super::super::column::ColumnIdentity;
 use super::super::scroll_memory::{DrillSlot, ScrollMemory};
-use super::super::theme::Palette;
 use super::{
     COVER_THUMB, ColumnKind, RiffApp, RowCovers, apply_collection_menu, apply_detail_action,
     apply_entity_selection, column_plan, resolve_detail_content, resolve_inspector,
     smart_list_openable,
 };
+use riff_gui_theme::theme::Palette;
 
 /// The stage's single-column states: stages that are not a LIBRARY section's
 /// facet drill render exactly one full-width listing column. The user
@@ -117,9 +118,12 @@ impl RiffApp {
         // owned by the shared geometry seam — the golden harness calls the very
         // same helper, so production and goldens cannot disagree on a column
         // edge. This call site supplies only the column content.
-        super::super::stage::show_elastic_stage(ui, plan.len(), inspector_visible, |ui, slot| {
-            match slot {
-                super::super::stage::StageSlot::Column(i) => {
+        riff_gui_components::stage::show_elastic_stage(
+            ui,
+            plan.len(),
+            inspector_visible,
+            |ui, slot| match slot {
+                riff_gui_components::stage::StageSlot::Column(i) => {
                     self.render_stage_column(
                         ui,
                         library,
@@ -129,11 +133,11 @@ impl RiffApp {
                         plan[i],
                     );
                 }
-                super::super::stage::StageSlot::Inspector => {
+                riff_gui_components::stage::StageSlot::Inspector => {
                     self.render_inspector(ui, library);
                 }
-            }
-        });
+            },
+        );
     }
 
     /// Render one list column of the elastic stage inside its
@@ -547,9 +551,9 @@ impl RiffApp {
         // frame the listener may choose from it. A Track in this column is in
         // no Playlist, so the menu offers the ADD targets and no removal.
         let playlists = self.views.playlists();
-        let options: Vec<(PlaylistId, String)> = playlists
+        let options: Vec<(PlaylistKey, String)> = playlists
             .iter()
-            .map(|p| (p.id.clone(), p.name.clone()))
+            .map(|p| (super::track_menu::playlist_id_to_key(&p.id), p.name.clone()))
             .collect();
         // `playable` and `editable` are true of every row here by
         // construction, and that is not an optimistic guess: a row only exists
@@ -566,7 +570,7 @@ impl RiffApp {
         // them. So the widget is handed a factory over the row and the host
         // still owns every flag — it is the same `BrowserColumn::item` shape a
         // virtualized listing already uses to hand out per-row data.
-        let track_menu = |row: &crate::ui::detail::TrackRow| crate::ui::menu::TrackMenu {
+        let track_menu = |row: &crate::ui::detail::TrackRow| TrackMenu {
             playable: true,
             editable: true,
             favorite: row.favorite,
@@ -614,7 +618,7 @@ impl RiffApp {
                     // to sit here existed only to route around those two
                     // missing handles — and the intents were not dropped to
                     // make room for it, they still work, through the host.
-                    let track_id = TrackId(report.key);
+                    let track_id = super::track_menu::track_key_to_id(report.key);
                     // The Track itself, resolved at dispatch time through the
                     // same seam the Detail Panel's Track readout uses; it is
                     // what "Edit Tags" needs to open its draft, and its absence
@@ -1119,7 +1123,7 @@ pub(super) struct ColumnPaint<'a> {
     /// The column's own ui.
     pub(super) ui: &'a mut egui::Ui,
     /// The glyph cache the rows and the sort control draw through.
-    pub(super) icons: &'a mut crate::ui::icons::IconCache,
+    pub(super) icons: &'a mut riff_gui_theme::icons::IconCache,
     /// The tokens the column paints from (ADR 0004).
     pub(super) palette: Palette,
     /// Whether hover washes and tweens snap to their settled state.
@@ -1137,7 +1141,7 @@ pub(super) struct ColumnPaint<'a> {
 /// set here means a seventh column site passes four fields and never lists them.
 pub(super) fn column_paint<'a>(
     ui: &'a mut egui::Ui,
-    icons: &'a mut crate::ui::icons::IconCache,
+    icons: &'a mut riff_gui_theme::icons::IconCache,
     palette: Palette,
     reduce_motion: bool,
 ) -> ColumnPaint<'a> {

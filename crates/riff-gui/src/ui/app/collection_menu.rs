@@ -103,7 +103,7 @@ impl<'a> CollectionMenuHost<'a> {
 /// is written once rather than twice.
 pub fn apply_collection_menu(
     key: &str,
-    intents: &[crate::ui::menu::ListMenuIntent],
+    intents: &[riff_gui_components::menu::ListMenuIntent],
     column: ColumnIdentity,
     host: CollectionMenuHost<'_>,
 ) {
@@ -123,15 +123,15 @@ pub fn apply_collection_menu(
         let row = entity_row(key, column.section(), column.level());
         let whole_album = matches!(row, Some(EntityRow::Album { .. }));
         match intent {
-            crate::ui::menu::ListMenuIntent::MeasureAlbumAggregate
-            | crate::ui::menu::ListMenuIntent::MeasureAlbumTracks => {
+            riff_gui_components::menu::ListMenuIntent::MeasureAlbumAggregate
+            | riff_gui_components::menu::ListMenuIntent::MeasureAlbumTracks => {
                 // Only the value kind differs between the two, so they share
                 // the guard and the submission and pick a command by intent.
                 let Some(EntityRow::Album { artist, title }) = row else {
                     continue;
                 };
                 host.passes.submit(match intent {
-                    crate::ui::menu::ListMenuIntent::MeasureAlbumAggregate => {
+                    riff_gui_components::menu::ListMenuIntent::MeasureAlbumAggregate => {
                         PassCommand::AlbumAggregate {
                             album_artist: artist,
                             album_title: title,
@@ -143,11 +143,11 @@ pub fn apply_collection_menu(
                     },
                 });
             }
-            crate::ui::menu::ListMenuIntent::Play => {
+            riff_gui_components::menu::ListMenuIntent::Play => {
                 let batch = entity_track_ids(key, column, host.views);
                 play_batch(&batch, whole_album, host.transport);
             }
-            crate::ui::menu::ListMenuIntent::Shuffle => {
+            riff_gui_components::menu::ListMenuIntent::Shuffle => {
                 let batch = entity_track_ids(key, column, host.views);
                 if batch.is_empty() {
                     continue;

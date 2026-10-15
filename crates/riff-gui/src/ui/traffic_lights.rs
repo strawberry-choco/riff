@@ -8,7 +8,7 @@
 //! so the system's red/yellow/green buttons are the window controls. But
 //! `AppKit` lays them out for ITS OWN titlebar — 28pt, 32pt on macOS 26 Tahoe,
 //! with 16pt/14pt button frames — while riff's strip is
-//! [`TITLEBAR_H`](crate::ui::theme::TITLEBAR_H), 56pt. So the cluster rides
+//! [`TITLEBAR_H`](riff_gui_theme::theme::TITLEBAR_H), 56pt. So the cluster rides
 //! roughly 14pt above the strip's centre, and this module re-centres it once
 //! per frame.
 //!
@@ -49,7 +49,7 @@
 #[cfg(target_os = "macos")]
 use super::chrome::{needs_reapply, traffic_light_plan};
 #[cfg(target_os = "macos")]
-use super::theme;
+use riff_gui_theme::theme;
 
 /// Re-centres the window's standard traffic lights in riff's strip, and does
 /// nothing at all when they are already there. Called once per frame from

@@ -19,17 +19,17 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::icons::{Icon, IconCache};
-use super::linear;
-use super::theme::geometry::playerbar::{
+use riff_backend::domain::{PlaybackState, RepeatMode, TrackId};
+use riff_gui_components::linear;
+use riff_gui_theme::icons::{Icon, IconCache};
+use riff_gui_theme::theme::geometry::playerbar::{
     CENTER_MIN_W, COVER, GHOST_BTN, MIN_INNER_H, MIN_TEXT_W, NOW_PLAYING_GAP, NOW_PLAYING_LINE_GAP,
     NOW_PLAYING_MIN_W, NOW_PLAYING_W, PLAY_BTN, QUEUE_LABEL_SPACE, QUEUE_PANEL_HEADER_H,
     QUEUE_PANEL_MAX_LIST_H, QUEUE_PANEL_W, TEXT_HIDE_META_W, VOLUME_THUMB, VOLUME_W,
 };
-use super::theme::geometry::seek::{TIME_LABEL_SPACE, TRACK_H};
-use super::theme::geometry::sidebar::ROW_H;
-use super::theme::{self, Palette};
-use riff_backend::domain::{PlaybackState, RepeatMode, TrackId};
+use riff_gui_theme::theme::geometry::seek::{TIME_LABEL_SPACE, TRACK_H};
+use riff_gui_theme::theme::geometry::sidebar::ROW_H;
+use riff_gui_theme::theme::{self, Palette};
 
 // --- Readout helpers -------------------------------------------------------------
 
@@ -196,7 +196,7 @@ pub enum PlayerBarAction {
 
 /// Draw the playerbar across the full panel strip and report every control
 /// interaction. Must run inside the shell's bottom panel of exactly
-/// [`crate::ui::theme::PLAYERBAR_H`] height; layout inside is manual and
+/// [`riff_gui_theme::theme::PLAYERBAR_H`] height; layout inside is manual and
 /// deterministic so the golden image pins real geometry.
 ///
 /// Observed actions are appended to `actions` — a buffer the caller owns
@@ -241,7 +241,7 @@ pub fn show_player_bar(
     } else {
         egui::Rect::from_min_size(cover_rect.min, egui::vec2(zone_w, COVER))
     };
-    let button = super::button::begin_icon_button(
+    let button = riff_gui_components::button::begin_icon_button(
         ui,
         zone_rect,
         egui::Id::new("playerbar_now_playing"),
@@ -262,7 +262,12 @@ pub fn show_player_bar(
             text_w,
         );
     }
-    if super::button::finish_icon_button(ui, palette, &button, &now_playing_label(content)) {
+    if riff_gui_components::button::finish_icon_button(
+        ui,
+        palette,
+        &button,
+        &now_playing_label(content),
+    ) {
         actions.push(PlayerBarAction::ToggleExpanded);
     }
 
@@ -337,8 +342,8 @@ fn paint_now_playing_text(
     pos: egui::Pos2,
     text_w: f32,
 ) {
-    let title_font = super::now_playing::styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM);
-    let meta_font = super::now_playing::styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS);
+    let title_font = riff_gui_theme::theme::styled_font(ui, egui::TextStyle::Body, theme::TEXT_SM);
+    let meta_font = riff_gui_theme::theme::styled_font(ui, egui::TextStyle::Small, theme::TEXT_XS);
     let (title, title_ink, meta, meta_ink) = match content.title.as_deref() {
         Some(title) => (
             title,
@@ -868,7 +873,7 @@ pub fn show_queue_panel(
 }
 
 /// The queue panel's empty state: the shared labelled
-/// [`super::empty_state::empty_state_in_rect`] composition over the panel body,
+/// [`riff_gui_components::empty_state::empty_state_in_rect`] composition over the panel body,
 /// plus a hover widget so assistive tech (and the harness) can read it.
 fn show_queue_panel_empty(ui: &egui::Ui, palette: &Palette) {
     let body = egui::Rect::from_min_max(
@@ -878,7 +883,7 @@ fn show_queue_panel_empty(ui: &egui::Ui, palette: &Palette) {
         ),
         ui.max_rect().max,
     );
-    super::empty_state::empty_state_in_rect(
+    riff_gui_components::empty_state::empty_state_in_rect(
         ui.painter(),
         palette,
         body,
@@ -933,7 +938,7 @@ fn ghost_circle_button(
     label: &str,
     active: bool,
 ) -> bool {
-    let button = super::button::begin_icon_button(ui, rect, id, false);
+    let button = riff_gui_components::button::begin_icon_button(ui, rect, id, false);
     let painter = ui.painter_at(rect);
 
     // Press replaces hover, and drops the hover ring with it: a held button
@@ -943,7 +948,7 @@ fn ghost_circle_button(
         painter.circle_filled(
             rect.center(),
             rect.width() / 2.0,
-            super::button::active_fill(ui),
+            riff_gui_components::button::active_fill(ui),
         );
     } else if button.hovered {
         painter.circle_filled(rect.center(), rect.width() / 2.0, palette.surface_2);
@@ -959,7 +964,7 @@ fn ghost_circle_button(
     let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
     painter.image(tex_id, icon_rect, super::artwork::UV_FULL, tint);
 
-    super::button::finish_icon_button(ui, palette, &button, label)
+    riff_gui_components::button::finish_icon_button(ui, palette, &button, label)
 }
 
 /// The 40px primary-filled play/pause circle: brand fill, on-brand glyph.
@@ -972,7 +977,12 @@ fn primary_play_button(
     icon: Icon,
     label: &str,
 ) -> bool {
-    let button = super::button::begin_icon_button(ui, rect, egui::Id::new("playerbar_play"), false);
+    let button = riff_gui_components::button::begin_icon_button(
+        ui,
+        rect,
+        egui::Id::new("playerbar_play"),
+        false,
+    );
     let painter = ui.painter_at(rect);
 
     // The FAB is the app's most-reached primary action, so it wears the same
@@ -990,10 +1000,10 @@ fn primary_play_button(
         painter.circle_filled(
             rect.center(),
             rect.width() / 2.0,
-            super::button::active_fill(ui),
+            riff_gui_components::button::active_fill(ui),
         );
     } else {
-        super::button::paint_primary_face(ui, palette, rect, rect.width() / 2.0);
+        riff_gui_components::button::paint_primary_face(ui, palette, rect, rect.width() / 2.0);
         if button.hovered {
             painter.circle_stroke(
                 rect.center(),
@@ -1006,5 +1016,5 @@ fn primary_play_button(
     let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(18.0, 18.0));
     painter.image(tex_id, icon_rect, super::artwork::UV_FULL, palette.on_brand);
 
-    super::button::finish_icon_button(ui, palette, &button, label)
+    riff_gui_components::button::finish_icon_button(ui, palette, &button, label)
 }

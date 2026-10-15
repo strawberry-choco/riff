@@ -1,7 +1,9 @@
-# riff-gui — the frontend: egui UI, tray icon, native dialogs, fonts, and the
+# riff-gui — the frontend: egui UI, tray icon, native dialogs, and the
 # `riff` binary entry point.
 #
-# Owns egui/eframe, egui_kittest, resvg, rfd, and tray-icon/muda.
+# Owns egui/eframe, egui_kittest, rfd, and tray-icon/muda. The design
+# authority (`riff-gui-theme`) and the presentation primitives
+# (`riff-gui-components`) it renders with are workspace crates (ADR 0018).
 #
 # The binary is a thin composition over the backend's Composition Root
 # (`riff_backend::composition::AppRuntime::spawn`, backend-crate-split
@@ -34,6 +36,11 @@ path = "src/main.rs"
 [dependencies]
 riff-backend = { path = "../riff-backend" }
 
+# The design authority and the presentation primitives this frontend renders
+# with (ADR 0018): Theme ← Component Library ← frontend.
+riff-gui-theme = { path = "../riff-gui-theme" }
+riff-gui-components = { path = "../riff-gui-components" }
+
 # UI
 egui.workspace = true
 eframe = { version = "0.35", features = ["default", "persistence"] }
@@ -42,9 +49,6 @@ epi = { package = "egui_extras", version = "0.35", features = ["image"] }
 # Window-handle access for eframe's window-chrome metrics (the macOS
 # traffic-light clearance)
 raw-window-handle = "0.6"
-
-# Lucide icon glyph rasterization for the shell chrome
-resvg = "0.48"
 
 # Logging
 tracing = "0.1"

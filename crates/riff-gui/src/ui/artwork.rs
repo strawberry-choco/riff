@@ -42,10 +42,10 @@
 use eframe::egui;
 
 use crate::ui::cover_cache::{CoverArrival, CoverCache};
-use crate::ui::icons;
-use crate::ui::theme::{self, Palette};
 use riff_backend::app::cover_service::{COVER_CACHE_CAP, lru_insert};
 use riff_backend::app::traits::RequestedSize;
+use riff_gui_theme::icons;
+use riff_gui_theme::theme::{self, Palette};
 
 // --- The cache key space -------------------------------------------------------
 //
@@ -380,7 +380,7 @@ pub enum Placeholder {
     /// The stops travel with the variant rather than being named here, so the
     /// gradient is the caller's to choose and this module never decides which
     /// pair of rungs a placeholder wears. The system pair is
-    /// [`super::theme::placeholder_gradient_stops`].
+    /// [`riff_gui_theme::theme::placeholder_gradient_stops`].
     Gradient {
         /// Colour at the block's top edge.
         top: egui::Color32,
@@ -480,7 +480,7 @@ fn paint_placeholder(
             // The caller's stops, painted by the shared gradient painter. A
             // placeholder is a plain rectangle, so the radius is zero and takes
             // that painter's rectangular path.
-            super::theme::paint_gradient_shape(painter, rect, 0.0, [top, bottom]);
+            riff_gui_theme::theme::paint_gradient_shape(painter, rect, 0.0, [top, bottom]);
         }
     }
 }

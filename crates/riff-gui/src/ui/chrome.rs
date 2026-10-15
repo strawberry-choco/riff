@@ -18,18 +18,18 @@
 //! this module paints is also the one rasterized for the tray and the OS window
 //! icon, so the three surfaces cannot disagree about what riff looks like.
 
-use super::icons::{Icon, IconCache, icon_button};
-use super::theme::geometry::sidebar::SEARCH_H;
+use eframe::egui;
+use riff_backend::app::state::{BrowseMode, ViewMode};
+use riff_gui_theme::icons::{Icon, IconCache, icon_button};
+use riff_gui_theme::theme::geometry::sidebar::SEARCH_H;
 #[cfg(not(target_os = "macos"))]
-use super::theme::geometry::titlebar::{CAPTION_BTN_H, CAPTION_BTN_W};
-use super::theme::geometry::titlebar::{
+use riff_gui_theme::theme::geometry::titlebar::{CAPTION_BTN_H, CAPTION_BTN_W};
+use riff_gui_theme::theme::geometry::titlebar::{
     CAPTION_GAP, SEARCH_EDGE_INSET, SEARCH_GAP, SEARCH_MAX_W, TRAFFIC_LIGHT_CLEARANCE,
     WORDMARK_GAP, WORDMARK_LEFT_INSET,
 };
-use super::theme::geometry::window;
-use super::theme::{self, Palette};
-use eframe::egui;
-use riff_backend::app::state::{BrowseMode, ViewMode};
+use riff_gui_theme::theme::geometry::window;
+use riff_gui_theme::theme::{self, Palette};
 
 /// The static normalized bar heights of the wordmark's equalizer glyph — a
 /// fixed brand mark that moved into the titlebar from the content top bar.
@@ -192,7 +192,7 @@ const TRAFFIC_LIGHT_DRIFT_EPSILON: f64 = 0.5;
 /// not the container is coordinate-flipped — only the container's *anchor* is
 /// orientation-sensitive, and that lives in [`crate::ui::traffic_lights`].
 ///
-/// `strip_h` is [`crate::ui::theme::TITLEBAR_H`] read, never a literal: the
+/// `strip_h` is [`riff_gui_theme::theme::TITLEBAR_H`] read, never a literal: the
 /// strip is 56pt on every platform and this must not become a way to make it
 /// otherwise. `button_h` is measured off the live `NSButton` rather than
 /// hardcoded, so Apple's next titlebar change costs nothing.
@@ -363,7 +363,7 @@ pub enum TitleBarAction {
 /// at the right edge (theme / Now Playing / Settings toggles plus
 /// minimize/close).
 ///
-/// Must run inside a top panel of exactly [`crate::ui::theme::TITLEBAR_H`]
+/// Must run inside a top panel of exactly [`riff_gui_theme::theme::TITLEBAR_H`]
 /// height with no frame margins, so the drag region covers the full strip.
 ///
 /// The global "Search or jump to…" field is shared chrome: it renders
@@ -514,12 +514,12 @@ pub fn show_titlebar(
     // dismisses on Escape. Returns the field's response so this caller can keep
     // driving the Ctrl+K request-focus shortcut.
     let id = egui::Id::new("riff_global_search");
-    super::text_field::text_field(
+    riff_gui_components::text_field::text_field(
         ui,
         cache,
         palette,
         search_query,
-        &super::text_field::TextField {
+        &riff_gui_components::text_field::TextField {
             id,
             rect: search_rect,
             hint: "Search or jump to…",
@@ -619,7 +619,7 @@ fn window_control_button(
     label: &str,
     danger: bool,
 ) -> bool {
-    let button = super::button::begin_icon_button(ui, rect, id, false);
+    let button = riff_gui_components::button::begin_icon_button(ui, rect, id, false);
     let painter = ui.painter_at(rect);
 
     // Press replaces the hover fill rather than compositing with it, so a held
@@ -630,7 +630,11 @@ fn window_control_button(
     // close's error red is a *hover* treatment, so it steps aside for the press
     // exactly as the neutral one does.
     if button.pressed {
-        painter.rect_filled(rect, theme::RADIUS_SM, super::button::active_fill(ui));
+        painter.rect_filled(
+            rect,
+            theme::RADIUS_SM,
+            riff_gui_components::button::active_fill(ui),
+        );
     } else if button.hovered {
         let fill = if danger {
             palette.error
@@ -652,7 +656,7 @@ fn window_control_button(
     let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
     painter.image(tex_id, icon_rect, super::artwork::UV_FULL, tint);
 
-    super::button::finish_icon_button(ui, palette, &button, label)
+    riff_gui_components::button::finish_icon_button(ui, palette, &button, label)
 }
 
 /// The right-edge nav-control cluster: theme / Now Playing / Settings
@@ -807,7 +811,7 @@ fn mark_svg() -> String {
 /// surfaces that take bytes rather than egui textures — the system tray.
 #[must_use]
 pub fn icon_rgba() -> Option<Vec<u8>> {
-    super::icons::rasterize_rgba(&mark_svg(), APP_ICON_PX as usize, theme::BRAND_500)
+    riff_gui_theme::icons::rasterize_rgba(&mark_svg(), APP_ICON_PX as usize, theme::BRAND_500)
 }
 
 /// The brand mark for the OS window and taskbar button.

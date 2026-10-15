@@ -47,10 +47,10 @@ use riff_gui::ui::frame::{
 };
 use riff_gui::ui::now_playing::NowPlayingAction;
 use riff_gui::ui::playerbar::PlayerBarAction;
-use riff_gui::ui::prompts::PromptOutcome;
 use riff_gui::ui::scroll_memory::ScrollMemory;
 use riff_gui::ui::sidebar::PlaylistRowAction;
-use riff_gui::ui::theme;
+use riff_gui_components::prompts::PromptOutcome;
+use riff_gui_theme::theme;
 use riff_persistence::test_support::StubLibraryQueryStore;
 
 // ---------------------------------------------------------------------------

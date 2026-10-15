@@ -25,6 +25,8 @@ pub mod stage;
 pub mod text_field;
 pub mod toggle_switch;
 
+pub use scroll_control::ScrollControl;
+
 /// Full-texture UV rect for [`egui::Painter::image`]: the full-rect UVs,
 /// shared by every texture blit in this crate's primitives.
 pub(crate) const UV_FULL: egui::Rect =

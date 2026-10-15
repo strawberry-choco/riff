@@ -98,13 +98,13 @@ use super::cover_cache::{CoverArrival, CoverCache};
 use super::feedback::{Feedback, FeedbackBoard};
 use super::now_playing::NowPlayingAction;
 use super::playerbar::PlayerBarAction;
-use super::prompts::PromptOutcome;
 use super::scroll_memory::ScrollMemory;
 use super::sidebar::PlaylistRowAction;
-use super::theme::{self, Palette};
 use riff_backend::app::pass_service::Passes;
 use riff_backend::app::replaygain_pass::PassCommand;
 use riff_backend::app::replaygain_pass::PassReport;
+use riff_gui_components::prompts::PromptOutcome;
+use riff_gui_theme::theme::{self, Palette};
 
 /// What one frame's egui input said.
 ///

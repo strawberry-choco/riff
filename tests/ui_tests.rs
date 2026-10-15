@@ -20524,9 +20524,10 @@ mod library_path_drop_tests {
         );
         assert_eq!(
             feedback.display_message(),
-            Some("Added library path, scanning\u{2026}".to_string()),
-            "a drop that registered anything leaves the confirmation standing for the \
-             live scan progress to overwrite moments later"
+            Some(format!("Not a directory: {}", file_b.display())),
+            "rejections win the slot: the last non-directory's sentence stands \
+             even though a folder registered after it — the scans requested above \
+             still start, so live scan progress overwrites the refusal moments later"
         );
     }
 }

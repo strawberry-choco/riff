@@ -79,10 +79,17 @@ pub struct DropResolution {
 /// of the drop still registers.
 ///
 /// The report rides the structured board on the Library notice — the
-/// titlebar's scan slot — rejections first, then the one success line, so an
-/// all-rejected drop leaves the standard refusal standing and a drop that
-/// registered anything leaves "Added library path, scanning…" for the live
-/// scan progress to overwrite moments later. One slot, no new surface.
+/// titlebar's scan slot — one slot, no new surface, and the write order
+/// across that slot is a deliberate product call: **rejections win**. The
+/// one success line is written first and every refusal sentence after it, so
+/// the last non-directory's standard sentence is what stands at the end of
+/// the frame — even when folders were dropped after it. The folders still
+/// register and their scans still start, so on a mixed drop the live scan
+/// progress overwrites that refusal moments later: the confirmation's
+/// purpose ("indexing began") is served by the progress that follows, while
+/// a refusal is information nothing else ever reports. A clean drop
+/// therefore leaves "Added library path, scanning…" standing, and an
+/// all-rejected drop leaves the last refusal standing.
 pub fn resolve_dropped_paths(
     candidates: &[PathBuf],
     library: &mut LibrarySession,
@@ -95,14 +102,7 @@ pub fn resolve_dropped_paths(
     let mut resolution = DropResolution::default();
     for candidate in candidates {
         match judge_candidate(candidate) {
-            Err(refusal) => {
-                feedback.set(
-                    NoticeSource::Library,
-                    refusal.clone(),
-                    NoticeSeverity::Warning,
-                );
-                resolution.rejections.push(refusal);
-            }
+            Err(refusal) => resolution.rejections.push(refusal),
             Ok(canonical) => {
                 // The adapter's own dedupe judgment: `register` dedupes the
                 // write, but the scan request must not ride a re-drop.
@@ -120,6 +120,15 @@ pub fn resolve_dropped_paths(
             NoticeSource::Library,
             "Added library path, scanning\u{2026}",
             NoticeSeverity::Info,
+        );
+    }
+    // Rejections win: the refusals are set after the success line, so the
+    // last non-directory's sentence is what stands on the slot.
+    for refusal in &resolution.rejections {
+        feedback.set(
+            NoticeSource::Library,
+            refusal.clone(),
+            NoticeSeverity::Warning,
         );
     }
     resolution

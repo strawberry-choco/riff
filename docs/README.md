@@ -73,7 +73,7 @@ How riff is built and how it works at runtime.
 How to work on riff correctly.
 
 - [Development setup](engineering/development-setup.md) — prerequisites, the command set, and build-profile notes.
-- [Coding standards](engineering/coding-standards.md) — layering rules, the per-OS branch rule, clippy and formatting configuration, the error-handling pattern, and the implementation gotchas.
+- [Coding standards](engineering/coding-standards.md) — layering rules, the per-OS branch rule, clippy, rustdoc and formatting configuration, the error-handling pattern, and the implementation gotchas.
 - [Contributing](engineering/contributing.md) — how to orient yourself and the pull-request checklist.
 - [Commit conventions](engineering/commit-conventions.md) — the commit-message profile the validator enforces, the type-to-section-to-bump table from `cliff.toml`, and the three enforcement points.
 - [Testing strategy](engineering/testing-strategy.md) — the per-crate suites and the workspace-root integration/golden suite, plus prioritized recommendations.

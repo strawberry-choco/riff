@@ -14,6 +14,7 @@ Closes #
 - [ ] **Composition root respected.** Only `riff-backend/src/composition.rs` constructs and wires infrastructure.
 - [ ] **No panics in the UI.** Recoverable errors surface as user-facing messages, never as panics.
 - [ ] **Clippy clean.** `cargo clippy --all-targets -- -D warnings` produces no warnings.
+- [ ] **Doc build clean.** `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --document-private-items` produces no warnings.
 - [ ] **Formatted.** `cargo fmt` has been run and produces no diff.
 - [ ] **Commit messages conventional.** Every commit on the branch passes the commit-message rules (type, scope, header length); rebase rather than squash-fix, since each commit stays as written — see [docs/engineering/commit-conventions.md](docs/engineering/commit-conventions.md).
 - [ ] **Tests added.** New domain logic (and, where practical, app logic) has accompanying tests, and `cargo test --all-targets` passes.
@@ -22,6 +23,6 @@ The same list, with the reasoning behind each item, is in [docs/engineering/cont
 
 ## Before you request review
 
-CI runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all-targets` on Linux and Windows — that is the gate, and clippy treats any warning as a failure. Run all three locally first.
+CI runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all-targets` on Linux and Windows, plus a warning-free rustdoc build on the Linux leg — that is the gate, and clippy and rustdoc treat any warning as a failure. Run them locally first.
 
 For UI changes, also run `cargo run -p riff-gui` and check the behavior by hand; much of the interface is exercised manually rather than by an automated test. If a golden-image test fails, read [docs/engineering/golden-image-testing.md](docs/engineering/golden-image-testing.md) before re-baselining — the committed snapshots are byte-exact and legitimately differ across hardware.

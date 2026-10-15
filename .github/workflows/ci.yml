@@ -9,7 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# this workflow only runs `cargo fmt`/`clippy`/`test` and needs no write
+# this workflow only runs `cargo fmt`/`clippy`/`test`/`doc` and needs no write
 # access. Stating the token scope explicitly stops a future tag-triggered
 # release workflow from silently inheriting a broader repository default.
 permissions:
@@ -99,6 +99,29 @@ jobs:
       # compare against, must run against the resolved graph the repository carries.
       - name: Test
         run: cargo test --locked --all-targets
+
+      # The rustdoc gate. `cargo test --all-targets` never runs doctests, and
+      # there are no runnable ones in the tree anyway — so this step is the doc
+      # check proper: every crate's documentation must compile with no rustdoc
+      # warning surviving, because RUSTDOCFLAGS turns each one into a failure.
+      #
+      # `--document-private-items` is deliberate: most of this workspace's doc
+      # comments sit on private items (the GUI modules are private and densely
+      # documented), so without it the gate would police a thin public shell.
+      # `private_intra_doc_links` is allowed once, in the root manifest's
+      # `[workspace.lints.rustdoc]` — these crates are internal, so a public
+      # doc comment linking a private item is a maintainer's cross-reference,
+      # not a broken promise (rustdoc keeps firing that lint even under
+      # `--document-private-items`, so the level has to live in the manifest).
+      #
+      # Linux only: rustdoc renders the same on every platform, the Linux leg
+      # already installs every system header the doc build needs, and a second
+      # run of the same platform-independent check buys no signal. Doc comments
+      # behind non-Linux `cfg` arms are covered by local runs on those
+      # platforms. Same lock discipline as clippy/test (`--locked`).
+      - name: Documentation
+        if: runner.os == 'Linux'
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --workspace --document-private-items
 
   # the pre-merge gate for commit messages. Validates every commit between the
   # merge base and the branch head with the same validator the local hook runs,

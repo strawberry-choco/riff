@@ -116,4 +116,4 @@ The resulting binary is written to `target/release/` (for example `target/releas
 
 ### Not automated
 
-Signing (an identified Apple Developer ID plus notarization, or a Windows Authenticode certificate), installers, checksums, and per-platform asset hosting are all absent, and each absence is a documented limitation rather than a gap in the pipeline. `.github/workflows/ci.yml` still owns the quality gate (`fmt`, `clippy`, `test` on Linux and Windows); the release workflow builds and publishes, and assumes the tag points at a commit that already passed CI.
+Signing (an identified Apple Developer ID plus notarization, or a Windows Authenticode certificate), installers, checksums, and per-platform asset hosting are all absent, and each absence is a documented limitation rather than a gap in the pipeline. `.github/workflows/ci.yml` still owns the quality gate (`fmt`, `clippy`, `test` on Linux and Windows, plus `doc` on the Linux leg); the release workflow builds and publishes, and assumes the tag points at a commit that already passed CI.

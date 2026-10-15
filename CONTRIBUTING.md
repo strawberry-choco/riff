@@ -35,12 +35,14 @@ cargo fmt                                  # format
 cargo check --all-targets                  # type/borrow checking across all targets
 cargo clippy --all-targets -- -D warnings  # lint with warnings as errors
 cargo test --all-targets                   # run all unit and integration tests
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --document-private-items  # build docs, rustdoc warnings are errors
 ```
 
-Run all of these before you open a pull request — it is the same gate CI runs on push and pull requests to `master`, on Linux and Windows runners. Two of them are stricter than they look:
+Run all of these before you open a pull request — it is the same gate CI runs on push and pull requests to `master`, on Linux and Windows runners, with the rustdoc build gated on the Linux leg. Three of them are stricter than they look:
 
 - **Clippy fails the build on any warning** (`-D warnings`). The workspace enables clippy's pedantic group as warnings, so the tree is expected to stay completely warning-free; a clean run is the standard, not a nicety.
 - **`cargo fmt` must produce no diff** (CI runs `cargo fmt --check`). There is no `rustfmt.toml` in the repository, so this is rustfmt's default style.
+- **The doc build fails on any rustdoc warning** (`RUSTDOCFLAGS="-D warnings"`). Intra-doc links must resolve, and doc comments are linted rather than treated as decoration; run it whenever a change touches doc comments.
 
 For UI changes, also run `cargo run -p riff-gui` and check the behavior by hand — much of the interface is exercised manually rather than by an automated test. New logic should come with new tests; [docs/engineering/testing-strategy.md](docs/engineering/testing-strategy.md) says which suite a given change belongs in.
 
@@ -66,6 +68,7 @@ If the `riff-tests` binary dies mid-run with `STATUS_ACCESS_VIOLATION` and no fa
 - [ ] **Composition root respected.** Only `riff-backend/src/composition.rs` constructs and wires infrastructure.
 - [ ] **No panics in the UI.** Recoverable errors surface as user-facing messages, never as panics.
 - [ ] **Clippy clean.** `cargo clippy --all-targets -- -D warnings` produces no warnings.
+- [ ] **Doc build clean.** `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --document-private-items` produces no warnings and every intra-doc link resolves.
 - [ ] **Formatted.** `cargo fmt` has been run and produces no diff.
 - [ ] **Tests added.** New domain logic (and, where practical, app logic) has accompanying tests, and `cargo test --all-targets` passes.
 - [ ] **Commit messages conventional.** Every commit on the branch is a well-formed Conventional Commit; see [Merge strategy](#merge-strategy) for why there is no rewrite step to fix one later.

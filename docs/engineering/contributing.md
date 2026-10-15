@@ -23,7 +23,8 @@ A typical contribution workflow looks like this:
 3. Run `cargo fmt` so formatting matches the project default (there is no `rustfmt.toml`).
 4. Run `cargo clippy` and resolve any new warnings. Pedantic lints are enabled as warnings; a clean run is the expected standard.
 5. Run `cargo test`. New logic should come with new tests; see [testing-strategy.md](./testing-strategy.md) for where each suite lives and which one matches the code you changed.
-6. For UI changes, run `cargo run -p riff-gui` and manually verify the behavior, since much of the UI is exercised by hand rather than by automated tests.
+6. If your change touches doc comments, run the doc build (`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --document-private-items`); a single rustdoc warning fails CI.
+7. For UI changes, run `cargo run -p riff-gui` and manually verify the behavior, since much of the UI is exercised by hand rather than by automated tests.
 
 ### Adding tests
 
@@ -39,6 +40,7 @@ Run through this before requesting review. Each item maps to a rule above:
 - [ ] **Composition root respected.** Only `riff-backend/src/composition.rs` constructs and wires infrastructure.
 - [ ] **No panics in the UI.** Recoverable errors surface as user-facing messages, never as panics.
 - [ ] **Clippy clean.** `cargo clippy` produces no new warnings under the pedantic configuration.
+- [ ] **Doc build clean.** `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --document-private-items` produces no warnings and every intra-doc link resolves.
 - [ ] **Formatted.** `cargo fmt` has been run and produces no diff.
 - [ ] **Commit messages conventional.** Every commit on the branch passes the commit-message rules (type, scope, header length); rebase rather than squash-fix, since commits land as written — see [commit-conventions.md](./commit-conventions.md).
 - [ ] **Tests added.** New domain logic (and, where practical, app logic) has accompanying tests, and `cargo test` passes.

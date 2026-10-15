@@ -81,3 +81,14 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"
+
+[workspace.lints.rustdoc]
+# Allowed deliberately. These crates are internal — nothing here is published
+# or consumed by an outside reader — so a public doc comment that links to a
+# private item is a maintainer's cross-reference, not a broken promise to an
+# API consumer. The lint's premise (the public docs hide the target) does not
+# apply, and `--document-private-items` documents the target anyway; rustdoc
+# still fires the lint in that mode, so the level has to be set once here.
+# Rewriting these links as plain backticks would trade real navigation for
+# a clean warning list.
+private_intra_doc_links = "allow"

@@ -78,6 +78,16 @@ The five individually allowed lints are worth understanding, because they reflec
 
 `clippy.toml` sets the tool MSRV (matching the `rust-version` in every crate manifest) and the project's behavioral options. Run `cargo clippy` before committing. Pedantic lints are warnings, so the build will not fail on them, but a clean clippy run is the expected standard; see [contributing.md](./contributing.md) for the pull-request expectations.
 
+## Documenting with rustdoc
+
+Rustdoc lint levels are configured in `Cargo.toml` under `[lints.rustdoc]`, and the doc build is part of the quality gate: CI runs `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --document-private-items` on its Linux leg, so a single rustdoc warning fails the build. Run the same command before committing when a change touches doc comments; as with clippy, the CI gate is the backstop, not the first check.
+
+`--document-private-items` is deliberate: most doc comments in this workspace sit on private items, so without it the gate would only police the public surface. Two consequences for day-to-day edits: an intra-doc link must resolve (fix the path, or use plain backticks for a name that is not an item), and doc comments are checked, not decoration.
+
+The configuration allows one lint:
+
+- `private_intra_doc_links` — these crates are internal, so a public doc comment linking a private item is a maintainer's cross-reference, not a broken promise to an API consumer.
+
 ## Formatting with rustfmt
 
 There is no `rustfmt.toml` or `.rustfmt.toml` in the repository, so riff uses rustfmt's default style. Run `cargo fmt` before committing so that formatting is consistent and does not appear as noise in diffs. No hook does this for you — the only versioned hook is the optional commit-message validator (see [commit-conventions.md](./commit-conventions.md)) — so the formatting check in CI is the gate.

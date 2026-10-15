@@ -59,13 +59,14 @@ cargo fmt                                  # format
 cargo check --all-targets                  # type/borrow checking across all targets
 cargo clippy --all-targets -- -D warnings  # lint with warnings as errors
 cargo test --all-targets                   # run all unit and integration tests
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --document-private-items  # build docs, rustdoc warnings are errors
 cargo run -p riff-gui                      # run in dev mode
 cargo build --release -p riff-gui          # release build (LTO, stripped)
 ```
 
 **Test suite**: Per-crate suites sit with the code they cover; cross-crate integration, UI and golden suites sit in the single workspace-root `riff-tests` crate. `docs/engineering/testing-strategy.md` is authoritative on placement, and the golden-image snapshot workflow is in `docs/engineering/golden-image-testing.md`.
 
-**CI**: `.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy --all-targets`, `cargo test --all-targets` on push/PR to `master` (Linux + Windows matrix), plus the `commit-lint` jobs that validate every commit message against the Conventional Commits profile (`docs/engineering/commit-conventions.md`). A commit-message hook is available locally (`git config core.hooksPath .githooks`) — optional, with the CI jobs as the real gate.
+**CI**: `.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy --all-targets`, `cargo test --all-targets` on push/PR to `master` (Linux + Windows matrix), plus a warning-free rustdoc build (`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --document-private-items`) on the Linux leg, plus the `commit-lint` jobs that validate every commit message against the Conventional Commits profile (`docs/engineering/commit-conventions.md`). A commit-message hook is available locally (`git config core.hooksPath .githooks`) — optional, with the CI jobs as the real gate.
 
 ## State Persistence
 
@@ -87,7 +88,7 @@ cargo build --release -p riff-gui          # release build (LTO, stripped)
 
 ## Config Files
 
-`clippy.toml` configures Clippy (msrv, tool-level options). Lint levels are set in the root `Cargo.toml` under `[workspace.lints.clippy]` (pedantic with selected allowances) and inherited by every crate via `[lints] workspace = true`. CI config is `.github/workflows/ci.yml`; no `rustfmt.toml` (defaults apply). Architecture rules live in `docs/technical/architecture.md`. Feature statuses live in `docs/product/features.md`. The full documentation index is in `docs/README.md`.
+`clippy.toml` configures Clippy (msrv, tool-level options). Lint levels are set in the root `Cargo.toml` under `[workspace.lints.clippy]` (pedantic with selected allowances) and `[workspace.lints.rustdoc]` (`private_intra_doc_links` allowed), inherited by every crate via `[lints] workspace = true`. CI config is `.github/workflows/ci.yml`; no `rustfmt.toml` (defaults apply). Architecture rules live in `docs/technical/architecture.md`. Feature statuses live in `docs/product/features.md`. The full documentation index is in `docs/README.md`.
 
 ## Domain docs
 

@@ -8,7 +8,7 @@ mod tag_editor;
 pub mod track_menu;
 
 pub use collection_menu::{CollectionMenuHost, apply_collection_menu};
-pub use library_picker::register_library_path;
+pub use library_picker::{DropResolution, register_library_path, resolve_dropped_paths};
 pub use tag_editor::InlineTagEditor;
 pub use track_menu::{TrackMenuHost, TrackMenuOpen, TrackMenuSubject};
 
@@ -960,10 +960,10 @@ impl RiffApp {
     /// Read this frame's egui-owned facts into a [`FrameInput`].
     ///
     /// The one place the draw half reaches into egui on the Frame's behalf, and
-    /// it only *reads*: a viewport flag, two key presses, and the window
-    /// metric the native chrome branch lays out against. Everything else the
-    /// frame decides is decided from these, which is what keeps
-    /// `ui::frame` free of any egui type at all.
+    /// it only *reads*: a viewport flag, two key presses, a drop's candidate
+    /// paths, and the window metric the native chrome branch lays out against.
+    /// Everything else the frame decides is decided from these, which is what
+    /// keeps `ui::frame` free of any egui type at all.
     fn read_frame_input(ui: &egui::Ui, frame: &eframe::Frame) -> FrameInput {
         let ctx = ui.ctx();
         // Order matters and mirrors the pre-frame code exactly: the "no widget
@@ -979,6 +979,18 @@ impl RiffApp {
             toggle_playback,
             traffic_lights_width: crate::ui::chrome::measured_traffic_lights_width(frame),
             zoom_factor: ctx.zoom_factor(),
+            // egui-winit accumulates a drag's dropped files and
+            // `RawInput::take` moves them out per pass, so a drop lands on
+            // exactly one frame's input — no frame-level dedupe is needed. A
+            // `DroppedFile` without a path has no candidate to probe; it is
+            // skipped here.
+            dropped_paths: ctx.input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|file| file.path.clone())
+                    .collect()
+            }),
         }
     }
 
@@ -1124,6 +1136,15 @@ impl RiffApp {
             let library_arc = self.library.clone();
             let mut guard = library_arc.lock_or_recover();
             self.add_library_via_platform_picker(&mut guard);
+        }
+        if !out.dropped_paths.is_empty() {
+            // The drop flow rides the tail beside the picker: the frame's own
+            // library guard is already dropped, so the session locks here once
+            // and the adapter operation does the whole resolution — the shared
+            // acceptance, one scan request per newly registered root, and the
+            // report. Nothing here judges a path: that is the adapter's job,
+            // which is what keeps this glue thin.
+            self.enact_dropped_library_paths(&out.dropped_paths);
         }
         if out.hide_window {
             // The custom titlebar X is the only hide gesture on macOS/Windows,

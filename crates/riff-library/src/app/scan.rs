@@ -1,11 +1,11 @@
 //! Scan-side Track construction: drives the [`MetadataReader`] port over
 //! discovered file paths to produce domain [`Track`]s ready for an
-//! [`LibraryMutationStore`] batch commit.
+//! [`LibraryMutationStore`](crate::app::store::LibraryMutationStore) batch commit.
 //!
 //! This is app-layer logic on purpose: it orchestrates a port over pure
 //! domain values and owns scan policy (per-file failures never abort a
 //! scan; first-add stamping). The filesystem walk itself lives in
-//! infrastructure ([`crate::infra::AudioFileScanner`]); the durable commit
+//! infrastructure (`riff_infra::filesystem::AudioFileScanner`); the durable commit
 //! lives behind the mutation port.
 
 use crate::app::traits::MetadataReader;

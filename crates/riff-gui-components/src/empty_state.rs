@@ -6,8 +6,8 @@
 //! Queue. Two entry points share one copy-and-type treatment so the surfaces
 //! agree on ink and hierarchy while each keeps its own layout model:
 //! [`empty_state`] flows into an [`egui::Ui`] (the explorer columns), and
-//! [`empty_state_in_rect`] paints into a caller-owned rect via a [`Painter`]
-//! (the hand-laid queue panel and Now Playing list).
+//! [`empty_state_in_rect`] paints into a caller-owned rect via a
+//! [`Painter`](egui::Painter) (the hand-laid queue panel and Now Playing list).
 //!
 //! Surface-appropriate copy stays at each call site — this owner fixes only
 //! *how* a labelled empty state looks, never *what* it says. Pure paint, reads

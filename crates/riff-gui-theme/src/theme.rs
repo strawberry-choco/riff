@@ -724,7 +724,8 @@ pub mod geometry {
 
     /// The sidebar's tree row — the row height every list in the app lays out
     /// with (the detail column, Now Playing's Up Next and the player bar's
-    /// queue panel all read [`ROW_H`] from here), plus what sits inside one.
+    /// queue panel all read [`ROW_H`](sidebar::ROW_H) from here), plus what
+    /// sits inside one.
     pub mod sidebar {
         /// Tree-row height (`h-10`): every sidebar row is exactly 40px tall.
         pub const ROW_H: f32 = 40.0;
@@ -765,7 +766,8 @@ pub mod geometry {
 
     /// The browser column's list mode: the 48px row that fits a cover
     /// thumbnail beside two lines of text, and the header strip above it. Its
-    /// rows are taller than [`super::sidebar::ROW_H`] because they carry art.
+    /// rows are taller than [`super::sidebar::ROW_H`](sidebar::ROW_H) because
+    /// they carry art.
     pub mod browser {
         /// Row height of the browser column's list mode: room for a 36px cover
         /// thumbnail (the artist variant's "small cover thumbnail") with
@@ -846,7 +848,7 @@ pub mod geometry {
     /// The 88px bottom player bar: cover, transport, the seek and volume
     /// rows, and the queue sheet it opens. Its height is
     /// [`PLAYERBAR_H`](crate::theme::PLAYERBAR_H); its scrub track comes
-    /// from [`seek`](super::seek).
+    /// from [`seek`].
     pub mod playerbar {
         /// Cover-art square (`size-14`): the now-playing cover is exactly
         /// 56×56.
@@ -893,10 +895,11 @@ pub mod geometry {
     }
 
     /// The Now Playing stage: the 240px cover, its copy block, the seek row,
-    /// the Up Next list and the close affordance. [`HEADER_H`] is the Up Next
-    /// section's line, 24px — the same word as the browser column's 28px
-    /// [`HEADER_H`](super::browser::HEADER_H) because each names its own
-    /// surface's header, and neither is the other's.
+    /// the Up Next list and the close affordance.
+    /// [`HEADER_H`](now_playing::HEADER_H) is the Up Next section's line,
+    /// 24px — the same word as the browser column's 28px
+    /// [`HEADER_H`](browser::HEADER_H) because each names its own surface's
+    /// header, and neither is the other's.
     pub mod now_playing {
         /// Cover-art square (`w-60 h-60`): the Now Playing cover is exactly
         /// 240px.
@@ -936,7 +939,7 @@ pub mod geometry {
         /// Height of one inline tag-editor field's input well.
         ///
         /// The editor's rows reuse the shared single-line text field
-        /// ([`crate::ui::text_field`]) — the same rounded well, focus ring, and
+        /// (`crate::ui::text_field`) — the same rounded well, focus ring, and
         /// 4px inner inset as the app's search boxes — so a field must be a
         /// full input well, not the bare one-line interact height. At egui's
         /// default interact height the well is a single text line tall with a
@@ -955,8 +958,9 @@ pub mod geometry {
     }
 
     /// The shell's size policy: the fixed 56/280/88 chrome plus the least
-    /// main stage that stays usable beside it. Below [`MIN_WINDOW_SIZE`] the
-    /// panels would collapse, so the viewport refuses to shrink that far.
+    /// main stage that stays usable beside it. Below
+    /// [`MIN_WINDOW_SIZE`](window::MIN_WINDOW_SIZE) the panels would
+    /// collapse, so the viewport refuses to shrink that far.
     pub mod window {
         /// Smallest main-stage area kept usable beside/between the fixed
         /// chrome.
@@ -970,14 +974,14 @@ pub mod geometry {
     }
 
     /// The Settings modal: its card and left nav, the library pane's rows and
-    /// actions, the preference rows and their controls. [`SECTION_GAP`] is the
-    /// gap between Settings `<section>`s — the same word as Now Playing's
-    /// 16px [`SECTION_GAP`](super::now_playing::SECTION_GAP), a different
-    /// measurement.
+    /// actions, the preference rows and their controls.
+    /// [`SECTION_GAP`](settings::SECTION_GAP) is the gap between Settings
+    /// `<section>`s — the same word as Now Playing's 16px
+    /// [`SECTION_GAP`](now_playing::SECTION_GAP), a different measurement.
     ///
     /// Every token in here is consumed by the Settings view alone. They are
     /// distinct from the now-playing rhythm, which deliberately carries its own
-    /// same-named gap token — [`SECTION_GAP`](super::now_playing::SECTION_GAP)
+    /// same-named gap token — [`SECTION_GAP`](now_playing::SECTION_GAP)
     /// above is 32px where Now Playing's is 16px — so a reader must not assume
     /// one shared value behind a shared name.
     pub mod settings {
@@ -1098,8 +1102,9 @@ pub mod geometry {
         /// Gap between adjacent format chips. Used on both axes: the same gap
         /// separates chips on one line and the chip rows when the card wraps.
         pub const CHIP_GAP: f32 = 8.0;
-        /// Narrowest content column in which all seven format chips still fit on
-        /// one line, measured with the vendored Inter set at [`TEXT_XS`]:
+        /// Narrowest content column in which all seven format chips still fit
+        /// on one line, measured with the vendored Inter set at
+        /// [`TEXT_XS`](crate::theme::TEXT_XS):
         ///
         /// ```text
         /// label widths   26.19 + 27.34 + 25.56 + 33.53 + 27.16 + 30.72 + 27.44

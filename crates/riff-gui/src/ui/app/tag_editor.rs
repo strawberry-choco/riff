@@ -117,10 +117,10 @@ impl InlineTagEditor {
         }
     }
 
-    /// Drain polled Tag Edit outcomes from the front-end. On [`Saved`] the
-    /// open draft closes (or the album batch tallies), and the status line
-    /// reports the saved file; on `Failed` the draft keeps its inline reason
-    /// — there is no silent-success path.
+    /// Drain polled Tag Edit outcomes from the front-end. On
+    /// [`Saved`](TagEditOutcome::Saved) the open draft closes (or the album
+    /// batch tallies), and the status line reports the saved file; on `Failed`
+    /// the draft keeps its inline reason — there is no silent-success path.
     pub fn poll_outcomes(&mut self, feedback: &mut crate::ui::feedback::FeedbackBoard) {
         while let Some(outcome) = self.tag_edits.poll() {
             // Outcomes carry no identity; the outstanding record captured at

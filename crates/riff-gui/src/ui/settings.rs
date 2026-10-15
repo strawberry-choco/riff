@@ -1212,13 +1212,14 @@ fn library_row_controls(
 }
 
 /// The per-root Watch control: a "Watch" label beside the shared checkbox box
-/// (painted through [`super::toggle_switch`] with the same focus ring the
-/// toggle pill draws), over the whole-slot hit area so clicking the label
-/// toggles too. A [`WatchState::Warning`] or an unavailable root disables the
-/// box — no focus ring, no click — and the warning's reason shows as a tooltip.
-/// It stays a checkbox (not a preference toggle) precisely because that
-/// per-Library-Path disabling is what distinguishes Watch State from a
-/// plain boolean preference.
+/// (painted through
+/// [`super::toggle_switch`](riff_gui_components::toggle_switch::toggle_switch)
+/// with the same focus ring the toggle pill draws), over the whole-slot hit
+/// area so clicking the label toggles too. A [`WatchState::Warning`] or an
+/// unavailable root disables the box — no focus ring, no click — and the
+/// warning's reason shows as a tooltip. It stays a checkbox (not a preference
+/// toggle) precisely because that per-Library-Path disabling is what
+/// distinguishes Watch State from a plain boolean preference.
 fn watch_control(
     ui: &mut egui::Ui,
     palette: &Palette,

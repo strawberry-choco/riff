@@ -123,11 +123,11 @@ pub struct BrowserColumn<'a> {
 /// function exists to serve. A test that wants this column now passes `None`
 /// here, exactly as the app passes `Some(control)`, so the two cannot drift.
 ///
-/// With a `Some(control)` the list's `ScrollArea` takes a [`ScrollControl`] —
-/// the stable per-slot salt plus the offset to start at — and the actual
-/// vertical scroll offset after the frame is returned (0 when nothing scrolled),
-/// so the Scroll Memory can record it back and stay the single source of truth
-/// between frames.
+/// With a `Some(control)` the list's `ScrollArea` takes a
+/// [`ScrollControl`](riff_gui_components::ScrollControl) — the stable per-slot
+/// salt plus the offset to start at — and the actual vertical scroll offset
+/// after the frame is returned (0 when nothing scrolled), so the Scroll Memory
+/// can record it back and stay the single source of truth between frames.
 pub fn show_browser_column_scrolled(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -161,8 +161,9 @@ pub fn show_browser_column_scrolled(
 }
 
 /// The friendly empty state — the shared composition now owned by
-/// [`super::empty_state`] and re-exported here so the explorer's call sites and
-/// the historical `browser::empty_state` path keep resolving. See
+/// [`super::empty_state`](riff_gui_components::empty_state::empty_state) and
+/// re-exported here so the explorer's call sites and the historical
+/// `browser::empty_state` path keep resolving. See
 /// [`riff_gui_components::empty_state::empty_state`].
 pub use riff_gui_components::empty_state::empty_state;
 
@@ -273,10 +274,11 @@ pub fn track_sort_row(
 /// window in hand is materialized; the walk still measures every row above
 /// the window so positions stay exact.
 ///
-/// With a [`ScrollControl`] the list keys egui's state by the per-slot salt
-/// and starts the frame at the control's offset (saved, or 0 on a reset);
-/// without one it keeps the shared positional salt and egui's own state.
-/// Returns the actual vertical offset after the frame.
+/// With a [`ScrollControl`](riff_gui_components::ScrollControl) the list keys
+/// egui's state by the per-slot salt and starts the frame at the control's
+/// offset (saved, or 0 on a reset); without one it keeps the shared positional
+/// salt and egui's own state. Returns the actual vertical offset after the
+/// frame.
 fn show_browser_list(
     ui: &mut egui::Ui,
     cache: &mut IconCache,

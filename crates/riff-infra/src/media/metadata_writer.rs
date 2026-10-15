@@ -46,7 +46,7 @@ fn sanitize_language_frames(tag: &mut Tag) {
 }
 
 /// The one save-error formatter: lofty's top-level `Display` is only
-/// "failed to write <format> file", so the source chain is walked to the
+/// "failed to write `<format>` file", so the source chain is walked to the
 /// root cause and spelled out — the reason a write failed is exactly what
 /// the user needs to see.
 fn save_error(e: lofty::error::FileEncodingError) -> LibraryError {

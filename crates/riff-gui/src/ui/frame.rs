@@ -611,11 +611,12 @@ impl<'a> Frame<'a> {
     }
 
     /// Drain polled Library Scan outcomes and report each root's Readiness
-    /// through the [`LibraryPaths`] slot — the scan worker writes *through* the
-    /// module instead of reaching into the session — plus the titlebar
-    /// scan-status line. The service NEVER touches `LibrarySession` (ADR
-    /// 0006). The watcher observes a scan's end itself via `is_scanning`, so no
-    /// relay fires here.
+    /// through the
+    /// [`LibraryPaths`](riff_backend::app::library_paths::LibraryPaths) slot —
+    /// the scan worker writes *through* the module instead of reaching into the
+    /// session — plus the titlebar scan-status line. The service NEVER touches
+    /// `LibrarySession` (ADR 0006). The watcher observes a scan's end itself
+    /// via `is_scanning`, so no relay fires here.
     fn poll_library_updates(&mut self) {
         use riff_backend::app::events::{NoticeSeverity, NoticeSource};
         for outcome in self.parts.scans.poll() {
@@ -1052,7 +1053,7 @@ pub fn apply_player_bar_action(
     }
 }
 
-/// Apply one [`NowPlayingAction`](super::now_playing::NowPlayingAction)
+/// Apply one [`NowPlayingAction`]
 /// (Issue 10). Close ALWAYS lands on the Library View: Now Playing is a mode
 /// that replaces the active View (resolved navigation gaps), so there is no
 /// prior view to restore — closing from anywhere returns to the Library.

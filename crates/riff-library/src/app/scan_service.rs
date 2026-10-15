@@ -21,8 +21,9 @@
 //!
 //! Threading follows the Audio Engine pattern: nothing here spawns threads.
 //! The composition root constructs both halves — binding the real scanner
-//! into the walk closure over the same cancel flag it hands to [`new`] — and
-//! runs [`ScanWorker::run`] on its own dedicated thread.
+//! into the walk closure over the same cancel flag it hands to
+//! [`new`](ScanService::new) — and runs [`ScanWorker::run`] on its own
+//! dedicated thread.
 
 use crate::app::scan::build_tracks;
 use crate::app::store::{FullScanSummary, LibraryMutationStore, LibraryQueryStore};

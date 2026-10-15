@@ -2838,7 +2838,7 @@ impl LibraryQueryStore for SqliteStore {
 
 impl SqliteStore {
     /// Total stored Tracks on an already-held connection. A Listing Page
-    /// calls this instead of [`LibraryQueryStore::track_count`], which would
+    /// calls this instead of `LibraryQueryStore::track_count`, which would
     /// take the non-reentrant connection lock a second time.
     fn track_count_on(conn: &Connection) -> rusqlite::Result<usize> {
         conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| {
@@ -3070,7 +3070,7 @@ impl SqliteStore {
 
     /// Total hit albums for [`Self::hit_albums_window_on`] semantics on an
     /// already-held connection. A Listing Page calls this instead of
-    /// [`LibraryQueryStore::hit_albums_count`], which would take the
+    /// `LibraryQueryStore::hit_albums_count`, which would take the
     /// non-reentrant connection lock a second time.
     fn hit_albums_count_on(conn: &Connection, query: &str) -> rusqlite::Result<usize> {
         let needle = query.to_lowercase();
@@ -3083,7 +3083,7 @@ impl SqliteStore {
     }
 
     /// One bounded window of hit albums on an already-held connection. A
-    /// Listing Page calls this instead of [`LibraryQueryStore::hit_albums`].
+    /// Listing Page calls this instead of `LibraryQueryStore::hit_albums`.
     fn hit_albums_window_on(
         conn: &Connection,
         query: &str,
@@ -3143,7 +3143,7 @@ impl SqliteStore {
 
     /// Total hit artists for [`Self::hit_artists_window_on`] semantics on an
     /// already-held connection. A Listing Page calls this instead of
-    /// [`LibraryQueryStore::hit_artists_count`].
+    /// `LibraryQueryStore::hit_artists_count`.
     fn hit_artists_count_on(conn: &Connection, query: &str) -> rusqlite::Result<usize> {
         let needle = query.to_lowercase();
         conn.query_row(
@@ -3155,7 +3155,7 @@ impl SqliteStore {
     }
 
     /// One bounded window of hit artists on an already-held connection. A
-    /// Listing Page calls this instead of [`LibraryQueryStore::hit_artists`].
+    /// Listing Page calls this instead of `LibraryQueryStore::hit_artists`.
     fn hit_artists_window_on(
         conn: &Connection,
         query: &str,
@@ -3202,7 +3202,7 @@ impl SqliteStore {
 
     /// Total artists for [`Self::artists_window_on`] semantics on an
     /// already-held connection. A Listing Page calls this instead of
-    /// [`LibraryQueryStore::artists_count`], which would take the
+    /// `LibraryQueryStore::artists_count`, which would take the
     /// non-reentrant connection lock a second time.
     fn artists_count_on(conn: &Connection) -> rusqlite::Result<usize> {
         conn.query_row("SELECT COUNT(*) FROM artists", [], |row| {
@@ -3212,7 +3212,7 @@ impl SqliteStore {
     }
 
     /// One bounded artist window on an already-held connection. A Listing
-    /// Page calls this instead of [`LibraryQueryStore::artists_window`].
+    /// Page calls this instead of `LibraryQueryStore::artists_window`.
     fn artists_window_on(
         conn: &Connection,
         direction: SortDirection,
@@ -3254,7 +3254,7 @@ impl SqliteStore {
 
     /// Total albums for [`Self::albums_window_on`] semantics on an
     /// already-held connection. A Listing Page calls this instead of
-    /// [`LibraryQueryStore::albums_count`], which would take the
+    /// `LibraryQueryStore::albums_count`, which would take the
     /// non-reentrant connection lock a second time.
     fn albums_count_on(conn: &Connection) -> rusqlite::Result<usize> {
         conn.query_row("SELECT COUNT(*) FROM albums", [], |row| {
@@ -3264,7 +3264,7 @@ impl SqliteStore {
     }
 
     /// One bounded album window on an already-held connection. A Listing
-    /// Page calls this instead of [`LibraryQueryStore::albums_window`].
+    /// Page calls this instead of `LibraryQueryStore::albums_window`.
     fn albums_window_on(
         conn: &Connection,
         direction: SortDirection,
@@ -3318,7 +3318,7 @@ impl SqliteStore {
 
     /// Total genre entries for [`Self::genres_window_on`] semantics on an
     /// already-held connection. A Listing Page calls this instead of
-    /// [`LibraryQueryStore::genres_count`], which would take the
+    /// `LibraryQueryStore::genres_count`, which would take the
     /// non-reentrant connection lock a second time.
     fn genres_count_on(conn: &Connection) -> rusqlite::Result<usize> {
         let mut stmt = conn.prepare(&format!(
@@ -3336,7 +3336,7 @@ impl SqliteStore {
     }
 
     /// One bounded genre window on an already-held connection. A Listing
-    /// Page calls this instead of [`LibraryQueryStore::genres_window`].
+    /// Page calls this instead of `LibraryQueryStore::genres_window`.
     fn genres_window_on(
         conn: &Connection,
         direction: SortDirection,
@@ -3361,7 +3361,7 @@ impl SqliteStore {
 
     /// Total artists within `genre` for [`Self::artists_in_genre_window_on`]
     /// semantics on an already-held connection. A Listing Page calls this
-    /// instead of [`LibraryQueryStore::artists_in_genre_count`], which would
+    /// instead of `LibraryQueryStore::artists_in_genre_count`, which would
     /// take the non-reentrant connection lock a second time.
     fn artists_in_genre_count_on(conn: &Connection, genre: &str) -> rusqlite::Result<usize> {
         let mut stmt = conn.prepare(&format!(
@@ -3384,7 +3384,7 @@ impl SqliteStore {
 
     /// One bounded window of genre artists on an already-held connection. A
     /// Listing Page calls this instead of
-    /// [`LibraryQueryStore::artists_in_genre_window`].
+    /// `LibraryQueryStore::artists_in_genre_window`.
     fn artists_in_genre_window_on(
         conn: &Connection,
         genre: &str,
@@ -3437,7 +3437,7 @@ impl SqliteStore {
     /// Total albums within `artist` and `genre` for
     /// [`Self::artist_albums_in_genre_window_on`] semantics on an
     /// already-held connection. A Listing Page calls this instead of
-    /// [`LibraryQueryStore::artist_albums_in_genre_count`], which would take
+    /// `LibraryQueryStore::artist_albums_in_genre_count`, which would take
     /// the non-reentrant connection lock a second time.
     fn artist_albums_in_genre_count_on(
         conn: &Connection,
@@ -3464,7 +3464,7 @@ impl SqliteStore {
 
     /// One bounded window of genre albums on an already-held connection. A
     /// Listing Page calls this instead of
-    /// [`LibraryQueryStore::artist_albums_in_genre_window`].
+    /// `LibraryQueryStore::artist_albums_in_genre_window`.
     fn artist_albums_in_genre_window_on(
         conn: &Connection,
         artist: &str,

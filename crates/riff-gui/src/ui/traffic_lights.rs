@@ -41,8 +41,8 @@
 //! macOS, so the Linux/Windows legs compile only the no-op `apply` at the
 //! bottom of this file and never link the native binding. What IS covered is
 //! the portable decision it executes,
-//! [`traffic_light_plan`](crate::ui::chrome::traffic_light_plan)
-//! and [`needs_reapply`](crate::ui::chrome::needs_reapply), asserted as data in
+//! [`traffic_light_plan`]
+//! and [`needs_reapply`], asserted as data in
 //! `tests/ui_tests.rs`. Do not read a green suite as evidence that the lights
 //! are where they should be; it is evidence the arithmetic is.
 

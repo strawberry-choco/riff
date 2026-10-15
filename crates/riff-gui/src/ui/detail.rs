@@ -66,7 +66,8 @@ use riff_gui_theme::theme::{self, Palette};
 /// [`DetailReport`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetailAction {
-    /// A track-table row was selected, by its [`crate::riff_backend::domain::TrackId`]
+    /// A track-table row was selected, by its
+    /// [`crate::riff_backend::domain::TrackId`](riff_backend::domain::TrackId)
     /// key.
     SelectTrack(String),
     /// A track-table row asked to start playing, by its id key.

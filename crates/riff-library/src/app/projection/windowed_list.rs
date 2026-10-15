@@ -10,12 +10,13 @@
 //! This projection is where the whole paged-listing protocol lives, which is
 //! why the seam's paged reads are two calls per listing and one line each:
 //!
-//! * [`Self::row`] answers **"give me row *i*"**. It aligns *i* down to the
-//!   window size, refetches only when *i* falls outside the window already
-//!   in hand, and hands back the single row asked for as an `Arc` the caller
-//!   can keep while it makes other seam reads.
-//! * [`Self::count`] answers **"how many rows does this listing have"** as
-//!   its own read, cached beside the windows at the same generation.
+//! * [`Self::row`](WindowedListProjection::row) answers **"give me row *i*"**. It
+//!   aligns *i* down to the window size, refetches only when *i* falls
+//!   outside the window already in hand, and hands back the single row asked
+//!   for as an `Arc` the caller can keep while it makes other seam reads.
+//! * [`Self::count`](WindowedListProjection::count) answers **"how many rows
+//!   does this listing have"** as its own read, cached beside the windows at
+//!   the same generation.
 //!
 //! The arithmetic that used to be written once per paged read here and again
 //! in every render site — the alignment, the "refetch only when the row

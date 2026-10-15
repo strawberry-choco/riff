@@ -8,7 +8,7 @@
 //!   `Box<dyn TagEdits>`: it submits intent and polls outcomes. It never
 //!   blocks and never touches disk.
 //! - [`TagEditWorker`] is the blocking back-end that owns the entire save
-//!   flow: Lofty write via the [`MetadataWriter`](crate::app::traits::MetadataWriter)
+//!   flow: Lofty write via the [`MetadataWriter`]
 //!   port, resolving the edited Track from the Application Store through the
 //!   Library query port, applying the edit to the fresh copy, committing
 //!   through the Library mutation port's targeted tag-refresh flow (which

@@ -8,7 +8,8 @@
 //! Stale reads are possible only between a committed write and the next
 //! refresh, which generation invalidation makes explicit.
 //!
-//! One file per projection: each owns its [`GenerationCache`] instances and
+//! One file per projection: each owns its
+//! [`GenerationCache`](crate::app::store::GenerationCache) instances and
 //! the staleness contract its views ride on, so understanding one view's
 //! caching contract means reading one small file. The module name is the
 //! seam — everything re-exported here keeps the historical

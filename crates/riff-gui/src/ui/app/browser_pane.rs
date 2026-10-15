@@ -72,10 +72,11 @@ impl RiffApp {
     /// The elastic column stage: the Library view's whole content area. The
     /// stage lays the section's list columns side by side — the number of
     /// columns follows the section and the drill-down path (the pure
-    /// [`column_plan`]), each at its sized width ([`column_widths`]) with a
-    /// thin hairline separator between — then the collapsible inspector as
-    /// the rightmost column only while a selection exists. No horizontal
-    /// scrolling: narrow windows shrink columns toward their floors.
+    /// [`column_plan`]), each at its sized width
+    /// ([`column_widths`](super::column_widths)) with a thin hairline separator
+    /// between — then the collapsible inspector as the rightmost column only
+    /// while a selection exists. No horizontal scrolling: narrow windows shrink
+    /// columns toward their floors.
     pub(super) fn render_elastic_stage(
         &mut self,
         ui: &mut egui::Ui,
@@ -1112,7 +1113,7 @@ impl RiffApp {
 /// [`browser::BrowserColumn`] already holds `&mut self.views`, the Cover
 /// Cache's two halves and the LRU keys at once, so a bundle that outlived that
 /// closure would need a field of `self` the closure already holds. See the
-/// module section above, and the precedent [`RowCovers`](super::RowCovers)
+/// module section above, and the precedent [`RowCovers`]
 /// documents for the same reason.
 ///
 /// The Scroll Memory is deliberately NOT in here: it is the one handle the
@@ -1298,7 +1299,7 @@ pub(super) fn sort_tracks<T>(rows: &mut [T], title_key: impl Fn(&T) -> String, s
 /// Pure over its arguments, which is why it is a free function rather than a
 /// method: it reads no listing state, so the three columns can share it while
 /// their `item` closures hold `&mut self.views` and the Cover Cache's two
-/// halves (the same borrow shape [`RowCovers`](super::RowCovers) documents).
+/// halves (the same borrow shape [`RowCovers`] documents).
 fn album_item(
     album: &Album,
     selected: bool,

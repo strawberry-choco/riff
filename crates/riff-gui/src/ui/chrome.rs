@@ -279,7 +279,7 @@ impl WindowControl {
     /// there is no tray: it sends the real [`egui::ViewportCommand::Close`],
     /// which quits. On macOS/Windows the custom X is a hide gesture — the app
     /// sends it through the frontend-local visibility channel
-    /// ([`crate::ui::window_visibility::VisibilityMessage(false)`]), never
+    /// (`crate::ui::window_visibility::VisibilityMessage(false)`), never
     /// through this method: with the close-to-tray veto gone, every `Close`
     /// that reaches eframe quits, so a hard exit here would quit instead of
     /// stowing to the tray.

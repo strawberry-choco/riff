@@ -1,10 +1,10 @@
 //! [`ThumbnailCache`] over the filesystem, below `<data_local_dir>/covers/`.
 //!
-//! Every entry's name comes from [`thumbnail_path::cache_path`], so a lookup is
-//! one `stat` of the cover Source and one `open` of the derived name — there is
-//! no index, and nothing to keep in sync with one. See the trait's contract in
-//! `riff-persistence` for why there is neither a content hash nor an eviction
-//! policy.
+//! Every entry's name comes from [`thumbnail_path::cache_path`](cache_path), so a
+//! lookup is one `stat` of the cover Source and one `open` of the derived name —
+//! there is no index, and nothing to keep in sync with one. See the trait's
+//! contract in `riff-persistence` for why there is neither a content hash nor an
+//! eviction policy.
 
 use crate::media::thumbnail_path::{SourceFingerprint, cache_path};
 use riff_persistence::errors::StoreError;

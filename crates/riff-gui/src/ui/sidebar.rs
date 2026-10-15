@@ -739,12 +739,12 @@ pub struct UpNextEntry {
     pub label: String,
 }
 
-/// Build the Up Next rows from the playback projection's resolved window:
-/// the tracks after the current one, in the QUEUE's own order (shuffle
-/// included), capped at `limit`. The queue-to-window mapping and the skip of
-/// entries whose files have left the library live in
-/// [`crate::app::views::SessionViews`]; this is the pure label formatting over
-/// its result.
+/// Build the Up Next rows from the playback projection's resolved window: the
+/// tracks after the current one, in the QUEUE's own order (shuffle included),
+/// capped at `limit`. The queue-to-window mapping and the skip of entries whose
+/// files have left the library live in
+/// [`crate::app::views::SessionViews`](riff_backend::app::views::SessionViews);
+/// this is the pure label formatting over its result.
 #[must_use]
 pub fn up_next_entries(up_next: &[Track], limit: usize) -> Vec<UpNextEntry> {
     up_next

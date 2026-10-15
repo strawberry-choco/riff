@@ -1,21 +1,22 @@
 //! Frontend-local window visibility plumbing (Issue 03).
 //!
-//! The system tray runs on its own thread and cannot call into the egui
-//! context directly. Instead it pushes a [`VisibilityMessage`] over an
-//! unbounded crossbeam channel that [`RiffApp`] drains on every logic tick.
-//! When the app is hidden (`eframe` 0.35 calls [`logic`] while hidden), the
-//! same drain keeps the visibility state fresh without ever touching backend
-//! state or the audio engine.
+//! The system tray runs on its own thread and cannot call into the egui context
+//! directly. Instead it pushes a [`VisibilityMessage`] over an unbounded
+//! crossbeam channel that [`RiffApp`](super::RiffApp) drains on every logic
+//! tick. When the app is hidden (`eframe` 0.35 calls
+//! [`logic`](eframe::App::logic) while hidden), the same drain keeps the
+//! visibility state fresh without ever touching backend state or the audio
+//! engine.
 //!
 //! This file is entirely frontend: no `riff_backend` import, no
-//! [`crate::domain::PlaybackCommand`]. The tray ↔ UI loop is one of the two
+//! `crate::domain::PlaybackCommand`. The tray ↔ UI loop is one of the two
 //! frontend-only channels (the other being the tray quit flag).
 
 use crossbeam_channel::Receiver;
 use eframe::egui;
 
 /// A frontend-local request from the tray or the custom titlebar X (via
-/// [`RiffApp`]) to flip the window's visible state.
+/// [`RiffApp`](super::RiffApp)) to flip the window's visible state.
 ///
 /// `true` → show and focus; `false` → hide. The sender never constructs
 /// backend commands — this keeps the tray path independent of the audio
@@ -73,9 +74,10 @@ pub fn viewport_commands_for(
     }
 }
 
-/// Build the frontend-local visibility channel pair. Callers pass the sender
-/// to the tray thread (over `create_tray`) and keep the [`VisibilityListener`]
-/// on [`RiffApp`], where the UI thread drains requests on every logic tick.
+/// Build the frontend-local visibility channel pair. Callers pass the sender to
+/// the tray thread (over `create_tray`) and keep the [`VisibilityListener`] on
+/// [`RiffApp`](super::RiffApp), where the UI thread drains requests on every
+/// logic tick.
 pub fn spawn_visibility_listener() -> (VisibilityTx, VisibilityListener) {
     let (tx, rx) = crossbeam_channel::unbounded();
     (tx, VisibilityListener { rx })

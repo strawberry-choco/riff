@@ -222,7 +222,7 @@ pub trait SettingsStore {
 /// semantics require it (see `playlist_manager`).
 #[derive(Debug, Clone)]
 pub struct PlaylistEntry {
-    /// The referenced [`TrackId`](crate::track::TrackId) (its full file path).
+    /// The referenced [`TrackId`] (its full file path).
     pub id: TrackId,
     /// The resolved Track when the Library knows it, `None` when dangling.
     pub track: Option<Track>,
@@ -530,12 +530,13 @@ pub enum SortDirection {
     Descending,
 }
 
-/// The explicit order of a flat track-listing read ([`Self::tracks_page`] /
-/// [`Self::search_page`]): the canonical path order and its reversal, or the
-/// title A–Z / Z–A order the listing's sort control offers. The order lands
-/// in the query's `ORDER BY` — page offsets stay aligned when it changes,
-/// and no in-memory copy of a window is ever reversed (the same contract
-/// [`SortDirection`] gives the browse reads).
+/// The explicit order of a flat track-listing read
+/// ([`LibraryQueryStore::tracks_page`] / [`LibraryQueryStore::search_page`]):
+/// the canonical path order and its reversal, or the title A–Z / Z–A order
+/// the listing's sort control offers. The order lands in the query's
+/// `ORDER BY` — page offsets stay aligned when it changes, and no in-memory
+/// copy of a window is ever reversed (the same contract [`SortDirection`]
+/// gives the browse reads).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TrackListOrder {
     /// Path-ascending: the flat list's canonical order (ADR 0003).
@@ -721,7 +722,7 @@ pub trait LibraryQueryStore {
     fn folder_has_audio(&self, folder: &std::path::Path) -> Result<bool, StoreError>;
 
     /// Whether any stored Track under `folder` matches the search query
-    /// (same substring semantics as [`Self::search_window`]: the query is
+    /// (same substring semantics as [`Self::search_page`]: the query is
     /// lowercased in Rust and matched literally against the derived
     /// Rust-lowercased search text).
     fn folder_has_search_match(

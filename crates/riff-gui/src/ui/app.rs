@@ -139,10 +139,11 @@ fn label_numbered(track: &Track) -> String {
 /// so neither surface builds the strings twice.
 type NowPlayingLabels = (Option<Arc<str>>, Option<Arc<str>>);
 
-/// The state one interactive Track row needs that cannot stay behind
-/// `&mut self` across [`sidebar::tree_row`], which borrows the icon cache
-/// mutably — the very borrow that forced the state to be threaded parameter by
-/// parameter through three render sites with seven to nine of them.
+/// The state one interactive Track row needs that cannot stay behind `&mut
+/// self` across [`sidebar::tree_row`](super::sidebar::tree_row), which borrows
+/// the icon cache mutably — the very borrow that forced the state to be
+/// threaded parameter by parameter through three render sites with seven to
+/// nine of them.
 ///
 /// This bundle is the ownership shape that removes the threading: it is built
 /// once per listing and handed down, so a row site reads four arguments instead
@@ -1701,7 +1702,7 @@ fn genre_track_ids(views: &mut SessionViews, genre: &str) -> Vec<TrackId> {
 /// the shown rows resolved by the caller; both are gone with the buttons, and
 /// so is the batch parameter that fed them. What remains moves selection and
 /// commits a favorite: a batch play is reached from a collection's menu
-/// instead, through [`play_album_batch`].
+/// instead, through `play_album_batch`.
 ///
 /// A Track row's **menu** report is not one of these, and that is structural
 /// rather than a no-op arm's worth of documentation: a menu report is a
@@ -2969,8 +2970,8 @@ impl RiffApp {
 
     /// The sidebar footer's action side: the stamp text comes from the
     /// last-scan read model (issue 05) formatted by
-    /// [`sidebar::format_last_scan_ago`]; Add folder routes through the
-    /// EXISTING add-library-path flow.
+    /// [`sidebar::format_last_scan_ago`](super::sidebar::format_last_scan_ago);
+    /// Add folder routes through the EXISTING add-library-path flow.
     fn render_sidebar_footer(
         &mut self,
         ui: &mut egui::Ui,
@@ -3549,24 +3550,26 @@ impl RiffApp {
         });
     }
 
-    /// One drag-reorderable row of [`Self::render_playlist_view`] (Issue
-    /// 12): the standard interactive track row wrapped in egui's built-in
-    /// drag-and-drop support ([`sidebar::reorderable_row`]). Releasing a row
-    /// on another persists the new order through the [`PlaylistStore`] port
-    /// via [`commit_playlist_reorder`] (ADR 0002); clicks and double-clicks
-    /// behave exactly as before. `reorderable: false` (the sorted views —
-    /// a drag would persist positions read off the wrong order) renders the
-    /// identical row shape without the drag wrapper, via [`sidebar::tree_row`].
+    /// One drag-reorderable row of [`Self::render_playlist_view`] (Issue 12):
+    /// the standard interactive track row wrapped in egui's built-in
+    /// drag-and-drop support
+    /// ([`sidebar::reorderable_row`](super::sidebar::reorderable_row)).
+    /// Releasing a row on another persists the new order through the
+    /// [`PlaylistStore`] port via [`commit_playlist_reorder`] (ADR 0002);
+    /// clicks and double-clicks behave exactly as before. `reorderable: false`
+    /// (the sorted views — a drag would persist positions read off the wrong
+    /// order) renders the identical row shape without the drag wrapper, via
+    /// [`sidebar::tree_row`](super::sidebar::tree_row).
     ///
     /// The row's drag hit-area sits UNDERNEATH the row's own response, and
-    /// [`sidebar::reorderable_row`] documents why the ordering cannot be the
-    /// other way round: egui's hit test swallows clicks that land on a
-    /// drag-only widget stacked above a click widget. So that ordering is what
-    /// lets a secondary click reach the row at all, which is why a right-click
-    /// here opens the menu and selects the Track exactly as on every other
-    /// Track row — and why it begins no drag. Reordering is the row's own
-    /// gesture and the menu's is the right button; neither is the other's
-    /// business.
+    /// [`sidebar::reorderable_row`](super::sidebar::reorderable_row) documents
+    /// why the ordering cannot be the other way round: egui's hit test swallows
+    /// clicks that land on a drag-only widget stacked above a click widget. So
+    /// that ordering is what lets a secondary click reach the row at all, which
+    /// is why a right-click here opens the menu and selects the Track exactly
+    /// as on every other Track row — and why it begins no drag. Reordering is
+    /// the row's own gesture and the menu's is the right button; neither is the
+    /// other's business.
     fn render_reorderable_playlist_row(
         &mut self,
         ui: &mut egui::Ui,

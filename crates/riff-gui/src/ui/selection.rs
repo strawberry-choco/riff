@@ -247,7 +247,7 @@ impl BatchStatus {
     }
 
     /// The completion line: "Saved N of M tracks", or "Saved N of M tracks —
-    /// k failed: <reason>" for a partial failure. `None` while requests are
+    /// k failed: `<reason>`" for a partial failure. `None` while requests are
     /// outstanding.
     pub fn summary(&self) -> Option<String> {
         if self.done() {

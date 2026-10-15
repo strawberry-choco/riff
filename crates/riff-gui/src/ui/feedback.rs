@@ -9,9 +9,9 @@
 //! highest-severity active notice, so the streams coexist.
 //!
 //! The frontend owns this model (it is paint state, not a session fact): the
-//! [`RiffApp`] holds one board, the scan / playback / Tag Edit producers write
-//! their slot, and the board's display feeds the existing `scan_status`
-//! line unchanged — same placement, same copy, no new surface.
+//! [`RiffApp`](super::RiffApp) holds one board, the scan / playback / Tag Edit
+//! producers write their slot, and the board's display feeds the existing
+//! `scan_status` line unchanged — same placement, same copy, no new surface.
 
 use riff_backend::app::events::{NoticePayload, NoticeSeverity, NoticeSource};
 

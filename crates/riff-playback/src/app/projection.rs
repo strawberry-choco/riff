@@ -190,29 +190,23 @@ mod tests {
     use riff_persistence::track::{Track, TrackId, TrackMetadata};
     use std::path::PathBuf;
 
-    fn make_track(id: &str) -> Track {
-        Track {
-            id: TrackId(id.to_string()),
-            file_path: PathBuf::from(id),
-            metadata: TrackMetadata::default(),
-            duration: None,
-            sample_rate: None,
-            channels: None,
-            play_count: 0,
-            last_played: None,
-            date_added: None,
-            favorite: false,
-            search_text: String::new(),
-        }
-    }
-
     #[test]
     fn projection_cache_freshness() {
         let r#gen = StoreGeneration::new();
         let mut proj = PlaybackProjection::new(r#gen.clone());
 
         let queue = PlaybackQueue::new(vec![TrackId("a".into()), TrackId("b".into())]);
-        let mut loader = |id: &TrackId| Ok(Some(make_track(&id.0)));
+        let mut loader = |id: &TrackId| {
+            Ok(Some(Track::fresh_scan(
+                id.clone(),
+                PathBuf::from(&id.0),
+                TrackMetadata::default(),
+                None,
+                None,
+                None,
+                None,
+            )))
+        };
 
         proj.refresh(&queue, 2, &mut loader).unwrap();
         assert_eq!(proj.up_next().len(), 1);
@@ -229,7 +223,17 @@ mod tests {
         let mut proj = PlaybackProjection::new(r#gen.clone());
 
         let queue = PlaybackQueue::new(vec![TrackId("a".into()), TrackId("b".into())]);
-        let mut loader = |id: &TrackId| Ok(Some(make_track(&id.0)));
+        let mut loader = |id: &TrackId| {
+            Ok(Some(Track::fresh_scan(
+                id.clone(),
+                PathBuf::from(&id.0),
+                TrackMetadata::default(),
+                None,
+                None,
+                None,
+                None,
+            )))
+        };
 
         proj.refresh(&queue, 2, &mut loader).unwrap();
         r#gen.bump();
@@ -244,7 +248,17 @@ mod tests {
         let r#gen = StoreGeneration::new();
         let mut proj = PlaybackProjection::new(r#gen.clone());
         let queue = PlaybackQueue::new(vec![TrackId("a".into()), TrackId("b".into())]);
-        let mut loader = |id: &TrackId| Ok(Some(make_track(&id.0)));
+        let mut loader = |id: &TrackId| {
+            Ok(Some(Track::fresh_scan(
+                id.clone(),
+                PathBuf::from(&id.0),
+                TrackMetadata::default(),
+                None,
+                None,
+                None,
+                None,
+            )))
+        };
 
         proj.refresh(&queue, 2, &mut loader).unwrap();
 

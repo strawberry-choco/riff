@@ -72,19 +72,15 @@ mod tests {
 
     #[test]
     fn test_track_display_methods() {
-        let track = Track {
-            id: TrackId("test.mp3".to_string()),
-            file_path: std::path::PathBuf::from("test.mp3"),
-            metadata: crate::domain::TrackMetadata::default(),
-            duration: None,
-            sample_rate: None,
-            channels: None,
-            play_count: 0,
-            last_played: None,
-            date_added: None,
-            favorite: false,
-            search_text: String::new(),
-        };
+        let track = Track::fresh_scan(
+            TrackId("test.mp3".to_string()),
+            std::path::PathBuf::from("test.mp3"),
+            crate::domain::TrackMetadata::default(),
+            None,
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(track.metadata.display_artist(), "Unknown Artist");
         // With no title tag, `display_title` falls back to the file stem

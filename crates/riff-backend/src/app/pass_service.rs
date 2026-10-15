@@ -225,18 +225,16 @@ mod tests {
             Arc::new((0..count).map(|i| format!("music/t{i:02}.flac")).collect());
         let ids = Arc::clone(&tracks);
         StubLibraryQueryStore::new(move |id| {
-            tracks.contains(&id.0).then(|| Track {
-                id: TrackId(id.0.clone()),
-                file_path: std::path::PathBuf::from(&id.0),
-                metadata: TrackMetadata::default(),
-                duration: None,
-                sample_rate: None,
-                channels: None,
-                play_count: 0,
-                last_played: None,
-                date_added: None,
-                favorite: false,
-                search_text: String::new(),
+            tracks.contains(&id.0).then(|| {
+                Track::fresh_scan(
+                    TrackId(id.0.clone()),
+                    std::path::PathBuf::from(&id.0),
+                    TrackMetadata::default(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
             })
         })
         .with_all_track_ids(move || ids.iter().cloned().map(TrackId).collect())

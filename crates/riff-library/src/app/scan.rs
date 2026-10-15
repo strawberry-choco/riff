@@ -23,25 +23,19 @@ pub fn build_tracks(paths: Vec<PathBuf>, reader: &dyn MetadataReader) -> Vec<Tra
         match reader.read_all(&path) {
             Ok((metadata, duration, _cover_source, audio_format)) => {
                 let id = TrackId::from_path(&path);
-                tracks.push(Track {
+                // Stamp first-add time once, at scan time. This (not the file
+                // mtime) drives "Recently Added"; a fresh scan never marks
+                // favorites and carries no search blob — `Track::fresh_scan`
+                // fixes those to a new Track's values.
+                tracks.push(Track::fresh_scan(
                     id,
-                    file_path: path,
+                    path,
                     metadata,
-                    duration: Some(duration),
-                    sample_rate: Some(audio_format.sample_rate),
-                    channels: Some(audio_format.channels),
-                    play_count: 0,
-                    last_played: None,
-                    // Stamp first-add time once, at scan time. This (not
-                    // the file mtime) drives "Recently Added".
-                    date_added: Some(SystemTime::now()),
-                    // A fresh scan never marks favorites; the flag is a user
-                    // fact the store preserves across rescans.
-                    favorite: false,
-                    // The store derives search_text from metadata at write
-                    // time; freshly scanned tracks carry none yet.
-                    search_text: String::new(),
-                });
+                    Some(duration),
+                    Some(audio_format.sample_rate),
+                    Some(audio_format.channels),
+                    Some(SystemTime::now()),
+                ));
             }
             Err(e) => {
                 tracing::error!("Failed to read metadata for {:?}: {}", path, e);

@@ -520,21 +520,11 @@ impl AudioEngine {
         let session = self.session.lock_or_recover();
         let gapless_conditions = crate::app::gapless::GaplessConditions {
             shuffle: session.queue.shuffle,
-            repeat_one: session.queue.repeats_one(),
             format_compatible: pre_decode_state.format_compatible,
             has_successor: pre_decode_state.has_successor,
         };
 
-        let can_gapless = if session.queue.repeats_one() {
-            crate::app::gapless::repeat_one_handoff_eligible(
-                session.queue.shuffle,
-                true,
-                pre_decode_state.format_compatible,
-                pre_decode_state.has_successor,
-            )
-        } else {
-            crate::app::gapless::is_gapless_eligible(gapless_conditions)
-        };
+        let can_gapless = crate::app::gapless::is_gapless_eligible(gapless_conditions);
 
         if can_gapless && pre_decode_state.pre_decoder.is_some() {
             // Gapless handoff: flush the pre-buffered successor audio and
@@ -698,22 +688,6 @@ mod tests {
         None
     }
 
-    fn track(path: &str) -> Track {
-        Track {
-            id: id(path),
-            file_path: PathBuf::from(path),
-            metadata: TrackMetadata::default(),
-            duration: None,
-            sample_rate: None,
-            channels: None,
-            play_count: 0,
-            last_played: None,
-            date_added: None,
-            favorite: false,
-            search_text: String::new(),
-        }
-    }
-
     /// The Library as playback reads it: the narrowed port's two reads over a
     /// canned map, and nothing else — no listing window, no count, no
     /// artist/album/genre/folder read, because the engine asks for none. The
@@ -727,7 +701,24 @@ mod tests {
     impl FakeLibrary {
         fn holding(paths: &[&str]) -> Self {
             Self {
-                tracks: paths.iter().map(|path| (id(path), track(path))).collect(),
+                tracks: paths
+                    .iter()
+                    .map(|path| {
+                        let path = *path;
+                        (
+                            id(path),
+                            Track::fresh_scan(
+                                id(path),
+                                PathBuf::from(path),
+                                TrackMetadata::default(),
+                                None,
+                                None,
+                                None,
+                                None,
+                            ),
+                        )
+                    })
+                    .collect(),
             }
         }
     }

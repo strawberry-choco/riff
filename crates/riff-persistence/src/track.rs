@@ -47,6 +47,45 @@ pub struct Track {
     pub search_text: String,
 }
 
+impl Track {
+    /// Build the freshly scanned [`Track`] shape: the facts a scan produces —
+    /// the identity, the file path, the metadata, and the optional audio
+    /// format (`duration`, `sample_rate`, `channels`) — with the four
+    /// user-dependent fields fixed to the values a brand-new Track always
+    /// has: no finished plays, never played, not a favorite, and an empty
+    /// search blob (the store derives `search_text` from metadata at write
+    /// time, so a freshly scanned Track carries none yet).
+    ///
+    /// The first-add instant is a caller-supplied value, not a clock read:
+    /// "stamp first-add once, at scan time" is the scan site's policy, so the
+    /// stored entity stays free of a wall clock and a test can pass a fixed
+    /// instant or none.
+    #[must_use]
+    pub fn fresh_scan(
+        id: TrackId,
+        file_path: PathBuf,
+        metadata: TrackMetadata,
+        duration: Option<Duration>,
+        sample_rate: Option<u32>,
+        channels: Option<u16>,
+        date_added: Option<SystemTime>,
+    ) -> Self {
+        Self {
+            id,
+            file_path,
+            metadata,
+            duration,
+            sample_rate,
+            channels,
+            play_count: 0,
+            last_played: None,
+            date_added,
+            favorite: false,
+            search_text: String::new(),
+        }
+    }
+}
+
 /// The six auto-generated, read-only smart playlists (REQ-ML-009). Each is
 /// computed on demand from local library metadata, the favorite flags, and
 /// play history — purely offline, no network access, and never persisted as
@@ -223,4 +262,50 @@ pub enum CoverSource {
     Embedded(Arc<[u8]>),
     Filesystem(PathBuf),
     None,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fresh-scan shape is pinned at its one seam: the four
+    /// user-dependent fields hold a freshly scanned Track's values, and the
+    /// caller-supplied facts round-trip unchanged.
+    #[test]
+    fn fresh_scan_fixes_the_user_dependent_fields_and_round_trips_its_facts() {
+        let id = TrackId::from_path(Path::new("/music/a.flac"));
+        let metadata = TrackMetadata {
+            title: Some("A Title".to_string()),
+            artist: Some("An Artist".to_string()),
+            ..TrackMetadata::default()
+        };
+        let first_add = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let duration = Duration::from_mins(3);
+
+        let track = Track::fresh_scan(
+            id.clone(),
+            PathBuf::from("/music/a.flac"),
+            metadata.clone(),
+            Some(duration),
+            Some(44_100),
+            Some(2),
+            Some(first_add),
+        );
+
+        // The four user-dependent fields a scan zeroes: no finished plays,
+        // never played, not a favorite, and no search blob yet.
+        assert_eq!(track.play_count, 0);
+        assert_eq!(track.last_played, None);
+        assert!(!track.favorite);
+        assert!(track.search_text.is_empty());
+
+        // Every caller-supplied fact round-trips.
+        assert_eq!(track.id, id);
+        assert_eq!(track.file_path, PathBuf::from("/music/a.flac"));
+        assert_eq!(track.metadata, metadata);
+        assert_eq!(track.duration, Some(duration));
+        assert_eq!(track.sample_rate, Some(44_100));
+        assert_eq!(track.channels, Some(2));
+        assert_eq!(track.date_added, Some(first_add));
+    }
 }

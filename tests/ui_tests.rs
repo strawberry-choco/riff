@@ -14670,10 +14670,8 @@ mod whole_frame_tests {
     use egui_kittest::kittest::Queryable;
     use riff_backend::app::MutexExt;
     use riff_backend::app::cover_service::{ClearCacheOutcome, Covers};
-    use riff_backend::app::events::BackendEvents;
     use riff_backend::app::scan_service::ScanOutcome;
     use riff_backend::app::state::{LibrarySession, LibraryStatus, PlaybackSession, ViewMode};
-    use riff_backend::app::store::StoreGeneration;
     use riff_backend::app::store::{
         LibraryMutationStore, LibraryQueryStore, PlaylistStore, SettingsStore,
     };
@@ -14687,9 +14685,8 @@ mod whole_frame_tests {
     use std::sync::{Arc, Mutex};
 
     use crate::mocks::{
-        FailingQuery, FakeTagEdits, MockLibraryMutationStore, MockLibraryQueryStore,
-        MockPlaylistStore, MockScans, MockSettingsStore, MockTransport, SettingsCall,
-        TransportIntent,
+        FailingQuery, MockLibraryMutationStore, MockLibraryQueryStore, MockPlaylistStore,
+        MockScans, MockSettingsStore, MockTransport, SettingsCall, TransportIntent,
     };
     use crate::test_utils::{create_test_track_with_metadata, float_close};
 
@@ -14740,22 +14737,12 @@ mod whole_frame_tests {
     const FAST_STEP: f32 = 0.02;
 
     /// A shell plus the handles a test needs to observe what a frame did.
-    struct Shell {
-        /// The harness owns the app; `state_mut()` reaches it between frames.
-        harness: egui_kittest::Harness<'static, RiffApp>,
-        /// The live playback session the app writes UI-owned fields back to.
-        playback: Arc<Mutex<PlaybackSession>>,
-        /// The live library session the app holds for the whole frame.
-        library: Arc<Mutex<LibrarySession>>,
-        /// The event inbox the app drains at the start of every frame.
-        backend_events: Arc<Mutex<BackendEvents>>,
-        /// The scripted scan front end the app polls every frame.
-        scans: MockScans,
-        /// Every settings mutation the app committed at a frame end.
-        settings_calls: Arc<Mutex<Vec<SettingsCall>>>,
-        /// Every folder cover request the app sent, in order.
-        folder_covers: Arc<Mutex<Vec<(TrackId, RequestedSize)>>>,
-    }
+    ///
+    /// This is the composed-shell fixture's handle type, aliased so every
+    /// signature and every `shell.<handle>` read in this suite stays put. One
+    /// spelling means a handle added to the fixture is visible here, with no
+    /// second field list to keep exhaustive.
+    type Shell = crate::composed_shell::ComposedHarness;
 
     /// Build a shell from fully-specified ports, on kittest's own default clock.
     fn build(
@@ -14782,6 +14769,11 @@ mod whole_frame_tests {
     /// [`build`] on a clock of the caller's choosing, for the gestures whose
     /// TIMING is the thing under test rather than a frame count.
     ///
+    /// A thin adapter over the shared [`crate::composed_shell::compose`], which
+    /// owns the app's test-constructor wiring, the fonts install and the
+    /// settled-time guard. This keeps its call shape so every caller and every
+    /// test body stays put; only the ports it hands the composer vary.
+    ///
     /// `build_eframe` runs the app's `logic`/`ui` for its own warm-up frames
     /// (one to initialise AccessKit, one to settle), so by the time this
     /// returns the app has already rendered — and `first_frame` hydration has
@@ -14804,46 +14796,26 @@ mod whole_frame_tests {
         views: SessionViews,
         step_dt: f32,
     ) -> Shell {
-        let playback = Arc::new(Mutex::new(PlaybackSession::default()));
-        let library = Arc::new(Mutex::new(LibrarySession::default()));
-        let backend_events = Arc::new(Mutex::new(BackendEvents::default()));
-        let folder_covers = Arc::new(Mutex::new(Vec::new()));
+        use crate::composed_shell::{self, ComposedShell, ShellFonts};
 
-        let (app, _visibility_tx) = RiffApp::new_for_test(
-            Arc::clone(&playback),
-            Arc::clone(&library),
+        let folder_covers = Arc::new(Mutex::new(Vec::new()));
+        composed_shell::compose(ComposedShell {
+            playback: Arc::new(Mutex::new(PlaybackSession::default())),
+            library: Arc::new(Mutex::new(LibrarySession::default())),
             transport,
-            Box::new(scans.clone()),
+            scans,
             settings_store,
+            settings_calls,
             playlist_store,
             library_mutations,
             views,
-            Box::new(FakeTagEdits::new()),
-            Box::new(crate::mocks::RecordingPasses::default()),
-            Box::new(ShellCovers(Arc::clone(&folder_covers))),
-            Arc::clone(&backend_events),
-        );
-
-        let harness = egui_kittest::Harness::builder()
-            .with_size(WINDOW)
-            .with_step_dt(step_dt)
-            .build_eframe(|cc| {
-                // The same font install `main.rs` performs, because the shell's
-                // named families (`riff-inter-semibold` and friends) are
-                // required by the render path — a frame panics without them.
-                riff_gui::ui::fonts::configure_fonts(&cc.egui_ctx);
-                app
-            });
-
-        Shell {
-            harness,
-            playback,
-            library,
-            backend_events,
-            scans,
-            settings_calls,
-            folder_covers,
-        }
+            covers: Box::new(ShellCovers(Arc::clone(&folder_covers))),
+            folder_covers: Arc::clone(&folder_covers),
+            size: WINDOW,
+            step_dt,
+            now: None,
+            fonts: ShellFonts::Production,
+        })
     }
 
     /// A shell over the mock port kit: no Application Store, no audio device,
@@ -14851,6 +14823,10 @@ mod whole_frame_tests {
     fn mock_shell() -> Shell {
         let settings_calls = Arc::new(Mutex::new(Vec::new()));
         let scans = MockScans::default();
+        let (playlist_store, views) = crate::composed_shell::playlist_ports(
+            Box::new(MockLibraryQueryStore::default()),
+            MockPlaylistStore::default(),
+        );
         build(
             Box::new(MockTransport::new()),
             scans,
@@ -14858,14 +14834,9 @@ mod whole_frame_tests {
                 &settings_calls,
             ))),
             settings_calls,
-            Box::new(MockPlaylistStore::default()),
+            playlist_store,
             Box::new(MockLibraryMutationStore::new()),
-            SessionViews::new(
-                Box::new(MockLibraryQueryStore::default()),
-                Box::new(MockPlaylistStore::default()),
-                StoreGeneration::new(),
-                StoreGeneration::new(),
-            ),
+            views,
         )
     }
 
@@ -14887,6 +14858,8 @@ mod whole_frame_tests {
         let transport = Arc::new(MockTransport::new());
 
         let settings_calls = Arc::new(Mutex::new(Vec::new()));
+        let (playlist_store, views) =
+            crate::composed_shell::playlist_ports(Box::new(mock), MockPlaylistStore::default());
         let shell = build_at_step(
             Box::new(transport.as_ref().clone()),
             MockScans::default(),
@@ -14894,14 +14867,9 @@ mod whole_frame_tests {
                 &settings_calls,
             ))),
             settings_calls,
-            Box::new(MockPlaylistStore::default()),
+            playlist_store,
             Box::new(MockLibraryMutationStore::new()),
-            SessionViews::new(
-                Box::new(mock),
-                Box::new(MockPlaylistStore::default()),
-                StoreGeneration::new(),
-                StoreGeneration::new(),
-            ),
+            views,
             step_dt,
         );
         (shell, transport)
@@ -14956,6 +14924,17 @@ mod whole_frame_tests {
         let playlist_generation = store.playlist_generation();
 
         let settings_calls = Arc::new(Mutex::new(Vec::new()));
+        // The real store serves all three ports and both generations — the
+        // mutation port, the query port, the playlist read port and the
+        // counters its own commits bump. `playlist_ports_at` states that wiring
+        // once; the store's own generations are load-bearing here (a committing
+        // write must move the projection).
+        let (playlist_store, views) = crate::composed_shell::playlist_ports_at(
+            Box::new(store.clone()),
+            store.clone(),
+            library_generation,
+            playlist_generation,
+        );
         let shell = build(
             Box::new(MockTransport::new()),
             MockScans::default(),
@@ -14963,14 +14942,9 @@ mod whole_frame_tests {
                 &settings_calls,
             ))),
             settings_calls,
+            playlist_store,
             Box::new(store.clone()),
-            Box::new(store.clone()),
-            SessionViews::new(
-                Box::new(store.clone()),
-                Box::new(store.clone()),
-                library_generation,
-                playlist_generation,
-            ),
+            views,
         );
         (shell, dir, pid, store)
     }
@@ -16094,6 +16068,10 @@ mod whole_frame_tests {
     ) -> (Shell, Arc<Mutex<MockLibraryQueryStore>>) {
         let shared = Arc::new(Mutex::new(mock));
         let settings_calls = Arc::new(Mutex::new(Vec::new()));
+        let (playlist_store, views) = crate::composed_shell::playlist_ports(
+            Box::new(crate::mocks::SharedQueryStore(Arc::clone(&shared))),
+            MockPlaylistStore::default(),
+        );
         let shell = build(
             Box::new(MockTransport::new()),
             MockScans::default(),
@@ -16101,14 +16079,9 @@ mod whole_frame_tests {
                 &settings_calls,
             ))),
             settings_calls,
-            Box::new(MockPlaylistStore::default()),
+            playlist_store,
             Box::new(MockLibraryMutationStore::new()),
-            SessionViews::new(
-                Box::new(crate::mocks::SharedQueryStore(Arc::clone(&shared))),
-                Box::new(MockPlaylistStore::default()),
-                StoreGeneration::new(),
-                StoreGeneration::new(),
-            ),
+            views,
         );
         (shell, shared)
     }
@@ -18199,58 +18172,31 @@ mod whole_frame_tests {
     /// in-flight frames the frame-loop contract is about never exist. A step
     /// short enough that several frames fall inside the tween is the only way
     /// to observe one; nothing else about the shell differs, so the fold,
-    /// selection and cover wiring are the production ones.
+    /// selection and cover wiring are the production ones. It is a thin adapter
+    /// over [`build_at_step`], which rides the shared composer.
     fn folders_shell(step_dt: f32) -> Shell {
-        let playback = Arc::new(Mutex::new(PlaybackSession::default()));
-        let library = Arc::new(Mutex::new(LibrarySession::default()));
-        let backend_events = Arc::new(Mutex::new(BackendEvents::default()));
-        let folder_covers = Arc::new(Mutex::new(Vec::new()));
         let settings_calls = Arc::new(Mutex::new(Vec::new()));
-
-        let (app, _visibility_tx) = RiffApp::new_for_test(
-            Arc::clone(&playback),
-            Arc::clone(&library),
+        let (playlist_store, views) = crate::composed_shell::playlist_ports(
+            Box::new(MockLibraryQueryStore {
+                folder_has_audio: true,
+                folder_children: vec![PathBuf::from("/music/boards")],
+                folder_direct_tracks: vec![track("t1.mp3", "Ready Let's Go")],
+                ..Default::default()
+            }),
+            MockPlaylistStore::default(),
+        );
+        build_at_step(
             Box::new(MockTransport::new()),
-            Box::new(MockScans::default()),
+            MockScans::default(),
             Box::new(MockSettingsStore::with_shared_calls(Arc::clone(
                 &settings_calls,
             ))),
-            Box::new(MockPlaylistStore::default()),
-            Box::new(MockLibraryMutationStore::new()),
-            SessionViews::new(
-                Box::new(MockLibraryQueryStore {
-                    folder_has_audio: true,
-                    folder_children: vec![PathBuf::from("/music/boards")],
-                    folder_direct_tracks: vec![track("t1.mp3", "Ready Let's Go")],
-                    ..Default::default()
-                }),
-                Box::new(MockPlaylistStore::default()),
-                StoreGeneration::new(),
-                StoreGeneration::new(),
-            ),
-            Box::new(FakeTagEdits::new()),
-            Box::new(crate::mocks::RecordingPasses::default()),
-            Box::new(ShellCovers(Arc::clone(&folder_covers))),
-            Arc::clone(&backend_events),
-        );
-
-        let harness = egui_kittest::Harness::builder()
-            .with_size(WINDOW)
-            .with_step_dt(step_dt)
-            .build_eframe(|cc| {
-                riff_gui::ui::fonts::configure_fonts(&cc.egui_ctx);
-                app
-            });
-
-        Shell {
-            harness,
-            playback,
-            library,
-            backend_events,
-            scans: MockScans::default(),
             settings_calls,
-            folder_covers,
-        }
+            playlist_store,
+            Box::new(MockLibraryMutationStore::new()),
+            views,
+            step_dt,
+        )
     }
 
     /// The repaint requests the *previous* pass attributed to riff's own UI

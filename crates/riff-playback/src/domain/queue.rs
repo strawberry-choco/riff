@@ -108,7 +108,7 @@ impl PlaybackQueue {
 
     /// Whether Repeat-One is actually looping: shuffling takes the shuffle
     /// order instead. The one spelling of that rule — asked by
-    /// [`crate::domain::continuation`] and by the Audio Engine's gapless gate.
+    /// [`crate::domain::continuation`].
     #[must_use]
     pub(crate) fn repeats_one(&self) -> bool {
         self.repeat == RepeatMode::One && !self.shuffle

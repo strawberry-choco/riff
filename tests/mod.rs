@@ -138,6 +138,254 @@ pub(crate) mod determinism {
     }
 }
 
+// --- The composed-shell fixture -----------------------------------------------
+//
+// The ONE home for building the real `RiffApp` over the mock port kit. The
+// composed goldens, the README screenshot generator and the whole-frame gesture
+// shells each used to spell the wiring out for themselves — the same
+// many-argument test constructor and its order, the same fonts-before-building
+// closure, the same settled-time pin — and differed only in the ports they hand
+// in and the display facts. Their copies could drift: `readme_screenshots`'s own
+// doc even said it was "the same mechanism as `golden_tests.rs`'s". One composer
+// now owns that fixed remainder, so a new port argument or a reordered
+// constructor is edited once and cannot drift between suites — the same fix
+// `determinism` already applied to the render knobs.
+pub(crate) mod composed_shell {
+    use crate::mocks::{FakeTagEdits, MockScans, RecordingPasses, SettingsCall};
+    use riff_backend::app::events::BackendEvents;
+    use riff_backend::app::state::{LibrarySession, PlaybackSession};
+    use riff_backend::app::store::{
+        LibraryMutationStore, LibraryQueryStore, PlaylistStore, SettingsStore, StoreGeneration,
+    };
+    use riff_backend::app::transport::Transport;
+    use riff_backend::app::views::SessionViews;
+    use riff_backend::domain::TrackId;
+    use riff_gui::ui::RiffApp;
+    use riff_library::app::cover_service::Covers;
+    use riff_library::app::traits::RequestedSize;
+    use std::sync::{Arc, Mutex};
+    use std::time::SystemTime;
+
+    /// kittest's own default step: a quarter of a second per frame. The
+    /// composed goldens and the README shot ride it; the gesture suites whose
+    /// TIMING is the thing under test pass their own.
+    pub(crate) const DEFAULT_STEP_DT: f32 = 0.25;
+
+    /// Which font set the composed harness installs before building.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum ShellFonts {
+        /// The vendored Inter faces only — the render-determinism contract the
+        /// goldens and the README assets ride.
+        InterOnly,
+        /// The production set `main.rs` installs; the shell's named families
+        /// are required by the render path, so a frame panics without them.
+        Production,
+    }
+
+    /// The facts a composed shell varies by.
+    ///
+    /// Everything a caller must hand in lives here; the fixed remainder of the
+    /// wiring — the tag-edit and passes fakes, the event inbox, the
+    /// fonts-before-building closure and the settled-time guard — does not.
+    pub(crate) struct ComposedShell {
+        /// The live playback session the app writes UI-owned fields back to.
+        pub playback: Arc<Mutex<PlaybackSession>>,
+        /// The live library session the app holds for the whole frame.
+        pub library: Arc<Mutex<LibrarySession>>,
+        /// The playback command front end.
+        pub transport: Box<dyn Transport>,
+        /// The scripted scan front end the app polls every frame.
+        pub scans: MockScans,
+        /// The Application Store's Settings the app hydrates from at launch.
+        pub settings_store: Box<dyn SettingsStore>,
+        /// The record every committed settings mutation lands in.
+        pub settings_calls: Arc<Mutex<Vec<SettingsCall>>>,
+        /// The playlist mutation port the app writes through.
+        pub playlist_store: Box<dyn PlaylistStore>,
+        /// The library mutation port (tag refresh, favorites, play history).
+        pub library_mutations: Box<dyn LibraryMutationStore>,
+        /// The read side: the query port, the playlist read port and both
+        /// session generations.
+        pub views: SessionViews,
+        /// The cover adapter. Each suite keeps its OWN adapter — some record
+        /// track requests, some folder requests, some answer with pixels — so
+        /// folding the wiring changes what no suite records or returns.
+        pub covers: Box<dyn Covers>,
+        /// The record the folder-cover adapter writes to, in order.
+        pub folder_covers: Arc<Mutex<Vec<(TrackId, RequestedSize)>>>,
+        /// The window size the composed frame renders at.
+        pub size: egui::Vec2,
+        /// The clock advance per step.
+        pub step_dt: f32,
+        /// The fixed instant every time-driven readout is stamped with, when
+        /// the caller wants the clock pinned; `None` means the real clock.
+        pub now: Option<SystemTime>,
+        /// Which font set to install before building.
+        pub fonts: ShellFonts,
+    }
+
+    /// The live handles a composed consumer reads back.
+    pub(crate) struct ComposedHarness {
+        /// The harness owns the app; `state_mut()` reaches it between frames.
+        pub harness: egui_kittest::Harness<'static, RiffApp>,
+        /// The live playback session the app writes UI-owned fields back to.
+        pub playback: Arc<Mutex<PlaybackSession>>,
+        /// The live library session the app holds for the whole frame.
+        pub library: Arc<Mutex<LibrarySession>>,
+        /// The event inbox the app drains at the start of every frame.
+        pub backend_events: Arc<Mutex<BackendEvents>>,
+        /// The scripted scan front end the app polls every frame.
+        pub scans: MockScans,
+        /// Every settings mutation the app committed at a frame end.
+        pub settings_calls: Arc<Mutex<Vec<SettingsCall>>>,
+        /// Every folder cover request the app sent, in order.
+        pub folder_covers: Arc<Mutex<Vec<(TrackId, RequestedSize)>>>,
+    }
+
+    /// Build the real `RiffApp` over `shell`'s ports — the ONE composed-shell
+    /// construction every composed consumer crosses.
+    ///
+    /// This owns the fixed remainder: the app's test-constructor argument list
+    /// and its order, the tag-edit and passes fakes, the event inbox, the
+    /// fonts-before-building closure, the clock pin, and — for the
+    /// deterministic-render (`InterOnly`) consumers — the settled-time guard
+    /// re-asserted (and asserted) after construction.
+    pub(crate) fn compose(shell: ComposedShell) -> ComposedHarness {
+        let ComposedShell {
+            playback,
+            library,
+            transport,
+            scans,
+            settings_store,
+            settings_calls,
+            playlist_store,
+            library_mutations,
+            views,
+            covers,
+            folder_covers,
+            size,
+            step_dt,
+            now,
+            fonts,
+        } = shell;
+
+        let backend_events = Arc::new(Mutex::new(BackendEvents::default()));
+
+        let harness = egui_kittest::Harness::builder()
+            .with_size(size)
+            .with_pixels_per_point(1.0)
+            .with_step_dt(step_dt)
+            .build_eframe({
+                let playback = Arc::clone(&playback);
+                let library = Arc::clone(&library);
+                let backend_events = Arc::clone(&backend_events);
+                let scans = scans.clone();
+                move |cc| {
+                    match fonts {
+                        ShellFonts::InterOnly => cc
+                            .egui_ctx
+                            .set_fonts(crate::determinism::inter_only_font_definitions()),
+                        ShellFonts::Production => {
+                            riff_gui::ui::fonts::configure_fonts(&cc.egui_ctx);
+                        }
+                    }
+                    let (mut app, _visibility_tx) = RiffApp::new_for_test(
+                        playback,
+                        library,
+                        transport,
+                        Box::new(scans),
+                        settings_store,
+                        playlist_store,
+                        library_mutations,
+                        views,
+                        Box::new(FakeTagEdits::new()),
+                        Box::new(RecordingPasses::default()),
+                        covers,
+                        backend_events,
+                    );
+                    if let Some(now) = now {
+                        app.set_now_for_test(now);
+                    }
+                    app
+                }
+            });
+
+        // The app installs its palette from inside its own first `update`, so a
+        // warm-up frame could have cached a system-fallback metric into a galley
+        // that survives into the frame under test: force the vendored set once
+        // more after construction. `configure_fonts` is deliberately NOT used —
+        // it appends a machine-dependent CJK fallback, which would make the
+        // render non-portable.
+        //
+        // The settled-time guard rides the same deterministic-render contract,
+        // and only it: the Production gesture shells drive LIVE motion — the
+        // Folders tree's `CollapsingState::openness` reads `Style::animation_time`
+        // — so pinning there would snap the in-flight frames their frame-loop
+        // tests exist to observe. One composer, one guard, applied where the
+        // contract it guards actually applies.
+        if fonts == ShellFonts::InterOnly {
+            harness
+                .ctx
+                .set_fonts(crate::determinism::inter_only_font_definitions());
+            crate::determinism::pin_settled_time(&harness.ctx);
+            crate::determinism::assert_settled_on_both_slots(&harness.ctx);
+        }
+
+        ComposedHarness {
+            harness,
+            playback,
+            library,
+            backend_events,
+            scans,
+            settings_calls,
+            folder_covers,
+        }
+    }
+
+    /// Production's playlist wiring: ONE store cloned into both the mutation
+    /// port the app writes through and the read side the sidebar and stage list
+    /// from, with two freshly-made session generations — the shape every
+    /// mock-port entry point wants.
+    #[must_use]
+    pub(crate) fn playlist_ports<P>(
+        query: Box<dyn LibraryQueryStore>,
+        playlist: P,
+    ) -> (Box<dyn PlaylistStore>, SessionViews)
+    where
+        P: PlaylistStore + Clone + 'static,
+    {
+        playlist_ports_at(
+            query,
+            playlist,
+            StoreGeneration::new(),
+            StoreGeneration::new(),
+        )
+    }
+
+    /// [`playlist_ports`] at generations the caller supplies — the real-store
+    /// suites pass the store's own, which their mutation tests depend on.
+    #[must_use]
+    pub(crate) fn playlist_ports_at<P>(
+        query: Box<dyn LibraryQueryStore>,
+        playlist: P,
+        library_generation: StoreGeneration,
+        playlist_generation: StoreGeneration,
+    ) -> (Box<dyn PlaylistStore>, SessionViews)
+    where
+        P: PlaylistStore + Clone + 'static,
+    {
+        (
+            Box::new(playlist.clone()),
+            SessionViews::new(
+                query,
+                Box::new(playlist),
+                library_generation,
+                playlist_generation,
+            ),
+        )
+    }
+}
+
 // --- Library re-exports ---------------------------------------------------
 //
 // Bring the library modules into the test crate root so qualified paths such as
@@ -152,9 +400,8 @@ pub use riff_infra;
 // Kept explicit (rather than glob re-exports) to avoid name collisions.
 pub use riff_backend::app::MutexExt;
 pub use riff_backend::app::gapless::{
-    GaplessConditions, QueueConditions, duration_from_frames, elapsed_from_samples,
-    frames_from_duration, is_gapless_eligible, pre_buffer_cap, repeat_one_handoff_eligible,
-    samples_from_duration,
+    GaplessConditions, duration_from_frames, elapsed_from_samples, frames_from_duration,
+    is_gapless_eligible, pre_buffer_cap, samples_from_duration,
 };
 pub use riff_backend::app::state::{
     LibrarySession, LibraryStatus, PlaybackQueue, PlaybackSession, ReplayGainMode, WatchState,
@@ -232,19 +479,15 @@ pub mod test_utils {
 
     /// Create a test track with the given ID and file path
     pub fn create_test_track(id: &str, file_path: &str) -> crate::domain::Track {
-        crate::domain::Track {
-            id: TrackId(id.to_string()),
-            file_path: PathBuf::from(file_path),
-            metadata: TrackMetadata::default(),
-            duration: None,
-            sample_rate: None,
-            channels: None,
-            play_count: 0,
-            last_played: None,
-            date_added: None,
-            favorite: false,
-            search_text: String::new(),
-        }
+        crate::domain::Track::fresh_scan(
+            TrackId(id.to_string()),
+            PathBuf::from(file_path),
+            TrackMetadata::default(),
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Create a test track with custom metadata
@@ -255,24 +498,20 @@ pub mod test_utils {
         title: &str,
         album: &str,
     ) -> crate::domain::Track {
-        crate::domain::Track {
-            id: TrackId(id.to_string()),
-            file_path: PathBuf::from(file_path),
-            metadata: TrackMetadata {
+        crate::domain::Track::fresh_scan(
+            TrackId(id.to_string()),
+            PathBuf::from(file_path),
+            TrackMetadata {
                 artist: Some(artist.to_string()),
                 title: Some(title.to_string()),
                 album: Some(album.to_string()),
                 ..Default::default()
             },
-            duration: None,
-            sample_rate: None,
-            channels: None,
-            play_count: 0,
-            last_played: None,
-            date_added: None,
-            favorite: false,
-            search_text: String::new(),
-        }
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Is pixel `p` within `tol` of every channel of `color`?

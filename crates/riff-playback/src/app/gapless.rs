@@ -15,62 +15,24 @@ use std::time::Duration;
 
 pub use crate::domain::playback::{duration_from_frames, frames_from_duration};
 
-/// Queue-derived conditions affecting gapless eligibility, grouped so the
-/// decision inputs stay cohesive.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct QueueConditions {
-    pub shuffle: bool,
-    pub repeat_one: bool,
-    pub has_successor: bool,
-}
-
 /// Conditions that decide whether a gapless handoff may be attempted at EOF.
 /// Grouped into one value so the decision function stays readable; see
 /// [`is_gapless_eligible`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "each condition is an independent handoff gate"
-)]
 pub struct GaplessConditions {
     pub shuffle: bool,
-    pub repeat_one: bool,
     pub format_compatible: bool,
     pub has_successor: bool,
 }
 
-/// Whether a gapless handoff to the NATURAL SUCCESSOR may be attempted at
-/// EOF. Repeat-one looping is a separate handoff case (the same track loops,
-/// decided by the caller), so `repeat_one` disqualifies here. Shuffle is
-/// excluded because the next track is not predictable far enough ahead.
+/// Whether a gapless handoff may be attempted at EOF. Shuffle disqualifies
+/// because the successor is not predictable far enough ahead; an incompatible
+/// format disqualifies because the running stream cannot be reused; no
+/// successor disqualifies because there is nothing pre-buffered to flush.
+/// Repeat-one handoffs reach this same predicate.
 #[must_use]
 pub fn is_gapless_eligible(conditions: GaplessConditions) -> bool {
-    !conditions.shuffle
-        && !conditions.repeat_one
-        && conditions.format_compatible
-        && conditions.has_successor
-}
-
-/// Whether the repeat-one loop may hand off to itself gaplessly at EOF: the
-/// same track restarts on the pre-buffered decoder only when it really is up
-/// next (not shuffled), the formats match so the running cpal stream can be
-/// reused, and a pre-buffered copy exists. This is the repeat-one counterpart
-/// of [`is_gapless_eligible`], which deliberately excludes `repeat_one`.
-///
-/// As with every helper in this module, the engine calls THIS function —
-/// the tested logic is the real logic.
-// The flat bool signature is deliberate: it mirrors the engine's local
-// variables one-to-one at the call site (the struct-qualified alternative
-// would just re-wrap them).
-#[allow(clippy::fn_params_excessive_bools)]
-#[must_use]
-pub fn repeat_one_handoff_eligible(
-    shuffle: bool,
-    repeat_one: bool,
-    format_compatible: bool,
-    has_successor: bool,
-) -> bool {
-    !shuffle && repeat_one && format_compatible && has_successor
+    !conditions.shuffle && conditions.format_compatible && conditions.has_successor
 }
 
 /// Interleaved-sample count equivalent of a [`Duration`] at the given format:
@@ -144,32 +106,30 @@ mod tests {
 
     #[test]
     fn is_gapless_eligible_basic() {
+        // The positive case: not shuffled, formats compatible, a successor exists.
         assert!(is_gapless_eligible(GaplessConditions {
             shuffle: false,
-            repeat_one: false,
             format_compatible: true,
             has_successor: true,
         }));
+        // Shuffle disqualifies: the successor is not predictable far enough ahead.
         assert!(!is_gapless_eligible(GaplessConditions {
             shuffle: true,
-            repeat_one: false,
             format_compatible: true,
             has_successor: true,
         }));
+        // Format incompatibility disqualifies: the running stream cannot be reused.
         assert!(!is_gapless_eligible(GaplessConditions {
             shuffle: false,
-            repeat_one: true,
-            format_compatible: true,
+            format_compatible: false,
             has_successor: true,
         }));
-    }
-
-    #[test]
-    fn repeat_one_handoff_eligible_basic() {
-        assert!(repeat_one_handoff_eligible(false, true, true, true));
-        assert!(!repeat_one_handoff_eligible(true, true, true, true));
-        assert!(!repeat_one_handoff_eligible(false, true, false, true));
-        assert!(!repeat_one_handoff_eligible(false, true, true, false));
+        // No successor disqualifies: nothing is pre-buffered to flush.
+        assert!(!is_gapless_eligible(GaplessConditions {
+            shuffle: false,
+            format_compatible: true,
+            has_successor: false,
+        }));
     }
 
     #[test]

@@ -747,19 +747,15 @@ mod tests {
             metadata.album = Some(title.to_string());
             metadata.album_artist = Some(artist.to_string());
         }
-        Track {
-            id: TrackId(path.to_string()),
-            file_path: std::path::PathBuf::from(path),
+        Track::fresh_scan(
+            TrackId(path.to_string()),
+            std::path::PathBuf::from(path),
             metadata,
-            duration: Some(Duration::from_secs(2)),
-            sample_rate: None,
-            channels: None,
-            play_count: 0,
-            last_played: None,
-            date_added: None,
-            favorite: false,
-            search_text: String::new(),
-        }
+            Some(Duration::from_secs(2)),
+            None,
+            None,
+            None,
+        )
     }
 
     fn loudness(gain_db: f32, peak: f32) -> TrackLoudness {

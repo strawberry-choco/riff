@@ -137,10 +137,35 @@ pub struct SessionViews {
     playlists: PlaylistProjection,
 }
 
+/// The Session Views seam's one store-error policy: on a store error, log a
+/// `tracing::warn!` carrying `context` and degrade to `fallback`, so the UI
+/// never sees a `Result`.
+///
+/// `context` and `fallback` are producers, not values: both run on the error
+/// path only, so a read never formats a message or computes a fallback it
+/// never uses. Every read site — the paged listings' two arms, the flat
+/// count/row pair, the scoped and unbounded listings, the folder and sidebar
+/// reads, the playlist reads, and the playback-slot reads — supplies only its
+/// own context and its own fallback through this one implementation.
+fn degrade<T, E: std::fmt::Display>(
+    result: Result<T, E>,
+    context: impl FnOnce() -> String,
+    fallback: impl FnOnce() -> T,
+) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            let context = context();
+            tracing::warn!("{context}: {error}");
+            fallback()
+        }
+    }
+}
+
 /// Generate one paged listing's `*_count` / `*_row` method pair — the shape
-/// the "Paged listings" section comment inside [`SessionViews`] describes,
-/// with the error policy (log, then degrade to the last good answer) written
-/// exactly once here.
+/// the "Paged listings" section comment inside [`SessionViews`] describes.
+/// Both arms delegate their store-error policy to the module's one
+/// [`degrade`] combinator, so the paged and hand-written reads cannot drift.
 ///
 /// - `$count` / `$row`: the two method names.
 /// - `args`: the parameters both take; `$row` takes the same list plus the
@@ -164,32 +189,28 @@ macro_rules! paged_listing {
     ) => {
         $(#[$count_meta])*
         pub fn $count(&mut self, $($arg: $arg_ty),*) -> usize {
-            match self.$proj.count($key, &mut || {
+            let result = self.$proj.count($key, &mut || {
                 self.queries
                     .$page($($parg,)* 0, COUNT_ROWS)
                     .map(|page| page.total())
-            }) {
-                Ok(total) => total,
-                Err(e) => {
-                    let listing = $listing;
-                    tracing::warn!("Failed to count {listing} in the store: {e}");
-                    self.$proj.cached_count().unwrap_or(0)
-                }
-            }
+            });
+            degrade(
+                result,
+                || format!("Failed to count {} in the store", $listing),
+                || self.$proj.cached_count().unwrap_or(0),
+            )
         }
 
         $(#[$row_meta])*
         pub fn $row(&mut self, $($arg: $arg_ty,)* index: usize) -> Option<$ret> {
-            match self.$proj.row($key, index, &mut |offset, limit| {
+            let result = self.$proj.row($key, index, &mut |offset, limit| {
                 self.queries.$page($($parg,)* offset, limit)
-            }) {
-                Ok(row) => row,
-                Err(e) => {
-                    let listing = $listing;
-                    tracing::warn!("Failed to refresh {listing} from the store: {e}");
-                    self.$proj.cached_row(index)
-                }
-            }
+            });
+            degrade(
+                result,
+                || format!("Failed to refresh {} from the store", $listing),
+                || self.$proj.cached_row(index),
+            )
         }
     };
 }
@@ -336,25 +357,26 @@ impl SessionViews {
     /// costs no store read; a failed read keeps the last good total.
     pub fn track_count(&mut self, query: &str, sort: TrackSort) -> usize {
         let (key, order) = Self::track_key(query, sort);
-        let listing = if query.is_empty() {
-            "the flat list"
-        } else {
-            "the search"
-        };
-        match self.tracks.count(key, &mut || {
+        let result = self.tracks.count(key, &mut || {
             let page = if query.is_empty() {
                 self.queries.tracks_page(order, 0, COUNT_ROWS)
             } else {
                 self.queries.search_page(query, order, 0, COUNT_ROWS)
             };
             page.map(|page| page.total())
-        }) {
-            Ok(total) => total,
-            Err(e) => {
-                tracing::warn!("Failed to count {listing} (query {query:?}) in the store: {e}");
-                self.tracks.cached_count().unwrap_or(0)
-            }
-        }
+        });
+        degrade(
+            result,
+            || {
+                let listing = if query.is_empty() {
+                    "the flat list"
+                } else {
+                    "the search"
+                };
+                format!("Failed to count {listing} (query {query:?}) in the store")
+            },
+            || self.tracks.cached_count().unwrap_or(0),
+        )
     }
 
     /// Row `index` of the flat track list (`query` empty) or the search
@@ -368,24 +390,25 @@ impl SessionViews {
     /// offset, a window start, or a window boundary.
     pub fn track_row(&mut self, query: &str, sort: TrackSort, index: usize) -> Option<Arc<Track>> {
         let (key, order) = Self::track_key(query, sort);
-        let listing = if query.is_empty() {
-            "the flat list"
-        } else {
-            "the search"
-        };
-        match self.tracks.row(key, index, &mut |offset, limit| {
+        let result = self.tracks.row(key, index, &mut |offset, limit| {
             if query.is_empty() {
                 self.queries.tracks_page(order, offset, limit)
             } else {
                 self.queries.search_page(query, order, offset, limit)
             }
-        }) {
-            Ok(row) => row,
-            Err(e) => {
-                tracing::warn!("Failed to refresh {listing} (query {query:?}) from the store: {e}");
-                self.tracks.cached_row(index)
-            }
-        }
+        });
+        degrade(
+            result,
+            || {
+                let listing = if query.is_empty() {
+                    "the flat list"
+                } else {
+                    "the search"
+                };
+                format!("Failed to refresh {listing} (query {query:?}) from the store")
+            },
+            || self.tracks.cached_row(index),
+        )
     }
 
     // --- Entity hit roots (search across Library sections) ------------------
@@ -541,16 +564,20 @@ impl SessionViews {
         album_title: &str,
         query: &str,
     ) -> Arc<[Track]> {
-        self.hits
-            .album_hit_tracks(album_artist, album_title, query, &mut |a, t, q| {
-                self.queries.album_hit_tracks(a, t, q)
-            })
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    "Failed to load hit tracks for {album_title} (query {query:?}) from the store: {e}"
-                );
-                Arc::from([])
-            })
+        let result =
+            self.hits
+                .album_hit_tracks(album_artist, album_title, query, &mut |a, t, q| {
+                    self.queries.album_hit_tracks(a, t, q)
+                });
+        degrade(
+            result,
+            || {
+                format!(
+                    "Failed to load hit tracks for {album_title} (query {query:?}) from the store"
+                )
+            },
+            || Arc::from([]),
+        )
     }
 
     /// Whether `album` is itself a name hit for `query` (its album artist or
@@ -562,30 +589,38 @@ impl SessionViews {
         album_title: &str,
         query: &str,
     ) -> bool {
-        self.hits
-            .album_is_name_hit(album_artist, album_title, query, &mut |a, t, q| {
-                self.queries.album_is_name_hit(a, t, q)
-            })
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    "Failed to check whether {album_title} is a name hit (query {query:?}) in the store: {e}"
-                );
-                false
-            })
+        let result =
+            self.hits
+                .album_is_name_hit(album_artist, album_title, query, &mut |a, t, q| {
+                    self.queries.album_is_name_hit(a, t, q)
+                });
+        degrade(
+            result,
+            || {
+                format!(
+                    "Failed to check whether {album_title} is a name hit (query {query:?}) in the store"
+                )
+            },
+            || false,
+        )
     }
 
     /// Whether `artist` is itself a name hit for `query` (its own name
     /// matched), cached per (artist, query) per generation. `false` on a
     /// store error or for unknown artists.
     pub fn artist_is_name_hit(&mut self, artist: &str, query: &str) -> bool {
-        self.hits
-            .artist_is_name_hit(artist, query, &mut |a, q| self.queries.artist_is_name_hit(a, q))
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    "Failed to check whether {artist} is a name hit (query {query:?}) in the store: {e}"
-                );
-                false
-            })
+        let result = self.hits.artist_is_name_hit(artist, query, &mut |a, q| {
+            self.queries.artist_is_name_hit(a, q)
+        });
+        degrade(
+            result,
+            || {
+                format!(
+                    "Failed to check whether {artist} is a name hit (query {query:?}) in the store"
+                )
+            },
+            || false,
+        )
     }
 
     /// One album's tracks that match `query` among its `genre`-bearing
@@ -600,20 +635,22 @@ impl SessionViews {
         genre: &str,
         query: &str,
     ) -> Arc<[Track]> {
-        self.hits
-            .genre_album_tracks(
-                album_artist,
-                album_title,
-                genre,
-                query,
-                &mut |a, t, g, q| self.queries.album_hit_tracks_in_genre(a, t, g, q),
-            )
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    "Failed to load hit tracks for {album_title} in genre {genre:?} (query {query:?}) from the store: {e}"
-                );
-                Arc::from([])
-            })
+        let result = self.hits.genre_album_tracks(
+            album_artist,
+            album_title,
+            genre,
+            query,
+            &mut |a, t, g, q| self.queries.album_hit_tracks_in_genre(a, t, g, q),
+        );
+        degrade(
+            result,
+            || {
+                format!(
+                    "Failed to load hit tracks for {album_title} in genre {genre:?} (query {query:?}) from the store"
+                )
+            },
+            || Arc::from([]),
+        )
     }
 
     // --- Artist / album browsing ---------------------------------------------
@@ -627,25 +664,29 @@ impl SessionViews {
     /// One artist's albums in canonical order, cached per generation.
     /// Fresh frames hand out an `Arc` clone of the cached list.
     pub fn artist_albums(&mut self, artist: &str) -> Arc<[Album]> {
-        self.browsing
-            .artist_albums(artist, &mut |a| self.queries.artist_albums(a))
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to load albums for {artist}: {e}");
-                Arc::from([])
-            })
+        let result = self
+            .browsing
+            .artist_albums(artist, &mut |a| self.queries.artist_albums(a));
+        degrade(
+            result,
+            || format!("Failed to load albums for {artist}"),
+            || Arc::from([]),
+        )
     }
 
     /// One album's tracks in canonical order, cached per generation. Fresh
     /// frames hand out an `Arc` clone of the cached list.
     pub fn album_tracks(&mut self, album_artist: &str, album_title: &str) -> Arc<[Track]> {
-        self.browsing
+        let result = self
+            .browsing
             .album_tracks(album_artist, album_title, &mut |a, t| {
                 self.queries.album_tracks(a, t)
-            })
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to load tracks for {album_title}: {e}");
-                Arc::from([])
-            })
+            });
+        degrade(
+            result,
+            || format!("Failed to load tracks for {album_title}"),
+            || Arc::from([]),
+        )
     }
 
     /// The first track (by file path) of an artist's first album, used for
@@ -685,38 +726,42 @@ impl SessionViews {
     /// generation. The sidebar's total-genres count is the list's length.
     /// Fresh frames hand out an `Arc` clone of the cached list.
     pub fn genres(&mut self) -> Arc<[GenreCount]> {
-        self.genres
-            .counts(&mut || self.queries.genre_counts())
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to load genre counts from the store: {e}");
-                Arc::from([])
-            })
+        let result = self.genres.counts(&mut || self.queries.genre_counts());
+        degrade(
+            result,
+            || "Failed to load genre counts from the store".to_string(),
+            || Arc::from([]),
+        )
     }
 
     /// Artists having at least one track with `genre`, name-ascending, each
     /// with their genre-matching album keys, cached per generation. Fresh
     /// frames hand out an `Arc` clone of the cached list.
     pub fn artists_in_genre(&mut self, genre: &str) -> Arc<[Artist]> {
-        self.genres
-            .artists_in_genre(genre, &mut |g| self.queries.artists_in_genre(g))
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to load artists for genre {genre:?}: {e}");
-                Arc::from([])
-            })
+        let result = self
+            .genres
+            .artists_in_genre(genre, &mut |g| self.queries.artists_in_genre(g));
+        degrade(
+            result,
+            || format!("Failed to load artists for genre {genre:?}"),
+            || Arc::from([]),
+        )
     }
 
     /// One artist's albums holding a track with `genre`, in canonical
     /// browsing order with genre-matching track membership, cached per
     /// generation. Fresh frames hand out an `Arc` clone of the cached list.
     pub fn artist_albums_in_genre(&mut self, artist: &str, genre: &str) -> Arc<[Album]> {
-        self.genres
+        let result = self
+            .genres
             .artist_albums_in_genre(artist, genre, &mut |a, g| {
                 self.queries.artist_albums_in_genre(a, g)
-            })
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to load albums for {artist} in genre {genre:?}: {e}");
-                Arc::from([])
-            })
+            });
+        degrade(
+            result,
+            || format!("Failed to load albums for {artist} in genre {genre:?}"),
+            || Arc::from([]),
+        )
     }
 
     /// One album's tracks with `genre`, in canonical album-track order,
@@ -728,73 +773,83 @@ impl SessionViews {
         album_title: &str,
         genre: &str,
     ) -> Arc<[Track]> {
-        self.genres
-            .album_tracks_in_genre(album_artist, album_title, genre, &mut |a, t, g| {
-                self.queries.album_tracks_in_genre(a, t, g)
-            })
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to load tracks for {album_title} in genre {genre:?}: {e}");
-                Arc::from([])
-            })
+        let result =
+            self.genres
+                .album_tracks_in_genre(album_artist, album_title, genre, &mut |a, t, g| {
+                    self.queries.album_tracks_in_genre(a, t, g)
+                });
+        degrade(
+            result,
+            || format!("Failed to load tracks for {album_title} in genre {genre:?}"),
+            || Arc::from([]),
+        )
     }
 
     // --- Folder tree ----------------------------------------------------------
 
     /// Whether `folder` contains any audio, cached per generation.
     pub fn folder_has_audio(&mut self, folder: &Path) -> bool {
-        self.folders
-            .has_audio(folder, &mut |f| self.queries.folder_has_audio(f))
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to probe folder {}: {e}", folder.display());
-                false
-            })
+        let result = self
+            .folders
+            .has_audio(folder, &mut |f| self.queries.folder_has_audio(f));
+        degrade(
+            result,
+            || format!("Failed to probe folder {}", folder.display()),
+            || false,
+        )
     }
 
     /// Whether any track under `folder` matches the search query, cached per
     /// (folder, query) per generation.
     pub fn folder_search_match(&mut self, folder: &Path, query: &str) -> bool {
-        self.folders
-            .has_search_match(folder, query, &mut |f, q| {
-                self.queries.folder_has_search_match(f, q)
-            })
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to search folder {}: {e}", folder.display());
-                false
-            })
+        let result = self.folders.has_search_match(folder, query, &mut |f, q| {
+            self.queries.folder_has_search_match(f, q)
+        });
+        degrade(
+            result,
+            || format!("Failed to search folder {}", folder.display()),
+            || false,
+        )
     }
 
     /// Every track id under `folder`, path-ordered, cached per generation.
     /// Fresh frames hand out an `Arc` clone of the cached list — no
     /// per-frame copy of one id per track.
     pub fn folder_subtree_ids(&mut self, folder: &Path) -> Arc<[TrackId]> {
-        self.folders
-            .subtree_ids(folder, &mut |f| self.queries.track_ids_in_folder_tree(f))
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to list folder tree {}: {e}", folder.display());
-                Arc::from([])
-            })
+        let result = self
+            .folders
+            .subtree_ids(folder, &mut |f| self.queries.track_ids_in_folder_tree(f));
+        degrade(
+            result,
+            || format!("Failed to list folder tree {}", folder.display()),
+            || Arc::from([]),
+        )
     }
 
     /// The child directories of `folder` holding audio, cached per
     /// generation. Fresh frames hand out an `Arc` clone of the cached list.
     pub fn folder_children(&mut self, folder: &Path) -> Arc<[PathBuf]> {
-        self.folders
-            .children(folder, &mut |f| self.queries.subdirs_with_audio(f))
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to list folder children {}: {e}", folder.display());
-                Arc::from([])
-            })
+        let result = self
+            .folders
+            .children(folder, &mut |f| self.queries.subdirs_with_audio(f));
+        degrade(
+            result,
+            || format!("Failed to list folder children {}", folder.display()),
+            || Arc::from([]),
+        )
     }
 
     /// The tracks directly inside `folder`, cached per generation. Fresh
     /// frames hand out an `Arc` clone of the cached list.
     pub fn folder_direct_tracks(&mut self, folder: &Path) -> Arc<[Track]> {
-        self.folders
-            .direct_tracks(folder, &mut |f| self.queries.tracks_in_folder(f))
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to list folder tracks {}: {e}", folder.display());
-                Arc::from([])
-            })
+        let result = self
+            .folders
+            .direct_tracks(folder, &mut |f| self.queries.tracks_in_folder(f));
+        degrade(
+            result,
+            || format!("Failed to list folder tracks {}", folder.display()),
+            || Arc::from([]),
+        )
     }
 
     // --- Smart playlists --------------------------------------------------------
@@ -803,15 +858,14 @@ impl SessionViews {
     /// generation and limit. Fresh frames hand out an `Arc` clone of the
     /// cached list.
     pub fn smart_list(&mut self, kind: SmartPlaylistKind, limit: usize) -> Arc<[Track]> {
-        self.smart_playlists
-            .list(kind, limit, &mut |k, l| self.queries.smart_playlist(k, l))
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    "Failed to compute smart playlist {}: {e}",
-                    kind.display_name()
-                );
-                Arc::from([])
-            })
+        let result = self
+            .smart_playlists
+            .list(kind, limit, &mut |k, l| self.queries.smart_playlist(k, l));
+        degrade(
+            result,
+            || format!("Failed to compute smart playlist {}", kind.display_name()),
+            || Arc::from([]),
+        )
     }
 
     // --- Sidebar counts ----------------------------------------------------------
@@ -826,23 +880,18 @@ impl SessionViews {
     /// paths. On a store error the affected counts answer their defaults
     /// (`0`, an empty list) so the sidebar still renders.
     pub fn sidebar_counts(&mut self, folder_roots: usize) -> SidebarCounts {
-        let library = match self
-            .counts
-            .library_counts(&mut || self.queries.library_counts())
-        {
-            Ok(counts) => *counts,
-            Err(e) => {
-                tracing::warn!("Failed to load the library counts from the store: {e}");
-                LibraryCounts::default()
-            }
-        };
-        let smart_lists = self
-            .counts
-            .smart_list_counts(&mut || self.queries.smart_list_counts())
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to load the smart-list counts from the store: {e}");
-                Arc::from([])
-            });
+        let library = degrade(
+            self.counts
+                .library_counts(&mut || self.queries.library_counts()),
+            || "Failed to load the library counts from the store".to_string(),
+            || Arc::new(LibraryCounts::default()),
+        );
+        let smart_lists = degrade(
+            self.counts
+                .smart_list_counts(&mut || self.queries.smart_list_counts()),
+            || "Failed to load the smart-list counts from the store".to_string(),
+            || Arc::from([]),
+        );
         let playlists = self
             .playlists()
             .iter()
@@ -863,16 +912,12 @@ impl SessionViews {
     /// per (generation, folder) — the per-music-folder count the Settings
     /// Library pane shows. `0` on a store error so the pane still renders.
     pub fn folder_track_count(&mut self, folder: &Path) -> usize {
-        match self
-            .counts
-            .folder_count(folder, &mut |f| self.queries.folder_track_count(f))
-        {
-            Ok(count) => count,
-            Err(e) => {
-                tracing::warn!("Failed to count tracks under {}: {e}", folder.display());
-                0
-            }
-        }
+        degrade(
+            self.counts
+                .folder_count(folder, &mut |f| self.queries.folder_track_count(f)),
+            || format!("Failed to count tracks under {}", folder.display()),
+            || 0,
+        )
     }
 
     /// The timestamp of the last completed full library scan, cached per
@@ -887,13 +932,11 @@ impl SessionViews {
     /// included). `None` when no scan has ever completed or the read failed
     /// (design-handoff issue 12).
     pub fn last_full_scan_summary(&mut self) -> Option<crate::app::store::FullScanSummary> {
-        match self.counts.last_scan(&mut || self.queries.last_full_scan()) {
-            Ok(scan) => scan,
-            Err(e) => {
-                tracing::warn!("Failed to read the last-scan summary from the store: {e}");
-                None
-            }
-        }
+        degrade(
+            self.counts.last_scan(&mut || self.queries.last_full_scan()),
+            || "Failed to read the last-scan summary from the store".to_string(),
+            || None,
+        )
     }
 
     // --- User playlists ---------------------------------------------------------
@@ -903,12 +946,14 @@ impl SessionViews {
     /// On a store error the last good list is kept (a cold miss renders
     /// empty) and the next call retries.
     pub fn playlists(&mut self) -> Arc<[Playlist]> {
-        self.playlists
-            .playlists(&mut || self.playlist_queries.load_playlists())
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to load playlists from the store: {e}");
-                self.playlists.cached_playlists().unwrap_or_default()
-            })
+        let result = self
+            .playlists
+            .playlists(&mut || self.playlist_queries.load_playlists());
+        degrade(
+            result,
+            || "Failed to load playlists from the store".to_string(),
+            || self.playlists.cached_playlists().unwrap_or_default(),
+        )
     }
 
     /// One user playlist's ready-to-render rows: the entry id, its
@@ -922,15 +967,14 @@ impl SessionViews {
         if !self.playlists().iter().any(|playlist| &playlist.id == id) {
             return None;
         }
-        match self.playlists.playlist_view(id, &mut |pid| {
+        let result = self.playlists.playlist_view(id, &mut |pid| {
             self.playlist_queries.load_playlist_entries(pid)
-        }) {
-            Ok(view) => Some(view),
-            Err(e) => {
-                tracing::warn!("Failed to load playlist entries for {id:?} from the store: {e}");
-                Some(self.playlists.cached_view(id).unwrap_or_default())
-            }
-        }
+        });
+        Some(degrade(
+            result,
+            || format!("Failed to load playlist entries for {id:?} from the store"),
+            || self.playlists.cached_view(id).unwrap_or_default(),
+        ))
     }
 
     // --- Playback-side reads ------------------------------------------------------
@@ -940,12 +984,12 @@ impl SessionViews {
     /// moved (a stamp comparison); otherwise refetches through the store.
     /// Failures keep the previous slots so stale-but-present beats blank.
     pub fn sync_playback(&mut self, queue: &PlaybackQueue, up_next_limit: usize) {
-        if let Err(e) = self
-            .playback
-            .refresh(queue, up_next_limit, &mut |id| self.queries.get_track(id))
-        {
-            tracing::warn!("Failed to refresh the playback projection from the store: {e}");
-        }
+        degrade(
+            self.playback
+                .refresh(queue, up_next_limit, &mut |id| self.queries.get_track(id)),
+            || "Failed to refresh the playback projection from the store".to_string(),
+            || (),
+        );
     }
 
     /// The resolved current Track, when one is playing and it still resolves.
@@ -967,15 +1011,11 @@ impl SessionViews {
     /// or the generation moves. A cached absence (id unknown to the store)
     /// yields `None` without requerying per frame.
     pub fn selected_track(&mut self, id: &TrackId) -> Option<Track> {
-        match self
-            .playback
-            .selected_track(id, &mut |tid| self.queries.get_track(tid))
-        {
-            Ok(track) => track,
-            Err(e) => {
-                tracing::warn!("Failed to resolve selected track {id:?} from the store: {e}");
-                None
-            }
-        }
+        degrade(
+            self.playback
+                .selected_track(id, &mut |tid| self.queries.get_track(tid)),
+            || format!("Failed to resolve selected track {id:?} from the store"),
+            || None,
+        )
     }
 }

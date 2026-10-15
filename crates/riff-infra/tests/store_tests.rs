@@ -1527,25 +1527,21 @@ fn library_track(
     album: &str,
     album_artist: Option<&str>,
 ) -> Track {
-    Track {
-        id: TrackId::from_path(std::path::Path::new(path)),
-        file_path: PathBuf::from(path),
-        metadata: TrackMetadata {
+    Track::fresh_scan(
+        TrackId::from_path(std::path::Path::new(path)),
+        PathBuf::from(path),
+        TrackMetadata {
             title: Some(title.to_string()),
             artist: artist.map(str::to_string),
             album: Some(album.to_string()),
             album_artist: album_artist.map(str::to_string),
             ..TrackMetadata::default()
         },
-        duration: None,
-        sample_rate: None,
-        channels: None,
-        play_count: 0,
-        last_played: None,
-        date_added: None,
-        favorite: false,
-        search_text: String::new(),
-    }
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 // --- Deleted window + count reads, in terms of Listing Pages ---------------
@@ -2950,10 +2946,10 @@ fn browsing_track(
     track_number: Option<u32>,
     year: Option<u32>,
 ) -> Track {
-    Track {
-        id: TrackId::from_path(std::path::Path::new(path)),
-        file_path: PathBuf::from(path),
-        metadata: TrackMetadata {
+    Track::fresh_scan(
+        TrackId::from_path(std::path::Path::new(path)),
+        PathBuf::from(path),
+        TrackMetadata {
             title: Some(title.to_string()),
             artist: Some(album_artist.to_string()),
             album: Some(album.to_string()),
@@ -2962,15 +2958,11 @@ fn browsing_track(
             year,
             ..TrackMetadata::default()
         },
-        duration: None,
-        sample_rate: None,
-        channels: None,
-        play_count: 0,
-        last_played: None,
-        date_added: None,
-        favorite: false,
-        search_text: String::new(),
-    }
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 /// An independent Rust-only restatement of the three browsing orderings,
@@ -3638,13 +3630,19 @@ fn genre_track(
     album: &str,
     genre: Option<&str>,
 ) -> Track {
-    Track {
-        metadata: TrackMetadata {
+    let base = browsing_track(path, title, album_artist, album, None, None);
+    Track::fresh_scan(
+        base.id,
+        base.file_path,
+        TrackMetadata {
             genre: genre.map(str::to_string),
-            ..browsing_track(path, title, album_artist, album, None, None).metadata
+            ..base.metadata
         },
-        ..browsing_track(path, title, album_artist, album, None, None)
-    }
+        base.duration,
+        base.sample_rate,
+        base.channels,
+        base.date_added,
+    )
 }
 
 #[test]
@@ -6260,19 +6258,15 @@ mod emit_beside_bump {
     #[test]
     fn committed_library_mutation_emits_one_notify_and_bumps() {
         let (mut store, rx) = fresh_store();
-        let track = Track {
-            id: TrackId::from_path(std::path::Path::new("track://x/1")),
-            file_path: PathBuf::from("track://x/1"),
-            metadata: TrackMetadata::default(),
-            duration: None,
-            sample_rate: None,
-            channels: None,
-            play_count: 0,
-            last_played: None,
-            date_added: None,
-            favorite: false,
-            search_text: String::new(),
-        };
+        let track = Track::fresh_scan(
+            TrackId::from_path(std::path::Path::new("track://x/1")),
+            PathBuf::from("track://x/1"),
+            TrackMetadata::default(),
+            None,
+            None,
+            None,
+            None,
+        );
 
         let gen_before = store.library_generation().current();
         assert_eq!(gen_before, 0);

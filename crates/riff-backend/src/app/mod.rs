@@ -38,9 +38,8 @@ pub use riff_playback::infra::ports::{AudioDecoder, AudioOutput, DecoderFactory}
 pub use riff_playback::app::{
     errors::PlaybackError,
     gapless::{
-        GaplessConditions, QueueConditions, duration_from_frames, elapsed_from_samples,
-        frames_from_duration, is_gapless_eligible, pre_buffer_cap, repeat_one_handoff_eligible,
-        samples_from_duration,
+        GaplessConditions, duration_from_frames, elapsed_from_samples, frames_from_duration,
+        is_gapless_eligible, pre_buffer_cap, samples_from_duration,
     },
     playback_coordinator::PlaybackCoordinator,
     projection::PlaybackProjection,

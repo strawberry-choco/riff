@@ -442,129 +442,70 @@ mod tests {
 
     /// Build the gapless-conditions struct used by [`is_gapless_eligible`].
     fn gapless_conditions(
-        queue: QueueConditions,
+        shuffle: bool,
         formats_compatible: bool,
         has_successor: bool,
     ) -> GaplessConditions {
         GaplessConditions {
-            shuffle: queue.shuffle,
-            repeat_one: queue.repeat_one,
+            shuffle,
             format_compatible: formats_compatible,
             has_successor,
         }
     }
 
-    /// Shorthand for the queue part of [`gapless_conditions`].
-    fn queue_conditions(shuffle: bool, repeat_one: bool) -> QueueConditions {
-        QueueConditions {
-            shuffle,
-            repeat_one,
-            has_successor: true,
-        }
-    }
-
     #[test]
     fn test_gapless_eligible_true_only_when_all_conditions_hold() {
-        assert!(is_gapless_eligible(gapless_conditions(
-            queue_conditions(false, false),
-            true,
-            true
-        )));
+        assert!(is_gapless_eligible(gapless_conditions(false, true, true)));
     }
 
     #[test]
     fn test_gapless_eligible_false_when_shuffling() {
         // The successor is not predictable far enough ahead in shuffle mode.
-        assert!(!is_gapless_eligible(gapless_conditions(
-            queue_conditions(true, false),
-            true,
-            true
-        )));
-    }
-
-    #[test]
-    fn test_gapless_eligible_false_when_repeat_one() {
-        // Repeat-one loops via its own engine EOF branch, not this helper.
-        assert!(!is_gapless_eligible(gapless_conditions(
-            queue_conditions(false, true),
-            true,
-            true
-        )));
+        assert!(!is_gapless_eligible(gapless_conditions(true, true, true)));
     }
 
     #[test]
     fn test_gapless_eligible_false_when_formats_incompatible() {
-        assert!(!is_gapless_eligible(gapless_conditions(
-            queue_conditions(false, false),
-            false,
-            true
-        )));
+        // A format change requires the gapped path (stream reinit).
+        assert!(!is_gapless_eligible(gapless_conditions(false, false, true)));
     }
 
     #[test]
     fn test_gapless_eligible_false_without_successor() {
-        assert!(!is_gapless_eligible(gapless_conditions(
-            queue_conditions(false, false),
-            true,
-            false
-        )));
+        // Nothing pre-buffered: the seamless handoff has nothing to flush.
+        assert!(!is_gapless_eligible(gapless_conditions(false, true, false)));
     }
 
     #[test]
     fn test_gapless_eligible_false_when_multiple_conditions_fail() {
+        assert!(!is_gapless_eligible(gapless_conditions(true, false, false)));
+        assert!(!is_gapless_eligible(gapless_conditions(true, false, true)));
         assert!(!is_gapless_eligible(gapless_conditions(
-            queue_conditions(true, true),
-            false,
-            false
+            false, false, false
         )));
-        assert!(!is_gapless_eligible(gapless_conditions(
-            queue_conditions(true, false),
-            false,
-            true
-        )));
-        assert!(!is_gapless_eligible(gapless_conditions(
-            queue_conditions(false, true),
-            false,
-            false
-        )));
-        assert!(!is_gapless_eligible(gapless_conditions(
-            queue_conditions(true, true),
-            true,
-            true
-        )));
+        assert!(!is_gapless_eligible(gapless_conditions(true, true, true)));
     }
 
-    // --- repeat-one gapless handoff (engine EOF branch) -------------------------
+    // The former repeat-one handoff predicate folds onto `is_gapless_eligible`
+    // (the engine makes one call for sequential and repeat-one handoffs alike),
+    // so its live-term cases assert the same disqualifiers here.
 
     #[test]
-    fn test_repeat_one_handoff_eligible_when_not_shuffled_compatible_with_successor() {
-        // The one fully eligible case: repeat-one, sequential order, same
-        // format, and a pre-buffered copy of the looping track exists.
-        assert!(repeat_one_handoff_eligible(false, true, true, true));
+    fn test_gapless_handoff_ineligible_when_shuffling() {
+        // Shuffled: the successor is not predictable far enough ahead.
+        assert!(!is_gapless_eligible(gapless_conditions(true, true, true)));
     }
 
     #[test]
-    fn test_repeat_one_handoff_ineligible_when_shuffling() {
-        // Shuffled: the looping track is not guaranteed to be up next.
-        assert!(!repeat_one_handoff_eligible(true, true, true, true));
-    }
-
-    #[test]
-    fn test_repeat_one_handoff_ineligible_when_formats_incompatible() {
+    fn test_gapless_handoff_ineligible_when_formats_incompatible() {
         // A format change requires the gapped path (stream reinit).
-        assert!(!repeat_one_handoff_eligible(false, true, false, true));
+        assert!(!is_gapless_eligible(gapless_conditions(false, false, true)));
     }
 
     #[test]
-    fn test_repeat_one_handoff_ineligible_without_successor() {
-        // Nothing pre-buffered: the seamless restart has nothing to flush.
-        assert!(!repeat_one_handoff_eligible(false, true, true, false));
-    }
-
-    #[test]
-    fn test_repeat_one_handoff_ineligible_when_repeat_one_off() {
-        // Plain sequential playback is `is_gapless_eligible`'s job, not this.
-        assert!(!repeat_one_handoff_eligible(false, false, true, true));
+    fn test_gapless_handoff_ineligible_without_successor() {
+        // Nothing pre-buffered: the seamless handoff has nothing to flush.
+        assert!(!is_gapless_eligible(gapless_conditions(false, true, false)));
     }
 
     #[test]

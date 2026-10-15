@@ -118,7 +118,7 @@ The buffer is otherwise drained naturally through the callback. The buffer is cl
 
 ## Gapless Handoff
 
-For gapless-eligible transitions (compatible formats, no shuffle, correct repeat mode — pinned by `gapless::is_gapless_eligible`), the engine pre-decodes the successor track's first samples into a bounded pre-buffer while the current track finishes, then hands off without waiting on a fresh `init` on the hot path. The eligibility math and frame/duration conversions live in `riff-playback/src/app/gapless.rs`; the pre-buffer cap is 4 seconds of audio at the track's rate.
+For gapless-eligible transitions (compatible formats, no shuffle, a successor to hand off to — pinned by `gapless::is_gapless_eligible`), the engine pre-decodes the successor track's first samples into a bounded pre-buffer while the current track finishes, then hands off without waiting on a fresh `init` on the hot path. The eligibility math and frame/duration conversions live in `riff-playback/src/app/gapless.rs`; the pre-buffer cap is 4 seconds of audio at the track's rate.
 
 ## See also
 

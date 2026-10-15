@@ -424,22 +424,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    fn make_track(id: &str) -> Track {
-        Track {
-            id: TrackId(id.to_string()),
-            file_path: PathBuf::from(id),
-            metadata: TrackMetadata::default(),
-            duration: None,
-            sample_rate: None,
-            channels: None,
-            play_count: 0,
-            last_played: None,
-            date_added: None,
-            favorite: false,
-            search_text: String::new(),
-        }
-    }
-
     struct MockReader;
     impl MetadataReader for MockReader {
         fn read_all(
@@ -473,7 +457,17 @@ mod tests {
                 .lock()
                 .unwrap()
                 .contains(&PathBuf::from(&id.0))
-                .then(|| make_track(&id.0))
+                .then(|| {
+                    Track::fresh_scan(
+                        TrackId(id.0.clone()),
+                        PathBuf::from(&id.0),
+                        TrackMetadata::default(),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                })
         })
     }
 

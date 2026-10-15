@@ -28,24 +28,21 @@
 //! `docs/engineering/golden-image-testing.md`): only the vendored Inter faces
 //! are installed (never a system CJK fallback), animation time / scroll
 //! animation / cursor blink are pinned on both theme slots after construction
-//! ([`pin_settled_time`]), every screenshot renders a fixed number of frames,
+//! (the shared settled-time guard in `crate::composed_shell::compose`), every
+//! screenshot renders a fixed number of frames,
 //! and the fake cursor is removed before the final render. Cover art is
 //! generated procedurally from the album name's hash, so the same album always
 //! yields the same art on every machine.
 
 #[cfg(test)]
 mod tests {
-    use crate::determinism::{
-        assert_settled_on_both_slots, distinct_colors, inter_only_font_definitions,
-        pin_settled_time,
-    };
+    use crate::determinism::distinct_colors;
     use egui_kittest::kittest::Queryable;
     use riff_backend::app::cover_service::Covers;
     use riff_backend::app::state::{
         BrowserSelection, LibrarySection, LibrarySession, PlaybackSession, ViewMode,
     };
-    use riff_backend::app::store::{PlaylistStore as PlaylistStoreTrait, StoreGeneration};
-    use riff_backend::app::views::SessionViews;
+    use riff_backend::app::store::PlaylistStore as PlaylistStoreTrait;
     use riff_backend::domain::{
         Album, Artist, GenreCount, PlaybackPosition, PlaybackQueue, PlaybackState, Playlist,
         PlaylistId, RepeatMode, SmartPlaylistKind, Track, TrackId,
@@ -63,8 +60,8 @@ mod tests {
     // would paint no cover art at all. `ProceduralCovers` below takes its
     // place in the composed shell.
     use crate::mocks::{
-        FakeTagEdits, MockLibraryMutationStore, MockLibraryQueryStore, MockScans,
-        MockSettingsStore, MockTransport,
+        MockLibraryMutationStore, MockLibraryQueryStore, MockScans, MockSettingsStore,
+        MockTransport,
     };
 
     /// Where the PNGs land: `docs/assets/readme/` in the workspace root. The
@@ -637,56 +634,42 @@ mod tests {
         }
     }
 
-    /// Build the composed-shell harness over the demo stores (same mechanism
-    /// as `golden_tests.rs`'s `composed_shell`): a real `RiffApp` headlessly
-    /// through `build_eframe`, vendored Inter fonts installed during and after
-    /// construction, settled time pinned on both theme slots. Returns the
-    /// harness plus the two session handles so tests can move the UI's state
+    /// Build the composed-shell harness over the demo stores — a thin adapter
+    /// over the shared [`crate::composed_shell::compose`], which owns the
+    /// fonts-before-building closure, the clock and the settled-time guard the
+    /// golden suite and this generator now share (no longer "the same
+    /// mechanism as" it, but it). Returns the harness; the two session handles
+    /// are the ones the caller handed in, so tests can move the UI's state
     /// between frames.
     fn build_shell(
         queries: MockLibraryQueryStore,
         playback: Arc<Mutex<PlaybackSession>>,
         library: Arc<Mutex<LibrarySession>>,
     ) -> egui_kittest::Harness<'static, RiffApp> {
-        let harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(1280.0, 800.0))
-            .with_pixels_per_point(1.0)
-            .build_eframe(|cc| {
-                cc.egui_ctx.set_fonts(inter_only_font_definitions());
-                let (app, _visibility_tx) = RiffApp::new_for_test(
-                    Arc::clone(&playback),
-                    Arc::clone(&library),
-                    Box::new(MockTransport::new()),
-                    Box::new(MockScans::default()),
-                    Box::new(MockSettingsStore::default()),
-                    Box::new(NightDrivePlaylistStore),
-                    Box::new(MockLibraryMutationStore::new()),
-                    SessionViews::new(
-                        Box::new(queries),
-                        Box::new(NightDrivePlaylistStore),
-                        StoreGeneration::new(),
-                        StoreGeneration::new(),
-                    ),
-                    Box::new(FakeTagEdits::new()),
-                    Box::new(crate::mocks::RecordingPasses::default()),
-                    Box::new(ProceduralCovers::default()),
-                    Arc::new(Mutex::new(
-                        riff_backend::app::events::BackendEvents::default(),
-                    )),
-                );
-                app
-            });
+        use crate::composed_shell::{self, ComposedShell, ShellFonts};
 
-        // Same re-assert as `composed_shell`: the app installs its dark palette
-        // inside its first `update`, which happens in `build_eframe`'s warm-up
-        // frames, so pinning must land after construction (and survives the
-        // screenshot frames because `apply_theme` short-circuits on an
-        // unchanged selection).
-        pin_settled_time(&harness.ctx);
-        // Ride the same settled-time invariant the golden suite asserts, so the
-        // README generator shares that guard rather than trusting the copy.
-        assert_settled_on_both_slots(&harness.ctx);
-        harness
+        // `playlist_ports` clones Night Drive into both the mutation and the
+        // read port, exactly as production wires one store into both.
+        let (playlist_store, views) =
+            composed_shell::playlist_ports(Box::new(queries), NightDrivePlaylistStore);
+        composed_shell::compose(ComposedShell {
+            playback,
+            library,
+            transport: Box::new(MockTransport::new()),
+            scans: MockScans::default(),
+            settings_store: Box::new(MockSettingsStore::default()),
+            settings_calls: Arc::new(Mutex::new(Vec::new())),
+            playlist_store,
+            library_mutations: Box::new(MockLibraryMutationStore::new()),
+            views,
+            covers: Box::new(ProceduralCovers::default()),
+            folder_covers: Arc::new(Mutex::new(Vec::new())),
+            size: egui::vec2(1280.0, 800.0),
+            step_dt: composed_shell::DEFAULT_STEP_DT,
+            now: None,
+            fonts: ShellFonts::InterOnly,
+        })
+        .harness
     }
 
     /// Settle the shell and save the last frame: a fixed step count (the

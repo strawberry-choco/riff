@@ -315,14 +315,13 @@ mod tests {
 
     /// Build the real `RiffApp` at `size` from `seed`, with the vendored Inter
     /// faces installed and the determinism pass pinned.
+    ///
+    /// A thin adapter over the shared [`crate::composed_shell::compose`]: the
+    /// seed names only the facts this golden differs by, and the composer owns
+    /// the rest of the wiring.
     fn composed(seed: Seed) -> egui_kittest::Harness<'static, riff_gui::ui::RiffApp> {
-        use crate::mocks::{
-            FakeTagEdits, MockLibraryMutationStore, MockScans, MockTransport, StubCovers,
-        };
-        use riff_backend::app::events::BackendEvents;
-        use riff_backend::app::store::StoreGeneration;
-        use riff_backend::app::views::SessionViews;
-        use riff_gui::ui::RiffApp;
+        use crate::composed_shell::{self, ComposedShell, ShellFonts};
+        use crate::mocks::{MockLibraryMutationStore, MockScans, MockTransport, StubCovers};
         use std::sync::{Arc, Mutex};
 
         let Seed {
@@ -340,65 +339,38 @@ mod tests {
         for outcome in outcomes {
             scans.queue(outcome);
         }
-        // One Playlists store, cloned into both ports: the mutation port the
-        // app writes through and the read projection the sidebar and stage
-        // list from, so a seeded playlist is the SAME playlist in both — which
-        // is the production wiring, and the only one where a row can be seen
-        // and then opened.
-        let read_playlists = playlists.clone();
-        let playlists = Box::new(playlists);
+        // One Playlists store, cloned into both ports (`playlist_ports` states
+        // that wiring once), so a seeded playlist is the SAME playlist in both —
+        // the mutation port the app writes through and the read projection the
+        // sidebar and stage list from.
+        let (playlist_store, views) = composed_shell::playlist_ports(Box::new(query), playlists);
         let covers: Box<dyn riff_library::app::cover_service::Covers> = if art {
             Box::new(StubCovers::default())
         } else {
             Box::new(crate::mocks::RecordingCovers::new())
         };
 
-        let harness = egui_kittest::Harness::builder()
-            .with_size(size)
-            .with_pixels_per_point(1.0)
-            .build_eframe(move |cc| {
-                cc.egui_ctx.set_fonts(inter_only_font_definitions());
-                let (mut app, _visibility_tx) = RiffApp::new_for_test(
-                    Arc::new(Mutex::new(playback)),
-                    Arc::new(Mutex::new(library)),
-                    Box::new(MockTransport::new()),
-                    Box::new(scans.clone()),
-                    Box::new(settings),
-                    playlists,
-                    Box::new(MockLibraryMutationStore::new()),
-                    SessionViews::new(
-                        Box::new(query),
-                        Box::new(read_playlists),
-                        StoreGeneration::new(),
-                        StoreGeneration::new(),
-                    ),
-                    Box::new(FakeTagEdits::new()),
-                    Box::new(crate::mocks::RecordingPasses::default()),
-                    covers,
-                    Arc::new(Mutex::new(BackendEvents::default())),
-                );
-                // PIN the clock (the F1 seam): every composed golden reads its
-                // "Last played" / "Last scan" / "Last full scan" stamps against
-                // this fixed instant, so a baseline bakes no time-of-run string.
-                app.set_now_for_test(golden_now());
-                app
-            });
-
-        // The app installs its own (dark) palette on the first `update`. Force
-        // the vendored Inter set once more after construction so a warm-up
-        // frame cannot have cached a system-fallback metric into a galley that
-        // survives into the snapshot frame. `configure_fonts` is deliberately
-        // NOT used — it appends a machine-dependent system CJK fallback; the
-        // Inter-only set keeps the baseline portable.
-        harness.ctx.set_fonts(inter_only_font_definitions());
-        // The composed shell installs its palette from *inside* its own first
-        // `update`, so it inherits neither the gate nor the re-assert that
-        // `with_golden_style` issues. It gets its own [`pin_settled_time`] for
-        // exactly that reason, and
-        // `composed_shell_harness_pins_settled_time_on_both_theme_slots` is what
-        // keeps the two from drifting apart.
-        pin_settled_time(&harness.ctx);
-        harness
+        composed_shell::compose(ComposedShell {
+            playback: Arc::new(Mutex::new(playback)),
+            library: Arc::new(Mutex::new(library)),
+            transport: Box::new(MockTransport::new()),
+            scans,
+            settings_store: Box::new(settings),
+            settings_calls: Arc::new(Mutex::new(Vec::new())),
+            playlist_store,
+            library_mutations: Box::new(MockLibraryMutationStore::new()),
+            views,
+            covers,
+            folder_covers: Arc::new(Mutex::new(Vec::new())),
+            size,
+            step_dt: composed_shell::DEFAULT_STEP_DT,
+            // PIN the clock (the F1 seam): every composed golden reads its
+            // "Last played" / "Last scan" / "Last full scan" stamps against
+            // this fixed instant, so a baseline bakes no time-of-run string.
+            now: Some(golden_now()),
+            fonts: ShellFonts::InterOnly,
+        })
+        .harness
     }
 
     /// How many frames a composed golden runs before the one it pins.

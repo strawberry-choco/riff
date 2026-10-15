@@ -15,6 +15,8 @@ The workspace members:
 | `riff-playback` | Playback capability | The Playback Queue, the audio engine, gapless logic, the playback coordinator, the Transport trait, the playback ports, the playback session, and the Up Next read model. |
 | `riff-infra` | Adapter crate | Every port implementation and every native/external dependency, so toolchain requirements exist in exactly one place. |
 | `riff-backend` | Application API | The Backend Events inbox (typed events and notices), the app-layer application services, the library session state, and the Composition Root that owns the worker threads. |
+| `riff-gui-theme` | Design system | The design authority: the token and palette store, the vendored fonts, the icon set, and the assets those are compiled from. No `riff-*` dependency at all — `egui` and `resvg`, nothing else. |
+| `riff-gui-components` | Component library | The presentation primitives: props in, a response or a typed intent out. No `riff-*` dependency at all — `riff-gui-theme` and `egui`, nothing else. |
 | `riff-gui` | Frontend | egui UI, tray icon, native dialogs, fonts, and the `riff` binary entry point — a thin composition over `riff-backend`. |
 | `tests` | Integration tests | The single workspace-root integration-test crate (cross-crate integration, UI, and golden-image suites). |
 
@@ -23,17 +25,23 @@ The workspace members:
 ```
 riff-gui (frontend, `riff` binary)
     | depends on
-    v
-riff-backend (application API + Composition Root)
-    | depends on all four below
+    +--> riff-backend (application API + Composition Root)
+    |        | depends on all four below
+    |        |
+    |        |--> riff-infra (adapters + native deps)
+    |        |        | depends on all three below
+    |        |        v
+    |        |--> riff-library -------> riff-persistence
+    |        |--> riff-playback ------> riff-persistence
+    |        +-----------------------> riff-persistence
     |
-    |--> riff-infra (adapters + native deps)
-    |        | depends on all three below
-    |        v
-    |--> riff-library -------> riff-persistence
-    |--> riff-playback ------> riff-persistence
-    +-----------------------> riff-persistence
+    +--> riff-gui-components (component library)
+             | depends on
+             v
+          riff-gui-theme (design system)
 ```
+
+`riff-gui-theme` and `riff-gui-components` are written to point at nothing else in the workspace: neither has an edge to `riff-backend`, to a slice, or to `riff-infra` (ADR 0018).
 
 Read precisely, the edges are:
 
@@ -41,7 +49,9 @@ Read precisely, the edges are:
 - `riff-library` and `riff-playback` each depend on `riff-persistence` (plus pure-Rust utilities such as `crossbeam-channel`, `thiserror`, `tracing`, `fastrand`). They are **true siblings with no edge between them** — neither can import a type from the other, and the compiler enforces it.
 - `riff-infra` depends on all three (`riff-persistence`, `riff-library`, `riff-playback`) and implements their ports. This is where `rusqlite` (bundled SQLite, a C compiler), `cpal` (platform audio libraries), `symphonia`, `lofty`, `image`, `walkdir`, and `notify` live.
 - `riff-backend` depends on all four. It is the only crate that names both the slice-defined ports and the concrete `riff-infra` adapters.
-- `riff-gui` depends on `riff-backend` (plus UI/platform dependencies: `egui`/`eframe`, `resvg`, `tray-icon`/`muda`/`rfd` on non-Linux). It carries no adapter dependencies.
+- `riff-gui-theme` depends on **nothing in the workspace** — `egui` and `resvg`, and the assets it compiles in. It is the design authority and no business crate may reach it, or it, them.
+- `riff-gui-components` depends on `riff-gui-theme` and `egui`, and on nothing else in the workspace. A primitive's props are its own types; it names no business type at all.
+- `riff-gui` depends on `riff-backend`, `riff-gui-components` and `riff-gui-theme` (plus UI/platform dependencies: `egui`/`eframe`, `resvg`, `tray-icon`/`muda`/`rfd` on non-Linux). It carries no adapter dependencies.
 - `tests` depends on every crate by name (per-crate imports) so each suite reaches the type it needs directly.
 
 The arrows point inward in the inversion-of-control sense: slices define ports and code against `Box<dyn Port>`; `riff-infra` depends on the slices and implements their traits; runtime control flows slices → adapters while the dependency arrow points adapters → slices.
@@ -86,19 +96,33 @@ Concretely: the SQLite Application Store (`store/`: `SqliteStore`, migrations, c
 
 It owns the Backend Events inbox (`events.rs` — the `BackendEvent` enum, notices with source and severity, and the two inputs that feed it: recorded transport commands and the store's `StoreChanged` stream), the app-layer application services (the Session Views read seam `views.rs`, the Tag Edit service `tag_edit_service.rs`, the Watcher Manager `watcher_manager.rs`), the library half of the session state (`state.rs`: `LibrarySession`, `ViewMode`, `BrowseMode`, `LibraryStatus`, `UiFlags` — the playback half lives in `riff-playback`), the Composition Root (`composition.rs`: `AppRuntime::spawn` opens the Application Store, constructs every real adapter, wires them into the slice-defined ports, and spawns the worker threads), and the re-export surface that keeps historical `riff_backend::…` import paths resolving for the frontend and the test suite. The crate carries no native dependencies of its own and no UI crate dependencies.
 
+### `riff-gui-theme` — the design system
+
+**Membership criterion**: a design value, or the asset it is compiled from.
+
+It owns the token and palette store (`theme.rs` — every color, corner radius, type size, spacing step and component dimension, per ADR 0004), the vendored Inter faces and the system CJK fallback wiring (`fonts.rs`), the vendored Lucide glyphs with their tinted-texture cache (`icons.rs`), the assets those two are compiled in from (`assets/fonts`, `assets/icons`, with the OFL and ISC licences), and the two helpers that are token-derived rather than widget-shaped (`styled_font`, `search_ring_stroke`). It has no `riff-*` dependency — `egui` and `resvg`, nothing else — so a crate that means anything about the Library, playback or the store cannot reach it. What it holds is the design's own arithmetic (a contrast ratio, a tween's endpoints, the derived light palette) and never a decision about the product.
+
+### `riff-gui-components` — the component library
+
+**Membership criterion**: a presentation primitive — props in, a response or a typed intent out.
+
+It owns the reusable presentation and interaction widgets that views compose from: the button family (with the Track menu's chrome, the prompts, and `ghost_icon_button`), the row band, the linear control, the text field, the toggle and checkbox, the empty state, the elastic stage, and the scroll-area wrapper. A primitive receives the `egui` context, the active `Palette`, an icon cache where needed, presentation values, and **caller-owned** buffers; it never names `RiffApp`, a session, `SessionViews`, a service front end, a store port, `Transport`, an application generation, or a native integration, and it never holds a shared handle to one. It has no `riff-*` dependency — `riff-gui-theme` and `egui`, nothing else — which is the point: the rule is a manifest edge the compiler checks on every line, where it used to be a substring sweep over a list of file names that no thirteenth module had to join. Its vocabulary is its own rather than the business side's (`menu` declares its own sort key and id keys, and `riff-gui` owns the transform), and a module whose seam is shared policy, a shared contract, or a business-shaped API rather than a name — `artwork`, with the cover service's eviction cap and the `RequestedSize` its loader also consumes, and `feedback`, whose every operation dispatches on the business provenance type and which is not scheduled to move — is a frontend module, not a primitive.
+
 ### `riff-gui` — the frontend
 
 **Membership criterion**: rendering, input, and platform integration.
 
-It owns egui widget code, the main window and its views, fonts and icon rasterization, the system tray (non-Linux), native dialogs, and the `riff` binary — a thin composition over `riff_backend::composition::AppRuntime::spawn` that opens the store at its default location and hands the returned `AppRuntime` handles to the UI and tray. The cover-texture LRU lives here because it is an egui-specific concern (`egui::TextureHandle`).
+It owns the feature composites (`app.rs`, `app/`, `browser`, `chrome`, `detail`, `playerbar`, `sidebar`, `settings`, `selection`, `now_playing`, `frame`, and the presentation owners that name application types: `artwork`, `cover_cache`, `column`, `scroll_memory`), the host adapters (`tray`, `window_visibility`, `traffic_lights`, and the `impl RiffApp` blocks), and the `riff` binary — a thin composition over `riff_backend::composition::AppRuntime::spawn` that opens the store at its default location and hands the returned `AppRuntime` handles to the UI and tray. It depends on `riff-backend`, `riff-gui-components` and `riff-gui-theme`. The cover-texture LRU lives here because it is at once an egui-specific concern (`egui::TextureHandle`) and a store-facing one.
 
-### Inside `riff-gui`: the internal component layer
+### Inside the frontend: the widgetry crates, and the two tiers that remain
 
-`riff-gui` has one frontend consumer, so the shared widgetry is an **internal three-tier layer, not a crate** — the workspace dependency graph is unchanged, and a separate crate stays a decision for when a second consumer, a publication need, or a measured independent-build need appears. New UI work starts by asking which tier it belongs to:
+The shared widgetry is **two crates below the frontend, not a layer inside it** (ADR 0018): `riff-gui-theme` holds the design authority and `riff-gui-components` the presentation primitives, and neither can name a `riff-*` crate. New UI work starts by asking which of three homes it belongs to:
 
-- **Primitives** — the reusable presentation and interaction widgets that views compose from. The contract is props in, responses or typed intents out: they receive the `egui` context, the active `Palette`, an icon/cache dependency where needed, presentation values, and **caller-owned** buffers. They never name `RiffApp`, a session, `SessionViews`, a service front end, a store port, `Transport`, an application generation, or a native integration, and they never hold a shared handle to one. `component_boundary_tests` sweeps these files for exactly those names, alongside ADR 0004's token sweeps.
-- **Feature composites** — the recognizably riff-specific views: they combine primitives with content, and they are where application state is legitimately held.
-- **Host adapters** — the `impl RiffApp` blocks (including `app/library_picker.rs` and `app/tag_editor.rs`) plus `tray` and `window_visibility`. They resolve the props, map emitted intents onto `Transport` / store / session / native effects, and keep platform behavior (the folder picker, Linux's text-path flow, the no-tray policy) explicit rather than hidden inside a generic widget.
+- **`riff-gui-theme`** — a design value, or the asset it is compiled from: a token, a palette, a font, a glyph, a geometry constant, a helper that derives one. Names may be riff-flavoured (`geometry::playerbar`, `geometry::seek`) because naming a surface is not knowing anything about it, and the store still makes no decision.
+- **`riff-gui-components`** — a presentation primitive on the props-in / intents-out contract, whose vocabulary is its own. If a widget has to know what a `TrackSort` or a `NoticeSeverity` *is*, it is not this crate's, and the mapping lives in the frontend.
+- **`riff-gui`** — a feature composite or a host adapter. **Feature composites** are the recognizably riff-specific views: they combine primitives with content, and they are where application state is legitimately held. **Host adapters** are the `impl RiffApp` blocks (including `app/library_picker.rs` and `app/tag_editor.rs`) plus `tray` and `window_visibility`: they resolve the props, map emitted intents onto `Transport` / store / session / native effects, and keep platform behavior (the folder picker, Linux's text-path flow, the no-tray policy) explicit rather than hidden inside a generic widget.
+
+*A module whose seam is shared policy or a shared contract rather than a name stays up.* `artwork` names the cover service's eviction cap and the `RequestedSize` the backend's own loader consumes, so it is a frontend module and not a primitive — importing either would put shared policy inside the crate whose rule is that it holds neither.
 
 `app/track_menu.rs` is the one place in that layer where the mapping is *shared* rather than per-site. A right-click on a Track is one gesture, and it used to be answered through an eight-field effects bundle that each Track-row surface assembled by hand — one attach point for the six flat/smart/folder/playlist listings, and a second, differently-populated copy in the Tracks Column that intercepted a report the detail-action applier could not answer. The **Track-menu host** now owns those handles and answers exactly two questions (*a right-click happened on this Track*, *this item was chosen*), and a surface supplies only a `TrackMenuSubject` — which Track, and the one fact about where its row sits. `RiffApp::track_menu` is the app's single declaration of the handle set, and the test suite calls that same constructor, so a handle added to or dropped from the host breaks the app and its tests together rather than leaving a mirror to drift.
 
@@ -114,7 +138,7 @@ The dispatch entry points follow: `apply_entity_selection`, `entity_track_ids` a
 
 The Tracks Column's Track-menu report is a **separate report type** (`menu::TrackMenuReport`, carried in `detail::DetailReport`'s second variant) rather than a `DetailAction`. That is what makes the detail-action applier's former no-op arm *unnecessary* rather than merely removed: the applier takes a type that cannot carry a menu report, so it needs no arm to discard one.
 
-The theme, fonts, and icons stay the single design authority through all three tiers: every component module reads its values from `theme.rs`, so a future crate moves them together rather than leaving a second token store behind.
+The theme, fonts, and icons are one design authority in `riff-gui-theme`, and both crates above it read their values from there rather than keeping a second token store — the arrangement this section anticipated, moved together rather than split (ADR 0018).
 
 ## Dependency Rules
 
@@ -125,13 +149,15 @@ The core rule is that **dependencies follow the chain above and nothing bypasses
 - Each slice defines the port traits for every external dependency it has, and `riff-infra` implements them. A slice never names a concrete adapter type.
 - `riff-infra` implements slice-defined ports; it contains no business logic (no play-order or shuffle decisions, no scan policy).
 - `riff-backend` is the only place that names both a port and its concrete implementation (`composition.rs`). Concrete adapters are not re-exported to the frontend.
-- `riff-gui` depends on `riff-backend` only (plus UI/platform crates). It reads the backend's re-exported read-side surface — entities, Session Views, projections, Transport — and never touches an adapter.
+- `riff-gui` depends on `riff-backend`, `riff-gui-components` and `riff-gui-theme` (plus UI/platform crates). It reads the backend's re-exported read-side surface — entities, Session Views, projections, Transport — and never touches an adapter.
+- `riff-gui-theme` and `riff-gui-components` never gain a dependency on a `riff-*` business crate — not `riff-backend`, not a slice, not `riff-infra`. Neither holds a decision, a port, a session or a shared handle, and a widget that has to know what an application type means is a frontend module instead.
 
 Inside each slice, the historical layering is preserved as module convention: `domain/` (pure types and logic), `app/` (use cases, session state, projections), `infra/` (port traits the adapter crate implements). What the split added is compiler enforcement of the boundaries *between* capabilities.
 
 ### Data crossing boundaries
 
 - **Persistence contract to slices**: owned stored entities and DTOs (`Track`, `TrackId`, `Settings`, `PlaylistEntry`).
+- **Theme to the widgetry crates**: tokens, palettes and presentation values flow down (`riff-gui-theme` → `riff-gui-components` → `riff-gui`), and a response or a typed intent flows back up. No session, port, service front end, or domain type crosses this boundary in either direction.
 - **Slices to infrastructure**: trait method calls passing owned data or immutable references (for example `MetadataReader::read_all(&self, path: &Path)`).
 - **Infrastructure to slices**: results returned through trait methods. Infrastructure never holds a reference to application state.
 - **Backend to frontend**: the `AppRuntime` handles — the two session mutexes, the event inbox, the transports, the service front ends, and the store port views — plus channel messages drained by the UI each frame.
@@ -177,14 +203,15 @@ Use this checklist when adding or reviewing a component:
 - [ ] **Purity**: `riff-persistence` builds with no dependencies; the slices stay pure Rust. If a change needs a C compiler or platform audio libraries, it belongs in `riff-infra`.
 - [ ] **Thread safety**: shared state between threads is synchronized with `Arc<Mutex<_>>` (one mutex per session — never nested), and cross-thread communication uses channels.
 - [ ] **Error handling**: errors are owned by the crate that raises them; `riff-infra` maps external errors into the owning port's error; the UI shows user-friendly messages.
-- [ ] **No UI in logic**: there is no `egui` code outside `riff-gui`, and no audio decoding in the UI.
+- [ ] **No UI in logic**: `egui` code lives only in `riff-gui`, `riff-gui-components` and `riff-gui-theme`, and there is no audio decoding in any of them. Neither widgetry crate names a `riff-*` business crate, and neither holds a decision, a port, a session or a shared handle.
 - [ ] **Composition root**: only `riff-backend/src/composition.rs` constructs and wires infrastructure; no other file calls `::new()` on a concrete adapter and injects it across a boundary.
 
 ## Anti-Patterns
 
 - **Native crates in a slice**: a `Cargo.toml` of `riff-library` or `riff-playback` gains `rusqlite`, `cpal`, `symphonia`, `lofty`, or `image`. Move the code to `riff-infra` behind a port.
 - **A slice imports the other slice**: `riff-library` code touches a `riff-playback` type (or vice versa). Move the shared type down into `riff-persistence`, or move the code into `riff-backend`.
-- **egui outside the frontend**: any crate other than `riff-gui` imports `egui::`. UI concerns belong in the frontend.
+- **egui outside the frontend**: any crate other than `riff-gui`, `riff-gui-components` and `riff-gui-theme` imports `egui::`. UI concerns belong in the frontend.
+- **A business import in a widgetry crate**: `riff-gui-theme` or `riff-gui-components` gains `riff-backend`, `riff-library`, `riff-playback`, `riff-persistence` or `riff-infra` as a dependency. A primitive's props are its own types; what an application type means is the frontend's to translate, at the boundary.
 - **Second composition root**: a file other than `composition.rs` calls `SymphoniaDecoder::new()` (or any concrete adapter constructor) and injects it across a boundary. Route the wiring through the Composition Root.
 - **UI thread blocking**: a `riff-gui` handler performs scanning or image decoding synchronously. Move it to a worker thread and use a channel.
 - **Callback spaghetti**: an audio callback calls UI methods directly. Use channels for all thread-to-thread communication; never call UI code from a non-UI thread.

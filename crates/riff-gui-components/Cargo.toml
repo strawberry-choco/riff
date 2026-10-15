@@ -1,0 +1,29 @@
+# riff-gui-components — the presentation primitives of riff's widgetry
+# (ADR 0018).
+#
+# Membership criterion: a presentation primitive — props in, a response or a
+# typed intent out. A primitive paints from the palette tokens it is handed,
+# mutates nothing but caller-owned buffers, and reports what the user did; it
+# decides nothing about the application.
+#
+# No `riff-*` crate may be named by this one: the manifest takes
+# `riff-gui-theme` and `egui` and nothing else, so the manifest edge is the
+# boundary — an offending import fails the build rather than a source sweep.
+
+[package]
+name = "riff-gui-components"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+egui.workspace = true
+riff-gui-theme = { path = "../riff-gui-theme" }
+
+[lints]
+workspace = true

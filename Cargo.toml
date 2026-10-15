@@ -27,6 +27,7 @@ members = [
     "crates/riff-infra",
     "crates/riff-backend",
     "crates/riff-gui-theme",
+    "crates/riff-gui-components",
     "crates/riff-gui",
     "tests",
 ]

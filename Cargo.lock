@@ -4205,6 +4205,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "riff-gui-theme"
+version = "0.2.0"
+dependencies = [
+ "egui",
+ "resvg",
+ "tracing",
+]
+
+[[package]]
 name = "riff-infra"
 version = "0.2.0"
 dependencies = [

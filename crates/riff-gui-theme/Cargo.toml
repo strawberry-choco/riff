@@ -1,0 +1,31 @@
+# riff-gui-theme — the design authority: the token and palette store, the
+# vendored fonts, the icon set, and the `assets/fonts` + `assets/icons` those
+# are compiled in from (ADR 0018).
+#
+# Membership criterion: a design value, or the asset it is compiled from.
+# No `riff-*` crate may depend into this one or be named by it — the manifest
+# edge is the boundary, so an offending import fails the build rather than a
+# source sweep.
+
+[package]
+name = "riff-gui-theme"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+egui.workspace = true
+
+# Lucide icon glyph rasterization for the tinted icon textures
+resvg = "0.48"
+
+# Structured logging from the system-CJK font scan and the icon rasterizer
+tracing = "0.1"
+
+[lints]
+workspace = true

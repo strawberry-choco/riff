@@ -26,6 +26,7 @@ members = [
     "crates/riff-library",
     "crates/riff-infra",
     "crates/riff-backend",
+    "crates/riff-gui-theme",
     "crates/riff-gui",
     "tests",
 ]
@@ -43,6 +44,19 @@ authors = ["strawberry-choco"]
 repository = "https://github.com/strawberry-choco/riff"
 homepage = "https://github.com/strawberry-choco/riff"
 documentation = "https://github.com/strawberry-choco/riff/tree/master/docs"
+
+# The GUI toolkit pin, stated exactly once for every crate that names the
+# toolkit; members inherit it via `egui.workspace = true`.
+[workspace.dependencies]
+# egui is pinned to 0.35 deliberately. 0.36 regressed headless texture
+# rendering: under kittest the golden snapshots silently lose every
+# user-loaded texture, because `ctx.load_texture` and the painter/image
+# widgets paint nothing while text and shapes still render. That partial
+# failure is what makes it easy to miss — the windowed app looks fine on
+# either version, and the damage lands entirely in the committed goldens.
+# Revisit only after checking the upstream fix status; do not bump the pin
+# to "catch up" and re-baseline the snapshots to make the diff go away.
+egui = "0.35"
 
 # Workspace-level profiles and lints apply to every member.
 [profile.release]

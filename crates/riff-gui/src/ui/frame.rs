@@ -786,9 +786,12 @@ impl<'a> Frame<'a> {
     /// judgment, and the delivery is once-only (`RawInput::take` moves the
     /// drop out per pass), so there is nothing to dedupe and nothing to
     /// suppress.
+    // Kept a step method in the ordered sequence, like the sibling steps; the
+    // carry reads no state of its own.
+    #[allow(clippy::unused_self)]
     fn decide_drop(&mut self, input: &FrameInput, out: &mut FrameOutput) {
         if !input.dropped_paths.is_empty() {
-            out.dropped_paths = input.dropped_paths.clone();
+            out.dropped_paths.clone_from(&input.dropped_paths);
         }
     }
 

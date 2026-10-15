@@ -1,24 +1,45 @@
 //! The host's Library Path adapter (component-layer issue 16).
 //!
-//! The Settings modal and the sidebar's Add Library control are two entry
-//! points on one flow: choose a directory, make it a Library Path fact, and let
-//! the listener decide when to index it. Everything that touches the platform —
-//! the native folder dialog, the filesystem probe, the autocomplete listing —
-//! and the application (the session's registered roots, the durable settings
-//! row) lives here. [`crate::ui::settings::path_input`] only draws what this
-//! resolves and reports what the listener chose, which is what lets the Linux
-//! text flow and the native dialog share one set of rules.
+//! The Settings modal, the sidebar's Add Library control, and a folder dropped
+//! onto the window are three entry points on one flow: hand over a directory,
+//! make it a Library Path fact, and let the listener decide when to index it —
+//! with the one deliberate divergence: a drop is an impatient gesture, so each
+//! *newly registered* root's scan request leaves with the drop, while the
+//! picker and the typed path still register without scanning. Everything that
+//! touches the platform — the native folder dialog, the filesystem probe, the
+//! autocomplete listing — and the application (the session's registered roots,
+//! the durable settings row) lives here. [`crate::ui::settings::path_input`]
+//! only draws what this resolves and reports what the listener chose, which is
+//! what lets the Linux text flow, the native dialog, and the drop share one
+//! set of rules.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "linux")]
 use eframe::egui;
 
+use super::super::feedback::FeedbackBoard;
 use super::super::settings;
 #[cfg(target_os = "linux")]
 use super::super::settings::PathInputAction;
+use riff_backend::app::MutexExt;
+use riff_backend::app::scan_service::Scans;
 use riff_backend::app::state::LibrarySession;
 use riff_backend::app::store::SettingsStore;
+
+/// The acceptance judgment every entry point shares: the candidate must exist
+/// and be a directory, and the answer is its canonical form or the standard
+/// refusal sentence. Registering is the caller's next step, because the drop
+/// flow has one more question to ask first — whether the root is already here.
+fn judge_candidate(path: &Path) -> Result<PathBuf, String> {
+    if !path.exists() {
+        return Err(format!("Path does not exist: {}", path.display()));
+    }
+    if !path.is_dir() {
+        return Err(format!("Not a directory: {}", path.display()));
+    }
+    Ok(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+}
 
 /// Accept one typed candidate as a Library Path.
 ///
@@ -33,19 +54,103 @@ pub fn register_library_path(
     library: &mut LibrarySession,
     settings: &mut dyn SettingsStore,
 ) -> Result<PathBuf, String> {
-    let path = settings::expand_tilde(candidate);
-    if !path.exists() {
-        return Err(format!("Path does not exist: {}", path.display()));
-    }
-    if !path.is_dir() {
-        return Err(format!("Not a directory: {}", path.display()));
-    }
-    let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+    let canonical = judge_candidate(&settings::expand_tilde(candidate))?;
     library.library_paths.register(canonical.clone(), settings);
     Ok(canonical)
 }
 
+/// What one drop resolved to, in drop order: the canonical roots it newly
+/// registered — each of which already got its scan request — and the refusal
+/// sentence each rejected candidate was reported with.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DropResolution {
+    /// The canonical roots newly registered by this drop, in drop order.
+    pub registered: Vec<PathBuf>,
+    /// The sentence reported for each refused candidate, in drop order.
+    pub rejections: Vec<String>,
+}
+
+/// Resolve one drop's candidates through the same acceptance every entry
+/// point shares. The drop is the entry point that indexes immediately: each
+/// newly registered root's scan request leaves here, at drop time, while an
+/// already-registered root is a silent no-op — the session's own dedupe keeps
+/// the write from repeating, and this judgment keeps a re-drop from ever
+/// triggering a surprise rescan. A refused candidate stops nothing: the rest
+/// of the drop still registers.
+///
+/// The report rides the structured board on the Library notice — the
+/// titlebar's scan slot — one slot, no new surface, and the write order
+/// across that slot is a deliberate product call: **rejections win**. The
+/// one success line is written first and every refusal sentence after it, so
+/// the last non-directory's standard sentence is what stands at the end of
+/// the frame — even when folders were dropped after it. The folders still
+/// register and their scans still start, so on a mixed drop the live scan
+/// progress overwrites that refusal moments later: the confirmation's
+/// purpose ("indexing began") is served by the progress that follows, while
+/// a refusal is information nothing else ever reports. A clean drop
+/// therefore leaves "Added library path, scanning…" standing, and an
+/// all-rejected drop leaves the last refusal standing.
+pub fn resolve_dropped_paths(
+    candidates: &[PathBuf],
+    library: &mut LibrarySession,
+    settings: &mut dyn SettingsStore,
+    scans: &dyn Scans,
+    feedback: &mut FeedbackBoard,
+) -> DropResolution {
+    use riff_backend::app::events::{NoticeSeverity, NoticeSource};
+
+    let mut resolution = DropResolution::default();
+    for candidate in candidates {
+        match judge_candidate(candidate) {
+            Err(refusal) => resolution.rejections.push(refusal),
+            Ok(canonical) => {
+                // The adapter's own dedupe judgment: `register` dedupes the
+                // write, but the scan request must not ride a re-drop.
+                if library.library_paths.paths().contains(&canonical) {
+                    continue;
+                }
+                library.library_paths.register(canonical.clone(), settings);
+                scans.request(canonical.clone());
+                resolution.registered.push(canonical);
+            }
+        }
+    }
+    if !resolution.registered.is_empty() {
+        feedback.set(
+            NoticeSource::Library,
+            "Added library path, scanning\u{2026}",
+            NoticeSeverity::Info,
+        );
+    }
+    // Rejections win: the refusals are set after the success line, so the
+    // last non-directory's sentence is what stands on the slot.
+    for refusal in &resolution.rejections {
+        feedback.set(
+            NoticeSource::Library,
+            refusal.clone(),
+            NoticeSeverity::Warning,
+        );
+    }
+    resolution
+}
+
 impl super::RiffApp {
+    /// Enact the frame's drop decision: lock the Library Session once — the
+    /// frame's own guard is already dropped by the time the tail runs — and
+    /// hand every candidate to [`resolve_dropped_paths`], the one operation
+    /// the flow's application work lives in.
+    pub(crate) fn enact_dropped_library_paths(&mut self, candidates: &[PathBuf]) {
+        let library_arc = self.library.clone();
+        let mut guard = library_arc.lock_or_recover();
+        resolve_dropped_paths(
+            candidates,
+            &mut guard,
+            self.settings_store.as_mut(),
+            self.scans.as_ref(),
+            &mut self.feedback,
+        );
+    }
+
     /// Register a new library root through the platform picker: the native
     /// folder dialog everywhere except Linux, which opens the text-input row
     /// rendered beneath the stage. Also called from the sidebar footer

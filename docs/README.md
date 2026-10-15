@@ -55,6 +55,7 @@ What riff is, what it does, and how to use it.
 - [ADR 0016: The commit history was retrofitted to conform](adr/0016-history-retrofit.md) — the 2026-10-07 one-time rewrite that made the whole log satisfy the commit profile, what it destroyed (pre-rewrite SHAs, the merge structure), and the constraint that justified it.
 - [ADR 0017: Reduce motion resolves to tempo, not palette](adr/0017-reduce-motion-resolves-to-tempo-not-palette.md) — the Reduce motion setting is a `UiFlags` peer of High contrast but resolves into a temporal policy at the theme boundary; `Palette` stays a pure colour set and the `0.0` sentinel snaps washes to their settled tint with no repaint loop.
 - [ADR 0018: The frontend widgetry splits into a Theme crate and a Component crate](adr/0018-gui-widgetry-splits-into-theme-and-component-crates.md) — the design authority and the presentation primitives become two crates no business crate can reach; the manifest edge replaces the file-name sweep, and the frontend keeps the composites and the host adapters.
+- [ADR 0019: Folder drops are the third Library Path entry point](adr/0019-folder-drop-is-the-third-library-path-entry-point.md) — a folder dropped onto the window joins the picker and the typed path on one acceptance and one fact-set, with the one deliberate divergence (a drop auto-scans because it is an impatient gesture) and no platform conditional added.
 
 The numbering skips 0008: no ADR 0008 was ever written, so a missing `0008` is expected rather than a lost file.
 

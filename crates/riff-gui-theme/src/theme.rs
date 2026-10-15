@@ -208,8 +208,15 @@ pub fn hero_title_font() -> egui::FontId {
 /// vendored fonts are installed). Shared with the player bar's now-playing
 /// zone, which paints at the same scale.
 pub fn styled_font(ui: &egui::Ui, key: egui::TextStyle, size: f32) -> egui::FontId {
-    let family = ui
-        .style()
+    styled_font_in(ui.style(), key, size)
+}
+
+/// [`styled_font`]'s body, for a paint site that holds a [`egui::Style`] — or a
+/// [`egui::Context`], via [`egui::Context::style`] — rather than a
+/// [`egui::Ui`]: the drop-hover veil paints straight onto a top layer, with no
+/// `Ui` to ask.
+pub fn styled_font_in(style: &egui::Style, key: egui::TextStyle, size: f32) -> egui::FontId {
+    let family = style
         .text_styles
         .get(&key)
         .map_or(egui::FontFamily::Proportional, |font| font.family.clone());
@@ -226,6 +233,13 @@ pub const BRAND_50: Color32 = Color32::from_rgb(0xff, 0xf8, 0xe7);
 pub const BRAND_400: Color32 = Color32::from_rgb(0xff, 0xb8, 0x33);
 /// `--riff-brand-500` — `#f0821e`, the primary brand color.
 pub const BRAND_500: Color32 = Color32::from_rgb(0xf0, 0x82, 0x1e);
+/// The deep amber end of the brand hue — `#854d0e`. Not a CSS variable of the
+/// mockup's: it is the value the light palette already wears for warning text,
+/// named when a second consumer needed the same rung. `BRAND_500` reads amber
+/// on the dark surfaces but sits under 3:1 against the light ones, so the two
+/// surfaces that must *stroke* amber on light — the light warning text and the
+/// drop-hover dash ([`drop_hover_dash`]) — wear this end of the same hue.
+pub const BRAND_700: Color32 = Color32::from_rgb(0x85, 0x4d, 0x0e);
 
 /// The brand gradient's first stop: [`BRAND_400`], the lighter end. A wash that
 /// steps from here to [`BRAND_GRADIENT_BOTTOM`] reads as one lit shape; the
@@ -973,6 +987,30 @@ pub mod geometry {
         );
     }
 
+    /// The drop-hover veil: what the window wears while a platform file drag
+    /// hovers it, so the whole window — not one panel — reads as the drop
+    /// target. The veil's and dash's colours are [`drop_hover_veil`] /
+    /// [`drop_hover_dash`](crate::theme::drop_hover_dash); these are the
+    /// border's geometry.
+    pub mod drop_overlay {
+        /// Inset of the dashed border from the window edge, on all four sides.
+        /// A product decision from review (the drop-folder spec records it as
+        /// such), pinned by a test like [`MOTION_REDUCED`](crate::theme::MOTION_REDUCED)
+        /// is: the inset IS the "the whole window is the target" read.
+        pub const INSET: f32 = 4.0;
+        /// Width of one dash stroke. Two px — the app's hairline
+        /// ([`CARD_BORDER_W`](settings::CARD_BORDER_W)) is what a card edge
+        /// wears; an affordance that must carry across a veiled window strokes
+        /// twice that.
+        pub const BORDER_W: f32 = 2.0;
+        /// Length of one dash. Long enough to read as dashes rather than dots
+        /// at window scale.
+        pub const DASH: f32 = 10.0;
+        /// Gap between dashes. Slightly under [`DASH`] so the border reads as
+        /// dashes, not as dots with spacing.
+        pub const GAP: f32 = 8.0;
+    }
+
     /// The Settings modal: its card and left nav, the library pane's rows and
     /// actions, the preference rows and their controls.
     /// [`SECTION_GAP`](settings::SECTION_GAP) is the gap between Settings
@@ -1341,8 +1379,10 @@ impl Palette {
             // row's `(different)` state, an unindexed path's status — and a
             // bright yellow on a light panel reads at 1.25:1, so light wears
             // the deep amber end of the same hue instead: the same job, legible
-            // on its own surfaces.
-            warning: Color32::from_rgb(0x85, 0x4d, 0x0e),
+            // on its own surfaces. The rung is [`BRAND_700`], named for the
+            // stroke consumers (this slot and [`drop_hover_dash`]) that share
+            // it; the value is unchanged from the literal it replaces.
+            warning: BRAND_700,
             // Error carries text for the same reason warning does — the
             // destructive label, a failed scan's error line, an unreadable
             // path — and the shared bright red reads 3.06:1 on a light panel,
@@ -1544,6 +1584,55 @@ pub const GLOW_SPREAD: f32 = 10.0;
 #[must_use]
 pub fn glow(palette: &Palette, alpha: f32) -> Color32 {
     palette.brand_primary.gamma_multiply(alpha)
+}
+
+/// The drop-hover veil over the **dark** families: white at veil coverage.
+///
+/// The palette's own hairline convention ([`LINE`] is white at low coverage on
+/// dark) scaled to veil presence — a white frost that lifts the whole window
+/// behind the drop target. A dim is what a drop veil does on a light UI, and a
+/// dark UI cannot wear one: its surfaces sit so close to black that a scrim
+/// toward black moves almost nothing, so the dark families lift instead, the
+/// one direction the veil is visible from.
+pub const DROP_VEIL_DARK: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 40);
+
+/// The drop-hover veil over the **light** families: black at the very coverage
+/// [`DROP_VEIL_DARK`] carries — the same white→black flip [`LINE`] makes, at
+/// the same unchanged alpha. The two veils are one operation on mirrored
+/// surfaces (lift toward white on dark, quiet toward black on light), so one
+/// coverage is the honest spelling of that symmetry; a test pins it.
+pub const DROP_VEIL_LIGHT: Color32 = Color32::from_rgba_unmultiplied_const(0, 0, 0, 40);
+
+/// The drop-hover veil for `palette`'s family: the wash a whole window wears
+/// while a platform file drag hovers it. Deliberately a straight-alpha
+/// construction ([`wash_at`]'s shape) built from an un-premultiplied base —
+/// never a `gamma_multiply` of an opaque token, per the premultiplied trap
+/// [`accent_wash`]'s doc records.
+///
+/// High Contrast inherits its base family's veil: its surfaces are the base's
+/// surfaces unchanged, so the wash that reads there reads here.
+#[must_use]
+pub fn drop_hover_veil(palette: &Palette) -> Color32 {
+    if palette.dark {
+        DROP_VEIL_DARK
+    } else {
+        DROP_VEIL_LIGHT
+    }
+}
+
+/// The drop-hover dash colour for `palette`'s family: the brand amber on the
+/// dark families, and on the light ones the deep amber end ([`BRAND_700`]) —
+/// the same per-family move [`Palette::focus_ring`] makes, for the same reason:
+/// a stroked affordance has to clear 3:1 against the surfaces it strokes over,
+/// and [`BRAND_500`] does not on light. High Contrast inherits its base, whose
+/// deep end is the *more* legible of the two there.
+#[must_use]
+pub fn drop_hover_dash(palette: &Palette) -> Color32 {
+    if palette.dark {
+        palette.brand_primary
+    } else {
+        BRAND_700
+    }
 }
 
 /// The brand gradient's two stops, in paint order: the light rung first.
@@ -2146,5 +2235,75 @@ mod tests {
             (moving.animation_time - reduced.animation_time).abs() > f32::EPSILON,
             "reduce motion must at least change the tempo, even though it changes no colour"
         );
+    }
+
+    // --- Drop-hover veil and dash -------------------------------------------
+    //
+    // The drop-folder overlay's two derived colours, pinned at their invariants
+    // rather than at their literals: the values are the store's to retune, but
+    // the per-family SHAPE is the design.
+
+    /// The veil is one operation in both families — the palette's own hairline
+    /// convention ([`LINE`]: white on the dark families, black on the light
+    /// ones) at ONE shared coverage. A coverage that drifts per family, or a
+    /// coloured base, fails here rather than in a palette review.
+    #[test]
+    fn drop_hover_veil_is_one_coverage_over_the_line_bases() {
+        let dark = drop_hover_veil(&Palette::dark());
+        let light = drop_hover_veil(&Palette::light());
+        assert_eq!(dark.a(), light.a(), "the two veils are the same coverage");
+        // [`Color32`] stores its bytes premultiplied, so a white base at
+        // coverage α stores r==g==b==α and a black base r==g==b==0: the base
+        // shows in the channel-to-alpha relation.
+        assert_eq!(dark.r(), dark.a(), "the dark veil lifts (a white frost)");
+        assert_eq!(light.r(), u8::MIN, "the light veil quiets (a black scrim)");
+        // Both bases are gray, so the veil is a pure lightness wash.
+        for veil in [dark, light] {
+            assert_eq!(veil.r(), veil.g());
+            assert_eq!(veil.g(), veil.b());
+        }
+    }
+
+    /// The dash rides the brand on the dark families and the deep amber end on
+    /// the light ones — the same per-family move [`Palette::focus_ring`]
+    /// makes — and High Contrast inherits its base rather than getting a third
+    /// answer. The deep end is the value the light palette already wears for
+    /// its warning text: one deep amber, two consumers, no parallel constant.
+    #[test]
+    fn drop_hover_dash_rides_the_brand_per_family() {
+        let dark = Palette::dark();
+        assert_eq!(drop_hover_dash(&dark), dark.brand_primary);
+        let light = Palette::light();
+        let dash = drop_hover_dash(&light);
+        assert_ne!(
+            dash, light.brand_primary,
+            "BRAND_500 does not clear 3:1 against the light surfaces it dashes over"
+        );
+        assert_eq!(drop_hover_dash(&light.high_contrast()), dash);
+        assert_eq!(dash, light.warning);
+    }
+
+    /// The 4 px inset is a product decision out of review (the spec records it
+    /// as such), so it is pinned here like [`MOTION_REDUCED`] is: a token
+    /// refactor cannot quietly move the product's answer.
+    #[test]
+    fn drop_overlay_inset_is_the_product_decision() {
+        assert!((geometry::drop_overlay::INSET - 4.0).abs() < f32::EPSILON);
+    }
+
+    /// [`styled_font_in`] is [`styled_font`]'s body for paint sites that hold a
+    /// style rather than a [`egui::Ui`] — the drop-hover veil paints straight
+    /// onto a top layer, with no `Ui` to ask. Asserted inside a real (headless)
+    /// egui pass so the two cannot drift apart.
+    #[test]
+    fn styled_font_in_agrees_with_styled_font() {
+        let ctx = egui::Context::default();
+        ctx.run_ui(Default::default(), |ui| {
+            for key in [egui::TextStyle::Body, egui::TextStyle::Heading] {
+                let from_ui = styled_font(ui, key.clone(), TEXT_XL);
+                let from_style = styled_font_in(ui.style(), key, TEXT_XL);
+                assert_eq!(from_ui, from_style);
+            }
+        });
     }
 }

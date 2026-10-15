@@ -16,6 +16,7 @@ pub mod button;
 pub mod empty_state;
 pub mod ghost_icon_button;
 pub mod linear;
+pub mod menu;
 pub mod prompts;
 pub mod row;
 pub mod scroll_area;

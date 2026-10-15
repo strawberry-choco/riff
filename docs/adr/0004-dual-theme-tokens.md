@@ -77,3 +77,18 @@ set *contains*, so they are recorded here.
   `_LIGHT`. This is a split in an *effect*, not a new colour rule: the hue is
   still the one brand token in both families.
 
+## Amendment — 2026-10-15 (the token store moves to its own crate)
+
+The decision above stands; the store's address moves. The widgetry split
+(ADR 0018) lifted the token store, the font wiring and the icon set out of the
+frontend into `riff-gui-theme`, so the first consequence now reads with a new
+path: the token store is `crates/riff-gui-theme/src/theme.rs`, and it is still
+both the store and the read source — every color, radius, type size, spacing
+step and component dimension ships there, and view code reads it from there.
+The enforcing sweeps moved with the rule they enforce: each widgetry crate
+(`riff-gui-theme`, `riff-gui-components`, `riff-gui`) now carries the three
+sweeps in its own `tests/token_sweeps.rs`, scanning its own source, and
+`theme.rs` remains the one exempt file inside its own crate. Nothing here
+changes what a token is or how the palettes derive; only where the store and
+its guards live.
+

@@ -12,7 +12,7 @@ This record fixes where it lives so the resemblance is not mistaken for a patter
 ## Decision
 
 **`reduce_motion` is a temporal policy that resolves at the theme boundary; it never lands on `Palette`.**
-`Palette` stays a semantic colour set whose `resolve` is a two-axis function of `(dark, high_contrast)`, exactly as the motion-token rule in `crates/riff-gui/src/ui/theme.rs` already argues: motion is family-invariant, so a per-family tempo would be four things to keep coherent for no gain, and a reducing *mode* is no different from the families on that axis.
+`Palette` stays a semantic colour set whose `resolve` is a two-axis function of `(dark, high_contrast)`, exactly as the motion-token rule in `crates/riff-gui-theme/src/theme.rs` already argues: motion is family-invariant, so a per-family tempo would be four things to keep coherent for no gain, and a reducing *mode* is no different from the families on that axis.
 
 The policy has one sentinel and two resolvers:
 

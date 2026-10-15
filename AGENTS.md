@@ -1,6 +1,6 @@
 # riff — Music Player (Rust + egui)
 
-A lightweight, offline-first desktop music player. A Cargo workspace: backend capability crates, a frontend crate, and an integration-test crate. See `docs/technical/architecture.md` for the split.
+A lightweight, offline-first desktop music player. A Cargo workspace: backend capability crates, two frontend widgetry crates (design system + component library), a frontend crate, and an integration-test crate. See `docs/technical/architecture.md` for the split.
 
 ## Quick Start
 
@@ -15,13 +15,15 @@ No special features or feature flags. No codegen step, no migrations to run by h
 
 ## Architecture
 
-A vertical capability split with a strict, compiler-enforced dependency chain (full reference in `docs/technical/architecture.md`, decision record in `docs/adr/0009-vertical-crate-split-of-the-backend.md`):
+A vertical capability split with a strict, compiler-enforced dependency chain (full reference in `docs/technical/architecture.md`; decision records in `docs/adr/0009-vertical-crate-split-of-the-backend.md` and `docs/adr/0018-gui-widgetry-splits-into-theme-and-component-crates.md`):
 
 ```
 riff-gui (frontend, `riff` binary)
     -> riff-backend (application API + Composition Root)
         -> riff-infra (adapters + native deps)
             -> riff-library / riff-playback -> riff-persistence
+    -> riff-gui-components (component library)
+        -> riff-gui-theme (design system)
 ```
 
 Each crate's contents and membership criterion, one line each; `docs/technical/architecture.md#crate-definitions-and-membership-criteria` is the full reference.
@@ -31,7 +33,9 @@ Each crate's contents and membership criterion, one line each; `docs/technical/a
 - **`riff-playback`** — the playback capability: playback use cases and the ports they consume.
 - **`riff-infra`** — an item belongs here iff it implements a port defined in another crate or wraps a native/external dependency — nothing else.
 - **`riff-backend`** — the frontend-facing event surface, the app-layer application services, and the one place that knows both ports and adapters (the Composition Root).
-- **`riff-gui`** — the frontend: rendering, input, and platform integration, plus the `riff` binary, which is a thin composition over `riff_backend::composition::AppRuntime::spawn`. `crates/riff-gui/src/ui/theme.rs` is the design system's single store: every design value is written there and read from there, enforced by source sweeps (ADR 0004; rules in `docs/engineering/coding-standards.md#design-tokens`).
+- **`riff-gui-theme`** — the design system: the token and palette store, the vendored fonts, and the icon set, with the assets they are compiled from. `crates/riff-gui-theme/src/theme.rs` is the design system's single store: every design value is written there and read from there, enforced by per-crate source sweeps (ADR 0004; rules in `docs/engineering/coding-standards.md#design-tokens`). It names no `riff-*` crate.
+- **`riff-gui-components`** — the component library: the presentation primitives on the props-in / response-or-typed-intent-out contract. It names no `riff-*` crate — `riff-gui-theme` and `egui`, nothing else — so a widget that has to know what an application type means is a frontend module instead (ADR 0018).
+- **`riff-gui`** — the frontend: rendering, input, and platform integration, plus the `riff` binary, which is a thin composition over `riff_backend::composition::AppRuntime::spawn`. It composites the primitives over values read from `riff-gui-theme` and owns the transform between the components' display vocabulary and the business types.
 
 Domain types (`Track`, `TrackId`, `PlaybackQueue`, …) live in `riff-persistence` and `riff-playback` and import nothing from app, infra, or UI code. Each slice codes against its own port traits; `riff-infra` implements them; dependency arrows point adapters → slices.
 
@@ -73,7 +77,7 @@ cargo build --release -p riff-gui          # release build (LTO, stripped)
 ## Important Gotchas
 
 - **msrv**: `rust-version = "1.95"` in every crate manifest (edition 2024), and no job enforces it. CI pins one exact toolchain (`toolchain:` in `.github/workflows/ci.yml`) and is bumped deliberately, so a Rust release cannot make CI fail on its own.
-- **egui pinned to 0.35**: egui 0.36 regressed headless texture rendering — kittest golden snapshots lose all user-loaded textures (`ctx.load_texture` + painter/image widgets paint nothing; text/shapes still render). The app itself renders fine windowed, but goldens would capture icon-less UI. Revisit when upgrading past 0.35 (check upstream fix status first). See the note in `crates/riff-gui/Cargo.toml`.
+- **egui pinned to 0.35**: egui 0.36 regressed headless texture rendering — kittest golden snapshots lose all user-loaded textures (`ctx.load_texture` + painter/image widgets paint nothing; text/shapes still render). The app itself renders fine windowed, but goldens would capture icon-less UI. Revisit when upgrading past 0.35 (check upstream fix status first). The pin and its rationale live once in the root `Cargo.toml` under `[workspace.dependencies]`; all three widgetry crates inherit it.
 - **Release profile**: workspace-level LTO, codegen-units=1, strip=true. Profiles and the release process live in `docs/engineering/release-and-packaging.md`.
 - **Audio device**: The output stream always opens at the **device default** sample rate. `build_stream_config` (in `riff-infra`'s `audio_output.rs`) takes the track's requested rate as `_requested_rate` and never reads it, so the "falls back when the track's rate is unsupported" behaviour (common on Windows WASAPI shared mode at 48 kHz) is really "always the default" — the requested rate is not consulted. The rate achieved is readable only as a concrete `pub fn CpalAudioOutput::effective_sample_rate`, which **no production code calls**; it is *not* a method on the `AudioOutput` port, so the Audio Engine cannot see it through its interface. Wiring the fact through the port belongs in the same change as the consumer that reads it, never on its own.
 - **Session state is two structs**: `PlaybackSession` (`riff-playback`) and `LibrarySession` (`riff-backend`), each behind its own `Arc<Mutex<>>`. Plan lock ordering carefully; never hold one session's lock while acquiring the other's. The one cross-slice interaction (a playback failure setting a scan-status message) is a typed notice through the event inbox, not a state write.

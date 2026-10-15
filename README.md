@@ -104,4 +104,4 @@ The design has a hard boundary: riff stays offline. Features that would need a s
 
 riff is licensed under the **Apache License 2.0** — see [LICENSE](LICENSE).
 
-It ships with the [Inter](crates/riff-gui/assets/fonts/Inter-LICENSE-OFL.txt) typeface (SIL Open Font License) and [Lucide](crates/riff-gui/assets/icons/LICENSE-Lucide.txt) icons (ISC license). Both are embedded in the binary, so the fonts and icons travel with the executable.
+It ships with the [Inter](crates/riff-gui-theme/assets/fonts/Inter-LICENSE-OFL.txt) typeface (SIL Open Font License) and [Lucide](crates/riff-gui-theme/assets/icons/LICENSE-Lucide.txt) icons (ISC license). Both are embedded in the binary, so the fonts and icons travel with the executable.

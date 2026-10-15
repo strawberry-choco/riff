@@ -399,7 +399,7 @@ jobs:
 
       # Linux keeps a tar.gz of the bare binary. The Inter faces are
       # `include_bytes!`-ed and the Lucide SVGs are `include_str!`-ed by
-      # `crates/riff-gui/src/ui/fonts.rs` and `.../icons.rs`, so the executable
+      # `crates/riff-gui-theme/src/fonts.rs` and `.../icons.rs`, so the executable
       # carries its own fonts and icons — no assets folder is needed, and the
       # binary is the whole product.
       - name: Package (Linux)

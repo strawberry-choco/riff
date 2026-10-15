@@ -41,7 +41,7 @@ What riff is, what it does, and how to use it.
 - [ADR 0001: SQLite is the authoritative Application Store](adr/0001-sqlite-is-the-authoritative-application-store.md) — supersedes decision 004.
 - [ADR 0002: The UI reads the store through Session Projections](adr/0002-ui-reads-the-store-through-session-projections.md).
 - [ADR 0003: Store query model](adr/0003-store-query-model.md).
-- [ADR 0004: Dual-theme tokens despite a dark-only design source](adr/0004-dual-theme-tokens.md) — two palettes with High Contrast as a variant over each, and `crates/riff-gui/src/ui/theme.rs` as the single store and read source for every design value.
+- [ADR 0004: Dual-theme tokens despite a dark-only design source](adr/0004-dual-theme-tokens.md) — two palettes with High Contrast as a variant over each, and `crates/riff-gui-theme/src/theme.rs` as the single store and read source for every design value (amended 2026-10-15: the store moved to its own crate).
 - [ADR 0005: Custom window chrome (frameless) on all platforms](adr/0005-frameless-window-chrome-on-all-platforms.md) — amended 2026-09-28: the decision stands on Windows and Linux; macOS keeps its native decorations, with a transparent title bar and the system's traffic lights as the window controls; the windowed macOS spike passed and its gate is closed, with the native path confirmed as the shipping path.
 - [ADR 0006: Background workers behind app-layer service seams](adr/0006-background-workers-behind-app-layer-service-seams.md) — Tag Edit and Cover services replace the worker threads spawned inline by `RiffApp`.
 - [ADR 0007: No write-side SessionStore facade](adr/0007-no-write-side-sessionstore-facade.md) — the three store-mutation ports stay separate; the store owns generation bumps, so a facade would be a pass-through.
@@ -54,6 +54,7 @@ What riff is, what it does, and how to use it.
 - [ADR 0015: Commit messages are a machine-read interface](adr/0015-commit-messages-are-a-machine-read-interface.md) — the message format matters because the release-notes generator parses it; one validator, generated release notes, rebase-and-merge only, and the pinned pre-1.0 bump semantics in `cliff.toml`.
 - [ADR 0016: The commit history was retrofitted to conform](adr/0016-history-retrofit.md) — the 2026-10-07 one-time rewrite that made the whole log satisfy the commit profile, what it destroyed (pre-rewrite SHAs, the merge structure), and the constraint that justified it.
 - [ADR 0017: Reduce motion resolves to tempo, not palette](adr/0017-reduce-motion-resolves-to-tempo-not-palette.md) — the Reduce motion setting is a `UiFlags` peer of High contrast but resolves into a temporal policy at the theme boundary; `Palette` stays a pure colour set and the `0.0` sentinel snaps washes to their settled tint with no repaint loop.
+- [ADR 0018: The frontend widgetry splits into a Theme crate and a Component crate](adr/0018-gui-widgetry-splits-into-theme-and-component-crates.md) — the design authority and the presentation primitives become two crates no business crate can reach; the manifest edge replaces the file-name sweep, and the frontend keeps the composites and the host adapters.
 
 The numbering skips 0008: no ADR 0008 was ever written, so a missing `0008` is expected rather than a lost file.
 
@@ -62,7 +63,7 @@ The numbering skips 0008: no ADR 0008 was ever written, so a missing `0008` is e
 How riff is built and how it works at runtime.
 
 - [Architecture](technical/architecture.md) — the workspace crate split, the dependency chain, each crate's membership criterion, boundary rules, validation checklist, and anti-patterns.
-- [Design tokens](engineering/coding-standards.md#design-tokens) — where a design value lives (`theme.rs`), what view code may read and derive, and the three source sweeps that enforce it.
+- [Design tokens](engineering/coding-standards.md#design-tokens) — where a design value lives (`riff-gui-theme`'s `theme.rs`), what view code may read and derive, and the per-crate source sweeps that enforce it.
 - [Threading model](technical/threading-model.md) — the threads (all workers spawned by the Composition Root), the crossbeam channels between them, shared state, and real-time constraints.
 - [Data flow](technical/data-flow.md) — step-by-step sequences for the three primary flows: play a track, scan a library, resolve cover art.
 - [Data model](technical/data-model.md) — the domain entities, `AppState`, the Application Store ports, and the port traits.

@@ -7,6 +7,10 @@
 #   * `riff-playback`    — playback capability slice (pure Rust)
 #   * `riff-infra`       — every port implementation + every native dependency
 #   * `riff-backend`     — application API: facade, services, Composition Root
+#   * `riff-gui-theme`   — design authority: token/palette store, fonts, icons,
+#                          and the assets those are compiled in from
+#   * `riff-gui-components` — presentation primitives (props in, a response or
+#                          a typed intent out); depends on riff-gui-theme
 #   * `riff-gui`         — frontend (egui UI, tray, native dialogs) + the `riff`
 #                          binary entry point (a thin composition over
 #                          `riff_backend::composition::AppRuntime::spawn`)
@@ -35,7 +39,7 @@ resolver = "2"
 
 # Single source of truth for the version, edition, MSRV and the identity fields
 # that every member inherits via `<key>.workspace = true`. Releases touch this
-# one block instead of seven manifests, so the crates can never disagree.
+# one block instead of nine manifests, so the crates can never disagree.
 [workspace.package]
 version = "0.2.0"
 edition = "2024"

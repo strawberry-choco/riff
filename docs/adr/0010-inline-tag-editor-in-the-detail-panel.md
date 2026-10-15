@@ -3,7 +3,7 @@
 **Status**: Accepted
 **Date**: 2026-09-16
 
-Tag editing today is a modal reachable only from a single context-menu item: "Edit Tags" on a Track row, behind the advanced toggle. The modal ([`crate::ui::prompts::tag_edit_modal`](../../crates/riff-gui/src/ui/prompts.rs)) edits one Track at a time across seven fields (Title, Artist, Album, Album Artist, Genre, Year, Track Number), submits one [`TagEditRequest`](../../crates/riff-backend/src/app/tag_edit_service.rs) per save, and reports one [`TagEditOutcome`](../../crates/riff-backend/src/app/tag_edit_service.rs) — file tags and Store facts as one durable change (ADR 0006). The readout panels already summarize some tag data (Artist / Album / Genre rows) but are strictly display-only, and the Album readout aggregates nothing: it shows only the album-level year and genre plus aggregate plays and path.
+Tag editing today is a modal reachable only from a single context-menu item: "Edit Tags" on a Track row, behind the advanced toggle. The modal ([`crate::ui::prompts::tag_edit_modal`](../../crates/riff-gui-components/src/prompts.rs)) edits one Track at a time across seven fields (Title, Artist, Album, Album Artist, Genre, Year, Track Number), submits one [`TagEditRequest`](../../crates/riff-backend/src/app/tag_edit_service.rs) per save, and reports one [`TagEditOutcome`](../../crates/riff-backend/src/app/tag_edit_service.rs) — file tags and Store facts as one durable change (ADR 0006). The readout panels already summarize some tag data (Artist / Album / Genre rows) but are strictly display-only, and the Album readout aggregates nothing: it shows only the album-level year and genre plus aggregate plays and path.
 
 ## Decision
 

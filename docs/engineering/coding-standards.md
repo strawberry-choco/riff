@@ -2,7 +2,7 @@
 
 This document describes the conventions that keep riff's codebase consistent and maintainable. It covers the layered architecture rules, the lint and formatting configuration, the error-handling pattern, and the implementation gotchas that catch contributors. Read this before writing any non-trivial change, and pair it with [development-setup.md](./development-setup.md) for the commands that enforce these standards.
 
-riff is organized as a Cargo workspace of capability crates. The single most important rule is that dependencies follow the crate chain: `riff-persistence` ← `riff-library`/`riff-playback` ← `riff-infra` ← `riff-backend` ← `riff-gui`, with the two capability slices as siblings and no edge between them. The compiler enforces this chain, so a misplaced dependency fails the build rather than passing unnoticed.
+riff is organized as a Cargo workspace of capability crates. The single most important rule is that dependencies follow the crate chain: `riff-persistence` ← `riff-library`/`riff-playback` ← `riff-infra` ← `riff-backend` ← `riff-gui`, with the two capability slices as siblings and no edge between them, and the widgetry chain `riff-gui-theme` ← `riff-gui-components` ← `riff-gui` hanging off the frontend (ADR 0018) — neither widgetry crate names a `riff-*` crate. The compiler enforces these chains, so a misplaced dependency fails the build rather than passing unnoticed.
 
 ## Architecture Layering
 
@@ -17,7 +17,8 @@ Dependencies always follow the chain, and lower crates know nothing about higher
 - `riff-library` and `riff-playback` depend only on `riff-persistence` plus pure-Rust utilities. They never import each other, never name a concrete adapter, and never touch `symphonia`, `cpal`, `lofty`, `image`, `rusqlite`, or `egui`.
 - Each slice defines the port traits for its external dependencies; `riff-infra` implements them and depends on the slices — never the reverse.
 - `riff-backend` is the only crate that names both ports and concrete adapters; that happens exclusively in `composition.rs`.
-- `riff-gui` depends only on `riff-backend` (plus UI/platform crates).
+- `riff-gui` depends on `riff-backend`, `riff-gui-theme` and `riff-gui-components` (plus UI/platform crates).
+- `riff-gui-theme` depends on no `riff-*` crate — `egui` and `resvg` (plus `tracing`), nothing else — and `riff-gui-components` on `riff-gui-theme` and `egui`, nothing else. A primitive's props are its own types; a widget that has to know what an application type means is a frontend module.
 
 ### Trait abstraction and dependency injection
 
@@ -43,7 +44,7 @@ Before submitting a change, confirm:
 2. The workspace dependency chain has no new bypasses; the slices have no native imports.
 3. External dependencies cross the slice/infra boundary only through port traits.
 4. The persistence contract stays dependency-free, and the slices stay pure Rust.
-5. There is no `egui` code outside `riff-gui`, and no audio decoding in the frontend.
+5. There is no `egui` code outside `riff-gui`, `riff-gui-theme` and `riff-gui-components`, and no audio decoding in any of the three; neither widgetry crate names a `riff-*` crate.
 6. Only `riff-backend/src/composition.rs` constructs and wires infrastructure.
 7. Any new per-OS branch is the one decision function every call site reads, and its non-native branch is asserted as data rather than assumed.
 8. Any new platform-only OS interop is one leaf whose native binding is compiled out on the other platforms and declared under `[target.'cfg(...)'.dependencies]`, with every decision it makes a pure function asserted on all of them.
@@ -52,7 +53,7 @@ For the full treatment, including key flows and the threading model, see [../tec
 
 ## Design Tokens
 
-`crates/riff-gui/src/ui/theme.rs` is the only place a design value is written, and the only place view code reads one from (ADR 0004). It holds the colors and the `Palette` slots, the corner radii, the type scale, the spacing scale (`SPACE_*`), the chrome dimensions, and the component geometry under `theme::geometry`.
+`crates/riff-gui-theme/src/theme.rs` is the only place a design value is written, and the only place view code reads one from (ADR 0004). It holds the colors and the `Palette` slots, the corner radii, the type scale, the spacing scale (`SPACE_*`), the chrome dimensions, and the component geometry under `theme::geometry`.
 
 The rules, and what each one is for:
 
@@ -61,7 +62,7 @@ The rules, and what each one is for:
 - **Contrast is a property of the tokens, not of the call sites.** If muted text is hard to read, fix `INK_3`; do not move the call sites to `INK_2`. The computed WCAG test holds every text token at 4.5:1 on the fills it paints on, in all four palette combinations.
 - **Structural stays with the algorithm.** Scroll and paging math, texture cache keys, a raster resolution, and how many rows a view asks its read model for are consequences of code, not of the design, and live in the view that computes them.
 
-Three mechanical sweeps in `tests/ui_tests.rs` enforce the first two rules against the source of `crates/riff-gui/src/ui/**` (`theme.rs` exempt, being the store): `test_view_code_contains_no_hardcoded_color_literals`, `test_view_code_declares_no_dimensions_of_its_own`, `test_view_code_sets_no_spacing_of_its_own`. A violation names the file and line, and the fix is always to move the value into `theme.rs` — never to widen a sweep.
+Three mechanical sweeps enforce the first two rules, homed with the crate each scans (ADR 0018): `crates/riff-gui-theme/tests/token_sweeps.rs`, `crates/riff-gui-components/tests/token_sweeps.rs` and `crates/riff-gui/tests/token_sweeps.rs` carry the same three tests — `test_view_code_contains_no_hardcoded_color_literals`, `test_view_code_declares_no_dimensions_of_its_own`, `test_view_code_sets_no_spacing_of_its_own` — each against its own crate's `src/**`, with `theme.rs` exempt in the theme crate, being the store. A violation names the file and line, and the fix is always to move the value into the token store — never to widen a sweep.
 
 ## Linting with Clippy
 

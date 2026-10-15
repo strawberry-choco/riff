@@ -15,9 +15,9 @@ The workspace members:
 | `riff-playback` | Playback capability | The Playback Queue, the audio engine, gapless logic, the playback coordinator, the Transport trait, the playback ports, the playback session, and the Up Next read model. |
 | `riff-infra` | Adapter crate | Every port implementation and every native/external dependency, so toolchain requirements exist in exactly one place. |
 | `riff-backend` | Application API | The Backend Events inbox (typed events and notices), the app-layer application services, the library session state, and the Composition Root that owns the worker threads. |
-| `riff-gui-theme` | Design system | The design authority: the token and palette store, the vendored fonts, the icon set, and the assets those are compiled from. No `riff-*` dependency at all — `egui` and `resvg`, nothing else. |
+| `riff-gui-theme` | Design system | The design authority: the token and palette store, the vendored fonts, the icon set, and the assets those are compiled from. No `riff-*` dependency at all — `egui`, `resvg` and `tracing`, nothing else. |
 | `riff-gui-components` | Component library | The presentation primitives: props in, a response or a typed intent out. No `riff-*` dependency at all — `riff-gui-theme` and `egui`, nothing else. |
-| `riff-gui` | Frontend | egui UI, tray icon, native dialogs, fonts, and the `riff` binary entry point — a thin composition over `riff-backend`. |
+| `riff-gui` | Frontend | egui UI, tray icon, native dialogs, and the `riff` binary entry point — a thin composition over `riff-backend`, rendering through the two widgetry crates. |
 | `tests` | Integration tests | The single workspace-root integration-test crate (cross-crate integration, UI, and golden-image suites). |
 
 ### Dependency chain
@@ -49,9 +49,9 @@ Read precisely, the edges are:
 - `riff-library` and `riff-playback` each depend on `riff-persistence` (plus pure-Rust utilities such as `crossbeam-channel`, `thiserror`, `tracing`, `fastrand`). They are **true siblings with no edge between them** — neither can import a type from the other, and the compiler enforces it.
 - `riff-infra` depends on all three (`riff-persistence`, `riff-library`, `riff-playback`) and implements their ports. This is where `rusqlite` (bundled SQLite, a C compiler), `cpal` (platform audio libraries), `symphonia`, `lofty`, `image`, `walkdir`, and `notify` live.
 - `riff-backend` depends on all four. It is the only crate that names both the slice-defined ports and the concrete `riff-infra` adapters.
-- `riff-gui-theme` depends on **nothing in the workspace** — `egui` and `resvg`, and the assets it compiles in. It is the design authority and no business crate may reach it, or it, them.
+- `riff-gui-theme` depends on **nothing in the workspace** — `egui`, `resvg` and `tracing`, and the assets it compiles in. It is the design authority and no business crate may reach it, or it, them.
 - `riff-gui-components` depends on `riff-gui-theme` and `egui`, and on nothing else in the workspace. A primitive's props are its own types; it names no business type at all.
-- `riff-gui` depends on `riff-backend`, `riff-gui-components` and `riff-gui-theme` (plus UI/platform dependencies: `egui`/`eframe`, `resvg`, `tray-icon`/`muda`/`rfd` on non-Linux). It carries no adapter dependencies.
+- `riff-gui` depends on `riff-backend`, `riff-gui-components` and `riff-gui-theme` (plus UI/platform dependencies: `egui`/`eframe`, `tray-icon`/`muda`/`rfd` on non-Linux). It carries no adapter dependencies; the icon rasterizer it used to name moved down into `riff-gui-theme`.
 - `tests` depends on every crate by name (per-crate imports) so each suite reaches the type it needs directly.
 
 The arrows point inward in the inversion-of-control sense: slices define ports and code against `Box<dyn Port>`; `riff-infra` depends on the slices and implements their traits; runtime control flows slices → adapters while the dependency arrow points adapters → slices.
@@ -100,7 +100,7 @@ It owns the Backend Events inbox (`events.rs` — the `BackendEvent` enum, notic
 
 **Membership criterion**: a design value, or the asset it is compiled from.
 
-It owns the token and palette store (`theme.rs` — every color, corner radius, type size, spacing step and component dimension, per ADR 0004), the vendored Inter faces and the system CJK fallback wiring (`fonts.rs`), the vendored Lucide glyphs with their tinted-texture cache (`icons.rs`), the assets those two are compiled in from (`assets/fonts`, `assets/icons`, with the OFL and ISC licences), and the two helpers that are token-derived rather than widget-shaped (`styled_font`, `search_ring_stroke`). It has no `riff-*` dependency — `egui` and `resvg`, nothing else — so a crate that means anything about the Library, playback or the store cannot reach it. What it holds is the design's own arithmetic (a contrast ratio, a tween's endpoints, the derived light palette) and never a decision about the product.
+It owns the token and palette store (`theme.rs` — every color, corner radius, type size, spacing step and component dimension, per ADR 0004), the vendored Inter faces and the system CJK fallback wiring (`fonts.rs`), the vendored Lucide glyphs with their tinted-texture cache (`icons.rs`), the assets those two are compiled in from (`assets/fonts`, `assets/icons`, with the OFL and ISC licences), and the two helpers that are token-derived rather than widget-shaped (`styled_font`, `search_ring_stroke`). It has no `riff-*` dependency — `egui`, `resvg` and `tracing`, nothing else — so a crate that means anything about the Library, playback or the store cannot reach it. What it holds is the design's own arithmetic (a contrast ratio, a tween's endpoints, the derived light palette) and never a decision about the product.
 
 ### `riff-gui-components` — the component library
 

@@ -1453,6 +1453,12 @@ impl eframe::App for RiffApp {
         drop(library);
 
         self.enact_frame_tail(ui.ctx(), &mut output);
+
+        // The drop-hover veil paints last, above every panel: while a platform
+        // file drag hovers the window, the whole window — titlebar, sidebar,
+        // stage, player bar — reads as the drop target. Pure draw-half paint;
+        // the frame decides nothing about it.
+        crate::ui::drop_overlay::paint(ui.ctx(), &self.theme.active);
     }
 }
 

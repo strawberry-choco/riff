@@ -750,7 +750,7 @@ mod tests {
     // design-token sheet (`colors_and_type.css`) — the independent source of
     // truth for the mockup palette. The dark palette must match it exactly.
 
-    use riff_gui::ui::theme;
+    use riff_gui_theme::theme;
 
     #[test]
     fn test_dark_surface_and_ink_tokens_match_the_mockup() {
@@ -1033,7 +1033,7 @@ mod tests {
     #[test]
     fn test_placeholder_tile_is_shared_across_identities() {
         use riff_gui::ui::artwork::lookup_cover_texture;
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_theme::theme::Palette;
         use riff_library::app::traits::RequestedSize;
 
         let ctx = placeholder_ctx();
@@ -1091,7 +1091,7 @@ mod tests {
     #[test]
     fn test_placeholder_tile_follows_the_palette_family() {
         use riff_gui::ui::artwork::placeholder_image;
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_theme::theme::Palette;
 
         // The derivation answers to the active palette: the well and glyph
         // colours come from `surface_2` / `ink_3`, which differ across the
@@ -1130,7 +1130,7 @@ mod tests {
         use riff_gui::ui::artwork::{
             lookup_cover_texture, placeholder_cache_key, placeholder_image,
         };
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_theme::theme::Palette;
         use riff_library::app::traits::RequestedSize;
 
         let ctx = placeholder_ctx();
@@ -1201,7 +1201,7 @@ mod tests {
     fn test_real_art_wins_over_the_placeholder_tile() {
         use riff_gui::ui::app::cover_cache_key;
         use riff_gui::ui::artwork::lookup_cover_texture;
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_theme::theme::Palette;
         use riff_library::app::traits::RequestedSize;
 
         let ctx = placeholder_ctx();
@@ -1266,7 +1266,7 @@ mod tests {
     fn test_evict_generated_removes_only_the_placeholder_tile() {
         use riff_gui::ui::app::cover_cache_key;
         use riff_gui::ui::artwork::{evict_generated, lookup_cover_texture, placeholder_cache_key};
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_theme::theme::Palette;
         use riff_library::app::traits::RequestedSize;
 
         let ctx = placeholder_ctx();
@@ -1346,7 +1346,7 @@ mod tests {
     #[test]
     fn test_artwork_fit_policy_stretches_or_letterboxes_the_texture() {
         use riff_gui::ui::artwork::{self, Artwork, Fit};
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_theme::theme::Palette;
 
         let palette = Palette::dark();
         let red = egui::Color32::from_rgb(200, 30, 30);
@@ -1393,8 +1393,8 @@ mod tests {
     #[test]
     fn test_artwork_placeholder_is_a_themed_well_not_a_hole() {
         use riff_gui::ui::artwork::{self, Artwork, Fit, Placeholder};
-        use riff_gui::ui::icons::{Icon, IconCache};
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_theme::icons::{Icon, IconCache};
+        use riff_gui_theme::theme::Palette;
 
         let block = egui::vec2(80.0, 80.0);
         let rect = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), block);
@@ -1462,6 +1462,47 @@ mod tests {
         );
     }
 
+    /// `(path, line)` for every code line under the frontend crate's own `ui`
+    /// tree, comments dropped. The scan root is the crate's source root, not a
+    /// per-module path, so a module that moves inside the tree cannot orphan
+    /// the guard.
+    fn frontend_ui_lines() -> Vec<(PathBuf, String)> {
+        fn scan_dir(dir: &std::path::Path, lines: &mut Vec<(PathBuf, String)>) {
+            let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+                .expect("the frontend's src/ui directory must be readable")
+                .map(|entry| entry.expect("directory entries must resolve").path())
+                .collect();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    scan_dir(&path, lines);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let source =
+                        std::fs::read_to_string(&path).expect("source files must be UTF-8");
+                    for line in source.lines() {
+                        let trimmed = line.trim_start();
+                        if trimmed.starts_with("//") {
+                            continue;
+                        }
+                        lines.push((path.clone(), trimmed.to_owned()));
+                    }
+                }
+            }
+        }
+
+        let mut lines = Vec::new();
+        scan_dir(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("crates")
+                .join("riff-gui")
+                .join("src")
+                .join("ui"),
+            &mut lines,
+        );
+        lines
+    }
+
     /// The cycle guard: the placeholder tile used to live in a sibling module
     /// that `use`d `crate::ui::app::…` for the very cache-key space the app
     /// module imported the placeholder back from. `ui::artwork` owns that key
@@ -1475,17 +1516,18 @@ mod tests {
             "COVER_CARD",
             "COVER_HERO",
         ];
-        let outside_app: Vec<_> = ui_source_lines()
+        let outside_app: Vec<_> = frontend_ui_lines()
             .into_iter()
-            .filter(|(path, _, _)| !path.display().to_string().contains("/ui/app"))
+            .filter(|(path, _)| !path.display().to_string().contains("/ui/app"))
             .collect();
-        let offenders = violations(
-            |line| {
+        let offenders: Vec<String> = outside_app
+            .into_iter()
+            .filter(|(_, line)| {
                 line.contains("ui::app::")
                     && ARTWORK_KEY_SPACE.iter().any(|symbol| line.contains(symbol))
-            },
-            &outside_app,
-        );
+            })
+            .map(|(path, line)| format!("{}: {line}", path.display()))
+            .collect();
         assert!(
             offenders.is_empty(),
             "the artwork key space belongs to ui::artwork:\n{}",
@@ -1499,8 +1541,8 @@ mod tests {
     #[test]
     fn test_clear_library_confirmation_presents_its_action_as_destructive() {
         use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::prompts::{CLEAR_LIBRARY_CONFIRM_COPY, destructive_confirm};
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_components::prompts::{CLEAR_LIBRARY_CONFIRM_COPY, destructive_confirm};
+        use riff_gui_theme::theme::Palette;
 
         let palette = Palette::dark();
         let mut harness = egui_kittest::Harness::builder()
@@ -1509,7 +1551,7 @@ mod tests {
             .build_ui(|ui| {
                 let background = ui.ctx().layer_painter(egui::LayerId::background());
                 background.rect_filled(ui.ctx().content_rect(), 0.0, palette.background);
-                let mut cache = riff_gui::ui::icons::IconCache::new();
+                let mut cache = riff_gui_theme::icons::IconCache::new();
                 let _ = destructive_confirm(
                     ui,
                     &mut cache,
@@ -1714,7 +1756,7 @@ mod tests {
     // text-sm 14 / text-xl 20 / text-3xl 30, with font-medium/semibold/bold
     // accents on buttons, section headers, and the wordmark.
 
-    use riff_gui::ui::fonts;
+    use riff_gui_theme::fonts;
 
     #[test]
     fn test_text_scale_constants_match_the_mockup_tailwind_usage() {
@@ -1920,7 +1962,7 @@ mod tests {
     fn test_traffic_light_clearance_divides_the_measured_metric_by_the_zoom_and_floors_at_the_token()
      {
         use riff_gui::ui::chrome::traffic_light_clearance;
-        use riff_gui::ui::theme::geometry::titlebar::TRAFFIC_LIGHT_CLEARANCE;
+        use riff_gui_theme::theme::geometry::titlebar::TRAFFIC_LIGHT_CLEARANCE;
 
         // The fallback constant is a design value in the theme's single store,
         // and a floor under the real cluster: it must exceed the standard
@@ -2247,7 +2289,7 @@ mod tests {
         );
 
         // And it is the brand's own orange, not the placeholder's blue.
-        let brand = riff_gui::ui::theme::BRAND_500;
+        let brand = riff_gui_theme::theme::BRAND_500;
         let (bar_x, _) = runs[0];
         let ink = (side / 2 * side + bar_x) * 4;
         assert_eq!(
@@ -2263,175 +2305,6 @@ mod tests {
         // neither for a hidden window. If upstream starts reporting real
         // visibility, this fails and the app-side record can be retired.
         assert_eq!(egui::ViewportInfo::default().visible(), None);
-    }
-
-    // --- Token-authority sweeps (Issue 03, ADR 0004) -----------------------------
-    //
-    // `theme.rs` is both the store and the read source for every design value,
-    // so the UI layer's source gets scanned for what a view must not do:
-    // construct or derive a color, declare a dimension of its own, or set a
-    // spacing gap by number. Each rule is mechanical, which is the point — the
-    // acceptance for the token-authority work is "grep-verifiable", and encoded
-    // here it stops being something a later restyle ticket can quietly drift
-    // out of.
-
-    /// True when a code line derives an egui color instead of reading one: a
-    /// `Color32`/`Rgba` construction from scratch (any `from_*` constructor or
-    /// associated constant), or a palette color scaled into a new one at the
-    /// call site (`gamma_multiply`, `linear_multiply`, `to_opaque`, …).
-    ///
-    /// The constructor path alone was not enough: `palette.error
-    /// .gamma_multiply(0.1)` reads a token and passed clean while still
-    /// deciding a color outside the design system. Reading a color's channels
-    /// (`color.r()` for a texture name, `px.a() == 0` to skip a pixel) is not
-    /// a derivation and stays unflagged, and [`theme::blend_over`] stays
-    /// sanctioned too — it is the helper the token module exposes for
-    /// composing colors, and its one view caller composites rasterized
-    /// texture pixels rather than choosing a style.
-    fn hardcoded_color_literal(line: &str) -> bool {
-        for marker in ["Color32::", "Rgba::"] {
-            let mut search = 0;
-            while let Some(rel) = line[search..].find(marker) {
-                let start = search + rel + marker.len();
-                if line[start..].starts_with("from_")
-                    || line[start..]
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_ascii_uppercase())
-                {
-                    return true;
-                }
-                search = start;
-            }
-        }
-        [
-            ".gamma_multiply(",
-            ".gamma_multiply_u8(",
-            ".linear_multiply(",
-            ".to_opaque(",
-            ".to_normalized_rgba(",
-            ".to_normalized_gamma_f32(",
-        ]
-        .iter()
-        .any(|derives| line.contains(derives))
-    }
-
-    /// Every `(path, line number, trimmed source)` triple the token sweeps
-    /// judge: `.rs` files under `crates/riff-gui/src/ui`, minus `theme.rs` —
-    /// which is the store, so the literals are its job — and minus comment
-    /// lines, so prose may name the APIs a sweep bans.
-    fn ui_source_lines() -> Vec<(std::path::PathBuf, usize, String)> {
-        fn scan_dir(dir: &std::path::Path, lines: &mut Vec<(std::path::PathBuf, usize, String)>) {
-            let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
-                .expect("the src/ui directory must be readable")
-                .map(|entry| entry.expect("directory entries must resolve").path())
-                .collect();
-            entries.sort();
-            for path in entries {
-                if path.is_dir() {
-                    scan_dir(&path, lines);
-                } else if path.extension().is_some_and(|ext| ext == "rs")
-                    && path.file_name().and_then(|name| name.to_str()) != Some("theme.rs")
-                {
-                    let source =
-                        std::fs::read_to_string(&path).expect("source files must be UTF-8");
-                    for (idx, line) in source.lines().enumerate() {
-                        let trimmed = line.trim_start();
-                        if trimmed.starts_with("//") {
-                            continue;
-                        }
-                        lines.push((path.clone(), idx + 1, trimmed.to_owned()));
-                    }
-                }
-            }
-        }
-
-        let mut lines = Vec::new();
-        scan_dir(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join("crates")
-                .join("riff-gui")
-                .join("src")
-                .join("ui"),
-            &mut lines,
-        );
-        lines
-    }
-
-    /// `path:line: source` for every swept line a token sweep objects to.
-    fn violations<'a>(
-        mut offending: impl FnMut(&str) -> bool,
-        lines: impl IntoIterator<Item = &'a (std::path::PathBuf, usize, String)>,
-    ) -> Vec<String> {
-        lines
-            .into_iter()
-            .filter(|(_, _, line)| offending(line))
-            .map(|(path, num, line)| format!("{}:{num}: {line}", path.display()))
-            .collect()
-    }
-
-    /// Collect `path:line` pairs where UI-layer source derives an egui color.
-    fn hardcoded_color_violations() -> Vec<String> {
-        violations(hardcoded_color_literal, &ui_source_lines())
-    }
-
-    /// True when a line gives a view a dimension of its own: a `const` of a
-    /// measured type declared outside `theme.rs`.
-    ///
-    /// A derived declaration counts (`MIN_INNER_H = PLAY_BTN + 16.0 + 8.0`) —
-    /// the arithmetic belongs beside the tokens it reads, which is where the
-    /// surfaces that share a control disagree today. What a view may still own
-    /// is what no designer would retune and no second surface reads: a `usize`
-    /// count of rows to ask its read model for, a `[f32; 4]` of shape data for
-    /// one hand-painted glyph, a texture's raster resolution.
-    fn view_owned_dimension(line: &str) -> bool {
-        let Some(decl) = line
-            .strip_prefix("const ")
-            .or_else(|| line.strip_prefix("pub const "))
-        else {
-            return false;
-        };
-        decl.split_once(": ").is_some_and(|(_, typed)| {
-            ["f32 =", "egui::Vec2 ="]
-                .iter()
-                .any(|ty| typed.starts_with(ty))
-        })
-    }
-
-    /// True when `text` sets a non-zero number: a digit run that starts on a
-    /// word boundary, so the `2` in `vec2` contributes nothing and `0.0` reads
-    /// as the zero it is.
-    fn sets_a_nonzero_number(text: &str) -> bool {
-        let bytes = text.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            let starts_a_literal =
-                bytes[i].is_ascii_digit() && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric());
-            if !starts_a_literal {
-                i += 1;
-                continue;
-            }
-            let start = i;
-            while i < bytes.len() && matches!(bytes[i], b'0'..=b'9' | b'.') {
-                i += 1;
-            }
-            if text[start..i]
-                .parse::<f32>()
-                .is_ok_and(|value| value != 0.0)
-            {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// True when a line leaves a gap between items that the spacing scale does
-    /// not name. Zero stays allowed: setting `item_spacing` to nothing is how a
-    /// widget opts out of egui's layout so it can place its own sub-rectangles,
-    /// which is structure rather than design.
-    fn numeric_item_spacing(line: &str) -> bool {
-        line.contains("item_spacing") && sets_a_nonzero_number(line)
     }
 
     /// WCAG 2.1 relative luminance: sRGB channels linearized and weighted.
@@ -2610,118 +2483,6 @@ mod tests {
     }
 
     #[test]
-    fn test_view_code_contains_no_hardcoded_color_literals() {
-        let violations = hardcoded_color_violations();
-        assert!(
-            violations.is_empty(),
-            "view code must style itself from theme tokens (ADR 0004); \
-             found hardcoded colors:\n{}",
-            violations.join("\n")
-        );
-    }
-
-    #[test]
-    fn test_the_color_sweep_flags_derivations_but_not_channel_reads() {
-        // The hole the widening closed: a palette color scaled at a call site
-        // decides a color outside the design system without naming a
-        // constructor, so it must fail the sweep — as must a literal.
-        for derives in [
-            "    let fill = palette.error.gamma_multiply(0.1);",
-            "    let wash = palette.ink_3.gamma_multiply(0.4);",
-            "    let ring = theme::INK.linear_multiply(0.5);",
-            "    let edge = palette.border.gamma_multiply_u8(200);",
-            "    let flat = Color32::from_rgb(0, 0, 0);",
-        ] {
-            assert!(hardcoded_color_literal(derives), "sweep misses {derives}");
-        }
-        // Reading a color's channels composes nothing, and `blend_over` is the
-        // helper the token module exposes for composing them: both stay clean,
-        // or the sweep would be arguing with the design system instead of
-        // protecting it.
-        for benign in [
-            "    let key = (icon, px, color.r(), color.g(), color.b());",
-            "    if px.a() == 0 { continue; }",
-            "    image.pixels[i] = theme::blend_over(image.pixels[i], *px);",
-            "    painter.galley(pos, galley, palette.ink);",
-        ] {
-            assert!(
-                !hardcoded_color_literal(benign),
-                "sweep false-positives {benign}"
-            );
-        }
-    }
-
-    /// The geometry half of the same claim as the color sweep: `theme.rs` is
-    /// the store, so a view that declares a measured constant has taken a
-    /// design value into its own hands. Before the views were cleaned up this
-    /// caught nothing, because every one of these constants was already gone;
-    /// it exists so the next one cannot land quietly.
-    #[test]
-    fn test_view_code_declares_no_dimensions_of_its_own() {
-        let violations = violations(view_owned_dimension, &ui_source_lines());
-        assert!(
-            violations.is_empty(),
-            "component geometry belongs in theme.rs's `geometry` section, next \
-             to the surface that paints it (ADR 0004); found view-owned \
-             dimensions:\n{}",
-            violations.join("\n")
-        );
-
-        for declares in [
-            "const ROW_H: f32 = 40.0;",
-            "pub const HEADER_H: f32 = 28.0;",
-            "const MIN_INNER_H: f32 = PLAY_BTN + 16.0 + 8.0;",
-            "pub const MIN_STAGE_SIZE: egui::Vec2 = egui::vec2(520.0, 456.0);",
-        ] {
-            assert!(view_owned_dimension(declares), "sweep misses {declares}");
-        }
-        for owns in [
-            // What the rule deliberately does not reach: a read-model bound,
-            // one glyph's shape data, a raster resolution, a token module's
-            // own `const fn`, and a plain local.
-            "pub const UP_NEXT_LIMIT: usize = 5;",
-            "const WORDMARK_BARS: [f32; 4] = [0.55, 0.95, 0.7, 0.4];",
-            "const TILE_PX: usize = 256;",
-            "pub const fn corner(radius: f32) -> CornerRadius {",
-            "    let row_h = theme::geometry::sidebar::ROW_H;",
-        ] {
-            assert!(!view_owned_dimension(owns), "sweep false-positives {owns}");
-        }
-    }
-
-    /// The spacing half: a gap between items is a scale step, so a numeric
-    /// `item_spacing` assignment in a view is a gap the design system has
-    /// never heard of.
-    #[test]
-    fn test_view_code_sets_no_spacing_of_its_own() {
-        let violations = violations(numeric_item_spacing, &ui_source_lines());
-        assert!(
-            violations.is_empty(),
-            "spacing between items comes from theme's SPACE_* scale (ADR 0004); \
-             found numeric item_spacing assignments:\n{}",
-            violations.join("\n")
-        );
-
-        for sets in [
-            "ui.spacing_mut().item_spacing.x = 6.0;",
-            "ui.spacing_mut().item_spacing.x = 10.0;",
-            "ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);",
-        ] {
-            assert!(numeric_item_spacing(sets), "sweep misses {sets}");
-        }
-        for reads in [
-            "ui.spacing_mut().item_spacing.x = 0.0;",
-            "strip_ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);",
-            "ui.spacing_mut().item_spacing.x = theme::SPACE_MD;",
-        ] {
-            assert!(
-                !numeric_item_spacing(reads),
-                "sweep false-positives {reads}"
-            );
-        }
-    }
-
-    #[test]
     fn test_resolve_builds_the_active_palette_for_a_theme_selection() {
         // The plain bases resolve to themselves...
         assert_eq!(theme::resolve(true, false), theme::Palette::dark());
@@ -2745,7 +2506,8 @@ mod tests {
     // behind an icon helper, and routes nav so exactly one View is visible.
 
     use riff_backend::app::state::{BrowseMode, ViewMode};
-    use riff_gui::ui::{chrome, icons};
+    use riff_gui::ui::chrome;
+    use riff_gui_theme::icons;
 
     #[test]
     fn test_min_window_size_fits_the_fixed_chrome() {
@@ -2854,7 +2616,7 @@ mod tests {
 
     #[test]
     fn test_rasterize_tints_icons_with_the_requested_color() {
-        use riff_gui::ui::theme::INK;
+        use riff_gui_theme::theme::INK;
 
         let image = icons::rasterize(icons::Icon::Play.svg(), 24, INK)
             .expect("the play glyph rasterizes headlessly");
@@ -2905,7 +2667,7 @@ mod tests {
     #[test]
     fn test_titlebar_clicks_report_window_and_nav_actions() {
         use riff_gui::ui::chrome::{ChromeMode, TitleBarAction, TitleBarContent, show_titlebar};
-        use riff_gui::ui::icons::IconCache;
+        use riff_gui_theme::icons::IconCache;
 
         // Harness label queries resolve through kittest's accessibility tree.
         use egui_kittest::kittest::Queryable;
@@ -2978,7 +2740,7 @@ mod tests {
     #[test]
     fn test_titlebar_left_inset_starts_the_wordmark_cluster_past_the_traffic_lights() {
         use riff_gui::ui::chrome::{ChromeMode, titlebar_left_inset};
-        use riff_gui::ui::theme::geometry::titlebar::{
+        use riff_gui_theme::theme::geometry::titlebar::{
             TRAFFIC_LIGHT_CLEARANCE, WORDMARK_LEFT_INSET,
         };
 
@@ -3000,8 +2762,8 @@ mod tests {
     #[test]
     fn test_native_mode_titlebar_reports_no_window_control_actions_and_clears_the_lights() {
         use riff_gui::ui::chrome::{ChromeMode, TitleBarAction, TitleBarContent, show_titlebar};
-        use riff_gui::ui::icons::IconCache;
-        use riff_gui::ui::theme::geometry::titlebar::TRAFFIC_LIGHT_CLEARANCE;
+        use riff_gui_theme::icons::IconCache;
+        use riff_gui_theme::theme::geometry::titlebar::TRAFFIC_LIGHT_CLEARANCE;
 
         // Harness label queries resolve through kittest's accessibility tree.
         use egui_kittest::kittest::Queryable;
@@ -3561,13 +3323,13 @@ mod tests {
     fn test_search_box_ring_uses_the_focus_token_only_when_focused() {
         let dark = theme::Palette::dark();
 
-        let idle = sidebar::search_ring_stroke(&dark, false);
+        let idle = theme::search_ring_stroke(&dark, false);
         assert_eq!(
             idle.color, dark.border,
             "idle border comes from the line token"
         );
 
-        let focused = sidebar::search_ring_stroke(&dark, true);
+        let focused = theme::search_ring_stroke(&dark, true);
         assert_eq!(
             focused.color, dark.focus_ring,
             "the focus ring is the palette's ring token"
@@ -5167,8 +4929,9 @@ mod tests {
     // --- Library stage empty-state hero tokens (Issue 09) ------------------------
     //
     // The empty-state hero widget that painted these is gone (the stage's
-    // empty state moved to `empty_state.rs` and the leftover module is
-    // deleted), but its geometry and glow tokens stay in the design system's
+    // empty state moved to the component crate's `empty_state.rs` and the
+    // leftover module is deleted), but its geometry and glow tokens stay in
+    // the design system's
     // store, so what they pinned is pinned here against the token values
     // themselves: the mockup's 160px disc circle (`w-40 h-40`) with an 80px
     // glyph (`w-20 h-20`), `mb-6`/`mb-1` copy gaps inside a `p-8` stage, and
@@ -5528,7 +5291,7 @@ mod tests {
     // on disk AND indexed into the Library — never its Watch State.
 
     use riff_gui::ui::settings::{self, LibraryRow, Readiness, SettingsAction, SettingsContent};
-    use riff_gui::ui::toggle_switch;
+    use riff_gui_components::toggle_switch;
 
     #[test]
     fn test_toggle_switch_dimensions_match_the_mockup_pill() {
@@ -5726,18 +5489,18 @@ mod tests {
         // one note, `FOOTER_NOTE`, so the dedicated line under the button is
         // gone. The glossary guard follows the copy that still ships.
         assert_eq!(
-            riff_gui::ui::prompts::CLEAR_LIBRARY_CONFIRM_COPY,
+            riff_gui_components::prompts::CLEAR_LIBRARY_CONFIRM_COPY,
             "Remove every indexed track? Playlists and settings are kept, and the \
              collection rebuilds on the next scan."
         );
         // The recovery clause the footer note used to carry must survive
         // somewhere, or a destructive action loses its consequence.
         assert!(
-            riff_gui::ui::prompts::CLEAR_LIBRARY_CONFIRM_COPY.contains("next scan"),
+            riff_gui_components::prompts::CLEAR_LIBRARY_CONFIRM_COPY.contains("next scan"),
             "the confirm copy must still say the collection rebuilds on the next scan"
         );
         assert!(
-            !riff_gui::ui::prompts::CLEAR_LIBRARY_CONFIRM_COPY.contains("Cache")
+            !riff_gui_components::prompts::CLEAR_LIBRARY_CONFIRM_COPY.contains("Cache")
                 && !settings::CLEAR_LIBRARY_LABEL.contains("Cache"),
             "no user-visible Clear Library copy may use the retired 'Cache' term"
         );
@@ -5877,7 +5640,7 @@ mod tests {
     #[test]
     fn test_settings_card_paints_its_fill_and_a_border_defined_edge() {
         use riff_gui::ui::settings::SettingsSection;
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_theme::theme::Palette;
 
         let palette = Palette::dark();
         let content = sample_content();
@@ -6091,7 +5854,7 @@ mod tests {
     #[test]
     fn test_library_pane_splits_two_columns_at_and_above_the_breakpoint() {
         use riff_gui::ui::settings::{LibraryPaneColumns, settings_pane_columns};
-        use riff_gui::ui::theme::geometry::settings::{COLUMN_GAP, MIN_TWO_COL_W};
+        use riff_gui_theme::theme::geometry::settings::{COLUMN_GAP, MIN_TWO_COL_W};
 
         // Comfortably below: one stacked column at the full available width.
         for width in [MIN_TWO_COL_W - 1.0, MIN_TWO_COL_W - 200.0, 284.0] {
@@ -6152,7 +5915,7 @@ mod tests {
     #[test]
     fn test_library_pane_columns_are_balanced_and_separated_by_the_token_gap() {
         use riff_gui::ui::settings::{LibraryPaneColumns, settings_pane_columns};
-        use riff_gui::ui::theme::geometry::settings::COLUMN_GAP;
+        use riff_gui_theme::theme::geometry::settings::COLUMN_GAP;
 
         for width in [620.0_f32, 621.0, 700.0, 920.0, 1400.0, 1737.0] {
             let LibraryPaneColumns::TwoColumns { left, right } = settings_pane_columns(width)
@@ -6247,7 +6010,7 @@ mod tests {
     #[test]
     fn test_row_flow_switches_at_the_stack_threshold() {
         use riff_gui::ui::settings::{RowFlow, row_flow, row_height};
-        use riff_gui::ui::theme::geometry::settings::{LIBRARY_ROW_H, LIBRARY_ROW_STACK_W};
+        use riff_gui_theme::theme::geometry::settings::{LIBRARY_ROW_H, LIBRARY_ROW_STACK_W};
 
         for width in [LIBRARY_ROW_STACK_W - 1.0, 205.0, 197.0, 100.0] {
             assert_eq!(
@@ -6281,7 +6044,7 @@ mod tests {
     #[test]
     fn test_row_reflow_is_a_noop_at_the_pinned_widths() {
         use riff_gui::ui::settings::{RowFlow, row_flow, row_height};
-        use riff_gui::ui::theme::geometry::settings::LIBRARY_ROW_H;
+        use riff_gui_theme::theme::geometry::settings::LIBRARY_ROW_H;
 
         // The measured row widths of the pinned renders, and the narrowest
         // already-pinned row anywhere (a preference row inside the two-column
@@ -6310,7 +6073,7 @@ mod tests {
     fn test_minimum_stage_library_row_has_no_overlap_or_clipping() {
         use egui_kittest::kittest::Queryable;
         use riff_gui::ui::settings::{RowFlow, SettingsSection, row_flow, row_height};
-        use riff_gui::ui::theme::geometry::window::MIN_STAGE_SIZE;
+        use riff_gui_theme::theme::geometry::window::MIN_STAGE_SIZE;
 
         let path = sample_content().libraries[0]
             .path
@@ -6379,7 +6142,7 @@ mod tests {
         // and the strip band are disjoint.
         assert!(
             row_height(RowFlow::Stacked)
-                > 2.0 * riff_gui::ui::theme::geometry::settings::SMALL_BTN_H
+                > 2.0 * riff_gui_theme::theme::geometry::settings::SMALL_BTN_H
         );
     }
 
@@ -6390,7 +6153,7 @@ mod tests {
         use riff_gui::ui::settings::{
             RowFlow, preference_row_height, preference_text_width, row_flow,
         };
-        use riff_gui::ui::theme::geometry::settings::PREF_ROW_H;
+        use riff_gui_theme::theme::geometry::settings::PREF_ROW_H;
 
         let narrow = preference_text_width(197.0);
         let wide = preference_text_width(605.0);
@@ -6445,7 +6208,7 @@ mod tests {
 
     /// The chip widths, i.e. the measured labels plus the chip's own padding.
     fn measured_chip_widths() -> Vec<f32> {
-        use riff_gui::ui::theme::geometry::settings::CHIP_LABEL_PAD;
+        use riff_gui_theme::theme::geometry::settings::CHIP_LABEL_PAD;
         MEASURED_CHIP_LABELS
             .iter()
             .map(|label| CHIP_LABEL_PAD * 2.0 + label)
@@ -6466,7 +6229,7 @@ mod tests {
     #[test]
     fn test_format_chip_row_wraps_only_below_the_measured_threshold() {
         use riff_gui::ui::settings::{ChipFlow, chip_flow};
-        use riff_gui::ui::theme::geometry::settings::CHIP_ROW_NO_WRAP_W;
+        use riff_gui_theme::theme::geometry::settings::CHIP_ROW_NO_WRAP_W;
 
         for width in [
             MIN_STAGE_CHIP_AVAILABLE,
@@ -6497,7 +6260,7 @@ mod tests {
         // or the two drift apart and the card sizes itself for one form while
         // painting the other.
         let cluster: f32 = measured_chip_widths().iter().sum::<f32>()
-            + riff_gui::ui::theme::geometry::settings::CHIP_GAP
+            + riff_gui_theme::theme::geometry::settings::CHIP_GAP
                 * f32::from(u8::try_from(MEASURED_CHIP_LABELS.len() - 1).unwrap());
         assert!(
             CHIP_ROW_NO_WRAP_W >= cluster,
@@ -6515,7 +6278,7 @@ mod tests {
     #[test]
     fn test_format_chips_all_fit_inside_the_card_at_the_minimum_stage() {
         use riff_gui::ui::settings::{chip_block_height, chip_placements};
-        use riff_gui::ui::theme::geometry::settings::{CHIP_GAP, CHIP_H, CHIP_ROW_NO_WRAP_W};
+        use riff_gui_theme::theme::geometry::settings::{CHIP_GAP, CHIP_H, CHIP_ROW_NO_WRAP_W};
 
         let widths = measured_chip_widths();
         let placements = chip_placements(&widths, MIN_STAGE_CHIP_AVAILABLE);
@@ -6719,7 +6482,7 @@ mod tests {
     fn test_library_pane_scroll_offset_survives_a_branch_switch() {
         use egui_kittest::kittest::Queryable;
         use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_theme::theme::Palette;
 
         // A short window, narrow enough for the stacked branch, so the pane is
         // genuinely taller than the viewport and scrolling moves something.
@@ -6832,8 +6595,8 @@ mod tests {
         use riff_gui::ui::settings::{
             SettingsSection, scan_card_height, scan_card_lines, scan_line_color,
         };
-        use riff_gui::ui::theme::Palette;
-        use riff_gui::ui::theme::geometry::settings::SCAN_CARD_H;
+        use riff_gui_theme::theme::Palette;
+        use riff_gui_theme::theme::geometry::settings::SCAN_CARD_H;
 
         // Pin the clock seam the pure-seam checks read: the scan card's
         // "Last full scan" stamp is measured against this fixed instant
@@ -6993,7 +6756,7 @@ mod tests {
             harness.run();
 
             harness
-                .get_by_label(riff_gui::ui::prompts::CLEAR_THUMBNAIL_CACHE_LABEL)
+                .get_by_label(riff_gui_components::prompts::CLEAR_THUMBNAIL_CACHE_LABEL)
                 .click();
             harness.run();
             assert!(
@@ -7349,8 +7112,8 @@ mod tests {
     /// when `boxy`) and report whether it painted the keyboard focus ring, so a
     /// test can prove the toggle and the checkbox share the focus treatment.
     fn bool_control_painted_ring(checkbox: bool, focused: bool) -> bool {
-        use riff_gui::ui::theme;
-        use riff_gui::ui::toggle_switch;
+        use riff_gui_components::toggle_switch;
+        use riff_gui_theme::theme;
         let palette = theme::Palette::dark();
         let id = egui::Id::new("bool_control");
         let ring = theme::focus_ring_stroke(&palette, true)
@@ -7848,56 +7611,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ghost_icon_buttons_show_tooltips_on_hover() {
-        use egui_kittest::kittest::Queryable;
-
-        let palette = theme::Palette::dark();
-        let mut cache = icons::IconCache::new();
-        let btn_id = egui::Id::new("tooltip_probe");
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(64.0, theme::geometry::sidebar::ROW_H))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                move |ui, opened: &mut Vec<bool>| {
-                    make_tooltips_instant(ui.ctx());
-                    let rect = egui::Rect::from_center_size(
-                        ui.max_rect().center(),
-                        egui::vec2(24.0, 24.0),
-                    );
-                    let _ = sidebar::ghost_icon_button(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        rect,
-                        btn_id,
-                        icons::Icon::Trash,
-                        "Delete playlist",
-                        true,
-                    );
-                    if ui
-                        .ctx()
-                        .read_response(btn_id)
-                        .is_some_and(|r| r.is_tooltip_open())
-                    {
-                        opened.push(true);
-                    }
-                },
-                Vec::new(),
-            );
-        harness.run();
-        assert!(harness.state().is_empty(), "no tooltip before hovering");
-
-        // Hover-reveal hides the glyph until hovered, but the hit target (and
-        // its accessibility label) is registered every frame.
-        harness.get_by_label("Delete playlist").hover();
-        harness.run();
-        assert!(
-            !harness.state().is_empty(),
-            "hovering a ghost icon button shows its tooltip"
-        );
-    }
-
-    #[test]
     fn test_large_library_fixture_culls_rows_to_the_visible_window() {
         use egui_kittest::kittest::Queryable;
         use std::cell::Cell;
@@ -8295,7 +8008,7 @@ mod background_service_ui_tests {
             &mut textures,
             &mut lru_keys,
             &ctx,
-            &riff_gui::ui::theme::Palette::dark(),
+            &riff_gui_theme::theme::Palette::dark(),
             "/music/none.mp3",
             COVER_HERO,
         );
@@ -9229,10 +8942,10 @@ mod titlebar_search_ui_tests {
     fn test_titlebar_search_field_edits_the_query_buffer() {
         use egui_kittest::kittest::Queryable;
 
-        let palette = riff_gui::ui::theme::Palette::dark();
-        let mut cache = riff_gui::ui::icons::IconCache::new();
+        let palette = riff_gui_theme::theme::Palette::dark();
+        let mut cache = riff_gui_theme::icons::IconCache::new();
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, riff_gui::ui::theme::TITLEBAR_H))
+            .with_size(egui::vec2(800.0, riff_gui_theme::theme::TITLEBAR_H))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, query| {
@@ -9242,7 +8955,7 @@ mod titlebar_search_ui_tests {
             );
         harness
             .ctx
-            .set_fonts(riff_gui::ui::fonts::font_definitions());
+            .set_fonts(riff_gui_theme::fonts::font_definitions());
         harness.run();
 
         // Typing into the field writes straight into the caller's query
@@ -9264,10 +8977,10 @@ mod titlebar_search_ui_tests {
         use riff_backend::app::state::PlaybackSession;
         use riff_gui::ui::app::handle_keyboard_shortcuts;
 
-        let palette = riff_gui::ui::theme::Palette::dark();
-        let mut cache = riff_gui::ui::icons::IconCache::new();
+        let palette = riff_gui_theme::theme::Palette::dark();
+        let mut cache = riff_gui_theme::icons::IconCache::new();
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, riff_gui::ui::theme::TITLEBAR_H))
+            .with_size(egui::vec2(800.0, riff_gui_theme::theme::TITLEBAR_H))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, state| {
@@ -9291,7 +9004,7 @@ mod titlebar_search_ui_tests {
             );
         harness
             .ctx
-            .set_fonts(riff_gui::ui::fonts::font_definitions());
+            .set_fonts(riff_gui_theme::fonts::font_definitions());
         harness.run();
 
         // Ctrl+K targets the titlebar search field.
@@ -9304,10 +9017,10 @@ mod titlebar_search_ui_tests {
     fn test_titlebar_search_dismisses_on_escape() {
         use egui_kittest::kittest::Queryable;
 
-        let palette = riff_gui::ui::theme::Palette::dark();
-        let mut cache = riff_gui::ui::icons::IconCache::new();
+        let palette = riff_gui_theme::theme::Palette::dark();
+        let mut cache = riff_gui_theme::icons::IconCache::new();
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, riff_gui::ui::theme::TITLEBAR_H))
+            .with_size(egui::vec2(800.0, riff_gui_theme::theme::TITLEBAR_H))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, query| {
@@ -9317,7 +9030,7 @@ mod titlebar_search_ui_tests {
             );
         harness
             .ctx
-            .set_fonts(riff_gui::ui::fonts::font_definitions());
+            .set_fonts(riff_gui_theme::fonts::font_definitions());
         harness.run();
 
         // Type a query so there is something to dismiss.
@@ -9359,8 +9072,8 @@ mod titlebar_search_ui_tests {
 mod browser_column_ui_tests {
     use super::*;
     use riff_gui::ui::browser::{BrowserAction, BrowserColumn, BrowserItem};
-    use riff_gui::ui::icons::IconCache;
-    use riff_gui::ui::theme::Palette;
+    use riff_gui_theme::icons::IconCache;
+    use riff_gui_theme::theme::Palette;
 
     /// Three fixed rows, the smallest column that proves rendering and
     /// selection reporting.
@@ -9567,14 +9280,14 @@ mod browser_column_ui_tests {
             .query_by_label("A genre name far too long to fit the column's text width (12 tracks)")
             .unwrap_or_else(|| panic!("the long row renders"));
         assert!(
-            long.rect().height() > riff_gui::ui::theme::geometry::browser::ROW_H,
+            long.rect().height() > riff_gui_theme::theme::geometry::browser::ROW_H,
             "a wrapped label grows its row past the classic slot: {:?}",
             long.rect()
         );
         let short = harness.get_by_label("Jazz (5 tracks)");
         assert_eq!(
             short.rect().height(),
-            riff_gui::ui::theme::geometry::browser::ROW_H,
+            riff_gui_theme::theme::geometry::browser::ROW_H,
             "a single-line row keeps the classic 48px slot"
         );
     }
@@ -10095,11 +9808,12 @@ mod browser_column_ui_tests {
     #[test]
     fn test_a_secondary_click_on_a_track_row_reports_its_key_with_the_menu() {
         use egui_kittest::kittest::Queryable;
-        use riff_backend::domain::PlaylistId;
         use riff_gui::ui::detail::{
             DetailColumn, DetailReport, TrackRow, show_detail_column_scrolled,
         };
-        use riff_gui::ui::menu::{TrackMenu, TrackMenuIntent, TrackMenuReport};
+        use riff_gui_components::menu::{
+            PlaylistKey, TrackKey, TrackMenu, TrackMenuIntent, TrackMenuReport,
+        };
         use std::time::Duration;
 
         let palette = Palette::dark();
@@ -10117,11 +9831,13 @@ mod browser_column_ui_tests {
                 now_playing: false,
             })
             .collect();
-        // The playlist targets the host resolved up front, and NO removal: a
-        // Track in the Tracks Column is in no Playlist. The menu is handed over
+        // The playlist targets the host resolved up front, spelled in the
+        // menu's own key vocabulary (`PlaylistKey`) — the host bridges its
+        // ids onto these — and NO removal: a Track in the Tracks Column is in
+        // no Playlist. The menu is handed over
         // as the same per-row factory the app hands over, reading the row's own
         // Favourite flag.
-        let playlists = [(PlaylistId::new("pl-1"), "Gym".to_string())];
+        let playlists = [(PlaylistKey("pl-1".to_string()), "Gym".to_string())];
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(560.0, 300.0))
             .with_pixels_per_point(1.0)
@@ -10164,7 +9880,7 @@ mod browser_column_ui_tests {
         assert_eq!(
             harness.state().first(),
             Some(&DetailReport::TrackMenu(TrackMenuReport {
-                key: "t3".to_string(),
+                key: TrackKey("t3".to_string()),
                 intents: Vec::new(),
             })),
             "opening the menu reports the RIGHT-CLICKED row's own key with no intent \
@@ -10199,7 +9915,7 @@ mod browser_column_ui_tests {
         assert_eq!(
             harness.state().last(),
             Some(&DetailReport::TrackMenu(TrackMenuReport {
-                key: "t3".to_string(),
+                key: TrackKey("t3".to_string()),
                 intents: vec![TrackMenuIntent::PlayNext],
             })),
             "choosing an item rides the same key, so the host can both select the \
@@ -10227,7 +9943,7 @@ mod browser_column_ui_tests {
     fn test_the_tracks_column_offers_each_row_its_own_favourite_wording() {
         use egui_kittest::kittest::Queryable;
         use riff_gui::ui::detail::{DetailColumn, TrackRow, show_detail_column_scrolled};
-        use riff_gui::ui::menu::TrackMenu;
+        use riff_gui_components::menu::TrackMenu;
 
         let palette = Palette::dark();
         let mut cache = IconCache::new();
@@ -10758,7 +10474,7 @@ mod browser_column_ui_tests {
         columns: usize,
         inspector: bool,
     ) -> Vec<(usize, egui::Rect)> {
-        use riff_gui::ui::stage::{StageSlot, show_elastic_stage};
+        use riff_gui_components::stage::{StageSlot, show_elastic_stage};
         use std::cell::RefCell;
         use std::rc::Rc;
 
@@ -10794,7 +10510,7 @@ mod browser_column_ui_tests {
     /// left-to-right edges are pinned by the `elastic_*` goldens.)
     #[test]
     fn test_elastic_stage_geometry_fits_with_stable_child_identities() {
-        let inspector_w = riff_gui::ui::theme::INSPECTOR_WIDTH;
+        let inspector_w = riff_gui_theme::theme::INSPECTOR_WIDTH;
 
         for available in [1000.0_f32, 520.0] {
             for (columns, inspector) in [(1usize, false), (3, false), (2, true), (4, true)] {
@@ -10872,7 +10588,7 @@ mod browser_column_ui_tests {
     #[test]
     fn test_settings_page_fills_the_stage_with_no_backdrop_margin() {
         use riff_gui::ui::settings::settings_page_rects;
-        use riff_gui::ui::theme::geometry::settings as geo;
+        use riff_gui_theme::theme::geometry::settings as geo;
 
         for stage in [1600.0_f32, 1280.0, 980.0, 760.0] {
             let available =
@@ -10916,7 +10632,7 @@ mod browser_column_ui_tests {
     #[test]
     fn test_settings_page_frame_pins_header_nav_and_footer() {
         use riff_gui::ui::settings::settings_page_rects;
-        use riff_gui::ui::theme::geometry::settings as geo;
+        use riff_gui_theme::theme::geometry::settings as geo;
 
         let available = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 840.0));
         let r = settings_page_rects(available);
@@ -11041,7 +10757,7 @@ mod browser_column_ui_tests {
         use riff_gui::ui::settings::{
             LibraryRow, SettingsContent, SettingsSection, show_settings_modal,
         };
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_theme::theme::Palette;
         use std::path::PathBuf;
 
         let content = SettingsContent {
@@ -11060,7 +10776,7 @@ mod browser_column_ui_tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, ()| {
-                    let mut cache = riff_gui::ui::icons::IconCache::new();
+                    let mut cache = riff_gui_theme::icons::IconCache::new();
                     show_settings_modal(
                         ui,
                         &mut cache,
@@ -11151,8 +10867,8 @@ mod browser_column_ui_tests {
     /// did before — the id is only here to carry the wash's tween, which is why
     /// no widget has to claim it.
     fn render_row_band(selected: bool, hovered: bool, focused: bool) -> image::RgbaImage {
-        use riff_gui::ui::row::paint_row_band;
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_components::row::paint_row_band;
+        use riff_gui_theme::theme::Palette;
         let palette = Palette::dark();
         let id = egui::Id::new("test_row_band");
         let mut harness = egui_kittest::Harness::builder()
@@ -11251,8 +10967,8 @@ mod browser_column_ui_tests {
     /// would stop at the last row actually rendered.
     #[test]
     fn test_idle_row_paints_the_row_plane_under_the_card() {
-        use riff_gui::ui::theme::Palette;
-        use riff_gui::ui::theme::geometry::browser::ROW_H;
+        use riff_gui_theme::theme::Palette;
+        use riff_gui_theme::theme::geometry::browser::ROW_H;
         let palette = Palette::dark();
         let (field, list) = render_idle_list_field();
 
@@ -11299,7 +11015,7 @@ mod browser_column_ui_tests {
     /// the states cannot drift between them.
     #[test]
     fn test_neutral_row_band_maps_state_to_tokens() {
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_theme::theme::Palette;
         let palette = Palette::dark();
 
         let selected = render_row_band(true, false, false);
@@ -11334,7 +11050,7 @@ mod browser_column_ui_tests {
             0
         );
 
-        let ring = riff_gui::ui::theme::focus_ring_stroke(&palette, true)
+        let ring = riff_gui_theme::theme::focus_ring_stroke(&palette, true)
             .expect("a focused row has a ring stroke")
             .color;
         let focused = render_row_band(false, false, true);
@@ -11383,7 +11099,7 @@ mod browser_column_ui_tests {
     /// interpolating RGB would be interpolating toward a fiction.
     #[test]
     fn test_row_band_hover_wash_is_a_pure_function_of_its_tween_value() {
-        use riff_gui::ui::theme::{Palette, row_band_fill};
+        use riff_gui_theme::theme::{Palette, row_band_fill};
 
         let palette = Palette::dark();
 
@@ -11481,8 +11197,8 @@ mod browser_column_ui_tests {
         id: egui::Id,
         reduce_motion: bool,
     ) -> egui_kittest::Harness<'static, bool> {
-        use riff_gui::ui::row::paint_row_band;
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_components::row::paint_row_band;
+        use riff_gui_theme::theme::Palette;
         let palette = Palette::dark();
         egui_kittest::Harness::builder()
             .with_size(egui::vec2(240.0, 80.0))
@@ -11559,7 +11275,7 @@ mod browser_column_ui_tests {
     /// duplicate.
     #[test]
     fn test_row_band_hover_wash_asks_for_frames_only_while_it_is_in_flight() {
-        use riff_gui::ui::theme::MOTION_HOVER;
+        use riff_gui_theme::theme::MOTION_HOVER;
 
         /// One step of the harness clock, chosen so the hover token spans
         /// several frames and the settle is observable rather than a single
@@ -11650,7 +11366,7 @@ mod browser_column_ui_tests {
                  asking again for a frame it has already been given."
             );
             assert!(
-                causes[0].contains("riff-gui/src/ui/row.rs"),
+                causes[0].contains("crates/riff-gui-components/src/row.rs"),
                 "pass {pass} asked for a frame from outside the row band: {causes:?}"
             );
         }
@@ -11712,8 +11428,8 @@ mod browser_column_ui_tests {
     /// whether the focus ring was painted and whether a disabled button took
     /// focus.
     fn render_icon_button(focused: bool, disabled: bool) -> image::RgbaImage {
-        use riff_gui::ui::button::{begin_icon_button, finish_icon_button};
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_components::button::{begin_icon_button, finish_icon_button};
+        use riff_gui_theme::theme::Palette;
         let palette = Palette::dark();
         let id = egui::Id::new("test_icon_button");
         let mut harness = egui_kittest::Harness::builder()
@@ -11743,9 +11459,9 @@ mod browser_column_ui_tests {
     /// separate icon buttons lacked.
     #[test]
     fn test_icon_button_shares_focus_ring_and_disables_focus() {
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_theme::theme::Palette;
         let palette = Palette::dark();
-        let ring = riff_gui::ui::theme::focus_ring_stroke(&palette, true)
+        let ring = riff_gui_theme::theme::focus_ring_stroke(&palette, true)
             .expect("a focused button has a ring stroke")
             .color;
 
@@ -11774,13 +11490,13 @@ mod browser_column_ui_tests {
     /// can see which tokens a variant paints and whether it took the focus
     /// ring.
     fn render_text_button(
-        variant: riff_gui::ui::button::Variant,
+        variant: riff_gui_components::button::Variant,
         focused: bool,
         disabled: bool,
     ) -> image::RgbaImage {
-        use riff_gui::ui::button::{TextButton, text_button};
-        use riff_gui::ui::icons::IconCache;
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_components::button::{TextButton, text_button};
+        use riff_gui_theme::icons::IconCache;
+        use riff_gui_theme::theme::Palette;
         let palette = Palette::dark();
         let id = egui::Id::new("test_text_button");
         let mut cache = IconCache::new();
@@ -11819,9 +11535,9 @@ mod browser_column_ui_tests {
     /// fixed by this helper so a test can sample the face and the plane around
     /// it without asking the harness where the button landed.
     fn render_primary_button() -> (image::RgbaImage, egui::Rect) {
-        use riff_gui::ui::button::{TextButton, Variant, text_button};
-        use riff_gui::ui::icons::IconCache;
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_components::button::{TextButton, Variant, text_button};
+        use riff_gui_theme::icons::IconCache;
+        use riff_gui_theme::theme::Palette;
         let rect = egui::Rect::from_min_size(egui::pos2(40.0, 34.0), egui::vec2(120.0, 36.0));
         let palette = Palette::dark();
         let mut cache = IconCache::new();
@@ -11893,7 +11609,7 @@ mod browser_column_ui_tests {
     /// back, would not pass.
     #[test]
     fn test_primary_button_face_is_a_vertical_brand_gradient() {
-        use riff_gui::ui::theme::{BRAND_GRADIENT_BOTTOM, BRAND_GRADIENT_TOP, RADIUS_MD};
+        use riff_gui_theme::theme::{BRAND_GRADIENT_BOTTOM, BRAND_GRADIENT_TOP, RADIUS_MD};
         let (frame, rect) = render_primary_button();
         // Inset by the corner radius so the rounded ends stay out of the sample.
         let face = egui::Rect::from_min_max(
@@ -11947,7 +11663,7 @@ mod browser_column_ui_tests {
     /// from a flat tinted plate.
     #[test]
     fn test_primary_button_sits_on_a_soft_accent_glow() {
-        use riff_gui::ui::theme::{GLOW_ALPHA, GLOW_SPREAD, Palette, glow};
+        use riff_gui_theme::theme::{GLOW_ALPHA, GLOW_SPREAD, Palette, glow};
         let palette = Palette::dark();
         let (frame, rect) = render_primary_button();
         let plane = palette.surface;
@@ -12015,7 +11731,7 @@ mod browser_column_ui_tests {
     /// spanned by the two gradient stops, so every point of the gradient counts
     /// and a color from any other part of the system does not.
     fn brand_ramp_pixels(frame: &image::RgbaImage) -> usize {
-        use riff_gui::ui::theme::{BRAND_GRADIENT_BOTTOM, BRAND_GRADIENT_TOP};
+        use riff_gui_theme::theme::{BRAND_GRADIENT_BOTTOM, BRAND_GRADIENT_TOP};
         let (width, height) = frame.dimensions();
         let (lo, hi) = (BRAND_GRADIENT_BOTTOM, BRAND_GRADIENT_TOP);
         (0..height)
@@ -12036,8 +11752,8 @@ mod browser_column_ui_tests {
     /// with the given stops, and return the frame.
     fn render_gradient_placeholder(top: egui::Color32, bottom: egui::Color32) -> image::RgbaImage {
         use riff_gui::ui::artwork::{Artwork, Fit, Placeholder, paint};
-        use riff_gui::ui::icons::IconCache;
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_theme::icons::IconCache;
+        use riff_gui_theme::theme::Palette;
         let _ = IconCache::new();
         let palette = Palette::dark();
         let rect = egui::Rect::from_min_size(egui::pos2(30.0, 30.0), egui::vec2(60.0, 40.0));
@@ -12054,7 +11770,7 @@ mod browser_column_ui_tests {
                         rect,
                         texture: None,
                         fit: Fit::Fill,
-                        tint: riff_gui::ui::theme::TEXTURE_TINT,
+                        tint: riff_gui_theme::theme::TEXTURE_TINT,
                         placeholder: Some(Placeholder::Gradient { top, bottom }),
                         border: None,
                     },
@@ -12075,8 +11791,8 @@ mod browser_column_ui_tests {
     /// different frames, and the supplied stops must be the ones on screen.
     #[test]
     fn test_gradient_placeholder_paints_the_stops_its_caller_supplied() {
-        use riff_gui::ui::theme::placeholder_gradient_stops;
-        let palette = riff_gui::ui::theme::Palette::dark();
+        use riff_gui_theme::theme::placeholder_gradient_stops;
+        let palette = riff_gui_theme::theme::Palette::dark();
 
         // The system pair the app ships: the two raised-surface rungs.
         let [sys_top, sys_bottom] = placeholder_gradient_stops(&palette);
@@ -12084,8 +11800,8 @@ mod browser_column_ui_tests {
 
         // A pair the module could not have chosen for itself.
         let other = render_gradient_placeholder(
-            riff_gui::ui::theme::BRAND_GRADIENT_TOP,
-            riff_gui::ui::theme::BRAND_GRADIENT_BOTTOM,
+            riff_gui_theme::theme::BRAND_GRADIENT_TOP,
+            riff_gui_theme::theme::BRAND_GRADIENT_BOTTOM,
         );
         let differing = system
             .as_raw()
@@ -12107,13 +11823,13 @@ mod browser_column_ui_tests {
         let top_row = sample(&other, 30 + 40 / 3);
         let bottom_row = sample(&other, 30 + 40 * 2 / 3);
         assert!(
-            color_distance(top_row, riff_gui::ui::theme::BRAND_GRADIENT_TOP)
-                < color_distance(top_row, riff_gui::ui::theme::BRAND_GRADIENT_BOTTOM),
+            color_distance(top_row, riff_gui_theme::theme::BRAND_GRADIENT_TOP)
+                < color_distance(top_row, riff_gui_theme::theme::BRAND_GRADIENT_BOTTOM),
             "the supplied top stop is the lighter end of what was painted: {top_row:?}"
         );
         assert!(
-            color_distance(bottom_row, riff_gui::ui::theme::BRAND_GRADIENT_BOTTOM)
-                < color_distance(bottom_row, riff_gui::ui::theme::BRAND_GRADIENT_TOP),
+            color_distance(bottom_row, riff_gui_theme::theme::BRAND_GRADIENT_BOTTOM)
+                < color_distance(bottom_row, riff_gui_theme::theme::BRAND_GRADIENT_TOP),
             "the supplied bottom stop is the deeper end of what was painted: {bottom_row:?}"
         );
     }
@@ -12127,12 +11843,12 @@ mod browser_column_ui_tests {
     fn test_high_contrast_inherits_every_surface_including_the_row_plane() {
         for (base, variant) in [
             (
-                riff_gui::ui::theme::Palette::dark(),
-                riff_gui::ui::theme::Palette::dark().high_contrast(),
+                riff_gui_theme::theme::Palette::dark(),
+                riff_gui_theme::theme::Palette::dark().high_contrast(),
             ),
             (
-                riff_gui::ui::theme::Palette::light(),
-                riff_gui::ui::theme::Palette::light().high_contrast(),
+                riff_gui_theme::theme::Palette::light(),
+                riff_gui_theme::theme::Palette::light().high_contrast(),
             ),
         ] {
             for field in [
@@ -12142,7 +11858,7 @@ mod browser_column_ui_tests {
                 "surface_2",
                 "surface_3",
             ] {
-                let value = |p: &riff_gui::ui::theme::Palette| match field {
+                let value = |p: &riff_gui_theme::theme::Palette| match field {
                     "background" => p.background,
                     "surface_row" => p.surface_row,
                     "surface" => p.surface,
@@ -12172,8 +11888,8 @@ mod browser_column_ui_tests {
     /// number to keep in step.
     #[test]
     fn test_accent_glow_strength_is_split_per_family_and_hc_inherits_it() {
-        use riff_gui::ui::theme::Palette;
-        use riff_gui::ui::theme::glow_alpha;
+        use riff_gui_theme::theme::Palette;
+        use riff_gui_theme::theme::glow_alpha;
         // Read through a Vec so the values are not const-folded at the call
         // site: the point of these assertions is the value, and a folded
         // comparison would be asserting the compiler's arithmetic back at it.
@@ -12218,9 +11934,9 @@ mod browser_column_ui_tests {
     /// observes the two states in one frame each without moving a pointer —
     /// the same technique the row-band test uses for its four states.
     fn render_accent_button(hovered: bool) -> (image::RgbaImage, egui::Rect) {
-        use riff_gui::ui::button::{Variant, paint_text_button};
-        use riff_gui::ui::icons::IconCache;
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_components::button::{Variant, paint_text_button};
+        use riff_gui_theme::icons::IconCache;
+        use riff_gui_theme::theme::Palette;
         let rect = egui::Rect::from_min_size(egui::pos2(40.0, 34.0), egui::vec2(120.0, 36.0));
         // The two wash roles keep their tween under the button's own widget id,
         // so the probe needs one. This helper renders the accent tier at rest
@@ -12267,8 +11983,8 @@ mod browser_column_ui_tests {
     /// face change would pass on the old code.
     #[test]
     fn test_accent_button_washes_toward_the_brand_hue_on_hover_only() {
-        use riff_gui::ui::button::Variant;
-        use riff_gui::ui::theme::{self, Palette, RADIUS_MD, accent_fill};
+        use riff_gui_components::button::Variant;
+        use riff_gui_theme::theme::{self, Palette, RADIUS_MD, accent_fill};
         let palette = Palette::dark();
 
         // Redness over blueness: the brand ramp is warm, so an accent wash
@@ -12342,7 +12058,7 @@ mod browser_column_ui_tests {
         // idle golden byte-identical.
         assert_eq!(
             accent_fill(&palette, false),
-            riff_gui::ui::theme::TRANSPARENT
+            riff_gui_theme::theme::TRANSPARENT
         );
         assert_ne!(Variant::Accent, Variant::Secondary);
     }
@@ -12355,10 +12071,10 @@ mod browser_column_ui_tests {
     /// Panel's hand-built buttons previously lacked.
     #[test]
     fn test_text_button_variants_share_focus_ring_and_disable() {
-        use riff_gui::ui::button::Variant;
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_components::button::Variant;
+        use riff_gui_theme::theme::Palette;
         let palette = Palette::dark();
-        let ring = riff_gui::ui::theme::focus_ring_stroke(&palette, true)
+        let ring = riff_gui_theme::theme::focus_ring_stroke(&palette, true)
             .expect("a focused button has a ring stroke")
             .color;
 
@@ -12406,152 +12122,13 @@ mod browser_column_ui_tests {
         );
     }
 
-    /// Render the shared text-field seam over an owned value buffer and return
-    /// the frame, so a test can see the focus ring the well paints.
-    fn run_text_field(focused: bool) -> image::RgbaImage {
-        use riff_gui::ui::icons::Icon;
-        use riff_gui::ui::text_field::{TextField, text_field};
-        use riff_gui::ui::theme::Palette;
-        let palette = Palette::dark();
-        let id = egui::Id::new("test_text_field");
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(240.0, 40.0))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, value| {
-                    let bg = ui.ctx().layer_painter(egui::LayerId::background());
-                    bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.background);
-                    if focused {
-                        ui.memory_mut(|m| m.request_focus(id));
-                    }
-                    let rect =
-                        egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(200.0, 24.0));
-                    text_field(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        value,
-                        &TextField {
-                            id,
-                            rect,
-                            hint: "Search or jump to…",
-                            leading_icon: Some(Icon::Search),
-                            clear_label: Some("Clear search"),
-                            dismiss_on_escape: true,
-                        },
-                    );
-                },
-                String::new(),
-            );
-        harness.run();
-        harness
-            .render()
-            .expect("the text field must render headlessly")
-    }
-
-    /// The shared text-field contract gives every surface the same well, clear
-    /// affordance and focus treatment: the clear button appears only while the
-    /// value is non-empty and empties it when clicked, and a focused field
-    /// paints the search ring while an idle one paints the hairline instead.
-    /// Titlebar search drives the exact same primitive end to end.
-    #[test]
-    fn test_text_field_shares_clear_affordance_and_focus_ring() {
-        use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::icons::Icon;
-        use riff_gui::ui::text_field::{TextField, text_field};
-        use riff_gui::ui::theme::Palette;
-        let palette = Palette::dark();
-        let id = egui::Id::new("tf_clear");
-
-        // A non-empty field exposes a clear affordance that empties the value.
-        let mut cache = IconCache::new();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(240.0, 40.0))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, value| {
-                    let rect =
-                        egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(200.0, 24.0));
-                    text_field(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        value,
-                        &TextField {
-                            id,
-                            rect,
-                            hint: "Search or jump to…",
-                            leading_icon: Some(Icon::Search),
-                            clear_label: Some("Clear search"),
-                            dismiss_on_escape: true,
-                        },
-                    );
-                },
-                "boards".to_string(),
-            );
-        harness.run();
-        harness.get_by_label("Clear search").click();
-        harness.run();
-        assert!(
-            harness.state().is_empty(),
-            "the clear affordance empties the value"
-        );
-
-        // An empty field offers no clear affordance.
-        let mut cache2 = IconCache::new();
-        let mut idle = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(240.0, 40.0))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                |ui, value| {
-                    let rect =
-                        egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(200.0, 24.0));
-                    text_field(
-                        ui,
-                        &mut cache2,
-                        &palette,
-                        value,
-                        &TextField {
-                            id,
-                            rect,
-                            hint: "Search or jump to…",
-                            leading_icon: Some(Icon::Search),
-                            clear_label: Some("Clear search"),
-                            dismiss_on_escape: true,
-                        },
-                    );
-                },
-                String::new(),
-            );
-        idle.run();
-        assert!(
-            idle.query_by_label("Clear search").is_none(),
-            "an empty field shows no clear affordance"
-        );
-
-        // Focus drives the well's ring, not a fixed stroke.
-        let ring_color = riff_gui::ui::sidebar::search_ring_stroke(&palette, true).color;
-        let focused_img = run_text_field(true);
-        assert!(
-            crate::test_utils::count_near(&focused_img, ring_color, 2) > 0,
-            "a focused text field paints the search ring"
-        );
-        let idle_img = run_text_field(false);
-        assert_eq!(
-            crate::test_utils::count_near(&idle_img, ring_color, 2),
-            0,
-            "an idle text field paints no focus ring"
-        );
-    }
-
     /// Render the shared linear-control seam and report whether it exposed an
     /// operable `Seek` slider node and how many brand-fill pixels it painted.
     fn render_linear(value: f32, interactive: bool) -> (bool, usize) {
         use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::linear::{LinearControl, linear_control};
-        use riff_gui::ui::theme::geometry::seek::TRACK_H;
-        let palette = riff_gui::ui::theme::Palette::dark();
+        use riff_gui_components::linear::{LinearControl, linear_control};
+        use riff_gui_theme::theme::geometry::seek::TRACK_H;
+        let palette = riff_gui_theme::theme::Palette::dark();
         let id = egui::Id::new("test_linear");
         let track = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(160.0, TRACK_H));
         let hit = track.expand2(egui::vec2(0.0, 12.0));
@@ -12630,8 +12207,8 @@ mod browser_column_ui_tests {
     #[test]
     fn test_empty_state_owner_composes_labelled_state_both_paths() {
         use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::empty_state::{empty_state, empty_state_in_rect};
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_components::empty_state::{empty_state, empty_state_in_rect};
+        use riff_gui_theme::theme::Palette;
         let palette = Palette::dark();
 
         // Flowing Ui path: title and hint are present as readable labels.
@@ -14418,7 +13995,7 @@ mod browser_column_ui_tests {
         use riff_gui::ui::chrome::{TitleBarContent, show_titlebar};
         use riff_gui::ui::detail::{DetailColumn, TrackRow};
         use riff_gui::ui::selection::SelectionPanel;
-        use riff_gui::ui::theme::TITLEBAR_H;
+        use riff_gui_theme::theme::TITLEBAR_H;
         use std::time::Duration;
 
         let palette = Palette::dark();
@@ -17599,7 +17176,7 @@ mod whole_frame_tests {
 
     #[test]
     fn test_asking_to_clear_the_library_opens_the_confirmation_and_writes_nothing() {
-        use riff_gui::ui::prompts::CLEAR_LIBRARY_CONFIRM_COPY;
+        use riff_gui_components::prompts::CLEAR_LIBRARY_CONFIRM_COPY;
 
         let (mut shell, _dir, _pid, store) = store_shell();
         shell.harness.step();
@@ -17635,17 +17212,17 @@ mod whole_frame_tests {
     /// outside the Settings panel's visible area.
     #[test]
     fn test_clear_library_confirmation_reports_confirm_and_cancel() {
-        use riff_gui::ui::prompts::{
+        use riff_gui_components::prompts::{
             CLEAR_LIBRARY_CONFIRM_COPY, PromptOutcome, destructive_confirm,
         };
 
-        let palette = riff_gui::ui::theme::Palette::dark();
+        let palette = riff_gui_theme::theme::Palette::dark();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(420.0, 88.0))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, outcomes: &mut Vec<PromptOutcome>| {
-                    let mut cache = riff_gui::ui::icons::IconCache::new();
+                    let mut cache = riff_gui_theme::icons::IconCache::new();
                     outcomes.extend(destructive_confirm(
                         ui,
                         &mut cache,
@@ -17684,17 +17261,17 @@ mod whole_frame_tests {
     /// action can set a flag rather than touch the disk.
     #[test]
     fn test_clear_thumbnail_cache_confirmation_reports_confirm_and_cancel() {
-        use riff_gui::ui::prompts::{
+        use riff_gui_components::prompts::{
             CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY, PromptOutcome, destructive_confirm,
         };
 
-        let palette = riff_gui::ui::theme::Palette::dark();
+        let palette = riff_gui_theme::theme::Palette::dark();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(420.0, 88.0))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, outcomes: &mut Vec<PromptOutcome>| {
-                    let mut cache = riff_gui::ui::icons::IconCache::new();
+                    let mut cache = riff_gui_theme::icons::IconCache::new();
                     outcomes.extend(destructive_confirm(
                         ui,
                         &mut cache,
@@ -17710,7 +17287,7 @@ mod whole_frame_tests {
 
         assert_ne!(
             CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY,
-            riff_gui::ui::prompts::CLEAR_LIBRARY_CONFIRM_COPY,
+            riff_gui_components::prompts::CLEAR_LIBRARY_CONFIRM_COPY,
             "the two wipes sit one gap apart in the same footer, so their copy must not read alike"
         );
 
@@ -17747,11 +17324,11 @@ mod whole_frame_tests {
     #[test]
     fn test_the_two_destructive_confirmations_keep_their_own_id_and_copy() {
         use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::prompts::{
+        use riff_gui_components::prompts::{
             CLEAR_LIBRARY_CONFIRM_COPY, CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY, PromptOutcome,
             destructive_confirm,
         };
-        use riff_gui::ui::theme::Palette;
+        use riff_gui_theme::theme::Palette;
 
         /// Which confirmation reported, and what it reported. The caller
         /// (`settings.rs`) owns the effect; this records the report alone.
@@ -17767,7 +17344,7 @@ mod whole_frame_tests {
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 |ui, reported: &mut Reported| {
-                    let mut cache = riff_gui::ui::icons::IconCache::new();
+                    let mut cache = riff_gui_theme::icons::IconCache::new();
                     let library = destructive_confirm(
                         ui,
                         &mut cache,
@@ -17853,7 +17430,7 @@ mod whole_frame_tests {
     #[test]
     fn test_clearing_the_thumbnail_cache_asks_first_with_its_own_copy() {
         use egui_kittest::kittest::Queryable;
-        use riff_gui::ui::prompts::{
+        use riff_gui_components::prompts::{
             CLEAR_LIBRARY_CONFIRM_COPY, CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY,
             CLEAR_THUMBNAIL_CACHE_LABEL,
         };
@@ -18231,16 +17808,14 @@ mod whole_frame_tests {
         let ctx = &shell.harness.ctx;
         // Normalized to `/` because `file!()` bakes in backslash separators on
         // Windows, where an un-normalized `ends_with` against a forward-slash
-        // module path never matches and the idle tick reads as absent.
+        // module path never matches and the idle tick reads as absent. The
+        // suffix names the frontend's own `app.rs` — the only `ui/app.rs` in
+        // the workspace — so a move of the file inside the frontend's tree
+        // cannot orphan the filter.
         let asked_by_riff = ctx
             .repaint_causes()
             .iter()
-            .filter(|cause| {
-                cause
-                    .file
-                    .replace('\\', "/")
-                    .ends_with("riff-gui/src/ui/app.rs")
-            })
+            .filter(|cause| cause.file.replace('\\', "/").ends_with("ui/app.rs"))
             .map(|cause| cause.line)
             .collect();
         (asked_by_riff, ctx.requested_repaint_last_pass())
@@ -18376,7 +17951,8 @@ mod whole_frame_tests {
 
 // --- Context menus: shared item conventions and typed intents (issue 15) -----
 //
-// The production Track and list menus render through `ui::menu` and report
+// The production Track and list menus render through the component crate's
+// `menu` and report
 // typed intents; every Transport, Playlist Store, selection, and Inline Tag
 // Editor effect happens afterwards, in the host's own mapping.
 //
@@ -18398,15 +17974,18 @@ mod context_menu_ui_tests {
     };
     use riff_backend::app::store::{LibraryMutationStore, PlaylistStore};
     use riff_backend::domain::{PlaylistId, TrackId};
+    use riff_gui::ui::app::track_menu::playlist_id_to_key;
     use riff_gui::ui::app::{
         CollectionMenuHost, InlineTagEditor, TrackMenuHost, TrackMenuSubject,
         apply_collection_menu, apply_list_menu_intent, entity_track_ids,
     };
     use riff_gui::ui::column::ColumnIdentity;
-    use riff_gui::ui::menu::{self, Item, ItemState, ListMenuIntent, TrackMenu, TrackMenuIntent};
     use riff_gui::ui::scroll_memory::DrillSlot;
     use riff_gui::ui::selection::DraftKind;
-    use riff_gui::ui::theme::Palette;
+    use riff_gui_components::menu::{
+        self, Item, ItemState, ListMenuIntent, PlaylistKey, TrackMenu, TrackMenuIntent,
+    };
+    use riff_gui_theme::theme::Palette;
 
     use crate::mocks::{
         FakeTagEdits, MockLibraryQueryStore, MockPlaylistStore, MockTransport, TransportIntent,
@@ -18500,8 +18079,7 @@ mod context_menu_ui_tests {
 
     #[test]
     fn test_track_menu_reports_one_typed_intent_per_action() {
-        let pid = PlaylistId::new("pl-1");
-        let options = [(pid.clone(), "Gym".to_string())];
+        let options = [(PlaylistKey("pl-1".to_string()), "Gym".to_string())];
         let props = TrackMenu {
             playable: true,
             editable: true,
@@ -18727,8 +18305,7 @@ mod context_menu_ui_tests {
     /// the claim: one row, and that row is the removal.
     #[test]
     fn test_unplayable_track_menu_keeps_only_the_playlist_actions() {
-        let pid = PlaylistId::new("pl-1");
-        let options = [(pid.clone(), "Gym".to_string())];
+        let options = [(PlaylistKey("pl-1".to_string()), "Gym".to_string())];
         let props = TrackMenu {
             playable: false,
             editable: false,
@@ -18798,7 +18375,7 @@ mod context_menu_ui_tests {
             (true, false),
             "the two fixtures really are the two different states the labels claim"
         );
-        let options = [(PlaylistId::new("pl-1"), "Gym".to_string())];
+        let options = [(PlaylistKey("pl-1".to_string()), "Gym".to_string())];
         let offered = options.clone();
         let rows = menu_rows(move |ui, palette| {
             let mut intents = Vec::new();
@@ -18988,7 +18565,7 @@ mod context_menu_ui_tests {
         // A row that is in no Playlist: the flat list, a search result, a Smart
         // Playlist's Tracks, a folder node's Tracks, AND a Track in the Tracks
         // Column all render this shape.
-        let no_playlists: [(PlaylistId, String); 0] = [];
+        let no_playlists: [(PlaylistKey, String); 0] = [];
         let in_no_playlist = menu_rows(move |ui, palette| {
             let mut intents = Vec::new();
             menu::track_menu(
@@ -19021,7 +18598,7 @@ mod context_menu_ui_tests {
         // A row that IS in a Playlist, which is the one extra row that host
         // adds, and it goes between the two groups for the same reason it always
         // did.
-        let with_playlist = [(PlaylistId::new("pl-1"), "Gym".to_string())];
+        let with_playlist = [(PlaylistKey("pl-1".to_string()), "Gym".to_string())];
         assert_eq!(
             menu_rows(move |ui, palette| {
                 let mut intents = Vec::new();
@@ -19063,7 +18640,7 @@ mod context_menu_ui_tests {
         // claim, and a comparison fails if either surface's wording moves
         // independently of the other's — which a restatement of the expected
         // list would not.
-        let targets = [(PlaylistId::new("pl-1"), "Gym".to_string())];
+        let targets = [(PlaylistKey("pl-1".to_string()), "Gym".to_string())];
         let in_the_tracks_column = menu_rows(move |ui, palette| {
             let mut intents = Vec::new();
             menu::track_menu(
@@ -19093,7 +18670,7 @@ mod context_menu_ui_tests {
     /// menu's wording moves independently of the other.
     #[test]
     fn test_the_collection_menu_shares_a_three_item_prefix_with_the_track_menu() {
-        let track_options: [(PlaylistId, String); 0] = [];
+        let track_options: [(PlaylistKey, String); 0] = [];
         let track_rows = menu_rows(move |ui, palette| {
             let mut intents = Vec::new();
             menu::track_menu(
@@ -19159,7 +18736,7 @@ mod context_menu_ui_tests {
     #[test]
     fn test_a_secondary_click_on_an_entity_row_reports_its_key_with_the_menu() {
         let palette = Palette::dark();
-        let mut cache = riff_gui::ui::icons::IconCache::new();
+        let mut cache = riff_gui_theme::icons::IconCache::new();
         let items = [riff_gui::ui::browser::BrowserItem {
             key: "Boards of Canada\u{1f}Geogaddi".to_string(),
             label: "Geogaddi".to_string(),
@@ -19236,7 +18813,7 @@ mod context_menu_ui_tests {
     #[test]
     fn test_a_left_click_on_an_entity_row_still_reports_only_a_selection() {
         let palette = Palette::dark();
-        let mut cache = riff_gui::ui::icons::IconCache::new();
+        let mut cache = riff_gui_theme::icons::IconCache::new();
         let items = [riff_gui::ui::browser::BrowserItem {
             key: "jazz".to_string(),
             label: "Jazz".to_string(),
@@ -19866,44 +19443,20 @@ mod context_menu_ui_tests {
         );
     }
 
-    /// The variants [`ItemState`] declares, in declaration order, read from the
-    /// enum's own source.
-    ///
-    /// A sweep, because the claim is about the SHAPE of a type and nothing in the
-    /// app constrains that shape: no code matches exhaustively on `ItemState`, so
-    /// a `Checked` variant would compile, would paint, and would pass every test
-    /// that exercises the three states that exist. The spec's "no checked or
-    /// ticked state" is a promise about the enum, so it is read off the enum.
-    fn item_state_variants() -> Vec<String> {
-        let source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join("crates")
-                .join("riff-gui")
-                .join("src")
-                .join("ui")
-                .join("menu.rs"),
-        )
-        .expect("menu.rs must be readable");
-        let body = source
-            .split_once("pub enum ItemState {")
-            .expect("ItemState is declared in menu.rs")
-            .1
-            .split_once("\n}")
-            .expect("ItemState's body is closed by a brace on its own line")
-            .0;
-        body.lines()
-            .map(str::trim)
-            .filter(|line| {
-                // A variant is a bare, documented identifier: no attributes, no
-                // braces, no type annotation.
-                !line.is_empty()
-                    && !line.starts_with("//")
-                    && !line.starts_with('#')
-                    && !line.contains(['{', '}', ':', ';', '='])
-            })
-            .map(|variant| variant.trim_end_matches(',').to_owned())
-            .collect()
+    /// The name of the [`ItemState`] variant `state` carries, asserted by the
+    /// compiler: this match is total and has no wildcard arm, so a variant
+    /// added to the enum — a `Checked`, say — breaks this test's build instead
+    /// of passing silently. Nothing else matches exhaustively on
+    /// [`ItemState`], so a fourth variant would otherwise compile, paint, and
+    /// pass every test that exercises the three states that exist. The spec's
+    /// "no checked or ticked state" is a promise about the enum's shape, and a
+    /// total match is the cheapest thing that cannot be satisfied by accident.
+    fn name_of(state: ItemState) -> &'static str {
+        match state {
+            ItemState::Normal => "Normal",
+            ItemState::Destructive => "Destructive",
+            ItemState::Disabled => "Disabled",
+        }
     }
 
     /// Enabled, disabled, and destructive rows come from one owner: a disabled
@@ -19912,15 +19465,19 @@ mod context_menu_ui_tests {
     /// The vocabulary count below is the second half of this test and the reason
     /// the Favourite item needed no new state: a menu condition is said with a
     /// word or with ink, and a tick would have needed a FOURTH variant to live in.
-    /// It is counted from the enum's own source because the count is not
-    /// observable any other way from outside — nothing matches exhaustively on
-    /// [`ItemState`], so a fourth variant would compile, paint, and pass every
-    /// other test in this file.
+    /// It is carried by the total match in [`name_of`] — the compiler, not a
+    /// source read — because the count is not observable any other way from
+    /// outside.
     #[test]
     fn test_menu_item_states_share_one_treatment() {
         assert_eq!(
-            item_state_variants(),
-            vec!["Normal", "Destructive", "Disabled"],
+            [
+                ItemState::Normal,
+                ItemState::Destructive,
+                ItemState::Disabled
+            ]
+            .map(name_of),
+            ["Normal", "Destructive", "Disabled"],
             "the menu's item state is still exactly these three — a Favourite is announced \
              by its LABEL, so nothing marked was needed and no Checked arrived"
         );
@@ -19981,8 +19538,8 @@ mod context_menu_ui_tests {
         let first = PlaylistId::new("pl-1");
         let second = PlaylistId::new("pl-2");
         let options = vec![
-            (first.clone(), "Gym".to_string()),
-            (second.clone(), "Focus".to_string()),
+            (playlist_id_to_key(&first), "Gym".to_string()),
+            (playlist_id_to_key(&second), "Focus".to_string()),
         ];
 
         let mut harness = egui_kittest::Harness::builder()
@@ -20003,11 +19560,11 @@ mod context_menu_ui_tests {
         harness.run();
         assert_eq!(
             *harness.state(),
-            vec![TrackMenuIntent::AddToPlaylist(second.clone())],
+            vec![TrackMenuIntent::AddToPlaylist(playlist_id_to_key(&second))],
             "the chosen playlist rides back on the intent"
         );
 
-        let empty: Vec<(PlaylistId, String)> = Vec::new();
+        let empty: Vec<(PlaylistKey, String)> = Vec::new();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(220.0, 64.0))
             .with_pixels_per_point(1.0)
@@ -20120,7 +19677,10 @@ mod context_menu_ui_tests {
                 &mut editor,
                 &mut selected,
             );
-            host.item_chosen(subject, TrackMenuIntent::AddToPlaylist(pid.clone()));
+            host.item_chosen(
+                subject,
+                TrackMenuIntent::AddToPlaylist(playlist_id_to_key(&pid)),
+            );
         }
         assert_eq!(
             entries(&store),
@@ -20500,7 +20060,7 @@ mod context_menu_ui_tests {
     #[test]
     fn test_a_row_renders_as_a_real_button() {
         let palette = Palette::dark();
-        let options: [(PlaylistId, String); 0] = [];
+        let options: [(PlaylistKey, String); 0] = [];
         let props = TrackMenu {
             playable: true,
             editable: true,
@@ -20548,7 +20108,7 @@ mod library_path_ui_tests {
     use riff_backend::app::state::{LibrarySession, LibraryStatus};
     use riff_gui::ui::app::register_library_path;
     use riff_gui::ui::settings::{PathInput, PathInputAction, path_input};
-    use riff_gui::ui::theme::Palette;
+    use riff_gui_theme::theme::Palette;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
@@ -20727,841 +20287,16 @@ mod library_path_ui_tests {
     }
 }
 
-// --- The component boundary, as a standing gate (issue 18) --------------------
+// --- The component boundary, as a standing gate --------------------------------
 //
-// The two-tier layer is only real if the rules stay enforced. These sweeps are
-// the enforcement: what a primitive may not own, that every component module is
-// inside the token sweeps' view, and that the historical frontend paths the
-// extraction promised to keep on resolving actually still resolve.
-
-/// Press feedback, wired (issue 05).
-///
-/// `IconButton::pressed` was computed on every frame by `begin_icon_button` and
-/// read by no painter: the app had hover feedback and none at all for a press.
-/// These probes drive a real pointer press through egui_kittest and hold two
-/// things at once — the state the widget's own `Response` reports, and the
-/// pixels the painter chose from it. "A press reports a state distinct from
-/// hover" is only a claim if the two can be told apart, so every probe keeps
-/// the idle, hover and press frames side by side.
-///
-/// **The press is simulated, not injected.** `Harness::drag_at` queues an
-/// `egui::Event::PointerButton { pressed: true }` and `Harness::step` runs
-/// exactly one frame with it. `Harness::run` cannot be used for the press: it
-/// steps until nothing is repainting, and `RawInput::take` resets the pointer
-/// between frames, so by the second frame the press has already been released.
-/// egui's `is_pointer_button_down_on` reads `Interaction::potential_click_id`,
-/// which the press sets from the *previous* frame's widget rects — which is why
-/// every probe settles with `run()` before the pointer arrives.
-/// The accent and destructive button washes fade in (issue 07).
-///
-/// Two seams, in the order the motion spec's coverage table names them. The
-/// **pure function** is the primary one: each wash is a function of a tween
-/// value alone, so the fade is assertable at its endpoints and its midpoint
-/// with no frame, no renderer and no pixel. The **frame loop** is the
-/// supporting one: it pins the property the pure function cannot see — that
-/// only these two roles allocate a tween at all, so a hovered list of fifty
-/// buttons that are not accent-tier costs nothing.
-///
-/// **The pointer has to be re-sent every frame.** `Harness::step` takes
-/// `RawInput::take` per frame, so a pointer that arrived on one frame is gone
-/// on the next; a probe that hovers once and then steps is measuring an
-/// unhovered button. `Harness::run` is worse for this: it steps until nothing
-/// repaints, which is exactly what a settled tween is asking for. Every probe
-/// below therefore sends `hover_at` and steps, once per sampled pass.
-#[cfg(test)]
-mod button_wash_tests {
-    use riff_gui::ui::button::Variant;
-    use riff_gui::ui::theme::{self, MOTION_HOVER, Palette};
-
-    /// One step of the harness clock, small enough that the hover token spans
-    /// several frames — the same choice the row band's frame-loop test makes,
-    /// and for the same reason: at the default 0.25 s step a 0.10 s tween
-    /// saturates inside one frame and there is nothing left to observe.
-    const STEP_DT: f32 = 0.02;
-    /// Passes sampled per probe, several times the longest a motion token
-    /// could publish.
-    const SAMPLED_PASSES: usize = 20;
-    /// Settled passes the sample must end with, so "stops asking" is asserted
-    /// over a run and not over one frame.
-    const SETTLED_PASSES: usize = 4;
-
-    /// A `Color32`'s channels as a fraction of its own alpha — the
-    /// *un-premultiplied* RGB, which is the colour a translucent wash is
-    /// nominally "of". `Color32` stores premultiplied bytes, so a wash that
-    /// keeps its hue reads the same here at every coverage; one that had lerped
-    /// its RGB toward a backdrop would drift. The row-band test carries the
-    /// same helper privately; this is that helper, for the same reason.
-    fn nominal_rgb(color: egui::Color32) -> [f32; 3] {
-        let a = f32::from(color.a()).max(1.0) / 255.0;
-        [
-            f32::from(color.r()) / a,
-            f32::from(color.g()) / a,
-            f32::from(color.b()) / a,
-        ]
-    }
-
-    /// The source files that asked for a repaint on the pass that has just
-    /// finished, or an empty vector if nothing did.
-    ///
-    /// egui swaps the accumulated causes into a "previous pass" slot at the
-    /// *start* of a pass (`egui-0.35.0/src/context.rs:101-105`), so a reading
-    /// taken right after `step` describes the pass that just ran, and no
-    /// alignment arithmetic is needed. `Context::request_repaint` is
-    /// `#[track_caller]`, so a cause names riff's call site — the
-    /// `animate_bool_with_time` line in `button.rs` — rather than egui's own.
-    ///
-    /// The separators are normalized to `/`: `file!()` on Windows bakes in
-    /// backslash paths, so a `contains` against a forward-slash module path
-    /// never matches there and every ask reads as silence.
-    fn asked_by(harness: &egui_kittest::Harness<'_, ()>) -> Vec<String> {
-        harness
-            .ctx
-            .repaint_causes()
-            .iter()
-            .map(|cause| format!("{}:{}", cause.file.replace('\\', "/"), cause.line))
-            .collect()
-    }
-
-    /// The causes attributed to riff's button module, which is where a wash's
-    /// tween read lives. Filtered by file because egui's own housekeeping
-    /// (a pointer move, a focus change) also asks for frames, and the claim
-    /// under test is about the ones a *riff tween* issues.
-    fn asked_by_buttons(harness: &egui_kittest::Harness<'_, ()>) -> Vec<String> {
-        asked_by(harness)
-            .into_iter()
-            .filter(|cause| cause.contains("riff-gui/src/ui/button.rs"))
-            .collect()
-    }
-
-    /// One text button of `variant` over the card plane, with a clock small
-    /// enough to see a hover token fade. No tooltip: a tooltip schedules its own
-    /// frame, and the probe is counting the tween's.
-    fn wash_probe(
-        variant: Variant,
-        label: &'static str,
-    ) -> (egui_kittest::Harness<'static, ()>, egui::Rect) {
-        let palette = Palette::dark();
-        let rect = egui::Rect::from_min_size(egui::pos2(40.0, 22.0), egui::vec2(120.0, 36.0));
-        let id = egui::Id::new(label);
-        let mut cache = riff_gui::ui::icons::IconCache::new();
-        let harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(200.0, 80.0))
-            .with_pixels_per_point(1.0)
-            .with_step_dt(STEP_DT)
-            .build_ui_state(
-                move |ui, _: &mut ()| {
-                    let bg = ui.ctx().layer_painter(egui::LayerId::background());
-                    bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.surface);
-                    let _ = riff_gui::ui::button::text_button(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        false,
-                        &riff_gui::ui::button::TextButton {
-                            id,
-                            rect,
-                            label,
-                            a11y: label,
-                            tooltip: None,
-                            icon: None,
-                            small: false,
-                            variant,
-                            enabled: true,
-                        },
-                    );
-                },
-                (),
-            );
-        (harness, rect)
-    }
-
-    /// The last frame's pixels, with the card plane the probe painted behind
-    /// the button so a comparison reads the button and not the window.
-    fn render_probe(harness: &mut egui_kittest::Harness<'_, ()>) -> image::RgbaImage {
-        harness
-            .render()
-            .expect("the wash probe must render headlessly")
-    }
-
-    /// Walk the pointer onto the button and hold it there for
-    /// [`SAMPLED_PASSES`] passes, returning the first hovered frame, the last
-    /// one, and the repaint causes attributed to `button.rs` on **each** pass.
-    ///
-    /// The causes come back per pass and un-collapsed, because the *count* on a
-    /// pass is the claim: a tween that asked twice would show up as a second
-    /// cause on every in-flight pass while leaving the number of asking passes
-    /// exactly where it was, so a probe that reduced each pass to a bool could
-    /// not tell a tween from a tween plus a redundant request.
-    ///
-    /// The first frame is read *after* the first hover step, and the last after
-    /// the final one, so both are frames the pointer was on the button for.
-    fn hover_frames(
-        harness: &mut egui_kittest::Harness<'_, ()>,
-        rect: egui::Rect,
-    ) -> (image::RgbaImage, image::RgbaImage, Vec<Vec<String>>) {
-        // Settling first is what registers the tween at 0.0, and it has to come
-        // before the pointer arrives: egui's `animate_bool` returns its target
-        // outright on the *first* call for an id it has never seen, so a probe
-        // that hovered before the button had ever painted at rest would measure
-        // a snap and call it a fade.
-        harness.run();
-        let mut causes_per_pass = Vec::with_capacity(SAMPLED_PASSES);
-        let mut first = None;
-        let mut last = None;
-        for pass in 0..SAMPLED_PASSES {
-            harness.hover_at(rect.center());
-            harness.step();
-            causes_per_pass.push(asked_by_buttons(harness));
-            let frame = render_probe(harness);
-            if pass == 0 {
-                first = Some(frame.clone());
-            }
-            last = Some(frame);
-        }
-        (
-            first.expect("one hovered frame"),
-            last.expect("one settled frame"),
-            causes_per_pass,
-        )
-    }
-
-    /// Issue 07: each button wash is a pure function of its tween value,
-    /// asserted at both endpoints and at the midpoint — the seam the motion
-    /// spec's coverage table names for this change ("endpoints match the two
-    /// tokens; the midpoint is strictly between them").
-    ///
-    /// **The endpoints are the contract that lets this change exist at all.**
-    /// `t = 0` must be fully transparent and `t = 1` must be *exactly* the
-    /// wash the instant swap painted, which is asserted against the existing
-    /// `accent_fill` / `destructive_fill` helpers rather than against a
-    /// literal: the tweened form is defined in terms of them, so this is the
-    /// pin that the definition has not quietly changed what "fully hovered"
-    /// means. Every golden in the suite captures an unhovered or a settled
-    /// button, and neither may move.
-    ///
-    /// The midpoint is asserted three ways, because they are three claims. It
-    /// is *strictly between* the endpoints; its *coverage* is strictly between
-    /// nothing and the full wash; and its *hue* is the wash's own, because a
-    /// wash is laid over a backdrop the painter never sees — scaling coverage
-    /// is the whole operation, and an RGB lerp would be interpolating toward a
-    /// fiction. That last one is what catches the premultiplied-alpha trap:
-    /// `egui::Color32` holds premultiplied bytes, so compositing a faded wash
-    /// through `blend_over` multiplies the coverage by itself and lands on a
-    /// colour darker than *both* endpoints — a colour belonging to neither
-    /// state, which is the exact failure the store's rules exist to prevent.
-    /// Assert one wash's endpoints, midpoint and hue, given its
-    /// `t`-parameterised form and the settled colour it must land on. Shared by
-    /// both roles because they are the same gesture in two hues, and running
-    /// the identical assertions over both is what shows that.
-    fn assert_wash(
-        role: &str,
-        at: impl Fn(f32) -> egui::Color32,
-        settled: egui::Color32,
-        nominal_of: egui::Color32,
-    ) {
-        let idle = at(0.0);
-        assert_eq!(
-            idle,
-            theme::TRANSPARENT,
-            "{role}: t=0 must be fully transparent, so an unhovered button paints what it painted \
-             before the wash tweened"
-        );
-        assert_eq!(
-            at(1.0),
-            settled,
-            "{role}: t=1 must be exactly the wash the instant swap painted, so a settled hover is \
-             byte-identical to the behaviour this replaces"
-        );
-
-        let mid = at(0.5);
-        assert!(
-            mid != idle && mid != settled,
-            "{role}: the midpoint must be strictly between the two endpoints, not equal to \
-             either: {mid:?}"
-        );
-        assert!(
-            mid.a() > 0 && mid.a() < settled.a(),
-            "{role}: the midpoint's coverage must be strictly between nothing and the full wash, \
-             which is what 'half a wash' means: alpha {} of the wash's {}",
-            mid.a(),
-            settled.a()
-        );
-        // The hue is the wash's own at every coverage — the anti-crossfade
-        // property, asserted in the value rather than in a frame, and against
-        // the *token* the wash is nominally "of" rather than against the settled
-        // wash, so the claim is that the fade changes coverage and nothing else.
-        //
-        // **The bound is half a byte step at the midpoint's own alpha, not a
-        // round number.** These targets are *translucent* — a 10% wash — so the
-        // stored bytes are premultiplied by 13/255 at the midpoint and one byte
-        // step there is worth 255/13 = 19.6 nominal units; rounding the same
-        // quantity two ways puts the brand's green at 137.3 and 127.5 around a
-        // true 130. A +/-1 tolerance (which is what an *opaque* target like the
-        // row band's `row_hover` affords) would fail on quantisation alone, and
-        // loosening it to a whole byte step would be toothless. Half a step is
-        // exactly what the rounding guarantees, and a crossfade — which is what
-        // compositing through `blend_over` would produce — misses it by an
-        // order of magnitude, because it also lands opaque.
-        let half_step = 127.5 / f32::from(mid.a());
-        let (nominal, target) = (nominal_rgb(mid), nominal_rgb(nominal_of));
-        for (channel, (got, want)) in nominal.iter().zip(target.iter()).enumerate() {
-            assert!(
-                (got - want).abs() <= half_step,
-                "{role}: channel {channel} of the midpoint drifted from the wash's own hue ({got} \
-                 vs {want}, within {half_step} of half a byte step at alpha {}): a wash scales \
-                 coverage over a backdrop the painter cannot see, and never lerps RGB toward a \
-                 guess at it",
-                mid.a()
-            );
-        }
-    }
-
-    /// Issue 07: each button wash is a pure function of its tween value,
-    /// asserted at both endpoints and at the midpoint — the seam the motion
-    /// spec's coverage table names for this change ("endpoints match the two
-    /// tokens; the midpoint is strictly between them").
-    ///
-    /// **The endpoints are the contract that lets this change exist at all.**
-    /// They are asserted against the existing `accent_fill` /
-    /// `destructive_fill` helpers rather than against a literal, because the
-    /// tweened forms are *defined* in terms of them: this is the pin that the
-    /// definition has not quietly changed what "fully hovered" means. Every
-    /// golden in the suite captures an unhovered or a settled button, and
-    /// neither may move.
-    ///
-    /// The midpoint carries two further claims. Its *coverage* is strictly
-    /// between nothing and the full wash — that is what "half a wash" means.
-    /// And its *hue* is the wash's own, because a wash is laid over a backdrop
-    /// the painter never sees: scaling coverage is the whole operation, and an
-    /// RGB lerp would be interpolating toward a fiction. That last one is what
-    /// catches the premultiplied-alpha trap — `egui::Color32` holds
-    /// premultiplied bytes, so compositing a faded wash through `blend_over`
-    /// multiplies the coverage by itself and lands on a colour darker than
-    /// *both* endpoints, which is the exact failure the store's rules exist to
-    /// prevent.
-    ///
-    /// **Red, proven by revert:** before these two functions existed the suite
-    /// did not compile — `error[E0425]: cannot find function 'accent_wash' in
-    /// module 'theme'`, with egui pointing at `destructive_fill` as the
-    /// similarly-named function — which is the honest red for a test whose
-    /// subject is a function. It earned its keep immediately after: the first
-    /// implementation, `wash_at(accent_fill(palette, true), t)`, failed the
-    /// endpoint assertion with `left: #18_0D_03_FF` against
-    /// `right: #18_0D_03_1A` — a 10% wash landing **opaque**, because
-    /// `wash_at` builds straight-alpha and was handed a colour that was already
-    /// premultiplied. Fixing the *production* code (feed it the un-premultiplied
-    /// token and a coverage) is what the endpoint assertion is for.
-    #[test]
-    fn test_the_accent_and_destructive_washes_are_pure_functions_of_their_tween_values() {
-        let palette = Palette::dark();
-        assert_wash(
-            "accent",
-            |t| theme::accent_wash(&palette, t),
-            theme::accent_fill(&palette, true),
-            palette.brand_primary,
-        );
-        assert_wash(
-            "destructive",
-            |t| theme::destructive_wash(&palette, t),
-            theme::destructive_fill(&palette, true),
-            palette.error,
-        );
-    }
-
-    /// Issue 07: only the two wash roles tween, and they ask for frames only
-    /// while they are in flight.
-    ///
-    /// This is the property the pure function cannot see, and it is the one
-    /// that keeps the feature affordable: a tween allocates an animation id and
-    /// asks the frame loop for a pass, so a variant that tweens for tidiness
-    /// multiplies that cost by every button on screen. So the probe pins both
-    /// halves from the outside:
-    ///
-    /// - a hovered **Secondary** — a role with a real hover treatment (a
-    ///   `surface_3` face and the hover stroke) that must nonetheless be
-    ///   **instant** — asks for no frame from `button.rs` on any pass, and its
-    ///   first hovered frame is already **pixel-identical to its own settled
-    ///   frame**. That is the byte-identity claim, stated against the only
-    ///   comparison that can mean it: a hovered button legitimately repaints,
-    ///   so "identical to unhovered" would be a claim about nothing. Identical
-    ///   to *settled* is the claim that no tween was allocated.
-    /// - a hovered **Accent** asks for a frame across the whole tween and then
-    ///   stops, and its first hovered frame differs from its settled one —
-    ///   which is what a fade looks like from the outside.
-    ///
-    /// The asking run's length is the claim that the wash runs on the *hover*
-    /// token rather than the published global default: at this step
-    /// `MOTION_HOVER` (0.10 s) is five passes and `MOTION_DEFAULT` (0.18 s) is
-    /// nine, so a wash that had picked up `Style::animation_time` instead of
-    /// passing the token explicitly is caught here.
-    /// **Red, proven by revert, twice.** Before the tween was wired the Accent
-    /// probe reported `asked for a frame on 0 of 20` with
-    /// `asked=[false, false, ... x20]` — the instant swap's signature, which is
-    /// also what an *un*-tweened implementation looks like from the outside.
-    /// Reverting only the wiring in `paint_text_button` (leaving both
-    /// `theme::accent_wash` and `theme::destructive_wash` in place) reproduces
-    /// that identical red while the pure-function test above stays green. That
-    /// split is the point of having two tests: the value and the clock are
-    /// separate claims, and only one of them can be wrong at a time.
-    ///
-    /// **The per-pass count, proven by duplication.** The asking-pass assertions
-    /// above cannot see a redundant `request_repaint`, because asking twice does
-    /// not make a pass any more *asked-for* than asking once. So the redundant
-    /// request was added to `wash_tween` in the form rule 3 warns about —
-    /// `if 0.0 < t && t < 1.0 { ui.ctx().request_repaint(); }`, which is how the
-    /// Folders tree writes its own — and this failed with:
-    ///
-    /// ```text
-    /// pass 1 made ["crates/riff-gui/src/ui/button.rs:166",
-    ///               "crates/riff-gui/src/ui/button.rs:170"] — the accent wash must cost
-    /// exactly one repaint request per in-flight frame …
-    ///   left: 2
-    ///  right: 1
-    /// ```
-    ///
-    /// Two things are worth keeping from that output. The two causes name
-    /// **two different lines of `button.rs`** — `:166` the
-    /// `animate_bool_with_time` and `:170` the redundant call — so
-    /// `#[track_caller]` attributes per call site and a duplicate is legible in
-    /// the failure message rather than merely counted. And the row band's
-    /// frame-loop test **passed with the duplicate in place** (measured, not
-    /// assumed): it drives a different animation id in a different module, so
-    /// nothing outside this module's own frame loop can stand in for it. That is
-    /// why the store's rule-3 claim needed pinning *here* and not just there.
-    #[test]
-    fn test_only_the_accent_and_destructive_washes_tween() {
-        let hover_passes = (MOTION_HOVER / STEP_DT).ceil() as usize;
-
-        // --- Secondary: a real hover treatment, deliberately instant. --------
-        let (mut harness, rect) = wash_probe(Variant::Secondary, "Rescan now");
-        harness.run();
-        assert!(
-            asked_by_buttons(&harness).is_empty(),
-            "an idle button must ask the frame loop for nothing"
-        );
-        let (first_secondary, settled_secondary, causes_secondary) =
-            hover_frames(&mut harness, rect);
-        assert!(
-            causes_secondary.iter().all(Vec::is_empty),
-            "a hovered secondary asked for frames {causes_secondary:?} — only the accent and \
-             destructive washes are on the allow-list, and a per-variant fill is not one of them"
-        );
-        assert_eq!(
-            first_secondary, settled_secondary,
-            "a hovered secondary's first frame must be pixel-identical to its settled one: the \
-             hover swap is instant, so there is no tween sample to find part-applied"
-        );
-
-        // --- Accent: the same gesture, and this one fades. --------------------
-        let (mut harness, rect) = wash_probe(Variant::Accent, "Rescan now");
-        harness.run();
-        let (first_accent, settled_accent, causes_accent) = hover_frames(&mut harness, rect);
-
-        let asked_accent: Vec<bool> = causes_accent
-            .iter()
-            .map(|causes| !causes.is_empty())
-            .collect();
-        let asking = asked_accent.iter().filter(|asked| **asked).count();
-        let longest_run = asked_accent
-            .iter()
-            .fold((0usize, 0usize), |(best, current), asked| {
-                let current = if *asked { current + 1 } else { 0 };
-                (best.max(current), current)
-            })
-            .0;
-        assert_eq!(
-            asking, longest_run,
-            "frames must be asked for across the whole tween, not in bursts: {asked_accent:?}"
-        );
-        assert!(
-            (2..=hover_passes).contains(&asking),
-            "the accent wash must tween for roughly MOTION_HOVER ({MOTION_HOVER}s ≈ \
-             {hover_passes} passes at {STEP_DT}s) and asked for a frame on {asking} of \
-             {SAMPLED_PASSES}: an instant swap never asks, a tween that never settles asks \
-             forever. asked={asked_accent:?}"
-        );
-        assert!(
-            SAMPLED_PASSES - asking >= SETTLED_PASSES,
-            "the sample holds fewer than {SETTLED_PASSES} settled passes, so 'a settled hover \
-             asks for nothing' is unproven: {asked_accent:?}"
-        );
-        assert_ne!(
-            first_accent, settled_accent,
-            "the accent wash must actually fade: its first hovered frame is identical to its \
-             settled one, so nothing moved between them"
-        );
-
-        // **Exactly one request per in-flight pass, and none once settled.** This
-        // is the half the asking-pass count above cannot see, and it is what
-        // makes the store's rule-3 claim true for *this* surface: the wash relies
-        // on egui's bound for its frames, so a redundant
-        // `ui.ctx().request_repaint()` beside the tween read would be riff
-        // saying what egui has already said, once per frame of every fade in the
-        // app. It leaves the number of asking passes untouched, so only the
-        // per-pass count catches it.
-        //
-        // `Context::request_repaint` is `#[track_caller]`, so a `RepaintCause`
-        // names riff's *call site* — the `animate_bool_with_time` line in
-        // `button.rs` — and not egui's own `request_repaint`. Attribution by file
-        // therefore cannot by itself tell "egui's wrapper asked on riff's
-        // behalf" from "riff asked": both are `button.rs`. The count can.
-        for (pass, causes) in causes_accent.iter().enumerate() {
-            match asked_accent[pass] {
-                true => assert_eq!(
-                    causes.len(),
-                    1,
-                    "pass {pass} made {causes:?} — the accent wash must cost exactly one repaint \
-                     request per in-flight frame, the one egui's animate_bool_with_time already \
-                     issues while the value is strictly between 0 and 1. A second cause is riff \
-                     asking again for a frame it has already been given."
-                ),
-                false => assert!(
-                    causes.is_empty(),
-                    "pass {pass} asked for a frame after the wash had settled: {causes:?} — a \
-                     settled tween asks for nothing, which is the bound at the far end"
-                ),
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod press_feedback_tests {
-    use riff_gui::ui::button::Variant;
-    use riff_gui::ui::{icons, sidebar, theme};
-
-    /// What one driven frame reported for the probed button, read back out of
-    /// the button's own `Response` — egui's verdict, not the painter's.
-    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-    struct PressProbe {
-        /// The pointer is over the button.
-        hovered: bool,
-        /// The pointer is held down on the button.
-        pressed: bool,
-    }
-
-    /// One driven frame: its pixels, and the state the probed button reported
-    /// while it was being painted.
-    struct PressFrame {
-        image: image::RgbaImage,
-        state: PressProbe,
-    }
-
-    /// Count frame pixels within a hair of `color` inside `rect` — the idiom
-    /// for asking *which fill a painter chose* over a specific patch.
-    fn press_count_color(
-        image: &image::RgbaImage,
-        color: egui::Color32,
-        rect: egui::Rect,
-    ) -> usize {
-        crate::test_utils::count_near_in(image, color, rect, 2)
-    }
-
-    /// The framework's own active fill, as the theme store publishes it: read
-    /// straight off the style rather than off a `palette.*` field, because the
-    /// claim under test is that riff's buttons and egui's stock widgets agree
-    /// about what a press looks like — which is only true if both read the one
-    /// style.
-    fn active_fill() -> egui::Color32 {
-        theme::style_from(&theme::Palette::dark(), false)
-            .visuals
-            .widgets
-            .active
-            .bg_fill
-    }
-
-    /// Stand the app's style up inside the probe. Only the widget-state block is
-    /// installed, because `style_from` also names riff's vendored font families
-    /// and nothing binds those in a headless context — a harness limitation, and
-    /// nothing about it touches the fill a button reads.
-    fn use_riff_widget_style(ctx: &egui::Context) {
-        let active = active_fill();
-        ctx.style_mut_of(egui::Theme::Dark, |style| {
-            style.visuals.widgets.active.bg_fill = active;
-        });
-    }
-
-    /// Read the probe out of the widget egui registered under `id` this frame.
-    fn press_probe_of(ctx: &egui::Context, id: egui::Id) -> PressProbe {
-        ctx.read_response(id)
-            .map_or_else(PressProbe::default, |response| PressProbe {
-                hovered: response.hovered(),
-                pressed: response.is_pointer_button_down_on(),
-            })
-    }
-
-    /// The band of a button's face a pixel count is read from: an interior
-    /// strip along the left edge, clear of the centred glyph, of the rounded
-    /// corners, and of the mouse cursor `Harness::render` synthesises at the
-    /// pointer. A colour counted here is the fill the painter chose and nothing
-    /// else — the cursor is white on black and its antialiased edge walks the
-    /// neutral surface ramp, which is exactly what an "this fill must be
-    /// absent" assertion would otherwise trip over.
-    fn press_face_patch(rect: egui::Rect) -> egui::Rect {
-        egui::Rect::from_min_max(
-            egui::pos2(rect.min.x + 8.0, rect.min.y + 8.0),
-            egui::pos2(rect.min.x + 14.0, rect.max.y - 8.0),
-        )
-    }
-
-    /// The strip a hover *stroke* is read from: the button's top edge, where an
-    /// inside stroke actually lands, held clear of the corner arcs (a stroke
-    /// follows the rounded outline, so a count over the corners would measure
-    /// the radius rather than the stroke).
-    fn press_stroke_band(rect: egui::Rect) -> egui::Rect {
-        egui::Rect::from_min_max(
-            egui::pos2(rect.min.x + 14.0, rect.min.y),
-            egui::pos2(rect.max.x - 14.0, rect.min.y + 2.0),
-        )
-    }
-
-    /// The last frame's pixels. The probe paints the card plane behind the
-    /// button first, so every count below reads a fill and never the window.
-    fn render_probe(harness: &mut egui_kittest::Harness<'_, PressProbe>) -> image::RgbaImage {
-        harness
-            .render()
-            .expect("the press probe must render headlessly")
-    }
-
-    /// Settle the probe, walk the pointer onto it for one hover frame, then hold
-    /// the button down for one press frame, returning both frames with the state
-    /// each reported.
-    fn drive_press(
-        harness: &mut egui_kittest::Harness<'_, PressProbe>,
-        rect: egui::Rect,
-    ) -> (PressFrame, PressFrame) {
-        harness.run();
-        harness.hover_at(rect.center());
-        harness.step();
-        let hovered = PressFrame {
-            image: render_probe(harness),
-            state: *harness.state(),
-        };
-        // The press gets a frame of its own and no further pointer event, so
-        // the frame is exactly "over the button, button held down".
-        harness.drag_at(rect.center());
-        harness.step();
-        let pressed = PressFrame {
-            image: render_probe(harness),
-            state: *harness.state(),
-        };
-        (hovered, pressed)
-    }
-
-    /// One text button of `variant` over the card plane, recording the state it
-    /// reports. Driven through `text_button` — the real entry point — so a
-    /// probe cannot pass by a painter production does not take.
-    fn press_text_button(
-        variant: Variant,
-        label: &'static str,
-    ) -> (egui_kittest::Harness<'static, PressProbe>, egui::Rect) {
-        let palette = theme::Palette::dark();
-        let rect = egui::Rect::from_min_size(egui::pos2(40.0, 22.0), egui::vec2(120.0, 36.0));
-        let id = egui::Id::new(label);
-        let mut cache = icons::IconCache::new();
-        let harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(200.0, 80.0))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                move |ui, probe: &mut PressProbe| {
-                    let bg = ui.ctx().layer_painter(egui::LayerId::background());
-                    bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.surface);
-                    let _ = riff_gui::ui::button::text_button(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        false,
-                        &riff_gui::ui::button::TextButton {
-                            id,
-                            rect,
-                            label,
-                            a11y: label,
-                            tooltip: None,
-                            icon: None,
-                            small: false,
-                            variant,
-                            enabled: true,
-                        },
-                    );
-                    *probe = press_probe_of(ui.ctx(), id);
-                },
-                PressProbe::default(),
-            );
-        use_riff_widget_style(&harness.ctx);
-        (harness, rect)
-    }
-
-    /// The same, for the hand-painted ghost icon button — one of the painters
-    /// that holds an `IconButton` and read only its `hovered` field.
-    fn press_icon_button() -> (egui_kittest::Harness<'static, PressProbe>, egui::Rect) {
-        let palette = theme::Palette::dark();
-        let rect = egui::Rect::from_min_size(egui::pos2(84.0, 24.0), egui::vec2(32.0, 32.0));
-        let id = egui::Id::new("press_icon_probe");
-        let mut cache = icons::IconCache::new();
-        let harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(200.0, 80.0))
-            .with_pixels_per_point(1.0)
-            .build_ui_state(
-                move |ui, probe: &mut PressProbe| {
-                    let bg = ui.ctx().layer_painter(egui::LayerId::background());
-                    bg.rect_filled(ui.ctx().content_rect(), 0.0, palette.surface);
-                    let _ = sidebar::ghost_icon_button(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        rect,
-                        id,
-                        icons::Icon::Trash,
-                        "Delete playlist",
-                        true,
-                    );
-                    *probe = press_probe_of(ui.ctx(), id);
-                },
-                PressProbe::default(),
-            );
-        use_riff_widget_style(&harness.ctx);
-        (harness, rect)
-    }
-
-    /// A ghost text button's press is a state of its own. Idle is transparent,
-    /// hover is the hover fill, press is the active fill — three different
-    /// faces, so a press that still looked like a hover would be visible on the
-    /// face alone and no stroke has to be read to tell it.
-    ///
-    /// The pressed face is also *complete* on that one frame. Press is instant
-    /// by decision (`theme::MOTION_*` is a hover-family allow-list that press
-    /// deliberately sits outside), so the first pressed frame is already the
-    /// whole active fill rather than a tween's first sample on its way there.
-    ///
-    /// **Red, proven by revert:** with `pressed` unthreaded from `text_button`
-    /// back out of `paint_text_button`, the press frame paints the hover fill
-    /// and this fails with `left: 0, right: 120` on the active-fill count — the
-    /// state assertion above it still passes, because egui was reporting the
-    /// press all along and no painter was listening.
-    #[test]
-    fn test_a_pressed_text_button_paints_a_state_distinct_from_hover() {
-        let palette = theme::Palette::dark();
-        // The pressed fill is egui's own active fill, which the theme store
-        // publishes from the palette's interact styles — so riff's buttons and
-        // egui's stock widgets cannot disagree about what a press looks like.
-        assert_eq!(
-            active_fill(),
-            palette.surface_3,
-            "the framework's active fill is the palette's own pressed surface"
-        );
-
-        let (mut harness, rect) = press_text_button(Variant::Ghost, "Delete all");
-        let patch = press_face_patch(rect);
-        let area = (patch.width() * patch.height()) as usize;
-        let (hovered, pressed) = drive_press(&mut harness, rect);
-
-        assert_eq!(
-            hovered.state,
-            PressProbe {
-                hovered: true,
-                pressed: false
-            },
-            "a pointer over the button is a hover and nothing more"
-        );
-        assert_eq!(
-            pressed.state,
-            PressProbe {
-                hovered: true,
-                pressed: true
-            },
-            "a held button reports a press — the state no painter used to read"
-        );
-        let hover_hovered = press_count_color(&hovered.image, palette.surface_2, patch);
-        let active_hovered = press_count_color(&hovered.image, palette.surface_3, patch);
-        let active_pressed = press_count_color(&pressed.image, palette.surface_3, patch);
-        let hover_pressed = press_count_color(&pressed.image, palette.surface_2, patch);
-        assert_eq!(
-            (hover_hovered, active_hovered),
-            (area, 0),
-            "a hovered ghost button wears the hover fill, whole"
-        );
-        assert_eq!(
-            active_pressed, area,
-            "the first pressed frame is already the whole active fill — press is \
-             instant, so there is no tween sample to find part-filled"
-        );
-        assert_eq!(
-            hover_pressed, 0,
-            "press REPLACES the hover fill rather than compositing with it"
-        );
-    }
-
-    /// A secondary button's face cannot carry the difference — its hover fill
-    /// *is* the active fill — so what tells a press from a hover there is the
-    /// hover stroke dropping away. A held button must never look both hovered
-    /// and pressed.
-    ///
-    /// **Red, proven by revert:** with `pressed` unthreaded, a held button is
-    /// told only that it is hovered, so the stroke stays and this fails with
-    /// `left: 92, right: 0` — 92 px of hover stroke on a button that is down.
-    #[test]
-    fn test_a_press_drops_the_text_button_hover_stroke() {
-        let palette = theme::Palette::dark();
-
-        let (mut harness, rect) = press_text_button(Variant::Secondary, "Rescan now");
-        let band = press_stroke_band(rect);
-        let (hovered, pressed) = drive_press(&mut harness, rect);
-
-        assert!(pressed.state.pressed, "the press is reported here too");
-        let stroke_hovered = press_count_color(&hovered.image, palette.focus_ring, band);
-        let stroke_pressed = press_count_color(&pressed.image, palette.focus_ring, band);
-        assert!(
-            stroke_hovered > 0,
-            "a hovered secondary button carries the hover stroke, else the next \
-             assertion would pass on a frame that painted none"
-        );
-        assert_eq!(
-            stroke_pressed, 0,
-            "a press drops the hover stroke: a held button must never look both \
-             hovered and pressed"
-        );
-    }
-
-    /// The other half of the write-only field: the painters that already hold an
-    /// `IconButton` now read `pressed` too. A ghost icon button has no hover
-    /// fill to swap out — hovering only reveals the glyph — so its press is the
-    /// first frame that paints a face at all, which is why the hover frame
-    /// counts zero.
-    ///
-    /// **Red, proven by revert:** with the `button.pressed` arm removed from
-    /// `sidebar::ghost_icon_button`, this fails on a zero pixel count — "found
-    /// 0 px of the active fill #28_25_21_FF in the face", because nothing paints
-    /// a fill behind the glyph while the button is held down.
-    #[test]
-    fn test_a_pressed_ghost_icon_button_paints_the_active_fill() {
-        let active = active_fill();
-
-        let (mut harness, rect) = press_icon_button();
-        let patch = press_face_patch(rect);
-        let (hovered, pressed) = drive_press(&mut harness, rect);
-
-        assert_eq!(
-            pressed.state,
-            PressProbe {
-                hovered: true,
-                pressed: true
-            },
-            "the icon button reports the press it used to compute and discard"
-        );
-        let fill_hovered = press_count_color(&hovered.image, active, patch);
-        let fill_pressed = press_count_color(&pressed.image, active, patch);
-        assert_eq!(
-            fill_hovered, 0,
-            "hover alone paints no fill on a ghost icon button"
-        );
-        assert!(
-            fill_pressed > 0,
-            "a held ghost icon button paints the framework's active fill, found \
-             {fill_pressed} px of the active fill {active:?} in the face"
-        );
-    }
-}
-
+// The widgetry split made the boundary a manifest edge: a crate that cannot
+// name a business crate cannot reach into one, and the compiler carries that
+// half. What the compiler cannot see stays swept here — a primitive must never
+// reach a *shared* application handle, because an `Arc<Mutex<_>>` needs no
+// business crate. The application-ownership sweep that used to stand beside it
+// is deleted: the manifest covers every line it could, and more, and the token
+// sweeps now live beside the crates they judge. The historical frontend paths
+// the extraction kept alive are pinned in the same module.
 #[cfg(test)]
 mod component_boundary_tests {
     use eframe::egui;
@@ -21570,110 +20305,69 @@ mod component_boundary_tests {
     use riff_backend::domain::TrackId;
     use std::path::{Path, PathBuf};
 
-    /// Every module the component-layer tickets added or reshaped: primitives
-    /// and the neutral presentation owners. Feature composites (`app`,
-    /// `browser_pane`, `sidebar`, `settings`, `detail`, `playerbar`,
-    /// `now_playing`, `chrome`, `selection`) are deliberately absent — they are
-    /// allowed to hold application state, and the sweeps below would be wrong
-    /// to demand otherwise.
-    const PRIMITIVES: [&str; 12] = [
-        "artwork.rs",
-        "button.rs",
-        "empty_state.rs",
-        "feedback.rs",
-        "icons.rs",
-        "linear.rs",
-        "menu.rs",
-        "prompts.rs",
-        "row.rs",
-        "stage.rs",
-        "text_field.rs",
-        "toggle_switch.rs",
-    ];
+    /// `(path, line)` for every code line of the two widgetry crates the sweep
+    /// judges, comments dropped — prose is allowed to name the handles a
+    /// primitive must not hold.
+    ///
+    /// The scan roots are the two crate roots, not per-module paths: a module
+    /// that moves inside either crate cannot orphan the guard, and a module
+    /// that lands in either crate is covered the moment it arrives. (The
+    /// feedback board stays in `riff-gui`, outside this sweep — accepted, and
+    /// final: it holds no shared handle.)
+    fn widgetry_source_lines() -> Vec<(PathBuf, String)> {
+        /// The widgetry crate roots the sweep scans, relative to the workspace.
+        const WIDGETRY_CRATES: [&str; 2] = ["riff-gui-theme", "riff-gui-components"];
 
-    fn ui_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("crates")
-            .join("riff-gui")
-            .join("src")
-            .join("ui")
-    }
-
-    /// `(path, line)` for every code line of one primitive module, comments
-    /// dropped — prose is allowed to name the owners a primitive must not hold.
-    fn primitive_lines(name: &str) -> Vec<(PathBuf, String)> {
-        let path = ui_dir().join(name);
-        let source = std::fs::read_to_string(&path)
-            .unwrap_or_else(|_| panic!("{name} is part of the component layer"));
-        source
-            .lines()
-            .map(str::trim_start)
-            .filter(|line| !line.starts_with("//"))
-            .map(|line| (path.clone(), line.to_owned()))
-            .collect()
-    }
-
-    /// A primitive receives presentation values and returns responses or typed
-    /// intents. It must not reach for the application: not `RiffApp`, the two
-    /// sessions, the read model, a port, a service front end, a generation, or a
-    /// native integration. Those are the host's, and the sweep is what stops a
-    /// future "just this one call" from putting them back.
-    #[test]
-    fn test_no_primitive_names_an_application_owner() {
-        const FORBIDDEN: [&str; 17] = [
-            "RiffApp",
-            "SessionViews",
-            "LibrarySession",
-            "PlaybackSession",
-            "dyn Transport",
-            "Transport::",
-            "PlaylistStore",
-            "SettingsStore",
-            "LibraryMutationStore",
-            "Scans",
-            "Covers",
-            "TagEdits",
-            "WatcherManager",
-            "rfd::",
-            // A primitive depends on the theme and its own props — never on the
-            // composite that hosts it. (Both arrows used to point the wrong
-            // way: the placeholder's own module <-> ui::app, ui::stage ->
-            // ui::app.)
-            "ui::app::",
-            "super::app::",
-            "crate::app::",
-        ];
-        let mut offenders = Vec::new();
-        for name in PRIMITIVES {
-            for (path, line) in primitive_lines(name) {
-                if FORBIDDEN.iter().any(|owner| line.contains(owner)) {
-                    offenders.push(format!("{}: {line}", path.display()));
+        fn scan_dir(dir: &Path, lines: &mut Vec<(PathBuf, String)>) {
+            let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+                .expect("the widgetry crate's src directory must be readable")
+                .map(|entry| entry.expect("directory entries must resolve").path())
+                .collect();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    scan_dir(&path, lines);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let source =
+                        std::fs::read_to_string(&path).expect("source files must be UTF-8");
+                    for line in source.lines() {
+                        let trimmed = line.trim_start();
+                        if trimmed.starts_with("//") {
+                            continue;
+                        }
+                        lines.push((path.clone(), trimmed.to_owned()));
+                    }
                 }
             }
         }
-        assert!(
-            offenders.is_empty(),
-            "the component layer must stay free of application ownership:\n{}",
-            offenders.join("\n")
-        );
+
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut lines = Vec::new();
+        for crate_name in WIDGETRY_CRATES {
+            scan_dir(
+                &workspace.join("crates").join(crate_name).join("src"),
+                &mut lines,
+            );
+        }
+        lines
     }
 
-    /// A primitive may hold its own presentation state — the feedback board
-    /// folds notices into slots, an icon cache holds textures — but it never
-    /// reaches a *shared* handle: no `Arc<Mutex<…>>` session, no lock-recovery,
-    /// no clone of an application handle. The two sessions, the event inbox, and
-    /// the watcher live behind `Arc<Mutex<…>>` in the host, and that is where
-    /// they stay.
+    /// A primitive receives presentation values and returns responses or typed
+    /// intents. It may hold its own presentation state — an icon cache holds
+    /// textures — but it never reaches a *shared* handle: no `Arc<Mutex<…>>`
+    /// session, no lock-recovery, no clone of an application handle. The two
+    /// sessions, the event inbox, and the watcher live behind `Arc<Mutex<…>>`
+    /// in the host, and that is where they stay. A widget holding a shared
+    /// lock needs no business crate, so the manifest alone cannot catch this:
+    /// the sweep is what stops a future "just this one call" from putting the
+    /// handle back.
     #[test]
     fn test_no_primitive_reaches_a_shared_application_handle() {
         const SHARED_HANDLES: [&str; 4] = ["Arc<Mutex", "Arc<", "lock_or_recover", "RiffApp"];
         let mut offenders = Vec::new();
-        for name in PRIMITIVES {
-            for (path, line) in primitive_lines(name) {
-                if SHARED_HANDLES.iter().any(|handle| line.contains(handle)) {
-                    offenders.push(format!("{}: {line}", path.display()));
-                }
+        for (path, line) in widgetry_source_lines() {
+            if SHARED_HANDLES.iter().any(|handle| line.contains(handle)) {
+                offenders.push(format!("{}: {line}", path.display()));
             }
         }
         assert!(
@@ -21683,51 +20377,19 @@ mod component_boundary_tests {
         );
     }
 
-    /// The token sweeps (ADR 0004) walk `src/ui` recursively, so a new component
-    /// module is covered the moment it lands — but only if it is really there.
-    /// Asserted against the same directory the sweeps scan, so a module renamed
-    /// out of the list is caught rather than silently unscanned.
-    #[test]
-    fn test_every_component_module_is_inside_the_token_sweeps() {
-        fn scan(dir: &Path, found: &mut Vec<String>) {
-            for entry in std::fs::read_dir(dir).expect("src/ui must be readable") {
-                let path = entry.expect("a readable entry").path();
-                if path.is_dir() {
-                    scan(&path, found);
-                } else if path.extension().is_some_and(|ext| ext == "rs") {
-                    found.push(
-                        path.file_name()
-                            .and_then(|name| name.to_str())
-                            .expect("a utf-8 file name")
-                            .to_owned(),
-                    );
-                }
-            }
-        }
-
-        // The sweeps exclude exactly one file — `theme.rs`, the token store
-        // itself — so any module that lives under `src/ui` is judged by them.
-        let mut found = Vec::new();
-        scan(&ui_dir(), &mut found);
-        let missing: Vec<&str> = PRIMITIVES
-            .iter()
-            .copied()
-            .filter(|name| !found.iter().any(|file| file == name))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "component modules outside the swept tree would escape the token \
-             sweeps (ADR 0004): {missing:?}"
-        );
-    }
     /// Story 40: the extraction is an internal ownership change, not an
     /// application-wide migration. Every historical frontend path feature code
     /// and the suite were already writing has to keep resolving — these are the
     /// spellings the tickets promised to keep alive through re-exports, named
-    /// here so a cleanup that deletes one is a test failure, not a quiet break.
+    /// here so a cleanup that deletes one is a test failure, not a quiet
+    /// break. The paths whose subjects moved into the widgetry crates
+    /// (`ui::theme`, `ui::menu`, the component modules) are gone on purpose:
+    /// their not resolving is the boundary working.
     #[test]
     fn test_historical_frontend_paths_still_resolve() {
-        // Moved out of `ui::app` in ticket 13; still callable from it.
+        // The cover cache-key surface kept its historical `ui::app::` paths
+        // (issue 13's move inside the frontend), and the suite still drives
+        // them from `app_tests`.
         let _boxes = [
             riff_gui::ui::app::COVER_THUMB,
             riff_gui::ui::app::COVER_CARD,
@@ -21741,237 +20403,23 @@ mod component_boundary_tests {
         // The artwork placeholder's owner (its historical alias module is gone).
         let _tile = riff_gui::ui::artwork::placeholder_cache_key;
 
-        // Moved out of `ui::browser` (ticket 12) and `ui::now_playing` (ticket 05).
-        let _empty: fn(&mut egui::Ui, &riff_gui::ui::theme::Palette, &str, &str) =
+        // Kept as documented re-exports so the explorer's call sites and the
+        // historical `browser::empty_state` / `now_playing::` paths resolve;
+        // the palette type now names the crate it moved to.
+        let _empty: fn(&mut egui::Ui, &riff_gui_theme::theme::Palette, &str, &str) =
             riff_gui::ui::browser::empty_state;
         let _entries = riff_gui::ui::now_playing::up_next_entries(&[], 5);
         let _entry: Option<riff_gui::ui::now_playing::UpNextEntry> = None;
 
-        // The host-adapter paths the suite drives menus and prompts through.
+        // The host-adapter paths the suite drives menus and prompts through —
+        // the intent type now names the component crate it moved to.
         let _intent: fn(
-            riff_gui::ui::menu::ListMenuIntent,
+            riff_gui_components::menu::ListMenuIntent,
             &[TrackId],
             &dyn Transport,
             &mut PlaybackSession,
         ) = riff_gui::ui::app::apply_list_menu_intent;
         let _duration: fn(std::time::Duration) -> String = riff_gui::ui::app::format_duration;
         let _expand: fn(&str) -> std::path::PathBuf = riff_gui::ui::settings::expand_tilde;
-    }
-}
-
-/// Seek-bar affordance (issue 08): the hover thumb, the dragged-track
-/// thickening, and the geometry tokens that own both.
-///
-/// The spec's coverage table is explicit that this change is appearance-only and
-/// that no hover is simulated, so nothing here drives a pointer onto a control.
-/// What these tests pin instead is everything the hover is *built from*, which is
-/// the part that can rot with no pixel ever changing:
-///
-/// - the dimensions are tokens in the seek surface's own store, ordered so the
-///   grabbed track is thicker than the idle one and the thumb caps it;
-/// - at rest a seek bar paints no thumb and its track is the idle thickness —
-///   and the *same* counter, on a frame that differs only in which of the
-///   control's two thumb slots the diameter comes from, does find a thumb on a
-///   control that wears one unconditionally, so the first assertion cannot pass
-///   on a frame that renders nothing at all;
-/// - the thickening is a pure function of the caller's rect and the drag state,
-///   asserted directly, with no frame and no pointer involved.
-///
-/// That last one is why the derivation is a `pub fn` rather than an expression
-/// inside `paint`: dragging must change the track's thickness and *only* its
-/// thickness, or the bar shifts under the pointer at the moment the user can
-/// least afford to see it move.
-mod seek_affordance_tests {
-    use riff_gui::ui::linear::{LinearControl, active_track, linear_control};
-    use riff_gui::ui::theme::Palette;
-    use riff_gui::ui::theme::geometry::now_playing::SEEK_H;
-    use riff_gui::ui::theme::geometry::playerbar::VOLUME_THUMB;
-    use riff_gui::ui::theme::geometry::seek::{THUMB_D, TRACK_H, TRACK_H_ACTIVE};
-    use std::collections::BTreeSet;
-
-    /// How many distinct pixel rows carry `color` anywhere in the frame — the
-    /// painted *height* of a band, read straight off the pixels rather than off
-    /// the caller's own rect. A row count is used instead of a pixel count
-    /// because the band's width is not what these tests claim anything about.
-    fn rows_carrying(image: &image::RgbaImage, color: egui::Color32) -> usize {
-        image
-            .enumerate_pixels()
-            .filter(|(_, _, p)| crate::test_utils::near(p, color, 2))
-            .map(|(_, y, _)| y)
-            .collect::<BTreeSet<_>>()
-            .len()
-    }
-
-    /// Render one seek-bar-shaped linear control **at rest** and hand back the
-    /// frame. No pointer event is ever fed to the harness, so egui has no
-    /// `latest_pos` at all: nothing is hovered, nothing is dragged, and — the
-    /// reason this seam is usable at all — `Harness::render` paints no cursor
-    /// triangle either (it only does so when a pointer is in the window).
-    ///
-    /// The two flags select which thumb the control wears: a seek bar asks for
-    /// the hover-driven one and the volume slider brings its own, so holding
-    /// everything else fixed leaves exactly one thing varying between the pair of
-    /// frames the resting test compares.
-    fn render_at_rest(hover_thumb: bool, always_thumb: bool) -> image::RgbaImage {
-        let palette = Palette::dark();
-        let track = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(160.0, TRACK_H));
-        let hit = track.expand2(egui::vec2(0.0, 12.0));
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(200.0, 48.0))
-            .with_pixels_per_point(1.0)
-            .build_ui(move |ui| {
-                linear_control(
-                    ui,
-                    &palette,
-                    &LinearControl {
-                        id: egui::Id::new("test_seek_rest"),
-                        track,
-                        hit,
-                        value: 0.5,
-                        thumb: always_thumb.then_some(VOLUME_THUMB),
-                        hover_thumb,
-                        interactive: true,
-                        label: "Seek",
-                    },
-                );
-            });
-        harness.run();
-        harness
-            .render()
-            .expect("the linear control renders headlessly")
-    }
-
-    /// The three dimensions this affordance is built from are tokens in the seek
-    /// surface's own store, and they are ordered the only way that reads:
-    /// dragging thickens the track, and the thumb is big enough to cap the
-    /// thickest state of the track it rides on.
-    ///
-    /// The upper bounds are the real constraint: both seek surfaces build a hit
-    /// area out of their own row heights, Now Playing's being the tighter of the
-    /// two at 24px, so a thumb or a grabbed track taller than that would spill
-    /// onto the meta text above the row.
-    #[test]
-    fn test_seek_thickness_and_thumb_are_ordered_tokens_in_the_seek_store() {
-        // Read through locals: the tokens are `const`s, and an assertion the
-        // compiler can fold to `true` is a build error under this workspace's
-        // clippy configuration. The player-bar token test writes its pins as
-        // `(token - value).abs()` for the same reason.
-        let (idle, active, thumb, hit_h, volume) =
-            (TRACK_H, TRACK_H_ACTIVE, THUMB_D, SEEK_H, VOLUME_THUMB);
-
-        assert!(idle > 0.0, "the idle track is a real thickness: {idle}");
-
-        assert!(
-            active > idle,
-            "the grabbed track must be thicker than the idle one — that difference \
-             is the whole grab signal: idle {idle}, active {active}"
-        );
-        assert!(
-            active <= hit_h,
-            "the grabbed track has to stay inside the tightest seek hit area \
-             ({hit_h}px in Now Playing), or it bleeds onto the row above it"
-        );
-
-        assert!(
-            thumb >= active,
-            "the thumb caps the thickest state of the track, so it cannot be \
-             smaller than it: thumb {thumb}, active track {active}"
-        );
-        assert!(
-            thumb <= hit_h,
-            "the thumb has to stay inside the tightest seek hit area ({hit_h}px), \
-             or it spills over the time readouts flanking the bar"
-        );
-
-        // The volume slider's thumb is a *different* dimension on a *different*
-        // surface, and it is unchanged: the volume control keeps its own 10px
-        // always-visible thumb, which is what keeps the two bars distinguishable
-        // by purpose instead of looking like one of them lost its thumb.
-        assert!(
-            (volume - 10.0).abs() < f32::EPSILON,
-            "the volume slider keeps its mockup thumb diameter: {volume}"
-        );
-    }
-
-    /// At rest a seek bar paints no thumb, and its track is the idle thickness.
-    ///
-    /// The two frames share their drawing code, value, position and hit area, and
-    /// differ only in which of the control's two thumb slots the diameter comes
-    /// from — the second frame being the volume slider's real shape, at the
-    /// volume slider's own diameter. So it is the control that keeps the first
-    /// assertion honest: without it, "no ink pixels" would also be what a control
-    /// that painted nothing at all would report, and the band-height count would
-    /// be carrying the whole test.
-    #[test]
-    fn test_seek_bar_paints_no_thumb_at_rest_and_keeps_the_idle_thickness() {
-        let palette = Palette::dark();
-
-        let seek = render_at_rest(true, false);
-        assert_eq!(
-            crate::test_utils::count_near(&seek, palette.ink, 2),
-            0,
-            "a seek bar the pointer is not over paints no thumb — the affordance \
-             that says where the pointer is must be absent, not dimmed"
-        );
-        assert_eq!(
-            rows_carrying(&seek, palette.surface_3),
-            TRACK_H as usize,
-            "an ungrabbed track is painted at the idle thickness, so the only \
-             hover-driven change to the bar's pixels is an added thumb"
-        );
-
-        // The control: same code, same value, same ink — but a thumb the control
-        // wears unconditionally, exactly like the volume slider's.
-        let always = render_at_rest(false, true);
-        assert!(
-            crate::test_utils::count_near(&always, palette.ink, 2) > 0,
-            "the same counter finds the volume slider's always-visible thumb, so \
-             the resting assertion above is about the hover gate and not about a \
-             frame that renders nothing"
-        );
-    }
-
-    /// The grabbed track is the caller's own span and centre at the *token's*
-    /// thickness: the thickening is a thickness, not a delta on whatever height
-    /// the caller happened to ask for, and at rest it is the caller's rect
-    /// byte-for-byte so an idle frame cannot drift by a rounding step.
-    #[test]
-    fn test_dragged_track_thickens_on_the_same_span_and_centre() {
-        let idle = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(160.0, TRACK_H));
-
-        assert_eq!(
-            active_track(idle, false),
-            idle,
-            "at rest the painted track *is* the caller's rect — no re-derivation, so \
-             an idle frame is identical to a golden's"
-        );
-
-        let grabbed = active_track(idle, true);
-        assert_eq!(
-            (grabbed.left(), grabbed.right()),
-            (idle.left(), idle.right()),
-            "grabbing changes the thickness only: the horizontal span — and with it \
-             the fraction any pointer position maps to — must not move"
-        );
-        assert!(
-            (grabbed.center().y - idle.center().y).abs() < f32::EPSILON,
-            "the grabbed track keeps the idle track's centre, so the bar does not \
-             shift under a pointer that is already sitting on it"
-        );
-        assert!(
-            (grabbed.height() - TRACK_H_ACTIVE).abs() < f32::EPSILON,
-            "the grabbed track is the active token: {} vs {TRACK_H_ACTIVE}",
-            grabbed.height()
-        );
-        assert!(grabbed.height() > idle.height());
-
-        // A caller that ever passes a taller rect than `TRACK_H` still gets the
-        // same grabbed bar, measured from the token and not from its own height.
-        let tall = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(160.0, SEEK_H));
-        assert!(
-            (active_track(tall, true).height() - TRACK_H_ACTIVE).abs() < f32::EPSILON,
-            "the active thickness is the token, never the caller's height plus a \
-             delta"
-        );
     }
 }

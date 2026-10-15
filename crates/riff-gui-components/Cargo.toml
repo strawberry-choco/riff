@@ -25,5 +25,14 @@ publish = false
 egui.workspace = true
 riff-gui-theme = { path = "../riff-gui-theme" }
 
+# The component probes render real egui frames headlessly (kittest + wgpu).
+# No `snapshot` feature: the probes assert on pixels and responses, never
+# on a committed baseline — the golden images stay in the root `riff-tests`
+# crate.
+[dev-dependencies]
+egui_kittest = { version = "0.35", features = ["wgpu"] }
+# Counting pixels in headlessly rendered frames.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [lints]
 workspace = true

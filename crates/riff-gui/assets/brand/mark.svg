@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <!-- riff brand mark: the wordmark's static equalizer glyph.
        This file is the packaging copy of the mark the app generates at
-       runtime: `mark_svg()` in crates/riff-gui/src/ui/chrome.rs derives the
+       runtime: `mark_svg()` in the frontend's `ui/chrome.rs` derives the
        same four bars from WORDMARK_BARS ([0.55, 0.95, 0.7, 0.4]) with a 10%
        inset and rx = bar-width/2, tinted BRAND_500 (#f0821e, theme.rs). If the
        in-app mark changes, regenerate this file and riff.icns with it. -->

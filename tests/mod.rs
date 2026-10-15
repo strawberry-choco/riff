@@ -38,10 +38,10 @@ pub mod ui_tests;
 // nothing). Sharing one module means the two can never drift, and the README
 // generator now rides the same settled-time assertion the goldens do.
 pub(crate) mod determinism {
-    use riff_gui::ui::fonts::{self, INTER_FACES};
+    use riff_gui_theme::fonts::{self, INTER_FACES};
 
     /// Deterministic font definitions for rendering: the vendored Inter faces
-    /// only. Unlike [`riff_gui::ui::fonts::font_definitions`] this never scans
+    /// only. Unlike [`riff_gui_theme::fonts::font_definitions`] this never scans
     /// system CJK fonts, whose presence varies per machine — a rendered frame
     /// must rasterize identically everywhere the suite runs.
     pub(crate) fn inter_only_font_definitions() -> egui::FontDefinitions {
@@ -286,7 +286,7 @@ pub(crate) mod composed_shell {
                             .egui_ctx
                             .set_fonts(crate::determinism::inter_only_font_definitions()),
                         ShellFonts::Production => {
-                            riff_gui::ui::fonts::configure_fonts(&cc.egui_ctx);
+                            riff_gui_theme::fonts::configure_fonts(&cc.egui_ctx);
                         }
                     }
                     let (mut app, _visibility_tx) = RiffApp::new_for_test(

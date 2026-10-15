@@ -49,6 +49,10 @@ riff-library = { path = "../crates/riff-library" }
 riff-playback = { path = "../crates/riff-playback" }
 riff-persistence = { path = "../crates/riff-persistence" }
 riff-gui     = { path = "../crates/riff-gui" }
+# The widgetry crates: the suite re-points at them directly for the token
+# types and presentation primitives the split moved out of `riff-gui`.
+riff-gui-components = { path = "../crates/riff-gui-components" }
+riff-gui-theme = { path = "../crates/riff-gui-theme" }
 
 # Golden-image tests render real egui frames headlessly (kittest + wgpu).
 egui.workspace = true

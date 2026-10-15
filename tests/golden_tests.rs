@@ -29,8 +29,8 @@ mod tests {
     };
     use crate::mocks::{MockLibraryQueryStore, MockPlaylistStore, MockSettingsStore};
     use riff_backend::app::state::{LibrarySession, PlaybackSession};
-    use riff_gui::ui::fonts;
-    use riff_gui::ui::theme::{self, Palette};
+    use riff_gui_theme::fonts;
+    use riff_gui_theme::theme::{self, Palette};
 
     // --- Harness plumbing ------------------------------------------------------
 
@@ -95,7 +95,7 @@ mod tests {
     ///
     /// Every variant resolves from production geometry ([`theme`] tokens and,
     /// for the stage's columns, the very same
-    /// [`stage::column_widths`](riff_gui::ui::stage::column_widths) the frame
+    /// [`stage::column_widths`](riff_gui_components::stage::column_widths) the frame
     /// laid itself out with), so "the sidebar" means the 280px panel wherever
     /// `SIDEBAR_W` currently is.
     #[derive(Debug, Clone, Copy)]
@@ -171,10 +171,10 @@ mod tests {
                     egui::pos2(stage.right(), stage.bottom()),
                 ),
                 Self::QueuePanel { rows } => {
-                    use riff_gui::ui::theme::geometry::playerbar::{
+                    use riff_gui_theme::theme::geometry::playerbar::{
                         QUEUE_PANEL_HEADER_H, QUEUE_PANEL_MAX_LIST_H, QUEUE_PANEL_W,
                     };
-                    let list_h = (rows as f32 * riff_gui::ui::theme::geometry::sidebar::ROW_H)
+                    let list_h = (rows as f32 * riff_gui_theme::theme::geometry::sidebar::ROW_H)
                         .min(QUEUE_PANEL_MAX_LIST_H);
                     let height = QUEUE_PANEL_HEADER_H + list_h + 2.0 * 8.0;
                     let right = size.x - 16.0;
@@ -232,7 +232,7 @@ mod tests {
             reason = "a column count is a small non-negative number"
         )]
         let gaps = (columns.saturating_sub(1) + usize::from(inspector)) as f32;
-        let widths = riff_gui::ui::stage::column_widths(
+        let widths = riff_gui_components::stage::column_widths(
             stage.width() - STAGE_SEPARATOR_W * gaps,
             columns,
             inspector,
@@ -930,7 +930,7 @@ mod tests {
     fn composed_shell_minimum_matches_golden_baseline() {
         snapshot_composed(
             "composed_shell_minimum_dark",
-            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE,
+            riff_gui_theme::theme::geometry::window::MIN_WINDOW_SIZE,
             Region::Window,
             Plan::columns(1),
             |_| {},
@@ -944,7 +944,7 @@ mod tests {
     fn shell_chrome_light_matches_golden_baseline() {
         snapshot_composed(
             "shell_chrome_light",
-            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE,
+            riff_gui_theme::theme::geometry::window::MIN_WINDOW_SIZE,
             Region::Window,
             Plan::columns(1),
             toggle_theme,
@@ -959,7 +959,7 @@ mod tests {
     fn shell_chrome_scanning_dark_matches_golden_baseline() {
         snapshot_composed(
             "shell_chrome_scanning_dark",
-            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE,
+            riff_gui_theme::theme::geometry::window::MIN_WINDOW_SIZE,
             Region::Window,
             Plan::columns(1),
             |_| {},
@@ -980,7 +980,7 @@ mod tests {
         let library = Library::geogaddi();
         snapshot_composed(
             "shell_chrome_now_playing_dark",
-            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE,
+            riff_gui_theme::theme::geometry::window::MIN_WINDOW_SIZE,
             Region::Window,
             Plan::columns(1),
             |_| {},
@@ -1001,7 +1001,7 @@ mod tests {
         let library = Library::geogaddi();
         snapshot_composed(
             "shell_chrome_settings_dark",
-            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE,
+            riff_gui_theme::theme::geometry::window::MIN_WINDOW_SIZE,
             Region::Window,
             Plan::columns(1),
             |_| {},
@@ -1029,7 +1029,7 @@ mod tests {
         snapshot_composed(
             "sidebar_dark",
             window_with_stage(egui::vec2(
-                riff_gui::ui::theme::geometry::window::MIN_STAGE_SIZE.x,
+                riff_gui_theme::theme::geometry::window::MIN_STAGE_SIZE.x,
                 640.0,
             )),
             Region::Sidebar,
@@ -1056,7 +1056,7 @@ mod tests {
         snapshot_composed(
             "sidebar_light",
             window_with_stage(egui::vec2(
-                riff_gui::ui::theme::geometry::window::MIN_STAGE_SIZE.x,
+                riff_gui_theme::theme::geometry::window::MIN_STAGE_SIZE.x,
                 640.0,
             )),
             Region::Sidebar,
@@ -1085,7 +1085,7 @@ mod tests {
         snapshot_composed(
             "playlist_create_prompt_dark",
             window_with_stage(egui::vec2(
-                riff_gui::ui::theme::geometry::window::MIN_STAGE_SIZE.x,
+                riff_gui_theme::theme::geometry::window::MIN_STAGE_SIZE.x,
                 640.0,
             )),
             Region::Sidebar,
@@ -1103,7 +1103,7 @@ mod tests {
         snapshot_composed(
             "playlist_rename_prompt_dark",
             window_with_stage(egui::vec2(
-                riff_gui::ui::theme::geometry::window::MIN_STAGE_SIZE.x,
+                riff_gui_theme::theme::geometry::window::MIN_STAGE_SIZE.x,
                 640.0,
             )),
             Region::Sidebar,
@@ -1478,7 +1478,7 @@ mod tests {
         let selected = library.tracks[2].clone();
         snapshot_composed(
             "library_track_list_dark",
-            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE,
+            riff_gui_theme::theme::geometry::window::MIN_WINDOW_SIZE,
             Region::Stage,
             Plan::columns(1),
             |_| {},
@@ -1502,7 +1502,7 @@ mod tests {
     fn empty_column_dark_matches_golden_baseline() {
         snapshot_composed(
             "empty_column_dark",
-            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE,
+            riff_gui_theme::theme::geometry::window::MIN_WINDOW_SIZE,
             Region::Stage,
             Plan::columns(1),
             |_| {},
@@ -2008,7 +2008,7 @@ mod tests {
         let library = Library::geogaddi();
         snapshot_composed(
             "elastic_min_window_dark",
-            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE,
+            riff_gui_theme::theme::geometry::window::MIN_WINDOW_SIZE,
             Region::Stage,
             Plan::columns(3),
             |_| {},
@@ -2447,7 +2447,7 @@ mod tests {
         let library = Library::geogaddi();
         snapshot_composed(
             "settings_library_stacked_min_dark",
-            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE,
+            riff_gui_theme::theme::geometry::window::MIN_WINDOW_SIZE,
             Region::Stage,
             Plan::columns(1),
             |_| {},
@@ -2464,7 +2464,7 @@ mod tests {
         let library = Library::geogaddi();
         snapshot_composed(
             "settings_stacked_min_light",
-            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE,
+            riff_gui_theme::theme::geometry::window::MIN_WINDOW_SIZE,
             Region::Stage,
             Plan::columns(1),
             toggle_theme,
@@ -2480,7 +2480,7 @@ mod tests {
         let library = Library::geogaddi();
         snapshot_composed(
             "settings_stacked_min_hc",
-            riff_gui::ui::theme::geometry::window::MIN_WINDOW_SIZE,
+            riff_gui_theme::theme::geometry::window::MIN_WINDOW_SIZE,
             Region::Stage,
             Plan::columns(1),
             |_| {},
@@ -2531,9 +2531,9 @@ mod tests {
     /// button rather than a hand-built `egui::Button`.
     #[test]
     fn dark_play_card_matches_golden_baseline() {
-        use riff_gui::ui::button::{TextButton, Variant, text_button, text_button_size};
-        use riff_gui::ui::icons::IconCache;
-        use riff_gui::ui::theme::RADIUS_MD;
+        use riff_gui_components::button::{TextButton, Variant, text_button, text_button_size};
+        use riff_gui_theme::icons::IconCache;
+        use riff_gui_theme::theme::RADIUS_MD;
 
         snapshot(
             "play_card_dark",
@@ -2588,8 +2588,8 @@ mod tests {
     /// specimen — but it rasterizes through the app's own `IconCache`.
     #[test]
     fn icons_atlas_dark_matches_golden_baseline() {
-        use riff_gui::ui::icons::{Icon, IconCache};
-        use riff_gui::ui::theme::SURFACE_BG;
+        use riff_gui_theme::icons::{Icon, IconCache};
+        use riff_gui_theme::theme::SURFACE_BG;
 
         snapshot(
             "icons_atlas_dark",
@@ -2620,7 +2620,7 @@ mod tests {
     /// rasterize. The families are the app's own `fonts::family_*` ones.
     #[test]
     fn type_scale_dark_matches_golden_baseline() {
-        use riff_gui::ui::theme::SURFACE_BG;
+        use riff_gui_theme::theme::SURFACE_BG;
 
         snapshot(
             "type_scale_dark",
@@ -2663,8 +2663,8 @@ mod tests {
     /// by side, so this stays a specimen — through the app's own widget.
     #[test]
     fn toggle_switch_matrix_dark_matches_golden_baseline() {
-        use riff_gui::ui::theme::SURFACE_BG;
-        use riff_gui::ui::toggle_switch;
+        use riff_gui_components::toggle_switch;
+        use riff_gui_theme::theme::SURFACE_BG;
 
         snapshot(
             "toggle_switch_matrix_dark",
@@ -2792,8 +2792,8 @@ mod tests {
     /// driver-level dithering on flat fills.
     #[test]
     fn hovered_tree_row_paints_the_amber_wash() {
-        use riff_gui::ui::icons::IconCache;
         use riff_gui::ui::sidebar::{TreeRow, tree_row};
+        use riff_gui_theme::icons::IconCache;
 
         let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
@@ -2858,7 +2858,7 @@ mod tests {
     #[test]
     fn placeholder_tile_renders_in_a_headless_snapshot() {
         use riff_gui::ui::artwork::lookup_cover_texture;
-        use riff_gui::ui::theme::{SURFACE_BG, TEXTURE_TINT};
+        use riff_gui_theme::theme::{SURFACE_BG, TEXTURE_TINT};
 
         const IDENTITY: &str = "f:\\music\\artless golden.mp3";
 

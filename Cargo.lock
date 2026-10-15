@@ -4210,6 +4210,8 @@ name = "riff-gui-components"
 version = "0.2.0"
 dependencies = [
  "egui",
+ "egui_kittest",
+ "image",
  "riff-gui-theme",
 ]
 
@@ -4282,6 +4284,8 @@ dependencies = [
  "image",
  "riff-backend",
  "riff-gui",
+ "riff-gui-components",
+ "riff-gui-theme",
  "riff-infra",
  "riff-library",
  "riff-persistence",

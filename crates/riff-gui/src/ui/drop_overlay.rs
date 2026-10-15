@@ -35,9 +35,10 @@ const VEIL_LAYER: &str = "drop_hover_veil";
 
 /// Paint the drop-hover veil, if a platform file drag is hovering the window.
 ///
-/// Called once per frame at the very end of [`crate::ui::app::RiffApp::ui`],
-/// after every panel has drawn and the frame's palette is resolved: painting
-/// last is what lets a single top-layer painter sit above all of them.
+/// Called once per frame at the very end of
+/// [`crate::ui::app::RiffApp`]'s [`eframe::App::ui`], after every panel has
+/// drawn and the frame's palette is resolved: painting last is what lets a
+/// single top-layer painter sit above all of them.
 pub fn paint(ctx: &egui::Context, palette: &Palette) {
     let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
     if !hovering {

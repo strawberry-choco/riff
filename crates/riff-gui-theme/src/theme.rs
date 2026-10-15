@@ -212,7 +212,7 @@ pub fn styled_font(ui: &egui::Ui, key: egui::TextStyle, size: f32) -> egui::Font
 }
 
 /// [`styled_font`]'s body, for a paint site that holds a [`egui::Style`] — or a
-/// [`egui::Context`], via [`egui::Context::style`] — rather than a
+/// [`egui::Context`], via [`egui::Context::global_style`] — rather than a
 /// [`egui::Ui`]: the drop-hover veil paints straight onto a top layer, with no
 /// `Ui` to ask.
 pub fn styled_font_in(style: &egui::Style, key: egui::TextStyle, size: f32) -> egui::FontId {
@@ -989,7 +989,8 @@ pub mod geometry {
 
     /// The drop-hover veil: what the window wears while a platform file drag
     /// hovers it, so the whole window — not one panel — reads as the drop
-    /// target. The veil's and dash's colours are [`drop_hover_veil`] /
+    /// target. The veil's and dash's colours are
+    /// [`drop_hover_veil`](crate::theme::drop_hover_veil) and
     /// [`drop_hover_dash`](crate::theme::drop_hover_dash); these are the
     /// border's geometry.
     pub mod drop_overlay {
@@ -999,9 +1000,9 @@ pub mod geometry {
         /// is: the inset IS the "the whole window is the target" read.
         pub const INSET: f32 = 4.0;
         /// Width of one dash stroke. Two px — the app's hairline
-        /// ([`CARD_BORDER_W`](settings::CARD_BORDER_W)) is what a card edge
-        /// wears; an affordance that must carry across a veiled window strokes
-        /// twice that.
+        /// ([`CARD_BORDER_W`](super::settings::CARD_BORDER_W)) is what a card
+        /// edge wears; an affordance that must carry across a veiled window
+        /// strokes twice that.
         pub const BORDER_W: f32 = 2.0;
         /// Length of one dash. Long enough to read as dashes rather than dots
         /// at window scale.
@@ -2298,7 +2299,7 @@ mod tests {
     #[test]
     fn styled_font_in_agrees_with_styled_font() {
         let ctx = egui::Context::default();
-        ctx.run_ui(Default::default(), |ui| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             for key in [egui::TextStyle::Body, egui::TextStyle::Heading] {
                 let from_ui = styled_font(ui, key.clone(), TEXT_XL);
                 let from_style = styled_font_in(ui.style(), key, TEXT_XL);

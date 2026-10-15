@@ -20377,6 +20377,94 @@ mod component_boundary_tests {
         );
     }
 
+    /// Story 23: the one claim about the split the compiler does not carry.
+    /// The compiler carries *usage* — a crate cannot reach a dependency it did
+    /// not declare — but it says nothing about *declaration*: a one-line
+    /// manifest edit can name a business crate again and the build stays
+    /// green. This is the standing assertion against that edit (spec Testing
+    /// Decision 2). The manifests are read from the workspace root — a read
+    /// failure fails the test, so a manifest that moves must update this
+    /// guard rather than silence it — and the `[dependencies]` sections are
+    /// parsed line by line, which is honest for hand-formatted manifests that
+    /// keep one dependency per line. `riff-gui-theme` names no `riff-*` crate;
+    /// `riff-gui-components` names only `riff-gui-theme`, the design authority
+    /// (ADR 0018).
+    #[test]
+    fn test_widgetry_manifests_declare_no_business_crate() {
+        /// The widgetry crate manifests the assertion reads.
+        const WIDGETRY_CRATES: [&str; 2] = ["riff-gui-theme", "riff-gui-components"];
+        /// The one `riff-*` dependency the split itself introduced, and the
+        /// only one a widgetry manifest may name.
+        const ALLOWED_RIFF_DEPS: [&str; 1] = ["riff-gui-theme"];
+
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut offenders = Vec::new();
+        for crate_name in WIDGETRY_CRATES {
+            let manifest = workspace.join("crates").join(crate_name).join("Cargo.toml");
+            let text = std::fs::read_to_string(&manifest).unwrap_or_else(|error| {
+                panic!(
+                    "the widgetry crate's manifest must be readable ({}): {error}",
+                    manifest.display()
+                )
+            });
+            let mut saw_egui = false;
+            let mut in_dependencies = false;
+            for (number, line) in text.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                if trimmed.starts_with('[') {
+                    // Target-gated dependency tables count too; dev-dependencies
+                    // do not — they never build into a consumer.
+                    in_dependencies =
+                        trimmed == "[dependencies]" || trimmed.ends_with(".dependencies]");
+                    continue;
+                }
+                if !in_dependencies {
+                    continue;
+                }
+                let Some((key, _value)) = trimmed.split_once('=') else {
+                    offenders.push(format!(
+                        "{}:{}: not a `name = value` dependency line: {trimmed} \
+                         (if this manifest grew a multi-line entry, the line-based \
+                         reader in this test needs updating)",
+                        manifest.display(),
+                        number + 1
+                    ));
+                    continue;
+                };
+                let name = key.trim().split('.').next().unwrap_or(key.trim());
+                if name == "egui" {
+                    saw_egui = true;
+                }
+                // A rename smuggles the crate in under a key that is not its
+                // name, so the `package` value is judged alongside the key.
+                let renamed = trimmed.contains("package = \"riff-");
+                if (name.starts_with("riff-") && !ALLOWED_RIFF_DEPS.contains(&name)) || renamed {
+                    offenders.push(format!(
+                        "{}:{}: declares `{trimmed}` — a business crate the \
+                         widgetry split removed",
+                        manifest.display(),
+                        number + 1
+                    ));
+                }
+            }
+            assert!(
+                saw_egui,
+                "the parse of {} found no `egui` dependency, so it may be reading \
+                 nothing: the line-based reader no longer matches the \
+                 hand-formatted manifest it judges",
+                manifest.display()
+            );
+        }
+        assert!(
+            offenders.is_empty(),
+            "a widgetry manifest declares a business dependency:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// Story 40: the extraction is an internal ownership change, not an
     /// application-wide migration. Every historical frontend path feature code
     /// and the suite were already writing has to keep resolving — these are the

@@ -27,6 +27,8 @@ use riff_backend::app::replaygain_pass::PassCommand;
 use riff_backend::app::state::{LibrarySession, PlaybackSession};
 use riff_backend::app::views::SessionViews;
 
+use riff_gui_components::menu::ListMenuIntent;
+
 use crate::ui::column::ColumnIdentity;
 
 use super::{
@@ -103,7 +105,7 @@ impl<'a> CollectionMenuHost<'a> {
 /// is written once rather than twice.
 pub fn apply_collection_menu(
     key: &str,
-    intents: &[riff_gui_components::menu::ListMenuIntent],
+    intents: &[ListMenuIntent],
     column: ColumnIdentity,
     host: CollectionMenuHost<'_>,
 ) {
@@ -123,31 +125,28 @@ pub fn apply_collection_menu(
         let row = entity_row(key, column.section(), column.level());
         let whole_album = matches!(row, Some(EntityRow::Album { .. }));
         match intent {
-            riff_gui_components::menu::ListMenuIntent::MeasureAlbumAggregate
-            | riff_gui_components::menu::ListMenuIntent::MeasureAlbumTracks => {
+            ListMenuIntent::MeasureAlbumAggregate | ListMenuIntent::MeasureAlbumTracks => {
                 // Only the value kind differs between the two, so they share
                 // the guard and the submission and pick a command by intent.
                 let Some(EntityRow::Album { artist, title }) = row else {
                     continue;
                 };
                 host.passes.submit(match intent {
-                    riff_gui_components::menu::ListMenuIntent::MeasureAlbumAggregate => {
-                        PassCommand::AlbumAggregate {
-                            album_artist: artist,
-                            album_title: title,
-                        }
-                    }
+                    ListMenuIntent::MeasureAlbumAggregate => PassCommand::AlbumAggregate {
+                        album_artist: artist,
+                        album_title: title,
+                    },
                     _ => PassCommand::AlbumTracks {
                         album_artist: artist,
                         album_title: title,
                     },
                 });
             }
-            riff_gui_components::menu::ListMenuIntent::Play => {
+            ListMenuIntent::Play => {
                 let batch = entity_track_ids(key, column, host.views);
                 play_batch(&batch, whole_album, host.transport);
             }
-            riff_gui_components::menu::ListMenuIntent::Shuffle => {
+            ListMenuIntent::Shuffle => {
                 let batch = entity_track_ids(key, column, host.views);
                 if batch.is_empty() {
                     continue;

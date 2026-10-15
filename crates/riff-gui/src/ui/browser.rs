@@ -185,7 +185,7 @@ fn sort_button(ui: &mut egui::Ui, palette: &Palette, sort_desc: bool) -> bool {
                     .color(palette.ink_2),
             )
             .fill(palette.surface_2)
-            .corner_radius(riff_gui_theme::theme::RADIUS_SM);
+            .corner_radius(theme::RADIUS_SM);
             let response = ui.add(button).on_hover_text(label);
             response
                 .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
@@ -422,14 +422,8 @@ fn layout_row_text(ui: &egui::Ui, palette: &Palette, item: &BrowserItem) -> RowT
     } else {
         palette.ink
     };
-    let label_font = egui::FontId::new(
-        riff_gui_theme::theme::TEXT_SM,
-        egui::FontFamily::Proportional,
-    );
-    let detail_font = egui::FontId::new(
-        riff_gui_theme::theme::TEXT_XS,
-        egui::FontFamily::Proportional,
-    );
+    let label_font = egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional);
+    let detail_font = egui::FontId::new(theme::TEXT_XS, egui::FontFamily::Proportional);
     let wrap = text_w(ui.available_width());
     ui.fonts_mut(|f| RowText {
         label: f.layout(item.label.clone(), label_font, ink, wrap),
@@ -524,12 +518,12 @@ fn browser_row(
             rect: thumb_rect,
             texture: item.thumbnail.as_ref().map(egui::TextureHandle::id),
             fit: super::artwork::Fit::Fill,
-            tint: riff_gui_theme::theme::TEXTURE_TINT,
+            tint: theme::TEXTURE_TINT,
             placeholder: item
                 .thumbnail
                 .is_none()
                 .then(|| super::artwork::Placeholder::GlyphWell {
-                    radius: riff_gui_theme::theme::RADIUS_SM,
+                    radius: theme::RADIUS_SM,
                     glyph: cache.texture(
                         ui.ctx(),
                         riff_gui_theme::icons::Icon::Music,
@@ -588,20 +582,14 @@ fn paint_row_text(
                     egui::pos2(text_x, rect.center().y - 8.0),
                     egui::Align2::LEFT_CENTER,
                     &item.label,
-                    egui::FontId::new(
-                        riff_gui_theme::theme::TEXT_SM,
-                        egui::FontFamily::Proportional,
-                    ),
+                    egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional),
                     ink,
                 );
                 painter.text(
                     egui::pos2(text_x, rect.center().y + 9.0),
                     egui::Align2::LEFT_CENTER,
                     detail,
-                    egui::FontId::new(
-                        riff_gui_theme::theme::TEXT_XS,
-                        egui::FontFamily::Proportional,
-                    ),
+                    egui::FontId::new(theme::TEXT_XS, egui::FontFamily::Proportional),
                     palette.ink_3,
                 );
             }
@@ -610,10 +598,7 @@ fn paint_row_text(
                     egui::pos2(text_x, rect.center().y),
                     egui::Align2::LEFT_CENTER,
                     &item.label,
-                    egui::FontId::new(
-                        riff_gui_theme::theme::TEXT_SM,
-                        egui::FontFamily::Proportional,
-                    ),
+                    egui::FontId::new(theme::TEXT_SM, egui::FontFamily::Proportional),
                     ink,
                 );
             }

@@ -5,6 +5,7 @@ pub mod chrome;
 pub mod column;
 pub mod cover_cache;
 pub mod detail;
+pub mod drop_overlay;
 pub mod feedback;
 pub mod frame;
 pub mod now_playing;

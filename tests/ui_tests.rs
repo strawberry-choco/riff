@@ -16300,7 +16300,7 @@ mod browser_column_ui_tests {
 /// it is what the titlebar renders verbatim.
 #[cfg(test)]
 mod whole_frame_tests {
-    use egui_kittest::kittest::{By, Queryable};
+    use egui_kittest::kittest::{By, NodeT as _, Queryable};
     use riff_backend::app::MutexExt;
     use riff_backend::app::cover_service::{ClearCacheOutcome, Covers};
     use riff_backend::app::scan_service::ScanOutcome;
@@ -21430,7 +21430,482 @@ mod whole_frame_tests {
         );
     }
 
-    /// The row pass's typed intent, at the widget seam: a click on a custom
+    // --- Ticket 21: the Custom row's context menu -------------------------------
+    //
+    // Right-clicking a Custom Smart Playlist row offers exactly Duplicate,
+    // Rename and Delete. A Built-in row and an ordinary Playlist row offer
+    // nothing new — the Built-ins deliberately get no menu, which is what
+    // makes forking one into an editable Rule set impossible to reach. The
+    // menu is opened with a REAL secondary click
+    // (`click_secondary()` + two settling steps), never an intent injection;
+    // every assertion reads what a gesture DID.
+
+    /// Open the row's context menu the way a listener does: a real secondary
+    /// click at the row's hit area, then the two settling steps the popup
+    /// needs before its items are queryable (the harness's measured recipe).
+    fn open_custom_row_menu(shell: &mut Shell, row_label: &str) {
+        shell.harness.get_by_label(row_label).click_secondary();
+        shell.harness.step();
+        shell.harness.step();
+    }
+
+    /// The shell's tree-read counter for one identity — the observable an
+    /// open custom list leaves behind (the stage asks the store whether the
+    /// open id still exists).
+    fn tree_reads_for(mock: &Arc<Mutex<MockLibraryQueryStore>>, id: &PlaylistId) -> usize {
+        mock.lock()
+            .unwrap()
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, LibraryQueryCall::SmartPlaylistTree(rid) if rid == id))
+            .count()
+    }
+
+    /// A real secondary click on a Custom row opens the real popup, offering
+    /// exactly Duplicate, Rename and Delete — and the SAME hit area keeps the
+    /// primary-click open gesture. Both gestures are proven here, in one
+    /// composed frame, because a control that paints is not a control that is
+    /// reachable (this repo has five measured cases).
+    ///
+    /// The secondary probe starts from the Settings view on purpose: opening
+    /// the menu must not also open the list, and "the view stayed where it
+    /// was, and no tree read was issued" is that fact.
+    #[test]
+    fn a_secondary_click_opens_the_menu_and_the_primary_click_still_opens_the_list() {
+        let id = PlaylistId("spl-late-night-1".to_string());
+        let (mut shell, mock) = counting_mock_shell(MockLibraryQueryStore {
+            custom_smart_playlists: vec![custom_list("spl-late-night-1", "Late night jazz")],
+            smart_playlist_trees: [(id.clone(), one_rule_tree())].into(),
+            ..MockLibraryQueryStore::default()
+        });
+        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.step();
+
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        for item in ["Duplicate", "Rename", "Delete"] {
+            assert!(
+                shell.harness.query(By::new().label(item)).is_some(),
+                "the secondary click opened its menu, and {item} is on it"
+            );
+        }
+        assert!(
+            shell
+                .harness
+                .query_all_by_label_contains("Edit")
+                .next()
+                .is_none(),
+            "the menu offers no route to editing Rules"
+        );
+        assert_eq!(
+            shell.library.lock().unwrap().view_mode,
+            ViewMode::Settings,
+            "opening the menu is not opening the list: the view did not move"
+        );
+        assert_eq!(
+            tree_reads_for(&mock, &id),
+            0,
+            "and a right-click issues no read for the list — the open gesture did not fire"
+        );
+
+        // Escape dismisses the popup, exactly as it does anywhere else.
+        shell.harness.key_press(egui::Key::Escape);
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query(By::new().label("Duplicate")).is_none(),
+            "Escape closes the menu"
+        );
+
+        // The row's primary gesture is untouched: the same hit area opens the
+        // list, which is what the store-backed read below proves happened.
+        shell.harness.get_by_label("Late night jazz").click();
+        shell.harness.step();
+        assert_eq!(
+            shell.library.lock().unwrap().view_mode,
+            ViewMode::Library,
+            "the primary click still lands on the Library view"
+        );
+        assert_eq!(
+            tree_reads_for(&mock, &id),
+            1,
+            "and the list the click opened is the one the stage read"
+        );
+    }
+
+    /// A Built-in row and an ordinary Playlist row offer nothing new on a
+    /// right-click: no menu is attached, so no item ever appears. That is the
+    /// deliberate asymmetry — forking a Built-in into a Rule set stays out of
+    /// scope, and the way to make it unreachable is not to offer it.
+    #[test]
+    fn built_in_and_playlist_rows_offer_no_menu() {
+        let settings_calls = Arc::new(Mutex::new(Vec::new()));
+        let (playlist_store, views) = crate::composed_shell::playlist_ports(
+            Box::new(MockLibraryQueryStore {
+                custom_smart_playlists: vec![custom_list("spl-late-night-1", "Late night jazz")],
+                ..MockLibraryQueryStore::default()
+            }),
+            MockPlaylistStore::with_playlists(vec![(
+                PlaylistId("pl-gym".to_string()),
+                "Gym".to_string(),
+                Vec::new(),
+            )]),
+        );
+        let mut shell = build(
+            Box::new(MockTransport::new()),
+            MockScans::default(),
+            Box::new(MockSettingsStore::with_shared_calls(Arc::clone(
+                &settings_calls,
+            ))),
+            settings_calls,
+            playlist_store,
+            Box::new(MockLibraryMutationStore::new()),
+            views,
+        );
+        shell.harness.step();
+        shell.harness.step();
+
+        for row in ["Favorites (0)", "Gym"] {
+            open_custom_row_menu(&mut shell, row);
+            for item in ["Duplicate", "Rename", "Delete"] {
+                assert!(
+                    shell.harness.query(By::new().label(item)).is_none(),
+                    "{row} offers no {item}: neither Built-in nor Playlist rows carry a menu"
+                );
+            }
+        }
+
+        // The custom row still does, in the same frame — the negative above
+        // is not the whole app losing its menus.
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        assert!(
+            shell.harness.query(By::new().label("Duplicate")).is_some(),
+            "the Custom row's menu is unaffected by the two rows that have none"
+        );
+    }
+
+    /// Duplicate, chosen from the real menu: the copy is written immediately
+    /// with the store's own name choice — one transaction, so a second
+    /// Duplicate lands on `Copy of X 2` — and the page opens on the copy so
+    /// the listener can start varying it.
+    #[test]
+    fn duplicating_from_the_menu_writes_the_copy_and_opens_it() {
+        let (mut shell, _dir, id, store) = custom_list_store_shell();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Beta"))
+                .is_some(),
+            "the Library's flat listing is what the frame starts on"
+        );
+
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Duplicate").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // The copy exists, named by the store inside its one transaction.
+        let lists = store
+            .custom_smart_playlists()
+            .expect("the enumeration reads");
+        let names: Vec<&str> = lists.iter().map(|list| list.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["Late night jazz", "Copy of Late night jazz"],
+            "the copy is written straight away, under the store-chosen name"
+        );
+        let original = store
+            .smart_playlist_tree(&id)
+            .expect("the tree read works")
+            .expect("the original holds a tree");
+        let copy = store
+            .smart_playlist_tree(&lists[1].id)
+            .expect("the tree read works")
+            .expect("the copy holds a tree");
+        assert_eq!(
+            copy.root().rule_count(),
+            original.root().rule_count(),
+            "the copy carries the same Rules (fresh ids, same tree)"
+        );
+        assert_ne!(
+            lists[0].id, lists[1].id,
+            "and it is its own row, not a rename"
+        );
+
+        // The page opens on the COPY: its row is the selected one, and the
+        // custom listing replaced the Library's own one.
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Beta"))
+                .is_none(),
+            "a custom list's listing replaced the Library's flat one"
+        );
+        // `register_row_a11y` registers a sidebar row's `selected` through
+        // egui's `WidgetInfo::labeled` — whose second slot is the ENABLED
+        // flag, the harness's measured shape — so the open row is the enabled
+        // one and every idle row reads disabled. (`toggled()` is the
+        // OptionList's projection, not a row's.)
+        assert!(
+            !shell
+                .harness
+                .get_by_label("Copy of Late night jazz")
+                .accesskit_node()
+                .is_disabled(),
+            "the copy's row is the selected one — the page opened on the copy"
+        );
+        assert!(
+            shell
+                .harness
+                .get_by_label("Late night jazz")
+                .accesskit_node()
+                .is_disabled(),
+            "not on the original: its row is idle"
+        );
+
+        // A second Duplicate of the same original: the name collision is
+        // resolved by the store's transaction, not by the UI.
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Duplicate").click();
+        shell.harness.step();
+        shell.harness.step();
+        let names: Vec<String> = store
+            .custom_smart_playlists()
+            .expect("the enumeration reads")
+            .into_iter()
+            .map(|list| list.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "Late night jazz".to_string(),
+                "Copy of Late night jazz".to_string(),
+                "Copy of Late night jazz 2".to_string(),
+            ],
+            "two duplicates in a row cannot collide: the second copy is `Copy of X 2`"
+        );
+    }
+
+    /// Delete, chosen from the real menu: the confirmation comes up NAMING the
+    /// list; cancelling deletes nothing; confirming deletes the list (and its
+    /// whole tree) and, because it was the open one, returns the Library view.
+    #[test]
+    fn deleting_from_the_menu_asks_by_name_and_only_a_confirmed_delete_writes() {
+        let (mut shell, _dir, id, store) = custom_list_store_shell();
+        shell.harness.step();
+        shell.harness.step();
+
+        // Open the list first, so the confirmed delete's effect on the open
+        // slot is observable: the Library's own listing must come back.
+        shell.harness.get_by_label("Late night jazz").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Beta"))
+                .is_none(),
+            "the open custom list replaced the Library's flat listing"
+        );
+
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Delete").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // The question is up, on the shared destructive surface, and it names
+        // the list: the row is one label carrying the name, the question is
+        // another.
+        assert!(
+            shell.harness.query(By::new().label("Confirm")).is_some(),
+            "the destructive confirmation is what a Delete raises"
+        );
+        assert!(
+            shell
+                .harness
+                .query_all_by_label_contains("Late night jazz")
+                .count()
+                >= 2,
+            "the question names the list, not just `this list`"
+        );
+
+        // Cancelling writes nothing and closes the question.
+        shell.harness.get_by_label("Cancel").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query(By::new().label("Confirm")).is_none(),
+            "Cancel closes the confirmation"
+        );
+        assert_eq!(
+            store
+                .custom_smart_playlists()
+                .expect("the enumeration reads")
+                .len(),
+            1,
+            "cancelling deletes nothing"
+        );
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Late night jazz"))
+                .is_some(),
+            "and the row is still there"
+        );
+
+        // Now confirm: the list and its tree go, and the open slot clears, so
+        // the Library view returns.
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Delete").click();
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.get_by_label("Confirm").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            store
+                .custom_smart_playlists()
+                .expect("the enumeration reads")
+                .is_empty(),
+            "the confirmed delete is one durable store transaction"
+        );
+        assert!(
+            store
+                .smart_playlist_tree(&id)
+                .expect("the tree read works")
+                .is_none(),
+            "and its whole tree went with it: no Box or Rule answers under the id"
+        );
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Late night jazz"))
+                .is_none(),
+            "the deleted list's row is gone from the sidebar"
+        );
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Alpha"))
+                .is_some()
+                && shell
+                    .harness
+                    .query(By::new().label("Artist - Beta"))
+                    .is_some(),
+            "deleting the open list returns the Library view — the same fall-through a \
+             deleted open Playlist gets"
+        );
+    }
+
+    /// Rename, chosen from the real menu: the same inline prompt a Playlist
+    /// row uses (its `Save` label, its pre-filled draft), and Enter commits it
+    /// through the store. The button is exercised by Enter, not by a click:
+    /// this build's prompt buttons are measurably unclickable
+    /// (`.scratch/prompt-confirm-unclickable/issues/01`), so the keyboard is
+    /// the gesture the widget actually offers.
+    #[test]
+    fn renaming_from_the_menu_opens_the_prompt_and_enter_commits() {
+        let (mut shell, _dir, _id, store) = custom_list_store_shell();
+        shell.harness.step();
+        shell.harness.step();
+
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Rename").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query(By::new().label("Save")).is_some(),
+            "Rename opens the same inline prompt a Playlist row uses"
+        );
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some("Late night jazz"),
+            "pre-filled with the current name"
+        );
+
+        // Append to the draft (the field holds the caret at the end), then
+        // commit the way the prompt's own contract does: Enter.
+        focus_and_type_at(&mut shell, "Save", " deep");
+        confirm_prompt(&mut shell);
+
+        let names: Vec<String> = store
+            .custom_smart_playlists()
+            .expect("the enumeration reads")
+            .into_iter()
+            .map(|list| list.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Late night jazz deep".to_string()],
+            "the renamed name is the one in the store"
+        );
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Late night jazz deep"))
+                .is_some(),
+            "and the sidebar row wears it on the next frame"
+        );
+    }
+
+    /// A refused rename: the name another list already holds is refused by the
+    /// store, and the prompt stays open with the typed draft and the store's
+    /// reason under it — the reporting ticket 05 built, reused here because
+    /// this menu opens the same prompt.
+    #[test]
+    fn a_refused_rename_keeps_the_prompt_open_with_the_reason() {
+        let (mut shell, _dir, _id, mut store) = custom_list_store_shell();
+        store
+            .save_smart_playlist(None, "Late night jazz copy", &one_rule_tree())
+            .expect("the second list saves");
+        shell.harness.step();
+        shell.harness.step();
+
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Rename").click();
+        shell.harness.step();
+        shell.harness.step();
+        // The taken name is typed by appending to the pre-filled draft.
+        focus_and_type_at(&mut shell, "Save", " copy");
+        confirm_prompt(&mut shell);
+
+        assert!(
+            shell.harness.query(By::new().label("Save")).is_some(),
+            "a refused rename keeps the prompt open instead of vanishing"
+        );
+        assert!(
+            shell
+                .harness
+                .query_all_by_label_contains("already exists")
+                .next()
+                .is_some(),
+            "the store's own reason is written under the prompt, where it can be read"
+        );
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some("Late night jazz copy"),
+            "and the draft they typed is still in the field, un-trimmed"
+        );
+        let names: Vec<String> = store
+            .custom_smart_playlists()
+            .expect("the enumeration reads")
+            .into_iter()
+            .map(|list| list.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "Late night jazz".to_string(),
+                "Late night jazz copy".to_string(),
+            ],
+            "the refused write changed no name"
+        );
+    }
+
+    /// The row pass's typed intents, at the widget seam: a click on a custom
     /// row reports `OpenSmartList(Custom(that row's id))` — its own id, not a
     /// sibling's — and nothing else. No store, no slot, no frame in the way;
     /// the composed frame above proves the same intent reaches the slot.
@@ -21447,12 +21922,23 @@ mod whole_frame_tests {
             custom_list("spl-late-night-1", "Late night jazz"),
             custom_list("spl-deep-focus-1", "Deep focus"),
         ];
+        let mut rename = None;
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(280.0, 120.0))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 move |ui, report: &mut SidebarReport| {
-                    custom_smart_list_rows(ui, &mut cache, &palette, false, &lists, None, report);
+                    custom_smart_list_rows(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        false,
+                        &lists,
+                        None,
+                        &mut rename,
+                        None,
+                        report,
+                    );
                 },
                 SidebarReport::default(),
             );
@@ -21471,6 +21957,65 @@ mod whole_frame_tests {
             ))],
             "the clicked row reports its own id as the typed sidebar intent"
         );
+    }
+
+    /// The menu's typed intents at the same widget seam: each of the three
+    /// items reports `CustomSmartList` with the row's id, the painted name and
+    /// its own action — and nothing else. No store, no slot, no frame in the
+    /// way; the composed frames above prove what each intent's appliers do.
+    #[test]
+    fn test_the_custom_row_menu_reports_each_choice_as_its_typed_intent() {
+        use riff_gui::ui::app::{CustomSmartListAction, custom_smart_list_rows};
+        use riff_gui::ui::frame::{SidebarAction, SidebarReport};
+        use riff_gui_theme::icons::IconCache;
+        use riff_gui_theme::theme::Palette;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let lists = vec![custom_list("spl-late-night-1", "Late night jazz")];
+        let mut rename = None;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(280.0, 160.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, report: &mut SidebarReport| {
+                    custom_smart_list_rows(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        false,
+                        &lists,
+                        None,
+                        &mut rename,
+                        None,
+                        report,
+                    );
+                },
+                SidebarReport::default(),
+            );
+        harness.run();
+
+        for (item, action) in [
+            ("Duplicate", CustomSmartListAction::Duplicate),
+            ("Rename", CustomSmartListAction::Rename),
+            ("Delete", CustomSmartListAction::Delete),
+        ] {
+            harness.state_mut().actions.clear();
+            harness.get_by_label("Late night jazz").click_secondary();
+            harness.step();
+            harness.step();
+            harness.get_by_label(item).click();
+            harness.step();
+            assert_eq!(
+                harness.state().actions,
+                vec![SidebarAction::CustomSmartList {
+                    id: PlaylistId("spl-late-night-1".to_string()),
+                    name: "Late night jazz".to_string(),
+                    action,
+                }],
+                "{item} reports its own typed intent, and nothing else"
+            );
+        }
     }
 }
 

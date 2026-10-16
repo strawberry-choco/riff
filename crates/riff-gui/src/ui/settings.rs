@@ -3158,9 +3158,12 @@ impl super::app::RiffApp {
                     self.settings_store.as_mut(),
                 );
             }
-            SettingsAction::ClearLibrary => self.clear_library_confirm = true,
+            SettingsAction::ClearLibrary => {
+                self.pending_destructive = Some(super::app::PendingDestructive::ClearLibrary);
+            }
             SettingsAction::ClearThumbnailCache => {
-                self.clear_thumbnail_cache_confirm = true;
+                self.pending_destructive =
+                    Some(super::app::PendingDestructive::ClearThumbnailCache);
             }
             // --- Smart Playlists page (ticket 15; the tree is ticket 16) ---
             SettingsAction::SelectSmartPlaylist(id) => self.load_smart_playlist_into_editor(&id),
@@ -3282,9 +3285,9 @@ impl super::app::RiffApp {
     ///
     /// The outcome is reported untouched: [`PromptOutcome::Confirm`] when the
     /// listener committed, [`PromptOutcome::Cancel`] when they dismissed, and
-    /// `None` while the prompt is still open. Which of the app's flags each of
-    /// those clears is the caller's too, because that flag is the site's own
-    /// fact — this is the render, not the decision.
+    /// `None` while the prompt is still open. What each outcome does is
+    /// [`Self::render_pending_destructive`]'s — this is the render, not the
+    /// decision.
     fn destructive_confirm_outcome(
         &mut self,
         ui: &mut egui::Ui,
@@ -3294,90 +3297,6 @@ impl super::app::RiffApp {
     ) -> Option<PromptOutcome> {
         let palette = self.theme.active;
         prompts::destructive_confirm(ui, &mut self.icons, &palette, reduce_motion, copy, id)
-    }
-
-    /// The inline confirmation for the destructive Clear Library action,
-    /// rendered beneath the stage until confirmed or cancelled.
-    ///
-    /// What is left here is the Clear Library decision and nothing else: the
-    /// copy and the widget id that make this confirmation this action's, and
-    /// the wipe. The composition the prompt renders through is
-    /// [`Self::destructive_confirm_outcome`] — the same pixels the golden pins,
-    /// shared with Clear Thumbnail cache rather than spelled twice.
-    fn render_clear_library_confirm(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
-        match self.destructive_confirm_outcome(
-            ui,
-            library.ui_flags.reduce_motion,
-            prompts::CLEAR_LIBRARY_CONFIRM_COPY,
-            egui::Id::new("clear_library_confirm_action"),
-        ) {
-            Some(PromptOutcome::Confirm) => {
-                self.clear_library_confirm = false;
-                match self.library_mutations.clear_library() {
-                    Ok(removed) => {
-                        // The mutation adapter bumps the session generation;
-                        // the mirror no longer tracks collection data. The
-                        // fact-set is told too, so no root keeps claiming it
-                        // is indexed after the wipe.
-                        library.library_paths.clear_collection_data();
-                        self.feedback.set(
-                            riff_backend::app::events::NoticeSource::Library,
-                            format!(
-                                "Library cleared ({removed} tracks removed). Rescan to rebuild."
-                            ),
-                            riff_backend::app::events::NoticeSeverity::Info,
-                        );
-                        library.scan_status = self.feedback.display_message();
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to clear the library: {e}");
-                        self.feedback.set(
-                            riff_backend::app::events::NoticeSource::Library,
-                            "Failed to clear the library \u{2014} nothing was changed.".to_string(),
-                            riff_backend::app::events::NoticeSeverity::Error,
-                        );
-                        library.scan_status = self.feedback.display_message();
-                    }
-                }
-            }
-            Some(PromptOutcome::Cancel) => {
-                self.clear_library_confirm = false;
-            }
-            None => {}
-        }
-    }
-
-    /// The inline confirmation for the destructive Clear Thumbnail cache
-    /// action, shaped like [`Self::render_clear_library_confirm`] over the same
-    /// [`Self::destructive_confirm_outcome`] surface. What differs is what
-    /// Confirm does: the deletion is handed to the cover worker rather than run
-    /// on this thread, because `remove_dir_all` over a few hundred thousand
-    /// entries takes seconds and a frame may not wait for it.
-    ///
-    /// It takes the library session rather than one flag off it — the same
-    /// shape as its sibling — and reads the temporal policy from it, so the
-    /// two confirmations resolve that policy from one place instead of one of
-    /// them being handed the bool.
-    fn render_clear_thumbnail_cache_confirm(
-        &mut self,
-        ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-    ) {
-        match self.destructive_confirm_outcome(
-            ui,
-            library.ui_flags.reduce_motion,
-            prompts::CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY,
-            egui::Id::new("clear_thumbnail_cache_confirm_action"),
-        ) {
-            Some(PromptOutcome::Confirm) => {
-                self.clear_thumbnail_cache_confirm = false;
-                self.request_thumbnail_cache_clear();
-            }
-            Some(PromptOutcome::Cancel) => {
-                self.clear_thumbnail_cache_confirm = false;
-            }
-            None => {}
-        }
     }
 
     /// Render the sectioned Settings modal inside the shell's central panel
@@ -3464,11 +3383,96 @@ impl super::app::RiffApp {
         // Transient rows beneath the stage column.
         #[cfg(target_os = "linux")]
         self.render_library_path_input(ui, library);
-        if self.clear_library_confirm {
-            self.render_clear_library_confirm(ui, library);
+        // The one destructive confirmation does NOT render here: it renders
+        // from `RiffApp::draw_stage` for every view, because the sidebar
+        // (which raises a Custom Smart Playlist's Delete) is shared chrome —
+        // a confirmation raised there must show whatever is on stage. See
+        // `render_pending_destructive` and `render_pending_destructive_band`.
+    }
+
+    /// Render whichever destructive confirmation is pending — the ONE surface
+    /// every wipe shares, keyed on the pending identity rather than on a
+    /// boolean per wipe (ticket 21's widening).
+    ///
+    /// The identity answers both facts the surface needs and the caller
+    /// supplies none: the question ([`PendingDestructive::copy`], which is why
+    /// a wipe that must name a list can be one of its arms) and the widget id
+    /// that keeps this confirmation's affirmative action distinct from any
+    /// other's. A fourth confirmation adds an identity and an arm — it cannot
+    /// fork the surface or forget to render it.
+    pub(crate) fn render_pending_destructive(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+    ) {
+        let Some(pending) = self.pending_destructive.clone() else {
+            return;
+        };
+        match self.destructive_confirm_outcome(
+            ui,
+            library.ui_flags.reduce_motion,
+            &pending.copy(),
+            pending.confirm_id(),
+        ) {
+            Some(PromptOutcome::Confirm) => self.commit_pending_destructive(pending, library),
+            Some(PromptOutcome::Cancel) => self.pending_destructive = None,
+            None => {}
         }
-        if self.clear_thumbnail_cache_confirm {
-            self.render_clear_thumbnail_cache_confirm(ui, library);
+    }
+
+    /// Commit the confirmed destructive action. One arm per identity; each
+    /// clears the pending slot and then does exactly what its Settings call
+    /// site did before the slot existed — the two wipes byte-for-byte, the
+    /// Custom Smart Playlist delete through
+    /// [`delete_custom_smart_playlist`](super::app::delete_custom_smart_playlist),
+    /// which also empties the open-list slot when it was the deleted list's.
+    fn commit_pending_destructive(
+        &mut self,
+        pending: super::app::PendingDestructive,
+        library: &mut LibrarySession,
+    ) {
+        match pending {
+            super::app::PendingDestructive::ClearLibrary => {
+                self.pending_destructive = None;
+                match self.library_mutations.clear_library() {
+                    Ok(removed) => {
+                        // The mutation adapter bumps the session generation;
+                        // the mirror no longer tracks collection data. The
+                        // fact-set is told too, so no root keeps claiming it
+                        // is indexed after the wipe.
+                        library.library_paths.clear_collection_data();
+                        self.feedback.set(
+                            riff_backend::app::events::NoticeSource::Library,
+                            format!(
+                                "Library cleared ({removed} tracks removed). Rescan to rebuild."
+                            ),
+                            riff_backend::app::events::NoticeSeverity::Info,
+                        );
+                        library.scan_status = self.feedback.display_message();
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to clear the library: {e}");
+                        self.feedback.set(
+                            riff_backend::app::events::NoticeSource::Library,
+                            "Failed to clear the library \u{2014} nothing was changed.".to_string(),
+                            riff_backend::app::events::NoticeSeverity::Error,
+                        );
+                        library.scan_status = self.feedback.display_message();
+                    }
+                }
+            }
+            super::app::PendingDestructive::ClearThumbnailCache => {
+                self.pending_destructive = None;
+                self.request_thumbnail_cache_clear();
+            }
+            super::app::PendingDestructive::CustomSmartList { id, .. } => {
+                self.pending_destructive = None;
+                super::app::delete_custom_smart_playlist(
+                    &id,
+                    self.library_mutations.as_mut(),
+                    &mut self.smart_playlist_view,
+                );
+            }
         }
     }
 }

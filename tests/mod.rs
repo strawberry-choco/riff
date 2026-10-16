@@ -1422,10 +1422,7 @@ pub mod mocks {
             if let Some(reason) = self.refuse_next_write.take() {
                 return Err(StoreError::InvalidOperation(reason));
             }
-            self.committed
-                .lock()
-                .unwrap()
-                .push(name.to_string());
+            self.committed.lock().unwrap().push(name.to_string());
             Ok(PlaylistId::new("mock"))
         }
 
@@ -1437,10 +1434,7 @@ pub mod mocks {
             if let Some(reason) = self.refuse_next_write.take() {
                 return Err(StoreError::InvalidOperation(reason));
             }
-            self.committed
-                .lock()
-                .unwrap()
-                .push(new_name.to_string());
+            self.committed.lock().unwrap().push(new_name.to_string());
             Ok(true)
         }
 

@@ -17138,6 +17138,45 @@ mod whole_frame_tests {
         (shell, committed)
     }
 
+    /// Confirm the open prompt with Enter.
+    ///
+    /// Not with its confirming button: that control does not answer a click at
+    /// this base, so a refusal can only be reached through Enter. Measured, in
+    /// a real `SQLite` store shell — type a name, `get_by_label("Create")
+    /// .click()`, settle two frames — `load_playlists` still returned `["Gym"]`
+    /// and the prompt had closed. Instrumented inside the widget: the button
+    /// reported `clicked() == false` in EVERY frame of the gesture (its rect
+    /// `[276,524] - [328,543]` with the pointer at its centre, yet
+    /// `hovered == false`, `contains_pointer == false`), while the dismiss band
+    /// — `[12,523] - [389.9,788]` for a prompt row about 20px tall, because
+    /// `ui.min_rect()` there is the PARENT ui's extent, not the row's — also
+    /// reported `hovered == false`, so the release frame fell into the
+    /// outside-click arm and reported `Cancel` with no store call at all.
+    /// Disable that arm and the same click does nothing whatever: the prompt
+    /// stays open and still commits nothing. Enter is the same gesture by the
+    /// widget's own contract ("Enter means the same thing as the confirming
+    /// button"). Repairing this surface is a component-crate change outside
+    /// this ticket's scope.
+    fn confirm_prompt(shell: &mut Shell) {
+        shell.harness.key_press(egui::Key::Enter);
+        shell.harness.step();
+        shell.harness.step();
+    }
+
+    /// Open the rename prompt for the sidebar's only playlist row through a
+    /// real frame. The assertion IS the clickability measurement: the
+    /// hover-revealed pencil affordance has to actually report `Rename`, which
+    /// a painted-but-unreachable control would not survive.
+    fn open_playlist_rename_prompt(shell: &mut Shell) {
+        shell.harness.get_by_label("Rename playlist").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("Save").is_some(),
+            "the pencil affordance opens the inline rename prompt"
+        );
+    }
+
     /// The store raises exactly ONE variant, `StoreError::InvalidOperation`,
     /// for every fault it can meet — and today the sidebar's create gesture
     /// threw that error away into a log line, so a refused name read as
@@ -17151,11 +17190,9 @@ mod whole_frame_tests {
         });
         shell.harness.step();
         open_playlist_create_prompt(&mut shell);
-        focus_and_type(&mut shell, "Road Trip");
+        focus_and_type(&mut shell, "Road Trip ");
 
-        shell.harness.get_by_label("Create").click();
-        shell.harness.step();
-        shell.harness.step();
+        confirm_prompt(&mut shell);
 
         assert!(
             shell.harness.query_by_label("Create").is_some(),
@@ -17170,12 +17207,189 @@ mod whole_frame_tests {
         );
         assert_eq!(
             focused_prompt_text(&mut shell).as_deref(),
-            Some("Road Trip"),
-            "the name they typed is still in the field"
+            Some("Road Trip "),
+            "the name they typed is still in the field, un-trimmed: the draft \
+             written back is what was edited, not what was sent to the store"
         );
         assert!(
             committed.lock().unwrap().is_empty(),
             "a refused create committed nothing"
+        );
+    }
+
+    /// The other half of the same pair of outcomes, on the SAME prompt: the
+    /// write goes through, the prompt closes, and the reason line an earlier
+    /// refusal left behind goes with it — a stale refusal under a name that
+    /// just worked would be its own defect.
+    #[test]
+    fn a_create_that_follows_a_refusal_closes_the_prompt_and_clears_the_reason() {
+        let (mut shell, committed) = prompt_mock_shell(MockPlaylistStore {
+            refuse_next_write: Some("a playlist named \"Road Trip\" already exists".to_string()),
+            ..MockPlaylistStore::default()
+        });
+        shell.harness.step();
+        open_playlist_create_prompt(&mut shell);
+        focus_and_type(&mut shell, "Road Trip");
+        confirm_prompt(&mut shell);
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("already exists")
+                .is_some(),
+            "the refusal this test starts from reported itself"
+        );
+
+        // The preserved draft is what the listener edits next; the refusal
+        // consumed the store's one refusal, so this write commits.
+        confirm_prompt(&mut shell);
+
+        assert!(
+            shell.harness.query_by_label("Create").is_none(),
+            "a committed create closes the prompt"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("already exists")
+                .is_none(),
+            "a success clears the reason an earlier refusal wrote"
+        );
+        assert_eq!(
+            *committed.lock().unwrap(),
+            vec!["Road Trip".to_string()],
+            "and the name on screen is the name that committed"
+        );
+    }
+
+    /// A rename is the gesture that matters for this defect: the row already
+    /// carries a name, so a discarded `Err` was indistinguishable from "the
+    /// pencil did nothing". The prompt is prefilled with the current name, so
+    /// the listener's typing is an edit of it.
+    #[test]
+    fn a_refused_playlist_rename_keeps_the_prompt_open_with_the_name_and_the_reason() {
+        let (mut shell, committed) = prompt_mock_shell(MockPlaylistStore {
+            refuse_next_write: Some("a playlist named \"Gym Harder\" already exists".to_string()),
+            ..MockPlaylistStore::with_playlists(vec![(
+                PlaylistId::new("gym"),
+                "Gym".to_string(),
+                vec![],
+            )])
+        });
+        shell.harness.step();
+        open_playlist_rename_prompt(&mut shell);
+        focus_and_type_at(&mut shell, "Save", " Harder ");
+
+        confirm_prompt(&mut shell);
+
+        assert!(
+            shell.harness.query_by_label("Save").is_some(),
+            "a refused rename keeps the prompt open instead of vanishing"
+        );
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some("Gym Harder "),
+            "the name they edited is still in the field, un-trimmed as typed"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("already exists")
+                .is_some(),
+            "the reason the store gave is written under the row it belongs to"
+        );
+        assert!(
+            shell.harness.query_by_label("Gym").is_some(),
+            "the row keeps its old name — no write reached the store, so no row \
+             could change: the draft's own label is the only place the refused \
+             name appears"
+        );
+        assert!(
+            committed.lock().unwrap().is_empty(),
+            "a refused rename committed nothing"
+        );
+    }
+
+    /// A rename that commits closes its prompt and takes the leftover reason
+    /// with it, and the row's old name is no longer what the draft said.
+    #[test]
+    fn a_rename_that_follows_a_refusal_closes_the_prompt_and_clears_the_reason() {
+        let (mut shell, committed) = prompt_mock_shell(MockPlaylistStore {
+            refuse_next_write: Some("a playlist named \"Gym Harder\" already exists".to_string()),
+            ..MockPlaylistStore::with_playlists(vec![(
+                PlaylistId::new("gym"),
+                "Gym".to_string(),
+                vec![],
+            )])
+        });
+        shell.harness.step();
+        open_playlist_rename_prompt(&mut shell);
+        focus_and_type_at(&mut shell, "Save", " Harder");
+        confirm_prompt(&mut shell);
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("already exists")
+                .is_some(),
+            "the refusal this test starts from reported itself"
+        );
+
+        confirm_prompt(&mut shell);
+
+        assert!(
+            shell.harness.query_by_label("Save").is_none(),
+            "a committed rename closes the prompt"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("already exists")
+                .is_none(),
+            "a success clears the reason an earlier refusal wrote"
+        );
+        assert_eq!(
+            *committed.lock().unwrap(),
+            vec!["Gym Harder".to_string()],
+            "the rename committed the edited name"
+        );
+    }
+
+    /// `StoreError` has ONE variant for every fault the Application Store can
+    /// meet on a write — `SqliteStore::mutate` wraps a constraint violation, a
+    /// failed transaction and an IO failure into
+    /// `InvalidOperation` alike (`sqlite.rs`'s `op_error`) — so there is no
+    /// second arm to forget: a fault with nothing to do with names takes the
+    /// same reporting path as a refused name.
+    #[test]
+    fn a_store_fault_that_is_not_about_the_name_is_reported_the_same_way() {
+        let (mut shell, committed) = prompt_mock_shell(MockPlaylistStore {
+            refuse_next_write: Some("failed to create playlist: database is locked".to_string()),
+            ..MockPlaylistStore::default()
+        });
+        shell.harness.step();
+        open_playlist_create_prompt(&mut shell);
+        focus_and_type(&mut shell, "Road Trip");
+
+        confirm_prompt(&mut shell);
+
+        assert!(
+            shell.harness.query_by_label("Create").is_some(),
+            "a non-name fault keeps the prompt open exactly as a name refusal does"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("database is locked")
+                .is_some(),
+            "and the store's own sentence is what the listener reads"
+        );
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some("Road Trip"),
+            "the draft is preserved for a fault of any kind"
+        );
+        assert!(
+            committed.lock().unwrap().is_empty(),
+            "a failed write commits nothing"
         );
     }
 

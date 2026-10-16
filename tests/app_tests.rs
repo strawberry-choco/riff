@@ -10847,4 +10847,204 @@ mod custom_list_projection_tests {
         );
         assert!(degraded.reason.contains("rule tree read boom"));
     }
+
+    // --- Ticket 17: the live count of a draft tree ---------------------------
+    //
+    // The editor's "Matches N songs" line counts a tree that is not saved:
+    // no list id, no playlist generation, and a shape that changes several
+    // times inside one library generation. So it reads through a tree-keyed
+    // sibling of the trio above, over the SAME bounded Listing Page read
+    // (the total alone, `limit 0`), with its answer held against the
+    // compiled tree's shape and stamped on the library generation. These
+    // tests pin that port contract — the read counts and the reason
+    // channel — never matching behaviour, which is the store seam's proof.
+
+    #[test]
+    fn test_a_draft_trees_count_is_a_zero_row_page_read_for_that_exact_tree() {
+        let tree = one_rule_tree(MatchableField::Title, "rock");
+        let compiled = RuleTree::from_smart_playlist_tree(&tree).expect("a readable tree bridges");
+        let (mut views, mock, _lib_gen, _playlist_gen) = wire_custom(MockLibraryQueryStore {
+            custom_page: custom_rows(42),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            views
+                .custom_list_match_count(&tree)
+                .expect("a healthy seam counts fresh"),
+            42
+        );
+        assert_eq!(
+            mock.lock().unwrap().calls(),
+            vec![LibraryQueryCall::CustomSmartPlaylistPage(
+                compiled,
+                TrackListOrder::default(),
+                None,
+                0,
+                0,
+            )],
+            "one read for the total ALONE — limit 0, the count sentinel — \
+             for the compiled tree, with no needle and no sort of its own"
+        );
+        assert!(
+            mock.lock().unwrap().window_calls().is_empty(),
+            "and a count read is never a window read"
+        );
+    }
+
+    #[test]
+    fn test_the_held_count_is_keyed_on_the_trees_shape() {
+        let rock = one_rule_tree(MatchableField::Title, "rock");
+        let jazz = one_rule_tree(MatchableField::Title, "jazz");
+        let (mut views, mock, _lib_gen, _playlist_gen) = wire_custom(MockLibraryQueryStore {
+            custom_page: custom_rows(120),
+            ..Default::default()
+        });
+
+        assert_eq!(views.custom_list_match_count(&rock).expect("fresh"), 120);
+        // Repaints of the unchanged tree: the same shape, so the answer is
+        // held against it and no store read comes of them.
+        assert_eq!(views.custom_list_match_count(&rock).expect("held"), 120);
+        assert_eq!(
+            views.custom_list_match_count(&rock).expect("held again"),
+            120
+        );
+        assert_eq!(
+            mock.lock().unwrap().custom_page_calls().len(),
+            1,
+            "a repaint of an unchanged tree does not re-query"
+        );
+
+        // The listener commits another value: a different shape, one read.
+        assert_eq!(
+            views.custom_list_match_count(&jazz).expect("a new shape"),
+            120
+        );
+        assert_eq!(mock.lock().unwrap().custom_page_calls().len(), 2);
+
+        // The canned answer moves under the seam — a fresh read for `rock`
+        // would now answer 3 — and the listener commits the earlier value
+        // back onto the Rule.
+        mock.lock().unwrap().custom_page = custom_rows(3);
+        assert_eq!(
+            views
+                .custom_list_match_count(&rock)
+                .expect("the earlier shape is still held"),
+            120,
+            "editing a Rule back to its previous value reuses the held count"
+        );
+        assert_eq!(
+            mock.lock().unwrap().custom_page_calls().len(),
+            2,
+            "two shapes, two reads — never a third"
+        );
+    }
+
+    #[test]
+    fn test_the_hold_is_stamped_on_the_library_generation_and_only_that_generation() {
+        let tree = one_rule_tree(MatchableField::Title, "stamp");
+        let (mut views, mock, library_generation, playlist_generation) =
+            wire_custom(MockLibraryQueryStore {
+                custom_page: custom_rows(120),
+                ..Default::default()
+            });
+        assert_eq!(views.custom_list_match_count(&tree).expect("fresh"), 120);
+        assert_eq!(views.custom_list_match_count(&tree).expect("held"), 120);
+
+        // A name or tree write somewhere else cannot move which tracks this
+        // draft matches: the playlists counter is not this hold's stamp.
+        playlist_generation.bump();
+        assert_eq!(views.custom_list_match_count(&tree).expect("held"), 120);
+        assert_eq!(
+            mock.lock().unwrap().custom_page_calls().len(),
+            1,
+            "a playlist bump is not a reason to recount a draft"
+        );
+
+        // A scan can: which tracks match moves with the library generation.
+        mock.lock().unwrap().custom_page = custom_rows(7);
+        library_generation.bump();
+        assert_eq!(
+            views.custom_list_match_count(&tree).expect("refetched"),
+            7,
+            "the hold is stamped on the library generation, so a scan refetches"
+        );
+        assert_eq!(mock.lock().unwrap().custom_page_calls().len(), 2);
+    }
+
+    #[test]
+    fn test_a_failed_draft_count_carries_the_reason_and_the_last_good_count() {
+        let tree = one_rule_tree(MatchableField::Title, "failed");
+        let (mut views, mock, library_generation, _playlist_gen) =
+            wire_custom(MockLibraryQueryStore {
+                custom_page: custom_rows(120),
+                ..Default::default()
+            });
+
+        // Cold: nothing good is in hand for this shape, so the value to draw
+        // is the default beside the reason — and the line draws the reason,
+        // never the zero.
+        mock.lock()
+            .unwrap()
+            .failing
+            .push(FailingQuery::CustomSmartPlaylistCount);
+        let degraded = views
+            .custom_list_match_count(&tree)
+            .expect_err("a failing count answers degraded");
+        assert_eq!(degraded.value, 0, "no last good count exists yet");
+        assert!(
+            degraded.reason.contains("custom smart playlist boom"),
+            "the store's reason reaches the seam: {:?}",
+            degraded.reason
+        );
+
+        // Healed, then the library moves and the refetch fails: the last good
+        // count for this exact shape rides out beside the reason, the same
+        // "stale but present" policy every other last-good read uses.
+        mock.lock().unwrap().failing.clear();
+        assert_eq!(views.custom_list_match_count(&tree).expect("healed"), 120);
+        mock.lock()
+            .unwrap()
+            .failing
+            .push(FailingQuery::CustomSmartPlaylistCount);
+        library_generation.bump();
+        let degraded = views
+            .custom_list_match_count(&tree)
+            .expect_err("the refetch fails too");
+        assert_eq!(
+            degraded.value, 120,
+            "the last good count for this tree, kept beside the reason"
+        );
+        assert!(degraded.reason.contains("custom smart playlist boom"));
+    }
+
+    #[test]
+    fn test_an_unreadable_draft_tree_answers_the_listings_same_reason_with_no_query() {
+        let id = list_id("draft-unreadable");
+        let unreadable = unreadable_tree();
+        let (mut views, mock, _lib_gen, _playlist_gen) = wire_custom(MockLibraryQueryStore {
+            smart_playlist_trees: std::collections::HashMap::from([(
+                id.clone(),
+                unreadable.clone(),
+            )]),
+            custom_page: custom_rows(120),
+            ..Default::default()
+        });
+
+        let listing = views
+            .custom_list_count(&id, TrackSort::default(), None)
+            .expect_err("an unreadable list is degraded by definition");
+        let draft = views
+            .custom_list_match_count(&unreadable)
+            .expect_err("and so is a draft tree holding one");
+        assert_eq!(
+            draft.reason, listing.reason,
+            "the line and the listing carry the SAME reason for the same tree"
+        );
+        assert_eq!(draft.value, 0, "matches nothing");
+        assert!(
+            mock.lock().unwrap().custom_page_calls().is_empty(),
+            "no query at all: the short-circuit is the tree's own, not a canned answer"
+        );
+    }
 }

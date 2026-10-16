@@ -35,12 +35,12 @@
 //! so the next call retries automatically.
 //!
 //! The one exception to "the UI never sees a `Result`" is the Custom Smart
-//! Playlist trio (`custom_list_tree`, `custom_list_count`, `custom_list_row`):
-//! the surfaces that draw those (a listing's header, the rule editor's live
-//! count) must show *why* an answer is stale or empty, so they answer through
-//! a `Result` whose `Err` carries the last good value beside the reason —
-//! the typed-outcome precedent every other visible failure already uses.
-//! `degrade` is unchanged everywhere else.
+//! Playlist reads (`custom_list_tree`, `custom_list_count`, `custom_list_row`,
+//! and the draft's `custom_list_match_count`): the surfaces that draw those (a
+//! listing's header, the rule editor's live count) must show *why* an answer is
+//! stale or empty, so they answer through a `Result` whose `Err` carries the
+//! last good value beside the reason — the typed-outcome precedent every other
+//! visible failure already uses. `degrade` is unchanged everywhere else.
 
 use crate::app::projection::{BrowseList, BrowseProjectionKey};
 use crate::app::projection::{
@@ -977,6 +977,36 @@ impl SessionViews {
                     .custom_smart_playlist_page(tree, order, needle, offset, limit)
             },
         )
+    }
+
+    /// How many Tracks the draft tree `tree` matches right now — the count
+    /// behind the Smart Playlists editor's live "matches N songs" line.
+    ///
+    /// It is the same bounded Listing Page read as [`Self::custom_list_count`]
+    /// (the total alone, zero rows), taken for a **tree** rather than a list
+    /// id: a draft has no id, and the tree it spells has never been saved, so
+    /// the id-keyed accessors above cannot serve it. The seam holds the
+    /// answer against the tree's compiled shape for the current library
+    /// generation, so a repaint of an unchanged tree and an edit back to an
+    /// earlier shape are both served without a store read — the read
+    /// discipline ADR 0002 asks for, kept at the seam where its read counts
+    /// are pinned.
+    ///
+    /// # Errors
+    /// `Err` carries the value to draw beside the reason: the last good
+    /// count for this shape (or `0` when none is held), and the reason a
+    /// tree holding an Unreadable Rule is never counted — no query is ever
+    /// issued for it, the same rule and the same words the id-keyed count
+    /// answers with.
+    pub fn custom_list_match_count(
+        &mut self,
+        tree: &SmartPlaylistTree,
+    ) -> Result<usize, CustomListDegraded<usize>> {
+        self.custom_lists
+            .count_tree(tree, &mut |tree, order, needle, offset, limit| {
+                self.queries
+                    .custom_smart_playlist_page(tree, order, needle, offset, limit)
+            })
     }
 
     // --- Rule value pickers ------------------------------------------------------

@@ -131,6 +131,11 @@ const TEXT_POOL: &[&str] = &[
     "progressive rock",
     "art rock",
     "rock;progressive",
+    // Two whole segments in order: on genre `is` this asks for the sequence
+    // (ADR 0020), which the corpus's `one.flac` answers and its tab-padded
+    // near-twin does not. Drawn for any text field, it is an ordinary
+    // substring there.
+    "art rock;progressive rock",
     "trance",
     "100%",
     "%_done",

@@ -29,8 +29,10 @@
 //!   widened by ticket 16 to a [`ChildSlot`] (the Box's path plus the index).
 //! - *Ticket 18 (draft + save/cancel + reasons)* is what this module is now:
 //!   dirtiness derived by comparing the buffers against [`SmartPlaylistOriginal`],
-//!   the one [`SmartPlaylistsEditor::reconcile`] that drops a draft when it no
-//!   longer belongs, the third [`RuleChildDraft`] variant that carries an
+//!   the one [`SmartPlaylistsEditor::reconcile`] that keeps the draft aligned
+//!   with its saved row — dropped when it no longer belongs, the row's stored
+//!   name adopted when it was renamed —, the third [`RuleChildDraft`] variant
+//!   that carries an
 //!   Unreadable Rule at its stored position, and every refusal
 //!   ([`SmartPlaylistRefusal`]) with the reason rendered under the row that
 //!   caused it. The tag editor's single-slot, self-naming copy is the
@@ -306,14 +308,16 @@ impl SmartPlaylistsEditor {
         self.discard();
     }
 
-    /// The **single reconcile hook**: drop the draft when it no longer
-    /// belongs. A draft belongs to the Smart Playlists page and, when it has
-    /// one, to a saved list that still exists; anything else is a draft
-    /// outliving the thing it was written for, and it goes. Enforced here,
-    /// not by call-site discipline — `RiffApp::ui` calls this once per frame,
-    /// before anything draws, and no gesture clears a draft itself.
+    /// The **single reconcile hook**: keep the draft aligned with the page and
+    /// with the saved row it was written against — dropping it when it no
+    /// longer belongs, letting it follow a rename. A draft belongs to the
+    /// Smart Playlists page and, when it has one, to a saved list that still
+    /// exists; anything else is a draft outliving the thing it was written
+    /// for, and it goes. Enforced here, not by call-site discipline —
+    /// `RiffApp::ui` calls this once per frame, before anything draws, and no
+    /// gesture clears or re-stamps a draft itself.
     ///
-    /// The two cases, and what they are:
+    /// The cases, and what they are:
     ///
     /// - **the page is gone** (`on_page` false: another Settings section, or
     ///   the whole Settings view left behind): unsaved edits are discarded on
@@ -322,7 +326,18 @@ impl SmartPlaylistsEditor {
     /// - **its list is gone** (selected, but the enumeration no longer names
     ///   it — deleted from the sidebar while open): the draft can only be
     ///   written against a list that is not there any more, so it cannot
-    ///   stay.
+    ///   stay;
+    /// - **its list was renamed** (enumerated under a name the draft has not
+    ///   seen, and the listener has typed no name of their own): the draft
+    ///   adopts the stored name. Without that it kept the pre-rename name and
+    ///   Save — which writes the name on every call (D12) — silently reverted
+    ///   a rename the listener had committed elsewhere. The listener's **Rules
+    ///   are not re-read**: a sidebar rename touches no `smart_rules` row, so
+    ///   the stored tree is exactly what this draft was opened from, and
+    ///   re-loading it would throw the work in progress away. A name the
+    ///   listener has typed into is left alone — that is the name the page
+    ///   shows, and Save writes what the page shows, so it must never be
+    ///   overwritten here.
     ///
     /// Switching to another list is *not* a drop and does not belong here: it
     /// is a whole-draft **replacement** through [`Self::load_saved`] (the tag
@@ -333,10 +348,20 @@ impl SmartPlaylistsEditor {
             self.discard();
             return;
         }
-        if let Some(id) = &self.selected
-            && !lists.iter().any(|list| &list.id == id)
-        {
+        let Some(id) = self.selected.as_ref() else {
+            // A new, unsaved draft: it belongs to the page and to no row.
+            return;
+        };
+        let Some(list) = lists.iter().find(|list| &list.id == id) else {
             self.discard();
+            return;
+        };
+        // The rename case. Comparing against the *original* — not the name
+        // buffer — is what keeps one rule: a buffer the listener has typed
+        // into differs from the original, and their typing wins.
+        if list.name != self.original.name && self.name == self.original.name {
+            self.name.clone_from(&list.name);
+            self.original.name.clone_from(&list.name);
         }
     }
 

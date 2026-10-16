@@ -22096,6 +22096,101 @@ mod whole_frame_tests {
         );
     }
 
+    /// A sidebar Rename reaches the open draft: the store's name moves, the
+    /// reconcile lets the draft adopt it (the listener's Rules stay — a
+    /// sidebar rename touches no rule row), and the editor's Save therefore
+    /// writes the name the sidebar shows. This is the regression pin for the
+    /// silent revert: before the draft followed the row's stored name, Save —
+    /// which writes the name on every call (D12) — wrote the pre-rename name
+    /// back, undoing the rename the listener had just committed.
+    #[test]
+    fn a_sidebar_rename_survives_the_editors_next_save() {
+        let (mut shell, _dir, id, store) = custom_list_store_shell();
+        open_saved_list_in_editor(&mut shell);
+        assert!(
+            shell
+                .harness
+                .query(
+                    By::new()
+                        .role(egui::accesskit::Role::TextInput)
+                        .value("Late night jazz"),
+                )
+                .is_some(),
+            "the draft opened on the saved name, untyped"
+        );
+
+        // The rename the listener commits from the sidebar's own menu. The
+        // prompt's field holds the focus (the pane's own name field is not
+        // focused and its `Save` is on screen too, so the walk
+        // [`focus_and_type_at`] proves is not what this test needs): append to
+        // the pre-filled draft and Enter, the prompt's own commit gesture.
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Rename").click();
+        shell.harness.step();
+        shell.harness.step();
+        shell
+            .harness
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .find(|node| node.is_focused())
+            .expect("the rename prompt opened with its name field focused")
+            .type_text(" deep");
+        shell.harness.step();
+        confirm_prompt(&mut shell);
+        shell.harness.step();
+        shell.harness.step();
+        let names = |store: &riff_infra::store::SqliteStore| -> Vec<String> {
+            store
+                .custom_smart_playlists()
+                .expect("the enumeration reads")
+                .into_iter()
+                .map(|list| list.name)
+                .collect()
+        };
+        assert_eq!(
+            names(&store),
+            vec!["Late night jazz deep".to_string()],
+            "the rename committed through the store"
+        );
+
+        // The draft followed it: the name field holds the stored name and the
+        // draft is clean again — nothing is pending, and nothing was re-read:
+        // the tree is the one the draft was opened from.
+        assert!(
+            shell
+                .harness
+                .query(
+                    By::new()
+                        .role(egui::accesskit::Role::TextInput)
+                        .value("Late night jazz deep"),
+                )
+                .is_some(),
+            "the draft adopts the name the sidebar committed"
+        );
+
+        // Save: the name the page shows is the name the store keeps — the
+        // rename is not reverted by a Save that was about the Rules.
+        shell
+            .harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Save")
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+        assert_eq!(
+            names(&store),
+            vec!["Late night jazz deep".to_string()],
+            "Save wrote the renamed name: the draft held no pre-rename name to write back"
+        );
+        assert_eq!(
+            store
+                .smart_playlist_tree(&id)
+                .expect("the read works")
+                .expect("the tree exists")
+                .root(),
+            one_rule_tree().root(),
+            "and the whole tree written with it is the list's own"
+        );
+    }
+
     /// The row pass's typed intents, at the widget seam: a click on a custom
     /// row reports `OpenSmartList(Custom(that row's id))` — its own id, not a
     /// sibling's — and nothing else. No store, no slot, no frame in the way;

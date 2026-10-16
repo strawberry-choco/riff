@@ -343,6 +343,54 @@ fn a_new_draft_survives_the_reconcile_while_the_page_is_open() {
     assert!(editor.is_new(), "still nothing saved");
 }
 
+/// A row renamed elsewhere (the sidebar's own Rename) is followed by the
+/// draft: the stored name is adopted — the draft is clean again against it,
+/// and the Rules in hand are untouched, because a rename writes no rule row —
+/// while a name buffer the listener has typed into wins, being the name the
+/// page shows and the one Save writes.
+#[test]
+fn the_reconcile_adopts_a_renamed_rows_name_only_over_an_untouched_buffer() {
+    let tree = nested_tree();
+    let renamed = list("spl-late-night-2", "Late night jazz deep");
+
+    // Untouched: the draft follows the store's name and re-stamps its own
+    // baseline with it, and the tree is the one it was opened from.
+    let mut editor = editor_holding(&tree);
+    assert!(!editor.is_dirty());
+    editor.reconcile(true, std::slice::from_ref(&renamed));
+    assert_eq!(editor.name, "Late night jazz deep");
+    assert_eq!(editor.original.name, "Late night jazz deep");
+    assert!(
+        !editor.is_dirty(),
+        "adopting the stored name re-stamps the baseline, so nothing is pending"
+    );
+    assert_eq!(
+        &whole_tree_of(&editor),
+        tree.root(),
+        "the listener's Rules are not re-read: a rename touches no rule row"
+    );
+
+    // Typed: their own name is left alone — it is what the page shows, and
+    // overwriting it here would silently edit the draft under their hands.
+    let mut editor = editor_holding(&tree);
+    editor.name = "Typed by the listener".to_string();
+    editor.reconcile(true, std::slice::from_ref(&renamed));
+    assert_eq!(editor.name, "Typed by the listener");
+
+    // A rename over an edited tree: the name is adopted and the work in
+    // progress stays where it was.
+    let mut editor = editor_holding(&tree);
+    editor.add_rule(&BoxPath::root());
+    editor.reconcile(true, std::slice::from_ref(&renamed));
+    assert_eq!(editor.name, "Late night jazz deep");
+    assert!(editor.is_dirty(), "the tree edit is still unsaved");
+    assert_eq!(
+        editor.root.children.len(),
+        3,
+        "the Rules written so far are still in the draft"
+    );
+}
+
 // --- Save: the refusals, each naming its cause ----------------------------------
 
 /// Save on a draft the listener has not finished refuses, and the refusal

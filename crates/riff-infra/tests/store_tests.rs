@@ -2157,6 +2157,48 @@ fn test_flat_list_orders_land_in_sql_per_track_list_order() {
 }
 
 #[test]
+fn title_order_ends_on_the_path_when_two_titles_collide_under_nocase() {
+    use riff_persistence::store::TrackListOrder as Order;
+
+    let (_dir, mut store, _changes_rx) = open_store();
+
+    // Two rows whose titles are equal under SQLite's NOCASE fold — 'Alpha'
+    // and 'ALPHA' fold to one key — so the title arms have no order to give
+    // and the path tiebreak is the whole of the order between them. Seeded so
+    // path order disagrees with insertion order, which is what makes dropping
+    // `, path ASC` / `, path DESC` from `TrackListOrder::order_by` visible
+    // here and in no other test: the sibling above uses three distinct
+    // titles, the mock-seeded suites carry no titles, and the generated
+    // paging corpus titles are all distinct.
+    let batch: Vec<Track> = [("m:\\b.mp3", "ALPHA"), ("m:\\a.mp3", "Alpha")]
+        .iter()
+        .map(|(p, t)| library_track(p, t, Some("Artist"), "Album", None))
+        .collect();
+    store.apply_scan_batch(&batch).expect("batch applies");
+
+    let paths = |order: TrackListOrder| {
+        store
+            .tracks_page(order, 0, 10)
+            .expect("tracks page reads")
+            .rows()
+            .iter()
+            .map(|t| t.id.0.clone())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        paths(Order::TitleAsc),
+        ["m:\\a.mp3", "m:\\b.mp3"],
+        "a NOCASE tie in title-ascending order is decided by the path, ascending"
+    );
+    assert_eq!(
+        paths(Order::TitleDesc),
+        ["m:\\b.mp3", "m:\\a.mp3"],
+        "and in title-descending order the path tiebreak follows the direction"
+    );
+}
+
+#[test]
 fn test_all_track_ids_are_canonically_path_ordered() {
     let (_dir, db_path, store, _changes_rx) = open_store_with_path();
 
@@ -7142,6 +7184,17 @@ fn a_failed_mutation_reports_its_own_operation_context() {
 // through the compiled predicate, and a Rust-only walk of the same tree that
 // must agree with it. `rules_reference`'s module doc states the one rule that
 // makes this arrangement worth anything — read it before unifying anything.
+//
+// Zone assumption, stated because it is a developer-machine hazard rather
+// than a defect: `local_offset_seconds` measures the machine's offset **now**,
+// the fixtures seed their 2024-03-01/02 and 2024-06-01/02 instants through it,
+// and SQLite renders each stored instant with its *historical* offset. The
+// suite is exact on UTC — this host and the CI runners — and on any machine
+// whose current DST phase matches both dates; on a machine in the other phase
+// (US Eastern in October, say) the local-midnight boundary cases can disagree
+// by an hour for reasons that are nobody's change. Fixing it properly means
+// seeding *and* the reference's boundary conversion through SQLite's own
+// `localtime` rendering together; a note is the honest stop until then.
 
 use riff_persistence::rule::{Comparison, MatchableField};
 
@@ -7784,15 +7837,33 @@ pub(crate) mod rules_reference {
                 Some(folded_text(&held)? == needle)
             }
             (Held::Set(_), Semantic::Equality) => {
-                // One whole segment: split on `;`, strip spaces from both sides,
-                // and compare — which is exactly what the store's
-                // delimiter-wrapped `instr` asks for, arrived at differently.
-                let target = text(value)?.to_lowercase().replace(' ', "");
+                // The store wraps the lowered, space-stripped tag *and* needle
+                // in the delimiter and asks whether the wrapped needle occurs
+                // in the wrapped tag. For an ordinary needle that is one whole
+                // segment; a needle that carries the delimiter asks for a
+                // *sequence* of whole segments — `is "Art Rock;Progressive
+                // Rock"` matches the row tagged exactly that — which is the
+                // decided reading (ADR 0020), pinned by
+                // `test_genre_is_with_a_semicolon_asks_for_a_segment_sequence`
+                // and made askable by the matrix's genre probe.
+                //
+                // Walked here as segments rather than as wrapped strings: the
+                // needle's segments must equal a contiguous run of the tag's.
+                // That is the same question asked a different way on purpose —
+                // the sides share no helper — so mutating either side to the
+                // other reading (per-segment equality, where a `;`-bearing
+                // needle matches nothing) reddens the oracle.
+                let needle = text(value)?.to_lowercase().replace(' ', "");
+                let wanted: Vec<String> = needle.split(';').map(str::to_string).collect();
+                let segments: Vec<String> = folded_text(&held)?
+                    .replace(' ', "")
+                    .split(';')
+                    .map(str::to_string)
+                    .collect();
                 Some(
-                    folded_text(&held)?
-                        .replace(' ', "")
-                        .split(';')
-                        .any(|segment| segment == target),
+                    segments
+                        .windows(wanted.len())
+                        .any(|window| window == wanted.as_slice()),
                 )
             }
             (Held::Tag(_) | Held::Set(_), Semantic::Containment) => {
@@ -8103,7 +8174,13 @@ fn probe(field: MatchableField, comparison: Comparison) -> Option<RuleValue> {
     use MatchableField as F;
     match field {
         F::Genre => match comparison {
-            C::Is => needle("Progressive Rock"),
+            // A two-segment value, deliberately: the class the oracle could
+            // not ask about while the reference read `is` one segment at a
+            // time. The row tagged exactly `"Art Rock;Progressive Rock"`
+            // (`one.flac`) answers the sequence; the tab-padded near-twin
+            // (`two.wav`) does not; and both sides must read it the same way
+            // (ADR 0020's consequence list).
+            C::Is => needle("Art Rock;Progressive Rock"),
             C::Contains => needle("rock;progressive"),
             _ => None,
         },
@@ -8611,6 +8688,67 @@ fn test_genre_is_one_whole_segment_and_a_tab_padded_segment_is_pinned() {
         rule_window(&store, &empty_is, None),
         rule_window(&store, &missing, None),
         "`genre is \"\"` and `genre is missing` are one test on text"
+    );
+}
+
+#[test]
+fn test_genre_is_with_a_semicolon_asks_for_a_segment_sequence() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (store, tracks) = seeded_rules_store(&db_path);
+    let clock = rule_clock(&store);
+
+    // The decided reading (ADR 0020): a needle carrying the delimiter asks for
+    // a *sequence* of whole segments, because the store wraps the lowered,
+    // space-stripped tag and needle in the delimiter and searches for the
+    // wrapped needle. The listener who types the two genres their tag
+    // literally reads gets the row; the per-segment reading would answer
+    // nothing at all, which is the mutation this case exists to catch — on
+    // either side, because the two sides share no code.
+    let sequence = rule(
+        MatchableField::Genre,
+        Comparison::Is,
+        needle("Art Rock;Progressive Rock"),
+    );
+    assert_rule_membership(
+        &store,
+        &tracks,
+        &sequence,
+        None,
+        &clock,
+        "genre is \"Art Rock;Progressive Rock\"",
+    );
+    assert_eq!(
+        rule_window(&store, &sequence, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["one.flac"],
+        "the row tagged exactly `Art Rock;Progressive Rock` answers; the \
+         tab-padded near-twin does not (the spaces-only strip still holds per \
+         segment), and the *sequence* — not a coincidence of one segment — is \
+         what is being asked"
+    );
+
+    // The ordered half of the same class: the segments must appear in the
+    // order asked. Reversed, the sequence is not a run of the tag, and the
+    // answer is empty on both sides.
+    let reversed = rule(
+        MatchableField::Genre,
+        Comparison::Is,
+        needle("Progressive Rock;Art Rock"),
+    );
+    assert_rule_membership(
+        &store,
+        &tracks,
+        &reversed,
+        None,
+        &clock,
+        "genre is \"Progressive Rock;Art Rock\"",
+    );
+    assert!(
+        rule_window(&store, &reversed, None).is_empty(),
+        "a sequence asks for the order the tag lists, not a bag of segments"
     );
 }
 

@@ -16898,12 +16898,14 @@ mod whole_frame_tests {
         // One saved list, three Rules in its Root Box, each with its own
         // header label so the frame's order is readable.
         let id = PlaylistId::new("spl-morning-1");
-        let mut mock = MockLibraryQueryStore::default();
-        mock.custom_smart_playlists = vec![CustomSmartPlaylist {
-            id: id.clone(),
-            name: "Morning drive".to_string(),
-            created_at: std::time::SystemTime::UNIX_EPOCH,
-        }];
+        let mut mock = MockLibraryQueryStore {
+            custom_smart_playlists: vec![CustomSmartPlaylist {
+                id: id.clone(),
+                name: "Morning drive".to_string(),
+                created_at: std::time::SystemTime::UNIX_EPOCH,
+            }],
+            ..Default::default()
+        };
         mock.smart_playlist_trees.insert(
             id,
             SmartPlaylistTree::new(RootBox::new(RuleBox::new(Combine::All).with_children(

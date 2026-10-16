@@ -12,11 +12,15 @@
 //! the same thing (user story 8).
 //!
 //! Every gesture that names a sidebar row asks this one function — the
-//! editor's Save, the "New Playlist" prompt's confirm, and the rename prompt's
-//! confirm — so the check and its wording exist once. The comparison trims and
-//! folds exactly the way the store's rule does (Rust's full-Unicode
-//! `to_lowercase`, never SQLite's ASCII-only `lower()`): a name is identity,
-//! and the two halves of one rule must not fold differently.
+//! editor's Save, both sidebar prompt confirms (the "New Playlist" create and
+//! the playlist rename), and the Custom Smart Playlist rename the sidebar menu
+//! opens, which asks it inside its own commit helper so any future caller of
+//! that path inherits the check — so the check and its wording exist once. The
+//! one name no gesture picks is Duplicate's: the store mints `Copy of …` in
+//! its own transaction, and no such name can be a Built-in display name. The
+//! comparison trims and folds exactly the way the store's rule does (Rust's
+//! full-Unicode `to_lowercase`, never SQLite's ASCII-only `lower()`): a name
+//! is identity, and the two halves of one rule must not fold differently.
 //!
 //! [`SmartPlaylistKind`]: crate::domain::SmartPlaylistKind
 

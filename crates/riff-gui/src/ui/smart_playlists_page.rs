@@ -29,12 +29,13 @@
 //!   widened by ticket 16 to a [`ChildSlot`] (the Box's path plus the index).
 //! - *Ticket 18 (draft + save/cancel + reasons)* is what this module is now:
 //!   dirtiness derived by comparing the buffers against [`SmartPlaylistOriginal`],
-//!   the one [`SmartPlaylistsEditor::reconcile`] that drops a draft when it no
-//!   longer belongs, the third [`RuleChildDraft`] variant that carries an
-//!   Unreadable Rule at its stored position, and every refusal
-//!   ([`SmartPlaylistRefusal`]) with the reason rendered under the row that
-//!   caused it. The tag editor's single-slot, self-naming copy is the
-//!   precedent being shared, not its state.
+//!   the one [`SmartPlaylistsEditor::reconcile`] that keeps the draft aligned
+//!   with its saved row — dropped when it no longer belongs, the row's stored
+//!   name adopted when it was renamed —, the third [`RuleChildDraft`]
+//!   variant that carries an Unreadable Rule at its stored position, and
+//!   every refusal ([`SmartPlaylistRefusal`]) with the reason rendered under
+//!   the row that caused it. The tag editor's single-slot, self-naming copy is
+//!   the precedent being shared, not its state.
 //! - *Ticket 19 (reorder)* keys drags off the same row identity; ticket 14's
 //!   row hands back its response rect for exactly that.
 //!
@@ -237,6 +238,14 @@ pub struct SmartPlaylistsEditor {
     /// single slot is the tag editor's shape (`draft.error`), shared, and it
     /// is cleared only by a Save that passes every local check.
     pub refusal: Option<SmartPlaylistRefusal>,
+    /// Why the page's enumeration of the saved lists could not be read — the
+    /// reason channel's string, kept for the left column, whose empty state
+    /// would otherwise claim the listener has no lists at all (the Custom
+    /// listing draws the same distinction for its own failed read). Written
+    /// and cleared by [`Self::reconcile`], which is also what keeps the draft
+    /// alive while the read fails: a store that could not answer has not said
+    /// the list is gone. `None` whenever the read answered.
+    pub lists_reason: Option<String>,
     /// What the live match line shows: the count of the draft's committed
     /// tree, or why no number can be shown. Written by the app's per-frame
     /// refresh through [`SessionViews::custom_list_match_count`](riff_backend::app::views::SessionViews::custom_list_match_count)
@@ -263,6 +272,7 @@ impl Default for SmartPlaylistsEditor {
             picker: None,
             pending_picker: None,
             refusal: None,
+            lists_reason: None,
             match_line: None,
         }
     }
@@ -306,37 +316,80 @@ impl SmartPlaylistsEditor {
         self.discard();
     }
 
-    /// The **single reconcile hook**: drop the draft when it no longer
-    /// belongs. A draft belongs to the Smart Playlists page and, when it has
-    /// one, to a saved list that still exists; anything else is a draft
-    /// outliving the thing it was written for, and it goes. Enforced here,
-    /// not by call-site discipline — `RiffApp::ui` calls this once per frame,
-    /// before anything draws, and no gesture clears a draft itself.
+    /// The **single reconcile hook**: keep the draft aligned with the page and
+    /// with the saved row it was written against — dropping it when it no
+    /// longer belongs, letting it follow a rename — and tell the page when the
+    /// row could not be looked up at all. A draft belongs to the Smart
+    /// Playlists page and, when it has one, to a saved list that still exists;
+    /// anything else is a draft outliving the thing it was written for, and it
+    /// goes. Enforced here, not by call-site discipline — `RiffApp::ui` calls
+    /// this once per frame, before anything draws, and no gesture clears or
+    /// re-stamps a draft itself.
     ///
-    /// The two cases, and what they are:
+    /// `stored` is the D14 enumeration's answer: `Ok` is the store naming the
+    /// saved lists, `Err` is the store saying nothing at all — the reason it
+    /// could not be read, which the left column paints in place of its "no
+    /// lists" empty state ([`Self::lists_reason`]). The two are *not* the same
+    /// fact, and reading a failed read as an empty store used to discard the
+    /// listener's unsaved work on a transient error. `stored` is ignored when
+    /// `on_page` is false: the draft is discarded before any of it matters.
+    ///
+    /// The cases, and what they are:
     ///
     /// - **the page is gone** (`on_page` false: another Settings section, or
     ///   the whole Settings view left behind): unsaved edits are discarded on
     ///   leave, exactly as the inline tag editor discards them on a selection
     ///   change;
-    /// - **its list is gone** (selected, but the enumeration no longer names
-    ///   it — deleted from the sidebar while open): the draft can only be
-    ///   written against a list that is not there any more, so it cannot
-    ///   stay.
+    /// - **the read failed** (`Err`): the draft stays, whatever it holds —
+    ///   the store could not say whether the list is there, and a guess that
+    ///   it is not costs the listener their whole rule set — and the reason is
+    ///   kept for the page to show;
+    /// - **its list is gone** (enumerated successfully, and not named among
+    ///   the lists): the draft can only be written against a list that is not
+    ///   there any more, so it cannot stay;
+    /// - **its list was renamed** (enumerated under a name the draft has not
+    ///   seen, and the listener has typed no name of their own): the draft
+    ///   adopts the stored name. Without that it kept the pre-rename name and
+    ///   Save — which writes the name on every call (D12) — silently reverted
+    ///   a rename the listener had committed elsewhere. The listener's **Rules
+    ///   are not re-read**: a sidebar rename touches no `smart_rules` row, so
+    ///   the stored tree is exactly what this draft was opened from, and
+    ///   re-loading it would throw the work in progress away. A name the
+    ///   listener has typed into is left alone — that is the name the page
+    ///   shows, and Save writes what the page shows, so it must never be
+    ///   overwritten here.
     ///
     /// Switching to another list is *not* a drop and does not belong here: it
     /// is a whole-draft **replacement** through [`Self::load_saved`] (the tag
     /// editor's `open_track` on a row click), and a replacement cannot leave
     /// the previous draft behind to outlive anything.
-    pub fn reconcile(&mut self, on_page: bool, lists: &[CustomSmartPlaylist]) {
+    pub fn reconcile(&mut self, on_page: bool, stored: Result<Vec<CustomSmartPlaylist>, String>) {
         if !on_page {
             self.discard();
             return;
         }
-        if let Some(id) = &self.selected
-            && !lists.iter().any(|list| &list.id == id)
-        {
+        let lists = match stored {
+            Ok(lists) => lists,
+            Err(reason) => {
+                self.lists_reason = Some(reason);
+                return;
+            }
+        };
+        self.lists_reason = None;
+        let Some(id) = self.selected.as_ref() else {
+            // A new, unsaved draft: it belongs to the page and to no row.
+            return;
+        };
+        let Some(list) = lists.iter().find(|list| &list.id == id) else {
             self.discard();
+            return;
+        };
+        // The rename case. Comparing against the *original* — not the name
+        // buffer — is what keeps one rule: a buffer the listener has typed
+        // into differs from the original, and their typing wins.
+        if list.name != self.original.name && self.name == self.original.name {
+            self.name.clone_from(&list.name);
+            self.original.name.clone_from(&list.name);
         }
     }
 
@@ -847,12 +900,23 @@ fn lists_column(
     ui.add_space(theme::SPACE_MD);
 
     if content.custom_smart_playlists.is_empty() {
-        browser::empty_state(
-            ui,
-            palette,
-            "No smart playlists yet",
-            "Press \"New smart playlist\" above to write the first one.",
-        );
+        // The empty state is a claim — "you have no saved lists" — and a
+        // failed enumeration read cannot make it: the store said nothing, the
+        // draft was kept for the same reason, and the reason is what the
+        // column paints instead (the error treatment the Custom listing gives
+        // its own failed read). `settings.rs`'s fill and this pane's reconcile
+        // read the same enumeration in the same frame, so an empty column and
+        // a reason arrive together.
+        if let Some(reason) = &editor.lists_reason {
+            ui.colored_label(palette.error, reason);
+        } else {
+            browser::empty_state(
+                ui,
+                palette,
+                "No smart playlists yet",
+                "Press \"New smart playlist\" above to write the first one.",
+            );
+        }
         return;
     }
 

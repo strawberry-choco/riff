@@ -8450,7 +8450,6 @@ mod tests {
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Artist, "one")),
             RuleChildDraft::Box(RuleBoxDraft {
                 combine: Combine::Any,
-                open: false,
                 children: vec![RuleChildDraft::Rule(filled_rule_row(
                     MatchableField::Title,
                     "inner",
@@ -8588,7 +8587,6 @@ mod tests {
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
             RuleChildDraft::Box(RuleBoxDraft {
                 combine: Combine::All,
-                open: false,
                 children: vec![RuleChildDraft::Rule(filled_rule_row(
                     MatchableField::Artist,
                     "beta",
@@ -8646,7 +8644,6 @@ mod tests {
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
             RuleChildDraft::Box(RuleBoxDraft {
                 combine: Combine::All,
-                open: false,
                 children: vec![RuleChildDraft::Rule(filled_rule_row(
                     MatchableField::Artist,
                     "beta",
@@ -8705,7 +8702,6 @@ mod tests {
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
             RuleChildDraft::Box(RuleBoxDraft {
                 combine: Combine::All,
-                open: false,
                 children: vec![RuleChildDraft::Rule(filled_rule_row(
                     MatchableField::Artist,
                     "beta",
@@ -8778,7 +8774,6 @@ mod tests {
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
             RuleChildDraft::Box(RuleBoxDraft {
                 combine: Combine::All,
-                open: false,
                 children: vec![
                     RuleChildDraft::Rule(filled_rule_row(MatchableField::Artist, "beta")),
                     RuleChildDraft::Rule(filled_rule_row(MatchableField::Album, "gamma")),
@@ -8865,7 +8860,6 @@ mod tests {
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
             RuleChildDraft::Box(RuleBoxDraft {
                 combine: Combine::All,
-                open: false,
                 children: vec![RuleChildDraft::Rule(filled_rule_row(
                     MatchableField::Artist,
                     "beta",
@@ -21994,6 +21988,282 @@ mod whole_frame_tests {
                 "Late night jazz copy".to_string(),
             ],
             "the refused write changed no name"
+        );
+    }
+
+    /// A Custom Smart Playlist cannot be renamed to one of the six Built-in
+    /// display names from the sidebar menu: the application layer's half of the
+    /// name rule — the half no store query can hold, because the Built-ins
+    /// exist only as code — refuses it, its wording is painted under the prompt
+    /// the rename opened, and the list keeps its own name in the store. Before
+    /// this guard the sidebar could show two rows reading "Most Played", and a
+    /// later editor Save of that list refused until it was renamed away
+    /// (story 8).
+    #[test]
+    fn a_builtin_name_is_refused_by_the_sidebar_rename_and_the_list_keeps_its_name() {
+        let (mut shell, _dir, _id, store) = custom_list_store_shell();
+        shell.harness.step();
+        shell.harness.step();
+
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Rename").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some("Late night jazz"),
+            "the rename prompt opens pre-filled with the row's name"
+        );
+
+        // The prompt's field holds the first focus; Tab walks to the confirm
+        // control and Shift+Tab returns to the field — the walk
+        // [`focus_and_type_at`] proves. The pre-filled draft is then cleared a
+        // character at a time (this field has no select-all gesture the
+        // harness can drive, and Enter would commit it as it stands), leaving
+        // the Built-in name as the whole draft.
+        shell.harness.key_press(egui::Key::Tab);
+        shell.harness.step();
+        assert!(
+            shell.harness.get_by_label("Save").is_focused(),
+            "Tab from the prompt's first focus lands on Save"
+        );
+        shell
+            .harness
+            .key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+        shell.harness.step();
+        for _ in 0..40 {
+            if focused_prompt_text(&mut shell).as_deref() == Some("") {
+                break;
+            }
+            shell.harness.key_press(egui::Key::Backspace);
+            shell.harness.step();
+        }
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some(""),
+            "the pre-filled name is cleared before the new one is typed"
+        );
+        shell
+            .harness
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .find(|node| node.is_focused())
+            .expect("the name field keeps the focus")
+            .type_text("Most Played");
+        shell.harness.step();
+        confirm_prompt(&mut shell);
+
+        // Refused: the prompt stays open with the application layer's own
+        // wording under it, and nothing was written.
+        assert!(
+            shell.harness.query(By::new().label("Save")).is_some(),
+            "a refused rename keeps the prompt open instead of vanishing"
+        );
+        assert!(
+            shell
+                .harness
+                .query_all_by_label_contains(
+                    "a Built-in Smart Playlist is already named \"Most Played\""
+                )
+                .next()
+                .is_some(),
+            "the application layer's own refusal is painted under the prompt"
+        );
+        assert!(
+            shell
+                .harness
+                .query_all_by_label("Most Played")
+                .next()
+                .is_none(),
+            "no sidebar row wears a Built-in display name"
+        );
+        let names: Vec<String> = store
+            .custom_smart_playlists()
+            .expect("the enumeration reads")
+            .into_iter()
+            .map(|list| list.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Late night jazz".to_string()],
+            "the refused write changed no name: the six Built-in display names are code, \
+             and a Custom row may not borrow one"
+        );
+    }
+
+    /// An enumeration read that **fails** while the page is open is not a store
+    /// that holds no lists: the draft — the listener's name and Rules with it —
+    /// stays, and the page says why instead of claiming there are none. Only a
+    /// successful read that no longer names the draft's list drops it (pinned
+    /// in `smart_playlists_editor_tests.rs`). This is the one place in the
+    /// feature where a degraded read used to destroy the listener's work
+    /// instead of mispainting a frame.
+    #[test]
+    fn a_failed_enumeration_read_keeps_the_draft_and_says_why() {
+        let (mut shell, mock) = counting_mock_shell(MockLibraryQueryStore {
+            custom_smart_playlists: vec![custom_list("spl-late-night-1", "Late night jazz")],
+            smart_playlist_trees: [(PlaylistId("spl-late-night-1".to_string()), one_rule_tree())]
+                .into(),
+            ..MockLibraryQueryStore::default()
+        });
+        open_saved_list_in_editor(&mut shell);
+
+        // The listener's work in progress: a name typed over the loaded one.
+        shell
+            .harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::TextInput)
+                    .value("Late night jazz"),
+            )
+            .expect("the name field holds the loaded name")
+            .focus();
+        shell.harness.step();
+        shell
+            .harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::TextInput)
+                    .value("Late night jazz"),
+            )
+            .expect("the name field survives being focused")
+            .type_text(" X");
+        shell.harness.step();
+
+        // The store starts failing on the one read the reconcile's existence
+        // question goes through.
+        mock.lock()
+            .unwrap()
+            .failing
+            .push(FailingQuery::CustomSmartPlaylists);
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            shell
+                .harness
+                .query(
+                    By::new()
+                        .role(egui::accesskit::Role::TextInput)
+                        .value("Late night jazz X"),
+                )
+                .is_some(),
+            "a failed read says nothing about the list: the listener's draft is still there"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Label, "Edit smart playlist")
+                .is_some(),
+            "and it is still the draft of the list it was opened on"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("custom list enumeration read boom")
+                .is_some(),
+            "the page says why the saved lists are missing — the store's own reason"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("No smart playlists yet")
+                .is_none(),
+            "the empty state would claim an emptiness nobody measured"
+        );
+    }
+
+    /// A sidebar Rename reaches the open draft: the store's name moves, the
+    /// reconcile lets the draft adopt it (the listener's Rules stay — a
+    /// sidebar rename touches no rule row), and the editor's Save therefore
+    /// writes the name the sidebar shows. This is the regression pin for the
+    /// silent revert: before the draft followed the row's stored name, Save —
+    /// which writes the name on every call (D12) — wrote the pre-rename name
+    /// back, undoing the rename the listener had just committed.
+    #[test]
+    fn a_sidebar_rename_survives_the_editors_next_save() {
+        let (mut shell, _dir, id, store) = custom_list_store_shell();
+        open_saved_list_in_editor(&mut shell);
+        assert!(
+            shell
+                .harness
+                .query(
+                    By::new()
+                        .role(egui::accesskit::Role::TextInput)
+                        .value("Late night jazz"),
+                )
+                .is_some(),
+            "the draft opened on the saved name, untyped"
+        );
+
+        // The rename the listener commits from the sidebar's own menu. The
+        // prompt's field holds the focus (the pane's own name field is not
+        // focused and its `Save` is on screen too, so the walk
+        // [`focus_and_type_at`] proves is not what this test needs): append to
+        // the pre-filled draft and Enter, the prompt's own commit gesture.
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Rename").click();
+        shell.harness.step();
+        shell.harness.step();
+        shell
+            .harness
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .find(|node| node.is_focused())
+            .expect("the rename prompt opened with its name field focused")
+            .type_text(" deep");
+        shell.harness.step();
+        confirm_prompt(&mut shell);
+        shell.harness.step();
+        shell.harness.step();
+        let names = |store: &riff_infra::store::SqliteStore| -> Vec<String> {
+            store
+                .custom_smart_playlists()
+                .expect("the enumeration reads")
+                .into_iter()
+                .map(|list| list.name)
+                .collect()
+        };
+        assert_eq!(
+            names(&store),
+            vec!["Late night jazz deep".to_string()],
+            "the rename committed through the store"
+        );
+
+        // The draft followed it: the name field holds the stored name and the
+        // draft is clean again — nothing is pending, and nothing was re-read:
+        // the tree is the one the draft was opened from.
+        assert!(
+            shell
+                .harness
+                .query(
+                    By::new()
+                        .role(egui::accesskit::Role::TextInput)
+                        .value("Late night jazz deep"),
+                )
+                .is_some(),
+            "the draft adopts the name the sidebar committed"
+        );
+
+        // Save: the name the page shows is the name the store keeps — the
+        // rename is not reverted by a Save that was about the Rules.
+        shell
+            .harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Save")
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+        assert_eq!(
+            names(&store),
+            vec!["Late night jazz deep".to_string()],
+            "Save wrote the renamed name: the draft held no pre-rename name to write back"
+        );
+        assert_eq!(
+            store
+                .smart_playlist_tree(&id)
+                .expect("the read works")
+                .expect("the tree exists")
+                .root(),
+            one_rule_tree().root(),
+            "and the whole tree written with it is the list's own"
         );
     }
 

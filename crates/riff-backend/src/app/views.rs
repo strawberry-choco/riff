@@ -1056,16 +1056,44 @@ impl SessionViews {
     ///
     /// Deliberately uncached at this seam: the read answers the *which lists
     /// exist* question only (no Tracks, no Rule tree, no counts), the surfaces
-    /// that ask are the Settings pane and the sidebar section rather than a
-    /// paged listing, and a new projection would need the generation story
-    /// ticket 11's window cache owns. On a store error the list answers empty
-    /// behind a `tracing::warn!`, like every other degraded read.
+    /// that ask are the Smart Playlists pane — only while that section is the
+    /// current one — and the sidebar section rather than a paged listing, and
+    /// a new projection would need the generation story ticket 11's window
+    /// cache owns. On a store error the list answers empty behind a
+    /// `tracing::warn!`, like every other degraded read — a caller that must
+    /// tell a failed read from an answered one asks
+    /// [`Self::try_custom_smart_playlists`], the fallible half below.
     pub fn custom_smart_playlists(&mut self) -> Vec<CustomSmartPlaylist> {
         degrade(
             self.queries.custom_smart_playlists(),
             || "Failed to enumerate the Custom Smart Playlists from the store".to_string(),
             Vec::new,
         )
+    }
+
+    /// The fallible half of [`Self::custom_smart_playlists`]: every saved
+    /// Custom Smart Playlist, or the store's own reason it could not answer.
+    ///
+    /// This is the reason channel (D6) applied to the one enumeration read
+    /// whose *failure* must not be mistaken for its answer. The editor's
+    /// reconcile asks whether the list a draft was written against still
+    /// exists, and a degraded empty vector would read as "it was deleted" —
+    /// destroying the listener's unsaved work on a transient store error. So
+    /// the failure arrives as a reason instead, and the reconcile keeps the
+    /// draft. The reason travels alone, with no value beside it: unlike the
+    /// tree, total and row reads above, this read has no last-good answer to
+    /// hand over (it is deliberately uncached), and the empty list a degraded
+    /// read would answer with is exactly the value that must not be invented.
+    ///
+    /// The read is the same one [`Self::custom_smart_playlists`] makes, which
+    /// stays on `degrade` for every caller that only draws the answer.
+    pub fn try_custom_smart_playlists(&mut self) -> Result<Vec<CustomSmartPlaylist>, String> {
+        self.queries.custom_smart_playlists().map_err(|error| {
+            tracing::warn!(
+                "Failed to enumerate the Custom Smart Playlists from the store: {error}"
+            );
+            error.to_string()
+        })
     }
 
     // --- Sidebar counts ----------------------------------------------------------

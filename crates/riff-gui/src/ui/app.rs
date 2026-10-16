@@ -51,6 +51,10 @@ pub use riff_backend::app::cover_service::{
     COVER_CACHE_CAP, ClearCacheOutcome, Covers, lru_insert,
 };
 use riff_backend::app::pass_service::Passes;
+// The application layer's half of the sidebar name rule (the Built-in display
+// names), asked by every gesture that names a sidebar row: the two prompt
+// commits below and the editor's Save.
+use riff_backend::app::playlist_name::builtin_smart_list_name_conflict;
 use riff_backend::app::replaygain_pass::PassReport;
 // The artwork cache-key space moved to `ui::artwork` with the artwork primitive
 // (issue 13); these keep the historical `ui::app::` paths resolving.
@@ -1549,22 +1553,26 @@ impl eframe::App for RiffApp {
         // and only here: it belongs to the Smart Playlists page and to a saved
         // list that still exists, so leaving the page — another Settings
         // section, or the Settings view itself — or losing the list it was
-        // written against discards it. `SmartPlaylistsEditor::reconcile` is
-        // the ONE place that rule lives; no gesture clears a draft itself, so
-        // a stale draft cannot survive through a path nobody remembered to
-        // wire. Called before any panel draws, so a discarded draft is never
-        // painted. The enumeration read is the same bounded projection read
-        // the page's own content fill makes, and is asked only while the page
-        // is on screen.
+        // written against discards it, while a rename of that list is followed
+        // by the draft. `SmartPlaylistsEditor::reconcile` is the ONE place
+        // that rule lives; no gesture clears a draft itself, so a stale draft
+        // cannot survive through a path nobody remembered to wire. Called
+        // before any panel draws, so a discarded draft is never painted. The
+        // enumeration is the same bounded read the page's own content fill
+        // makes, asked only while the page is on screen and through its
+        // fallible accessor: a store that *could not answer* must not reach
+        // the reconcile as a store that answered "no lists", because the draft
+        // is the only holder of the listener's work and a transient read error
+        // would otherwise destroy it.
         let smart_page_open = matches!(library.view_mode, ViewMode::Settings)
             && self.settings_section == SettingsSection::SmartPlaylists;
-        let lists = if smart_page_open {
-            self.views.custom_smart_playlists()
+        let stored = if smart_page_open {
+            self.views.try_custom_smart_playlists()
         } else {
-            Vec::new()
+            Ok(Vec::new())
         };
         self.smart_playlists_editor
-            .reconcile(smart_page_open, &lists);
+            .reconcile(smart_page_open, stored);
 
         // --- SHELL (Issue 06): unified Panel API at exact token dimensions ---
         //
@@ -2831,9 +2839,18 @@ pub fn commit_playlist_rename(
 /// ([`LibraryMutationStore::rename_smart_playlist`] — a sidebar Rename names a
 /// list without touching its tree, which is why it is not a save).
 ///
-/// `Err(reason)` is the refusal the caller must render: the store's sidebar
-/// name rule refuses a name another row holds, and the prompt stays open with
-/// the reason under it.
+/// `Err(reason)` is the refusal the caller must render: both halves of the
+/// sidebar name rule — the application layer's Built-in-name half and the
+/// store's cross-table half (a name another row holds) — and the prompt stays
+/// open with the reason under it.
+///
+/// The Built-in-name half is asked **here**, not at the prompt's call site, so
+/// that any future caller of this commit inherits it: the six Built-in Smart
+/// Playlists exist only as code, so no query can refuse a Custom Smart
+/// Playlist named after one, and the sidebar must never show two rows reading
+/// "Most Played" (story 8). The same half is asked by the two playlist prompt
+/// arms and by the editor's Save; this is the fourth gesture that names a
+/// sidebar row.
 #[must_use = "a refused rename has to reach the listener, not the log"]
 pub fn commit_custom_smart_list_rename(
     store: &mut dyn LibraryMutationStore,
@@ -2843,6 +2860,9 @@ pub fn commit_custom_smart_list_rename(
     let draft = draft.trim().to_string();
     if draft.is_empty() {
         return Ok(());
+    }
+    if let Some(reason) = builtin_smart_list_name_conflict(&draft) {
+        return Err(reason);
     }
     match store.rename_smart_playlist(id, &draft) {
         Ok(_found) => Ok(()),

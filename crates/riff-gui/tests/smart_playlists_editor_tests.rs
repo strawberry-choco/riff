@@ -19,12 +19,33 @@ use riff_gui::ui::smart_playlists_page::{SmartPlaylistRefusal, SmartPlaylistsEdi
 
 // --- Fixtures ------------------------------------------------------------------
 
-/// One saved-list row as the D14 enumeration answers it.
+/// One saved-list row as the D14 enumeration answers it. `PlaylistId::new`
+/// stamps the wall clock, so two calls mint two ids unless they land in the
+/// same millisecond: a test that matches a row against the draft's own id
+/// builds both from ONE call — [`editor_and_list`] is that pairing.
 fn list(id: &str, name: &str) -> CustomSmartPlaylist {
     CustomSmartPlaylist {
         id: PlaylistId::new(id),
         name: name.to_string(),
         created_at: std::time::SystemTime::UNIX_EPOCH,
+    }
+}
+
+/// The editor holding `tree` **and the row it was opened from**, so a test can
+/// hand the reconcile an enumeration naming the very list the draft carries.
+fn editor_and_list(tree: &SmartPlaylistTree) -> (SmartPlaylistsEditor, CustomSmartPlaylist) {
+    let saved = list("spl-late-night-2", "Late night jazz");
+    let mut editor = SmartPlaylistsEditor::default();
+    editor.load_saved(&saved, Some(tree));
+    (editor, saved)
+}
+
+/// [`editor_and_list`]'s row under a different stored name — the rename a
+/// sidebar write commits, with the row's identity preserved.
+fn renamed_row(row: &CustomSmartPlaylist, name: &str) -> CustomSmartPlaylist {
+    CustomSmartPlaylist {
+        name: name.to_string(),
+        ..row.clone()
     }
 }
 
@@ -307,13 +328,13 @@ fn the_reconcile_drops_the_draft_only_where_it_no_longer_belongs() {
 
     let mut editor = editor_holding(&tree);
     editor.name = "half-typed".to_string();
-    editor.reconcile(true, std::slice::from_ref(&saved));
+    editor.reconcile(true, Ok(vec![saved.clone()]));
     assert_eq!(
         editor.name, "half-typed",
         "an open page and a list that still exists keep the draft, dirt and all"
     );
 
-    editor.reconcile(false, &[]);
+    editor.reconcile(false, Ok(Vec::new()));
     assert!(editor.is_new(), "leaving the page discards the whole draft");
     assert_eq!(
         editor,
@@ -322,12 +343,54 @@ fn the_reconcile_drops_the_draft_only_where_it_no_longer_belongs() {
     );
 
     let mut editor = editor_holding(&tree);
-    editor.reconcile(true, &[]);
+    editor.reconcile(true, Ok(Vec::new()));
     assert!(
         editor.is_new(),
         "a draft whose list was deleted elsewhere cannot outlive it"
     );
     assert_eq!(editor.name, "");
+}
+
+/// A failed enumeration read is not a successful read that found no lists: the
+/// draft — and the name typed into it — stays, and the reason is kept for the
+/// page to show. Only an answered read that no longer names the list drops it,
+/// and leaving the page drops it whatever the read said.
+#[test]
+fn a_failed_enumeration_read_keeps_the_draft_and_carries_the_reason() {
+    let tree = nested_tree();
+    let mut editor = editor_holding(&tree);
+    editor.name = "half-typed".to_string();
+
+    editor.reconcile(true, Err("the store is locked".to_string()));
+    assert!(
+        !editor.is_new(),
+        "a store that could not answer has not said the list is gone"
+    );
+    assert_eq!(
+        editor.name, "half-typed",
+        "so nothing of the listener's is dropped"
+    );
+    assert_eq!(
+        editor.lists_reason.as_deref(),
+        Some("the store is locked"),
+        "and the page is left the reason to paint"
+    );
+
+    // The read answers again — with the list — and the reason goes with it.
+    editor.reconcile(true, Ok(vec![list("spl-late-night-2", "Late night jazz")]));
+    assert_eq!(editor.lists_reason, None);
+    assert_eq!(
+        editor.name, "half-typed",
+        "an answered read changed nothing here"
+    );
+
+    // Leaving the page is still a discard, whatever the read said.
+    editor.reconcile(false, Err("the store is locked".to_string()));
+    assert!(editor.is_new());
+    assert_eq!(
+        editor.lists_reason, None,
+        "a discarded draft leaves no reason behind"
+    );
 }
 
 /// A new, unsaved draft belongs to the page: the reconcile does not touch it
@@ -338,9 +401,57 @@ fn a_new_draft_survives_the_reconcile_while_the_page_is_open() {
         name: "Unfinished".to_string(),
         ..SmartPlaylistsEditor::default()
     };
-    editor.reconcile(true, &[]);
+    editor.reconcile(true, Ok(Vec::new()));
     assert_eq!(editor.name, "Unfinished");
     assert!(editor.is_new(), "still nothing saved");
+}
+
+/// A row renamed elsewhere (the sidebar's own Rename) is followed by the
+/// draft: the stored name is adopted — the draft is clean again against it,
+/// and the Rules in hand are untouched, because a rename writes no rule row —
+/// while a name buffer the listener has typed into wins, being the name the
+/// page shows and the one Save writes.
+#[test]
+fn the_reconcile_adopts_a_renamed_rows_name_only_over_an_untouched_buffer() {
+    let tree = nested_tree();
+    let renamed = list("spl-late-night-2", "Late night jazz deep");
+
+    // Untouched: the draft follows the store's name and re-stamps its own
+    // baseline with it, and the tree is the one it was opened from.
+    let mut editor = editor_holding(&tree);
+    assert!(!editor.is_dirty());
+    editor.reconcile(true, Ok(vec![renamed.clone()]));
+    assert_eq!(editor.name, "Late night jazz deep");
+    assert_eq!(editor.original.name, "Late night jazz deep");
+    assert!(
+        !editor.is_dirty(),
+        "adopting the stored name re-stamps the baseline, so nothing is pending"
+    );
+    assert_eq!(
+        &whole_tree_of(&editor),
+        tree.root(),
+        "the listener's Rules are not re-read: a rename touches no rule row"
+    );
+
+    // Typed: their own name is left alone — it is what the page shows, and
+    // overwriting it here would silently edit the draft under their hands.
+    let mut editor = editor_holding(&tree);
+    editor.name = "Typed by the listener".to_string();
+    editor.reconcile(true, Ok(vec![renamed.clone()]));
+    assert_eq!(editor.name, "Typed by the listener");
+
+    // A rename over an edited tree: the name is adopted and the work in
+    // progress stays where it was.
+    let mut editor = editor_holding(&tree);
+    editor.add_rule(&BoxPath::root());
+    editor.reconcile(true, Ok(vec![renamed.clone()]));
+    assert_eq!(editor.name, "Late night jazz deep");
+    assert!(editor.is_dirty(), "the tree edit is still unsaved");
+    assert_eq!(
+        editor.root.children.len(),
+        3,
+        "the Rules written so far are still in the draft"
+    );
 }
 
 // --- Save: the refusals, each naming its cause ----------------------------------

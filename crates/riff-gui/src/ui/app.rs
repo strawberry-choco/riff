@@ -64,7 +64,9 @@ use riff_backend::app::scan_service::Scans;
 use riff_backend::app::state::{
     BrowseMode, BrowserSelection, LibrarySection, LibrarySession, PlaybackSession, ViewMode,
 };
-use riff_backend::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
+use riff_backend::app::store::{
+    CustomSmartPlaylist, LibraryMutationStore, PlaylistStore, SettingsStore,
+};
 use riff_backend::app::tag_edit_service::TagEdits;
 use riff_backend::app::traits::RequestedSize;
 use riff_backend::app::views::SessionViews;
@@ -260,10 +262,12 @@ pub struct RiffApp {
     /// editor's controller: submits save intent and yields polled outcomes;
     /// the whole save flow lives behind it.
     tag_editor: InlineTagEditor,
-    /// Which read-only smart playlist is open in the library explorer, if any.
+    /// Which smart list is open in the library explorer, if any — a Built-in
+    /// kind or a Custom list id ([`SmartListIdentity`]), so one SMART LISTS
+    /// section can open either.
     /// Transient UI state (precedent: `tag_edit`); the playlist contents are
     /// re-computed from library data on every frame, so nothing is cached.
-    smart_playlist_view: Option<SmartPlaylistKind>,
+    smart_playlist_view: Option<SmartListIdentity>,
     /// Which user playlist is open in the library explorer, if any.
     playlist_view: Option<PlaylistId>,
     /// The playing track's id whose cover the Now Playing stage last
@@ -2382,15 +2386,32 @@ fn last_played_label(
     )
 }
 
+/// Which smart list an open-list slot addresses: one of the six Built-in
+/// Smart Playlists, or one of the listener's Custom Smart Playlists by its
+/// store id.
+///
+/// One identity so the sidebar's SMART LISTS section can open either kind
+/// through one slot (`RiffApp::smart_playlist_view`, ticket 12). A Built-in
+/// is named by its code-defined kind; a Custom list by the `PlaylistId` Save
+/// minted — the id its bounded reads take, never a row that can go stale
+/// within the slot's own frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SmartListIdentity {
+    /// One of the six Built-in Smart Playlists, by its code-defined kind.
+    BuiltIn(SmartPlaylistKind),
+    /// A Custom Smart Playlist, by its store row id.
+    Custom(PlaylistId),
+}
+
 /// The transient playlist-prompt slots the sidebar's playlist rows act on,
 /// grouped so [`apply_playlist_row_action`] stays readable. They live on
 /// [`RiffApp`] between frames; this borrow bundle is built per frame.
 pub struct PlaylistPromptSlots<'a> {
     /// Which user playlist is open in the explorer.
     pub view: &'a mut Option<PlaylistId>,
-    /// Which read-only smart playlist is open (closed when a user playlist
-    /// opens).
-    pub smart_view: &'a mut Option<SmartPlaylistKind>,
+    /// Which read-only smart playlist is open — a Built-in kind or a Custom
+    /// list id (closed when a user playlist opens).
+    pub smart_view: &'a mut Option<SmartListIdentity>,
     /// The inline rename prompt: (playlist id, draft name).
     pub rename: &'a mut Option<(PlaylistId, String)>,
     /// The inline "New Playlist" prompt draft.
@@ -2427,6 +2448,83 @@ pub fn smart_list_openable(kind: SmartPlaylistKind, advanced: bool) -> bool {
             kind,
             SmartPlaylistKind::NeverPlayed | SmartPlaylistKind::LostGems
         )
+}
+
+/// Paint the Custom Smart Playlist rows of the SMART LISTS section (ticket
+/// 12): every saved list, in the order `lists` came back in — the store
+/// enumerates by `created_at`, so that is creation order — each one a plain
+/// nav row like the six Built-ins above it, and each opening over the
+/// library view.
+///
+/// **No count is passed, deliberately** — the `count` slot is `None`, never
+/// `Some(0)`, which would read as an empty list. The six Built-ins' counts
+/// are cheap because the counts model is cached per store generation, while
+/// a Custom count would cost one filtered pass per list per generation on
+/// every scan refresh.
+///
+/// A free function rather than an app method so the UI seam is assertable on
+/// its own: the rows report [`SidebarAction::OpenSmartList`] with the
+/// identity they opened, and nothing else.
+pub fn custom_smart_list_rows(
+    ui: &mut egui::Ui,
+    cache: &mut riff_gui_theme::icons::IconCache,
+    palette: &riff_gui_theme::theme::Palette,
+    reduce_motion: bool,
+    lists: &[CustomSmartPlaylist],
+    open: Option<&SmartListIdentity>,
+    report: &mut crate::ui::frame::SidebarReport,
+) {
+    use crate::ui::sidebar::{self, TreeRow};
+
+    for list in lists {
+        let selected = match open {
+            Some(SmartListIdentity::Custom(open_id)) => *open_id == list.id,
+            Some(SmartListIdentity::BuiltIn(_)) | None => false,
+        };
+        let row = sidebar::tree_row(
+            ui,
+            cache,
+            palette,
+            reduce_motion,
+            TreeRow::nav(
+                list.name.as_str(),
+                Some(riff_gui_theme::icons::Icon::Sparkles),
+                None,
+                selected,
+            ),
+        );
+        if row.response.clicked() {
+            report.push(crate::ui::frame::SidebarAction::OpenSmartList(
+                SmartListIdentity::Custom(list.id.clone()),
+            ));
+        }
+    }
+}
+
+/// Delete a Custom Smart Playlist through the store and close it when it was
+/// the one open.
+///
+/// The deletion is the store's own durable transaction
+/// ([`LibraryMutationStore::delete_smart_playlist`]); this is the layer
+/// ticket 21's sidebar menu calls once its confirmation is answered, and it
+/// owns ticket 12's clearing: when the deleted id is the open one the
+/// smart-list slot empties, exactly as deleting an open Playlist clears
+/// `playlist_view` (see [`apply_playlist_row_action`]'s `Delete` arm). No
+/// `land_on_library()` call — the Library returns because the stage's
+/// single-stage route is re-derived every frame and falls through to the
+/// section's own columns, and an active search survives, both exactly as
+/// they do for a deleted playlist.
+pub fn delete_custom_smart_playlist(
+    id: &PlaylistId,
+    store: &mut dyn LibraryMutationStore,
+    smart_view: &mut Option<SmartListIdentity>,
+) {
+    if let Err(e) = store.delete_smart_playlist(id) {
+        tracing::warn!("Failed to delete Custom Smart Playlist: {e}");
+    }
+    if smart_view.as_ref() == Some(&SmartListIdentity::Custom(id.clone())) {
+        *smart_view = None;
+    }
 }
 
 /// Apply one restyled playlist-row action (Issue 07) through the SAME Store
@@ -2806,6 +2904,11 @@ impl RiffApp {
             &counts,
             &mut section,
         );
+        // The listener's own lists, after the six Built-ins, in creation
+        // order — same sub-slot, same fold gate. They are visible without
+        // Advanced mode (ticket 12): only the Built-ins' two advanced-gated
+        // rows move with the toggle.
+        self.render_custom_smart_list_rows(ui, library, &mut section);
         self.apply_sidebar_slot(playback, library, out, &section);
 
         // --- PLAYLISTS ---------------------------------------------------------
@@ -3048,13 +3151,66 @@ impl RiffApp {
                     kind.display_name(),
                     Some(riff_gui_theme::icons::Icon::Sparkles),
                     Some(smart_count(kind)),
-                    self.smart_playlist_view == Some(kind),
+                    self.smart_playlist_view.as_ref().is_some_and(
+                        |open| matches!(open, SmartListIdentity::BuiltIn(k) if *k == kind),
+                    ),
                 ),
             );
             if row.response.clicked() {
-                report.push(SidebarAction::OpenSmartList(kind));
+                report.push(SidebarAction::OpenSmartList(SmartListIdentity::BuiltIn(
+                    kind,
+                )));
             }
         }
+    }
+
+    /// The listener's own Custom Smart Playlists, right below the six
+    /// Built-ins: one seam read for the whole row pass (however many lists
+    /// the store holds), no count read for any of them, and no Advanced-mode
+    /// gate — a headline feature behind a toggle is not a headline feature.
+    ///
+    /// The read is [`SessionViews::custom_smart_playlists`], the D14
+    /// enumeration: id, name and creation order, which is also the order the
+    /// rows paint in. Rows are drawn by [`custom_smart_list_rows`].
+    fn render_custom_smart_list_rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &LibrarySession,
+        report: &mut SidebarReport,
+    ) {
+        // Folded away with the section: the chevron's own answer is applied
+        // before this pass, and a folded section reads nothing.
+        if library.ui_flags.smart_lists_collapsed {
+            return;
+        }
+        let lists = self.views.custom_smart_playlists();
+        custom_smart_list_rows(
+            ui,
+            &mut self.icons,
+            &self.theme.active,
+            library.ui_flags.reduce_motion,
+            &lists,
+            self.smart_playlist_view.as_ref(),
+            report,
+        );
+    }
+
+    /// The listing a Custom Smart Playlist opens into — ticket 13's surface
+    /// (the windowed rows, the sort control, the needle, and the empty and
+    /// broken states). What ticket 12 owns is the identity half: the stage
+    /// routes here only for a list the store still holds, so a stale id
+    /// never paints an empty listing. Until ticket 13 lands, this build
+    /// paints one honest line where that listing will draw rather than an
+    /// empty stage.
+    #[allow(
+        clippy::unused_self,
+        reason = "ticket 13's listing reads self (views, theme, icons); the stub keeps the method's shape so the dispatch site does not move"
+    )]
+    fn render_custom_smart_list_view(&mut self, ui: &mut egui::Ui, id: &PlaylistId) {
+        let _ = id;
+        ui.vertical_centered(|ui| {
+            ui.weak("This build does not list Custom Smart Playlists yet.");
+        });
     }
 
     /// The sidebar footer's action side: the stamp text comes from the

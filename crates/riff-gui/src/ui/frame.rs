@@ -88,9 +88,9 @@ use riff_backend::app::traits::RequestedSize;
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
 use riff_backend::app::{MutexExt, Transport};
-use riff_backend::domain::{PlaylistId, SmartPlaylistKind};
+use riff_backend::domain::PlaylistId;
 
-use super::app::{InlineTagEditor, ThemeInputs, ThemeState};
+use super::app::{InlineTagEditor, SmartListIdentity, ThemeInputs, ThemeState};
 // Gated with the one caller: nothing on Windows or Linux resolves a native
 // close, and an ungated import would be an `unused_imports` there.
 #[cfg(target_os = "macos")]
@@ -320,8 +320,9 @@ pub struct FrameParts<'a> {
     pub title_key: &'a mut TitleKey,
     /// Which user playlist is open in the library explorer.
     pub playlist_view: &'a mut Option<PlaylistId>,
-    /// Which read-only smart playlist is open.
-    pub smart_playlist_view: &'a mut Option<SmartPlaylistKind>,
+    /// Which smart list is open — one of the six Built-in Smart Playlists or
+    /// a Custom Smart Playlist, by its store id ([`SmartListIdentity`]).
+    pub smart_playlist_view: &'a mut Option<SmartListIdentity>,
     /// The inline rename prompt: (playlist id, draft name).
     pub playlist_rename: &'a mut Option<(PlaylistId, String)>,
     /// The inline "New Playlist" name prompt, holding the draft.
@@ -1223,8 +1224,10 @@ pub enum SidebarAction {
     /// The SMART LISTS section header's chevron: fold the section away or open
     /// it again.
     ToggleSmartListsCollapsed,
-    /// A smart-list row: open it over the library view.
-    OpenSmartList(SmartPlaylistKind),
+    /// A smart-list row: open it over the library view. The identity says
+    /// which kind — a Built-in Smart Playlist or a Custom one — because the
+    /// SMART LISTS section's rows are one slot's (ticket 12).
+    OpenSmartList(SmartListIdentity),
     /// The Playlists header's "+": open the empty name prompt.
     NewPlaylist,
     /// The SMART LISTS header's "+": open the Smart Playlists page on a new,

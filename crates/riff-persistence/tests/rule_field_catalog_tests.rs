@@ -14,8 +14,8 @@ use std::path::Path;
 
 use riff_persistence::field_catalog::Absence;
 use riff_persistence::field_catalog::FieldSpec;
-use riff_persistence::field_catalog::ValueWidget;
 use riff_persistence::field_catalog::ValueType;
+use riff_persistence::field_catalog::ValueWidget;
 use riff_persistence::field_catalog::fields;
 use riff_persistence::rule::Comparison;
 use riff_persistence::rule::MatchableField;
@@ -69,10 +69,26 @@ fn every_matchable_field_has_exactly_one_catalog_row() {
 fn per_field_operator_legality_is_a_catalog_question_with_no_database() {
     // The spec's worked examples of what must NOT be a choice.
     for (field, comparison, why) in [
-        (MatchableField::Year, Comparison::Contains, "\"year contains\""),
-        (MatchableField::Year, Comparison::Is, "a number shows the arithmetic word"),
-        (MatchableField::Duration, Comparison::Contains, "duration is not text"),
-        (MatchableField::PlayCount, Comparison::Before, "a count is not a date"),
+        (
+            MatchableField::Year,
+            Comparison::Contains,
+            "\"year contains\"",
+        ),
+        (
+            MatchableField::Year,
+            Comparison::Is,
+            "a number shows the arithmetic word",
+        ),
+        (
+            MatchableField::Duration,
+            Comparison::Contains,
+            "duration is not text",
+        ),
+        (
+            MatchableField::PlayCount,
+            Comparison::Before,
+            "a count is not a date",
+        ),
         (
             MatchableField::LastPlayed,
             Comparison::GreaterThan,
@@ -405,7 +421,10 @@ fn the_widgets_are_named_as_ideas_never_as_controls() {
     // The spec's seven widget ideas, and nothing in the catalog's vocabulary
     // that smells like a toolkit control. This crate carries no UI dependency
     // to name one even by accident — its manifest has no `[dependencies]`.
-    let ideas: Vec<&str> = ValueWidget::ALL.iter().map(|widget| widget.idea()).collect();
+    let ideas: Vec<&str> = ValueWidget::ALL
+        .iter()
+        .map(|widget| widget.idea())
+        .collect();
     assert_eq!(
         ideas,
         vec![
@@ -439,10 +458,16 @@ fn display_names_are_words_the_rest_of_riff_already_uses() {
     // spellings the brief and the existing surfaces pin: the tag editor's
     // "Album Artist", the inspector's "Plays" and "Last played", and the
     // app's long-standing US "Favorite" rather than the glossary's "Favourite".
-    assert_eq!(spec(MatchableField::AlbumArtist).display_name(), "Album Artist");
+    assert_eq!(
+        spec(MatchableField::AlbumArtist).display_name(),
+        "Album Artist"
+    );
     assert_eq!(spec(MatchableField::Year).display_name(), "Year");
     assert_eq!(spec(MatchableField::PlayCount).display_name(), "Plays");
-    assert_eq!(spec(MatchableField::LastPlayed).display_name(), "Last played");
+    assert_eq!(
+        spec(MatchableField::LastPlayed).display_name(),
+        "Last played"
+    );
     assert_eq!(spec(MatchableField::Favorite).display_name(), "Favorite");
 
     let mut names: Vec<&str> = Vec::new();
@@ -530,8 +555,14 @@ fn a_rule_can_test_losslessness_of_a_path_without_reading_a_file() {
     use riff_persistence::field_catalog::path_is_lossless;
 
     assert!(path_is_lossless(Path::new("/m/a.flac")), "flac is lossless");
-    assert!(path_is_lossless(Path::new("/m/a.FLAC")), "case does not change it");
-    assert!(path_is_lossless(Path::new("/m/a.Wav")), "nor does mixed case");
+    assert!(
+        path_is_lossless(Path::new("/m/a.FLAC")),
+        "case does not change it"
+    );
+    assert!(
+        path_is_lossless(Path::new("/m/a.Wav")),
+        "nor does mixed case"
+    );
     assert!(
         !path_is_lossless(Path::new("/m/a.m4a")),
         "an ALAC file inside .m4a stays lossy: riff does not read the real codec, and \

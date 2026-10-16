@@ -239,7 +239,7 @@ pub struct SmartPlaylistsEditor {
     pub refusal: Option<SmartPlaylistRefusal>,
     /// What the live match line shows: the count of the draft's committed
     /// tree, or why no number can be shown. Written by the app's per-frame
-    /// refresh through [`SessionViews::custom_list_match_count`]
+    /// refresh through [`SessionViews::custom_list_match_count`](riff_backend::app::views::SessionViews::custom_list_match_count)
     /// ([`riff_backend::app::views::SessionViews`]) — the one read this line
     /// costs — and painted by the pane. `None` until the first refresh has
     /// run for the draft in hand; a replaced draft carries no answer from

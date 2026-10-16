@@ -4888,7 +4888,7 @@ fn show_list_context_menu(
 /// [`show_list_context_menu`] takes the ids in hand, which is right for the
 /// surfaces whose rows are already loaded (a built-in list's read, a
 /// playlist's entries, a folder's subtree, an entity row's tracks resolved by
-/// [`apply_collection_menu`](crate::ui::app::apply_collection_menu)). A Custom
+/// [`apply_collection_menu`]). A Custom
 /// Smart Playlist's rows are a bounded window, and the whole-list actions must
 /// queue **every matching Track in the displayed order, not the loaded
 /// window** — so the ids are read at dispatch, through the same paged read the

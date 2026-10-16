@@ -3119,11 +3119,11 @@ impl super::app::RiffApp {
     /// click, an Enter or a blur just committed is counted on the same
     /// frame's write-back and painted on the next.
     ///
-    /// The read is [`SessionViews::custom_list_match_count`]
+    /// The read is [`SessionViews::custom_list_match_count`](riff_backend::app::views::SessionViews::custom_list_match_count)
     /// ([`riff_backend::app::views::SessionViews`]) — the one read this line
     /// costs, on the UI thread with every other read the Settings page makes
     /// and no worker anywhere. What reaches the seam is the draft's
-    /// **committed** tree ([`SmartPlaylistsEditor::committed_tree`]), so a
+    /// **committed** tree ([`SmartPlaylistsEditor::committed_tree`](crate::ui::smart_playlists_page::SmartPlaylistsEditor::committed_tree)), so a
     /// repaint and a keystroke both arrive with a shape the seam already
     /// holds and no store read comes of them; a commit moves the shape, and
     /// a shape whose count is held is served from the hold rather than
@@ -3434,7 +3434,7 @@ impl super::app::RiffApp {
     /// boolean per wipe (ticket 21's widening).
     ///
     /// The identity answers both facts the surface needs and the caller
-    /// supplies none: the question ([`PendingDestructive::copy`], which is why
+    /// supplies none: the question ([`PendingDestructive::copy`](crate::ui::app::PendingDestructive::copy), which is why
     /// a wipe that must name a list can be one of its arms) and the widget id
     /// that keeps this confirmation's affirmative action distinct from any
     /// other's. A fourth confirmation adds an identity and an arm — it cannot

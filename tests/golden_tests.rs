@@ -3154,7 +3154,7 @@ mod tests {
         ready.set(true);
         harness.run_steps(2);
 
-        let mut settle = |harness: &mut egui_kittest::Harness<'_>, label: &str| {
+        let settle = |harness: &mut egui_kittest::Harness<'_>, label: &str| {
             harness.get_by_label(label).click();
             harness.run_steps(2);
         };

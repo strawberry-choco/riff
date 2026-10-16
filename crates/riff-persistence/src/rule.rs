@@ -356,11 +356,7 @@ impl Rule {
     /// The Rule that asserts its test outright. `None` is only correct for a
     /// comparison that takes no value; see [`Rule::is_fully_formed`].
     #[must_use]
-    pub fn new(
-        field: MatchableField,
-        comparison: Comparison,
-        value: Option<RuleValue>,
-    ) -> Self {
+    pub fn new(field: MatchableField, comparison: Comparison, value: Option<RuleValue>) -> Self {
         Self {
             field,
             comparison,

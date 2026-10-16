@@ -258,8 +258,11 @@ const DATE_COMPARISONS: &[Comparison] = &[
 ];
 /// A count the Library always has an answer for: `NOT NULL DEFAULT 0`, so 0 is
 /// present rather than missing.
-const COUNT_COMPARISONS: &[Comparison] =
-    &[Comparison::EqualTo, Comparison::GreaterThan, Comparison::LessThan];
+const COUNT_COMPARISONS: &[Comparison] = &[
+    Comparison::EqualTo,
+    Comparison::GreaterThan,
+    Comparison::LessThan,
+];
 /// A fact with only ever one side to test, and no absence to ask about.
 const YES_NO_COMPARISONS: &[Comparison] = &[Comparison::Is];
 

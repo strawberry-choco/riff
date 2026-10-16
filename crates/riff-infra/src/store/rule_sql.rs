@@ -5,9 +5,11 @@
 //! spelling is wrong in a way a passing test would not notice:
 //!
 //! * **No join, ever.** A Rule tests the Track's own tag, never the album or
-//!   artist entity's, so every column comes from this module's static
-//!   [`FIELD_COLUMNS`] table keyed by the stored field id. An id that is not in
-//!   that table is refused before a single character of SQL is emitted.
+//!   artist entity's, so every column comes from the store's one static
+//!   [`FIELD_COLUMNS`](super::field_columns::FIELD_COLUMNS) table, keyed by the
+//!   field and reached through [`field_column`]. An id that table does not
+//!   carry is refused before a single character of SQL is emitted — and this
+//!   file names no column of its own, so there is no second table to drift.
 //!   (`docs/adr/0003-store-query-model.md` fixes the ordering half of the read;
 //!   this file fixes the predicate half.)
 //! * **Two-valued before any `NOT`.** SQL answers `NOT` on a missing value with
@@ -43,6 +45,7 @@ use rusqlite::ToSql;
 use rusqlite::types::ToSqlOutput;
 use std::time::SystemTime;
 
+use super::field_columns::{Fact, FieldColumn, field_column};
 use super::sqlite::nanos_from_system_time;
 
 /// How many whole seconds the `in_last` window counts in a day. A day is
@@ -64,199 +67,6 @@ const REFUSAL: &str = "cannot match this Custom Smart Playlist";
 
 fn refusal(reason: impl std::fmt::Display) -> StoreError {
     StoreError::InvalidOperation(format!("{REFUSAL}: {reason}"))
-}
-
-/// One Matchable Field's storage facts: the bare `tracks` column its Rules
-/// test, and which [`Fact`] shape the column has to be read as.
-pub(crate) struct FieldColumn {
-    /// The stored id this row is keyed on — `MatchableField::stored_id`, the
-    /// value of `smart_rules.field_id`. Keyed by the id **string** rather than
-    /// by ticket 01's closed enum so that a row this build cannot read stays
-    /// visible to the lookup as the hole it is, and so the Settings page's
-    /// value pickers can key their distinct reads on this same table.
-    pub(crate) field_id: &'static str,
-    /// The bare `tracks` column name: what a picker would `SELECT DISTINCT`,
-    /// and what a Rule predicate tests — except for [`Fact::LosslessSuffix`],
-    /// which is derived from the path rather than tagged.
-    pub(crate) column: &'static str,
-    /// How the column stores the fact, and so how a test on it is made
-    /// two-valued.
-    pub(crate) fact: Fact,
-}
-
-/// The storage shapes a Rule leaf can meet: the only two things the compiler
-/// branches on, besides the comparison's [`Semantic`].
-pub(crate) enum Fact {
-    /// Nullable free text. Absence is the empty string, folded at the column.
-    Text,
-    /// The `;`-separated genre set: text for every purpose except `is`, which
-    /// asks for one whole segment.
-    GenreSegments,
-    /// A nullable `INTEGER`. Absence is `IS NULL`; the test is coalesced.
-    Integer,
-    /// A nullable `INTEGER` of **nanoseconds**, tested against a rule value in
-    /// whole milliseconds.
-    DurationNanos,
-    /// A nullable `INTEGER` of signed UTC epoch **nanoseconds**, written by the
-    /// same clock that stamps play history.
-    HistoryNanos,
-    /// A `NOT NULL` 0/1 flag: already two-valued, with no absence to fold —
-    /// which is why the catalog never offers `is missing` for one.
-    Flag,
-    /// Not a tagged column at all: a case-insensitive suffix match on the
-    /// stored path against [`field_catalog::LOSSLESS_EXTENSIONS`].
-    LosslessSuffix,
-}
-
-/// The one field id → column table, and the only place a field id names
-/// storage. Static, canonical, and covering every [`MatchableField`] this build
-/// reads: an id absent from it is refused.
-///
-/// The unit of each numeric column is spelled on its row, because a Rule value
-/// and a column are not in the same unit for two of the sixteen fields, and a
-/// picker that reads the same column has to convert the same way.
-pub(crate) const FIELD_COLUMNS: &[(&str, FieldColumn)] = &[
-    (
-        "genre",
-        FieldColumn {
-            field_id: "genre",
-            column: "genre",
-            fact: Fact::GenreSegments,
-        },
-    ),
-    (
-        "artist",
-        FieldColumn {
-            field_id: "artist",
-            column: "artist",
-            fact: Fact::Text,
-        },
-    ),
-    (
-        "album_artist",
-        FieldColumn {
-            field_id: "album_artist",
-            column: "album_artist",
-            fact: Fact::Text,
-        },
-    ),
-    (
-        "album",
-        FieldColumn {
-            field_id: "album",
-            column: "album",
-            fact: Fact::Text,
-        },
-    ),
-    (
-        "title",
-        FieldColumn {
-            field_id: "title",
-            column: "title",
-            fact: Fact::Text,
-        },
-    ),
-    (
-        "composer",
-        FieldColumn {
-            field_id: "composer",
-            column: "composer",
-            fact: Fact::Text,
-        },
-    ),
-    (
-        "comment",
-        FieldColumn {
-            field_id: "comment",
-            column: "comment",
-            fact: Fact::Text,
-        },
-    ),
-    (
-        "year",
-        FieldColumn {
-            field_id: "year",
-            column: "year",
-            fact: Fact::Integer,
-        },
-    ),
-    (
-        // `duration_nanos` is nanoseconds; a duration Rule holds milliseconds.
-        "duration",
-        FieldColumn {
-            field_id: "duration",
-            column: "duration_nanos",
-            fact: Fact::DurationNanos,
-        },
-    ),
-    (
-        "play_count",
-        FieldColumn {
-            field_id: "play_count",
-            column: "play_count",
-            fact: Fact::Integer,
-        },
-    ),
-    (
-        // `last_played_nanos` is signed UTC epoch nanoseconds.
-        "last_played",
-        FieldColumn {
-            field_id: "last_played",
-            column: "last_played_nanos",
-            fact: Fact::HistoryNanos,
-        },
-    ),
-    (
-        // `date_added_nanos` is signed UTC epoch nanoseconds.
-        "date_added",
-        FieldColumn {
-            field_id: "date_added",
-            column: "date_added_nanos",
-            fact: Fact::HistoryNanos,
-        },
-    ),
-    (
-        "favorite",
-        FieldColumn {
-            field_id: "favorite",
-            column: "favorite",
-            fact: Fact::Flag,
-        },
-    ),
-    (
-        "sample_rate",
-        FieldColumn {
-            field_id: "sample_rate",
-            column: "sample_rate",
-            fact: Fact::Integer,
-        },
-    ),
-    (
-        "channels",
-        FieldColumn {
-            field_id: "channels",
-            column: "channels",
-            fact: Fact::Integer,
-        },
-    ),
-    (
-        // Derived from the path, in any case: `.FLAC` is lossless.
-        "lossless",
-        FieldColumn {
-            field_id: "lossless",
-            column: "path",
-            fact: Fact::LosslessSuffix,
-        },
-    ),
-];
-
-/// The column a stored field id names, or `None` when this build has no column
-/// for it — the refusal that happens before any SQL exists.
-fn column_for(field_id: &str) -> Option<&'static FieldColumn> {
-    FIELD_COLUMNS
-        .iter()
-        .map(|(_, column)| column)
-        .find(|column| column.field_id == field_id)
 }
 
 /// SQLite's compiled-in ceiling on one statement's bound parameters
@@ -431,7 +241,10 @@ impl Compiler {
                 "a saved Rule tests \"{field_id}\", a field this riff cannot read"
             )));
         };
-        let Some(column) = column_for(field_id) else {
+        let Some(column) = field_column(field) else {
+            // The store's column table covers all sixteen fields today, so this
+            // is the guard for the day the enum grows and the table does not:
+            // a field with no column is refused, never read off a guessed one.
             return Err(refusal(format!(
                 "a saved Rule tests \"{field_id}\", which this build has no column for"
             )));

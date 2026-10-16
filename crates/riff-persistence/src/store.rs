@@ -781,6 +781,22 @@ pub trait LibraryQueryStore {
     /// one for `Jazz`, each counting the track once. Tracks whose genre is
     /// missing or empty aggregate into nothing: there is no row for them.
     /// The sidebar's total-genres count is this list's length.
+    ///
+    /// **Unbounded, and recorded as a follow-up rather than fixed here.** Its
+    /// two consumers ask a membership question over the *whole* Library —
+    /// "is this genre one the listener has?" before drilling in, and "what is
+    /// this genre's track count?" in the inspector — so a bound here would not
+    /// answer a smaller list, it would report a real genre as absent. It is
+    /// also not a per-frame read: both call sites reach it through the genre
+    /// Session Projection, which fetches once per store generation and hands
+    /// out an `Arc` clone after that, and its length is the listener's
+    /// distinct genre-entry count rather than their track count. The
+    /// follow-up, if the Genres listing ever needs a capped list read of its
+    /// own, is to page it through [`Self::genres_page`] — which already
+    /// answers a window plus the total — and to give the two membership
+    /// questions a point read, not to bound this one. Deliberately **not**
+    /// reused by the picker reads below: they answer a different question, on
+    /// a bounded path, per picker open.
     fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError>;
 
     /// Every artist having at least one Track with genre `genre`,

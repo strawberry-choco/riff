@@ -2,12 +2,10 @@
 //!
 //! A Rule names the **field id** it tests (`"genre"`, `"sample_rate"`, …) and
 //! never a column, so every store read that has to reach a tag fact — the
-//! bounded value-picker lists of
-//! [`LibraryQueryStore::picker_texts`] /
-//! [`LibraryQueryStore::picker_numbers`] today, and the compiled Rule tree of
-//! the Custom Smart Playlist read tomorrow — resolves that id here and
-//! nowhere else. Adding a testable field means adding a row to
-//! [`FIELD_COLUMNS`]; no read site learns a column name.
+//! bounded value-picker lists resolved by [`picker_column`] today, and the
+//! compiled Rule tree of the Custom Smart Playlist read tomorrow — resolves
+//! that id here and nowhere else. Adding a testable field means adding a row
+//! to [`FIELD_COLUMNS`]; no read site learns a column name.
 //!
 //! The table is also the store's injection boundary. Every `column` is a
 //! `&'static str` written in this file, so the SQL an adapter builds from it
@@ -15,9 +13,6 @@
 //! a picker request is only ever a lookup key, and an id that is not in this
 //! table is rejected here, before any SQL string is produced. Every actual
 //! value crossing into a query is a bound parameter.
-//!
-//! [`LibraryQueryStore::picker_texts`]: riff_persistence::store::LibraryQueryStore::picker_texts
-//! [`LibraryQueryStore::picker_numbers`]: riff_persistence::store::LibraryQueryStore::picker_numbers
 
 /// How a catalogued `tracks` column's values are typed at the SQL boundary.
 ///

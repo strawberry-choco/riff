@@ -299,6 +299,15 @@ pub struct RiffApp {
     playlist_create_name: Option<String>,
     /// Transient rename prompt: (playlist id, draft name).
     playlist_rename: Option<(PlaylistId, String)>,
+    /// Why the create prompt's last write was REFUSED, written by the Frame
+    /// when the Application Store said no and painted under the prompt it
+    /// belongs to. Transient like the draft it travels with, and owned here
+    /// rather than in the widget: a prompt reports an outcome and never
+    /// reaches the store, so the reason line is the host's (ADR 0018).
+    playlist_create_error: Option<String>,
+    /// Why the rename prompt's last write was refused. One slot because one
+    /// rename prompt can be open at a time — `playlist_rename` is keyed by id.
+    playlist_rename_error: Option<String>,
     /// Transient Clear Library confirmation (`true` = awaiting confirm).
     /// Grouped with the other transient prompts on `RiffApp`.
     pub(crate) clear_library_confirm: bool,
@@ -467,6 +476,8 @@ impl RiffApp {
             scroll_memory: crate::ui::scroll_memory::ScrollMemory::default(),
             playlist_create_name: None,
             playlist_rename: None,
+            playlist_create_error: None,
+            playlist_rename_error: None,
             clear_library_confirm: false,
             clear_thumbnail_cache_confirm: false,
             clear_cache_in_flight: false,
@@ -1033,6 +1044,8 @@ impl RiffApp {
                 smart_playlist_view: &mut self.smart_playlist_view,
                 playlist_rename: &mut self.playlist_rename,
                 playlist_create_name: &mut self.playlist_create_name,
+                playlist_create_error: &mut self.playlist_create_error,
+                playlist_rename_error: &mut self.playlist_rename_error,
                 playback_live: &self.playback,
                 #[cfg(target_os = "linux")]
                 settings_show_input: &mut self.settings_show_input,
@@ -2450,13 +2463,29 @@ pub fn apply_playlist_row_action(
 /// the [`PlaylistStore`] as one durable transaction. Empty drafts are
 /// ignored (pre-restyle behavior). The seam's next read reflects the commit
 /// on its own — no projection refresh here.
-pub fn commit_playlist_rename(store: &mut dyn PlaylistStore, id: &PlaylistId, draft: &str) {
+///
+/// `Err(reason)` is the refusal, already rendered, that the caller must show:
+/// [`StoreError`](riff_backend::app::errors::StoreError) has ONE variant, so a
+/// name conflict and a transaction failure both arrive here as that one arm
+/// and are reported the same way. Returning it is the point — the caller's
+/// alternative used to be a `tracing::warn!` the listener cannot see, which
+/// made a refused rename read as "nothing happened".
+#[must_use = "a refused rename has to reach the listener, not the log"]
+pub fn commit_playlist_rename(
+    store: &mut dyn PlaylistStore,
+    id: &PlaylistId,
+    draft: &str,
+) -> Result<(), String> {
     let draft = draft.trim().to_string();
     if draft.is_empty() {
-        return;
+        return Ok(());
     }
-    if let Err(e) = store.rename_playlist(id, &draft) {
-        tracing::warn!("Failed to rename playlist: {e}");
+    match store.rename_playlist(id, &draft) {
+        // The `bool` is the store's "this playlist existed" verdict. A rename
+        // of a row that is gone closes the prompt exactly as it did before
+        // this refusal reporting existed; only the error has a reason to show.
+        Ok(_found) => Ok(()),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -3334,13 +3363,23 @@ impl RiffApp {
     /// Draws the draft it is handed and reports how the prompt resolved; the
     /// trim-and-commit store flow belongs to the Frame, which is the only
     /// writer of the prompt slot and of the playlist store here.
+    ///
+    /// A write the Frame could not commit leaves the prompt open with the
+    /// reason written under it — the shape the inline tag editor and the
+    /// Linux library-path row already use. The prompt widget itself stays
+    /// props-in / outcome-out and names no application type (ADR 0018).
     fn render_playlist_create_prompt(&mut self, ui: &mut egui::Ui, report: &mut SidebarReport) {
+        let palette = self.theme.active;
         let Some(draft) = self.playlist_create_name.as_mut() else {
             return;
         };
         // The pure widget seam (golden-image gap audit P1-7) reports the
         // outcome; the store flow below is unchanged.
-        if let Some(outcome) = riff_gui_components::prompts::playlist_create_prompt(ui, draft) {
+        let outcome = riff_gui_components::prompts::playlist_create_prompt(ui, draft);
+        if let Some(reason) = &self.playlist_create_error {
+            ui.colored_label(palette.error, reason);
+        }
+        if let Some(outcome) = outcome {
             report.push(SidebarAction::PlaylistCreate(outcome));
         }
     }
@@ -3349,13 +3388,16 @@ impl RiffApp {
     /// by playlist id so fresh frames never clone it.
     ///
     /// Draws the draft and reports how it resolved; the trim-and-commit store
-    /// flow is the Frame's, at the sidebar's slot.
+    /// flow is the Frame's, at the sidebar's slot. A refused rename is written
+    /// under the prompt, directly under the row it belongs to — the render
+    /// site is inside the row loop for exactly that reason.
     fn render_playlist_rename_prompt(
         &mut self,
         ui: &mut egui::Ui,
         pid: &PlaylistId,
         report: &mut SidebarReport,
     ) {
+        let palette = self.theme.active;
         let renaming = self
             .playlist_rename
             .as_ref()
@@ -3368,7 +3410,11 @@ impl RiffApp {
         };
         // The pure widget seam (golden-image gap audit P1-7), same shape as
         // the create prompt.
-        if let Some(outcome) = riff_gui_components::prompts::playlist_rename_prompt(ui, draft) {
+        let outcome = riff_gui_components::prompts::playlist_rename_prompt(ui, draft);
+        if let Some(reason) = &self.playlist_rename_error {
+            ui.colored_label(palette.error, reason);
+        }
+        if let Some(outcome) = outcome {
             report.push(SidebarAction::PlaylistRename {
                 id: pid.clone(),
                 outcome,

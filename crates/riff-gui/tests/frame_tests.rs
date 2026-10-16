@@ -320,6 +320,8 @@ struct Harness {
     smart_playlist_view: Option<riff_backend::domain::SmartPlaylistKind>,
     playlist_rename: Option<(PlaylistId, String)>,
     playlist_create_name: Option<String>,
+    playlist_create_error: Option<String>,
+    playlist_rename_error: Option<String>,
     clear_cache_in_flight: bool,
     global_search_focus: bool,
     title_key: TitleKey,

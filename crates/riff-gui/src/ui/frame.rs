@@ -324,6 +324,12 @@ pub struct FrameParts<'a> {
     pub playlist_rename: &'a mut Option<(PlaylistId, String)>,
     /// The inline "New Playlist" name prompt, holding the draft.
     pub playlist_create_name: &'a mut Option<String>,
+    /// Why the create prompt's last write was refused, shown under that prompt.
+    /// Written only here: the widget reports an outcome and the store write is
+    /// this frame's, so the reason travels with the decision that made it.
+    pub playlist_create_error: &'a mut Option<String>,
+    /// Why the rename prompt's last write was refused, shown under that prompt.
+    pub playlist_rename_error: &'a mut Option<String>,
     /// The live playback session, re-locked by [`Frame::finish`] to write the
     /// six UI-owned fields back.
     pub playback_live: &'a Mutex<PlaybackSession>,
@@ -944,6 +950,9 @@ impl<'a> Frame<'a> {
             SidebarAction::NewPlaylist => {
                 *self.parts.playlist_create_name = Some(String::new());
                 *self.parts.playlist_rename = None;
+                // A freshly opened prompt never wears a reason from an
+                // earlier refusal.
+                *self.parts.playlist_create_error = None;
             }
             SidebarAction::PlaylistRow { id, action } => {
                 super::app::apply_playlist_row_action(
@@ -958,6 +967,11 @@ impl<'a> Frame<'a> {
                         create_name: self.parts.playlist_create_name,
                     },
                 );
+                if action == PlaylistRowAction::Rename {
+                    // The prompt this gesture opens is a fresh one, whatever
+                    // the last attempt on the row before it reported.
+                    *self.parts.playlist_rename_error = None;
+                }
                 // The sidebar is shared chrome on every view: opening a
                 // playlist lands on the library view so its listing is on
                 // screen, and clears any search filter over the results.
@@ -968,12 +982,13 @@ impl<'a> Frame<'a> {
             SidebarAction::PlaylistCreate(outcome) => {
                 if outcome == PromptOutcome::Cancel {
                     *self.parts.playlist_create_name = None;
+                    *self.parts.playlist_create_error = None;
                     return;
                 }
-                let Some(name) = self.parts.playlist_create_name.take() else {
+                let Some(typed) = self.parts.playlist_create_name.take() else {
                     return;
                 };
-                let name = name.trim().to_string();
+                let name = typed.trim().to_string();
                 if name.is_empty() {
                     return;
                 }
@@ -981,24 +996,41 @@ impl<'a> Frame<'a> {
                     Ok(id) => {
                         // The committed create bumps the playlist generation;
                         // the seam's next read lists the new playlist.
+                        *self.parts.playlist_create_error = None;
                         *self.parts.playlist_view = Some(id);
                     }
-                    Err(e) => tracing::warn!("Failed to create playlist: {e}"),
+                    // The store refused. The prompt stays up, the name the
+                    // listener typed stays in it, and the reason the store
+                    // gave is written under it — the refusal is reported to
+                    // the listener, not to the log.
+                    Err(e) => {
+                        *self.parts.playlist_create_name = Some(typed);
+                        *self.parts.playlist_create_error = Some(e.to_string());
+                    }
                 }
             }
             SidebarAction::PlaylistRename { outcome, .. } => {
                 if outcome == PromptOutcome::Cancel {
                     *self.parts.playlist_rename = None;
+                    *self.parts.playlist_rename_error = None;
                     return;
                 }
-                let Some((rid, draft)) = self.parts.playlist_rename.take() else {
+                let Some((rid, typed)) = self.parts.playlist_rename.take() else {
                     return;
                 };
                 // Same Store flow as before the restyle: trim, rename as one
                 // durable transaction. The seam's next read reflects the new
                 // name on its own (ADR 0002). The prompt slot is keyed by id,
                 // so the slot the row reported IS the slot taken here.
-                super::app::commit_playlist_rename(self.parts.playlist_store, &rid, &draft);
+                match super::app::commit_playlist_rename(self.parts.playlist_store, &rid, &typed) {
+                    Ok(()) => *self.parts.playlist_rename_error = None,
+                    // As with the create: the draft and the prompt both stay,
+                    // and the reason is the store's own words.
+                    Err(reason) => {
+                        *self.parts.playlist_rename = Some((rid, typed));
+                        *self.parts.playlist_rename_error = Some(reason);
+                    }
+                }
             }
             SidebarAction::AddFolderRequested => {
                 // The native folder picker is an OS dialog, so it is performed

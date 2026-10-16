@@ -3816,8 +3816,14 @@ mod tests {
         );
 
         // Saving the prompt commits through the same Store flow; the seam's
-        // next read reflects it with zero caller action (ADR 0002).
-        riff_gui::ui::app::commit_playlist_rename(store.as_mut(), &pid, "  Cardio  ");
+        // next read reflects it with zero caller action (ADR 0002). The store
+        // accepted here, so the write reports no refusal.
+        let refusal = riff_gui::ui::app::commit_playlist_rename(store.as_mut(), &pid, "  Cardio  ");
+        assert_eq!(
+            refusal,
+            Ok(()),
+            "an accepted rename gives the prompt nothing to show"
+        );
         assert_eq!(
             store.load_playlists().unwrap()[0].name,
             "Cardio",
@@ -17072,12 +17078,18 @@ mod whole_frame_tests {
     /// that holds the first focus: Tab from wherever the pointer left the
     /// focus walks to the confirm control, so Shift+Tab returns to the field.
     fn focus_and_type(shell: &mut Shell, text: &str) {
+        focus_and_type_at(shell, "Create", text);
+    }
+
+    /// [`focus_and_type`] for a prompt whose confirming button is named
+    /// something else — the rename prompt's `Save`.
+    fn focus_and_type_at(shell: &mut Shell, confirm_label: &str, text: &str) {
         let harness = &mut shell.harness;
         harness.key_press(egui::Key::Tab);
         harness.step();
         assert!(
-            harness.get_by_label("Create").is_focused(),
-            "Tab from the prompt's first focus lands on Create"
+            harness.get_by_label(confirm_label).is_focused(),
+            "Tab from the prompt's first focus lands on {confirm_label}"
         );
         harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
         harness.step();
@@ -17087,6 +17099,84 @@ mod whole_frame_tests {
             .expect("Shift+Tab returns to the prompt's name field, so the draft types there")
             .type_text(text);
         harness.step();
+    }
+
+    /// The text the focused name field is showing. A `TextEdit`'s accessibility
+    /// node carries its content as the node's VALUE (its label is the hint), so
+    /// this is what the listener actually sees in the prompt's field.
+    fn focused_prompt_text(shell: &mut Shell) -> Option<String> {
+        shell
+            .harness
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .find(|node| node.is_focused())
+            .expect("the open prompt's name field holds the focus")
+            .value()
+    }
+
+    /// A shell over a [`MockPlaylistStore`] with no Application Store behind
+    /// it, returning the write journal the same fake records committed names
+    /// in. The mock is the Playlists section of the store: `refuse_next_write`
+    /// is how a test crosses the refusal arm the real store can already take.
+    fn prompt_mock_shell(store: MockPlaylistStore) -> (Shell, Arc<Mutex<Vec<String>>>) {
+        let settings_calls = Arc::new(Mutex::new(Vec::new()));
+        let committed = Arc::clone(&store.committed);
+        let (playlist_store, views) = crate::composed_shell::playlist_ports(
+            Box::new(MockLibraryQueryStore::default()),
+            store,
+        );
+        let shell = build(
+            Box::new(MockTransport::new()),
+            MockScans::default(),
+            Box::new(MockSettingsStore::with_shared_calls(Arc::clone(
+                &settings_calls,
+            ))),
+            settings_calls,
+            playlist_store,
+            Box::new(MockLibraryMutationStore::new()),
+            views,
+        );
+        (shell, committed)
+    }
+
+    /// The store raises exactly ONE variant, `StoreError::InvalidOperation`,
+    /// for every fault it can meet — and today the sidebar's create gesture
+    /// threw that error away into a log line, so a refused name read as
+    /// "nothing happened". A non-name failure takes the same arm and is
+    /// reported the same way: there is nothing here to tell them apart.
+    #[test]
+    fn a_refused_playlist_create_keeps_the_prompt_open_with_the_name_and_the_reason() {
+        let (mut shell, committed) = prompt_mock_shell(MockPlaylistStore {
+            refuse_next_write: Some("a playlist named \"Road Trip\" already exists".to_string()),
+            ..MockPlaylistStore::default()
+        });
+        shell.harness.step();
+        open_playlist_create_prompt(&mut shell);
+        focus_and_type(&mut shell, "Road Trip");
+
+        shell.harness.get_by_label("Create").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            shell.harness.query_by_label("Create").is_some(),
+            "a refused create keeps the prompt open instead of vanishing"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("already exists")
+                .is_some(),
+            "the reason the store gave is written where the listener can see it"
+        );
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some("Road Trip"),
+            "the name they typed is still in the field"
+        );
+        assert!(
+            committed.lock().unwrap().is_empty(),
+            "a refused create committed nothing"
+        );
     }
 
     fn playlist_names(store: &riff_infra::store::SqliteStore) -> Vec<String> {

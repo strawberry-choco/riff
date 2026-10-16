@@ -110,6 +110,34 @@ fn ids_in(conn: &rusqlite::Connection, sql: &str) -> rusqlite::Result<Vec<String
     rows.collect()
 }
 
+/// Every Rule row the store holds, exactly as stored, ordered by list, box and
+/// sibling position.
+///
+/// This is the comparison for the assertions that must prove **content** — that a
+/// refused write left the tree precisely where it was — rather than reading a
+/// refusal message, which is only a claim the UI makes about itself.
+fn stored_rule_rows(store: &SqliteStore) -> Vec<(String, String, i64, Option<String>, i64)> {
+    store
+        .with_connection(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT r.field_id, r.operator_id, r.negated, r.value, r.position \
+                 FROM smart_rules r JOIN smart_rule_boxes b ON b.id = r.box_id \
+                 ORDER BY b.playlist_id, b.id, r.position",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?;
+            rows.collect()
+        })
+        .expect("reading every stored rule row must work")
+}
+
 /// The names the `smart_playlists` table holds, sorted, for the Duplicate
 /// assertions.
 fn smart_names(store: &SqliteStore) -> Vec<String> {
@@ -289,10 +317,10 @@ fn the_first_save_inserts_the_playlist_row_and_nothing_else_creates_one() {
 }
 
 #[test]
-fn a_second_save_leaves_id_name_and_created_at_and_replaces_the_tree_wholesale() {
+fn a_second_save_persists_the_name_and_replaces_the_tree_wholesale() {
     let (_dir, _path, mut store, _changes) = fresh_store();
     let id = store
-        .save_smart_playlist(None, "Kept Name", &authored_tree())
+        .save_smart_playlist(None, "Original Name", &authored_tree())
         .expect("the first save");
     let before = playlist_row(&store, &id);
 
@@ -306,24 +334,25 @@ fn a_second_save_leaves_id_name_and_created_at_and_replaces_the_tree_wholesale()
         )],
     )]);
     let again = store
-        .save_smart_playlist(Some(&id), "A Different Name", &changed)
-        .expect("a re-save under the list's own name is never a conflict with itself");
+        .save_smart_playlist(Some(&id), "  Renamed In One Save  ", &changed)
+        .expect("one Save carries the listener's name and their tree together");
 
     let after = playlist_row(&store, &again);
     assert_eq!(after.0, before.0, "the id survives every save");
     assert_eq!(
-        after.1, before.1,
-        "the save does not rename: only the rename path names a list"
+        after.1, "Renamed In One Save",
+        "the save writes the trimmed name: the editor's name field and its tree are \
+         one listener action, so they land in one transaction or neither does"
     );
     assert_eq!(
         after.2, before.2,
         "created_at survives every save, so a re-save is not a new list"
     );
-
     assert_eq!(
         row_counts(&store),
         (1, 2, 1),
-        "the tree is the new one and no row of the old one is left"
+        "one list row and the new tree — the name write did not delete and re-insert \
+         the row, and no row of the old tree is left"
     );
     let now = tree_row_ids(&store);
     assert_eq!(now.0.len(), 1, "one Rule row is left, the new tree's own");
@@ -1124,13 +1153,36 @@ fn re_saving_or_renaming_a_list_under_its_own_name_never_refuses_it_against_itse
         "and not when the case differs either"
     );
     store
-        .save_smart_playlist(Some(&id), "ignored by the save", &authored_tree())
-        .expect("a re-save of the list that already holds the name");
+        .save_smart_playlist(Some(&id), "OWN NAME", &tree(vec![year_rule()]))
+        .expect("a re-save under the list's own name is never a conflict with itself");
+    store
+        .save_smart_playlist(Some(&id), " own name ", &authored_tree())
+        .expect(
+            "nor is one under its own name padded and in lower case — the exemption \
+                 compares trimmed and folded, the same way the rule itself does",
+        );
+    assert_eq!(
+        playlist_row(&store, &id).1,
+        "own name",
+        "a save writes the name trimmed, so the row and the exemption agree"
+    );
     let reason = refusal(
         store.rename_smart_playlist(&other, "own name").map(|_| ()),
         "renaming a second list onto the first's name",
     );
     assert!(reason.contains("already exists"), "{reason}");
+    let reason = refusal(
+        store
+            .save_smart_playlist(Some(&other), " OWN NAME ", &authored_tree())
+            .map(|_| ()),
+        "saving a second list onto the first's name",
+    );
+    assert!(reason.contains("already exists"), "{reason}");
+    assert_eq!(
+        playlist_row(&store, &other).1,
+        "Different",
+        "and that refusal wrote nothing at all"
+    );
 }
 
 #[test]
@@ -1153,6 +1205,122 @@ fn a_new_list_under_a_name_a_sidebar_row_holds_is_refused_at_the_save() {
         row_counts(&store),
         (1, 3, 6),
         "a refused creation writes no row"
+    );
+}
+
+/// The refused half of the one-Save guarantee, proved by **row content**.
+///
+/// Two ways a split save could half-apply, and this test is what pins them shut:
+/// a name the check refuses must leave the tree exactly where it was, and a tree
+/// it refuses must leave the name exactly where it was. Neither direction is
+/// asserted against the refusal's wording — a message only says what the UI
+/// believes it did.
+#[test]
+fn a_save_onto_a_name_another_sidebar_row_holds_writes_neither_the_name_nor_the_tree() {
+    let (_dir, _path, mut store, changes_rx) = fresh_store();
+    let id = store
+        .save_smart_playlist(None, "Mine", &authored_tree())
+        .expect("the list being saved");
+    let squatter = store
+        .save_smart_playlist(None, "Other List", &tree(vec![year_rule()]))
+        .expect("another Custom Smart Playlist holds a name");
+    store
+        .create_playlist("Night Drive", &[])
+        .expect("and so does a Playlist");
+    drained(&changes_rx);
+
+    let name_before = playlist_row(&store, &id).1;
+    let rows_before = stored_rule_rows(&store);
+    let ids_before = tree_row_ids(&store);
+    let counts_before = row_counts(&store);
+
+    // Both tables, in another case and padded, so this is ticket 03's folded
+    // cross-table rule running inside the save and not a string coincidence.
+    let draft = tree(vec![negated_absence(MatchableField::Artist)]);
+    for taken in ["NIGHT DRIVE", "other LIST"] {
+        refusal(
+            store
+                .save_smart_playlist(Some(&id), taken, &draft)
+                .map(|_| ()),
+            "saving an existing list onto a name another sidebar row holds",
+        );
+        assert_eq!(
+            stored_rule_rows(&store),
+            rows_before,
+            "the refused Save named {taken:?} left every Rule row it could have \
+             overwritten exactly as stored: field, operator, negation, value, position"
+        );
+        assert_eq!(
+            tree_row_ids(&store),
+            ids_before,
+            "and not one box or Rule row was deleted and re-inserted"
+        );
+        assert_eq!(
+            playlist_row(&store, &id).1,
+            name_before,
+            "and the name the same call carried is untouched too"
+        );
+    }
+
+    assert_eq!(
+        row_counts(&store),
+        counts_before,
+        "(lists, boxes, rules) unchanged — nothing added, nothing dropped"
+    );
+    assert_eq!(
+        store
+            .smart_playlist_tree(&id)
+            .expect("read must work")
+            .expect("the list exists"),
+        authored_tree(),
+        "and the port read still returns the tree that was there before the refused Save"
+    );
+    assert_eq!(playlist_row(&store, &squatter).1, "Other List");
+    assert!(
+        drained(&changes_rx).is_empty(),
+        "a refused Save commits nothing, so it bumps nothing and emits nothing"
+    );
+}
+
+#[test]
+fn a_save_refused_by_its_tree_writes_no_name_either() {
+    let (_dir, _path, mut store, _changes) = fresh_store();
+    let id = store
+        .save_smart_playlist(None, "Still Mine", &authored_tree())
+        .expect("the save");
+
+    // Both names below are free, so the name check passes and the tree is what is
+    // refused. A save that wrote the name first — or in its own transaction —
+    // would rename the list here and still report failure.
+    refusal(
+        store
+            .save_smart_playlist(Some(&id), "Perfectly Free", &tree(Vec::new()))
+            .map(|_| ()),
+        "a save whose tree holds no Rule",
+    );
+    refusal(
+        store
+            .save_smart_playlist(
+                Some(&id),
+                "Also Free",
+                &tree(vec![rule(MatchableField::Year, Comparison::EqualTo, None)]),
+            )
+            .map(|_| ()),
+        "a save whose Rule is half-filled",
+    );
+
+    assert_eq!(
+        playlist_row(&store, &id).1,
+        "Still Mine",
+        "name and tree land together or not at all, so a tree refusal renames nothing"
+    );
+    assert_eq!(
+        store
+            .smart_playlist_tree(&id)
+            .expect("read must work")
+            .expect("the list exists"),
+        authored_tree(),
+        "and left the tree alone"
     );
 }
 

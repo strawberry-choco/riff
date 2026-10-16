@@ -7,6 +7,7 @@
 
 use crate::errors::StoreError;
 use crate::playlist::{Playlist, PlaylistId};
+use crate::rule::{RootBox, RuleBox, RuleChild, RuleValue};
 use crate::track::{Album, Artist, GenreCount, SmartPlaylistKind, Track, TrackId};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -891,6 +892,84 @@ impl<T> Page<T> {
     }
 }
 
+/// A Custom Smart Playlist Rule tree in the Application Store's own spelling:
+/// every leaf carries the **stored** field and operator ids and every box
+/// carries the stored combine word, so a row this build cannot read stays the
+/// data it is.
+///
+/// That is the whole reason this type exists rather than the port taking
+/// [`crate::rule::RootBox`] directly. [`crate::rule`]'s enums are closed, so an
+/// Unreadable Rule has no representation in them, and a tree that had to be
+/// coerced into [`crate::rule::MatchableField`] to reach a read would have
+/// already thrown the row away — or guessed at it. Keying on the id string is
+/// also how the store names a field everywhere else: the `smart_rules` row's
+/// own `field_id`, and the value pickers' field-keyed reads.
+///
+/// The value stays typed ([`RuleValue`]) because reading a stored `value`
+/// column back into one is the save path's question, not the compiler's: by
+/// the time a tree reaches a read, its values are already what the catalog says
+/// its field holds. A leaf whose value the compiler cannot use is refused with
+/// a reason, never silently ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleTree {
+    /// One Rule row: the stored `field_id`, `operator_id`, `negated` flag, and
+    /// the value it tests — `None` exactly where the catalog draws no value
+    /// input (`is missing`).
+    Rule {
+        /// The stored field id, `smart_rules.field_id`.
+        field_id: String,
+        /// The stored operator id, `smart_rules.operator_id`.
+        operator_id: String,
+        /// Whether the test's answer is inverted.
+        negated: bool,
+        /// The value tested against, already typed by the field.
+        value: Option<RuleValue>,
+    },
+    /// One Rule Box row: the stored `combine` word and its children in their
+    /// single shared sibling order.
+    Box {
+        /// The stored combine word, `smart_rule_boxes.combine`.
+        combine: String,
+        /// Rules and Boxes together, in the one sibling numbering.
+        children: Vec<RuleTree>,
+    },
+}
+
+impl RuleTree {
+    /// The store's spelling of a tree the frontend can hold: each closed enum
+    /// becomes its own stored id and every Rule keeps its typed value, so a
+    /// readable draft reaches a read unchanged.
+    ///
+    /// This is the only place the domain vocabulary is written into stored ids
+    /// for a read — a draft, a projection and a listing all go through here, so
+    /// no caller can restate the id spelling.
+    #[must_use]
+    pub fn from_root_box(root: &RootBox) -> Self {
+        Self::from_rule_box(root.inner())
+    }
+
+    /// One Rule Box and everything under it, spelled as stored ids.
+    #[must_use]
+    pub fn from_rule_box(boxed: &RuleBox) -> Self {
+        Self::Box {
+            combine: boxed.combine().stored_id().to_string(),
+            children: boxed
+                .children()
+                .iter()
+                .map(|child| match child {
+                    RuleChild::Rule(rule) => Self::Rule {
+                        field_id: rule.field().stored_id().to_string(),
+                        operator_id: rule.comparison().stored_id().to_string(),
+                        negated: rule.is_negated(),
+                        value: rule.value().cloned(),
+                    },
+                    RuleChild::Box(nested) => Self::from_rule_box(nested),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Port for reading the Library collection section of the Application Store.
 ///
 /// Flat-list and search reads are bounded windows (ADR 0003): callers fetch
@@ -968,6 +1047,36 @@ pub trait LibraryQueryStore {
         &self,
         query: &str,
         order: TrackListOrder,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Page<Track>, StoreError>;
+
+    // --- Custom Smart Playlist reads (rule trees as SQL) ------------------
+
+    /// A Custom Smart Playlist's Listing Page: the total number of Tracks its
+    /// Rule tree matches and one window of `limit` of them, in `order`, read as
+    /// one fact under a single connection acquisition.
+    ///
+    /// The tree is compiled to one predicate over the `tracks` table — never a
+    /// join to the `albums` or `artists` entity tables, because a Rule tests
+    /// the Track's own tag, not the album's. `needle` is the listing's current
+    /// search text and is combined into this read with `AND`, the way the folder
+    /// and genre-filtered reads combine theirs: a needle applied after paging
+    /// would silently drop rows from a window that was cut on the unfiltered
+    /// answer. `None` means no needle.
+    ///
+    /// A tree this store cannot turn into a predicate is an error carrying a
+    /// reason, never an empty page: a tree holding a field id this build does
+    /// not read, an operator its field does not permit, a Box with nothing in
+    /// it, or a tree wide enough to pass the engine's own ceiling on bound
+    /// values. Each is refused before any SQL is produced, and a listing that
+    /// cannot be computed says so instead of showing nothing — "no matches" and
+    /// "cannot tell" are different answers, and only one of them is a page.
+    fn custom_smart_playlist_page(
+        &self,
+        tree: &RuleTree,
+        order: TrackListOrder,
+        needle: Option<&str>,
         offset: usize,
         limit: usize,
     ) -> Result<Page<Track>, StoreError>;

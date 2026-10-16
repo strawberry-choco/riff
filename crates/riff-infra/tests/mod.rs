@@ -36,11 +36,14 @@ pub use riff_infra::store::SqliteStore;
 pub use riff_library::app::errors::LibraryError;
 pub use riff_library::app::traits::TagEdit;
 pub use riff_persistence::errors::StoreError;
+pub use riff_persistence::field_catalog::{LOSSLESS_EXTENSIONS, LOSSY_EXTENSIONS};
 pub use riff_persistence::playlist::{Playlist, PlaylistId};
+pub use riff_persistence::rule::{CivilDateTime, RuleValue};
 pub use riff_persistence::store::{
-    LOST_GEMS_THRESHOLD, LibraryMutationStore, LibraryQueryStore, PlaylistEntry, PlaylistStore,
-    ScalarSettings, ScanOptions, Settings, SettingsStore, SmartPlaylistTree, SortDirection,
-    StoreChanged, StoreGeneration, StoreMigrations, UnreadableRule, WatchState,
+    LOST_GEMS_THRESHOLD, LibraryMutationStore, LibraryQueryStore, Page, PlaylistEntry,
+    PlaylistStore, RuleTree, ScalarSettings, ScanOptions, Settings, SettingsStore,
+    SmartPlaylistTree, SortDirection, StoreChanged, StoreGeneration, StoreMigrations,
+    TrackListOrder, UnreadableRule, WatchState,
 };
 pub use riff_persistence::track::{
     Album, Artist, CoverSource, GenreCount, SmartPlaylistKind, Track, TrackId, TrackMetadata,

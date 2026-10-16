@@ -20,8 +20,9 @@ use riff_persistence::field_catalog::ValueType;
 use riff_persistence::playlist::{Playlist, PlaylistId};
 use riff_persistence::store::{
     FullScanSummary, LOST_GEMS_THRESHOLD, LibraryCounts, LibraryMutationStore, LibraryQueryStore,
-    Page, PlaylistEntry, PlaylistStore, ScalarSettings, Settings, SettingsStore, SmartPlaylistTree,
-    SortDirection, StoreChanged, StoreGeneration, StoreMigrations, TrackListOrder, WatchState,
+    Page, PlaylistEntry, PlaylistStore, RuleTree, ScalarSettings, Settings, SettingsStore,
+    SmartPlaylistTree, SortDirection, StoreChanged, StoreGeneration, StoreMigrations,
+    TrackListOrder, WatchState,
 };
 use riff_persistence::sync::MutexExt;
 use riff_persistence::track::{
@@ -33,6 +34,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::field_columns::{is_genre_set, picker_column};
+use super::rule_sql::{self, Bound, Predicate};
 
 /// A migration is an ordered schema step with a stable identity and content
 /// checksum so accidental edits are detected instead of silently applied.
@@ -964,6 +966,9 @@ fn system_time_from_nanos(nanos: i64) -> SystemTime {
     }
 }
 
+/// UTC epoch-nanosecond encoding for a `SystemTime` — the clock every history
+/// fact in the store is stamped with, and the same one a Rule's `in_last`
+/// window counts back from.
 pub(crate) fn nanos_from_system_time(time: SystemTime) -> i64 {
     match time.duration_since(UNIX_EPOCH) {
         Ok(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
@@ -2028,6 +2033,32 @@ impl LibraryQueryStore for SqliteStore {
         self.read_page(|conn| {
             let total = Self::search_count_on(conn, query)?;
             let rows = Self::search_window_on(conn, query, order, offset, limit)?;
+            Ok((total, rows))
+        })
+    }
+
+    // --- Custom Smart Playlist reads (rule trees as SQL) ------------------
+
+    fn custom_smart_playlist_page(
+        &self,
+        tree: &RuleTree,
+        order: TrackListOrder,
+        needle: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Page<Track>, StoreError> {
+        // Compiled **outside** the connection, on purpose. A tree this build
+        // cannot read — an unknown field id, an operator its field does not
+        // permit, an empty Box, a tree wider than the engine can bind — is
+        // refused by the compiler with its own reason before a single character
+        // of SQL is prepared, and never reaches a read that would have to
+        // explain the failure as a page. Nothing here chunks or splits a
+        // predicate to get under a ceiling either: half a predicate answers a
+        // different question than the one the listener wrote.
+        let predicate = rule_sql::compile(tree, needle)?;
+        self.read_page(|conn| {
+            let total = Self::rule_tree_count_on(conn, &predicate)?;
+            let rows = Self::rule_tree_window_on(conn, &predicate, order, offset, limit)?;
             Ok((total, rows))
         })
     }
@@ -3181,6 +3212,57 @@ impl SqliteStore {
                 i64::try_from(limit).unwrap_or(i64::MAX),
                 i64::try_from(offset).unwrap_or(i64::MAX),
             ],
+            track_from_row,
+        )?;
+        rows.collect()
+    }
+
+    /// Total Tracks matching one compiled Rule predicate on an already-held
+    /// connection — the counting half of a Custom Smart Playlist's Listing
+    /// Page. `WHERE` is the whole of what the tree asked, combined with the
+    /// listing's needle by `AND` in the compiler that built it.
+    fn rule_tree_count_on(conn: &Connection, predicate: &Predicate) -> rusqlite::Result<usize> {
+        let sql = format!("SELECT COUNT(*) FROM tracks WHERE {}", predicate.sql);
+        conn.query_row(
+            &sql,
+            rusqlite::params_from_iter(predicate.params.iter().cloned()),
+            |row| row.get::<_, i64>(0),
+        )
+        .map(count_usize)
+    }
+
+    /// One window of the Tracks a compiled Rule predicate matches, in `order`,
+    /// on an already-held connection.
+    ///
+    /// The statement is `prepare`d rather than `prepare_cached`, unlike every
+    /// other read here: this SQL text is derived from a listener's tree and is
+    /// as long as that tree, so caching it by text would keep one entry per
+    /// distinct tree the listener ever opened. The plan is cheap to rebuild at
+    /// this size, and a Custom Smart Playlist is opened by a person, not by a
+    /// frame loop.
+    fn rule_tree_window_on(
+        conn: &Connection,
+        predicate: &Predicate,
+        order: TrackListOrder,
+        offset: usize,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<Track>> {
+        let bound = predicate.params.len();
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks
+             WHERE {}
+             ORDER BY {} LIMIT ?{} OFFSET ?{}",
+            predicate.sql,
+            order.order_by(),
+            bound + 1,
+            bound + 2
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(predicate.params.iter().cloned().chain([
+                Bound::Integer(i64::try_from(limit).unwrap_or(i64::MAX)),
+                Bound::Integer(i64::try_from(offset).unwrap_or(i64::MAX)),
+            ])),
             track_from_row,
         )?;
         rows.collect()

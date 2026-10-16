@@ -67,3 +67,29 @@ for the seam side.
   no production caller: the two seam reads that walked those windows were
   deleted, so nothing asks for a partial window. Narrowing those signatures
   needs the `riff-infra` adapter and is not part of this change.
+## Amendment — 2026-10-16 (a Custom Smart Playlist listing is a covered shape)
+
+The ordering enumeration above is extended with one listing shape, and its
+canonical `ORDER BY` is the shared `TrackListOrder` spelling rather than a new one:
+
+- **Custom Smart Playlist listing**: a Rule tree compiled to one SQL predicate
+  over `tracks`, ordered by the track sort the listing was opened with, which
+  ends on `path` in every direction. The tree is ANDed with the listing's search
+  needle *inside* the read — never applied after paging — and the read answers
+  the window and the total as one Listing Page (`custom_smart_playlist_page`),
+  under a single connection acquisition, with a count read being the same call
+  with a limit of zero.
+
+Two things this shape deliberately does **not** do, both decisions rather than
+omissions. It never joins to the `albums` or `artists` entity tables: a Rule
+tests the Track's own tag, so an album-grain fact is out of reach by
+construction, and the column names come from a static field-id table inside the
+adapter (an id absent from it is refused before any SQL is produced). And its
+text matching is `lower(column)` against a Rust-lowercased bound needle rather
+than the derived `search_text` substring lookup above, which is the reversal
+[ADR 0020](0020-rule-matching-lowercases-at-query-time.md) records: a Rule must
+be able to ask about any column, not only the four the search blob carries.
+
+The six **Built-in Smart Playlist** reads stay outside this record. They remain
+unbounded `Vec` reads with no total and no offset — a list with no per-rule cap
+has nothing to page — and this shape's existence is not a reason to migrate them.

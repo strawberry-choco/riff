@@ -307,13 +307,13 @@ fn the_reconcile_drops_the_draft_only_where_it_no_longer_belongs() {
 
     let mut editor = editor_holding(&tree);
     editor.name = "half-typed".to_string();
-    editor.reconcile(true, std::slice::from_ref(&saved));
+    editor.reconcile(true, Ok(vec![saved.clone()]));
     assert_eq!(
         editor.name, "half-typed",
         "an open page and a list that still exists keep the draft, dirt and all"
     );
 
-    editor.reconcile(false, &[]);
+    editor.reconcile(false, Ok(Vec::new()));
     assert!(editor.is_new(), "leaving the page discards the whole draft");
     assert_eq!(
         editor,
@@ -322,12 +322,54 @@ fn the_reconcile_drops_the_draft_only_where_it_no_longer_belongs() {
     );
 
     let mut editor = editor_holding(&tree);
-    editor.reconcile(true, &[]);
+    editor.reconcile(true, Ok(Vec::new()));
     assert!(
         editor.is_new(),
         "a draft whose list was deleted elsewhere cannot outlive it"
     );
     assert_eq!(editor.name, "");
+}
+
+/// A failed enumeration read is not a successful read that found no lists: the
+/// draft — and the name typed into it — stays, and the reason is kept for the
+/// page to show. Only an answered read that no longer names the list drops it,
+/// and leaving the page drops it whatever the read said.
+#[test]
+fn a_failed_enumeration_read_keeps_the_draft_and_carries_the_reason() {
+    let tree = nested_tree();
+    let mut editor = editor_holding(&tree);
+    editor.name = "half-typed".to_string();
+
+    editor.reconcile(true, Err("the store is locked".to_string()));
+    assert!(
+        !editor.is_new(),
+        "a store that could not answer has not said the list is gone"
+    );
+    assert_eq!(
+        editor.name, "half-typed",
+        "so nothing of the listener's is dropped"
+    );
+    assert_eq!(
+        editor.lists_reason.as_deref(),
+        Some("the store is locked"),
+        "and the page is left the reason to paint"
+    );
+
+    // The read answers again — with the list — and the reason goes with it.
+    editor.reconcile(true, Ok(vec![list("spl-late-night-2", "Late night jazz")]));
+    assert_eq!(editor.lists_reason, None);
+    assert_eq!(
+        editor.name, "half-typed",
+        "an answered read changed nothing here"
+    );
+
+    // Leaving the page is still a discard, whatever the read said.
+    editor.reconcile(false, Err("the store is locked".to_string()));
+    assert!(editor.is_new());
+    assert_eq!(
+        editor.lists_reason, None,
+        "a discarded draft leaves no reason behind"
+    );
 }
 
 /// A new, unsaved draft belongs to the page: the reconcile does not touch it
@@ -338,7 +380,7 @@ fn a_new_draft_survives_the_reconcile_while_the_page_is_open() {
         name: "Unfinished".to_string(),
         ..SmartPlaylistsEditor::default()
     };
-    editor.reconcile(true, &[]);
+    editor.reconcile(true, Ok(Vec::new()));
     assert_eq!(editor.name, "Unfinished");
     assert!(editor.is_new(), "still nothing saved");
 }
@@ -357,7 +399,7 @@ fn the_reconcile_adopts_a_renamed_rows_name_only_over_an_untouched_buffer() {
     // baseline with it, and the tree is the one it was opened from.
     let mut editor = editor_holding(&tree);
     assert!(!editor.is_dirty());
-    editor.reconcile(true, std::slice::from_ref(&renamed));
+    editor.reconcile(true, Ok(vec![renamed.clone()]));
     assert_eq!(editor.name, "Late night jazz deep");
     assert_eq!(editor.original.name, "Late night jazz deep");
     assert!(
@@ -374,14 +416,14 @@ fn the_reconcile_adopts_a_renamed_rows_name_only_over_an_untouched_buffer() {
     // overwriting it here would silently edit the draft under their hands.
     let mut editor = editor_holding(&tree);
     editor.name = "Typed by the listener".to_string();
-    editor.reconcile(true, std::slice::from_ref(&renamed));
+    editor.reconcile(true, Ok(vec![renamed.clone()]));
     assert_eq!(editor.name, "Typed by the listener");
 
     // A rename over an edited tree: the name is adopted and the work in
     // progress stays where it was.
     let mut editor = editor_holding(&tree);
     editor.add_rule(&BoxPath::root());
-    editor.reconcile(true, std::slice::from_ref(&renamed));
+    editor.reconcile(true, Ok(vec![renamed.clone()]));
     assert_eq!(editor.name, "Late night jazz deep");
     assert!(editor.is_dirty(), "the tree edit is still unsaved");
     assert_eq!(

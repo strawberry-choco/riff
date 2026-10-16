@@ -22096,6 +22096,88 @@ mod whole_frame_tests {
         );
     }
 
+    /// An enumeration read that **fails** while the page is open is not a store
+    /// that holds no lists: the draft — the listener's name and Rules with it —
+    /// stays, and the page says why instead of claiming there are none. Only a
+    /// successful read that no longer names the draft's list drops it (pinned
+    /// in `smart_playlists_editor_tests.rs`). This is the one place in the
+    /// feature where a degraded read used to destroy the listener's work
+    /// instead of mispainting a frame.
+    #[test]
+    fn a_failed_enumeration_read_keeps_the_draft_and_says_why() {
+        let (mut shell, mock) = counting_mock_shell(MockLibraryQueryStore {
+            custom_smart_playlists: vec![custom_list("spl-late-night-1", "Late night jazz")],
+            smart_playlist_trees: [(PlaylistId("spl-late-night-1".to_string()), one_rule_tree())]
+                .into(),
+            ..MockLibraryQueryStore::default()
+        });
+        open_saved_list_in_editor(&mut shell);
+
+        // The listener's work in progress: a name typed over the loaded one.
+        shell
+            .harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::TextInput)
+                    .value("Late night jazz"),
+            )
+            .expect("the name field holds the loaded name")
+            .focus();
+        shell.harness.step();
+        shell
+            .harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::TextInput)
+                    .value("Late night jazz"),
+            )
+            .expect("the name field survives being focused")
+            .type_text(" X");
+        shell.harness.step();
+
+        // The store starts failing on the one read the reconcile's existence
+        // question goes through.
+        mock.lock()
+            .unwrap()
+            .failing
+            .push(FailingQuery::CustomSmartPlaylists);
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            shell
+                .harness
+                .query(
+                    By::new()
+                        .role(egui::accesskit::Role::TextInput)
+                        .value("Late night jazz X"),
+                )
+                .is_some(),
+            "a failed read says nothing about the list: the listener's draft is still there"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Label, "Edit smart playlist")
+                .is_some(),
+            "and it is still the draft of the list it was opened on"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("custom list enumeration read boom")
+                .is_some(),
+            "the page says why the saved lists are missing — the store's own reason"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("No smart playlists yet")
+                .is_none(),
+            "the empty state would claim an emptiness nobody measured"
+        );
+    }
+
     /// A sidebar Rename reaches the open draft: the store's name moves, the
     /// reconcile lets the draft adopt it (the listener's Rules stay — a
     /// sidebar rename touches no rule row), and the editor's Save therefore

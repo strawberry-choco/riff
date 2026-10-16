@@ -1553,22 +1553,26 @@ impl eframe::App for RiffApp {
         // and only here: it belongs to the Smart Playlists page and to a saved
         // list that still exists, so leaving the page — another Settings
         // section, or the Settings view itself — or losing the list it was
-        // written against discards it. `SmartPlaylistsEditor::reconcile` is
-        // the ONE place that rule lives; no gesture clears a draft itself, so
-        // a stale draft cannot survive through a path nobody remembered to
-        // wire. Called before any panel draws, so a discarded draft is never
-        // painted. The enumeration read is the same bounded projection read
-        // the page's own content fill makes, and is asked only while the page
-        // is on screen.
+        // written against discards it, while a rename of that list is followed
+        // by the draft. `SmartPlaylistsEditor::reconcile` is the ONE place
+        // that rule lives; no gesture clears a draft itself, so a stale draft
+        // cannot survive through a path nobody remembered to wire. Called
+        // before any panel draws, so a discarded draft is never painted. The
+        // enumeration is the same bounded read the page's own content fill
+        // makes, asked only while the page is on screen and through its
+        // fallible accessor: a store that *could not answer* must not reach
+        // the reconcile as a store that answered "no lists", because the draft
+        // is the only holder of the listener's work and a transient read error
+        // would otherwise destroy it.
         let smart_page_open = matches!(library.view_mode, ViewMode::Settings)
             && self.settings_section == SettingsSection::SmartPlaylists;
-        let lists = if smart_page_open {
-            self.views.custom_smart_playlists()
+        let stored = if smart_page_open {
+            self.views.try_custom_smart_playlists()
         } else {
-            Vec::new()
+            Ok(Vec::new())
         };
         self.smart_playlists_editor
-            .reconcile(smart_page_open, &lists);
+            .reconcile(smart_page_open, stored);
 
         // --- SHELL (Issue 06): unified Panel API at exact token dimensions ---
         //

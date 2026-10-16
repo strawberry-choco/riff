@@ -49,14 +49,6 @@ pub struct FieldColumn {
 
 /// The fields the `Application Store` can answer a value read for.
 ///
-/// The six entries here are exactly the pickable fields of the feature's
-/// catalog: the four text fields whose picker lists come from the Library and
-/// the two numeric ones. `title`, `composer` and `comment` are text facts a
-/// Rule can test but offer **no** picker list for, so they are deliberately
-/// absent — a picker value must come from a column the feature has decided
-/// the listener can choose from, and widening that set is a catalog change
-/// made elsewhere first.
-///
 /// Every row points at the column a Rule actually tests, not at the `albums`
 /// / `artists` entity tables the browse listings read. That distinction is
 /// load-bearing: the entity tables are keyed on the *display* value
@@ -65,6 +57,16 @@ pub struct FieldColumn {
 /// tag as it was read or `NULL` when it was absent. A picker over the entity
 /// table would offer `Unknown Artist`, a value neither column can contain, so
 /// the Rule built from it would match nothing.
+///
+/// The six rows here are today's whole table, and it is built to grow: the
+/// Custom Smart Playlist's compiled Rule tree has to reach every testable
+/// column — `year`, `duration_nanos`, `composer`, `comment`, `path`, `title`
+/// and the rest — and each of those is appended here rather than spelled at
+/// its new read site. Growing it does **not** widen the picker lists: those
+/// are gated by the closed [`PICKABLE_FIELD_IDS`] list, because the catalog
+/// decides which fields offer a library-derived list and which take typed
+/// input, and a store table that answers "which column holds this field"
+/// cannot be trusted to answer that second question by accident.
 pub const FIELD_COLUMNS: &[FieldColumn] = &[
     FieldColumn {
         field_id: "genre",
@@ -98,19 +100,46 @@ pub const FIELD_COLUMNS: &[FieldColumn] = &[
     },
 ];
 
+/// The field ids a value picker may list: the four pickable text fields and
+/// the two pickable numeric ones.
+///
+/// A closed allow-list, deliberately not derived from [`FIELD_COLUMNS`].
+/// That table answers "which column holds this field" and grows with every
+/// Rule the compiler learns to test; this one answers "can the listener pick
+/// this value from their Library", which is the field catalog's question and
+/// changes only when the catalog does. Without the split, appending `title`
+/// to the column table would quietly turn the Title picker into a scan of
+/// every track name — a field the catalog gives a text box, not a list.
+pub const PICKABLE_FIELD_IDS: &[&str] = &[
+    "genre",
+    "artist",
+    "album_artist",
+    "album",
+    "sample_rate",
+    "channels",
+];
+
 /// The [`FieldColumn`] catalogued under `field_id`, or `None` when the id
 /// names no column.
+///
+/// This is the lookup a query-builder uses; a picker read must go through
+/// [`picker_column`] so a catalogued-but-not-pickable field stays refused.
 pub fn field_column(field_id: &str) -> Option<&'static FieldColumn> {
     FIELD_COLUMNS.iter().find(|entry| entry.field_id == field_id)
 }
 
-/// The [`FieldColumn`] for `field_id`, but only when its kind is `expected`.
+/// The [`FieldColumn`] a picker read may use for `field_id`, but only when
+/// its kind is `expected`.
 ///
-/// A picker read asks for text values or numeric values, so asking the
-/// `"sample_rate"` column for a text list is a caller error even though the
-/// id is catalogued. Resolving through this one function keeps both
-/// rejections — an unknown id and a shape mismatch — in front of any SQL.
+/// Three rejections happen here, and all of them before any SQL is built: an
+/// id no column is catalogued under, an id the picker allow-list does not
+/// carry, and an id whose column belongs to the other value shape (asking the
+/// `sample_rate` column for a text list is a caller error even though the id
+/// is catalogued and pickable).
 pub fn picker_column(field_id: &str, expected: ColumnKind) -> Option<&'static FieldColumn> {
+    if !PICKABLE_FIELD_IDS.contains(&field_id) {
+        return None;
+    }
     field_column(field_id).filter(|entry| entry.kind == expected)
 }
 

@@ -8,6 +8,9 @@ pub mod field_columns;
 pub mod playback_library;
 pub mod sqlite;
 
-pub use field_columns::{ColumnKind, FIELD_COLUMNS, FieldColumn, field_column, picker_column};
+pub use field_columns::{
+    ColumnKind, FIELD_COLUMNS, FieldColumn, PICKABLE_FIELD_IDS, field_column, is_genre_set,
+    picker_column,
+};
 pub use playback_library::StorePlaybackLibrary;
 pub use sqlite::{SqliteStore, default_store_path};

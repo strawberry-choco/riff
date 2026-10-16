@@ -3,9 +3,9 @@
 #
 # Owns egui/eframe (egui workspace-inherited), epi/egui_extras (`image` +
 # `datepicker` + the `serde` the datepicker needs; see the dependency line),
-# rfd, and tray-icon/muda. The design
-# authority (`riff-gui-theme`) and the presentation primitives
-# (`riff-gui-components`) it renders with are workspace crates (ADR 0018).
+# rfd, and tray-icon/muda. The design authority (`riff-gui-theme`) and the
+# presentation primitives (`riff-gui-components`) it renders with are
+# workspace crates (ADR 0018).
 #
 # The binary is a thin composition over the backend's Composition Root
 # (`riff_backend::composition::AppRuntime::spawn`, backend-crate-split

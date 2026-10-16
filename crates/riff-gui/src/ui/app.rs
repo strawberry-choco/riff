@@ -1482,6 +1482,27 @@ impl eframe::App for RiffApp {
         let mut output = self.frame(&mut playback, &mut library).advance(&input);
         self.enact_frame_head(ui.ctx(), &mut output, library.ui_flags.reduce_motion);
 
+        // The Smart Playlists draft's right to exist, decided once per frame
+        // and only here: it belongs to the Smart Playlists page and to a saved
+        // list that still exists, so leaving the page — another Settings
+        // section, or the Settings view itself — or losing the list it was
+        // written against discards it. `SmartPlaylistsEditor::reconcile` is
+        // the ONE place that rule lives; no gesture clears a draft itself, so
+        // a stale draft cannot survive through a path nobody remembered to
+        // wire. Called before any panel draws, so a discarded draft is never
+        // painted. The enumeration read is the same bounded projection read
+        // the page's own content fill makes, and is asked only while the page
+        // is on screen.
+        let smart_page_open = matches!(library.view_mode, ViewMode::Settings)
+            && self.settings_section == SettingsSection::SmartPlaylists;
+        let lists = if smart_page_open {
+            self.views.custom_smart_playlists()
+        } else {
+            Vec::new()
+        };
+        self.smart_playlists_editor
+            .reconcile(smart_page_open, &lists);
+
         // --- SHELL (Issue 06): unified Panel API at exact token dimensions ---
         //
         // Four slots, and the Frame answers each report at its own slot: the

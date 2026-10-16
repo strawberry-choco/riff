@@ -7732,6 +7732,542 @@ mod tests {
         );
     }
 
+    // --- Smart Playlists page: the draft, Save, Cancel and the reasons (ticket 18) ---
+    //
+    // The pane's own seam for the editing experience: Save and Cancel are
+    // typed intents, the host applies them exactly as
+    // `RiffApp::apply_settings_action` does (validation for Save — the store
+    // write is the app's and there is no store behind this harness — and
+    // discard for Cancel), and every refusal is a reason in the frame,
+    // measured against the row it belongs to rather than compared as pixels.
+
+    use riff_backend::domain::Combine;
+    use riff_gui::ui::rule_row::RuleDraft;
+    use riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor;
+
+    /// One saved-list row for the draft-seeding helpers below.
+    fn saved_list(name: &str) -> CustomSmartPlaylist {
+        CustomSmartPlaylist {
+            id: PlaylistId::new(name),
+            name: name.to_string(),
+            created_at: std::time::SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    /// One whole Rule, spelled through the row's own constructor.
+    fn whole_rule(field: riff_backend::domain::MatchableField) -> RuleDraft {
+        use riff_backend::domain::{Comparison, MatchableField, Rule, RuleValue};
+
+        // `is missing` takes no value at all, so a whole row built this way
+        // draws no value well and no text input: the only TextInput in the
+        // pane stays the name field.
+        let comparison = if field == MatchableField::Title {
+            Comparison::Contains
+        } else {
+            Comparison::IsMissing
+        };
+        let value =
+            (comparison == Comparison::Contains).then(|| RuleValue::Text("anything".to_string()));
+        RuleDraft::from_rule(&Rule::new(field, comparison, value))
+    }
+
+    /// The editor holding one saved list's tree, opened through the
+    /// production load.
+    fn editor_holding(tree: &SmartPlaylistTree) -> SmartPlaylistsEditor {
+        let mut editor = SmartPlaylistsEditor::default();
+        editor.load_saved(&saved_list("Morning drive"), Some(tree));
+        editor
+    }
+
+    /// The pane over a caller-seeded draft, with the host applying the tree
+    /// gestures and Save/Cancel the way `RiffApp::apply_settings_action` does.
+    fn smart_playlists_draft_harness(
+        content: &SettingsContent,
+        editor: SmartPlaylistsEditor,
+        size: egui::Vec2,
+    ) -> egui_kittest::Harness<
+        '_,
+        (
+            riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor,
+            Vec<SettingsAction>,
+        ),
+    > {
+        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
+        use riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor;
+
+        let palette = theme::Palette::dark();
+        let mut cache = icons::IconCache::new();
+        egui_kittest::Harness::builder()
+            .with_size(size)
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, state: &mut (SmartPlaylistsEditor, Vec<SettingsAction>)| {
+                    let (editor, actions) = state;
+                    let reported = show_settings_modal(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        content,
+                        SettingsSection::SmartPlaylists,
+                        editor,
+                    );
+                    for action in reported {
+                        match &action {
+                            SettingsAction::AddSmartPlaylistRule { parent } => {
+                                editor.add_rule(parent);
+                            }
+                            SettingsAction::AddSmartPlaylistBox { parent } => {
+                                editor.add_box(parent);
+                            }
+                            SettingsAction::RemoveSmartPlaylistChild { parent, index } => {
+                                editor.remove_child(parent, *index);
+                            }
+                            SettingsAction::SetSmartPlaylistCombine { path, combine } => {
+                                editor.set_combine(path, *combine);
+                            }
+                            // The app's Save arm: the draft decides (and records
+                            // any refusal); the store call is the app's.
+                            SettingsAction::SaveSmartPlaylist => {
+                                let _plan = editor.prepare_save();
+                            }
+                            SettingsAction::CancelSmartPlaylist => editor.cancel(),
+                            _ => {}
+                        }
+                        actions.push(action);
+                    }
+                },
+                (editor, Vec::new()),
+            )
+    }
+
+    /// The rect of the single node bearing `label`, failing loudly when the
+    /// label is absent or ambiguous — a reason's position is only meaningful
+    /// against the one row it belongs to.
+    fn rect_of(
+        harness: &egui_kittest::Harness<
+            '_,
+            (
+                riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor,
+                Vec<SettingsAction>,
+            ),
+        >,
+        label: &str,
+    ) -> egui::Rect {
+        use egui_kittest::kittest::Queryable as _;
+
+        let nodes: Vec<_> = harness.query_all_by_label(label).collect();
+        assert_eq!(
+            nodes.len(),
+            1,
+            "{label:?} should be exactly one node, found {}",
+            nodes.len()
+        );
+        nodes[0].rect()
+    }
+
+    /// Click the one control of `role` labelled `label` and settle.
+    fn click_control(
+        harness: &mut egui_kittest::Harness<
+            '_,
+            (
+                riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor,
+                Vec<SettingsAction>,
+            ),
+        >,
+        role: egui::accesskit::Role,
+        label: &str,
+    ) {
+        use egui_kittest::kittest::Queryable as _;
+
+        let nodes: Vec<_> = harness.query_all_by_role_and_label(role, label).collect();
+        assert_eq!(
+            nodes.len(),
+            1,
+            "{label:?} as {role:?} should be exactly one control, found {}",
+            nodes.len()
+        );
+        nodes[0].click();
+        harness.run();
+    }
+
+    /// Save and Cancel are the pane's typed intents, reported by real clicks
+    /// on the pane's own controls — what they mean is the app's apply step.
+    #[test]
+    fn test_save_and_cancel_are_reported_as_typed_intents() {
+        let content = sample_content();
+        let mut harness = smart_playlists_draft_harness(
+            &content,
+            SmartPlaylistsEditor::default(),
+            egui::vec2(1280.0, 840.0),
+        );
+        harness.run();
+
+        click_control(&mut harness, egui::accesskit::Role::Button, "Save");
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::SaveSmartPlaylist),
+            "the Save control reports its own intent"
+        );
+        click_control(&mut harness, egui::accesskit::Role::Button, "Cancel");
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::CancelSmartPlaylist),
+            "and Cancel reports its own"
+        );
+    }
+
+    /// A draft survives repaints and a mid-edit change: the typed name and the
+    /// tree keep growing over several frames, and nothing was written — the
+    /// store is not even reachable from this pane.
+    #[test]
+    fn test_the_draft_survives_repaints_and_a_mid_edit_tree_change() {
+        use egui_kittest::kittest::Queryable as _;
+
+        let content = sample_content();
+        let mut harness = smart_playlists_draft_harness(
+            &content,
+            SmartPlaylistsEditor::default(),
+            egui::vec2(1280.0, 840.0),
+        );
+        harness.run();
+
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .focus();
+        harness.run();
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("Late night");
+        harness.run();
+
+        click_nth(&mut harness, "Add rule", 0);
+        harness.run();
+
+        assert_eq!(harness.state().0.name, "Late night", "the name survives");
+        assert_eq!(harness.state().0.root.children.len(), 2);
+        // A plain repaint, no gesture: the draft is still there and still the
+        // listener's, not the store's.
+        harness.run();
+        assert_eq!(harness.state().0.name, "Late night");
+        assert_eq!(harness.state().0.root.children.len(), 2);
+        assert!(
+            harness.state().0.is_dirty(),
+            "the draft has unsaved edits the whole time"
+        );
+    }
+
+    /// A half-filled Rule blocks Save, and the reason is painted **under that
+    /// row** — measured: below the blank row's own header and above the next
+    /// row's, never merely somewhere in the pane.
+    #[test]
+    fn test_a_half_filled_rule_paints_its_reason_under_that_row() {
+        use riff_backend::domain::MatchableField;
+        use riff_gui::ui::rule_box::RuleChildDraft;
+
+        let content = sample_content();
+        let mut editor = SmartPlaylistsEditor {
+            name: "Late night".to_string(),
+            ..SmartPlaylistsEditor::default()
+        };
+        // Row 0 whole, row 1 blank (the offender), row 2 whole: the reason has
+        // rows on both sides to be measured against.
+        editor.root.children = vec![
+            RuleChildDraft::Rule(whole_rule(MatchableField::Title)),
+            RuleChildDraft::Rule(RuleDraft::blank()),
+            RuleChildDraft::Rule(whole_rule(MatchableField::Album)),
+        ];
+        let mut harness =
+            smart_playlists_draft_harness(&content, editor, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        click_control(&mut harness, egui::accesskit::Role::Button, "Save");
+
+        let reason = rect_of(&harness, "this rule needs a field");
+        let blank_row = rect_of(&harness, "Choose a field");
+        let next_row = rect_of(&harness, "Album");
+        assert!(
+            reason.top() >= blank_row.bottom(),
+            "the reason is under the blank row, not over it: {reason:?} vs {blank_row:?}"
+        );
+        assert!(
+            reason.bottom() <= next_row.top(),
+            "and it belongs to the blank row, not the one after it: {reason:?} vs {next_row:?}"
+        );
+        assert!(
+            reason.left() >= blank_row.left(),
+            "it sits in the rows' own column, starting at or right of the row's edge"
+        );
+        assert_eq!(
+            harness.state().0.refusal,
+            Some(
+                riff_gui::ui::smart_playlists_page::SmartPlaylistRefusal::Row {
+                    slot: riff_gui::ui::rule_box::ChildSlot::new(
+                        riff_gui::ui::rule_box::BoxPath::root(),
+                        1
+                    ),
+                    reason: "this rule needs a field".to_string(),
+                }
+            ),
+            "and the refusal names the slot the reason was painted at"
+        );
+    }
+
+    /// The reason names what is *missing*, in three steps: a row with no
+    /// comparison says so, an empty value well says it needs a value, and a
+    /// value this build cannot read says that.
+    #[test]
+    fn test_the_reason_names_the_missing_half_of_the_row() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_backend::domain::{Comparison, MatchableField};
+        use riff_gui::ui::rule_box::RuleChildDraft;
+        use riff_gui::ui::rule_row::{ComparisonChoice, RuleIntent, RuleValueDraft};
+
+        let content = sample_content();
+        let size = egui::vec2(1280.0, 840.0);
+
+        // A chosen field with no comparison.
+        let mut draft = RuleDraft::blank();
+        draft.apply(&RuleIntent::FieldChosen {
+            field: MatchableField::Year,
+        });
+        let mut editor = SmartPlaylistsEditor {
+            name: "Late night".to_string(),
+            ..SmartPlaylistsEditor::default()
+        };
+        editor.root.children = vec![RuleChildDraft::Rule(draft)];
+        let mut harness = smart_playlists_draft_harness(&content, editor, size);
+        harness.run();
+        click_control(&mut harness, egui::accesskit::Role::Button, "Save");
+        assert!(
+            harness
+                .query_by_label("this rule needs a comparison")
+                .is_some(),
+            "a chosen field with no comparison says what is missing"
+        );
+
+        // A comparison that draws a value, with nothing typed into it.
+        let mut draft = RuleDraft::blank();
+        draft.apply(&RuleIntent::FieldChosen {
+            field: MatchableField::Year,
+        });
+        draft.apply(&RuleIntent::ComparisonChosen {
+            choice: ComparisonChoice::Stored(Comparison::GreaterThan),
+        });
+        draft.value = RuleValueDraft::Number(String::new());
+        let mut editor = SmartPlaylistsEditor {
+            name: "Late night".to_string(),
+            ..SmartPlaylistsEditor::default()
+        };
+        editor.root.children = vec![RuleChildDraft::Rule(draft)];
+        let mut harness = smart_playlists_draft_harness(&content, editor, size);
+        harness.run();
+        click_control(&mut harness, egui::accesskit::Role::Button, "Save");
+        assert!(
+            harness.query_by_label("this rule needs a value").is_some(),
+            "an empty value well says it needs a value"
+        );
+
+        // A value the field's own type cannot read.
+        let mut draft = RuleDraft::blank();
+        draft.apply(&RuleIntent::FieldChosen {
+            field: MatchableField::Year,
+        });
+        draft.apply(&RuleIntent::ComparisonChosen {
+            choice: ComparisonChoice::Stored(Comparison::GreaterThan),
+        });
+        draft.value = RuleValueDraft::Number("nineteen seventy-five".to_string());
+        let mut editor = SmartPlaylistsEditor {
+            name: "Late night".to_string(),
+            ..SmartPlaylistsEditor::default()
+        };
+        editor.root.children = vec![RuleChildDraft::Rule(draft)];
+        let mut harness = smart_playlists_draft_harness(&content, editor, size);
+        harness.run();
+        click_control(&mut harness, egui::accesskit::Role::Button, "Save");
+        assert!(
+            harness
+                .query_by_label("this rule's value can't be read as this field's kind")
+                .is_some(),
+            "a value of the wrong shape says so, rather than crying about the field"
+        );
+    }
+
+    /// An Unreadable Rule is shown where the store put it, blocks Save with a
+    /// reason **under it**, and the row's own delete control is the way out:
+    /// the same Save succeeds once it is gone.
+    #[test]
+    fn test_an_unreadable_rule_is_shown_pointed_at_and_removable() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_backend::domain::{
+            Comparison, MatchableField, RootBox, Rule, RuleBox, RuleChild, RuleValue,
+        };
+        use riff_gui::ui::rule_box::RuleChildDraft;
+
+        let content = sample_content();
+        let root = RootBox::new(
+            RuleBox::new(Combine::All).with_children(vec![RuleChild::Rule(Rule::new(
+                MatchableField::Title,
+                Comparison::Contains,
+                Some(RuleValue::Text("midnight".to_string())),
+            ))]),
+        );
+        let tree = SmartPlaylistTree::new(root).with_unreadable(vec![UnreadableRule::new(
+            Vec::new(),
+            1,
+            "mood".to_string(),
+            "is".to_string(),
+            false,
+            Some("calm".to_string()),
+        )]);
+        let mut harness = smart_playlists_draft_harness(
+            &content,
+            editor_holding(&tree),
+            egui::vec2(1280.0, 840.0),
+        );
+        harness.run();
+
+        let words = rect_of(&harness, "riff can't understand this rule");
+        assert_eq!(
+            harness.query_all_by_label("Remove rule").count(),
+            2,
+            "the whole row and the unreadable row each carry their own control"
+        );
+
+        click_control(&mut harness, egui::accesskit::Role::Button, "Save");
+        let reason = rect_of(
+            &harness,
+            "riff can't understand this rule — delete the row to save the list",
+        );
+        assert!(
+            reason.top() >= words.bottom(),
+            "the reason is painted under the row it names: {reason:?} vs {words:?}"
+        );
+
+        // The row's own delete control is the way out. The unreadable row is
+        // the second child, so its control is the second "Remove rule".
+        click_nth(&mut harness, "Remove rule", 1);
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::RemoveSmartPlaylistChild {
+                    parent: riff_gui::ui::rule_box::BoxPath::root(),
+                    index: 1,
+                }),
+            "the row's own control reports its slot, exactly like a Rule row"
+        );
+        assert!(
+            !harness
+                .state()
+                .0
+                .root
+                .children
+                .iter()
+                .any(|child| matches!(child, RuleChildDraft::Unreadable(_))),
+            "and the row really left the draft"
+        );
+        assert!(
+            harness
+                .query_all_by_label("riff can't understand this rule")
+                .next()
+                .is_none(),
+            "the row's words are gone from the frame"
+        );
+
+        click_control(&mut harness, egui::accesskit::Role::Button, "Save");
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::SaveSmartPlaylist),
+            "Save was asked again"
+        );
+        assert!(
+            harness.state().0.refusal.is_none(),
+            "and it was not refused: the tree is whole without the row"
+        );
+        assert!(
+            harness.state().0.root.to_root_box().is_some(),
+            "the draft spells a tree for the store"
+        );
+    }
+
+    /// A Built-in Smart Playlist's name is refused before any store is asked,
+    /// and the reason is painted under the name field it is about.
+    #[test]
+    fn test_a_builtin_name_is_refused_under_the_name_field() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_backend::domain::MatchableField;
+        use riff_gui::ui::rule_box::RuleChildDraft;
+
+        let content = sample_content();
+        let mut editor = SmartPlaylistsEditor {
+            name: "  most played ".to_string(),
+            ..SmartPlaylistsEditor::default()
+        };
+        editor.root.children = vec![RuleChildDraft::Rule(whole_rule(MatchableField::Album))];
+        let mut harness =
+            smart_playlists_draft_harness(&content, editor, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        let name_field = harness
+            .query_by_role(egui::accesskit::Role::TextInput)
+            .expect("the name field is the pane's only text input")
+            .rect();
+
+        click_control(&mut harness, egui::accesskit::Role::Button, "Save");
+
+        let reason = rect_of(
+            &harness,
+            "a Built-in Smart Playlist is already named \"Most Played\"",
+        );
+        assert!(
+            reason.top() >= name_field.bottom(),
+            "the reason is under the name field it is about: {reason:?} vs {name_field:?}"
+        );
+        assert!(
+            reason.bottom() <= rect_of(&harness, "Album").top(),
+            "and above the Rules it is not about"
+        );
+    }
+
+    /// The store's own refusal is rendered verbatim, above the Save line —
+    /// double prefix included — because that string is the store's and is not
+    /// reworded on its way to the listener.
+    #[test]
+    fn test_the_stores_refusal_is_painted_verbatim_above_the_save_line() {
+        use riff_backend::domain::MatchableField;
+        use riff_gui::ui::rule_box::RuleChildDraft;
+
+        let content = sample_content();
+        let mut editor = SmartPlaylistsEditor {
+            name: "Gym".to_string(),
+            ..SmartPlaylistsEditor::default()
+        };
+        editor.root.children = vec![RuleChildDraft::Rule(whole_rule(MatchableField::Album))];
+        let store_words = "Invalid operation: store query failed: a Playlist or Custom Smart \
+                           Playlist named \"Gym\" already exists";
+        editor.refuse_save(store_words.to_string());
+        let mut harness =
+            smart_playlists_draft_harness(&content, editor, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        let reason = rect_of(&harness, store_words);
+        let save = rect_of(&harness, "Save");
+        assert!(
+            reason.bottom() <= save.top(),
+            "the store's words read above the Save line: {reason:?} vs {save:?}"
+        );
+        assert!(
+            reason.top() >= rect_of(&harness, "Album").bottom(),
+            "and below the rows the write was about"
+        );
+    }
+
     /// A tree with an arbitrary number of Rules saves and reads back whole
     /// through the **real** SQLite store, and so does one deeper than the
     /// seven-level editor cap: the editor imposes no Rule count and no depth
@@ -18269,6 +18805,88 @@ mod whole_frame_tests {
         );
     }
 
+    /// The six Built-in Smart Playlists exist only as code, so no store query
+    /// can refuse a Playlist named after one — the application layer does it,
+    /// on the create prompt, before the store is ever asked. Without it the
+    /// sidebar would show two rows reading "Most Played" (story 8).
+    #[test]
+    fn a_builtin_smart_list_name_is_refused_on_the_create_prompt() {
+        let (mut shell, committed) = prompt_mock_shell(MockPlaylistStore::default());
+        shell.harness.step();
+        open_playlist_create_prompt(&mut shell);
+        focus_and_type(&mut shell, "  most played ");
+
+        confirm_prompt(&mut shell);
+
+        assert!(
+            shell.harness.query_by_label("Create").is_some(),
+            "the refusal keeps the prompt open instead of vanishing"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains(
+                    "a Built-in Smart Playlist is already named \"Most Played\""
+                )
+                .is_some(),
+            "the reason names the conflict, quoting the built-in's own spelling"
+        );
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some("  most played "),
+            "the name they typed is still in the field, un-trimmed as typed"
+        );
+        assert!(
+            committed.lock().unwrap().is_empty(),
+            "the check refused before the store was asked: it committed nothing"
+        );
+    }
+
+    /// The same application-layer half of the name rule on the rename prompt:
+    /// a Playlist may not take a Built-in's name either, and the store cannot
+    /// say so. The refusal names the conflict and leaves the row's old name
+    /// standing.
+    #[test]
+    fn a_builtin_smart_list_name_is_refused_on_the_rename_prompt() {
+        let (mut shell, committed) = prompt_mock_shell(MockPlaylistStore::with_playlists(vec![(
+            PlaylistId::new("most"),
+            "Most".to_string(),
+            vec![],
+        )]));
+        shell.harness.step();
+        open_playlist_rename_prompt(&mut shell);
+        focus_and_type_at(&mut shell, "Save", " Played");
+
+        confirm_prompt(&mut shell);
+
+        assert!(
+            shell.harness.query_by_label("Save").is_some(),
+            "a refused rename keeps the prompt open instead of vanishing"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains(
+                    "a Built-in Smart Playlist is already named \"Most Played\""
+                )
+                .is_some(),
+            "the reason names the conflict, quoting the built-in's own spelling"
+        );
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some("Most Played"),
+            "the name they edited is still in the field, as typed"
+        );
+        assert!(
+            shell.harness.query_by_label("Most").is_some(),
+            "the row keeps its old name — the refusal ran before the store was asked"
+        );
+        assert!(
+            committed.lock().unwrap().is_empty(),
+            "a refused rename committed nothing"
+        );
+    }
+
     /// `StoreError` has ONE variant for every fault the Application Store can
     /// meet on a write — `SqliteStore::mutate` wraps a constraint violation, a
     /// failed transaction and an IO failure into
@@ -19741,6 +20359,217 @@ mod whole_frame_tests {
             views,
         );
         (shell, dir, list_id, store)
+    }
+
+    /// The editor's Save, driven through a real Application Store in a
+    /// composed frame: one click writes the name **and** the whole tree in the
+    /// store's single call (D12), the listener stays on the page, and the
+    /// sidebar's SMART LISTS section shows the list under the name that was
+    /// typed — the committed write moves the Playlists generation the
+    /// sidebar's own enumeration is stamped on, so the next frame reads it.
+    ///
+    /// A second Save, under the name the list already holds, is not a conflict
+    /// with itself: the plan hands the store this row's id, which ticket 03's
+    /// rule exempts — the same exemption the sidebar Rename uses.
+    #[test]
+    fn saving_from_the_editor_writes_the_name_and_the_tree_and_the_sidebar_shows_the_row() {
+        let (mut shell, _dir, id, mut store) = custom_list_store_shell();
+        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.get_by_label("Smart Playlists").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // The premise: the sidebar already lists the saved list — the row
+        // that must read the new name after the save.
+        assert!(
+            shell
+                .harness
+                .query_all_by_label("Late night jazz")
+                .any(|node| node.rect().center().x < riff_gui_theme::theme::SIDEBAR_W),
+            "the sidebar lists the saved list before the save"
+        );
+
+        // Load the saved list into the draft through the page's own row. The
+        // sidebar row wears the same label, so the locator is geometry: the
+        // page's row sits in the stage, right of the sidebar's width.
+        let pane_row = shell
+            .harness
+            .query_all_by_label("Late night jazz")
+            .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
+            .expect("the page's own row for the saved list");
+        pane_row.click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // The load filled the name field with the saved name; the listener
+        // types the rest of a new one. Focus, re-query, type at the end.
+        shell
+            .harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::TextInput)
+                    .value("Late night jazz"),
+            )
+            .expect("the name field holds the loaded name")
+            .focus();
+        shell.harness.step();
+        shell
+            .harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::TextInput)
+                    .value("Late night jazz"),
+            )
+            .expect("the name field survives being focused")
+            .type_text(" X");
+        shell.harness.step();
+
+        // The store's cross-table half of the name rule, reached first: an
+        // ordinary Playlist holds the name the listener just typed, and the
+        // store's own words are what the listener reads — prefix and all,
+        // never reworded — while the draft is left exactly as typed.
+        let blocker = store
+            .create_playlist("Late night jazz X", &[])
+            .expect("the name is free for a Playlist while the list still holds the old one");
+        shell.harness.step();
+        shell
+            .harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Save")
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("Invalid operation")
+                .is_some(),
+            "the store's refusal is painted, prefix and all"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("already exists")
+                .is_some(),
+            "and it names the conflict the store refused"
+        );
+        assert!(
+            shell
+                .harness
+                .query(
+                    By::new()
+                        .role(egui::accesskit::Role::TextInput)
+                        .value("Late night jazz X"),
+                )
+                .is_some(),
+            "a refused save leaves the draft exactly as typed"
+        );
+        let lists = store
+            .custom_smart_playlists()
+            .expect("the store answers the D14 read");
+        assert_eq!(
+            lists
+                .iter()
+                .map(|list| list.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Late night jazz"],
+            "a refused save wrote nothing: the list keeps its old name, and one row exists"
+        );
+
+        // The obstruction goes — the listener's own route in riff is deleting
+        // the Playlist from the sidebar, which this test performs directly so
+        // the retry below is the editor's Save and nothing else.
+        store
+            .delete_playlist(&blocker)
+            .expect("the Playlist holding the name is deleted");
+        shell.harness.step();
+
+        shell
+            .harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Save")
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // One store call wrote the name and the tree together, on the row the
+        // draft was written against.
+        let lists = store
+            .custom_smart_playlists()
+            .expect("the store answers the D14 read");
+        assert_eq!(
+            lists.len(),
+            1,
+            "one list — the save updated, not duplicated"
+        );
+        assert_eq!(
+            lists[0].id, id,
+            "the list keeps the identity it was saved under"
+        );
+        assert_eq!(
+            lists[0].name, "Late night jazz X",
+            "the name typed while writing is the name the store holds"
+        );
+        let tree = store
+            .smart_playlist_tree(&id)
+            .expect("the read works")
+            .expect("the tree exists");
+        assert_eq!(
+            tree.root(),
+            one_rule_tree().root(),
+            "and the whole tree was written in the same call"
+        );
+
+        // The sidebar shows it under the typed name, with no navigation: the
+        // committed write moved the generation the sidebar's read is stamped
+        // on, so the next frame lists the new name.
+        assert!(
+            shell
+                .harness
+                .query_all_by_label("Late night jazz X")
+                .any(|node| node.rect().center().x < riff_gui_theme::theme::SIDEBAR_W),
+            "the sidebar's SMART LISTS section lists the list under its new name"
+        );
+
+        // The listener is still on the page, editing the list that just saved.
+        assert!(
+            shell
+                .harness
+                .query(
+                    By::new()
+                        .role(egui::accesskit::Role::TextInput)
+                        .value("Late night jazz X"),
+                )
+                .is_some(),
+            "the name field still holds the saved name"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Label, "Edit smart playlist")
+                .is_some(),
+            "the editor still edits the list it just saved"
+        );
+
+        // A re-save under the list's own name is not a conflict with itself.
+        shell
+            .harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Save")
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("Invalid operation")
+                .is_none(),
+            "the store did not refuse the list against its own name"
+        );
+        let lists = store
+            .custom_smart_playlists()
+            .expect("the store answers the D14 read");
+        assert_eq!(lists.len(), 1);
+        assert_eq!(lists[0].name, "Late night jazz X");
     }
 
     /// A stale custom id — the list was deleted from under the frame, with no

@@ -1288,6 +1288,22 @@ pub mod geometry {
         /// and the button's own horizontal padding.
         pub const HEADER_LABEL_PAD: f32 = 44.0;
     }
+
+    /// The Rule row's date controls (`riff_gui::ui::rule_date`): the calendar
+    /// button plus the typed three-number time that a `before`/`after` Rule
+    /// takes, and the day-count well `in the last` takes. Same scale as the
+    /// row's own wells ([`rule_row::WELL_H`](super::rule_row::WELL_H)).
+    pub mod rule_date {
+        /// Width of the calendar button. Fixed, not measured: the button's
+        /// text is a fixed-width `YYYY-MM-DD`, so the row does not jitter as
+        /// the day changes, and the popup anchors on its own rect.
+        pub const PICKER_W: f32 = 116.0;
+        /// Width of one of the typed time's three wells (hh, mm, ss).
+        pub const TIME_PART_W: f32 = 64.0;
+        /// Gap between the calendar button and the time wells, and between
+        /// the time wells themselves — the parts of one stored pair.
+        pub const PART_GAP: f32 = 4.0;
+    }
 }
 
 // --- Semantic palette ---------------------------------------------------------

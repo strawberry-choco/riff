@@ -32,8 +32,9 @@ use eframe::egui;
 use riff_backend::domain::{CivilDateTime, RuleValue};
 use riff_gui_components::text_field::{TextField, text_field};
 use riff_gui_theme::icons::IconCache;
+use riff_gui_theme::theme::Palette;
+use riff_gui_theme::theme::geometry::rule_date::{PART_GAP, PICKER_W, TIME_PART_W};
 use riff_gui_theme::theme::geometry::rule_row::{NUMBER_W, WELL_H};
-use riff_gui_theme::theme::{self, Palette};
 
 /// Which of the catalog's two date ideas this row is drawing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,15 +119,18 @@ impl RuleDateDraft {
     pub fn value(&self, kind: RuleDateKind) -> Option<RuleValue> {
         match kind {
             RuleDateKind::DateWindow => whole_days(&self.window_days).map(RuleValue::Days),
-            RuleDateKind::DateTime => None,
+            RuleDateKind::DateTime => self
+                .parts()
+                .filter(civil_is_storable)
+                .map(RuleValue::DateTime),
         }
     }
 
-    /// The parts of a `YYYY-MM-DD HH:MM:SS` pair, once ticket 20 has a
-    /// calendar to fill them. Kept here so the shape a stored
+    /// The parts of a `YYYY-MM-DD HH:MM:SS` pair. The shape a stored
     /// [`CivilDateTime`] round-trips through is fixed by this module and not
-    /// invented later: two digits of month or day, six digits of year, and
-    /// whole seconds only.
+    /// invented elsewhere: two digits of month or day, four of year, and
+    /// whole seconds only — the same text the store's comparison is written
+    /// against.
     #[must_use]
     pub fn parts(&self) -> Option<CivilDateTime> {
         let (year, month, day) = split_day(&self.day)?;
@@ -146,6 +150,20 @@ impl RuleDateDraft {
 /// buffer, which is an absence rather than a window of zero days.
 fn whole_days(text: &str) -> Option<u32> {
     text.trim().parse().ok()
+}
+
+/// Whether a parsed pair is a civil instant the stored text shape can mean:
+/// a four-digit year and real month, day and time ranges. A part outside
+/// them would spell text no stamp orders beside, so it refuses rather than
+/// stores — the calendar cannot produce one (`jiff`'s civil years are
+/// four-digit), and nothing else writes the day buffer.
+fn civil_is_storable(civil: &CivilDateTime) -> bool {
+    (0..=9999).contains(&civil.year)
+        && (1..=12).contains(&civil.month)
+        && (1..=31).contains(&civil.day)
+        && civil.hour < 24
+        && civil.minute < 60
+        && civil.second < 60
 }
 
 /// `YYYY-MM-DD` as parts, or `None` for anything else.
@@ -175,8 +193,8 @@ fn split_time(text: &str) -> Option<(u8, u8, u8)> {
 /// What the date controls report: a buffer the listener edited.
 ///
 /// The row maps these into
-/// [`crate::ui::rule_row::RuleIntent::Date`] unchanged, so ticket 20 adds no
-/// intent variant when it replaces [`rule_date_row`]'s body.
+/// [`crate::ui::rule_row::RuleIntent::Date`] unchanged — these three carry
+/// every date edit there is, so the row never grew a second spelling for one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleDateIntent {
     /// The new contents of the day buffer.
@@ -209,19 +227,7 @@ pub fn rule_date_row(
     let mut intents = Vec::new();
     match kind {
         RuleDateKind::DateWindow => draw_window(ui, cache, palette, id, draft, &mut intents),
-        RuleDateKind::DateTime => {
-            // The calendar-and-time half is the next slice of ticket 20 and
-            // stays honest about being unrendered until it lands.
-            let _ = (cache, draft);
-            ui.label(
-                egui::RichText::new(
-                    "date entry for a date and time lands in ticket 20 — not rendered by this build",
-                )
-                .text_style(egui::TextStyle::Small)
-                .color(palette.ink_3),
-            );
-            ui.add_space(theme::SPACE_XS);
-        }
+        RuleDateKind::DateTime => draw_fixed(ui, cache, palette, id, draft, &mut intents),
     }
     intents
 }
@@ -258,4 +264,111 @@ fn draw_window(
     if buffer != draft.window_days {
         intents.push(RuleDateIntent::WindowDays(buffer));
     }
+}
+
+/// The day the calendar shows while the day buffer is empty: the civil
+/// epoch, and deliberately **not** today — a control seeded from the wall
+/// clock would open at a different month every day and could not be pinned
+/// by any test. Nothing is stored until the listener saves a picked day; an
+/// empty buffer spells no value at all.
+const EMPTY_DAY: &str = "1970-01-01";
+
+/// The fixed date: a calendar day from `egui_extras`' date picker beside the
+/// time as three plain number wells. The pair is one stored zone-less stamp
+/// — see [`RuleDateDraft::value`] for why nothing here touches a clock.
+///
+/// The picker's own calendar type (`jiff::civil::Date`) is deliberately
+/// never spelled in this module: `jiff` reaches the crate only through the
+/// datepicker feature, and naming it would demand a direct dependency line
+/// this design does not take. The seed and the picked-day read go through
+/// inference and public methods only.
+///
+/// The open popup is never a golden: it paints `jiff`'s *today* at paint
+/// time, which the harness's settled clock does not pin, so a baseline with
+/// it open would redden on the next calendar day. Its reachability is proven
+/// by a real click through a composed frame instead
+/// (`tests/ui_tests.rs::rule_row_ui_tests`).
+fn draw_fixed(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    id: egui::Id,
+    draft: &RuleDateDraft,
+    intents: &mut Vec<RuleDateIntent>,
+) {
+    let mut day = draft
+        .day
+        .parse()
+        .unwrap_or_else(|_| EMPTY_DAY.parse().expect("the seed is a civil date"));
+    let salt = id.with("picker").value().to_string();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(PICKER_W, WELL_H), egui::Sense::hover());
+    let picked = ui.put(
+        rect,
+        epi::DatePickerButton::new(&mut day)
+            .id_salt(&salt)
+            // The picker's calendar emoji is not riff's icon set and is not
+            // in the shipped font textures; the date itself is the label a
+            // listener — and the harness — reads.
+            .show_icon(false),
+    );
+    if picked.changed() {
+        intents.push(RuleDateIntent::Day(format!(
+            "{:04}-{:02}-{:02}",
+            day.year(),
+            day.month(),
+            day.day()
+        )));
+    }
+    let (mut hour, mut minute, mut second) = split_time_text(&draft.time);
+    for (slot, (buffer, hint)) in [(&mut hour, "hh"), (&mut minute, "mm"), (&mut second, "ss")]
+        .into_iter()
+        .enumerate()
+    {
+        ui.add_space(PART_GAP);
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(TIME_PART_W, WELL_H), egui::Sense::hover());
+        text_field(
+            ui,
+            cache,
+            palette,
+            buffer,
+            &TextField {
+                id: id.with(("time", slot)),
+                rect,
+                hint,
+                leading_icon: None,
+                clear_label: None,
+                dismiss_on_escape: false,
+            },
+        );
+    }
+    let merged = merge_time_text(&hour, &minute, &second);
+    if merged != draft.time {
+        intents.push(RuleDateIntent::Time(merged));
+    }
+}
+
+/// `HH:MM:SS` split into its three wells. Any other text is shown as the
+/// pieces around the first two colons: a stray colon simply never spells a
+/// value, and split-then-merge is the identity on every string a listener
+/// can have typed, so nothing shown is quietly rewritten while they fix it.
+fn split_time_text(text: &str) -> (String, String, String) {
+    if text.is_empty() {
+        return (String::new(), String::new(), String::new());
+    }
+    let mut pieces = text.splitn(3, ':').map(str::to_owned);
+    (
+        pieces.next().unwrap_or_default(),
+        pieces.next().unwrap_or_default(),
+        pieces.next().unwrap_or_default(),
+    )
+}
+
+/// The three wells as the one `HH:MM:SS` buffer — empty when all three are,
+/// rather than a bare `::`, so a fresh pair reports nothing.
+fn merge_time_text(hour: &str, minute: &str, second: &str) -> String {
+    if hour.is_empty() && minute.is_empty() && second.is_empty() {
+        return String::new();
+    }
+    format!("{hour}:{minute}:{second}")
 }

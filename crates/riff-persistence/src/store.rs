@@ -979,6 +979,30 @@ impl RuleTree {
                 .collect(),
         }
     }
+
+    /// The ONE bridge between the two spellings of a Rule tree.
+    ///
+    /// [`SmartPlaylistTree`] is the read type: closed enums the editor can
+    /// hold, plus the rows this build cannot interpret, kept beside the tree
+    /// rather than forced into it. `RuleTree` is a bounded read's input: the
+    /// same tree in stored-id spelling, so the query compiler can reject an
+    /// unknown field id before any SQL is produced. This is the only place
+    /// one becomes the other, and the rule it enforces is the reason it
+    /// exists: a tree reporting even one [`UnreadableRule`] converts to
+    /// **nothing** — `None`, meaning no query at all, a list that matches
+    /// nothing. Guessing at the unreadable row or dropping it and querying
+    /// the rest would both answer a question the listener never saved.
+    /// Whoever reports the refusal builds its reason from
+    /// [`SmartPlaylistTree::unreadable`]; the ids the rows carry are the
+    /// store's own and never a frontend-facing identity.
+    #[must_use]
+    pub fn from_smart_playlist_tree(tree: &SmartPlaylistTree) -> Option<Self> {
+        if tree.unreadable().is_empty() {
+            Some(Self::from_root_box(tree.root()))
+        } else {
+            None
+        }
+    }
 }
 
 /// Port for reading the Library collection section of the Application Store.

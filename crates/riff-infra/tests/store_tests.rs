@@ -2157,6 +2157,48 @@ fn test_flat_list_orders_land_in_sql_per_track_list_order() {
 }
 
 #[test]
+fn title_order_ends_on_the_path_when_two_titles_collide_under_nocase() {
+    use riff_persistence::store::TrackListOrder as Order;
+
+    let (_dir, mut store, _changes_rx) = open_store();
+
+    // Two rows whose titles are equal under SQLite's NOCASE fold — 'Alpha'
+    // and 'ALPHA' fold to one key — so the title arms have no order to give
+    // and the path tiebreak is the whole of the order between them. Seeded so
+    // path order disagrees with insertion order, which is what makes dropping
+    // `, path ASC` / `, path DESC` from `TrackListOrder::order_by` visible
+    // here and in no other test: the sibling above uses three distinct
+    // titles, the mock-seeded suites carry no titles, and the generated
+    // paging corpus titles are all distinct.
+    let batch: Vec<Track> = [("m:\\b.mp3", "ALPHA"), ("m:\\a.mp3", "Alpha")]
+        .iter()
+        .map(|(p, t)| library_track(p, t, Some("Artist"), "Album", None))
+        .collect();
+    store.apply_scan_batch(&batch).expect("batch applies");
+
+    let paths = |order: TrackListOrder| {
+        store
+            .tracks_page(order, 0, 10)
+            .expect("tracks page reads")
+            .rows()
+            .iter()
+            .map(|t| t.id.0.clone())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        paths(Order::TitleAsc),
+        ["m:\\a.mp3", "m:\\b.mp3"],
+        "a NOCASE tie in title-ascending order is decided by the path, ascending"
+    );
+    assert_eq!(
+        paths(Order::TitleDesc),
+        ["m:\\b.mp3", "m:\\a.mp3"],
+        "and in title-descending order the path tiebreak follows the direction"
+    );
+}
+
+#[test]
 fn test_all_track_ids_are_canonically_path_ordered() {
     let (_dir, db_path, store, _changes_rx) = open_store_with_path();
 

@@ -1928,6 +1928,7 @@ pub mod mocks {
                 picker_texts: Vec::new(),
                 picker_numbers: Vec::new(),
                 smart_playlist_trees: std::collections::HashMap::new(),
+                custom_smart_playlists: Vec::new(),
                 failing: Vec::new(),
                 calls: Mutex::new(Vec::new()),
             }

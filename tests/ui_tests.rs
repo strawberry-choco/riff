@@ -5557,15 +5557,17 @@ mod tests {
         size: egui::Vec2,
     ) -> egui_kittest::Harness<'_, Vec<SettingsAction>> {
         use riff_gui::ui::settings::show_settings_modal;
+        use riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor;
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
+        let mut editor = SmartPlaylistsEditor::default();
         egui_kittest::Harness::builder()
             .with_size(size)
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 move |ui, actions: &mut Vec<SettingsAction>| {
                     actions.extend(show_settings_modal(
-                        ui, &mut cache, &palette, content, current,
+                        ui, &mut cache, &palette, content, current, &mut editor,
                     ));
                 },
                 Vec::new(),
@@ -6500,6 +6502,7 @@ mod tests {
             let content = sample_content();
             let palette = Palette::dark();
             let mut cache = icons::IconCache::new();
+            let mut editor = riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor::default();
             let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
                 egui_kittest::Harness::builder()
                     .with_size(egui::vec2(width, SHORT))
@@ -6512,6 +6515,7 @@ mod tests {
                                 &palette,
                                 &content,
                                 SettingsSection::Library,
+                                &mut editor,
                             ));
                         },
                         Vec::new(),
@@ -10783,12 +10787,15 @@ mod browser_column_ui_tests {
             .build_ui_state(
                 |ui, ()| {
                     let mut cache = riff_gui_theme::icons::IconCache::new();
+                    let mut editor =
+                        riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor::default();
                     show_settings_modal(
                         ui,
                         &mut cache,
                         &palette,
                         &content,
                         SettingsSection::Library,
+                        &mut editor,
                     );
                 },
                 (),

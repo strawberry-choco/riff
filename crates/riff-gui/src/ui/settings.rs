@@ -2593,12 +2593,7 @@ fn section_pane(
                     }
                     SettingsSection::SmartPlaylists => {
                         super::smart_playlists_page::smart_playlists_pane(
-                            ui,
-                            cache,
-                            palette,
-                            content,
-                            editor,
-                            actions,
+                            ui, cache, palette, content, editor, actions,
                         );
                     }
                     SettingsSection::Advanced => {
@@ -3084,8 +3079,11 @@ impl super::app::RiffApp {
                 let list = lists.iter().find(|list| list.id == id);
                 let tree = self.views.smart_playlist_tree(&id);
                 if let Some(list) = list {
+                    // `SmartPlaylistTree::root()` is the public accessor for
+                    // the interpretable half; the unreadable side list stays
+                    // ticket 18's sibling state, per ticket 14's note.
                     self.smart_playlists_editor
-                        .load_saved(list, tree.as_ref().map(|tree| &tree.root));
+                        .load_saved(list, tree.as_ref().map(|tree| tree.root()));
                 }
             }
             // The page's own button: the same new, empty, unsaved draft the
@@ -3363,7 +3361,8 @@ impl super::app::RiffApp {
                 )
             } else {
                 super::smart_playlists_page::SmartPlaylistPickerValues::Texts(
-                    self.views.picker_texts(field, super::rule_row::PICKER_LIMIT),
+                    self.views
+                        .picker_texts(field, super::rule_row::PICKER_LIMIT),
                 )
             };
             self.smart_playlists_editor.picker_answered(values);

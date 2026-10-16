@@ -403,9 +403,7 @@ fn editor_column(
         // keyboard-focused row inside this clipped pane, so the row that
         // just opened a list scrolls itself into view here.
         if opened {
-            outcome
-                .response
-                .scroll_to_me(Some(egui::Align::Center));
+            outcome.response.scroll_to_me(Some(egui::Align::Center));
         }
     }
 

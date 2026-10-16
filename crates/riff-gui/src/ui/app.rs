@@ -501,8 +501,8 @@ impl RiffApp {
             },
             icons: riff_gui_theme::icons::IconCache::new(),
             settings_section: SettingsSection::Library,
-            smart_playlists_editor:
-                crate::ui::smart_playlists_page::SmartPlaylistsEditor::default(),
+            smart_playlists_editor: crate::ui::smart_playlists_page::SmartPlaylistsEditor::default(
+            ),
             feedback: crate::ui::feedback::FeedbackBoard::default(),
             #[cfg(target_os = "linux")]
             settings_text_input: String::new(),
@@ -2994,10 +2994,7 @@ impl RiffApp {
                 // the frame at the store, and no row appears in this section
                 // until ticket 18's Save.
                 let plus_rect = egui::Rect::from_center_size(
-                    egui::pos2(
-                        ui.max_rect().right() - 12.0 - 28.0,
-                        ui.cursor().center().y,
-                    ),
+                    egui::pos2(ui.max_rect().right() - 12.0 - 28.0, ui.cursor().center().y),
                     egui::vec2(24.0, 24.0),
                 );
                 if riff_gui_components::ghost_icon_button::ghost_icon_button(

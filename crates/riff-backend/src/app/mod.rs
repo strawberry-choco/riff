@@ -16,8 +16,9 @@ pub use riff_library::app::{
     cover_service::{COVER_CACHE_CAP, CoverService, CoverWorker, Covers, lru_insert},
     errors::LibraryError,
     projection::{
-        BrowsingProjection, FolderProjection, GenreProjection, HitListProjection, HitProjection,
-        PlaylistProjection, SmartPlaylistsProjection, TrackListProjection, WindowedListProjection,
+        BrowsingProjection, CustomListDegraded, CustomListKey, CustomPlaylistProjection,
+        FolderProjection, GenreProjection, HitListProjection, HitProjection, PlaylistProjection,
+        SmartPlaylistsProjection, TrackListProjection, WindowedListProjection,
     },
     replaygain_pass::{PassCommand, PassReport, ReplayGainPass},
     scan::build_tracks,

@@ -371,7 +371,8 @@ impl Compiler {
             (Semantic::Containment, _) => {
                 // Containment is a literal substring of the folded text —
                 // including for genre, where a needle may land inside one
-                // segment or across two.
+                // segment or across two; the crossing is a recorded reading
+                // (ADR 0020), not an accident of reaching for `instr`.
                 let placeholder = self.bind(Bound::Text(needle));
                 format!("instr({folded}, {placeholder}) > 0")
             }
@@ -386,6 +387,14 @@ impl Compiler {
                 // view trims each segment and *does* show that tag — the
                 // documented disagreement between a view and a Rule, pinned by a
                 // test rather than hidden.
+                //
+                // For an ordinary needle the wrapped search means one whole
+                // segment; a needle that itself carries the delimiter therefore
+                // asks for a *sequence* of whole segments — `is "Art
+                // Rock;Progressive Rock"` matches the row tagged exactly that,
+                // which is the more useful answer to the listener who typed the
+                // two genres their tag literally reads. Decided and recorded on
+                // ADR 0020, not left as an accident of the wrapping.
                 let segment = needle.replace(' ', "");
                 let placeholder = self.bind(Bound::Text(format!(";{segment};")));
                 let segments = format!("';' || replace({folded}, ' ', '') || ';'");

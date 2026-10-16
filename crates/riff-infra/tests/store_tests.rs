@@ -7784,15 +7784,33 @@ pub(crate) mod rules_reference {
                 Some(folded_text(&held)? == needle)
             }
             (Held::Set(_), Semantic::Equality) => {
-                // One whole segment: split on `;`, strip spaces from both sides,
-                // and compare — which is exactly what the store's
-                // delimiter-wrapped `instr` asks for, arrived at differently.
-                let target = text(value)?.to_lowercase().replace(' ', "");
+                // The store wraps the lowered, space-stripped tag *and* needle
+                // in the delimiter and asks whether the wrapped needle occurs
+                // in the wrapped tag. For an ordinary needle that is one whole
+                // segment; a needle that carries the delimiter asks for a
+                // *sequence* of whole segments — `is "Art Rock;Progressive
+                // Rock"` matches the row tagged exactly that — which is the
+                // decided reading (ADR 0020), pinned by
+                // `test_genre_is_with_a_semicolon_asks_for_a_segment_sequence`
+                // and made askable by the matrix's genre probe.
+                //
+                // Walked here as segments rather than as wrapped strings: the
+                // needle's segments must equal a contiguous run of the tag's.
+                // That is the same question asked a different way on purpose —
+                // the sides share no helper — so mutating either side to the
+                // other reading (per-segment equality, where a `;`-bearing
+                // needle matches nothing) reddens the oracle.
+                let needle = text(value)?.to_lowercase().replace(' ', "");
+                let wanted: Vec<String> = needle.split(';').map(str::to_string).collect();
+                let segments: Vec<String> = folded_text(&held)?
+                    .replace(' ', "")
+                    .split(';')
+                    .map(str::to_string)
+                    .collect();
                 Some(
-                    folded_text(&held)?
-                        .replace(' ', "")
-                        .split(';')
-                        .any(|segment| segment == target),
+                    segments
+                        .windows(wanted.len())
+                        .any(|window| window == wanted.as_slice()),
                 )
             }
             (Held::Tag(_) | Held::Set(_), Semantic::Containment) => {
@@ -8103,7 +8121,13 @@ fn probe(field: MatchableField, comparison: Comparison) -> Option<RuleValue> {
     use MatchableField as F;
     match field {
         F::Genre => match comparison {
-            C::Is => needle("Progressive Rock"),
+            // A two-segment value, deliberately: the class the oracle could
+            // not ask about while the reference read `is` one segment at a
+            // time. The row tagged exactly `"Art Rock;Progressive Rock"`
+            // (`one.flac`) answers the sequence; the tab-padded near-twin
+            // (`two.wav`) does not; and both sides must read it the same way
+            // (ADR 0020's consequence list).
+            C::Is => needle("Art Rock;Progressive Rock"),
             C::Contains => needle("rock;progressive"),
             _ => None,
         },
@@ -8611,6 +8635,67 @@ fn test_genre_is_one_whole_segment_and_a_tab_padded_segment_is_pinned() {
         rule_window(&store, &empty_is, None),
         rule_window(&store, &missing, None),
         "`genre is \"\"` and `genre is missing` are one test on text"
+    );
+}
+
+#[test]
+fn test_genre_is_with_a_semicolon_asks_for_a_segment_sequence() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (store, tracks) = seeded_rules_store(&db_path);
+    let clock = rule_clock(&store);
+
+    // The decided reading (ADR 0020): a needle carrying the delimiter asks for
+    // a *sequence* of whole segments, because the store wraps the lowered,
+    // space-stripped tag and needle in the delimiter and searches for the
+    // wrapped needle. The listener who types the two genres their tag
+    // literally reads gets the row; the per-segment reading would answer
+    // nothing at all, which is the mutation this case exists to catch — on
+    // either side, because the two sides share no code.
+    let sequence = rule(
+        MatchableField::Genre,
+        Comparison::Is,
+        needle("Art Rock;Progressive Rock"),
+    );
+    assert_rule_membership(
+        &store,
+        &tracks,
+        &sequence,
+        None,
+        &clock,
+        "genre is \"Art Rock;Progressive Rock\"",
+    );
+    assert_eq!(
+        rule_window(&store, &sequence, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["one.flac"],
+        "the row tagged exactly `Art Rock;Progressive Rock` answers; the \
+         tab-padded near-twin does not (the spaces-only strip still holds per \
+         segment), and the *sequence* — not a coincidence of one segment — is \
+         what is being asked"
+    );
+
+    // The ordered half of the same class: the segments must appear in the
+    // order asked. Reversed, the sequence is not a run of the tag, and the
+    // answer is empty on both sides.
+    let reversed = rule(
+        MatchableField::Genre,
+        Comparison::Is,
+        needle("Progressive Rock;Art Rock"),
+    );
+    assert_rule_membership(
+        &store,
+        &tracks,
+        &reversed,
+        None,
+        &clock,
+        "genre is \"Progressive Rock;Art Rock\"",
+    );
+    assert!(
+        rule_window(&store, &reversed, None).is_empty(),
+        "a sequence asks for the order the tag lists, not a bag of segments"
     );
 }
 

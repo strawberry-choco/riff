@@ -291,6 +291,29 @@ impl RuleBoxDraft {
         }
     }
 
+    /// Move the child at `parent`/`from` to position `to` in the box's one
+    /// interleaved sibling order — the reorder a drag-and-drop gesture
+    /// reports as `(from, to)`. The math is
+    /// [`reorder_tracks`](riff_backend::app::playlist_manager::reorder_tracks)'s,
+    /// over the numbering Rules and Boxes share: remove the dragged child and
+    /// reinsert it at `to`, and every child between shifts one step to close
+    /// and open the gaps.
+    ///
+    /// A self-drop (`from == to`) and any out-of-range index change nothing,
+    /// so an empty gesture never renumbers, dirties or saves anything. A path
+    /// that names no box drops the gesture rather than inventing a box: a
+    /// path comes from the paint, so a miss means the tree moved under the
+    /// gesture and doing nothing is the only honest answer.
+    pub fn move_child(&mut self, parent: &BoxPath, from: usize, to: usize) {
+        if let Some(boxed) = self.box_at_mut(parent) {
+            if from == to || from >= boxed.children.len() || to >= boxed.children.len() {
+                return;
+            }
+            let dragged = boxed.children.remove(from);
+            boxed.children.insert(to, dragged);
+        }
+    }
+
     /// Set the combine choice of the box `path` names.
     pub fn set_combine(&mut self, path: &BoxPath, combine: Combine) {
         if let Some(boxed) = self.box_at_mut(path) {

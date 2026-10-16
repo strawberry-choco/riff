@@ -182,6 +182,27 @@ impl SmartPlaylistsEditor {
         }
     }
 
+    /// Move the child at `parent`/`from` to position `to` in that Box's one
+    /// interleaved sibling order — the drag-and-drop reorder, whose no-op
+    /// rule (self-drops, out-of-range gestures) lives in
+    /// [`RuleBoxDraft::move_child`]. The draft renumbers by construction: a
+    /// Box holds its Rules and Boxes in one `Vec`, so the list's order *is*
+    /// the shared `position` sequence Save spells.
+    pub fn move_child(&mut self, parent: &BoxPath, from: usize, to: usize) {
+        self.root.move_child(parent, from, to);
+        // A Box strictly under a reordered list answers to a different
+        // address once its siblings shift, so an open combine list down
+        // there would name whichever Box now sits at that address — close it
+        // rather than paint a different Box's list (the one-list-open
+        // invariant `remove_child` keeps for the dangling case).
+        if let Some(open) = &self.open_combine
+            && open != parent
+            && open.indices().starts_with(parent.indices())
+        {
+            self.open_combine = None;
+        }
+    }
+
     /// Choose the combine for the Box at `path` and close its list — the
     /// choice is the decision, and the list has no more to offer once made.
     pub fn set_combine(&mut self, path: &BoxPath, combine: Combine) {
@@ -393,6 +414,61 @@ enum PickerEvent {
     Closed,
 }
 
+/// Drag-and-drop payload for one row of the rule tree: the row's index in
+/// its Box, and **which Box's sibling list it came from**. Private to this
+/// module — the walk only ever sees a drop already checked against its own
+/// list (see [`draggable_rule_row`]).
+///
+/// The list identity is what makes a cross-Box drop fail safe. A pane
+/// renders several sibling lists at once and each starts at zero, so a bare
+/// index released over one Box's row would read as a legal move inside
+/// another Box's — the gesture would silently move a Rule across a Box
+/// boundary while looking like a success. Carrying the source list and
+/// refusing a payload from any other list makes that read impossible: the
+/// drop simply changes nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuleRowDrag {
+    /// The Box whose one interleaved sibling list the row belongs to.
+    list: BoxPath,
+    /// The row's index in that list.
+    index: usize,
+}
+
+/// One rule-tree row (a Rule's line or a nested Box's control line) wrapped
+/// in the shared drag mechanism ([`sidebar::drag_row`]), **scoped to the
+/// sibling list it lives in** — `list`/`index` are that row's own slot.
+///
+/// The scoping is the point: the wrapper constructs the payload from `list`
+/// and accepts a payload only from the same `list`, so a drag can never move
+/// a child across a Box boundary, and nothing at a call site can forget the
+/// check. Everything else — the hit-area registered before the row paints,
+/// the floating copy, the stale-payload cleanup — is the shared mechanism;
+/// see its doc for why the ordering cannot be reversed.
+fn draggable_rule_row<R>(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    list: &BoxPath,
+    index: usize,
+    id: egui::Id,
+    slot_size: egui::Vec2,
+    paint: impl FnOnce(&mut egui::Ui) -> (R, egui::Response),
+) -> sidebar::DragRow<RuleRowDrag, R> {
+    let payload = RuleRowDrag {
+        list: list.clone(),
+        index,
+    };
+    let held_list = list.clone();
+    sidebar::drag_row(
+        ui,
+        id,
+        slot_size,
+        palette,
+        payload,
+        move |incoming: &RuleRowDrag| incoming.list == held_list,
+        paint,
+    )
+}
+
 /// The right column: the name typed as the Rules are written, the Rule tree
 /// itself (ticket 14's rows inside ticket 16's Boxes, this pane the host),
 /// and the Save/Cancel line whose *meanings* are ticket 18's — the buttons
@@ -515,15 +591,26 @@ fn draw_rule_box(
 ) {
     let box_id = egui::Id::new(("smart_playlist_box", path));
     let listed = open_combine.as_ref() == Some(path);
-    let line = box_control_line(
-        ui,
-        cache,
-        palette,
-        box_id,
-        combine_label(boxed.combine),
-        listed,
-        own_slot.is_some(),
-    );
+    // A nested Box's control line is the Box's own row in its parent's
+    // sibling list (ticket 19): dragging it moves the whole child — the Box
+    // leaves with everything inside it, the same unit its remove control
+    // takes. The Root Box has no parent slot, so it neither drags nor
+    // accepts a drop. Same list only, enforced inside the wrapper.
+    let (line, dropped) =
+        draw_box_line(ui, cache, palette, box_id, boxed.combine, listed, own_slot);
+    // A drag released over this Box's line moves the dragged sibling to this
+    // Box's position; the floating copy reports nothing. A payload from
+    // another sibling list never reaches here (the wrapper refuses it), and
+    // a drop on the row it came from is the model's no-op.
+    if let Some(held) = dropped
+        && let Some(slot) = own_slot
+    {
+        actions.push(SettingsAction::MoveSmartPlaylistChild {
+            parent: slot.parent.clone(),
+            from: held.index,
+            to: slot.index,
+        });
+    }
     let mut now_listed = listed;
     if line.combine_pressed {
         *open_combine = if listed { None } else { Some(path.clone()) };
@@ -648,6 +735,13 @@ fn draw_box_add_controls(
 /// the remove control: the lists the row opens are drawn in its own flow, and
 /// a horizontal parent would lay the whole list out sideways. Its width is
 /// the line minus the remove control's square, so nothing is overlapped.
+///
+/// The row drags up and down among its parent Box's siblings (ticket 19)
+/// through [`draggable_rule_row`], whose hit-area registration happens
+/// BEFORE the row paints — the one ordering that keeps the row's controls
+/// clickable, the shared text field included. The drag's one order is the
+/// canonical one, so unlike a Playlist's entries the drag is always enabled;
+/// there is no sorted view here to disable it for.
 #[expect(clippy::too_many_arguments, reason = "one row in a threaded tree walk")]
 fn draw_rule_child(
     ui: &mut egui::Ui,
@@ -667,10 +761,10 @@ fn draw_rule_child(
         None
     };
     let mut remove_pressed = false;
-    let outcome = ui
+    let drag = ui
         .horizontal_top(|ui| {
             let row_w = (ui.available_width() - rule_box::REMOVE_W - theme::SPACE_SM).max(0.0);
-            let outcome = ui
+            let drag = ui
                 .scope_builder(
                     egui::UiBuilder::new()
                         .max_rect(egui::Rect::from_min_size(
@@ -679,7 +773,22 @@ fn draw_rule_child(
                         ))
                         .layout(egui::Layout::top_down(egui::Align::Min))
                         .id_salt(row_id),
-                    |ui| rule_row(ui, cache, palette, row_id, draft, prop.as_ref()),
+                    |ui| {
+                        draggable_rule_row(
+                            ui,
+                            palette,
+                            path,
+                            index,
+                            row_id.with("drag"),
+                            egui::vec2(row_w, HEADER_H),
+                            |ui| {
+                                let outcome =
+                                    rule_row(ui, cache, palette, row_id, draft, prop.as_ref());
+                                let response = outcome.response.clone();
+                                (outcome, response)
+                            },
+                        )
+                    },
                 )
                 .inner;
             ui.add_space(theme::SPACE_SM);
@@ -690,22 +799,40 @@ fn draw_rule_child(
                 row_id.with("remove_rule"),
                 "Remove rule",
             );
-            outcome
+            drag
         })
         .inner;
+    let outcome = drag.inner;
+    // A drag released over this row moves the dragged child to this row's
+    // position — but only a child of the same Box can reach here: the
+    // wrapper refuses any payload from another sibling list, and the model
+    // drops a self-drop. A row painted as the floating copy reports nothing.
+    if !drag.in_flight
+        && let Some(held) = &drag.dropped
+    {
+        actions.push(SettingsAction::MoveSmartPlaylistChild {
+            parent: path.clone(),
+            from: held.index,
+            to: index,
+        });
+    }
     let mut opened = false;
-    for intent in &outcome.intents {
-        draft.apply(intent);
-        match intent {
-            RuleIntent::PanelToggled { open, .. } if *open => opened = true,
-            RuleIntent::PickerOpened { field } => {
-                picker_events.push(PickerEvent::Opened {
-                    slot: ChildSlot::new(path.clone(), index),
-                    field: *field,
-                });
+    // The floating copy takes no part in interaction, so its intents are not
+    // the listener's decisions.
+    if !drag.in_flight {
+        for intent in &outcome.intents {
+            draft.apply(intent);
+            match intent {
+                RuleIntent::PanelToggled { open, .. } if *open => opened = true,
+                RuleIntent::PickerOpened { field } => {
+                    picker_events.push(PickerEvent::Opened {
+                        slot: ChildSlot::new(path.clone(), index),
+                        field: *field,
+                    });
+                }
+                RuleIntent::PickerClosed => picker_events.push(PickerEvent::Closed),
+                _ => {}
             }
-            RuleIntent::PickerClosed => picker_events.push(PickerEvent::Closed),
-            _ => {}
         }
     }
     // Host duty handed from ticket 14: egui 0.35 never auto-scrolls a
@@ -768,6 +895,64 @@ struct BoxLineReport {
     remove_pressed: bool,
     /// The line's own response, the scroll target when the list opens.
     response: egui::Response,
+}
+
+/// One Box's control line, wrapped in the shared row drag when the Box is a
+/// child of another Box. `own_slot` is the Box's slot in its parent's
+/// sibling list — `None` for the Root Box, which is no list's child, so it
+/// neither drags nor accepts a drop. The second half of the answer is the
+/// payload a drag released over the line carried, already checked against
+/// this list (and `None` while the line is the floating copy).
+fn draw_box_line(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    box_id: egui::Id,
+    combine: Combine,
+    listed: bool,
+    own_slot: Option<&ChildSlot>,
+) -> (BoxLineReport, Option<std::sync::Arc<RuleRowDrag>>) {
+    if let Some(slot) = own_slot {
+        let drag = draggable_rule_row(
+            ui,
+            palette,
+            &slot.parent,
+            slot.index,
+            box_id.with("drag"),
+            egui::vec2(ui.available_width(), HEADER_H),
+            |ui| {
+                let line = box_control_line(
+                    ui,
+                    cache,
+                    palette,
+                    box_id,
+                    combine_label(combine),
+                    listed,
+                    true,
+                );
+                let response = line.response.clone();
+                (line, response)
+            },
+        );
+        if drag.in_flight {
+            (drag.inner, None)
+        } else {
+            (drag.inner, drag.dropped)
+        }
+    } else {
+        (
+            box_control_line(
+                ui,
+                cache,
+                palette,
+                box_id,
+                combine_label(combine),
+                listed,
+                false,
+            ),
+            None,
+        )
+    }
 }
 
 /// One Box's control line: its combine control, and — for a nested Box — the

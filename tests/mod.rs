@@ -1334,9 +1334,10 @@ pub mod mocks {
     /// [`PlaylistStore`] fake standing in for the Playlists section of the
     /// Application Store. Reads serve whatever `playlists` / `entries` were
     /// seeded with (empty by default, which is the state most seam tests want)
-    /// and every mutation reports "nothing changed". The playlist
-    /// projection's own behavior is pinned against real `SQLite` scratch stores
-    /// in the app tests, not against this stub.
+    /// and every mutation reports "nothing changed" — unless it is refusing
+    /// (see `refuse_next_write`). The playlist projection's own behavior is
+    /// pinned against real `SQLite` scratch stores in the app tests, not
+    /// against this stub.
     #[derive(Clone, Default)]
     pub struct MockPlaylistStore {
         /// When set, every read fails with an `InvalidOperation` error.
@@ -1346,6 +1347,17 @@ pub mod mocks {
         /// Rows `load_playlist_entries` serves, keyed by playlist id.
         pub entries:
             std::collections::HashMap<PlaylistId, Vec<riff_backend::app::store::PlaylistEntry>>,
+        /// The next create or rename fails with
+        /// `StoreError::InvalidOperation(reason)` and commits nothing; every
+        /// write after it succeeds. The Application Store raises that ONE
+        /// variant for every fault it can meet — `op_error` wraps a constraint
+        /// violation, a transaction failure and an IO failure into it alike —
+        /// so a test sets the reason it wants reported and crosses the same
+        /// single production arm.
+        pub refuse_next_write: Option<String>,
+        /// Every name a create or rename COMMITTED with, in call order. Cloned
+        /// handles share it, so a test can read what its gesture wrote.
+        pub committed: Arc<Mutex<Vec<String>>>,
     }
 
     impl MockPlaylistStore {
@@ -1404,18 +1416,26 @@ pub mod mocks {
 
         fn create_playlist(
             &mut self,
-            _name: &str,
+            name: &str,
             _initial_tracks: &[TrackId],
         ) -> Result<PlaylistId, StoreError> {
+            if let Some(reason) = self.refuse_next_write.take() {
+                return Err(StoreError::InvalidOperation(reason));
+            }
+            self.committed.lock().unwrap().push(name.to_string());
             Ok(PlaylistId::new("mock"))
         }
 
         fn rename_playlist(
             &mut self,
             _id: &PlaylistId,
-            _new_name: &str,
+            new_name: &str,
         ) -> Result<bool, StoreError> {
-            Ok(false)
+            if let Some(reason) = self.refuse_next_write.take() {
+                return Err(StoreError::InvalidOperation(reason));
+            }
+            self.committed.lock().unwrap().push(new_name.to_string());
+            Ok(true)
         }
 
         fn delete_playlist(&mut self, _id: &PlaylistId) -> Result<bool, StoreError> {

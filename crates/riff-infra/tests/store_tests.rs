@@ -7040,3 +7040,141 @@ fn a_failed_mutation_reports_its_own_operation_context() {
     );
     assert!(changes_rx.is_empty(), "a failed mutation emits no notice");
 }
+
+// --- Bounded value-picker reads over the columns a Rule tests -------------
+//
+// smart-playlist-rules ticket 04. A Custom Smart Playlist's value picker must
+// offer only values the column the Rule actually tests can contain, so these
+// reads are bounded `DISTINCT` reads over `tracks` — never over the `albums` /
+// `artists` entity tables the browse listings use. The self-contained module
+// keeps the whole ticket's suite in one contiguous append.
+mod smart_picker_reads {
+    use super::*;
+
+    /// A `tracks` row with every picker-relevant tag under control: the four
+    /// pickable text columns plus the two numeric ones. `album` and
+    /// `album_artist` stay `Option` here — the fallback the scan bakes into
+    /// the *entity* keys is exactly what these tests are pinning the picker
+    /// reads against, so the fixture must be able to leave them absent.
+    fn picker_track(
+        path: &str,
+        artist: Option<&str>,
+        album_artist: Option<&str>,
+        album: Option<&str>,
+        genre: Option<&str>,
+        sample_rate: Option<u32>,
+        channels: Option<u16>,
+    ) -> Track {
+        Track::fresh_scan(
+            TrackId::from_path(std::path::Path::new(path)),
+            PathBuf::from(path),
+            TrackMetadata {
+                title: Some(format!("Track at {path}")),
+                artist: artist.map(str::to_string),
+                album: album.map(str::to_string),
+                album_artist: album_artist.map(str::to_string),
+                genre: genre.map(str::to_string),
+                ..TrackMetadata::default()
+            },
+            Some(Duration::from_mins(3)),
+            sample_rate,
+            channels,
+            None,
+        )
+    }
+
+    /// The shared fixture library: every picker-relevant shape the feature
+    /// cares about in one seed — a `;`-separated genre tag, a `;`-separated
+    /// tag with no space after the delimiter, a segment padded with spaces,
+    /// an empty-string genre, a `NULL` genre, an absent artist tag beside a
+    /// track literally tagged `Unknown Artist`, an absent album tag beside one
+    /// literally tagged `Unknown Album`, a repeated value, and absent numeric
+    /// facts.
+    fn seeded_picker_store() -> (tempfile::TempDir, SqliteStore) {
+        let (dir, mut store, _changes_rx) = open_store();
+        let tracks = vec![
+            picker_track(
+                "/lib/1.flac",
+                Some("Aphex Twin"),
+                Some("Aphex Twin"),
+                Some("Selected"),
+                Some("Ambient"),
+                Some(44_100),
+                Some(2),
+            ),
+            picker_track(
+                "/lib/2.mp3",
+                Some("Unknown Artist"),
+                None,
+                Some("Selected"),
+                Some("Ambient; Techno"),
+                Some(44_100),
+                Some(1),
+            ),
+            picker_track(
+                "/lib/3.mp3",
+                None,
+                None,
+                None,
+                Some(""),
+                Some(48_000),
+                Some(2),
+            ),
+            picker_track(
+                "/lib/4.wav",
+                Some("Björk"),
+                Some("Björk"),
+                Some("Homogenic"),
+                Some("Art Rock;Progressive Rock"),
+                None,
+                None,
+            ),
+            picker_track(
+                "/lib/5.ogg",
+                Some("Aphex Twin"),
+                Some("Warp Artists"),
+                Some("Selected"),
+                Some("  Techno "),
+                Some(48_000),
+                Some(6),
+            ),
+            picker_track(
+                "/lib/6.m4a",
+                Some("Unknown Artist"),
+                Some("Unknown Artist"),
+                Some("Unknown Album"),
+                Some("Techno"),
+                Some(96_000),
+                Some(2),
+            ),
+        ];
+        store.apply_scan_batch(&tracks).expect("fixtures apply");
+        (dir, store)
+    }
+
+    /// The genre picker offers the library's distinct genre *entries*, not its
+    /// distinct genre *strings*: a Rule tests genre as one whole
+    /// `;`-separated segment, so `"Ambient; Techno"` can never be a value it
+    /// matches and must never be offered. Space padding is trimmed away for
+    /// the same reason — the picked value has to be one the Rule can answer.
+    /// Empty and absent tags contribute nothing.
+    #[test]
+    fn genre_picker_offers_the_distinct_genre_entries_without_empty_or_absent_tags() {
+        let (_dir, store) = seeded_picker_store();
+
+        let offered = store
+            .picker_texts("genre", 50)
+            .expect("genre picker read");
+
+        assert_eq!(
+            offered,
+            vec![
+                "Ambient".to_string(),
+                "Art Rock".to_string(),
+                "Progressive Rock".to_string(),
+                "Techno".to_string(),
+            ],
+            "the six seeded genre strings collapse to four distinct entries"
+        );
+    }
+}

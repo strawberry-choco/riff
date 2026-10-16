@@ -964,6 +964,49 @@ pub trait LibraryQueryStore {
         offset: usize,
         limit: usize,
     ) -> Result<Page<Album>, StoreError>;
+
+    // --- Custom Smart Playlist value pickers ------------------------------
+    //
+    // A Rule's value picker offers what the Library actually holds. Both
+    // reads are keyed on the Rule's **field id string** — `"genre"`,
+    // `"artist"`, `"album_artist"`, `"album"`, `"sample_rate"`,
+    // `"channels"` — and the adapter owns the one field-id → column table
+    // that answers them, so an id outside that table is rejected before any
+    // query is built and no column name is ever taken from input. Each is a
+    // `DISTINCT` read over `tracks`, over the very column a Rule tests, and
+    // not over the `albums` / `artists` entity tables the browse listings
+    // read: a pickable value has to be one the tested column can contain.
+    // The consequence is deliberate — the Artists listing shows `Unknown
+    // Artist` for a track whose artist tag is absent, but that fallback
+    // lives in the entity key, so the picker can never offer it and "is
+    // missing" is how those tracks are asked for.
+
+    /// At most `limit` distinct values of the pickable **text** field
+    /// `field_id`, ordered byte-wise ascending, read as one bounded query.
+    ///
+    /// Absent values are excluded rather than surfaced as an empty entry: a
+    /// `NULL` or all-whitespace tag offers nothing a Rule could match. Genre
+    /// is the one text field stored as a `;`-separated set, so its distinct
+    /// values are the tag's trimmed *entries* — `"Ambient; Techno"` yields
+    /// `Ambient` and `Techno` and never the combined string, matching the
+    /// whole-segment semantics [`Self::genre_counts`] aggregates with.
+    ///
+    /// The bound is the store's, not the caller's: the answer never exceeds
+    /// `limit` values however large the Library is, so a 20,000-track Library
+    /// cannot fill a picker pane, and `limit` of `0` answers empty. An
+    /// `field_id` this store does not catalogue as a text picker field — an
+    /// unknown id, or one whose column is numeric — is an
+    /// [`StoreError`], never an empty list that hides the mistake.
+    fn picker_texts(&self, field_id: &str, limit: usize) -> Result<Vec<String>, StoreError>;
+
+    /// At most `limit` distinct values of the pickable **numeric** field
+    /// `field_id`, ascending, read as one bounded query.
+    ///
+    /// Absent here means `NULL` alone: a stored `0` is a present value and is
+    /// offered like any other. The same bound and unknown-field rules as
+    /// [`Self::picker_texts`] apply, with the same `DISTINCT`-over-`tracks`
+    /// shape.
+    fn picker_numbers(&self, field_id: &str, limit: usize) -> Result<Vec<i64>, StoreError>;
 }
 
 /// Notification the `Application Store` emits (best-effort) over a

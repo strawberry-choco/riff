@@ -3540,11 +3540,10 @@ impl RiffApp {
         // Header: the list's name and its fresh total — the shared slot
         // composition. The sort control rides its OWN full-width row below
         // (the flat listing's shared slot, [`crate::ui::browser::track_sort_row`]),
-        // not inside this band: the whole-list menu registers a click-sensing
-        // rect over the band below, and a control painted under that rect
-        // would paint but never receive a click. The count line appears only
-        // for a fresh answer: a degraded listing must not claim a total it did
-        // not just measure.
+        // not inside this band, where [`header_response`]'s click-sensing rect
+        // — the whole-list menu's handle — would cover it. The count line
+        // appears only for a fresh answer: a degraded listing must not claim a
+        // total it did not just measure.
         let header = ui.horizontal(|ui| {
             if let Some(name) = name.as_deref() {
                 ui.heading(name);

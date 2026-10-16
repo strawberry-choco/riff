@@ -31,12 +31,11 @@
 //!   dirtiness derived by comparing the buffers against [`SmartPlaylistOriginal`],
 //!   the one [`SmartPlaylistsEditor::reconcile`] that keeps the draft aligned
 //!   with its saved row — dropped when it no longer belongs, the row's stored
-//!   name adopted when it was renamed —, the third [`RuleChildDraft`] variant
-//!   that carries an
-//!   Unreadable Rule at its stored position, and every refusal
-//!   ([`SmartPlaylistRefusal`]) with the reason rendered under the row that
-//!   caused it. The tag editor's single-slot, self-naming copy is the
-//!   precedent being shared, not its state.
+//!   name adopted when it was renamed —, the third [`RuleChildDraft`]
+//!   variant that carries an Unreadable Rule at its stored position, and
+//!   every refusal ([`SmartPlaylistRefusal`]) with the reason rendered under
+//!   the row that caused it. The tag editor's single-slot, self-naming copy is
+//!   the precedent being shared, not its state.
 //! - *Ticket 19 (reorder)* keys drags off the same row identity; ticket 14's
 //!   row hands back its response rect for exactly that.
 //!

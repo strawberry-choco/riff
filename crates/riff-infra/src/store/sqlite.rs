@@ -459,6 +459,16 @@ const MIGRATIONS: &[Migration] = &[
         // list; the save path renumbers wholesale, so there is no gap
         // management and no uniqueness constraint on it.
         //
+        // `name UNIQUE` is a same-case backstop and must not be read as the
+        // rule. A name identifies a sidebar row, and the sidebar spans two
+        // tables with a case-insensitive identity, so the real constraint —
+        // one name across `playlists` and `smart_playlists`, compared trimmed
+        // and folded with Rust's full Unicode lowercase — cannot be expressed
+        // by any single table constraint at all; it lives in the store's
+        // mutation path. This UNIQUE only stops an exact-spelling duplicate
+        // of a Smart Playlist name from arriving through some path that
+        // skipped that check.
+        //
         // Two invariants the draft places on the save transaction, not on
         // SQL, deliberately left un-enforced here: a playlist has exactly one
         // parentless Root Box (a partial unique index over `parent_id IS NULL`
@@ -1036,7 +1046,8 @@ impl PlaylistStore for SqliteStore {
     }
 
     /// One immediate durable transaction: the playlist row plus its initial
-    /// entries commit together or not at all.
+    /// entries commit together or not at all. The sidebar-wide name rule runs
+    /// first, inside the same transaction, so a refused name writes nothing.
     fn create_playlist(
         &mut self,
         name: &str,
@@ -1051,12 +1062,16 @@ impl PlaylistStore for SqliteStore {
     }
 
     /// One immediate durable transaction: only the renamed row is written.
+    /// The new name goes through the sidebar-wide name rule first, with this
+    /// row's own id exempt, so a rename that changes nothing never refuses the
+    /// row it started from.
     fn rename_playlist(&mut self, id: &PlaylistId, new_name: &str) -> Result<bool, StoreError> {
         self.mutate(
             SessionGeneration::Playlists,
             |renamed| matches!(renamed, Ok(true)),
             "failed to rename playlist",
             |conn| {
+                Self::reject_taken_sidebar_name(conn, new_name, Some(&id.0))?;
                 conn.execute(
                     "UPDATE playlists SET name = ?2 WHERE id = ?1",
                     rusqlite::params![id.0, new_name.trim()],
@@ -3606,16 +3621,114 @@ impl SqliteStore {
     }
 }
 
+/// The tables whose `name` column identifies a row to the listener — every
+/// kind of sidebar row the store holds. [`SqliteStore::reject_taken_sidebar_name`]
+/// reads each of them, so a sidebar-wide rule has one list to grow rather than
+/// one call site per table; the names are table literals, never caller input,
+/// because an SQL identifier cannot be bound as a parameter.
+const SIDEBAR_NAME_TABLES: &[&str] = &["playlists", "smart_playlists"];
+
+/// Raise a store refusal from inside a transaction body.
+///
+/// [`SqliteStore::mutate`]'s body channel is a `rusqlite::Result`, and every
+/// failure on that channel reaches its caller through [`op_error`], which
+/// keeps the message of a `SqliteFailure` that carries one — verbatim, with
+/// nothing but the operation's own context in front of it. So a refusal
+/// written here surfaces as the store's single
+/// [`StoreError::InvalidOperation`] variant, exactly like any other store
+/// fault: no new variant, no panic.
+///
+/// The code rides along as a constraint violation because that is precisely
+/// the constraint the database cannot express across two tables — the check
+/// itself is this crate's Rust, never a SQL failure.
+fn store_refusal(reason: String) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+        Some(reason),
+    )
+}
+
 impl SqliteStore {
+    /// Refuse `name` when some other sidebar row already answers to it.
+    ///
+    /// A name is how the listener finds a row, and a Playlist name and a
+    /// Custom Smart Playlist name identify the same kind of thing — one
+    /// clickable row — so a name may be held by at most one row ACROSS the
+    /// sidebar's tables. One table constraint cannot say that
+    /// (`smart_playlists.name UNIQUE` sees one table and one spelling and is
+    /// only a same-case backstop), so the rule lives here, in the store's
+    /// mutation path, where it holds however the data arrived: every write
+    /// that names a sidebar row calls this inside its own transaction, before
+    /// it writes.
+    ///
+    /// The comparison trims first — the same trim the create and rename paths
+    /// already apply to the stored value — and folds case with Rust's full
+    /// Unicode [`str::to_lowercase`]. That is a deliberate asymmetry, not an
+    /// oversight a later reader should unify: a name is identity, so it folds
+    /// the way Rust folds, while a Rule's tag needle is content and folds
+    /// through SQLite's ASCII-only `lower()` (ADR 0020). `Night Drive` and
+    /// `night drive` can therefore never coexist **while** `РОК` and `рок`
+    /// remain two genres. The SQL here only fetches candidates; folding never
+    /// happens in the database.
+    ///
+    /// `resaved_row_id` is the id of the row being written when it already
+    /// has one — a rename, or a Custom Smart Playlist re-save that keeps its
+    /// id. That row is exempt, so a same-name re-save of itself is never
+    /// refused; pass [`None`] for a create, where nothing is exempt. Ids are
+    /// generated per table and never shared between them, so exempting an id
+    /// cannot hide a clash between two different rows.
+    ///
+    /// The six Built-in Smart Playlist display names are NOT checked here:
+    /// they exist only as code, never as rows in either table, so refusing a
+    /// name that shadows one is an application-layer rule.
+    ///
+    /// # Errors
+    /// [`store_refusal`] carrying the reason, naming `name`, when another row
+    /// holds it — the store's single `StoreError::InvalidOperation` variant
+    /// once [`SqliteStore::mutate`] wraps it. Propagates any query failure.
+    pub(crate) fn reject_taken_sidebar_name(
+        conn: &Connection,
+        name: &str,
+        resaved_row_id: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        // Trimmed, then folded — and folded against each stored name the same
+        // way, so a row seeded untrimmed by any path still compares by its
+        // trimmed, folded identity.
+        let given = name.trim();
+        let wanted = given.to_lowercase();
+        for table in SIDEBAR_NAME_TABLES {
+            // The table name is a literal from the list above, never caller
+            // text; an id, by contrast, is bound. `IS NOT` is the NULL-safe
+            // comparison, so `None` (a create) exempts no row — and a row with
+            // no id at all is invisible here exactly as it is to every other
+            // read of these tables, because no write path can create one.
+            let mut stmt =
+                conn.prepare_cached(&format!("SELECT name FROM {table} WHERE id IS NOT ?1"))?;
+            let rows = stmt.query_map([resaved_row_id], |row| row.get::<_, String>(0))?;
+            for stored in rows {
+                if stored?.trim().to_lowercase() == wanted {
+                    return Err(store_refusal(format!(
+                        "a Playlist or Custom Smart Playlist named {given:?} already exists"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Create-playlist body shared with the transaction wrapper above.
     /// Id generation dedupes against existing ids exactly like the former
-    /// JSON-era logic so same-millisecond creation of same-named playlists
-    /// cannot collide; duplicate names are allowed.
+    /// JSON-era logic, so two distinct names that slug alike in the same
+    /// millisecond still cannot collide. Names themselves are no longer
+    /// free to repeat: [`SqliteStore::reject_taken_sidebar_name`] runs first,
+    /// across every sidebar table, folded case-insensitively.
     fn create_playlist_in_tx(
         conn: &Connection,
         name: &str,
         initial_tracks: &[TrackId],
     ) -> rusqlite::Result<PlaylistId> {
+        Self::reject_taken_sidebar_name(conn, name, None)?;
+
         let mut id = PlaylistId::new(name);
         let mut suffix = 2;
         loop {

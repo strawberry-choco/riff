@@ -1337,16 +1337,19 @@ fn test_store_entry_add_remove_semantics_and_dangling_survival() {
 }
 
 #[test]
-fn test_store_duplicate_names_allowed_with_unique_ids() {
+fn test_store_distinct_names_that_slug_alike_still_get_unique_ids() {
     let (_dir, mut store, _changes_rx) = open_store();
-    // Same-millisecond creation of same-named playlists must not collide:
-    // ids dedupe, names may repeat (today's behavior).
-    let a = store.create_playlist("Mix", &[]).unwrap();
-    let b = store.create_playlist("Mix", &[]).unwrap();
-    assert_ne!(a, b, "ids must be unique even for identical names");
+    // Names are unique across the sidebar now (ticket 03), so the id-dedup
+    // loop can no longer be reached by two rows sharing a name. It is still
+    // reachable: two *different* names can slug alike inside one millisecond,
+    // and then the suffixing loop is what keeps their ids apart.
+    let a = store.create_playlist("Mix A", &[]).unwrap();
+    let b = store.create_playlist("Mix.A", &[]).unwrap();
+    assert_ne!(a, b, "ids must be unique even for slugs that agree");
     let playlists = store.load_playlists().unwrap();
     assert_eq!(playlists.len(), 2);
-    assert!(playlists.iter().all(|p| p.name == "Mix"));
+    assert_eq!(playlists[0].name, "Mix A", "each row keeps its own name");
+    assert_eq!(playlists[1].name, "Mix.A", "unchanged by the id suffixing");
 }
 
 // --- Application Store: playlist drag-reorder persistence (Issue 12) --------

@@ -471,6 +471,58 @@ fn display_names_are_words_the_rest_of_riff_already_uses() {
 }
 
 #[test]
+fn every_scanned_format_is_classified_by_the_two_literal_lists() {
+    // Both constants are visible from this crate — `AUDIO_EXTENSIONS` is the
+    // Library Scan's own list and the two classification lists are the
+    // catalog's — so the assertion lives beside them instead of inverting a
+    // dependency arrow or moving a constant out of the house it lives in.
+    for scanned in riff_persistence::store::AUDIO_EXTENSIONS {
+        let lossless = riff_persistence::field_catalog::LOSSLESS_EXTENSIONS
+            .iter()
+            .any(|lossless| lossless == scanned);
+        let lossy = riff_persistence::field_catalog::LOSSY_EXTENSIONS
+            .iter()
+            .any(|lossy| lossy == scanned);
+        assert!(
+            lossless != lossy,
+            "{scanned} is a format the Library can contain, so the catalog must classify it as \
+             lossless xor lossy — exactly one of the two lists names it"
+        );
+    }
+}
+
+#[test]
+fn the_two_lists_are_literals_that_neither_contain_nor_derive_from_each_other() {
+    // Two literal lists, spelled from the spec: what the Library can even
+    // contain is a scanning preference, and a Rule classifies a stored path
+    // regardless of it. `flac`/`wav` are the whole lossless answer, and the
+    // ALAC-in-`.m4a` decision is the pinned wrong answer that lives here.
+    assert_eq!(
+        riff_persistence::field_catalog::LOSSLESS_EXTENSIONS,
+        &["flac", "wav"],
+        "lossless is its own literal list"
+    );
+    assert_eq!(
+        riff_persistence::field_catalog::LOSSY_EXTENSIONS,
+        &["mp3", "m4a", "aac", "opus", "ogg"],
+        "lossy is its own literal list, not the complement of the other"
+    );
+
+    for lossless in riff_persistence::field_catalog::LOSSLESS_EXTENSIONS {
+        assert!(
+            !riff_persistence::field_catalog::LOSSY_EXTENSIONS
+                .iter()
+                .any(|lossy| lossy == lossless),
+            "{lossless} is classified once"
+        );
+        assert!(
+            riff_persistence::field_catalog::extension_is_lossless(lossless),
+            "{lossless} is in the list the classifier reads"
+        );
+    }
+}
+
+#[test]
 fn a_rule_can_test_losslessness_of_a_path_without_reading_a_file() {
     // The catalog's literal lists are the whole decision: a suffix match on
     // the stored path, case-insensitively, with anything it cannot classify

@@ -317,6 +317,46 @@ fn the_first_save_inserts_the_playlist_row_and_nothing_else_creates_one() {
 }
 
 #[test]
+fn a_playlist_name_cannot_forge_a_smart_playlist_id() {
+    let (_dir, _path, mut store, _changes) = fresh_store();
+
+    // The one invariant the sidebar name exemption leans on: an id shared
+    // between the two sidebar tables would exempt the wrong row. Smart ids are
+    // `spl:{slug}-{millis}` and `slugify` maps every non-alphanumeric character
+    // to `-`, so no Playlist name — not even one written to look like a smart
+    // id — can put the prefix's trailing `:` into a Playlist id. The two
+    // assertions below *are* the disjointness (a `spl:`-prefixed id contains
+    // `:`, and no Playlist id may), so this test reddens whichever half of the
+    // guarantee breaks, instead of a comment asserting it.
+    let ordinary = store
+        .create_playlist("spl:foo", &[])
+        .expect("a name holding the delimiter is still an ordinary name");
+    assert!(
+        !ordinary.0.contains(':'),
+        "`slugify` maps ':' to '-', which is what keeps an ordinary Playlist id \
+         out of the smart namespace; got {}",
+        ordinary.0
+    );
+
+    let smart = store
+        .save_smart_playlist(None, "foo", &tree(vec![year_rule()]))
+        .expect("a save creates the smart list");
+    assert!(
+        smart.0.starts_with("spl:"),
+        "smart ids are minted only under the store's own prefix; got {}",
+        smart.0
+    );
+
+    // Under the disjointness above this pair can never share an id, whatever
+    // the clock says — the same-millisecond coincidence is made impossible
+    // rather than deduped away.
+    assert_ne!(
+        ordinary.0, smart.0,
+        "the forged-looking Playlist name must not land in the smart id space"
+    );
+}
+
+#[test]
 fn a_second_save_persists_the_name_and_replaces_the_tree_wholesale() {
     let (_dir, _path, mut store, _changes) = fresh_store();
     let id = store

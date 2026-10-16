@@ -27,3 +27,11 @@ the listener and would not match how the genres view already behaves.
   costs an existing library no re-scan.
 - Adding lowercase columns later does not change Rule semantics, only the query shape; if it happens,
   supersede this ADR rather than contradicting it silently.
+- `genre is` wraps the space-stripped, lowered column **and** needle in the delimiter and searches for the wrapped
+  needle, so a needle that itself carries the delimiter asks for a **sequence** of whole segments: `genre is
+  "Art Rock;Progressive Rock"` matches the row tagged exactly that rather than nothing. Decided, not accidental — the
+  two genres a tag literally reads are the more useful answer than a guaranteed miss — and pinned on both sides of the
+  oracle (a probe that makes the class askable, and a fixed case named for it in `store_tests`).
+- `genre contains` is a plain substring of the whole folded tag, so its needle may **cross a segment boundary**
+  (`"rock;progressive"` matches `"Art Rock;Progressive Rock"`), where `is` never crosses. The spec's "inside one
+  segment" wording describes `is`; the crossing is a recorded reading, pinned by a probe rather than hidden.

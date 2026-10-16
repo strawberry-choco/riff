@@ -36,7 +36,9 @@ use riff_backend::app::traits::{DecodedCover, RequestedSize};
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
 use riff_backend::domain::{Playlist, PlaylistId, TrackId};
-use riff_gui::ui::app::{InlineTagEditor, ThemeInputs, ThemeState, resolve_dropped_paths};
+use riff_gui::ui::app::{
+    InlineTagEditor, SmartListIdentity, ThemeInputs, ThemeState, resolve_dropped_paths,
+};
 use riff_gui::ui::artwork::COVER_THUMB;
 use riff_gui::ui::chrome::TitleBarAction;
 use riff_gui::ui::cover_cache::CoverCache;
@@ -319,7 +321,7 @@ struct Harness {
     pass_force_choice: bool,
     last_pass_report: Option<PassReport>,
     playlist_view: Option<PlaylistId>,
-    smart_playlist_view: Option<riff_backend::domain::SmartPlaylistKind>,
+    smart_playlist_view: Option<SmartListIdentity>,
     playlist_rename: Option<(PlaylistId, String)>,
     playlist_create_name: Option<String>,
     playlist_create_error: Option<String>,
@@ -710,7 +712,9 @@ fn a_sidebar_navigation_clears_the_opened_list_and_the_search() {
     let mut harness = Harness::new();
     harness.library.search_query = "boards".to_string();
     harness.playlist_view = Some(PlaylistId("pl-1".to_string()));
-    harness.smart_playlist_view = Some(riff_backend::domain::SmartPlaylistKind::Favorites);
+    harness.smart_playlist_view = Some(SmartListIdentity::BuiltIn(
+        riff_backend::domain::SmartPlaylistKind::Favorites,
+    ));
     let reports = Reports {
         sidebar: SidebarReport {
             actions: vec![SidebarAction::Navigate {
@@ -739,7 +743,9 @@ fn a_sidebar_navigation_clears_the_opened_list_and_the_search() {
 #[test]
 fn folding_the_smart_lists_section_closes_the_list_it_opened() {
     let mut harness = Harness::new();
-    harness.smart_playlist_view = Some(riff_backend::domain::SmartPlaylistKind::RecentlyPlayed);
+    harness.smart_playlist_view = Some(SmartListIdentity::BuiltIn(
+        riff_backend::domain::SmartPlaylistKind::RecentlyPlayed,
+    ));
     let reports = Reports {
         sidebar: SidebarReport {
             actions: vec![SidebarAction::ToggleSmartListsCollapsed],
@@ -751,6 +757,106 @@ fn folding_the_smart_lists_section_closes_the_list_it_opened() {
 
     assert!(harness.library.ui_flags.smart_lists_collapsed);
     assert!(harness.smart_playlist_view.is_none());
+}
+
+/// Opening a Custom Smart Playlist (ticket 12) goes through the same action
+/// and the same slot as a Built-in one: it lands on the library view, clears
+/// the search box, replaces an open Built-in in the one slot, and closes any
+/// open user playlist — exactly one browser variant on screen after the
+/// click.
+#[test]
+fn opening_a_custom_smart_list_opens_it_over_the_library_and_closes_the_playlist() {
+    let mut harness = Harness::new();
+    harness.library.search_query = "boards".to_string();
+    harness.playlist_view = Some(PlaylistId("pl-1".to_string()));
+    harness.smart_playlist_view = Some(SmartListIdentity::BuiltIn(
+        riff_backend::domain::SmartPlaylistKind::RecentlyPlayed,
+    ));
+
+    let id = PlaylistId("spl-late-night-1".to_string());
+    let reports = Reports {
+        sidebar: SidebarReport {
+            actions: vec![SidebarAction::OpenSmartList(SmartListIdentity::Custom(
+                id.clone(),
+            ))],
+        },
+        ..Reports::default()
+    };
+
+    harness.run_frame(&reports);
+
+    assert_eq!(
+        harness.smart_playlist_view,
+        Some(SmartListIdentity::Custom(id)),
+        "the identity the row reported replaces the open Built-in in the one slot"
+    );
+    assert!(
+        harness.playlist_view.is_none(),
+        "opening a smart list closes an open playlist"
+    );
+    assert_eq!(harness.library.view_mode, ViewMode::Library);
+    assert_eq!(
+        harness.library.search_query, "",
+        "the sidebar click lands on the library view and clears the search box"
+    );
+}
+
+/// One slot, one section: a Built-in row opening closes an open Custom list,
+/// the mirror of a Custom row opening closing an open Built-in one.
+#[test]
+fn opening_a_built_in_smart_list_closes_an_open_custom_list() {
+    let mut harness = Harness::new();
+    harness.smart_playlist_view = Some(SmartListIdentity::Custom(PlaylistId(
+        "spl-late-night-1".to_string(),
+    )));
+
+    let reports = Reports {
+        sidebar: SidebarReport {
+            actions: vec![SidebarAction::OpenSmartList(SmartListIdentity::BuiltIn(
+                riff_backend::domain::SmartPlaylistKind::Favorites,
+            ))],
+        },
+        ..Reports::default()
+    };
+
+    harness.run_frame(&reports);
+
+    assert_eq!(
+        harness.smart_playlist_view,
+        Some(SmartListIdentity::BuiltIn(
+            riff_backend::domain::SmartPlaylistKind::Favorites,
+        )),
+        "the Built-in identity replaces the Custom one in the one slot"
+    );
+}
+
+/// The collapse chevron clears the smart-list slot whatever identity it
+/// holds, and clears nothing else: an open user playlist survives the fold
+/// (the built-in asymmetry, preserved by the widening).
+#[test]
+fn folding_the_smart_lists_section_closes_an_open_custom_list_and_keeps_the_playlist() {
+    let mut harness = Harness::new();
+    harness.smart_playlist_view = Some(SmartListIdentity::Custom(PlaylistId(
+        "spl-late-night-1".to_string(),
+    )));
+    harness.playlist_view = Some(PlaylistId("pl-keep".to_string()));
+
+    let reports = Reports {
+        sidebar: SidebarReport {
+            actions: vec![SidebarAction::ToggleSmartListsCollapsed],
+        },
+        ..Reports::default()
+    };
+
+    harness.run_frame(&reports);
+
+    assert!(harness.library.ui_flags.smart_lists_collapsed);
+    assert!(harness.smart_playlist_view.is_none());
+    assert_eq!(
+        harness.playlist_view,
+        Some(PlaylistId("pl-keep".to_string())),
+        "the fold clears only the smart-list slot"
+    );
 }
 
 /// The inline "New Playlist" prompt is opened by the header and committed by

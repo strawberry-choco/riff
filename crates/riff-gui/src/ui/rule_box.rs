@@ -387,14 +387,23 @@ impl RuleBoxDraft {
     /// that names no box drops the gesture rather than inventing a box: a
     /// path comes from the paint, so a miss means the tree moved under the
     /// gesture and doing nothing is the only honest answer.
-    pub fn move_child(&mut self, parent: &BoxPath, from: usize, to: usize) {
+    ///
+    /// The answer is whether the sibling order actually changed: `false` for
+    /// an empty gesture. The drag wiring reports a self-drop on every plain
+    /// press-release of a draggable row (egui begins a drag on the press
+    /// under a drag-only sense), so a caller that invalidates addresses on a
+    /// move must gate on this answer — otherwise an empty gesture would
+    /// close, say, the combine list the very click opened.
+    pub fn move_child(&mut self, parent: &BoxPath, from: usize, to: usize) -> bool {
         if let Some(boxed) = self.box_at_mut(parent) {
             if from == to || from >= boxed.children.len() || to >= boxed.children.len() {
-                return;
+                return false;
             }
             let dragged = boxed.children.remove(from);
             boxed.children.insert(to, dragged);
+            return true;
         }
+        false
     }
 
     /// Set the combine choice of the box `path` names.

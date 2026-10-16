@@ -209,7 +209,10 @@ impl RiffApp {
                     self.render_smart_playlist_view(ui, library, playback, *kind);
                 }
                 Some(SingleStage::CustomSmartList(id)) => {
-                    self.render_custom_smart_list_view(ui, id);
+                    // The needle travels into the custom listing: its reads
+                    // combine it with the Rule tree inside one store query
+                    // (story 72). The built-in lists stay needle-less.
+                    self.render_custom_smart_list_view(ui, library, playback, id, query);
                 }
                 Some(SingleStage::Folders) => self.render_folder_tree(ui, library, playback, query),
                 _ => unreachable!("a Single column renders only for the single-list stages"),

@@ -1531,6 +1531,51 @@ mod tests {
         );
     }
 
+    /// A Custom Smart Playlist opened as the full-width Track listing: the
+    /// name heading with the fresh total, the shared sort control on its own
+    /// header row, and the shared 40px Track rows — "Artist - Title" at the
+    /// row seam, the plays/time cluster and the heart per row.
+    ///
+    /// The crop is the WHOLE window on purpose: the fixture's list row in the
+    /// sidebar carries **no count**, and a whole-frame golden pins that
+    /// omission in the same picture as the listing it opens. The opening
+    /// gesture is itself part of the assertion: `click` addresses the row by
+    /// its exact label, and the count would fold into the label as
+    /// "Late night jazz (4)" — so a row that grew a count would stop answering
+    /// this golden's click.
+    #[test]
+    fn custom_smart_list_listing_dark_matches_golden_baseline() {
+        let library = Library::geogaddi();
+        let listed: Vec<_> = library
+            .stored()
+            .into_iter()
+            .filter(|track| track.metadata.album_artist.as_deref() == Some(Library::ALBUM_ARTIST))
+            .collect();
+        snapshot_composed(
+            "custom_smart_list_listing_dark",
+            riff_gui_theme::theme::geometry::window::MIN_WINDOW_SIZE,
+            Region::Window,
+            Plan::columns(1),
+            |shell| click(shell, "Late night jazz"),
+            Seed {
+                query: MockLibraryQueryStore {
+                    custom_smart_playlists: custom_lists(&[(
+                        "spl-late-night-1",
+                        "Late night jazz",
+                    )]),
+                    smart_playlist_trees: std::collections::HashMap::from([(
+                        riff_backend::domain::PlaylistId("spl-late-night-1".to_string()),
+                        custom_list_tree(),
+                    )]),
+                    custom_page: listed,
+                    ..library.query()
+                },
+                art: true,
+                ..Seed::over(&library)
+            },
+        );
+    }
+
     // --- Now Playing -------------------------------------------------------------
 
     /// The Now Playing stage at the launch main stage: the cover with its
@@ -3165,6 +3210,25 @@ mod tests {
                 created_at: canned_instant(1_700_000_000),
             })
             .collect()
+    }
+
+    /// One canned Rule tree — `Artist is "Boards of Canada"` in the Root Box —
+    /// the minimum a save accepts and the shape the custom listing's stage
+    /// route asks the store for before it opens. The mock's paged read never
+    /// consults it (which Tracks a tree matches is the store seam's proof,
+    /// never a double's), but the fixture keeps the tree and the rows it pages
+    /// consistent anyway.
+    fn custom_list_tree() -> riff_backend::app::store::SmartPlaylistTree {
+        use riff_backend::domain::{
+            Combine, Comparison, MatchableField, RootBox, Rule, RuleBox, RuleChild, RuleValue,
+        };
+        riff_backend::app::store::SmartPlaylistTree::new(RootBox::new(
+            RuleBox::new(Combine::All).with_children(vec![RuleChild::Rule(Rule::new(
+                MatchableField::Artist,
+                Comparison::Is,
+                Some(RuleValue::Text(Library::ALBUM_ARTIST.to_string())),
+            ))]),
+        ))
     }
 
     /// `seed` with `library`'s root reported as fully scanned at `tracks`

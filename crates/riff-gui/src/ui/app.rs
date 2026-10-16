@@ -44,6 +44,9 @@ pub use crate::ui::frame::{
 };
 use riff_backend::app::MutexExt;
 use riff_backend::app::Transport;
+// The Custom-list reason channel (D6): the typed "last good value AND why"
+// answer the listing's own reads come back through.
+use riff_backend::app::CustomListDegraded;
 pub use riff_backend::app::cover_service::{
     COVER_CACHE_CAP, ClearCacheOutcome, Covers, lru_insert,
 };
@@ -3447,22 +3450,202 @@ impl RiffApp {
         );
     }
 
-    /// The listing a Custom Smart Playlist opens into — ticket 13's surface
-    /// (the windowed rows, the sort control, the needle, and the empty and
-    /// broken states). What ticket 12 owns is the identity half: the stage
-    /// routes here only for a list the store still holds, so a stale id
-    /// never paints an empty listing. Until ticket 13 lands, this build
-    /// paints one honest line where that listing will draw rather than an
-    /// empty stage.
-    #[allow(
-        clippy::unused_self,
-        reason = "ticket 13's listing reads self (views, theme, icons); the stub keeps the method's shape so the dispatch site does not move"
-    )]
-    fn render_custom_smart_list_view(&mut self, ui: &mut egui::Ui, id: &PlaylistId) {
-        let _ = id;
-        ui.vertical_centered(|ui| {
-            ui.weak("This build does not list Custom Smart Playlists yet.");
+    /// The listing a Custom Smart Playlist opens into — the full-width Track
+    /// listing ticket 13 builds. What ticket 12 owns is the identity half: the
+    /// stage routes here only for a list the store still holds, so a stale id
+    /// never paints an empty listing.
+    ///
+    /// # The shape is the flat All Tracks listing's
+    ///
+    /// `custom_list_count` once — its own store read, the total to size the
+    /// row range with — then `custom_list_row(id, sort, needle, i)` per
+    /// visible index inside `show_rows`' row range. Never the built-in lists'
+    /// whole-`Vec` read and whole-list Rust-side sort: a list matching most of
+    /// a library paints one viewport without loading its answer. The order and
+    /// the needle are the shared ones — the session's Track sort and the
+    /// titlebar search box — and both travel into every read, so the store
+    /// combines the needle with the Rule tree inside one query (never after
+    /// paging), and the total order still ends on the path.
+    ///
+    /// Every row is [`Self::render_track_row`], the primitive the flat
+    /// listing, the built-in lists and the playlists all draw, so
+    /// double-click, the shared Track menu, the favourite heart and the
+    /// selection behave here exactly as they do everywhere else. The header
+    /// is the shared slot composition (name + count + the sort control at the
+    /// right edge) and the empty treatment is the shared
+    /// [`crate::ui::browser::empty_state`]. Nothing here is a second listing.
+    ///
+    /// # The two failure states are different on screen
+    ///
+    /// The count answers through the reason channel: `Ok(total)` is fresh;
+    /// `Err` carries the last good total (`value`) beside the reason. A tree
+    /// holding an **Unreadable Rule** issues no query at all (D13), so it
+    /// answers zero with that reason: the listing paints the shared empty
+    /// state **and** the reason line — both facts (stories 58 and 59). A list
+    /// the engine **cannot compute**, with nothing good in hand, paints the
+    /// reason **instead of** the empty message: "empty" and "cannot tell" are
+    /// different answers. Neither paints a count — a broken list must never
+    /// read as "0 tracks".
+    ///
+    /// The reason line is the count read's, and that is not a shortcut: it is
+    /// the ONE read the editor's count line also carries, so one failure shows
+    /// the same string on both surfaces. A window read that failed while the
+    /// count read did not paints its last good rows and no line for that
+    /// frame; the next frame's count read re-asks and carries the reason.
+    fn render_custom_smart_list_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        playback: &mut PlaybackSession,
+        id: &PlaylistId,
+        query: &str,
+    ) {
+        let palette = self.theme.active;
+        let needle = (!query.is_empty()).then_some(query);
+
+        // Does the list hold a Rule riff cannot read? Only the tree read
+        // answers that, and it is the projection's own generation cache, so
+        // asking costs no store read on top of the count below (the count
+        // compiles the same cached tree). This is the ONE failure whose
+        // screen carries the empty state as well as the reason.
+        let unreadable = matches!(
+            self.views.custom_list_tree(id),
+            Ok(Some(tree)) if !tree.unreadable().is_empty()
+        );
+
+        // The count read: the listing's own read, and the reason channel's
+        // entry point for this surface. On `Err` the value is the last good
+        // total for this exact query (never a guessed zero) and the reason is
+        // the string the editor's count line shows for the same failure.
+        let (total, fresh_total, reason) =
+            match self.views.custom_list_count(id, library.track_sort, needle) {
+                Ok(total) => (total, Some(total), None),
+                Err(degraded) => (degraded.value, None, Some(degraded.reason)),
+            };
+
+        // The header's name, from the D14 enumeration — the read that answers
+        // "which lists exist", the same one the sidebar's row pass makes. A
+        // list the enumeration no longer holds paints no heading; the stage
+        // routes such an id away (ticket 12), so this is only the frame a
+        // deletion lands on.
+        let name = self
+            .views
+            .custom_smart_playlists()
+            .into_iter()
+            .find(|list| &list.id == id)
+            .map(|list| list.name);
+
+        let current_track = playback.queue.current_track().cloned();
+
+        // Header: the list's name and its fresh total — the shared slot
+        // composition. The sort control rides its OWN full-width row below
+        // (the flat listing's shared slot, [`crate::ui::browser::track_sort_row`]),
+        // not inside this band, where [`header_response`]'s click-sensing rect
+        // — the whole-list menu's handle — would cover it. The count line
+        // appears only for a fresh answer: a degraded listing must not claim a
+        // total it did not just measure.
+        let header = ui.horizontal(|ui| {
+            if let Some(name) = name.as_deref() {
+                ui.heading(name);
+            }
+            if let Some(fresh_total) = fresh_total {
+                ui.weak(format!("({fresh_total} tracks)"));
+            }
         });
+        // The whole-list menu, over the WHOLE matching set — every matching
+        // Track in displayed order, resolved when an item is chosen and never
+        // from the window that happens to be loaded. `show_list_context_menu`
+        // takes ids in hand; this listing's rows are bounded, so the ids are
+        // read at dispatch through the same paged read the rows come from.
+        if total > 0 {
+            let sort = library.track_sort;
+            show_resolved_list_context_menu(
+                &header_response(ui, &header),
+                &palette,
+                self.transport.as_ref(),
+                playback,
+                || {
+                    (0..total)
+                        .filter_map(|index| {
+                            let row = match self.views.custom_list_row(id, sort, needle, index) {
+                                Ok(row) | Err(CustomListDegraded { value: row, .. }) => row,
+                            };
+                            row.map(|track| track.id.clone())
+                        })
+                        .collect()
+                },
+            );
+        }
+        ui.separator();
+
+        // The reason line, when there is one, in the shared error treatment.
+        if let Some(reason) = &reason {
+            ui.colored_label(palette.error, reason);
+        }
+
+        if total == 0 {
+            // Told apart rather than collapsed: an Unreadable Rule (no query
+            // was issued; the list matches nothing and the reason above says
+            // why), a compute failure with nothing good in hand (the reason
+            // above IS the screen — an "empty" message would claim an
+            // emptiness nobody measured), and an ordinary fresh zero.
+            if reason.is_none() || unreadable {
+                let (title, hint): (&str, String) = if query.is_empty() {
+                    (
+                        "This playlist is empty",
+                        "No tracks in your library match its rules.".to_string(),
+                    )
+                } else {
+                    (
+                        "No matching tracks",
+                        format!("Nothing in this list matches '{query}'."),
+                    )
+                };
+                crate::ui::browser::empty_state(ui, &palette, title, &hint);
+            }
+            return;
+        }
+
+        // The shared track-sort control in the header slot the flat listing
+        // uses: a full-width row with the control at its right edge, hidden
+        // while there is nothing to reorder (the same rule every listing
+        // follows). Writing the session's sort re-keys the read above on the
+        // next frame, so the store's ORDER BY follows it — never a Rust-side
+        // re-sort of a loaded page.
+        if let Some(sort) = crate::ui::browser::track_sort_row(ui, &palette, library.track_sort) {
+            library.track_sort = sort;
+        }
+
+        // Row *i* by index inside the visible range — the seam decides
+        // whether that row leaves the window it has cached. On a row read
+        // that failed, the last good row is what the projection hands back
+        // (its `value`); a `None` is a listing with no row at that index.
+        let sort = library.track_sort;
+        egui::ScrollArea::vertical().show_rows(
+            ui,
+            theme::geometry::sidebar::ROW_H,
+            total,
+            |ui, row_range| {
+                for i in row_range {
+                    let row = match self.views.custom_list_row(id, sort, needle, i) {
+                        Ok(row) | Err(CustomListDegraded { value: row, .. }) => row,
+                    };
+                    let Some(track) = row else {
+                        continue;
+                    };
+                    self.render_track_row(
+                        ui,
+                        &track,
+                        TrackRowContext {
+                            library,
+                            playback,
+                            current_track: current_track.as_ref(),
+                            reorder: None,
+                        },
+                    );
+                }
+            },
+        );
     }
 
     /// The sidebar footer's action side: the stamp text comes from the
@@ -4696,6 +4879,39 @@ fn show_list_context_menu(
     });
     for intent in intents {
         apply_list_menu_intent(intent, track_ids, transport, playback);
+    }
+}
+
+/// The whole-list context menu over a batch **resolved when an item is
+/// chosen**, not when the menu is painted.
+///
+/// [`show_list_context_menu`] takes the ids in hand, which is right for the
+/// surfaces whose rows are already loaded (a built-in list's read, a
+/// playlist's entries, a folder's subtree, an entity row's tracks resolved by
+/// [`apply_collection_menu`](crate::ui::app::apply_collection_menu)). A Custom
+/// Smart Playlist's rows are a bounded window, and the whole-list actions must
+/// queue **every matching Track in the displayed order, not the loaded
+/// window** — so the ids are read at dispatch, through the same paged read the
+/// rows come from, and painting the header costs nothing.
+fn show_resolved_list_context_menu(
+    response: &egui::Response,
+    palette: &Palette,
+    transport: &dyn Transport,
+    playback: &mut PlaybackSession,
+    resolve: impl FnOnce() -> Vec<TrackId>,
+) {
+    // Same menu, same intents, same applier as the ids-in-hand shape: only
+    // the source of the batch differs.
+    let mut intents = Vec::new();
+    response.context_menu(|ui| {
+        riff_gui_components::menu::list_menu(ui, palette, &mut intents);
+    });
+    if intents.is_empty() {
+        return;
+    }
+    let track_ids = resolve();
+    for intent in intents {
+        apply_list_menu_intent(intent, &track_ids, transport, playback);
     }
 }
 

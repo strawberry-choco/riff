@@ -7177,4 +7177,296 @@ mod smart_picker_reads {
             "the six seeded genre strings collapse to four distinct entries"
         );
     }
+
+    /// The artist, album-artist and album pickers answer `DISTINCT` over the
+    /// raw `tracks` column, so each offers exactly the tag values the Library
+    /// holds: a repeated tag appears once, an absent tag appears not at all,
+    /// and the order is the ascending byte-wise one the genre picker uses.
+    #[test]
+    fn artist_album_artist_and_album_pickers_offer_the_distinct_stored_tags() {
+        let (_dir, store) = seeded_picker_store();
+
+        assert_eq!(
+            store.picker_texts("artist", 50).expect("artist read"),
+            vec![
+                "Aphex Twin".to_string(),
+                "Bj\u{f6}rk".to_string(),
+                "Unknown Artist".to_string(),
+            ],
+            "the two Aphex Twin rows collapse to one entry and the absent tag on              /lib/3.mp3 contributes nothing"
+        );
+        assert_eq!(
+            store
+                .picker_texts("album_artist", 50)
+                .expect("album artist read"),
+            vec![
+                "Aphex Twin".to_string(),
+                "Bj\u{f6}rk".to_string(),
+                "Unknown Artist".to_string(),
+                "Warp Artists".to_string(),
+            ],
+            "the two rows with no album-artist tag contribute nothing, even though              their entity keys fall back"
+        );
+        assert_eq!(
+            store.picker_texts("album", 50).expect("album read"),
+            vec![
+                "Homogenic".to_string(),
+                "Selected".to_string(),
+                "Unknown Album".to_string(),
+            ],
+            "Unknown Album is here only because /lib/6.m4a is literally tagged so;              the untagged /lib/3.mp3 is absent from the list"
+        );
+    }
+
+    /// `Unknown Artist` is unofferable by construction, not filtered out by a
+    /// name check. A store whose only "unknown" artist comes from an absent
+    /// tag has the fallback in its `artists` entity table — that is what the
+    /// Artists listing reads, because the scan keys entities on
+    /// `display_album_artist()` — while `tracks.artist` is `NULL` and the
+    /// picker therefore answers without it. The listing assertion beside it is
+    /// what makes the picker assertion mean something: without a fallback to
+    /// refuse, an empty picker would pass for the wrong reason.
+    #[test]
+    fn an_absent_artist_tag_never_offers_the_display_fallback_the_artists_listing_shows() {
+        let (_dir, mut store, _changes_rx) = open_store();
+        store
+            .apply_scan_batch(&[
+                picker_track(
+                    "/only/untagged.flac",
+                    None,
+                    None,
+                    Some("An Album"),
+                    Some("Techno"),
+                    Some(44_100),
+                    Some(2),
+                ),
+                picker_track(
+                    "/only/tagged.flac",
+                    Some("Bj\u{f6}rk"),
+                    Some("Bj\u{f6}rk"),
+                    Some("Homogenic"),
+                    Some("Art Rock"),
+                    Some(48_000),
+                    Some(1),
+                ),
+            ])
+            .expect("fixtures apply");
+
+        assert_eq!(
+            store.picker_texts("artist", 50).expect("artist read"),
+            vec!["Bj\u{f6}rk".to_string()],
+            "the picker reads tracks.artist, which the absent tag leaves NULL"
+        );
+        assert_eq!(
+            store.picker_texts("album_artist", 50).expect("album artist read"),
+            vec!["Bj\u{f6}rk".to_string()],
+            "and the same holds for the album-artist column the fallback derives from"
+        );
+        let listed: Vec<String> = store
+            .all_artists()
+            .expect("artists listing reads")
+            .into_iter()
+            .map(|artist| artist.name)
+            .collect();
+        assert_eq!(
+            listed,
+            vec!["Bj\u{f6}rk".to_string(), "Unknown Artist".to_string()],
+            "the listing really does show the fallback the picker refuses —              asking for those tracks is `is missing`, not a pick"
+        );
+    }
+
+    /// The refusal is about the fallback, not the string: a track genuinely
+    /// tagged `Unknown Artist` is a value its column can contain, so a Rule
+    /// can match it and the picker must offer it — once, beside the absent
+    /// tag's silence.
+    #[test]
+    fn a_literal_unknown_artist_tag_is_offerable_while_an_absent_one_is_not() {
+        let (_dir, mut store, _changes_rx) = open_store();
+        store
+            .apply_scan_batch(&[
+                picker_track(
+                    "/literal/absent.mp3",
+                    None,
+                    None,
+                    Some("An Album"),
+                    Some("Techno"),
+                    Some(44_100),
+                    Some(2),
+                ),
+                picker_track(
+                    "/literal/tagged.mp3",
+                    Some("Unknown Artist"),
+                    Some("Unknown Artist"),
+                    Some("An Album"),
+                    Some("Techno"),
+                    Some(44_100),
+                    Some(2),
+                ),
+            ])
+            .expect("fixtures apply");
+
+        assert_eq!(
+            store.picker_texts("artist", 50).expect("artist read"),
+            vec!["Unknown Artist".to_string()],
+            "exactly one entry, and it is the literal tag"
+        );
+        assert_eq!(
+            store
+                .picker_texts("album_artist", 50)
+                .expect("album artist read"),
+            vec!["Unknown Artist".to_string()],
+            "the album-artist picker agrees, and no second fallback entry appears"
+        );
+    }
+
+    /// A field id the store does not catalogue as a pickable text field —
+    /// because it is unknown, because it names a numeric column, or because
+    /// it names a text column the catalog offers no picker for — is refused
+    /// before any SQL is produced, rather than answering as an empty list a
+    /// caller could not tell apart from an empty Library.
+    #[test]
+    fn an_id_with_no_pickable_text_column_is_refused_rather_than_answered_empty() {
+        let (_dir, store) = seeded_picker_store();
+
+        for field_id in ["not-a-field", "", "sample_rate", "title", "composer"] {
+            let outcome = store.picker_texts(field_id, 50);
+            assert!(
+                matches!(outcome, Err(StoreError::InvalidOperation(_))),
+                "{field_id} must be refused, got {outcome:?}"
+            );
+        }
+        for field_id in ["genre", "artist", "album", "album_artist"] {
+            let outcome = store.picker_numbers(field_id, 50);
+            assert!(
+                matches!(outcome, Err(StoreError::InvalidOperation(_))),
+                "{field_id} is not a numeric picker field, got {outcome:?}"
+            );
+        }
+    }
+
+    /// The picker allow-list and the column table must not drift: every
+    /// allowed id resolves to a column, and to a column of the shape its
+    /// picker read asks for. Pinned because the two lists are deliberately
+    /// independent — the column table grows with every Rule the compiler
+    /// learns to test, while the six fields the catalog offers a list for
+    /// change only when the catalog does.
+    #[test]
+    fn the_picker_allow_list_resolves_every_id_to_a_column_of_its_own_shape() {
+        use riff_infra::store::{PICKABLE_FIELD_IDS, field_column, picker_column};
+
+        assert_eq!(
+            PICKABLE_FIELD_IDS,
+            &["genre", "artist", "album_artist", "album", "sample_rate", "channels"],
+            "the pickable set is six fields: four text and two numeric"
+        );
+        for field_id in PICKABLE_FIELD_IDS {
+            let catalogued = field_column(field_id)
+                .unwrap_or_else(|| panic!("{field_id} is pickable but names no column"));
+            assert!(
+                picker_column(field_id, catalogued.kind).is_some(),
+                "{field_id} is allowed but its own shape is unreachable"
+            );
+        }
+    }
+
+    /// The two numeric pickers read `DISTINCT` over `tracks.sample_rate` and
+    /// `tracks.channels`, ascending: a repeated rate collapses to one entry,
+    /// an unmeasured track contributes nothing, and — unlike the text pickers
+    /// — a stored `0` would be a present value and belong in the answer. The
+    /// answer is `i64` because that is the column's own SQL affinity; the
+    /// Rule's stored value is text spelling the same number.
+    #[test]
+    fn sample_rate_and_channel_pickers_offer_the_distinct_measured_values() {
+        let (_dir, store) = seeded_picker_store();
+
+        assert_eq!(
+            store.picker_numbers("sample_rate", 50).expect("rate read"),
+            vec![44_100, 48_000, 96_000],
+            "the two rates repeat across six tracks and /lib/4.wav is unmeasured"
+        );
+        assert_eq!(
+            store.picker_numbers("channels", 50).expect("channels read"),
+            vec![1, 2, 6],
+            "channel counts collapse the same way, with the absent one absent"
+        );
+    }
+
+    /// A library bigger than the bound is the point of the bound: the store
+    /// answers exactly `limit` values and no more, so a 20,000-track Library
+    /// cannot fill a picker pane. Seeds `count` tracks each carrying its own
+    /// genre, artist, album, rate and channel count, then pins the truncation
+    /// for both shapes — text and numeric, plain column and genre-set.
+    #[test]
+    fn a_library_larger_than_the_bound_answers_exactly_the_bound() {
+        const SEEDED: usize = 40;
+        const BOUND: usize = 8;
+        let (_dir, mut store, _changes_rx) = open_store();
+        let tracks: Vec<Track> = (0..SEEDED)
+            .map(|index| {
+                let tag = format!("value {index:02}");
+                picker_track(
+                    &format!("/bounded/{index:02}.flac"),
+                    Some(&tag),
+                    Some(&tag),
+                    Some(&tag),
+                    // Two segments per tag, so the genre read has twice the
+                    // distinct entries and still has to honour the bound.
+                    Some(&format!("{tag}; extra {index:02}")),
+                    Some(8_000 + u32::try_from(index).expect("small index") * 100),
+                    Some(u16::try_from(index % 8 + 1).expect("small channel")),
+                )
+            })
+            .collect();
+        store.apply_scan_batch(&tracks).expect("fixtures apply");
+
+        let texts = store.picker_texts("artist", BOUND).expect("bounded artist read");
+        assert_eq!(
+            texts.len(),
+            BOUND,
+            "a 40-value library bounded at 8 answers 8, not 40 and not 9"
+        );
+        assert_eq!(
+            texts,
+            (0..BOUND).map(|index| format!("value {index:02}")).collect::<Vec<String>>(),
+            "the bounded answer is the deterministic ascending prefix of the full one"
+        );
+        let genres = store.picker_texts("genre", BOUND).expect("bounded genre read");
+        assert_eq!(
+            genres.len(),
+            BOUND,
+            "the genre read bounds its split entries, not its stored strings"
+        );
+        assert_eq!(
+            genres,
+            vec![
+                "extra 00".to_string(),
+                "extra 01".to_string(),
+                "extra 02".to_string(),
+                "extra 03".to_string(),
+                "extra 04".to_string(),
+                "extra 05".to_string(),
+                "extra 06".to_string(),
+                "extra 07".to_string(),
+            ],
+            "entries are ordered and truncated as entries: `value NN` sorts after              `extra NN` byte-wise, so no `value` entry can reach a bound of 8"
+        );
+        let rates = store.picker_numbers("sample_rate", BOUND).expect("bounded rate read");
+        assert_eq!(
+            rates,
+            (0..BOUND)
+                .map(|index| 8_000 + i64::try_from(index).expect("small bound") * 100)
+                .collect::<Vec<i64>>(),
+            "the numeric read bounds the same way, ascending from the smallest value"
+        );
+
+        // The bound is the store's, and it is not a hint: asking for more than
+        // exists answers every value, and asking for none answers nothing.
+        assert_eq!(
+            store.picker_numbers("channels", SEEDED + 10).expect("wide read").len(),
+            8,
+            "eight distinct channel counts is the whole answer once the library has fewer"
+        );
+        assert!(store.picker_texts("artist", 0).expect("zero bound").is_empty());
+        assert!(store.picker_numbers("channels", 0).expect("zero bound").is_empty());
+    }
 }

@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(track.play_count, 0);
         assert_eq!(track.last_played, None);
         assert!(!track.favorite);
-        assert!(track.search_text.is_empty());
+        assert_eq!(track.search_text, "");
 
         // Every caller-supplied fact round-trips.
         assert_eq!(track.id, id);

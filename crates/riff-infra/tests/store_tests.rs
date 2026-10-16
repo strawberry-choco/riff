@@ -8126,3 +8126,422 @@ fn test_every_field_and_comparison_the_catalog_permits_matches_the_reference() {
          is at least seventy cases — the matrix silently skipped rows: {cases}"
     );
 }
+
+/// Track identity named by corpus file name, in the canonical flat order.
+fn rule_ids(names: &[&str]) -> Vec<TrackId> {
+    let mut ids: Vec<TrackId> = names
+        .iter()
+        .map(|name| TrackId(format!("r:\\rules\\{name}")))
+        .collect();
+    ids.sort_by(|left, right| left.0.cmp(&right.0));
+    ids
+}
+
+/// The file name a `TrackId` names, for a failure message a person can read.
+fn rule_name(id: &TrackId) -> &str {
+    id.0.rsplit('\\').next().unwrap_or(&id.0)
+}
+
+#[test]
+fn test_negated_rules_include_tracks_whose_value_is_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (store, tracks) = seeded_rules_store(&db_path);
+    let clock = rule_clock(&store);
+
+    // Text: absent is the empty string, so `is not` sweeps the untagged up.
+    let not_alpha = rule_not(MatchableField::Title, Comparison::Is, needle("Alpha"));
+    assert_rule_membership(&store, &tracks, &not_alpha, None, &clock, "title is not Alpha");
+    let mut expect: Vec<&str> = rules_fixtures()
+        .iter()
+        .map(|row| row.name)
+        .filter(|name| *name != "one.flac")
+        .collect();
+    expect.sort();
+    // `eleven.mp3` carries no title at all, and it is in the answer — the
+    // promise a bare `NOT (lower(title) = 'alpha')` breaks.
+    assert!(
+        expect.contains(&"eleven.mp3") && expect.contains(&"six"),
+        "the corpus must hold absent-title rows for this to mean anything"
+    );
+    let names: Vec<String> = rule_window(&store, &not_alpha, None)
+        .iter()
+        .map(rule_name)
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        names,
+        expect
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>(),
+        "`title is not \"Alpha\"` is every other Track, absent title included"
+    );
+
+    // Numbers and dates: no empty value exists, so the TEST is folded, and a
+    // negated test on an absent column is true.
+    let cases: Vec<(&str, RuleTree, Vec<&str>)> = vec![
+        (
+            "duration is not greater than one hour",
+            rule_not(
+                MatchableField::Duration,
+                Comparison::GreaterThan,
+                millis(3_600_000),
+            ),
+            vec![
+                "aged.mp3",
+                "eight.mp3",
+                "eleven.mp3",
+                "five.FLAC",
+                "four.m4a",
+                "nine.mp3",
+                "oddball.mp3",
+                "one.flac",
+                "quote.mp3",
+                "recent.mp3",
+                "seven.mp3",
+                "six",
+                "ten.mp3",
+                "two.wav",
+            ],
+        ),
+        (
+            "year is missing",
+            rule(MatchableField::Year, Comparison::IsMissing, None),
+            vec!["eleven.mp3", "six"],
+        ),
+        (
+            "year is not 1975",
+            rule_not(MatchableField::Year, Comparison::EqualTo, number(1975)),
+            vec![
+                "aged.mp3",
+                "eight.mp3",
+                "eleven.mp3",
+                "five.FLAC",
+                "nine.mp3",
+                "oddball.mp3",
+                "quote.mp3",
+                "recent.mp3",
+                "six",
+                "ten.mp3",
+                "three.mp3",
+                "two.wav",
+            ],
+        ),
+        (
+            "sample rate is not 44100",
+            rule_not(
+                MatchableField::SampleRate,
+                Comparison::EqualTo,
+                number(44_100),
+            ),
+            vec![
+                "eleven.mp3",
+                "four.m4a",
+                "nine.mp3",
+                "six",
+                "ten.mp3",
+                "two.wav",
+            ],
+        ),
+        (
+            "channels is not 2",
+            rule_not(MatchableField::Channels, Comparison::EqualTo, number(2)),
+            vec![
+                "aged.mp3",
+                "eleven.mp3",
+                "four.m4a",
+                "nine.mp3",
+                "six",
+                "ten.mp3",
+                "two.wav",
+            ],
+        ),
+        (
+            "last played is not in the last 7 days",
+            rule_not(MatchableField::LastPlayed, Comparison::InLast, days(7)),
+            vec![
+                "aged.mp3",
+                "eight.mp3",
+                "eleven.mp3",
+                "five.FLAC",
+                "four.m4a",
+                "nine.mp3",
+                "oddball.mp3",
+                "one.flac",
+                "quote.mp3",
+                "seven.mp3",
+                "six",
+                "ten.mp3",
+                "three.mp3",
+                "two.wav",
+            ],
+        ),
+        (
+            "date added is missing",
+            rule(MatchableField::DateAdded, Comparison::IsMissing, None),
+            vec!["eleven.mp3", "six"],
+        ),
+    ];
+    for (why, tree, names) in cases {
+        let mut sorted = names;
+        sorted.sort();
+        assert_rule_membership(&store, &tracks, &tree, None, &clock, why);
+        let actual: Vec<String> = rule_window(&store, &tree, None)
+            .iter()
+            .map(rule_name)
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            actual,
+            sorted.iter().map(|n| n.to_string()).collect::<Vec<_>>(),
+            "{why}: pinned as membership, and every absent column must be in a \
+             negated numeric or date test"
+        );
+    }
+}
+
+#[test]
+fn test_box_mixing_an_unknown_and_a_false_arm_still_includes_the_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (store, tracks) = seeded_rules_store(&db_path);
+    let clock = rule_clock(&store);
+
+    // The arm that would answer *unknown* without the fold: a duration test on
+    // a Track with no duration. Beside it, an arm that answers false. Unfolded,
+    // `false OR unknown` is unknown, and `WHERE unknown` is false, so
+    // `eleven.mp3` (no title, no duration) would vanish from a Box whose
+    // negation says it belongs.
+    let tree = all_of(vec![any_of(vec![
+        rule_not(MatchableField::Title, Comparison::Is, needle("Alpha")),
+        rule_not(
+            MatchableField::Duration,
+            Comparison::GreaterThan,
+            millis(3_600_000),
+        ),
+    ])]);
+    assert_rule_membership(&store, &tracks, &tree, None, &clock, "negated Box arms");
+    let ids = rule_window(&store, &tree, None);
+    assert!(
+        ids.contains(&TrackId::from_path(std::path::Path::new("r:\\rules\\eleven.mp3"))),
+        "a Track with neither a title nor a duration is inside a Box whose arms \
+         are one false and one would-be-unknown answer: {:?}",
+        ids.iter().map(rule_name).collect::<Vec<_>>()
+    );
+
+    // The same arms without the negation: both fold to false, so the Box is
+    // false and the Track stays out — the fold is two-valued, not permissive.
+    let positive = any_of(vec![
+        rule(MatchableField::Title, Comparison::Is, needle("Alpha")),
+        rule(
+            MatchableField::Duration,
+            Comparison::GreaterThan,
+            millis(3_600_000),
+        ),
+    ]);
+    assert_rule_membership(&store, &tracks, &positive, None, &clock, "positive Box arms");
+    assert_eq!(
+        rule_window(&store, &positive, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["one.flac", "three.mp3"],
+        "`Alpha` or longer than an hour: the tagged long Track and the \
+         one-millisecond-over one, and no absent-duration row"
+    );
+}
+
+#[test]
+fn test_genre_is_one_whole_segment_and_a_tab_padded_segment_is_pinned() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (store, tracks) = seeded_rules_store(&db_path);
+    let clock = rule_clock(&store);
+
+    // A `;`-separated tag: `is` picks one whole segment, so "Rock" alone is not
+    // a segment of "Art Rock;Progressive Rock".
+    let is_rock = rule(MatchableField::Genre, Comparison::Is, needle("Rock"));
+    assert_rule_membership(&store, &tracks, &is_rock, None, &clock, "genre is Rock");
+    assert!(
+        rule_window(&store, &is_rock, None).is_empty(),
+        "no Track carries `Rock` as a whole segment"
+    );
+
+    let is_progressive = rule(
+        MatchableField::Genre,
+        Comparison::Is,
+        needle("Progressive Rock"),
+    );
+    assert_rule_membership(
+        &store,
+        &tracks,
+        &is_progressive,
+        None,
+        &clock,
+        "genre is Progressive Rock",
+    );
+    assert_eq!(
+        rule_window(&store, &is_progressive, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["one.flac"],
+        "THE DOCUMENTED DISAGREEMENT, pinned rather than hidden: `two.wav` tags \
+         itself \"Art Rock;<TAB>Progressive Rock\", and a Rule strips only \
+         SPACES, so the tab-padded segment is not `progressiverock` and does not \
+         match — while the genres view trims each segment and shows it. \
+         A Rule and a view disagree on purpose."
+    );
+    let genres = store.genre_counts().expect("genre counts");
+    assert!(
+        genres
+            .iter()
+            .any(|count| count.genre == "Progressive Rock" && count.tracks == 2),
+        "the genres view must show that tag twice, which is the disagreement: {genres:?}"
+    );
+
+    // Space-padded segments match, because spaces are stripped on both sides.
+    let padded = rule(
+        MatchableField::Genre,
+        Comparison::Is,
+        needle("  Art  Rock "),
+    );
+    assert_rule_membership(&store, &tracks, &padded, None, &clock, "padded needle");
+    assert_eq!(
+        rule_window(&store, &padded, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["one.flac", "two.wav"],
+        "spaces are stripped from the tag and from the needle, so both rows' \
+         first segment answers"
+    );
+
+    // An empty-string genre and a NULL genre both answer "missing".
+    let missing = rule(MatchableField::Genre, Comparison::IsMissing, needle(""));
+    assert_rule_membership(&store, &tracks, &missing, None, &clock, "genre missing");
+    assert_eq!(
+        rule_window(&store, &missing, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["eleven.mp3", "four.m4a", "three.mp3"],
+        "an empty genre and an absent genre are the same absence"
+    );
+    let empty_is = rule(MatchableField::Genre, Comparison::Is, needle(""));
+    assert_eq!(
+        rule_window(&store, &empty_is, None),
+        rule_window(&store, &missing, None),
+        "`genre is \"\"` and `genre is missing` are one test on text"
+    );
+}
+
+#[test]
+fn test_lossless_is_a_case_insensitive_suffix_match_on_the_stored_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (store, tracks) = seeded_rules_store(&db_path);
+    let clock = rule_clock(&store);
+
+    let lossless = rule(MatchableField::Lossless, Comparison::Is, yes(true));
+    assert_rule_membership(&store, &tracks, &lossless, None, &clock, "lossless is yes");
+    assert_eq!(
+        rule_window(&store, &lossless, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["five.FLAC", "one.flac", "two.wav"],
+        "an UPPERCASE `.FLAC` is lossless (a suffix match on the lowered path), \
+         and a file with NO extension is not"
+    );
+
+    let lossy = rule(MatchableField::Lossless, Comparison::Is, yes(false));
+    assert_rule_membership(&store, &tracks, &lossy, None, &clock, "lossless is no");
+    let lossy_names: Vec<String> = rule_window(&store, &lossy, None)
+        .iter()
+        .map(rule_name)
+        .map(str::to_string)
+        .collect();
+    assert!(
+        lossy_names.contains(&"four.m4a".to_string()) && lossy_names.contains(&"six".to_string()),
+        "`.m4a` is PINED as not-lossless (the real codec is never read, so an \
+         ALAC in an m4a container reports as lossy) and `six` has no extension: {lossy_names:?}"
+    );
+    assert_eq!(
+        lossy_names.len() + 3,
+        15,
+        "every Track lands in exactly one of the two answers"
+    );
+
+    // The two literal lists classify every extension the Library can index,
+    // and never both. Restated here at the store seam because this is where a
+    // mis-scaled list would show up as a wrong membership answer.
+    let mut both = LOSSLESS_EXTENSIONS
+        .iter()
+        .chain(LOSSY_EXTENSIONS)
+        .collect::<Vec<_>>();
+    both.sort();
+    let distinct: Vec<&&str> = both
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        distinct.len(),
+        both.len(),
+        "a format may not be in both lists at once"
+    );
+}
+
+#[test]
+fn test_non_latin_tags_do_not_fold_case_and_that_is_pinned() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (store, tracks) = seeded_rules_store(&db_path);
+    let clock = rule_clock(&store);
+
+    // Two rows, the same tag in two cases, one of them non-Latin. SQLite's
+    // `lower()` folds ASCII only (ADR 0020) while the needle is folded by Rust,
+    // so the accented UPPERCASE row is unreachable — the accepted limitation,
+    // pinned as membership rather than hidden behind a helper.
+    let is_electronic = rule(
+        MatchableField::Genre,
+        Comparison::Is,
+        needle("Électronique"),
+    );
+    assert_rule_membership(&store, &tracks, &is_electronic, None, &clock, "genre is Électronique");
+    assert_eq!(
+        rule_window(&store, &is_electronic, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["ten.mp3"],
+        "only the lowercase row answers: `nine.mp3` tags itself ÉLECTRONIQUE and \
+         no fold touches the accent, so a listener cannot reach it by that name"
+    );
+
+    // The ASCII part of the same name still reaches the ASCII part of the tag.
+    let contains_tronic = rule(
+        MatchableField::Genre,
+        Comparison::Contains,
+        needle("tronique"),
+    );
+    assert_rule_membership(
+        &store,
+        &tracks,
+        &contains_tronic,
+        None,
+        &clock,
+        "genre contains tronique",
+    );
+    assert_eq!(
+        rule_window(&store, &contains_tronic, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["nine.mp3", "ten.mp3"],
+        "both cases answer an ASCII needle, which is exactly how far the fold goes"
+    );
+}

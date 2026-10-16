@@ -16,6 +16,7 @@
 
 use crossbeam_channel::Sender;
 use riff_persistence::errors::StoreError;
+use riff_persistence::field_catalog::ValueType;
 use riff_persistence::playlist::{Playlist, PlaylistId};
 use riff_persistence::store::{
     FullScanSummary, LOST_GEMS_THRESHOLD, LibraryCounts, LibraryMutationStore, LibraryQueryStore,
@@ -31,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::field_columns::{ColumnKind, is_genre_set, picker_column};
+use super::field_columns::{is_genre_set, picker_column};
 
 /// A migration is an ordered schema step with a stable identity and content
 /// checksum so accidental edits are detected instead of silently applied.
@@ -2930,7 +2931,7 @@ impl LibraryQueryStore for SqliteStore {
     /// schema carries no indexes for these columns, which is why each list
     /// runs once when a picker opens rather than on a per-frame path.
     fn picker_texts(&self, field_id: &str, limit: usize) -> Result<Vec<String>, StoreError> {
-        let Some(entry) = picker_column(field_id, ColumnKind::Text) else {
+        let Some(entry) = picker_column(field_id, ValueType::Text) else {
             return Err(StoreError::InvalidOperation(format!(
                 "field {field_id:?} names no pickable text column"
             )));
@@ -2982,7 +2983,7 @@ impl LibraryQueryStore for SqliteStore {
     /// column-table-only interpolation, same bound parameter, and the same
     /// one-open-per-picker cadence as [`Self::picker_texts`].
     fn picker_numbers(&self, field_id: &str, limit: usize) -> Result<Vec<i64>, StoreError> {
-        let Some(entry) = picker_column(field_id, ColumnKind::Number) else {
+        let Some(entry) = picker_column(field_id, ValueType::Number) else {
             return Err(StoreError::InvalidOperation(format!(
                 "field {field_id:?} names no pickable numeric column"
             )));

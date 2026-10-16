@@ -7,42 +7,35 @@
 //! that id here and nowhere else. Adding a testable field means adding a row
 //! to [`FIELD_COLUMNS`]; no read site learns a column name.
 //!
+//! This table answers **only** "which column holds this field". Everything
+//! else a picker read needs to know — that the field exists at all, that its
+//! values are pickable rather than typed, that its value is text rather than
+//! a number — is the [`field_catalog`]'s question, and is asked there rather
+//! than restated here. The catalog cannot know SQL's column names and the
+//! store must not know the catalog's answers; the two meet in [`picker_column`].
+//!
 //! The table is also the store's injection boundary. Every `column` is a
 //! `&'static str` written in this file, so the SQL an adapter builds from it
 //! interpolates **no input at all** — the field id arriving from a Rule row or
-//! a picker request is only ever a lookup key, and an id that is not in this
-//! table is rejected here, before any SQL string is produced. Every actual
-//! value crossing into a query is a bound parameter.
+//! a picker request is only ever a lookup key, and an id the catalog does not
+//! know, or knows but does not resolve to a column here, is rejected before a
+//! single SQL string is produced. Every actual value crossing into a query is
+//! a bound parameter.
 
-/// How a catalogued `tracks` column's values are typed at the SQL boundary.
-///
-/// This is the column's SQL affinity — which absent test and which ordering
-/// an adapter must use — not a UI statement: what a field's value control
-/// draws is the field catalog's question in `riff-persistence`, and nothing
-/// here restates it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColumnKind {
-    /// A `TEXT` column: absent is `NULL` **or** an all-whitespace value, and
-    /// the deterministic order is byte-wise ascending (`SQLite` `BINARY`).
-    Text,
-    /// An `INTEGER` column: absent is `NULL` alone — a stored `0` is a
-    /// present value — and the deterministic order is ascending numerically.
-    Number,
-}
+use riff_persistence::field_catalog::{self, ValueType};
+use riff_persistence::rule::MatchableField;
 
-/// One catalogued field id and the `tracks` column that holds its value.
+/// One [`MatchableField`] and the `tracks` column that holds its value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FieldColumn {
-    /// The stable field id as a Rule stores it.
-    pub field_id: &'static str,
-    /// The `tracks` column a Rule testing this field reads. Always a
-    /// literal from this file — never derived from input.
+    /// The field this row resolves.
+    pub field: MatchableField,
+    /// The `tracks` column a Rule testing this field reads. Always a literal
+    /// from this file — never derived from input.
     pub column: &'static str,
-    /// The column's SQL type family, which decides its absent test and order.
-    pub kind: ColumnKind,
 }
 
-/// The fields the `Application Store` can answer a value read for.
+/// The fields the `Application Store` can answer a column-level read for.
 ///
 /// Every row points at the column a Rule actually tests, not at the `albums`
 /// / `artists` entity tables the browse listings read. That distinction is
@@ -54,93 +47,84 @@ pub struct FieldColumn {
 /// the Rule built from it would match nothing.
 ///
 /// The six rows here are today's whole table, and it is built to grow: the
-/// Custom Smart Playlist's compiled Rule tree has to reach every testable
-/// column — `year`, `duration_nanos`, `composer`, `comment`, `path`, `title`
-/// and the rest — and each of those is appended here rather than spelled at
-/// its new read site. Growing it does **not** widen the picker lists: those
-/// are gated by the closed [`PICKABLE_FIELD_IDS`] list, because the catalog
-/// decides which fields offer a library-derived list and which take typed
-/// input, and a store table that answers "which column holds this field"
-/// cannot be trusted to answer that second question by accident.
+/// compiled Rule tree has to reach every testable column — `year`,
+/// `duration_nanos`, `composer`, `comment`, `path`, `title` and the rest — and
+/// each of those is appended here rather than spelled at its new read site.
+/// Growing it does **not** widen the picker lists, because a picker read goes
+/// through [`picker_column`], which asks the field catalog whether the field
+/// is pickable at all. Without that gate, the day `title` was appended to
+/// make a Title comparison work would quietly have turned the Title picker
+/// into a scan of every track name in the Library — a field the catalog gives
+/// a text box, not a list.
 pub const FIELD_COLUMNS: &[FieldColumn] = &[
     FieldColumn {
-        field_id: "genre",
+        field: MatchableField::Genre,
         column: "genre",
-        kind: ColumnKind::Text,
     },
     FieldColumn {
-        field_id: "artist",
+        field: MatchableField::Artist,
         column: "artist",
-        kind: ColumnKind::Text,
     },
     FieldColumn {
-        field_id: "album_artist",
+        field: MatchableField::AlbumArtist,
         column: "album_artist",
-        kind: ColumnKind::Text,
     },
     FieldColumn {
-        field_id: "album",
+        field: MatchableField::Album,
         column: "album",
-        kind: ColumnKind::Text,
     },
     FieldColumn {
-        field_id: "sample_rate",
+        field: MatchableField::SampleRate,
         column: "sample_rate",
-        kind: ColumnKind::Number,
     },
     FieldColumn {
-        field_id: "channels",
+        field: MatchableField::Channels,
         column: "channels",
-        kind: ColumnKind::Number,
     },
 ];
 
-/// The field ids a value picker may list: the four pickable text fields and
-/// the two pickable numeric ones.
+/// The [`FieldColumn`] for a field the catalog knows, or `None` when this
+/// store has no column for it yet.
 ///
-/// A closed allow-list, deliberately not derived from [`FIELD_COLUMNS`].
-/// That table answers "which column holds this field" and grows with every
-/// Rule the compiler learns to test; this one answers "can the listener pick
-/// this value from their Library", which is the field catalog's question and
-/// changes only when the catalog does. Without the split, appending `title`
-/// to the column table would quietly turn the Title picker into a scan of
-/// every track name — a field the catalog gives a text box, not a list.
-pub const PICKABLE_FIELD_IDS: &[&str] = &[
-    "genre",
-    "artist",
-    "album_artist",
-    "album",
-    "sample_rate",
-    "channels",
-];
-
-/// The [`FieldColumn`] catalogued under `field_id`, or `None` when the id
-/// names no column.
-///
-/// This is the lookup a query-builder uses; a picker read must go through
-/// [`picker_column`] so a catalogued-but-not-pickable field stays refused.
-pub fn field_column(field_id: &str) -> Option<&'static FieldColumn> {
-    FIELD_COLUMNS.iter().find(|entry| entry.field_id == field_id)
+/// A query builder resolving a stored Rule's field uses this; a picker read
+/// must go through [`picker_column`] instead, so a field the catalog gives a
+/// typed control for stays unreachable however many columns this table learns.
+#[must_use]
+pub fn field_column(field: MatchableField) -> Option<&'static FieldColumn> {
+    FIELD_COLUMNS.iter().find(|entry| entry.field == field)
 }
 
-/// The [`FieldColumn`] a picker read may use for `field_id`, but only when
-/// its kind is `expected`.
+/// The [`FieldColumn`] a bounded picker read may use for `field_id`, but only
+/// when the catalog's own answers permit the read.
 ///
-/// Three rejections happen here, and all of them before any SQL is built: an
-/// id no column is catalogued under, an id the picker allow-list does not
-/// carry, and an id whose column belongs to the other value shape (asking the
-/// `sample_rate` column for a text list is a caller error even though the id
-/// is catalogued and pickable).
-pub fn picker_column(field_id: &str, expected: ColumnKind) -> Option<&'static FieldColumn> {
-    if !PICKABLE_FIELD_IDS.contains(&field_id) {
+/// Four rejections happen here, and all of them before any SQL is built:
+///
+/// * an id no [`MatchableField`] is — an Unreadable Rule's field, or a caller
+///   that spelled a display name instead of a stored id;
+/// * a field the catalog does not mark pickable, which is the case that keeps
+///   this table's necessary growth from widening what a listener can pick;
+/// * a field whose [`ValueType`] is not `expected`, because asking the
+///   `sample_rate` column for a text list is a caller error even though the
+///   field is real and pickable;
+/// * a field the catalog knows and this table does not — a compiler field
+///   with no picker, whose picker would have nothing to read.
+///
+/// `field_id` is used only as a lookup key into the catalog and this table,
+/// never as SQL text.
+#[must_use]
+pub fn picker_column(field_id: &str, expected: ValueType) -> Option<&'static FieldColumn> {
+    let field = MatchableField::from_stored_id(field_id)?;
+    let spec = field_catalog::spec(field);
+    if !spec.is_pickable() || spec.value_type() != expected {
         return None;
     }
-    field_column(field_id).filter(|entry| entry.kind == expected)
+    field_column(field)
 }
 
-/// Whether `field_id` is the `genre` column: the one catalogued text column
-/// whose stored value is a `;`-separated set, so its distinct values are its
-/// segments rather than its whole strings.
+/// Whether `field_id` names the genre column: the one catalogued text field
+/// whose stored value is a `;`-separated set, so its distinct values are the
+/// tag's entries rather than its whole strings.
+#[must_use]
 pub fn is_genre_set(field_id: &str) -> bool {
-    field_id == "genre"
+    field_id == MatchableField::Genre.stored_id()
 }

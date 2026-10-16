@@ -986,9 +986,10 @@ pub trait LibraryQueryStore {
     // A Rule's value picker offers what the Library actually holds. Both
     // reads are keyed on the Rule's **field id string** — `"genre"`,
     // `"artist"`, `"album_artist"`, `"album"`, `"sample_rate"`,
-    // `"channels"` — and the adapter owns the one field-id → column table
-    // that answers them, so an id outside that table is rejected before any
-    // query is built and no column name is ever taken from input. Each is a
+    // `"channels"` — and the adapter resolves that id through its own
+    // field-id → `tracks`-column table, gated by this crate's field catalog,
+    // so a column name is never taken from input and an id that is not a
+    // pickable field is rejected before any query is built. Each is a
     // `DISTINCT` read over `tracks`, over the very column a Rule tests, and
     // not over the `albums` / `artists` entity tables the browse listings
     // read: a pickable value has to be one the tested column can contain.
@@ -1010,9 +1011,10 @@ pub trait LibraryQueryStore {
     /// The bound is the store's, not the caller's: the answer never exceeds
     /// `limit` values however large the Library is, so a 20,000-track Library
     /// cannot fill a picker pane, and `limit` of `0` answers empty. An
-    /// `field_id` this store does not catalogue as a text picker field — an
-    /// unknown id, or one whose column is numeric — is an
-    /// [`StoreError`], never an empty list that hides the mistake.
+    /// `field_id` that is not a pickable text field — an id no field is, a
+    /// field the catalog gives a typed control for, or one whose value is a
+    /// number — is an [`StoreError`], never an empty list that hides the
+    /// mistake.
     fn picker_texts(&self, field_id: &str, limit: usize) -> Result<Vec<String>, StoreError>;
 
     /// At most `limit` distinct values of the pickable **numeric** field
@@ -1021,7 +1023,8 @@ pub trait LibraryQueryStore {
     /// Absent here means `NULL` alone: a stored `0` is a present value and is
     /// offered like any other. The same bound and unknown-field rules as
     /// [`Self::picker_texts`] apply, with the same `DISTINCT`-over-`tracks`
-    /// shape.
+    /// shape, and the same refusal of an id that is not a pickable numeric
+    /// field.
     fn picker_numbers(&self, field_id: &str, limit: usize) -> Result<Vec<i64>, StoreError>;
 }
 

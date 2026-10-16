@@ -7345,29 +7345,47 @@ mod smart_picker_reads {
         }
     }
 
-    /// The picker allow-list and the column table must not drift: every
-    /// allowed id resolves to a column, and to a column of the shape its
-    /// picker read asks for. Pinned because the two lists are deliberately
-    /// independent — the column table grows with every Rule the compiler
-    /// learns to test, while the six fields the catalog offers a list for
-    /// change only when the catalog does.
+    /// The store's column table and the field catalog must not drift, in
+    /// either direction. Every field the catalog marks pickable has to resolve
+    /// to a column, or its picker would answer nothing; and the fields the
+    /// catalog gives a typed control for have to stay unreachable from a
+    /// picker. The second half is the one that matters over time: the column
+    /// table grows with every Rule the compiler learns to test, and a Title or
+    /// Composer row landing there must not widen what a listener can pick.
     #[test]
-    fn the_picker_allow_list_resolves_every_id_to_a_column_of_its_own_shape() {
-        use riff_infra::store::{PICKABLE_FIELD_IDS, field_column, picker_column};
+    fn the_column_table_resolves_exactly_the_catalogs_pickable_fields() {
+        use riff_infra::store::{field_column, picker_column};
+        use riff_persistence::field_catalog::{ValueType, fields};
 
-        assert_eq!(
-            PICKABLE_FIELD_IDS,
-            &["genre", "artist", "album_artist", "album", "sample_rate", "channels"],
-            "the pickable set is six fields: four text and two numeric"
-        );
-        for field_id in PICKABLE_FIELD_IDS {
-            let catalogued = field_column(field_id)
-                .unwrap_or_else(|| panic!("{field_id} is pickable but names no column"));
-            assert!(
-                picker_column(field_id, catalogued.kind).is_some(),
-                "{field_id} is allowed but its own shape is unreachable"
+        let mut pickable = 0;
+        for spec in fields() {
+            let id = spec.field().stored_id();
+            if !spec.is_pickable() {
+                assert!(
+                    picker_column(id, ValueType::Text).is_none()
+                        && picker_column(id, ValueType::Number).is_none(),
+                    "{id} is not pickable but a picker read reaches it"
+                );
+                continue;
+            }
+            pickable += 1;
+            let expected = match spec.value_type() {
+                ValueType::Text => ValueType::Text,
+                ValueType::Number => ValueType::Number,
+                other => panic!("{id} is pickable as a {other:?}, which has no picker read"),
+            };
+            let resolved = picker_column(id, expected)
+                .unwrap_or_else(|| panic!("{id} is pickable but names no catalogued column"));
+            assert_eq!(
+                Some(resolved),
+                field_column(spec.field()),
+                "{id} resolves through the picker gate to a different column"
             );
         }
+        assert_eq!(
+            pickable, 6,
+            "four text fields (genre, artist, album artist, album) and two              numeric ones (sample rate, channels)"
+        );
     }
 
     /// The two numeric pickers read `DISTINCT` over `tracks.sample_rate` and

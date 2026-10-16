@@ -7815,6 +7815,91 @@ mod tests {
         assert_eq!(read.root(), nine_levels.root(), "nesting and order survive");
     }
 
+    /// The order a drag leaves survives the whole way: Save writes it through
+    /// the real store, a fresh read returns it in the store's one interleaved
+    /// shape, and re-opening the page into a new editor spells the same order
+    /// — the order the tree stores is the order the page redraws when the
+    /// listener comes back.
+    #[test]
+    fn test_a_reordered_tree_survives_save_reload_and_a_fresh_open() {
+        use riff_backend::app::store::{
+            CustomSmartPlaylist, LibraryMutationStore, LibraryQueryStore, SmartPlaylistTree,
+        };
+        use riff_backend::domain::{Combine, MatchableField, RuleChild};
+        use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
+
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (changes_tx, _changes_rx) = crossbeam_channel::unbounded();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(
+            &dir.path().join("riff.sqlite3"),
+            changes_tx,
+        )
+        .expect("opening a fresh store must work");
+
+        let mut editor = riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor::default();
+        editor.root.children = vec![
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Artist, "one")),
+            RuleChildDraft::Box(RuleBoxDraft {
+                combine: Combine::Any,
+                open: false,
+                children: vec![RuleChildDraft::Rule(filled_rule_row(
+                    MatchableField::Title,
+                    "inner",
+                ))],
+            }),
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Album, "two")),
+        ];
+        // The drag: the last Rule up past the Box.
+        editor.move_child(&BoxPath::root(), 2, 0);
+        assert_eq!(child_field(&editor.root, 0), MatchableField::Album);
+        assert_eq!(child_field(&editor.root, 1), MatchableField::Artist);
+
+        let tree = SmartPlaylistTree::new(
+            editor
+                .root
+                .to_root_box()
+                .expect("whole Rules spell a tree"),
+        );
+        let id = store
+            .save_smart_playlist(None, "Reordered", &tree)
+            .expect("the save lands");
+        let read = store
+            .smart_playlist_tree(&id)
+            .expect("the read works")
+            .expect("the tree exists");
+        let root = read.root();
+        // The stored children come back in the dragged order: the moved Rule
+        // first, the Box still last, Rules and Boxes in the one numbering.
+        assert_eq!(root.children().len(), 3, "nothing was lost or added");
+        let RuleChild::Rule(first) = &root.children()[0] else {
+            panic!("the moved Rule leads the stored list");
+        };
+        assert_eq!(first.field(), MatchableField::Album);
+        let RuleChild::Box(nested) = &root.children()[2] else {
+            panic!("the Box kept its place at the end");
+        };
+        assert_eq!(nested.children().len(), 1, "the Box kept its own list");
+
+        // Re-open: a fresh editor loads the saved list the way the page's row
+        // click does, and spells the same order.
+        let list = CustomSmartPlaylist {
+            id: id.clone(),
+            name: "Reordered".to_string(),
+            created_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+        let mut reopened = riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor::default();
+        reopened.load_saved(&list, Some(root));
+        assert_eq!(child_field(&reopened.root, 0), MatchableField::Album);
+        assert_eq!(child_field(&reopened.root, 1), MatchableField::Artist);
+        let RuleChildDraft::Box(inner) = &reopened.root.children[2] else {
+            panic!("the Box reopened in the same position");
+        };
+        let RuleChildDraft::Rule(title) = &inner.children[0] else {
+            panic!("the Box holds its Rule");
+        };
+        assert_eq!(title.field, Some(MatchableField::Title));
+    }
+
     /// The tree harness's state and handle, aliased so the drag helpers'
     /// signatures stay readable.
     type TreeState = (
@@ -16260,6 +16345,95 @@ mod whole_frame_tests {
             y_of(&shell.harness, "Artist - Beta") < y_of(&shell.harness, "Artist - Gamma")
                 && y_of(&shell.harness, "Artist - Gamma") < y_of(&shell.harness, "Artist - Alpha"),
             "the next real frame renders the committed order with no explicit invalidation"
+        );
+    }
+
+    /// A real drag on the Smart Playlists page reorders the Rules, and the
+    /// next frame draws the rows in the new order. The page is reached the
+    /// way a listener reaches it — Settings, the nav item, the list's own
+    /// row — so the drag has to survive the whole frame protocol to land,
+    /// and the drop runs through the typed `SettingsAction` and the applier,
+    /// never a test-side shortcut.
+    #[test]
+    fn test_a_real_drag_reorders_rule_rows_in_a_composed_frame() {
+        use riff_backend::app::state::ViewMode;
+        use riff_backend::app::store::{CustomSmartPlaylist, SmartPlaylistTree};
+        use riff_backend::domain::{
+            Combine, Comparison, MatchableField, PlaylistId, RootBox, Rule, RuleBox, RuleChild,
+            RuleValue,
+        };
+
+        // One saved list, three Rules in its Root Box, each with its own
+        // header label so the frame's order is readable.
+        let id = PlaylistId::new("spl-morning-1");
+        let mut mock = MockLibraryQueryStore::default();
+        mock.custom_smart_playlists = vec![CustomSmartPlaylist {
+            id: id.clone(),
+            name: "Morning drive".to_string(),
+            created_at: std::time::SystemTime::UNIX_EPOCH,
+        }];
+        mock.smart_playlist_trees.insert(
+            id,
+            SmartPlaylistTree::new(RootBox::new(RuleBox::new(Combine::All).with_children(vec![
+                RuleChild::Rule(Rule::new(
+                    MatchableField::Title,
+                    Comparison::Is,
+                    Some(RuleValue::Text("midnight".to_string())),
+                )),
+                RuleChild::Rule(Rule::new(
+                    MatchableField::Year,
+                    Comparison::GreaterThan,
+                    Some(RuleValue::Number(1975)),
+                )),
+                RuleChild::Rule(Rule::new(
+                    MatchableField::PlayCount,
+                    Comparison::GreaterThan,
+                    Some(RuleValue::Number(10)),
+                )),
+            ]))),
+        );
+        let (mut shell, _transport) = recording_transport_shell(mock);
+        shell.harness.step();
+
+        // Settings → Smart Playlists → the list's row, all by real clicks.
+        shell.library.lock_or_recover().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.get_by_label("Smart Playlists").click();
+        // The nav click applies at the end of its frame; the pane paints the
+        // next one, and the list's row exists only after that.
+        shell.harness.run_steps(2);
+        // The name sits twice in the a11y tree now — the sidebar's own custom
+        // row (ticket 12) and this pane's list row — so the click is scoped
+        // to the pane: the sidebar never crosses its 280px panel edge.
+        shell
+            .harness
+            .query_all_by_label("Morning drive")
+            .find(|node| node.rect().left() > 300.0)
+            .expect("the pane's list row renders on the stage")
+            .click();
+        shell.harness.run_steps(2);
+
+        assert!(
+            y_of(&shell.harness, "Title") < y_of(&shell.harness, "Year")
+                && y_of(&shell.harness, "Year") < y_of(&shell.harness, "Plays"),
+            "the pane renders the stored order top to bottom"
+        );
+
+        // Drag the first row onto the third: press, move, release.
+        let src = shell.harness.get_by_label("Title").rect();
+        let dst = shell.harness.get_by_label("Plays").rect();
+        shell.harness.drag_at(src.center());
+        shell.harness.step();
+        shell.harness.hover_at(dst.center());
+        shell.harness.step();
+        shell.harness.drop_at(dst.center());
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            y_of(&shell.harness, "Year") < y_of(&shell.harness, "Plays")
+                && y_of(&shell.harness, "Plays") < y_of(&shell.harness, "Title"),
+            "the next frame draws the reordered draft: Title moved to the end"
         );
     }
 

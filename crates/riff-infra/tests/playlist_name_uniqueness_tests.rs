@@ -61,9 +61,9 @@ fn seed_smart_playlist(store: &SqliteStore, id: &str, name: &str) {
 fn refusal_reason<T: std::fmt::Debug>(outcome: Result<T, StoreError>, what: &str) -> String {
     match outcome {
         Err(StoreError::InvalidOperation(reason)) => reason,
-        other => panic!(
-            "{what} must be refused as a `StoreError::InvalidOperation`, got {other:?}"
-        ),
+        other => {
+            panic!("{what} must be refused as a `StoreError::InvalidOperation`, got {other:?}")
+        }
     }
 }
 
@@ -197,9 +197,7 @@ fn renaming_onto_a_custom_smart_playlist_name_is_refused() {
         .expect("a free name is creatable");
 
     let reason = refusal_reason(
-        store
-            .rename_playlist(&playlist, "Night Drive")
-            .map(|_| ()),
+        store.rename_playlist(&playlist, "Night Drive").map(|_| ()),
         "renaming a Playlist onto a Custom Smart Playlist's name",
     );
     assert!(

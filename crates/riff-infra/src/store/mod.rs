@@ -6,6 +6,7 @@
 
 pub mod field_columns;
 pub mod playback_library;
+pub mod smart_playlist_tree;
 pub mod sqlite;
 
 pub use field_columns::{FIELD_COLUMNS, FieldColumn, field_column, is_genre_set, picker_column};

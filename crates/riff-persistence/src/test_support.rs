@@ -11,9 +11,10 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use crate::errors::StoreError;
+use crate::playlist::PlaylistId;
 use crate::store::{
-    FullScanSummary, LibraryCounts, LibraryMutationStore, LibraryQueryStore, Page, SortDirection,
-    TrackListOrder,
+    FullScanSummary, LibraryCounts, LibraryMutationStore, LibraryQueryStore, Page,
+    SmartPlaylistTree, SortDirection, TrackListOrder,
 };
 use crate::track::{
     Album, Artist, GenreCount, METADATA_VERSION, SmartPlaylistKind, Track, TrackId,
@@ -335,6 +336,10 @@ impl LibraryQueryStore for StubLibraryQueryStore {
     fn picker_numbers(&self, _field_id: &str, _limit: usize) -> Answer<Vec<i64>> {
         self.answer(|| Ok(Vec::new()))
     }
+
+    fn smart_playlist_tree(&self, _id: &PlaylistId) -> Answer<Option<SmartPlaylistTree>> {
+        self.answer(|| Ok(None))
+    }
 }
 
 /// A [`LibraryMutationStore`] whose every write is a no-op — the double for
@@ -343,7 +348,7 @@ impl LibraryQueryStore for StubLibraryQueryStore {
 ///
 /// A suite that needs the scan-batch commit to record or to fail composes it:
 /// hold this stub beside the recording state and delegate every method to it
-/// except the one write the suite actually exercises, so the seven other
+/// except the one write the suite actually exercises, so the other
 /// no-op bodies are never re-implemented per mock.
 #[derive(Default)]
 pub struct StubLibraryMutationStore;
@@ -383,5 +388,37 @@ impl LibraryMutationStore for StubLibraryMutationStore {
 
     fn stamp_metadata_version(&mut self, _version: u32) -> Result<(), StoreError> {
         Ok(())
+    }
+
+    // The Custom Smart Playlist writes answer the same way every other write
+    // here does: nothing is stored, so nothing moved. The id a save "returns" is
+    // inert for that reason — a suite that has to observe a save composes its own
+    // recording double rather than reading meaning out of this one.
+    fn save_smart_playlist(
+        &mut self,
+        _id: Option<&PlaylistId>,
+        _name: &str,
+        _tree: &SmartPlaylistTree,
+    ) -> Result<PlaylistId, StoreError> {
+        Ok(PlaylistId(String::new()))
+    }
+
+    fn rename_smart_playlist(
+        &mut self,
+        _id: &PlaylistId,
+        _new_name: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    fn delete_smart_playlist(&mut self, _id: &PlaylistId) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    fn duplicate_smart_playlist(
+        &mut self,
+        _id: &PlaylistId,
+    ) -> Result<Option<PlaylistId>, StoreError> {
+        Ok(None)
     }
 }

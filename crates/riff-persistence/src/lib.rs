@@ -1,9 +1,11 @@
 //! riff-persistence — the stored entities and the Application Store contract.
 //!
 //! Everything that crosses the persistence boundary lives here: the stored
-//! entities (tracks, albums, artists, playlists) and the Application Store
-//! ports plus their DTOs. This crate implements nothing — the `SQLite` adapter
-//! lives in `riff-infra` — and it depends on `std` alone, so the persistence
+//! entities (tracks, albums, artists, playlists), the Application Store
+//! ports plus their DTOs, and the vocabulary a Custom Smart Playlist's Rules
+//! are written in (`rule`, `field_catalog`). This crate implements nothing —
+//! the `SQLite` adapter lives in `riff-infra` — and it depends on `std`
+//! alone, so the persistence
 //! contract never drags in an audio, image, or database crate.
 //!
 //! `riff-backend` re-exports this surface at its historical qualified paths

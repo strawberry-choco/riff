@@ -15,6 +15,7 @@
 pub mod adapter_tests;
 pub mod loudness_tests;
 pub mod replaygain_tags_tests;
+pub mod smart_playlist_tables_tests;
 pub mod store_tests;
 pub mod thumbnail_path_tests;
 pub mod thumbnail_store_tests;

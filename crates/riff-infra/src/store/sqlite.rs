@@ -443,6 +443,65 @@ const MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE app_settings
           ADD COLUMN reduce_motion INTEGER NOT NULL DEFAULT 0 CHECK (reduce_motion IN (0, 1));",
     },
+    Migration {
+        version: 20,
+        name: "020_smart_playlist_rule_tables",
+        // Custom Smart Playlist `Rule` trees become store-resident collection
+        // data: one row per Rule and one per Rule Box, in three typed tables.
+        // No packed serialised blob — the same "no opaque blobs for user
+        // data" stance migration 002 took when it replaced the settings bag.
+        //
+        // Deletion is cascade-only, including the self-referential cascade
+        // from a box to its child boxes, so deleting a playlist takes its
+        // whole tree with it and leaves nothing orphaned. `position` is one
+        // numbering shared by the boxes and the rules that are siblings under
+        // one parent, which is what lets the editor draw a single interleaved
+        // list; the save path renumbers wholesale, so there is no gap
+        // management and no uniqueness constraint on it.
+        //
+        // Two invariants the draft places on the save transaction, not on
+        // SQL, deliberately left un-enforced here: a playlist has exactly one
+        // parentless Root Box (a partial unique index over `parent_id IS NULL`
+        // would fight the cascade-driven rewrite the save performs), and
+        // `value` is NULL only for the `is_missing` operator (a cross-column
+        // CHECK cannot see the operator's meaning, and the draft does not
+        // carry one). The `field_id` / `operator_id` lists are the union of
+        // the Rust rule catalog's legal ids and must move with it; there is no
+        // `is_not_missing` operator because `negated` already inverts a test.
+        //
+        // No new indexes, and that is a decision rather than an oversight:
+        // every Rule predicate is a rowid scan at this size, and indexing the
+        // tree is its own deferred ticket (like the large-library pagination
+        // follow-up). Tables only — no column is backfilled and
+        // `METADATA_VERSION` does not move, because the design reads nothing
+        // back out of audio files for this.
+        sql: "CREATE TABLE smart_playlists (
+          id          TEXT PRIMARY KEY,
+          name        TEXT NOT NULL UNIQUE,
+          created_at  INTEGER NOT NULL
+        );
+
+        CREATE TABLE smart_rule_boxes (
+          id          TEXT PRIMARY KEY,
+          playlist_id TEXT NOT NULL REFERENCES smart_playlists(id) ON DELETE CASCADE,
+          parent_id   TEXT REFERENCES smart_rule_boxes(id) ON DELETE CASCADE,
+          combine     TEXT NOT NULL CHECK (combine IN ('all', 'any')),
+          position    INTEGER NOT NULL
+        );
+
+        CREATE TABLE smart_rules (
+          id          TEXT PRIMARY KEY,
+          box_id      TEXT NOT NULL REFERENCES smart_rule_boxes(id) ON DELETE CASCADE,
+          field_id    TEXT NOT NULL CHECK (field_id IN ('genre','artist','album_artist',
+                        'album','title','composer','comment','year','duration','play_count',
+                        'last_played','date_added','favorite','sample_rate','channels','lossless')),
+          operator_id TEXT NOT NULL CHECK (operator_id IN ('is','contains','greater_than',
+                        'less_than','equal_to','in_last','before','after','is_missing')),
+          negated     INTEGER NOT NULL DEFAULT 0 CHECK (negated IN (0, 1)),
+          value       TEXT,
+          position    INTEGER NOT NULL
+        );",
+    },
 ];
 
 /// Location of the Application Store database file: `riff.sqlite3` in the

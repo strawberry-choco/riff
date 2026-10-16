@@ -5860,7 +5860,97 @@ fn seeded_clear_store(db_path: &std::path::Path) -> riff_infra::store::SqliteSto
     );
     store.save_watch_states(&watches).expect("watches save");
 
+    // One Custom Smart Playlist with a two-level tree: the maintenance wipe is a
+    // Library-collection wipe, and a list's Rule tree is curation, so all three
+    // rule tables have to be standing when it finishes.
     store
+        .save_smart_playlist(None, "Cleared-Around Me", &custom_rule_tree())
+        .expect("the Custom Smart Playlist saves");
+
+    store
+}
+
+/// A Custom Smart Playlist tree with a nested Rule Box, for the tests that have
+/// to prove the rule tables survive something.
+pub fn custom_rule_tree() -> riff_persistence::store::SmartPlaylistTree {
+    use riff_persistence::rule::{
+        Combine, Comparison, MatchableField, RootBox, Rule, RuleBox, RuleChild, RuleValue,
+    };
+    SmartPlaylistTree::new(RootBox::new(RuleBox::new(Combine::All).with_children(
+        vec![
+            RuleChild::Rule(Rule::new(
+                MatchableField::Genre,
+                Comparison::Contains,
+                Some(RuleValue::Text("rock".to_string())),
+            )),
+            RuleChild::Box(
+                RuleBox::new(Combine::Any).with_children(vec![RuleChild::Rule(Rule::new(
+                    MatchableField::Year,
+                    Comparison::GreaterThan,
+                    Some(RuleValue::Number(1990)),
+                ))]),
+            ),
+        ],
+    )))
+}
+
+/// The three Custom Smart Playlist tables, asserted intact after a maintenance
+/// wipe: a list's Rule tree is curation, not Library collection data, so
+/// `clear_library` never reaches any of the three.
+fn assert_custom_rule_tables_survive(store: &riff_infra::store::SqliteStore) {
+    // The three Custom Smart Playlist tables survive the wipe untouched: a list's
+    // Rule tree is curation, not collection data, and `clear_library` is the
+    // Library collection's own maintenance action.
+    assert_eq!(
+        store
+            .with_connection(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM smart_playlists", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .expect("counting lists must work"),
+        1,
+        "the Custom Smart Playlist row survives the wipe"
+    );
+    assert_eq!(
+        store
+            .with_connection(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM smart_rule_boxes", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .expect("counting boxes must work"),
+        2,
+        "its Root Box and its nested box both survive"
+    );
+    assert_eq!(
+        store
+            .with_connection(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM smart_rules", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .expect("counting rules must work"),
+        2,
+        "and both Rules — the wipe never reaches the rule tables"
+    );
+    let custom_id = store
+        .with_connection(|conn| {
+            conn.query_row(
+                "SELECT id FROM smart_playlists WHERE name = 'Cleared-Around Me'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .expect("reading the list id must work");
+    assert_eq!(
+        store
+            .smart_playlist_tree(&PlaylistId(custom_id))
+            .expect("the tree still reads")
+            .expect("the list is still there"),
+        custom_rule_tree(),
+        "and the tree reads back exactly as it was saved, after the wipe"
+    );
 }
 
 #[test]
@@ -5917,6 +6007,8 @@ fn test_clear_library_wipes_collection_and_preserves_curation() {
         ],
         "entries stay listed even though their tracks are gone"
     );
+
+    assert_custom_rule_tables_survive(&store);
 
     // Every setting survives untouched.
     let settings = store.load_settings().expect("settings load");

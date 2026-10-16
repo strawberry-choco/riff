@@ -420,7 +420,7 @@ pub use riff_infra::audio::{CpalAudioOutput, SymphoniaDecoder};
 pub use riff_infra::filesystem::{AudioFileScanner, FilesystemWatcher};
 pub use riff_infra::media::metadata_reader::parse_replaygain_gain;
 pub use riff_infra::media::{ImageCoverLoader, LoftyMetadataReader, LoftyMetadataWriter};
-pub use riff_persistence::store::{RuleTree, ScanOptions};
+pub use riff_persistence::store::{RuleTree, ScanOptions, SmartPlaylistTree, UnreadableRule};
 
 // Standard-library names referenced unqualified in some suites.
 pub use std::path::PathBuf;
@@ -572,7 +572,7 @@ pub mod mocks {
     use riff_backend::app::state::PlaybackSession;
     use riff_backend::app::store::{
         LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings, SettingsStore,
-        SortDirection,
+        SmartPlaylistTree, SortDirection,
     };
     use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
     use riff_backend::app::traits::{
@@ -1329,14 +1329,48 @@ pub mod mocks {
         ) -> Result<(), StoreError> {
             Ok(())
         }
+
+        // The four Custom Smart Playlist writes follow this mock's standing rule:
+        // a mutation answers "nothing changed" and records nothing. A suite that
+        // has to observe a save, a rename, a delete or a Duplicate uses a real
+        // `SqliteStore` — the semantics are transactional and the fake has no
+        // transaction to give them.
+        fn save_smart_playlist(
+            &mut self,
+            _id: Option<&PlaylistId>,
+            _name: &str,
+            _tree: &SmartPlaylistTree,
+        ) -> Result<PlaylistId, StoreError> {
+            Ok(PlaylistId(String::new()))
+        }
+
+        fn rename_smart_playlist(
+            &mut self,
+            _id: &PlaylistId,
+            _new_name: &str,
+        ) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        fn delete_smart_playlist(&mut self, _id: &PlaylistId) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        fn duplicate_smart_playlist(
+            &mut self,
+            _id: &PlaylistId,
+        ) -> Result<Option<PlaylistId>, StoreError> {
+            Ok(None)
+        }
     }
 
     /// [`PlaylistStore`] fake standing in for the Playlists section of the
     /// Application Store. Reads serve whatever `playlists` / `entries` were
     /// seeded with (empty by default, which is the state most seam tests want)
-    /// and every mutation reports "nothing changed". The playlist
-    /// projection's own behavior is pinned against real `SQLite` scratch stores
-    /// in the app tests, not against this stub.
+    /// and every mutation reports "nothing changed" — unless it is refusing
+    /// (see `refuse_next_write`). The playlist projection's own behavior is
+    /// pinned against real `SQLite` scratch stores in the app tests, not
+    /// against this stub.
     #[derive(Clone, Default)]
     pub struct MockPlaylistStore {
         /// When set, every read fails with an `InvalidOperation` error.
@@ -1346,6 +1380,17 @@ pub mod mocks {
         /// Rows `load_playlist_entries` serves, keyed by playlist id.
         pub entries:
             std::collections::HashMap<PlaylistId, Vec<riff_backend::app::store::PlaylistEntry>>,
+        /// The next create or rename fails with
+        /// `StoreError::InvalidOperation(reason)` and commits nothing; every
+        /// write after it succeeds. The Application Store raises that ONE
+        /// variant for every fault it can meet — `op_error` wraps a constraint
+        /// violation, a transaction failure and an IO failure into it alike —
+        /// so a test sets the reason it wants reported and crosses the same
+        /// single production arm.
+        pub refuse_next_write: Option<String>,
+        /// Every name a create or rename COMMITTED with, in call order. Cloned
+        /// handles share it, so a test can read what its gesture wrote.
+        pub committed: Arc<Mutex<Vec<String>>>,
     }
 
     impl MockPlaylistStore {
@@ -1404,18 +1449,26 @@ pub mod mocks {
 
         fn create_playlist(
             &mut self,
-            _name: &str,
+            name: &str,
             _initial_tracks: &[TrackId],
         ) -> Result<PlaylistId, StoreError> {
+            if let Some(reason) = self.refuse_next_write.take() {
+                return Err(StoreError::InvalidOperation(reason));
+            }
+            self.committed.lock().unwrap().push(name.to_string());
             Ok(PlaylistId::new("mock"))
         }
 
         fn rename_playlist(
             &mut self,
             _id: &PlaylistId,
-            _new_name: &str,
+            new_name: &str,
         ) -> Result<bool, StoreError> {
-            Ok(false)
+            if let Some(reason) = self.refuse_next_write.take() {
+                return Err(StoreError::InvalidOperation(reason));
+            }
+            self.committed.lock().unwrap().push(new_name.to_string());
+            Ok(true)
         }
 
         fn delete_playlist(&mut self, _id: &PlaylistId) -> Result<bool, StoreError> {
@@ -1644,6 +1697,7 @@ pub mod mocks {
             usize,
             usize,
         ),
+        SmartPlaylistTree(PlaylistId),
     }
 
     /// Which [`LibraryQueryStore`] query fails while listed in
@@ -1661,6 +1715,7 @@ pub mod mocks {
         GetTrack,
         PickerTexts,
         PickerNumbers,
+        SmartPlaylistTree,
         TracksWindow,
         TracksCount,
         SearchWindow,
@@ -1806,6 +1861,10 @@ pub mod mocks {
         pub picker_texts: Vec<String>,
         /// Answer served by `picker_numbers` for any field id.
         pub picker_numbers: Vec<i64>,
+        /// Trees served by `smart_playlist_tree`, keyed by list id. An id that
+        /// is not listed answers `None` — no row — which is the state most
+        /// suites want.
+        pub smart_playlist_trees: std::collections::HashMap<PlaylistId, SmartPlaylistTree>,
 
         // --- failure injection -------------------------------------------------
         /// Queries that fail while listed here.
@@ -1860,6 +1919,7 @@ pub mod mocks {
                 tracks_by_dir: std::collections::HashMap::new(),
                 picker_texts: Vec::new(),
                 picker_numbers: Vec::new(),
+                smart_playlist_trees: std::collections::HashMap::new(),
                 failing: Vec::new(),
                 calls: Mutex::new(Vec::new()),
             }
@@ -2595,6 +2655,22 @@ pub mod mocks {
             }
             Ok(self.picker_numbers.iter().take(limit).copied().collect())
         }
+
+        /// Records the list id it was asked about and serves the seeded tree, or
+        /// `None` for a list the suite did not seed. Which ids a real store has
+        /// is the adapter's own test's question, not this double's.
+        fn smart_playlist_tree(
+            &self,
+            id: &PlaylistId,
+        ) -> Result<Option<SmartPlaylistTree>, StoreError> {
+            self.record(LibraryQueryCall::SmartPlaylistTree(id.clone()));
+            if self.failing.contains(&FailingQuery::SmartPlaylistTree) {
+                return Err(StoreError::InvalidOperation(
+                    "rule tree read boom".to_string(),
+                ));
+            }
+            Ok(self.smart_playlist_trees.get(id).cloned())
+        }
     }
 
     /// [`LibraryQueryStore`] view over one shared [`MockLibraryQueryStore`]
@@ -2918,6 +2994,13 @@ pub mod mocks {
 
         fn picker_numbers(&self, field_id: &str, limit: usize) -> Result<Vec<i64>, StoreError> {
             self.0.lock().unwrap().picker_numbers(field_id, limit)
+        }
+
+        fn smart_playlist_tree(
+            &self,
+            id: &PlaylistId,
+        ) -> Result<Option<SmartPlaylistTree>, StoreError> {
+            self.0.lock().unwrap().smart_playlist_tree(id)
         }
     }
 

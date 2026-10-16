@@ -3511,6 +3511,15 @@ mod scan_service_tests {
         ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
             Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
+
+        fn smart_playlist_tree(
+            &self,
+            _id: &PlaylistId,
+        ) -> Result<Option<SmartPlaylistTree>, StoreError> {
+            Err(StoreError::InvalidOperation(
+                "rule tree read boom".to_string(),
+            ))
+        }
     }
 
     /// [`LibraryMutationStore`] whose scan batches always fail to commit —
@@ -3561,6 +3570,42 @@ mod scan_service_tests {
             _summary: riff_backend::app::store::FullScanSummary,
         ) -> Result<(), StoreError> {
             Ok(())
+        }
+
+        fn save_smart_playlist(
+            &mut self,
+            _id: Option<&PlaylistId>,
+            _name: &str,
+            _tree: &SmartPlaylistTree,
+        ) -> Result<PlaylistId, StoreError> {
+            Err(StoreError::InvalidOperation(
+                "smart playlist save boom".to_string(),
+            ))
+        }
+
+        fn rename_smart_playlist(
+            &mut self,
+            _id: &PlaylistId,
+            _new_name: &str,
+        ) -> Result<bool, StoreError> {
+            Err(StoreError::InvalidOperation(
+                "smart playlist rename boom".to_string(),
+            ))
+        }
+
+        fn delete_smart_playlist(&mut self, _id: &PlaylistId) -> Result<bool, StoreError> {
+            Err(StoreError::InvalidOperation(
+                "smart playlist delete boom".to_string(),
+            ))
+        }
+
+        fn duplicate_smart_playlist(
+            &mut self,
+            _id: &PlaylistId,
+        ) -> Result<Option<PlaylistId>, StoreError> {
+            Err(StoreError::InvalidOperation(
+                "smart playlist duplicate boom".to_string(),
+            ))
         }
     }
 
@@ -5359,6 +5404,13 @@ mod tag_edit_service_tests {
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
             Ok(riff_persistence::store::Page::new(0, Vec::new()))
+        }
+
+        fn smart_playlist_tree(
+            &self,
+            _id: &PlaylistId,
+        ) -> Result<Option<SmartPlaylistTree>, StoreError> {
+            Ok(None)
         }
     }
 
@@ -9970,6 +10022,34 @@ mod replaygain_mirror_tests {
             summary: riff_backend::app::store::FullScanSummary,
         ) -> Result<(), StoreError> {
             self.store.record_full_scan_completed(summary)
+        }
+
+        fn save_smart_playlist(
+            &mut self,
+            id: Option<&PlaylistId>,
+            name: &str,
+            tree: &SmartPlaylistTree,
+        ) -> Result<PlaylistId, StoreError> {
+            self.store.save_smart_playlist(id, name, tree)
+        }
+
+        fn rename_smart_playlist(
+            &mut self,
+            id: &PlaylistId,
+            new_name: &str,
+        ) -> Result<bool, StoreError> {
+            self.store.rename_smart_playlist(id, new_name)
+        }
+
+        fn delete_smart_playlist(&mut self, id: &PlaylistId) -> Result<bool, StoreError> {
+            self.store.delete_smart_playlist(id)
+        }
+
+        fn duplicate_smart_playlist(
+            &mut self,
+            id: &PlaylistId,
+        ) -> Result<Option<PlaylistId>, StoreError> {
+            self.store.duplicate_smart_playlist(id)
         }
     }
 

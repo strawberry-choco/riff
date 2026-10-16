@@ -17,6 +17,7 @@ pub mod loudness_tests;
 pub mod playlist_name_uniqueness_tests;
 pub mod replaygain_tags_tests;
 pub mod smart_playlist_tables_tests;
+pub mod smart_playlist_writes_tests;
 pub mod store_tests;
 pub mod thumbnail_path_tests;
 pub mod thumbnail_store_tests;
@@ -40,8 +41,9 @@ pub use riff_persistence::playlist::{Playlist, PlaylistId};
 pub use riff_persistence::rule::{CivilDateTime, RuleValue};
 pub use riff_persistence::store::{
     LOST_GEMS_THRESHOLD, LibraryMutationStore, LibraryQueryStore, Page, PlaylistEntry,
-    PlaylistStore, RuleTree, ScalarSettings, ScanOptions, Settings, SettingsStore, SortDirection,
-    StoreChanged, StoreGeneration, StoreMigrations, TrackListOrder, WatchState,
+    PlaylistStore, RuleTree, ScalarSettings, ScanOptions, Settings, SettingsStore,
+    SmartPlaylistTree, SortDirection, StoreChanged, StoreGeneration, StoreMigrations,
+    TrackListOrder, UnreadableRule, WatchState,
 };
 pub use riff_persistence::track::{
     Album, Artist, CoverSource, GenreCount, SmartPlaylistKind, Track, TrackId, TrackMetadata,

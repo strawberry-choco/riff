@@ -8390,12 +8390,8 @@ mod tests {
         assert_eq!(child_field(&editor.root, 0), MatchableField::Album);
         assert_eq!(child_field(&editor.root, 1), MatchableField::Artist);
 
-        let tree = SmartPlaylistTree::new(
-            editor
-                .root
-                .to_root_box()
-                .expect("whole Rules spell a tree"),
-        );
+        let tree =
+            SmartPlaylistTree::new(editor.root.to_root_box().expect("whole Rules spell a tree"));
         let id = store
             .save_smart_playlist(None, "Reordered", &tree)
             .expect("the save lands");
@@ -16910,23 +16906,25 @@ mod whole_frame_tests {
         }];
         mock.smart_playlist_trees.insert(
             id,
-            SmartPlaylistTree::new(RootBox::new(RuleBox::new(Combine::All).with_children(vec![
-                RuleChild::Rule(Rule::new(
-                    MatchableField::Title,
-                    Comparison::Is,
-                    Some(RuleValue::Text("midnight".to_string())),
-                )),
-                RuleChild::Rule(Rule::new(
-                    MatchableField::Year,
-                    Comparison::GreaterThan,
-                    Some(RuleValue::Number(1975)),
-                )),
-                RuleChild::Rule(Rule::new(
-                    MatchableField::PlayCount,
-                    Comparison::GreaterThan,
-                    Some(RuleValue::Number(10)),
-                )),
-            ]))),
+            SmartPlaylistTree::new(RootBox::new(RuleBox::new(Combine::All).with_children(
+                vec![
+                    RuleChild::Rule(Rule::new(
+                        MatchableField::Title,
+                        Comparison::Is,
+                        Some(RuleValue::Text("midnight".to_string())),
+                    )),
+                    RuleChild::Rule(Rule::new(
+                        MatchableField::Year,
+                        Comparison::GreaterThan,
+                        Some(RuleValue::Number(1975)),
+                    )),
+                    RuleChild::Rule(Rule::new(
+                        MatchableField::PlayCount,
+                        Comparison::GreaterThan,
+                        Some(RuleValue::Number(10)),
+                    )),
+                ],
+            ))),
         );
         let (mut shell, _transport) = recording_transport_shell(mock);
         shell.harness.step();

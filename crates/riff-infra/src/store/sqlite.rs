@@ -3034,8 +3034,8 @@ impl SqliteStore {
 
     /// Total Tracks matching one compiled Rule predicate on an already-held
     /// connection — the counting half of a Custom Smart Playlist's Listing
-    /// Page. `WHERE` is the whole of what the tree asked, ANDed with the
-    /// listing's needle by the compiler that built it.
+    /// Page. `WHERE` is the whole of what the tree asked, combined with the
+    /// listing's needle by `AND` in the compiler that built it.
     fn rule_tree_count_on(conn: &Connection, predicate: &Predicate) -> rusqlite::Result<usize> {
         let sql = format!("SELECT COUNT(*) FROM tracks WHERE {}", predicate.sql);
         conn.query_row(
@@ -3074,14 +3074,10 @@ impl SqliteStore {
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(
-            rusqlite::params_from_iter(
-                predicate
-                    .params
-                    .iter()
-                    .cloned()
-                    .chain([Bound::Integer(i64::try_from(limit).unwrap_or(i64::MAX)),
-                            Bound::Integer(i64::try_from(offset).unwrap_or(i64::MAX))]),
-            ),
+            rusqlite::params_from_iter(predicate.params.iter().cloned().chain([
+                Bound::Integer(i64::try_from(limit).unwrap_or(i64::MAX)),
+                Bound::Integer(i64::try_from(offset).unwrap_or(i64::MAX)),
+            ])),
             track_from_row,
         )?;
         rows.collect()

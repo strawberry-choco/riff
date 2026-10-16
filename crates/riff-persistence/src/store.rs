@@ -7,7 +7,7 @@
 
 use crate::errors::StoreError;
 use crate::playlist::{Playlist, PlaylistId};
-use crate::rule::{RuleBox, RuleChild, RuleValue, RootBox};
+use crate::rule::{RootBox, RuleBox, RuleChild, RuleValue};
 use crate::track::{Album, Artist, GenreCount, SmartPlaylistKind, Track, TrackId};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -779,10 +779,10 @@ pub trait LibraryQueryStore {
     /// The tree is compiled to one predicate over the `tracks` table — never a
     /// join to the `albums` or `artists` entity tables, because a Rule tests
     /// the Track's own tag, not the album's. `needle` is the listing's current
-    /// search text and is **ANDed inside** this read, the way the folder and
-    /// genre-filtered reads AND theirs: a needle applied after paging would
-    /// silently drop rows from a window that was cut on the unfiltered answer.
-    /// `None` means no needle.
+    /// search text and is combined into this read with `AND`, the way the folder
+    /// and genre-filtered reads combine theirs: a needle applied after paging
+    /// would silently drop rows from a window that was cut on the unfiltered
+    /// answer. `None` means no needle.
     ///
     /// A tree this store cannot turn into a predicate is an error carrying a
     /// reason, never an empty page: a tree holding a field id this build does

@@ -39,8 +39,8 @@ use riff_persistence::rule::{
     CivilDateTime, Combine, Comparison, MatchableField, RuleValue, Semantic,
 };
 use riff_persistence::store::RuleTree;
-use rusqlite::types::ToSqlOutput;
 use rusqlite::ToSql;
+use rusqlite::types::ToSqlOutput;
 use std::time::SystemTime;
 
 use super::sqlite::nanos_from_system_time;
@@ -303,12 +303,11 @@ pub(crate) struct Predicate {
     pub(crate) params: Vec<Bound>,
 }
 
-/// Compile a whole tree — ANDed with the listing's current search `needle`,
+/// Compile a whole tree — combined with the listing's current search `needle`
+/// by `AND`,
 /// `None` for no needle — into one predicate over `tracks`.
 pub(crate) fn compile(tree: &RuleTree, needle: Option<&str>) -> Result<Predicate, StoreError> {
-    let mut compiler = Compiler {
-        params: Vec::new(),
-    };
+    let mut compiler = Compiler { params: Vec::new() };
     let mut sql = compiler.group(tree)?;
 
     if let Some(needle) = needle {
@@ -457,7 +456,7 @@ impl Compiler {
         // a valueless row is the save path's mistake, not a reason to stop
         // matching: absence is decided by the column alone.
         if row.value_widgets(comparison).is_empty() {
-            return self.absence(column, field_id, operator_id);
+            return Self::absence(column, field_id, operator_id);
         }
         let Some(value) = value else {
             return Err(refusal(format!(
@@ -480,7 +479,6 @@ impl Compiler {
     /// untagged Tracks up. Numbers and dates have no empty value to fold into,
     /// so they ask whether the column is there at all.
     fn absence(
-        &mut self,
         column: &FieldColumn,
         field_id: &str,
         operator_id: &str,
@@ -506,7 +504,9 @@ impl Compiler {
     }
 
     /// One leaf's positive test, given the column's shape and what the
-    /// comparison means.
+    /// comparison means. One function per shape: the dispatch below is the
+    /// whole vocabulary of what a leaf can be, and a new [`Fact`] row has to
+    /// answer here rather than somewhere inside a hundred-line match.
     fn test(
         &mut self,
         column: &FieldColumn,
@@ -515,172 +515,213 @@ impl Compiler {
         field_id: &str,
         operator_id: &str,
     ) -> Result<String, StoreError> {
-        let wrong_kind = |kind: &str| {
-            refusal(format!(
-                "the Rule testing \"{field_id}\" with \"{operator_id}\" needs {kind}"
-            ))
-        };
-        Ok(match (&column.fact, semantic) {
-            // ---- text, folded at the column ------------------------------
+        match (&column.fact, semantic) {
             (Fact::Text | Fact::GenreSegments, Semantic::Equality | Semantic::Containment) => {
-                let RuleValue::Text(needle) = value else {
-                    return Err(wrong_kind("a needle"));
-                };
-                let needle = needle.to_lowercase();
-                let folded = fold_text(column.column);
-                match (semantic, &column.fact) {
-                    (Semantic::Containment, _) => {
-                        // Containment is a literal substring of the folded
-                        // text — including for genre, where a needle is
-                        // allowed to land inside one segment or across two.
-                        let placeholder = self.bind(Bound::Text(needle));
-                        format!("instr({folded}, {placeholder}) > 0")
-                    }
-                    (_, Fact::GenreSegments) => {
-                        // Genre is a *set*, so `is` asks for one whole segment:
-                        // the lowered, space-stripped column wrapped in the
-                        // delimiter on both sides, searched for the wrapped
-                        // needle. Exact for `"Art Rock;Progressive Rock"`, and
-                        // quietly wrong for a segment padded with anything that
-                        // is not a space: a tab survives the strip, so a row
-                        // stored as `"Art Rock;\tProgressive Rock"` holds no
-                        // `";progressiverock;"` and does not match. The genres
-                        // view trims each segment and *does* show that tag — a
-                        // documented disagreement between a view and a Rule,
-                        // pinned by a test rather than hidden.
-                        let segment = needle.replace(' ', "");
-                        let placeholder = self.bind(Bound::Text(format!(";{segment};")));
-                        let segments =
-                            format!("';' || replace({folded}, ' ', '') || ';'");
-                        format!("instr({segments}, {placeholder}) > 0")
-                    }
-                    _ => {
-                        let placeholder = self.bind(Bound::Text(needle));
-                        format!("{folded} = {placeholder}")
-                    }
-                }
+                self.text_test(column, semantic, value, field_id, operator_id)
             }
-
-            // ---- whole numbers -------------------------------------------
-            (Fact::Integer, Semantic::Equality | Semantic::GreaterThan | Semantic::LessThan) => {
-                let RuleValue::Number(number) = value else {
-                    return Err(wrong_kind("a number"));
-                };
-                fold_test(ordering_of(column, semantic, self.bind(Bound::Integer(*number))))
-            }
-
-            // ---- duration: milliseconds against the store's nanoseconds ---
             (
-                Fact::DurationNanos,
+                Fact::Integer | Fact::DurationNanos,
                 Semantic::Equality | Semantic::GreaterThan | Semantic::LessThan,
-            ) => {
-                let RuleValue::DurationMillis(millis) = value else {
-                    return Err(wrong_kind("a duration"));
-                };
+            ) => self.numeric_test(column, semantic, value, field_id, operator_id),
+            (
+                Fact::HistoryNanos,
+                Semantic::WithinDays | Semantic::EarlierThan | Semantic::LaterThan,
+            ) => self.history_test(column, semantic, value, field_id, operator_id),
+            (Fact::Flag | Fact::LosslessSuffix, Semantic::Equality) => {
+                self.yes_no_test(column, value, field_id, operator_id)
+            }
+            _ => Err(refusal(format!(
+                "the Rule tests \"{field_id}\" with \"{operator_id}\" in a way this build cannot compile"
+            ))),
+        }
+    }
+
+    /// Text, folded at the column: absent is the empty string, and the fold is
+    /// `lower()` — ASCII only, ADR 0020 — against a needle Rust-lowercased in
+    /// full, which is the asymmetry the non-Latin case pins.
+    fn text_test(
+        &mut self,
+        column: &FieldColumn,
+        semantic: Semantic,
+        value: &RuleValue,
+        field_id: &str,
+        operator_id: &str,
+    ) -> Result<String, StoreError> {
+        let RuleValue::Text(needle) = value else {
+            return Err(refusal(format!(
+                "the Rule testing \"{field_id}\" with \"{operator_id}\" needs a needle"
+            )));
+        };
+        let needle = needle.to_lowercase();
+        let folded = fold_text(column.column);
+        Ok(match (semantic, &column.fact) {
+            (Semantic::Containment, _) => {
+                // Containment is a literal substring of the folded text —
+                // including for genre, where a needle may land inside one
+                // segment or across two.
+                let placeholder = self.bind(Bound::Text(needle));
+                format!("instr({folded}, {placeholder}) > 0")
+            }
+            (_, Fact::GenreSegments) => {
+                // Genre is a *set*, so `is` asks for one whole segment: the
+                // lowered, space-stripped column wrapped in the delimiter on
+                // both sides, searched for the wrapped needle. Exact for
+                // `"Art Rock;Progressive Rock"`, and quietly wrong for a segment
+                // padded with anything that is not a space: a tab survives the
+                // strip, so a row stored as `"Art Rock;\tProgressive Rock"`
+                // holds no `";progressiverock;"` and does not match. The genres
+                // view trims each segment and *does* show that tag — the
+                // documented disagreement between a view and a Rule, pinned by a
+                // test rather than hidden.
+                let segment = needle.replace(' ', "");
+                let placeholder = self.bind(Bound::Text(format!(";{segment};")));
+                let segments = format!("';' || replace({folded}, ' ', '') || ';'");
+                format!("instr({segments}, {placeholder}) > 0")
+            }
+            _ => {
+                let placeholder = self.bind(Bound::Text(needle));
+                format!("{folded} = {placeholder}")
+            }
+        })
+    }
+
+    /// A whole number, or a duration: the same ordering test, and the same fold
+    /// of the *test* rather than the column, because a number has no empty value
+    /// to fold into.
+    fn numeric_test(
+        &mut self,
+        column: &FieldColumn,
+        semantic: Semantic,
+        value: &RuleValue,
+        field_id: &str,
+        operator_id: &str,
+    ) -> Result<String, StoreError> {
+        let number = match (&column.fact, value) {
+            (Fact::Integer, RuleValue::Number(number)) => *number,
+            (Fact::DurationNanos, RuleValue::DurationMillis(millis)) => {
                 // Exact, not rounded: 1 ms = 1e6 ns, so a threshold written in
                 // whole milliseconds lands on a whole multiple of the column's
-                // unit and `>` / `<` cannot straddle a track by a fraction.
-                let nanos = millis
+                // unit and `>` / `<` cannot straddle a Track by a fraction.
+                // Saturating, because a hand-edited value cannot fail a read.
+                millis
                     .checked_mul(NANOS_PER_MILLI)
                     .and_then(|nanos| i64::try_from(nanos).ok())
-                    .unwrap_or(i64::MAX);
-                fold_test(ordering_of(column, semantic, self.bind(Bound::Integer(nanos))))
+                    .unwrap_or(i64::MAX)
             }
-
-            // ---- history dates -------------------------------------------
-            (Fact::HistoryNanos, Semantic::WithinDays) => {
-                let RuleValue::Days(days) = value else {
-                    return Err(wrong_kind("a day count"));
-                };
-                // The cutoff is computed **at read time**, from the same epoch
-                // clock the history facts were written with: a window counted
-                // back from the day the Rule was saved would stop being a
-                // window the next morning.
-                let cutoff = self.bind(Bound::Integer(Self::days_cutoff(*days)));
-                fold_test(format!("{} >= {cutoff}", column.column))
-            }
-            (Fact::HistoryNanos, Semantic::EarlierThan | Semantic::LaterThan) => {
-                let RuleValue::DateTime(civil) = value else {
-                    return Err(wrong_kind("a day and a time"));
-                };
-                let operator = match semantic {
-                    Semantic::EarlierThan => "<",
-                    _ => ">",
-                };
-                // Zone-less on purpose, and read against the listener's own
-                // clock *on the machine doing the reading*: a saved Rule says
-                // what the listener typed, not what instant that maps to.
-                // Storing a zone would make one saved Rule answer differently
-                // on another machine, which is a thing no listener asks for.
-                //
-                // So the comparison happens in the local domain on both sides:
-                // the epoch-nanosecond column is rendered as local civil text
-                // and compared with the stored civil text. Fixed width,
-                // zero-padded ASCII digits — lexical order *is* chronological
-                // order. The reverse (converting the listener's typed day into
-                // epoch seconds to bind as a number) would need this crate to
-                // own a timezone database, which it does not have and must not
-                // gain for a Rule; `strftime(…, 'localtime') is the same machine
-                // clock the history stamp was written with.
-                //
-                // Second granularity, both sides: `before` is strictly earlier
-                // than the instant typed, and a stamp inside that same second
-                // is neither before nor after it.
-                let local = format!(
-                    "strftime('%Y-%m-%d %H:%M:%S', {} / 1000000000, 'unixepoch', 'localtime')",
-                    column.column
-                );
-                let placeholder = self.bind(Bound::Text(Self::civil_sql_text(civil)));
-                fold_test(format!("{local} {operator} {placeholder}"))
-            }
-
-            // ---- yes / no facts ------------------------------------------
-            (Fact::Flag | Fact::LosslessSuffix, Semantic::Equality) => {
-                let RuleValue::YesNo(yes) = value else {
-                    return Err(wrong_kind("a yes or a no"));
-                };
-                match column.fact {
-                    Fact::Flag => {
-                        let placeholder = self.bind(Bound::Integer(i64::from(*yes)));
-                        format!("{} = {placeholder}", column.column)
-                    }
-                    _ => {
-                        // A case-insensitive **suffix** match on the stored
-                        // path: no file is opened and no codec is inspected, so
-                        // an ALAC track inside a `.m4a` container reports as
-                        // lossy. Accepted, and pinned.
-                        //
-                        // `substr(x, -n) = ?` rather than `LIKE '%.ext'`: this
-                        // connection runs with `case_sensitive_like = ON`, and
-                        // `LIKE` would also make the extension's own letters
-                        // pattern characters to reason about. `lower()` folds
-                        // ASCII only (ADR 0020) and an extension is ASCII, so
-                        // for `.FLAC` the fold is exact.
-                        let mut arms = Vec::with_capacity(field_catalog::LOSSLESS_EXTENSIONS.len());
-                        for extension in field_catalog::LOSSLESS_EXTENSIONS {
-                            let suffix = format!(".{}", extension.to_lowercase());
-                            let placeholder = self.bind(Bound::Text(suffix.clone()));
-                            arms.push(format!(
-                                "substr(lower({}), -{}) = {placeholder}",
-                                column.column,
-                                suffix.chars().count()
-                            ));
-                        }
-                        let lossless = arms.join(" OR ");
-                        if *yes {
-                            format!("({lossless})")
-                        } else {
-                            format!("NOT ({lossless})")
-                        }
-                    }
-                }
-            }
-
             _ => {
                 return Err(refusal(format!(
-                    "the Rule tests \"{field_id}\" with \"{operator_id}\" in a way this build cannot compile"
+                    "the Rule testing \"{field_id}\" with \"{operator_id}\" needs a number or a duration"
                 )));
             }
+        };
+        Ok(fold_test(ordering_of(
+            column,
+            semantic,
+            self.bind(Bound::Integer(number)),
+        )))
+    }
+
+    /// A history date: a moving window counted back from the read, or a
+    /// zone-less boundary read against this machine's clock.
+    fn history_test(
+        &mut self,
+        column: &FieldColumn,
+        semantic: Semantic,
+        value: &RuleValue,
+        field_id: &str,
+        operator_id: &str,
+    ) -> Result<String, StoreError> {
+        if semantic == Semantic::WithinDays {
+            let RuleValue::Days(days) = value else {
+                return Err(refusal(format!(
+                    "the Rule testing \"{field_id}\" with \"{operator_id}\" needs a day count"
+                )));
+            };
+            // The cutoff is computed **at read time**, from the same epoch clock
+            // the history facts were written with: a window counted back from
+            // the day the Rule was saved would stop being a window the next
+            // morning.
+            let cutoff = self.bind(Bound::Integer(Self::days_cutoff(*days)));
+            return Ok(fold_test(format!("{} >= {cutoff}", column.column)));
+        }
+        let RuleValue::DateTime(civil) = value else {
+            return Err(refusal(format!(
+                "the Rule testing \"{field_id}\" with \"{operator_id}\" needs a day and a time"
+            )));
+        };
+        let operator = if semantic == Semantic::EarlierThan {
+            "<"
+        } else {
+            ">"
+        };
+        // Zone-less on purpose, and read against the listener's own clock *on
+        // the machine doing the reading*: a saved Rule says what the listener
+        // typed, not what instant that maps to. Storing a zone would make one
+        // saved Rule answer differently on another machine, which is a thing no
+        // listener asks for.
+        //
+        // So the comparison happens in the local domain on both sides: the
+        // epoch-nanosecond column is rendered as local civil text and compared
+        // with the stored civil text. Fixed width, zero-padded ASCII digits —
+        // lexical order *is* chronological order. The reverse (converting the
+        // listener's typed day into epoch seconds to bind as a number) would
+        // need this crate to own a timezone database, which it does not have and
+        // must not gain for a Rule; `strftime(…, \'localtime\')` is the same
+        // machine clock the history stamp was written with.
+        //
+        // Second granularity, both sides: `before` is strictly earlier than the
+        // instant typed, and a stamp inside that same second is neither before
+        // nor after it.
+        let local = format!(
+            "strftime('%Y-%m-%d %H:%M:%S', {} / 1000000000, 'unixepoch', 'localtime')",
+            column.column
+        );
+        let placeholder = self.bind(Bound::Text(Self::civil_sql_text(civil)));
+        Ok(fold_test(format!("{local} {operator} {placeholder}")))
+    }
+
+    /// A fact with two sides and no absent state: the favorite flag, and the
+    /// lossless suffix read off the stored path.
+    fn yes_no_test(
+        &mut self,
+        column: &FieldColumn,
+        value: &RuleValue,
+        field_id: &str,
+        operator_id: &str,
+    ) -> Result<String, StoreError> {
+        let RuleValue::YesNo(yes) = value else {
+            return Err(refusal(format!(
+                "the Rule testing \"{field_id}\" with \"{operator_id}\" needs a yes or a no"
+            )));
+        };
+        if let Fact::Flag = column.fact {
+            let placeholder = self.bind(Bound::Integer(i64::from(*yes)));
+            return Ok(format!("{} = {placeholder}", column.column));
+        }
+        // A case-insensitive **suffix** match on the stored path: no file is
+        // opened and no codec is inspected, so an ALAC track inside a `.m4a`
+        // container reports as lossy. Accepted, and pinned.
+        //
+        // `substr(x, -n) = ?` rather than `LIKE \'%.ext\'`: this connection runs
+        // with `case_sensitive_like = ON`, and `LIKE` would also make the
+        // extension\'s own letters pattern characters to reason about.
+        // `lower()` folds ASCII only (ADR 0020) and an extension is ASCII, so
+        // for `.FLAC` the fold is exact.
+        let mut arms = Vec::with_capacity(field_catalog::LOSSLESS_EXTENSIONS.len());
+        for extension in field_catalog::LOSSLESS_EXTENSIONS {
+            let suffix = format!(".{}", extension.to_lowercase());
+            let placeholder = self.bind(Bound::Text(suffix.clone()));
+            arms.push(format!(
+                "substr(lower({}), -{}) = {placeholder}",
+                column.column,
+                suffix.chars().count()
+            ));
+        }
+        let lossless = arms.join(" OR ");
+        Ok(if *yes {
+            format!("({lossless})")
+        } else {
+            format!("NOT ({lossless})")
         })
     }
 
@@ -701,8 +742,9 @@ impl Compiler {
     /// "everything that has a history stamp at all", which is what such a window
     /// means.
     fn days_cutoff(days: u32) -> i64 {
-        let nanos_back =
-            u64::from(days).saturating_mul(SECONDS_PER_DAY).saturating_mul(1_000_000_000);
+        let nanos_back = u64::from(days)
+            .saturating_mul(SECONDS_PER_DAY)
+            .saturating_mul(1_000_000_000);
         let now = nanos_from_system_time(SystemTime::now());
         now.saturating_sub(i64::try_from(nanos_back).unwrap_or(i64::MAX))
     }

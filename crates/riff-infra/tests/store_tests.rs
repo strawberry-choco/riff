@@ -7087,14 +7087,7 @@ struct RulesRow {
 }
 
 /// The civil instant a corpus row names, spelled as the parts a Rule stores.
-fn civil(
-    year: i32,
-    month: u8,
-    day: u8,
-    hour: u8,
-    minute: u8,
-    second: u8,
-) -> CivilDateTime {
+fn civil(year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> CivilDateTime {
     CivilDateTime {
         year,
         month,
@@ -7106,7 +7099,9 @@ fn civil(
 }
 
 /// The Rule corpus. One comment per row naming what it pins, and every shape
-/// the spec's fixture minimum asks for.
+/// the spec's fixture minimum asks for. The table is data rather than logic,
+/// so it is one table and deliberately not split.
+#[allow(clippy::too_many_lines, reason = "one corpus row per pinned shape")]
 fn rules_fixtures() -> Vec<RulesRow> {
     vec![
         // The `;`-separated genre tag, and the local-midnight pair's earlier
@@ -7413,16 +7408,18 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year_of_era = y - era * 400;
     let month_shift = if month > 2 { month - 3 } else { month + 9 };
     let day_of_year = (153 * month_shift + 2) / 5 + day - 1;
-    let day_of_era =
-        year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
 }
 
 /// The instant a zone-less civil value names *on this machine*: the listener's
 /// own clock is the whole of its meaning, which is why no zone is stored.
 fn local_instant(civil: &CivilDateTime, offset_seconds: i64) -> SystemTime {
-    let seconds = days_from_civil(i64::from(civil.year), i64::from(civil.month), i64::from(civil.day))
-        * 86_400
+    let seconds = days_from_civil(
+        i64::from(civil.year),
+        i64::from(civil.month),
+        i64::from(civil.day),
+    ) * 86_400
         + i64::from(civil.hour) * 3_600
         + i64::from(civil.minute) * 60
         + i64::from(civil.second)
@@ -7445,18 +7442,12 @@ fn rules_tracks(rows: &[RulesRow], offset_seconds: i64, now: SystemTime) -> Vec<
                 .last_played
                 .as_ref()
                 .map(|instant| local_instant(instant, offset_seconds))
-                .or_else(|| {
-                    row.last_played_days_ago
-                        .map(|days| days_ago(now, days))
-                });
+                .or_else(|| row.last_played_days_ago.map(|days| days_ago(now, days)));
             let date_added = row
                 .date_added
                 .as_ref()
                 .map(|instant| local_instant(instant, offset_seconds))
-                .or_else(|| {
-                    row.date_added_days_ago
-                        .map(|days| days_ago(now, days))
-                });
+                .or_else(|| row.date_added_days_ago.map(|days| days_ago(now, days)));
             Track {
                 id: TrackId::from_path(std::path::Path::new(&path)),
                 file_path: PathBuf::from(&path),
@@ -7494,15 +7485,12 @@ fn seeded_rules_store(db_path: &std::path::Path) -> (SqliteStore, Vec<Track>) {
     let (changes_tx, _changes_rx) =
         crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
     let mut store =
-        riff_infra::store::SqliteStore::open_and_migrate(db_path, changes_tx)
-            .expect("store opens");
+        riff_infra::store::SqliteStore::open_and_migrate(db_path, changes_tx).expect("store opens");
     let offset = local_offset_seconds(&store);
     let rows = rules_fixtures();
     let tracks = rules_tracks(&rows, offset, now);
 
-    store
-        .apply_scan_batch(&tracks)
-        .expect("fixtures apply");
+    store.apply_scan_batch(&tracks).expect("fixtures apply");
 
     for (row, track) in rows.iter().zip(&tracks) {
         let last_nanos = track.last_played.map(signed_nanos);
@@ -7616,9 +7604,11 @@ mod rules_reference {
             // `Duration`; the store compares nanoseconds against a rule value
             // scaled into nanoseconds. The corpus holds whole milliseconds,
             // which is what makes 1 ms = 1e6 ns exact on both sides.
-            "duration" => Held::Millis(track.duration.map(|length| {
-                u64::try_from(length.as_millis()).unwrap_or(u64::MAX)
-            })),
+            "duration" => Held::Millis(
+                track
+                    .duration
+                    .map(|length| u64::try_from(length.as_millis()).unwrap_or(u64::MAX)),
+            ),
             "play_count" => Held::Whole(Some(i64::from(track.play_count))),
             "last_played" => Held::Moment(track.last_played),
             "date_added" => Held::Moment(track.date_added),
@@ -7688,10 +7678,6 @@ mod rules_reference {
                 let needle = text(value)?.to_lowercase();
                 Some(folded_text(&held)? == needle)
             }
-            (Held::Tag(_), Semantic::Containment) => {
-                let needle = text(value)?.to_lowercase();
-                Some(folded_text(&held)?.contains(&needle))
-            }
             (Held::Set(_), Semantic::Equality) => {
                 // One whole segment: split on `;`, strip spaces from both sides,
                 // and compare — which is exactly what the store's
@@ -7704,7 +7690,7 @@ mod rules_reference {
                         .any(|segment| segment == target),
                 )
             }
-            (Held::Set(_), Semantic::Containment) => {
+            (Held::Tag(_) | Held::Set(_), Semantic::Containment) => {
                 let needle = text(value)?.to_lowercase();
                 Some(folded_text(&held)?.contains(&needle))
             }
@@ -7715,12 +7701,8 @@ mod rules_reference {
             // and the Track stays in. That sentence is the whole promise, and it
             // is what a `held.unwrap_or_default()` spelling would quietly break
             // (an absent duration would read as zero seconds long).
-            (Held::Whole(number), _) => {
-                Some(numeric(*number, semantic, number_value(value)?))
-            }
-            (Held::Millis(length), _) => {
-                Some(numeric(*length, semantic, duration_value(value)?))
-            }
+            (Held::Whole(number), _) => Some(numeric(*number, semantic, number_value(value)?)),
+            (Held::Millis(length), _) => Some(numeric(*length, semantic, duration_value(value)?)),
 
             // ---- history ---------------------------------------------------
             (Held::Moment(moment), _) => match semantic {
@@ -7747,7 +7729,7 @@ mod rules_reference {
                         _ => played > boundary,
                     })
                 }
-                _ => return None,
+                _ => None,
             },
 
             // ---- yes / no --------------------------------------------------
@@ -7757,7 +7739,7 @@ mod rules_reference {
     }
 
     /// One Box, and everything under it, answered for one Track.
-    fn answers(tree: &RuleTree, track: &Track, needle: Option<&str>, clock: &Clock) -> Option<bool> {
+    fn answers(tree: &RuleTree, track: &Track, clock: &Clock) -> Option<bool> {
         match tree {
             RuleTree::Rule {
                 field_id,
@@ -7775,7 +7757,7 @@ mod rules_reference {
                 }
                 let mut arms = Vec::with_capacity(children.len());
                 for child in children {
-                    arms.push(answers(child, track, needle, clock)?);
+                    arms.push(answers(child, track, clock)?);
                 }
                 Some(match combine {
                     Combine::All => arms.iter().all(|arm| *arm),
@@ -7803,16 +7785,21 @@ mod rules_reference {
             favorite: false,
             search_text: String::new(),
         };
-        answers(tree, &probe, None, clock).is_some()
+        answers(tree, &probe, clock).is_some()
     }
 
     /// Every Track the tree matches, in the store's canonical flat order (path
     /// ascending, byte-wise), which is the order the read is asked for.
-    pub fn matches(tracks: &[Track], tree: &RuleTree, needle: Option<&str>, clock: &Clock) -> Vec<TrackId> {
+    pub fn matches(
+        tracks: &[Track],
+        tree: &RuleTree,
+        needle: Option<&str>,
+        clock: &Clock,
+    ) -> Vec<TrackId> {
         let mut ids: Vec<TrackId> = tracks
             .iter()
             .filter(|track| {
-                answers(tree, track, needle, clock)
+                answers(tree, track, clock)
                     .expect("the tree must be readable before its answer is asked for")
                 // The needle is ANDed with the tree, never chosen against it.
                 && track
@@ -7898,26 +7885,50 @@ mod rules_reference {
 // the shared input of the built-in lists: data, no logic, and no field id that
 // the compiler's own table owns.
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "a probe names its value in one call"
+)]
 fn needle(text: &str) -> Option<RuleValue> {
     Some(RuleValue::Text(text.to_string()))
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "a probe names its value in one call"
+)]
 fn number(value: i64) -> Option<RuleValue> {
     Some(RuleValue::Number(value))
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "a probe names its value in one call"
+)]
 fn millis(value: u64) -> Option<RuleValue> {
     Some(RuleValue::DurationMillis(value))
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "a probe names its value in one call"
+)]
 fn days(value: u32) -> Option<RuleValue> {
     Some(RuleValue::Days(value))
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "a probe names its value in one call"
+)]
 fn boundary(instant: CivilDateTime) -> Option<RuleValue> {
     Some(RuleValue::DateTime(instant))
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "a probe names its value in one call"
+)]
 fn yes(value: bool) -> Option<RuleValue> {
     Some(RuleValue::YesNo(value))
 }
@@ -7933,11 +7944,7 @@ fn rule(field: MatchableField, comparison: Comparison, value: Option<RuleValue>)
 }
 
 /// The same test inverted — the one spelling of "is not" there is.
-fn rule_not(
-    field: MatchableField,
-    comparison: Comparison,
-    value: Option<RuleValue>,
-) -> RuleTree {
+fn rule_not(field: MatchableField, comparison: Comparison, value: Option<RuleValue>) -> RuleTree {
     RuleTree::Rule {
         field_id: field.stored_id().to_string(),
         operator_id: comparison.stored_id().to_string(),
@@ -7970,55 +7977,91 @@ fn from_root(boxed: riff_persistence::rule::RootBox) -> RuleTree {
 /// a window or a boundary that this corpus *splits*, so a case that silently
 /// answered "everything" or "nothing" would be visible in the fixture rather
 /// than hidden in the assertion. The catalog still decides which comparisons are
-/// asked at all — this table only answers what value to write.
+/// asked at all — this table only answers what value to write, and a shared
+/// threshold under two comparisons is deliberate: it proves `>` and `<` are two
+/// tests of one number rather than one test written twice.
 fn probe(field: MatchableField, comparison: Comparison) -> Option<RuleValue> {
     use Comparison as C;
     use MatchableField as F;
-    match (field, comparison) {
-        (F::Genre, C::Is) => needle("Progressive Rock"),
-        (F::Genre, C::Contains) => needle("rock;progressive"),
-        (F::Artist, C::Is) => needle("Unknown Artist"),
-        (F::Artist, C::Contains) => needle("known"),
-        (F::AlbumArtist, C::Is) => needle("AA"),
-        (F::AlbumArtist, C::Contains) => needle("e"),
-        (F::Album, C::Is) => needle("First"),
-        (F::Album, C::Contains) => needle("eo"),
-        (F::Title, C::Is) => needle("Alpha"),
-        (F::Title, C::Contains) => needle("lph"),
-        (F::Composer, C::Is) => needle("Bach"),
-        (F::Composer, C::Contains) => needle("iva"),
-        (F::Comment, C::Is) => needle("notes"),
-        (F::Comment, C::Contains) => needle("liner"),
-        (F::Year, C::EqualTo) => number(1975),
-        (F::Year, C::GreaterThan) => number(1990),
-        (F::Year, C::LessThan) => number(1990),
+    match field {
+        F::Genre => match comparison {
+            C::Is => needle("Progressive Rock"),
+            C::Contains => needle("rock;progressive"),
+            _ => None,
+        },
+        F::Artist => match comparison {
+            C::Is => needle("Unknown Artist"),
+            C::Contains => needle("known"),
+            _ => None,
+        },
+        F::AlbumArtist => match comparison {
+            C::Is => needle("AA"),
+            C::Contains => needle("e"),
+            _ => None,
+        },
+        F::Album => match comparison {
+            C::Is => needle("First"),
+            C::Contains => needle("eo"),
+            _ => None,
+        },
+        F::Title => match comparison {
+            C::Is => needle("Alpha"),
+            C::Contains => needle("lph"),
+            _ => None,
+        },
+        F::Composer => match comparison {
+            C::Is => needle("Bach"),
+            C::Contains => needle("iva"),
+            _ => None,
+        },
+        F::Comment => match comparison {
+            C::Is => needle("notes"),
+            C::Contains => needle("liner"),
+            _ => None,
+        },
+        F::Year => match comparison {
+            C::EqualTo => number(1975),
+            C::GreaterThan | C::LessThan => number(1990),
+            _ => None,
+        },
         // The round-millisecond pair: exactly one hour, and one millisecond
-        // over it. Equality and both orderings land on opposite rows.
-        (F::Duration, C::EqualTo) => millis(3_600_000),
-        (F::Duration, C::GreaterThan) => millis(3_600_000),
-        (F::Duration, C::LessThan) => millis(300_000),
-        (F::PlayCount, C::EqualTo) => number(3),
-        (F::PlayCount, C::GreaterThan) => number(3),
-        (F::PlayCount, C::LessThan) => number(3),
-        (F::LastPlayed, C::InLast) => days(7),
+        // over it. Equality and the ordering land on opposite rows.
+        F::Duration => match comparison {
+            C::EqualTo | C::GreaterThan => millis(3_600_000),
+            C::LessThan => millis(300_000),
+            _ => None,
+        },
+        F::PlayCount => match comparison {
+            C::EqualTo | C::GreaterThan | C::LessThan => number(3),
+            _ => None,
+        },
         // The local-midnight boundary: one row's stamp is 23:30 the evening
         // before it and one is 00:30 the morning after.
-        (F::LastPlayed, C::Before) => boundary(civil(2024, 3, 2, 0, 0, 0)),
-        (F::LastPlayed, C::After) => boundary(civil(2024, 3, 2, 0, 0, 0)),
-        (F::DateAdded, C::InLast) => days(30),
-        (F::DateAdded, C::Before) => boundary(civil(2024, 6, 2, 0, 0, 0)),
-        (F::DateAdded, C::After) => boundary(civil(2024, 6, 2, 0, 0, 0)),
-        (F::Favorite, C::Is) => yes(true),
-        (F::SampleRate, C::EqualTo) => number(44_100),
-        (F::SampleRate, C::GreaterThan) => number(48_000),
-        (F::SampleRate, C::LessThan) => number(44_100),
-        (F::Channels, C::EqualTo) => number(2),
-        (F::Channels, C::GreaterThan) => number(2),
-        (F::Channels, C::LessThan) => number(2),
-        (F::Lossless, C::Is) => yes(true),
-        // `is missing` takes no value, and the catalog is what says so.
-        (_, C::IsMissing) => None,
-        _ => None,
+        F::LastPlayed => match comparison {
+            C::InLast => days(7),
+            C::Before | C::After => boundary(civil(2024, 3, 2, 0, 0, 0)),
+            _ => None,
+        },
+        F::DateAdded => match comparison {
+            C::InLast => days(30),
+            C::Before | C::After => boundary(civil(2024, 6, 2, 0, 0, 0)),
+            _ => None,
+        },
+        // Both flag fields are probed with "yes", and the matrix asks each one
+        // negated as well, which is the other side.
+        F::Favorite | F::Lossless => match comparison {
+            C::Is => yes(true),
+            _ => None,
+        },
+        F::SampleRate => match comparison {
+            C::EqualTo | C::LessThan => number(44_100),
+            C::GreaterThan => number(48_000),
+            _ => None,
+        },
+        F::Channels => match comparison {
+            C::EqualTo | C::GreaterThan | C::LessThan => number(2),
+            _ => None,
+        },
     }
 }
 
@@ -8026,8 +8069,8 @@ fn probe(field: MatchableField, comparison: Comparison) -> Option<RuleValue> {
 
 /// The Rule listing's window, unwrapped, in the canonical flat order.
 fn rule_window(store: &SqliteStore, tree: &RuleTree, needle_text: Option<&str>) -> Vec<TrackId> {
-    let page = store
-        .custom_smart_playlist_page(tree, TrackListOrder::PathAsc, needle_text, 0, usize::MAX);
+    let page =
+        store.custom_smart_playlist_page(tree, TrackListOrder::PathAsc, needle_text, 0, usize::MAX);
     match page {
         Ok(page) => page.rows().iter().map(|track| track.id.clone()).collect(),
         Err(error) => panic!("the Rule tree must be answerable: {error}"),
@@ -8132,45 +8175,15 @@ fn rule_name(id: &TrackId) -> &str {
     id.0.rsplit('\\').next().unwrap_or(&id.0)
 }
 
-#[test]
-fn test_negated_rules_include_tracks_whose_value_is_absent() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("riff.sqlite3");
-    let (store, tracks) = seeded_rules_store(&db_path);
-    let clock = rule_clock(&store);
-
-    // Text: absent is the empty string, so `is not` sweeps the untagged up.
-    let not_alpha = rule_not(MatchableField::Title, Comparison::Is, needle("Alpha"));
-    assert_rule_membership(&store, &tracks, &not_alpha, None, &clock, "title is not Alpha");
-    let mut expect: Vec<&str> = rules_fixtures()
-        .iter()
-        .map(|row| row.name)
-        .filter(|name| *name != "one.flac")
-        .collect();
-    expect.sort();
-    // `eleven.mp3` carries no title at all, and it is in the answer — the
-    // promise a bare `NOT (lower(title) = 'alpha')` breaks.
-    assert!(
-        expect.contains(&"eleven.mp3") && expect.contains(&"six"),
-        "the corpus must hold absent-title rows for this to mean anything"
-    );
-    let names: Vec<String> = rule_window(&store, &not_alpha, None)
-        .iter()
-        .map(rule_name)
-        .map(str::to_string)
-        .collect();
-    assert_eq!(
-        names,
-        expect
-            .iter()
-            .map(|name| name.to_string())
-            .collect::<Vec<_>>(),
-        "`title is not \"Alpha\"` is every other Track, absent title included"
-    );
-
-    // Numbers and dates: no empty value exists, so the TEST is folded, and a
-    // negated test on an absent column is true.
-    let cases: Vec<(&str, RuleTree, Vec<&str>)> = vec![
+/// The negation pins: each entry is a tree, the corpus names it must answer,
+/// and why the shape is on the list. Pulled out of the test because the table
+/// is the point and a wall of fifteen-row vectors is not a readable assertion.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one pinned table: a tree per absent shape"
+)]
+fn negation_pins() -> Vec<(&'static str, RuleTree, Vec<&'static str>)> {
+    vec![
         (
             "duration is not greater than one hour",
             rule_not(
@@ -8272,10 +8285,53 @@ fn test_negated_rules_include_tracks_whose_value_is_absent() {
             rule(MatchableField::DateAdded, Comparison::IsMissing, None),
             vec!["eleven.mp3", "six"],
         ),
-    ];
-    for (why, tree, names) in cases {
-        let mut sorted = names;
-        sorted.sort();
+    ]
+}
+
+#[test]
+fn test_negated_rules_include_tracks_whose_value_is_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (store, tracks) = seeded_rules_store(&db_path);
+    let clock = rule_clock(&store);
+
+    // Text: absent is the empty string, so `is not` sweeps the untagged up.
+    let not_alpha = rule_not(MatchableField::Title, Comparison::Is, needle("Alpha"));
+    assert_rule_membership(
+        &store,
+        &tracks,
+        &not_alpha,
+        None,
+        &clock,
+        "title is not Alpha",
+    );
+    let mut expect: Vec<&str> = rules_fixtures()
+        .iter()
+        .map(|row| row.name)
+        .filter(|name| *name != "one.flac")
+        .collect();
+    expect.sort_unstable();
+    assert!(
+        expect.contains(&"eleven.mp3") && expect.contains(&"six"),
+        "the corpus must hold absent-title rows for this to mean anything"
+    );
+    let names: Vec<String> = rule_window(&store, &not_alpha, None)
+        .iter()
+        .map(rule_name)
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        names,
+        expect.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "`title is not \"Alpha\"` is every other Track, absent title included — \
+         `eleven.mp3` carries no title at all, which is exactly what a bare \
+         `NOT (lower(title) = 'alpha')` in SQL would have dropped"
+    );
+
+    // Numbers and dates: no empty value exists, so the TEST is folded, and a
+    // negated test on an absent column is true.
+    for (why, tree, mut names) in negation_pins() {
+        names.sort_unstable();
         assert_rule_membership(&store, &tracks, &tree, None, &clock, why);
         let actual: Vec<String> = rule_window(&store, &tree, None)
             .iter()
@@ -8284,9 +8340,9 @@ fn test_negated_rules_include_tracks_whose_value_is_absent() {
             .collect();
         assert_eq!(
             actual,
-            sorted.iter().map(|n| n.to_string()).collect::<Vec<_>>(),
-            "{why}: pinned as membership, and every absent column must be in a \
-             negated numeric or date test"
+            names.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "{why}: pinned as membership, and every absent column must be inside \
+             a negated numeric or date test"
         );
     }
 }
@@ -8314,7 +8370,9 @@ fn test_box_mixing_an_unknown_and_a_false_arm_still_includes_the_track() {
     assert_rule_membership(&store, &tracks, &tree, None, &clock, "negated Box arms");
     let ids = rule_window(&store, &tree, None);
     assert!(
-        ids.contains(&TrackId::from_path(std::path::Path::new("r:\\rules\\eleven.mp3"))),
+        ids.contains(&TrackId::from_path(std::path::Path::new(
+            "r:\\rules\\eleven.mp3"
+        ))),
         "a Track with neither a title nor a duration is inside a Box whose arms \
          are one false and one would-be-unknown answer: {:?}",
         ids.iter().map(rule_name).collect::<Vec<_>>()
@@ -8330,7 +8388,14 @@ fn test_box_mixing_an_unknown_and_a_false_arm_still_includes_the_track() {
             millis(3_600_000),
         ),
     ]);
-    assert_rule_membership(&store, &tracks, &positive, None, &clock, "positive Box arms");
+    assert_rule_membership(
+        &store,
+        &tracks,
+        &positive,
+        None,
+        &clock,
+        "positive Box arms",
+    );
     assert_eq!(
         rule_window(&store, &positive, None)
             .iter()
@@ -8501,7 +8566,14 @@ fn test_non_latin_tags_do_not_fold_case_and_that_is_pinned() {
         Comparison::Is,
         needle("Électronique"),
     );
-    assert_rule_membership(&store, &tracks, &is_electronic, None, &clock, "genre is Électronique");
+    assert_rule_membership(
+        &store,
+        &tracks,
+        &is_electronic,
+        None,
+        &clock,
+        "genre is Électronique",
+    );
     assert_eq!(
         rule_window(&store, &is_electronic, None)
             .iter()
@@ -8537,6 +8609,10 @@ fn test_non_latin_tags_do_not_fold_case_and_that_is_pinned() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one narrative: ANDing, literal needles, then paging"
+)]
 fn test_the_needle_is_anded_inside_the_read_and_paging_never_repeats_or_skips() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");
@@ -8564,7 +8640,14 @@ fn test_the_needle_is_anded_inside_the_read_and_paging_never_repeats_or_skips() 
         vec!["aged.mp3"],
         "the needle lands inside the tree's answer"
     );
-    assert_rule_membership(&store, &tracks, &ambient, Some("oscar"), &clock, "ANDed needle");
+    assert_rule_membership(
+        &store,
+        &tracks,
+        &ambient,
+        Some("oscar"),
+        &clock,
+        "ANDed needle",
+    );
     assert_eq!(
         (
             rule_total(&store, &ambient, Some("oscar")),
@@ -8596,7 +8679,14 @@ fn test_the_needle_is_anded_inside_the_read_and_paging_never_repeats_or_skips() 
         Comparison::Contains,
         needle("%_done"),
     );
-    assert_rule_membership(&store, &tracks, &underscore, None, &clock, "title contains %_done");
+    assert_rule_membership(
+        &store,
+        &tracks,
+        &underscore,
+        None,
+        &clock,
+        "title contains %_done",
+    );
     assert_eq!(
         rule_window(&store, &underscore, None)
             .iter()
@@ -8636,9 +8726,16 @@ fn test_the_needle_is_anded_inside_the_read_and_paging_never_repeats_or_skips() 
             let page = store
                 .custom_smart_playlist_page(&lossy, order, None, offset, 5)
                 .expect("a legal tree is answerable");
-            assert_eq!(page.total(), full.len(), "the total does not move with the offset");
+            assert_eq!(
+                page.total(),
+                full.len(),
+                "the total does not move with the offset"
+            );
             let ids: Vec<TrackId> = page.rows().iter().map(|track| track.id.clone()).collect();
-            assert!(!ids.is_empty(), "offset {offset} of a twelve-row answer has rows");
+            assert!(
+                !ids.is_empty(),
+                "offset {offset} of a twelve-row answer has rows"
+            );
             seen.extend(ids);
         }
         assert_eq!(seen.len(), 12, "three windows of five over twelve rows");
@@ -8684,7 +8781,11 @@ fn test_a_tree_whose_rules_match_nothing_answers_empty_and_not_everything() {
     let (store, tracks) = seeded_rules_store(&db_path);
     let clock = rule_clock(&store);
 
-    let nothing = rule(MatchableField::Title, Comparison::Is, needle("no such title"));
+    let nothing = rule(
+        MatchableField::Title,
+        Comparison::Is,
+        needle("no such title"),
+    );
     assert_rule_membership(&store, &tracks, &nothing, None, &clock, "no such title");
     assert_eq!(
         (
@@ -8771,7 +8872,11 @@ fn test_seven_levels_of_boxes_answer_the_reference_and_the_store_never_counts_th
             rule(MatchableField::Favorite, Comparison::Is, yes(true)),
             all_of(vec![
                 rule(MatchableField::Channels, Comparison::EqualTo, number(1)),
-                rule_not(MatchableField::Genre, Comparison::Is, needle("électronique")),
+                rule_not(
+                    MatchableField::Genre,
+                    Comparison::Is,
+                    needle("électronique"),
+                ),
             ]),
         ]),
     ]);
@@ -8789,14 +8894,15 @@ fn test_seven_levels_of_boxes_answer_the_reference_and_the_store_never_counts_th
     // The store's spelling and the domain's Root Box are one tree: the read is
     // driven from a frontend-shaped value in exactly the case above.
     let boxed = riff_persistence::rule::RootBox::new(
-        riff_persistence::rule::RuleBox::new(riff_persistence::rule::Combine::All)
-            .with_children(vec![riff_persistence::rule::RuleChild::Rule(
+        riff_persistence::rule::RuleBox::new(riff_persistence::rule::Combine::All).with_children(
+            vec![riff_persistence::rule::RuleChild::Rule(
                 riff_persistence::rule::Rule::new(
                     MatchableField::Year,
                     Comparison::EqualTo,
                     number(1975),
                 ),
-            )]),
+            )],
+        ),
     );
     let spelled = from_root(boxed.clone());
     assert_eq!(
@@ -8831,8 +8937,19 @@ fn test_a_zone_less_boundary_is_read_against_the_machines_own_local_midnight() {
     // that machine's own midnight rather than the epoch boundary, which is what
     // "read against the listener's own clock on that machine" promises.
     let midnight = civil(2024, 3, 2, 0, 0, 0);
-    let before = rule(MatchableField::LastPlayed, Comparison::Before, boundary(midnight));
-    assert_rule_membership(&store, &tracks, &before, None, &clock, "before local midnight");
+    let before = rule(
+        MatchableField::LastPlayed,
+        Comparison::Before,
+        boundary(midnight),
+    );
+    assert_rule_membership(
+        &store,
+        &tracks,
+        &before,
+        None,
+        &clock,
+        "before local midnight",
+    );
     assert_eq!(
         rule_window(&store, &before, None)
             .iter()
@@ -8843,8 +8960,19 @@ fn test_a_zone_less_boundary_is_read_against_the_machines_own_local_midnight() {
          it is not — nothing in the tree or the data carries a zone"
     );
 
-    let after = rule(MatchableField::LastPlayed, Comparison::After, boundary(midnight));
-    assert_rule_membership(&store, &tracks, &after, None, &clock, "after local midnight");
+    let after = rule(
+        MatchableField::LastPlayed,
+        Comparison::After,
+        boundary(midnight),
+    );
+    assert_rule_membership(
+        &store,
+        &tracks,
+        &after,
+        None,
+        &clock,
+        "after local midnight",
+    );
     assert_eq!(
         rule_window(&store, &after, None)
             .iter()
@@ -8858,8 +8986,19 @@ fn test_a_zone_less_boundary_is_read_against_the_machines_own_local_midnight() {
 
     // Negated, the same boundary takes in every Track that has no history at
     // all: absent means the test is false, and `is not` inverts that.
-    let not_after = rule_not(MatchableField::LastPlayed, Comparison::After, boundary(midnight));
-    assert_rule_membership(&store, &tracks, &not_after, None, &clock, "not after midnight");
+    let not_after = rule_not(
+        MatchableField::LastPlayed,
+        Comparison::After,
+        boundary(midnight),
+    );
+    assert_rule_membership(
+        &store,
+        &tracks,
+        &not_after,
+        None,
+        &clock,
+        "not after midnight",
+    );
     assert_eq!(
         rule_total(&store, &not_after, None),
         12,
@@ -8878,6 +9017,10 @@ fn unreadable_field(field_id: &str) -> RuleTree {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one refusal case per unreadable shape"
+)]
 fn test_an_unreadable_tree_is_refused_with_a_reason_and_never_as_an_empty_page() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("riff.sqlite3");

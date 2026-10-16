@@ -295,7 +295,6 @@ fn a_second_save_leaves_id_name_and_created_at_and_replaces_the_tree_wholesale()
         .save_smart_playlist(None, "Kept Name", &authored_tree())
         .expect("the first save");
     let before = playlist_row(&store, &id);
-    let before_ids = tree_row_ids(&store);
 
     // A different tree: one rule, one box. Every row of the first tree is gone.
     let changed = tree(vec![nested(
@@ -395,9 +394,11 @@ fn a_saved_tree_survives_reopen() {
 
 // --- the value column -------------------------------------------------------
 
-#[test]
-fn each_value_is_stored_in_the_one_spelling_the_storage_rules_name() {
-    let cases: Vec<(&str, RuleChild, Option<&str>)> = vec![
+/// Every value shape the storage rules name, as `(what, the Rule, the TEXT it is
+/// stored as)`. Table-driven because the spellings are one contract with nine
+/// cases, and a per-case test would restate the harness nine times.
+fn spelling_cases() -> Vec<(&'static str, RuleChild, Option<&'static str>)> {
+    vec![
         ("year", year_rule(), Some("1975")),
         (
             "duration",
@@ -485,9 +486,12 @@ fn each_value_is_stored_in_the_one_spelling_the_storage_rules_name() {
             ),
             Some("96000"),
         ),
-    ];
+    ]
+}
 
-    for (what, child, expected) in cases {
+#[test]
+fn each_value_is_stored_in_the_one_spelling_the_storage_rules_name() {
+    for (what, child, expected) in spelling_cases() {
         let (_dir, _path, mut store, _changes) = fresh_store();
         let authored = tree(vec![child.clone()]);
         let id = store
@@ -1251,10 +1255,10 @@ fn deleting_a_custom_list_touches_no_playlist() {
     let (_dir, _path, mut store, _changes) = fresh_store();
     let track = fixture_track("/music/one.mp3");
     store
-        .apply_scan_batch(&[track.clone()])
+        .apply_scan_batch(std::slice::from_ref(&track))
         .expect("seeding a track");
     let playlist = store
-        .create_playlist("A Playlist", &[track.id.clone()])
+        .create_playlist("A Playlist", std::slice::from_ref(&track.id))
         .expect("a Playlist row");
     let id = store
         .save_smart_playlist(None, "Custom", &authored_tree())

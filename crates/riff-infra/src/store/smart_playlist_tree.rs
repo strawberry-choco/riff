@@ -198,29 +198,26 @@ fn save_in_tx(
 ) -> rusqlite::Result<PlaylistId> {
     refuse_unsavable(tree)?;
 
-    let playlist_id = match id {
+    let playlist_id = if let Some(existing) = id {
         // The row exists, so it is updated in place — which here means this write
         // touches **no column of it at all**: not the name (only the rename path
         // names a list), not `created_at`, not the id.
-        Some(existing) => {
-            if !smart_playlist_exists(conn, existing)? {
-                return Err(store_refusal(
-                    "this list cannot be saved: the Custom Smart Playlist its draft was written \
-                     against no longer exists"
-                        .to_string(),
-                ));
-            }
-            existing.0.clone()
+        if !smart_playlist_exists(conn, existing)? {
+            return Err(store_refusal(
+                "this list cannot be saved: the Custom Smart Playlist its draft was written \
+                 against no longer exists"
+                    .to_string(),
+            ));
         }
+        existing.0.clone()
+    } else {
         // Creation is not a separate path: this insert is the only one, which is
         // why the sidebar's `+` writes nothing and the list appears on Save.
-        None => {
-            SqliteStore::reject_taken_sidebar_name(conn, name, None)?;
-            let trimmed = name.trim();
-            let id = new_smart_playlist_id(conn, trimmed)?;
-            conn.execute(INSERT_SMART_PLAYLIST, params![id, trimmed, now_nanos()])?;
-            id
-        }
+        SqliteStore::reject_taken_sidebar_name(conn, name, None)?;
+        let trimmed = name.trim();
+        let id = new_smart_playlist_id(conn, trimmed)?;
+        conn.execute(INSERT_SMART_PLAYLIST, params![id, trimmed, now_nanos()])?;
+        id
     };
 
     // Wholesale replacement, in one delete. The schema's cascades take every

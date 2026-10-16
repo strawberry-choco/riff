@@ -21060,3 +21060,643 @@ mod component_boundary_tests {
         let _expand: fn(&str) -> std::path::PathBuf = riff_gui::ui::settings::expand_tilde;
     }
 }
+
+/// The Rule row on the headless harness (Smart Playlists ticket 14).
+///
+/// Every claim here is a *measured* one: a selection is proven by a real
+/// `click()` landing on an option and the intent the row reported for it, not
+/// by a picture of a painted control — this project has twice pinned a control
+/// a user could not reach because a parent clip rect excluded it. The host is a
+/// **test-only specimen pane**, the same declared-exception class ticket 06 used
+/// for the selector: there is no production surface composing the row until
+/// ticket 15's Settings page, and no debug pane was bolted into Settings to make
+/// this suite runnable. The specimen draws the row inside a `ScrollArea`, the
+/// clipped host the real pane will be, and it owns the one effect the row must
+/// not have — reading the Library's picker values, once per picker-open.
+#[cfg(test)]
+mod rule_row_ui_tests {
+    use crate::mocks::{
+        LibraryQueryCall, MockLibraryQueryStore, MockPlaylistStore, SharedQueryStore,
+    };
+    use egui::accesskit::Toggled;
+    use egui_kittest::kittest::{NodeT as _, Queryable};
+    use riff_backend::app::store::StoreGeneration;
+    use riff_backend::app::views::SessionViews;
+    use riff_backend::domain::field_catalog::{ValueType, spec};
+    use riff_backend::domain::{Comparison, MatchableField, RuleValue};
+    use riff_gui::ui::rule_row::{
+        PICKER_LIMIT, RuleDraft, RuleIntent, RulePanel, RulePickerValues, rule_row,
+    };
+    use riff_gui_theme::icons::IconCache;
+    use riff_gui_theme::theme::Palette;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
+
+    /// The host's picker buffers: what the app seam read for the row that
+    /// opened it, handed to the row as a prop.
+    struct PickerBuffers {
+        field: Option<MatchableField>,
+        texts: Vec<String>,
+        numbers: Vec<i64>,
+    }
+
+    impl PickerBuffers {
+        fn values(&self) -> Option<RulePickerValues<'_>> {
+            self.field.map(|field| {
+                if spec(field).value_type() == ValueType::Text {
+                    RulePickerValues::Texts(&self.texts)
+                } else {
+                    RulePickerValues::Numbers(&self.numbers)
+                }
+            })
+        }
+    }
+
+    /// The specimen pane: `rows` sibling Rule rows in one scrolling host, each
+    /// with its own draft, and the host-side effect the row reports but never
+    /// performs.
+    #[derive(Clone)]
+    struct RuleRowHost {
+        drafts: Rc<RefCell<Vec<RuleDraft>>>,
+        log: Rc<RefCell<Vec<RuleIntent>>>,
+        cache: Rc<RefCell<IconCache>>,
+        picker: Rc<RefCell<PickerBuffers>>,
+        views: Rc<RefCell<SessionViews>>,
+    }
+
+    impl RuleRowHost {
+        fn new(
+            rows: usize,
+            mock: MockLibraryQueryStore,
+        ) -> (Self, Arc<Mutex<MockLibraryQueryStore>>) {
+            let mock = Arc::new(Mutex::new(mock));
+            let views = SessionViews::new(
+                Box::new(SharedQueryStore(Arc::clone(&mock))),
+                Box::new(MockPlaylistStore::default()),
+                StoreGeneration::new(),
+                StoreGeneration::new(),
+            );
+            (
+                Self {
+                    drafts: Rc::new(RefCell::new(
+                        (0..rows).map(|_| RuleDraft::blank()).collect(),
+                    )),
+                    log: Rc::new(RefCell::new(Vec::new())),
+                    cache: Rc::new(RefCell::new(IconCache::new())),
+                    picker: Rc::new(RefCell::new(PickerBuffers {
+                        field: None,
+                        texts: Vec::new(),
+                        numbers: Vec::new(),
+                    })),
+                    views: Rc::new(RefCell::new(views)),
+                },
+                mock,
+            )
+        }
+
+        fn render(&self, ui: &mut egui::Ui) {
+            let palette = Palette::dark();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let mut drafts = self.drafts.borrow_mut();
+                    for (index, draft) in drafts.iter_mut().enumerate() {
+                        let stored = self.picker.borrow();
+                        let picker = if draft.open == Some(RulePanel::Value) {
+                            stored.values()
+                        } else {
+                            None
+                        };
+                        let outcome = rule_row(
+                            ui,
+                            &mut self.cache.borrow_mut(),
+                            &palette,
+                            egui::Id::new(("specimen_rule_row", index)),
+                            draft,
+                            picker.as_ref(),
+                        );
+                        drop(stored);
+                        for intent in outcome.intents {
+                            match &intent {
+                                RuleIntent::PickerOpened { field } => {
+                                    // The read this row cannot make for itself:
+                                    // once per open, at the app seam.
+                                    let mut views = self.views.borrow_mut();
+                                    let mut stored = self.picker.borrow_mut();
+                                    stored.field = Some(*field);
+                                    if spec(*field).value_type() == ValueType::Text {
+                                        stored.texts = views.picker_texts(*field, PICKER_LIMIT);
+                                    } else {
+                                        stored.numbers = views.picker_numbers(*field, PICKER_LIMIT);
+                                    }
+                                }
+                                RuleIntent::PickerClosed => {
+                                    let mut stored = self.picker.borrow_mut();
+                                    *stored = PickerBuffers {
+                                        field: None,
+                                        texts: Vec::new(),
+                                        numbers: Vec::new(),
+                                    };
+                                }
+                                _ => {}
+                            }
+                            self.log.borrow_mut().push(intent.clone());
+                            draft.apply(&intent);
+                        }
+                    }
+                });
+        }
+
+        fn take_intents(&self) -> Vec<RuleIntent> {
+            std::mem::take(&mut *self.log.borrow_mut())
+        }
+
+        fn draft(&self, row: usize) -> RuleDraft {
+            self.drafts.borrow()[row].clone()
+        }
+    }
+
+    /// A specimen pane of `rows` rows over `mock`, already stepped once.
+    fn specimen(
+        rows: usize,
+        mock: MockLibraryQueryStore,
+    ) -> (
+        egui_kittest::Harness<'static>,
+        RuleRowHost,
+        Arc<Mutex<MockLibraryQueryStore>>,
+    ) {
+        let (host, mock) = RuleRowHost::new(rows, mock);
+        let drawn = host.clone();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(560.0, 1_200.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(move |ui| drawn.render(ui));
+        harness.step();
+        (harness, host, mock)
+    }
+
+    /// The genre picker the mock answers with.
+    fn genre_mock() -> MockLibraryQueryStore {
+        MockLibraryQueryStore {
+            picker_texts: vec![
+                "ambient".to_string(),
+                "electronic".to_string(),
+                "trip-hop".to_string(),
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// One settling pair: a click applies at the end of its frame and renders
+    /// in the one after.
+    fn click(harness: &mut egui_kittest::Harness<'_>, label: &str) {
+        harness.get_by_label(label).click();
+        harness.run_steps(2);
+    }
+
+    /// The same, aimed at one of several nodes sharing a label — a header and
+    /// the open list's row for the field it already chose are two such nodes.
+    fn click_nth(harness: &mut egui_kittest::Harness<'_>, label: &str, index: usize) {
+        let nodes: Vec<_> = harness.query_all_by_label(label).collect();
+        assert!(
+            nodes.len() > index,
+            "{label:?} has no entry #{index} of {} — a control that is not in the              frame is not clickable",
+            nodes.len()
+        );
+        nodes[index].click();
+        harness.run_steps(2);
+    }
+
+    fn click_last(harness: &mut egui_kittest::Harness<'_>, label: &str) {
+        let nodes: Vec<_> = harness.query_all_by_label(label).collect();
+        assert!(!nodes.is_empty(), "{label:?} is absent from the frame");
+        nodes.last().expect("non-empty").click();
+        harness.run_steps(2);
+    }
+
+    /// Every picker read the port recorded, as `(field id, limit)`.
+    fn picker_reads(mock: &Arc<Mutex<MockLibraryQueryStore>>) -> Vec<(String, usize)> {
+        mock.lock()
+            .unwrap()
+            .calls()
+            .iter()
+            .filter_map(|call| match call {
+                LibraryQueryCall::PickerTexts(field, limit)
+                | LibraryQueryCall::PickerNumbers(field, limit) => Some((field.clone(), *limit)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Land a starting state on row `row` without pretending a user clicked it,
+    /// and repaint so the state is actually in the frame the next click reads.
+    fn seed(
+        harness: &mut egui_kittest::Harness<'_>,
+        host: &RuleRowHost,
+        row: usize,
+        intents: &[RuleIntent],
+    ) {
+        for intent in intents {
+            host.drafts.borrow_mut()[row].apply(intent);
+        }
+        host.log.borrow_mut().clear();
+        harness.step();
+    }
+
+    #[test]
+    fn a_real_click_reaches_an_option_in_each_of_the_rows_lists() {
+        let (mut harness, host, _mock) = specimen(1, genre_mock());
+
+        // The field list: the catalog's display names, and the deep tail of all
+        // sixteen rows is on the host's own scroll, not clipped away.
+        click(&mut harness, "Choose a field");
+        assert!(
+            harness.query_by_label("Lossless").is_some(),
+            "the field list must be drawn inline where a click can land, not behind a popup"
+        );
+        click(&mut harness, "Album Artist");
+        let intents = host.take_intents();
+        assert!(
+            intents.contains(&RuleIntent::FieldChosen {
+                field: MatchableField::AlbumArtist
+            }),
+            "a click on the catalog's own name chose the field: {intents:?}"
+        );
+        assert_eq!(host.draft(0).field, Some(MatchableField::AlbumArtist));
+        assert_eq!(
+            host.draft(0).open,
+            None,
+            "choosing closes the list it chose from"
+        );
+
+        // The comparison list, for the field now chosen.
+        click(&mut harness, "Choose a comparison");
+        click(&mut harness, "contains");
+        assert!(
+            host.take_intents().contains(&RuleIntent::ComparisonChosen {
+                choice: riff_gui::ui::rule_row::ComparisonChoice::Stored(Comparison::Contains)
+            }),
+            "a click chose `contains`"
+        );
+        assert_eq!(host.draft(0).comparison, Some(Comparison::Contains));
+
+        // The library picker, and the value it commits.
+        click(&mut harness, "Choose…");
+        assert_eq!(host.draft(0).open, Some(RulePanel::Value));
+        click(&mut harness, "trip-hop");
+        let intents = host.take_intents();
+        assert!(
+            intents.contains(&RuleIntent::ValueCommitted {
+                value: RuleValue::Text("trip-hop".to_string())
+            }),
+            "clicking a Library value committed it: {intents:?}"
+        );
+        assert_eq!(
+            host.draft(0).rule().expect("a whole rule").value(),
+            Some(&RuleValue::Text("trip-hop".to_string()))
+        );
+
+        // The yes/no list, once the row's field is one that takes it. The
+        // header and the open list's own row share the label, so the reopen is
+        // scoped to the last node.
+        click_last(&mut harness, "Album Artist");
+        click(&mut harness, "Favorite");
+        click(&mut harness, "Choose a comparison");
+        click(&mut harness, "is");
+        click(&mut harness, "Yes");
+        assert!(
+            host.take_intents().contains(&RuleIntent::ValueCommitted {
+                value: RuleValue::YesNo(true)
+            }),
+            "a click on Yes is the catalog's Yes/No answer"
+        );
+        assert_eq!(host.draft(0).gap(), None);
+    }
+
+    #[test]
+    fn the_chosen_option_is_marked_toggled_because_egui_0_35_reports_selected_that_way() {
+        let (mut harness, host, _mock) = specimen(1, genre_mock());
+        click(&mut harness, "Choose a field");
+        click(&mut harness, "Genre");
+        // Re-open the list: the current choice must carry the a11y mark.
+        click(&mut harness, "Genre");
+        let nodes: Vec<_> = harness.query_all_by_label("Genre").collect();
+        let option = nodes
+            .last()
+            .expect("the open list carries its own node for the current field");
+        assert_eq!(
+            option.accesskit_node().toggled(),
+            Some(Toggled::True),
+            "`selected` reaches AccessKit as `Toggled`, not as a selected state"
+        );
+        assert_eq!(host.draft(0).field, Some(MatchableField::Genre));
+    }
+
+    #[test]
+    fn two_rows_in_one_pane_keep_their_own_choices() {
+        let (mut harness, host, _mock) = specimen(2, genre_mock());
+        // Row one, then row two: the caller-supplied id is what keeps them apart.
+        click_nth(&mut harness, "Choose a field", 0);
+        click(&mut harness, "Artist");
+        let headers: Vec<_> = harness.query_all_by_label("Choose a field").collect();
+        assert_eq!(
+            headers.len(),
+            1,
+            "the row that chose a field stopped offering its invitation"
+        );
+        click_last(&mut harness, "Choose a field");
+        click(&mut harness, "Year");
+        assert_eq!(host.draft(0).field, Some(MatchableField::Artist));
+        assert_eq!(
+            host.draft(1).field,
+            Some(MatchableField::Year),
+            "a second instance in the same pane cannot share the first's choice"
+        );
+    }
+
+    #[test]
+    fn the_not_control_inverts_the_test_and_marks_itself() {
+        let (mut harness, host, _mock) = specimen(1, genre_mock());
+        seed(
+            &mut harness,
+            &host,
+            0,
+            &[
+                RuleIntent::FieldChosen {
+                    field: MatchableField::Genre,
+                },
+                RuleIntent::ComparisonChosen {
+                    choice: riff_gui::ui::rule_row::ComparisonChoice::Stored(Comparison::Is),
+                },
+                RuleIntent::ValueCommitted {
+                    value: RuleValue::Text("rock".to_string()),
+                },
+            ],
+        );
+        // The painted word and the switch's accessible name share the label, so
+        // the click is scoped to the control drawn after its word.
+        let nots: Vec<_> = harness.query_all_by_label("Not").collect();
+        assert_eq!(nots.len(), 2, "the inversion is both readable and named");
+        nots.last().expect("the switch").click();
+        harness.run_steps(2);
+        assert_eq!(
+            host.take_intents(),
+            vec![RuleIntent::NegationToggled { negated: true }],
+            "one control, one intent"
+        );
+        let rule = host.draft(0).rule().expect("still a whole rule");
+        assert!(rule.is_negated());
+        assert_eq!(rule.comparison(), Comparison::Is);
+        assert_eq!(
+            harness
+                .query_all_by_label("Not")
+                .last()
+                .expect("the Not control has an a11y name")
+                .accesskit_node()
+                .toggled(),
+            Some(Toggled::True),
+            "the inversion is readable, not only painted"
+        );
+    }
+
+    #[test]
+    fn is_not_missing_is_a_word_the_row_normalises_on_the_way_out() {
+        let (mut harness, host, _mock) = specimen(1, genre_mock());
+        seed(
+            &mut harness,
+            &host,
+            0,
+            &[RuleIntent::FieldChosen {
+                field: MatchableField::Genre,
+            }],
+        );
+        click(&mut harness, "Choose a comparison");
+        click(&mut harness, "is not missing");
+        assert!(
+            host.take_intents().contains(&RuleIntent::ComparisonChosen {
+                choice: riff_gui::ui::rule_row::ComparisonChoice::IsNotMissing
+            }),
+            "the row offers the word"
+        );
+        let draft = host.draft(0);
+        assert_eq!(
+            draft.comparison,
+            Some(Comparison::IsMissing),
+            "and `is_not_missing` is never a stored operator"
+        );
+        assert!(draft.negated);
+        assert_eq!(
+            draft.rule().expect("whole").comparison().stored_id(),
+            "is_missing"
+        );
+        assert_eq!(draft.current_comparison_label(), "is not missing");
+    }
+
+    #[test]
+    fn a_typed_value_is_accepted_on_enter_and_on_blur() {
+        let (mut harness, host, _mock) = specimen(1, genre_mock());
+        seed(
+            &mut harness,
+            &host,
+            0,
+            &[
+                RuleIntent::FieldChosen {
+                    field: MatchableField::Year,
+                },
+                RuleIntent::ComparisonChosen {
+                    choice: riff_gui::ui::rule_row::ComparisonChoice::Stored(Comparison::EqualTo),
+                },
+            ],
+        );
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .focus();
+        harness.run_steps(1);
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("1975");
+        harness.run_steps(1);
+        harness.key_press(egui::Key::Enter);
+        harness.run_steps(2);
+        assert_eq!(
+            host.take_intents(),
+            vec![RuleIntent::ValueCommitted {
+                value: RuleValue::Number(1975),
+            }],
+            "Enter accepts the typed year"
+        );
+
+        // A single-line field surrenders focus on Enter, so the well must be
+        // re-focused before anything else can be typed into it.
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .focus();
+        harness.run_steps(1);
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("7");
+        harness.run_steps(1);
+        // Leaving the well for another control is an acceptance too: a listener
+        // who clicks away means the value they typed.
+        click(&mut harness, "is equal to");
+        let intents = host.take_intents();
+        assert!(
+            intents.contains(&RuleIntent::ValueCommitted {
+                value: RuleValue::Number(19_757),
+            }),
+            "blur accepts the re-typed year: {intents:?}"
+        );
+    }
+
+    #[test]
+    fn the_picker_is_an_affordance_and_typing_still_answers() {
+        let (mut harness, host, mock) = specimen(1, genre_mock());
+        seed(
+            &mut harness,
+            &host,
+            0,
+            &[RuleIntent::FieldChosen {
+                field: MatchableField::Genre,
+            }],
+        );
+        click(&mut harness, "Choose a comparison");
+        click(&mut harness, "is");
+        click(&mut harness, "Choose…");
+        let before = picker_reads(&mock).len();
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .focus();
+        harness.run_steps(1);
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("synth-pop");
+        harness.run_steps(1);
+        harness.key_press(egui::Key::Enter);
+        harness.run_steps(2);
+        assert!(
+            host.take_intents().contains(&RuleIntent::ValueCommitted {
+                value: RuleValue::Text("synth-pop".to_string()),
+            }),
+            "a value the Library does not hold is still a value the listener can type"
+        );
+        assert_eq!(
+            picker_reads(&mock).len(),
+            before,
+            "typing is not a reason to read the Library again"
+        );
+    }
+
+    #[test]
+    fn the_picker_is_read_once_per_open_and_never_on_a_frame() {
+        let (mut harness, host, mock) = specimen(1, genre_mock());
+        // Painting the row — the per-frame path — must never be a store read.
+        for _ in 0..8 {
+            harness.step();
+        }
+        assert!(
+            picker_reads(&mock).is_empty(),
+            "eight frames of the same row read no picker at all"
+        );
+
+        seed(
+            &mut harness,
+            &host,
+            0,
+            &[RuleIntent::FieldChosen {
+                field: MatchableField::Genre,
+            }],
+        );
+        click(&mut harness, "Choose a comparison");
+        click(&mut harness, "is");
+        assert!(
+            picker_reads(&mock).is_empty(),
+            "choosing a comparison is not opening a picker"
+        );
+
+        click(&mut harness, "Choose…");
+        assert_eq!(
+            picker_reads(&mock),
+            vec![("genre".to_string(), PICKER_LIMIT)],
+            "one open, one bounded read, by the field's stored id"
+        );
+        for _ in 0..10 {
+            harness.step();
+        }
+        assert_eq!(
+            picker_reads(&mock).len(),
+            1,
+            "the open picker is a state, not a per-frame poll"
+        );
+
+        click(&mut harness, "Hide values");
+        click(&mut harness, "Choose…");
+        assert_eq!(
+            picker_reads(&mock).len(),
+            2,
+            "a second open is a second read — one per open, never a cache the row leans on"
+        );
+    }
+
+    #[test]
+    fn the_app_seam_reads_the_picker_by_stored_id_with_the_callers_bound() {
+        // The port contract the pane leans on: one read, bounded, and the field
+        // named by its stored id rather than its display name.
+        let (host, mock) = RuleRowHost::new(
+            1,
+            MockLibraryQueryStore {
+                picker_texts: vec!["rock".to_string()],
+                picker_numbers: vec![44_100, 48_000],
+                ..Default::default()
+            },
+        );
+        let mut views = host.views.borrow_mut();
+        assert_eq!(
+            views.picker_texts(MatchableField::Genre, PICKER_LIMIT),
+            vec!["rock".to_string()]
+        );
+        assert_eq!(
+            views.picker_numbers(MatchableField::SampleRate, PICKER_LIMIT),
+            vec![44_100, 48_000]
+        );
+        drop(views);
+        assert_eq!(
+            mock.lock().unwrap().calls(),
+            vec![
+                LibraryQueryCall::PickerTexts("genre".to_string(), PICKER_LIMIT),
+                LibraryQueryCall::PickerNumbers("sample_rate".to_string(), PICKER_LIMIT),
+            ],
+            "the accessor goes through the port once per call and names the stored id"
+        );
+    }
+
+    #[test]
+    fn a_date_rule_stays_half_formed_until_ticket_20_lands() {
+        let (mut harness, host, _mock) = specimen(1, genre_mock());
+        seed(
+            &mut harness,
+            &host,
+            0,
+            &[RuleIntent::FieldChosen {
+                field: MatchableField::LastPlayed,
+            }],
+        );
+        click(&mut harness, "Choose a comparison");
+        click(&mut harness, "is before");
+        let draft = host.draft(0);
+        assert_eq!(draft.comparison, Some(Comparison::Before));
+        assert!(
+            harness.query_by_label("Yes").is_none(),
+            "a date field draws no yes/no list"
+        );
+        assert_eq!(
+            draft.gap(),
+            Some(riff_gui::ui::rule_row::RuleGap::Value(
+                riff_gui::ui::rule_row::ValueGap::Missing
+            )),
+            "the row names its missing value half rather than pretending a calendar exists"
+        );
+        assert!(draft.rule().is_none());
+    }
+}

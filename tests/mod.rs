@@ -1865,6 +1865,13 @@ pub mod mocks {
         /// is not listed answers `None` — no row — which is the state most
         /// suites want.
         pub smart_playlist_trees: std::collections::HashMap<PlaylistId, SmartPlaylistTree>,
+        /// Rows served by `custom_smart_playlist_page`, sliced per window in
+        /// list order (the total is the list's length). An empty list answers
+        /// the empty Listing Page, which is all a suite that never opens a
+        /// custom listing needs — the slice serves page mechanics only:
+        /// which Tracks a tree actually matches is the store seam's proof,
+        /// never this double's.
+        pub custom_page: Vec<Track>,
 
         // --- failure injection -------------------------------------------------
         /// Queries that fail while listed here.
@@ -1920,6 +1927,7 @@ pub mod mocks {
                 picker_texts: Vec::new(),
                 picker_numbers: Vec::new(),
                 smart_playlist_trees: std::collections::HashMap::new(),
+                custom_page: Vec::new(),
                 failing: Vec::new(),
                 calls: Mutex::new(Vec::new()),
             }
@@ -1951,7 +1959,8 @@ pub mod mocks {
                     | LibraryQueryCall::AlbumsPage(_, offset, limit)
                     | LibraryQueryCall::GenresPage(_, offset, limit)
                     | LibraryQueryCall::ArtistsInGenrePage(_, _, offset, limit)
-                    | LibraryQueryCall::ArtistAlbumsInGenrePage(_, _, _, offset, limit) => {
+                    | LibraryQueryCall::ArtistAlbumsInGenrePage(_, _, _, offset, limit)
+                    | LibraryQueryCall::CustomSmartPlaylistPage(_, _, _, offset, limit) => {
                         (*limit > 0).then_some((*offset, *limit))
                     }
                     _ => None,
@@ -1978,7 +1987,8 @@ pub mod mocks {
                     | LibraryQueryCall::AlbumsPage(_, offset, limit)
                     | LibraryQueryCall::GenresPage(_, offset, limit)
                     | LibraryQueryCall::ArtistsInGenrePage(_, _, offset, limit)
-                    | LibraryQueryCall::ArtistAlbumsInGenrePage(_, _, _, offset, limit) => {
+                    | LibraryQueryCall::ArtistAlbumsInGenrePage(_, _, _, offset, limit)
+                    | LibraryQueryCall::CustomSmartPlaylistPage(_, _, _, offset, limit) => {
                         (*limit == 0).then_some((*offset, *limit))
                     }
                     _ => None,
@@ -1995,6 +2005,46 @@ pub mod mocks {
                 .iter()
                 .filter_map(|call| match call {
                     LibraryQueryCall::GetTrack(id) => Some(id.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Every Custom Smart Playlist Listing Page read as
+        /// `(order, needle, offset, limit)` — the compiled tree the read was
+        /// asked for is on the recorded call itself for shape assertions.
+        #[must_use]
+        pub fn custom_page_calls(
+            &self,
+        ) -> Vec<(
+            riff_persistence::store::TrackListOrder,
+            Option<String>,
+            usize,
+            usize,
+        )> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|call| match call {
+                    LibraryQueryCall::CustomSmartPlaylistPage(_, order, needle, offset, limit) => {
+                        Some((*order, needle.clone(), *offset, *limit))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Every Custom Smart Playlist tree read, as the list id it was
+        /// asked about, in call order.
+        #[must_use]
+        pub fn smart_playlist_tree_calls(&self) -> Vec<PlaylistId> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|call| match call {
+                    LibraryQueryCall::SmartPlaylistTree(id) => Some(id.clone()),
                     _ => None,
                 })
                 .collect()
@@ -2148,11 +2198,19 @@ pub mod mocks {
                     "custom smart playlist boom".to_string(),
                 ));
             }
-            // Canned rows belong to whichever suite needs them: the mock
-            // answers an empty Listing Page, which is all a port-contract
-            // test can ask of a fake that never compiles SQL. Matching
-            // behaviour is the store seam's proof, never this double's.
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
+            // The canned rows slice into windows exactly like the flat list's
+            // do, which is the page mechanics a port-contract test pins.
+            // Which Tracks a tree actually matches is the store seam's
+            // proof, never this double's.
+            let total = self.custom_page.len();
+            let rows = self
+                .custom_page
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect();
+            Ok(riff_persistence::store::Page::new(total, rows))
         }
 
         fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {

@@ -11,11 +11,13 @@
 //! The rules this module exists to enforce, each stated where it is applied:
 //!
 //! * **Creation is not a separate path.** The first save inserts the playlist
-//!   row. Every later save updates that row **in place** — its id, its name and
-//!   its `created_at` survive — and replaces the tree **wholesale**: boxes and
-//!   Rules are deleted and re-inserted from the draft, positions and all, inside
-//!   the same transaction, so no row of the previous tree can survive and no
-//!   crash can leave half a rule set.
+//!   row. Every later save updates that row **in place** — its id and its
+//!   `created_at` survive, and its `name` is written from the same draft, because
+//!   the editor's name and its Rule tree are one listener action in one
+//!   transaction (the rationale is stated at `save_in_tx`) — and replaces the
+//!   tree **wholesale**: boxes and Rules are deleted and re-inserted from the
+//!   draft, positions and all, inside that same transaction, so no row of the
+//!   previous tree can survive and no crash can leave half a rule set.
 //! * **Rule and Rule Box ids are generated here**, are opaque, and never reach
 //!   the frontend. A draft therefore carries no identity that can go stale.
 //! * **Nothing empty is ever stored**: a tree with no Rule, and any box with no
@@ -64,12 +66,13 @@ const INSERT_SMART_PLAYLIST: &str =
 
 impl SqliteStore {
     /// Save one Custom Smart Playlist: insert the row when the list is new,
-    /// replace its Rule tree wholesale when it is not.
+    /// rewrite its name and replace its Rule tree wholesale when it is not.
     ///
     /// One immediate durable transaction, `BEGIN IMMEDIATE` to `COMMIT`, so the
-    /// delete and every re-inserted row land together. The sidebar-wide name rule
-    /// runs inside that transaction and before any write, so a refused name
-    /// writes nothing.
+    /// name, the delete and every re-inserted row land together. The sidebar-wide
+    /// name rule runs inside that transaction and before any write, so a refused
+    /// name writes nothing — including a re-save under a name some other sidebar
+    /// row holds, which leaves the tree exactly where it was.
     ///
     /// # Errors
     /// [`StoreError::InvalidOperation`] when the tree is not savable (no Rule, an
@@ -199,9 +202,6 @@ fn save_in_tx(
     refuse_unsavable(tree)?;
 
     let playlist_id = if let Some(existing) = id {
-        // The row exists, so it is updated in place — which here means this write
-        // touches **no column of it at all**: not the name (only the rename path
-        // names a list), not `created_at`, not the id.
         if !smart_playlist_exists(conn, existing)? {
             return Err(store_refusal(
                 "this list cannot be saved: the Custom Smart Playlist its draft was written \
@@ -209,6 +209,31 @@ fn save_in_tx(
                     .to_string(),
             ));
         }
+        // The save names the list too — deliberately, and not an oversight a later
+        // reader should "correct" back into leaving the name alone.
+        //
+        // **Why:** the editor's name field and its Rule tree arrive as ONE listener
+        // action taken in ONE form, so both land in this transaction or neither does
+        // (spec user story 46: "my whole rule set written in one step, so a crash
+        // partway cannot leave me with half a rule set"). Splitting the write across
+        // `save_smart_playlist` and `rename_smart_playlist` cannot give that guarantee;
+        // it half-applies in two distinct bad ways — the name lands and the tree save
+        // fails, or the tree saves and the rename is refused because the name is taken,
+        // silently discarding what the listener typed while reporting success.
+        //
+        // What survives every save is therefore the row's **identity and its age**: the
+        // id and `created_at` are never written, the row is never deleted and
+        // re-inserted, and the sidebar's Rename action (`rename_smart_playlist`) is
+        // still the only write that names a list without touching its tree.
+        //
+        // Self-exemption is what keeps a re-save under an untouched name legal: ticket
+        // 03's rule runs with this row's id exempt, exactly as the rename path does, so
+        // the name check never refuses a list against itself.
+        SqliteStore::reject_taken_sidebar_name(conn, name, Some(&existing.0))?;
+        conn.execute(
+            "UPDATE smart_playlists SET name = ?2 WHERE id = ?1",
+            params![existing.0, name.trim()],
+        )?;
         existing.0.clone()
     } else {
         // Creation is not a separate path: this insert is the only one, which is

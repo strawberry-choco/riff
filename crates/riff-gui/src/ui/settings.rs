@@ -3072,18 +3072,24 @@ impl super::app::RiffApp {
             }
             // --- Smart Playlists page (ticket 15) ---
             // Picking a saved list loads its name and Root Box Rules into the
-            // frontend-local draft. Nothing is written: the draft is what the
-            // listener edits, the store is what ticket 18's Save commits.
+            // frontend-local draft. The tree comes through ticket 11's
+            // projection read — the D6 reason channel — like every other
+            // Custom-list read; a degraded answer still hands the last good
+            // tree (or none), and what to do with the reason is ticket 18's
+            // refusal decision, not this load's.
             SettingsAction::SelectSmartPlaylist(id) => {
                 let lists = self.views.custom_smart_playlists();
-                let list = lists.iter().find(|list| list.id == id);
-                let tree = self.views.smart_playlist_tree(&id);
+                let list = lists.iter().find(|list| list.id == id).cloned();
                 if let Some(list) = list {
+                    let tree = self
+                        .views
+                        .custom_list_tree(&id)
+                        .unwrap_or_else(|degraded| degraded.value);
                     // `SmartPlaylistTree::root()` is the public accessor for
                     // the interpretable half; the unreadable side list stays
                     // ticket 18's sibling state, per ticket 14's note.
                     self.smart_playlists_editor
-                        .load_saved(list, tree.as_ref().map(|tree| tree.root()));
+                        .load_saved(&list, tree.as_ref().map(|tree| tree.root()));
                 }
             }
             // The page's own button: the same new, empty, unsaved draft the

@@ -1038,19 +1038,6 @@ impl SessionViews {
         )
     }
 
-    /// The stored Rule tree of one Custom Smart Playlist, as the editor loads
-    /// it when the listener picks a saved list. `None` answers both "no such
-    /// list" and a store error (degraded behind the seam's one `warn!`), which
-    /// is what the editor needs: an absent tree means no Rule rows to show,
-    /// never a fabricated one.
-    pub fn smart_playlist_tree(&mut self, id: &PlaylistId) -> Option<SmartPlaylistTree> {
-        degrade(
-            self.queries.smart_playlist_tree(id),
-            || format!("Failed to read the rule tree for smart playlist {id:?}"),
-            || None,
-        )
-    }
-
     // --- Sidebar counts ----------------------------------------------------------
 
     /// Every count the sidebar renders (design-handoff issue 05), in one

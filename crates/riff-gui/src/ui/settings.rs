@@ -488,8 +488,9 @@ pub struct SettingsContent {
     pub now: Option<std::time::SystemTime>,
     /// The listener's saved Custom Smart Playlists, in creation order — the
     /// Smart Playlists page's left column. Read through the Session Views
-    /// seam like every other store-backed list; the six Built-ins are code
-    /// and never appear here.
+    /// seam like every other store-backed list, and only while the Smart
+    /// Playlists section is the current one; the six Built-ins are code and
+    /// never appear here.
     pub custom_smart_playlists: Vec<CustomSmartPlaylist>,
 }
 
@@ -3380,7 +3381,15 @@ impl super::app::RiffApp {
                 .map(crate::ui::frame::pass_outcome_line),
             last_scan: self.views.last_full_scan_summary(),
             now: self.now,
-            custom_smart_playlists: self.views.custom_smart_playlists(),
+            // The one pane that draws the lists is the only one that reads
+            // them: the D14 enumeration is deliberately uncached, so filling it
+            // for the four sections that never paint it would cost one small
+            // SELECT per frame each for nothing.
+            custom_smart_playlists: if self.settings_section == SettingsSection::SmartPlaylists {
+                self.views.custom_smart_playlists()
+            } else {
+                Vec::new()
+            },
         };
 
         let palette = self.theme.active;

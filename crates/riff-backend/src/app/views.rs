@@ -1056,11 +1056,12 @@ impl SessionViews {
     ///
     /// Deliberately uncached at this seam: the read answers the *which lists
     /// exist* question only (no Tracks, no Rule tree, no counts), the surfaces
-    /// that ask are the Settings pane and the sidebar section rather than a
-    /// paged listing, and a new projection would need the generation story
-    /// ticket 11's window cache owns. On a store error the list answers empty
-    /// behind a `tracing::warn!`, like every other degraded read — a caller
-    /// that must tell a failed read from an answered one asks
+    /// that ask are the Smart Playlists pane — only while that section is the
+    /// current one — and the sidebar section rather than a paged listing, and
+    /// a new projection would need the generation story ticket 11's window
+    /// cache owns. On a store error the list answers empty behind a
+    /// `tracing::warn!`, like every other degraded read — a caller that must
+    /// tell a failed read from an answered one asks
     /// [`Self::try_custom_smart_playlists`], the fallible half below.
     pub fn custom_smart_playlists(&mut self) -> Vec<CustomSmartPlaylist> {
         degrade(

@@ -435,7 +435,6 @@ fn moving_a_child_renumbers_the_one_interleaved_sibling_order() {
         RuleChildDraft::Rule(filled_rule(MatchableField::Title, "first")),
         RuleChildDraft::Box(RuleBoxDraft {
             combine: Combine::Any,
-            open: false,
             children: vec![RuleChildDraft::Rule(filled_rule(
                 MatchableField::Artist,
                 "inner",
@@ -471,7 +470,6 @@ fn a_nested_boxes_sibling_list_reorders_on_its_own() {
     root.children = vec![
         RuleChildDraft::Box(RuleBoxDraft {
             combine: Combine::All,
-            open: false,
             children: vec![
                 RuleChildDraft::Rule(filled_rule(MatchableField::Title, "a")),
                 RuleChildDraft::Rule(filled_rule(MatchableField::Title, "b")),

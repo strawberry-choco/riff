@@ -138,17 +138,12 @@ pub enum RuleChildDraft {
     Unreadable(UnreadableRule),
 }
 
-/// One Rule Box's draft: how it combines its children, whether its combine
-/// list is open, and its children in one interleaved order.
+/// One Rule Box's draft: how it combines its children, and its children in one
+/// interleaved order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleBoxDraft {
     /// Whether everything inside must match or any one thing may.
     pub combine: Combine,
-    /// Which inline list is open — presentation state that travels with the
-    /// box. The pane keeps at most one box's list open by holding the open
-    /// path itself, so this flag is written for no one else; it exists so a
-    /// cloned draft is self-describing.
-    pub open: bool,
     /// The box's children, Rules and Boxes interleaved in the order they were
     /// put in.
     pub children: Vec<RuleChildDraft>,
@@ -160,7 +155,6 @@ impl RuleBoxDraft {
     pub const fn empty(combine: Combine) -> Self {
         Self {
             combine,
-            open: false,
             children: Vec::new(),
         }
     }
@@ -176,7 +170,6 @@ impl RuleBoxDraft {
     fn from_rule_box(boxed: &RuleBox) -> Self {
         Self {
             combine: boxed.combine(),
-            open: false,
             children: boxed
                 .children()
                 .iter()

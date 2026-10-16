@@ -8450,7 +8450,6 @@ mod tests {
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Artist, "one")),
             RuleChildDraft::Box(RuleBoxDraft {
                 combine: Combine::Any,
-                open: false,
                 children: vec![RuleChildDraft::Rule(filled_rule_row(
                     MatchableField::Title,
                     "inner",
@@ -8588,7 +8587,6 @@ mod tests {
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
             RuleChildDraft::Box(RuleBoxDraft {
                 combine: Combine::All,
-                open: false,
                 children: vec![RuleChildDraft::Rule(filled_rule_row(
                     MatchableField::Artist,
                     "beta",
@@ -8646,7 +8644,6 @@ mod tests {
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
             RuleChildDraft::Box(RuleBoxDraft {
                 combine: Combine::All,
-                open: false,
                 children: vec![RuleChildDraft::Rule(filled_rule_row(
                     MatchableField::Artist,
                     "beta",
@@ -8705,7 +8702,6 @@ mod tests {
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
             RuleChildDraft::Box(RuleBoxDraft {
                 combine: Combine::All,
-                open: false,
                 children: vec![RuleChildDraft::Rule(filled_rule_row(
                     MatchableField::Artist,
                     "beta",
@@ -8778,7 +8774,6 @@ mod tests {
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
             RuleChildDraft::Box(RuleBoxDraft {
                 combine: Combine::All,
-                open: false,
                 children: vec![
                     RuleChildDraft::Rule(filled_rule_row(MatchableField::Artist, "beta")),
                     RuleChildDraft::Rule(filled_rule_row(MatchableField::Album, "gamma")),
@@ -8865,7 +8860,6 @@ mod tests {
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
             RuleChildDraft::Box(RuleBoxDraft {
                 combine: Combine::All,
-                open: false,
                 children: vec![RuleChildDraft::Rule(filled_rule_row(
                     MatchableField::Artist,
                     "beta",

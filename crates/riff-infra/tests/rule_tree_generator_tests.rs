@@ -894,10 +894,7 @@ fn page_of(
 }
 
 /// One order's whole answer out of a generated tree's four reads.
-fn ids_in<'a>(
-    wholes: &'a [(TrackListOrder, Vec<TrackId>)],
-    order: TrackListOrder,
-) -> &'a [TrackId] {
+fn ids_in(wholes: &[(TrackListOrder, Vec<TrackId>)], order: TrackListOrder) -> &[TrackId] {
     &wholes
         .iter()
         .find(|(asked, _)| *asked == order)

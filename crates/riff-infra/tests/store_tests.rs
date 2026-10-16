@@ -8127,16 +8127,6 @@ fn test_every_field_and_comparison_the_catalog_permits_matches_the_reference() {
     );
 }
 
-/// Track identity named by corpus file name, in the canonical flat order.
-fn rule_ids(names: &[&str]) -> Vec<TrackId> {
-    let mut ids: Vec<TrackId> = names
-        .iter()
-        .map(|name| TrackId(format!("r:\\rules\\{name}")))
-        .collect();
-    ids.sort_by(|left, right| left.0.cmp(&right.0));
-    ids
-}
-
 /// The file name a `TrackId` names, for a failure message a person can read.
 fn rule_name(id: &TrackId) -> &str {
     id.0.rsplit('\\').next().unwrap_or(&id.0)
@@ -8543,5 +8533,573 @@ fn test_non_latin_tags_do_not_fold_case_and_that_is_pinned() {
             .collect::<Vec<_>>(),
         vec!["nine.mp3", "ten.mp3"],
         "both cases answer an ASCII needle, which is exactly how far the fold goes"
+    );
+}
+
+#[test]
+fn test_the_needle_is_anded_inside_the_read_and_paging_never_repeats_or_skips() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (store, tracks) = seeded_rules_store(&db_path);
+    let clock = rule_clock(&store);
+
+    let ambient = rule(MatchableField::Genre, Comparison::Is, needle("Ambient"));
+    assert_rule_membership(&store, &tracks, &ambient, None, &clock, "genre is Ambient");
+    assert_eq!(
+        rule_window(&store, &ambient, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["aged.mp3", "five.FLAC", "recent.mp3", "six"],
+        "the tree alone answers four Tracks"
+    );
+
+    // ANDed, never chosen between: the same tree with a needle the tree also
+    // permits narrows the answer instead of replacing it.
+    assert_eq!(
+        rule_window(&store, &ambient, Some("oscar"))
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["aged.mp3"],
+        "the needle lands inside the tree's answer"
+    );
+    assert_rule_membership(&store, &tracks, &ambient, Some("oscar"), &clock, "ANDed needle");
+    assert_eq!(
+        (
+            rule_total(&store, &ambient, Some("oscar")),
+            rule_total(&store, &ambient, None)
+        ),
+        (1, 4),
+        "the total counts the filtered rows, not the tree's rows"
+    );
+    assert_eq!(
+        rule_window(&store, &ambient, Some("alpha")),
+        Vec::<TrackId>::new(),
+        "a needle that matches a Track the tree excludes answers nothing: the \
+         two conditions are ANDed, never ORed and never applied after paging"
+    );
+
+    // A needle carrying a quote, a `%` and a `_` matches literally.
+    let percent = rule(MatchableField::Title, Comparison::Contains, needle("%"));
+    assert_rule_membership(&store, &tracks, &percent, None, &clock, "title contains %");
+    assert_eq!(
+        rule_window(&store, &percent, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["oddball.mp3", "quote.mp3"],
+        "a `%` is a character, not a wildcard"
+    );
+    let underscore = rule(
+        MatchableField::Title,
+        Comparison::Contains,
+        needle("%_done"),
+    );
+    assert_rule_membership(&store, &tracks, &underscore, None, &clock, "title contains %_done");
+    assert_eq!(
+        rule_window(&store, &underscore, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["oddball.mp3"],
+        "`%_` inside a needle is two literal characters — the shape a `LIKE` \
+         would read as \"anything then any one character\""
+    );
+    let quoted = rule(
+        MatchableField::Title,
+        Comparison::Is,
+        needle("He said \"yes\" 100%"),
+    );
+    assert_rule_membership(&store, &tracks, &quoted, None, &clock, "a quoted needle");
+    assert_eq!(
+        rule_window(&store, &quoted, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["quote.mp3"],
+        "a quote in the value is data, and it reaches the row that holds it"
+    );
+    assert_eq!(
+        rule_window(&store, &quoted, Some("said")),
+        rule_window(&store, &quoted, None),
+        "a needle the matched row already satisfies leaves the answer alone"
+    );
+
+    // The paged contract: a disjoint, correctly ordered slice and one total.
+    let lossy = rule(MatchableField::Lossless, Comparison::Is, yes(false));
+    let full = rules_reference::matches(&tracks, &lossy, None, &clock);
+    assert_eq!(full.len(), 12, "twelve of the fifteen are not lossless");
+    for order in [TrackListOrder::PathAsc, TrackListOrder::TitleAsc] {
+        let mut seen = Vec::new();
+        for offset in [0usize, 5, 10] {
+            let page = store
+                .custom_smart_playlist_page(&lossy, order, None, offset, 5)
+                .expect("a legal tree is answerable");
+            assert_eq!(page.total(), full.len(), "the total does not move with the offset");
+            let ids: Vec<TrackId> = page.rows().iter().map(|track| track.id.clone()).collect();
+            assert!(!ids.is_empty(), "offset {offset} of a twelve-row answer has rows");
+            seen.extend(ids);
+        }
+        assert_eq!(seen.len(), 12, "three windows of five over twelve rows");
+        assert_eq!(
+            seen.iter().collect::<std::collections::HashSet<_>>().len(),
+            12,
+            "no row appears twice across the windows"
+        );
+    }
+
+    // The canonical orders end on `path`, so the flat order is the whole
+    // listing's total order and the reversal is exact.
+    let ascending = rule_window(&store, &lossy, None);
+    let descending: Vec<TrackId> = store
+        .custom_smart_playlist_page(&lossy, TrackListOrder::PathDesc, None, 0, usize::MAX)
+        .expect("a legal tree is answerable")
+        .rows()
+        .iter()
+        .map(|track| track.id.clone())
+        .collect();
+    assert_eq!(
+        descending,
+        ascending.iter().rev().cloned().collect::<Vec<_>>(),
+        "path-descending is the exact reversal, because path alone is unique"
+    );
+
+    // A count read is the same Listing Page asked for zero rows (ADR 0003's
+    // 2026-09-29 amendment): total only, empty window.
+    let counted = store
+        .custom_smart_playlist_page(&lossy, TrackListOrder::PathAsc, None, 0, 0)
+        .expect("a count read is a page with no rows");
+    assert_eq!((counted.total(), counted.rows().len()), (12, 0));
+    let counted_with_needle = store
+        .custom_smart_playlist_page(&lossy, TrackListOrder::PathAsc, Some("oscar"), 0, 0)
+        .expect("a count read carries the needle too");
+    assert_eq!(counted_with_needle.total(), 1);
+}
+
+#[test]
+fn test_a_tree_whose_rules_match_nothing_answers_empty_and_not_everything() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (store, tracks) = seeded_rules_store(&db_path);
+    let clock = rule_clock(&store);
+
+    let nothing = rule(MatchableField::Title, Comparison::Is, needle("no such title"));
+    assert_rule_membership(&store, &tracks, &nothing, None, &clock, "no such title");
+    assert_eq!(
+        (
+            rule_window(&store, &nothing, None),
+            rule_total(&store, &nothing, None)
+        ),
+        (Vec::<TrackId>::new(), 0),
+        "a listing that matched nothing is empty, with a total of zero"
+    );
+
+    // Two Box levels whose arms cannot both hold: an `all` over an `any` that
+    // only ever answers false. The fold must not turn unsatisfiable into
+    // everything.
+    let unsatisfiable = all_of(vec![
+        any_of(vec![
+            rule(MatchableField::Title, Comparison::Is, needle("nope")),
+            rule(MatchableField::Title, Comparison::Is, needle("also nope")),
+        ]),
+        rule(MatchableField::Year, Comparison::GreaterThan, number(3000)),
+    ]);
+    assert_rule_membership(
+        &store,
+        &tracks,
+        &unsatisfiable,
+        None,
+        &clock,
+        "unsatisfiable tree",
+    );
+    assert_eq!(
+        rule_total(&store, &unsatisfiable, None),
+        0,
+        "a tree no Track can satisfy answers nothing, at every level of it"
+    );
+}
+
+#[test]
+fn test_seven_levels_of_boxes_answer_the_reference_and_the_store_never_counts_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (store, tracks) = seeded_rules_store(&db_path);
+    let clock = rule_clock(&store);
+
+    // The editor's ceiling is seven levels; the store counts none of them, so
+    // a tree that deep is answered here rather than refused, and a deeper one
+    // from a newer riff is answered too (only the engine's own limits bite).
+    let mut tree = any_of(vec![
+        rule(MatchableField::Composer, Comparison::Is, needle("Bach")),
+        rule(
+            MatchableField::Duration,
+            Comparison::LessThan,
+            millis(200_000),
+        ),
+    ]);
+    for level in 0..6 {
+        tree = if level % 2 == 0 {
+            all_of(vec![tree])
+        } else {
+            any_of(vec![tree])
+        };
+    }
+    assert_rule_membership(&store, &tracks, &tree, None, &clock, "seven levels");
+    assert_eq!(
+        rule_window(&store, &tree, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec![
+            "aged.mp3",
+            "five.FLAC",
+            "four.m4a",
+            "oddball.mp3",
+            "one.flac",
+            "quote.mp3",
+            "recent.mp3",
+        ],
+        "Bach or shorter than two minutes, wrapped in six alternating Box levels"
+    );
+
+    // A Box beside a Rule under one parent, and a Box inside a Box: the two
+    // shapes the editor draws as one interleaved list.
+    let mixed = all_of(vec![
+        rule(MatchableField::Year, Comparison::EqualTo, number(1975)),
+        any_of(vec![
+            rule(MatchableField::Favorite, Comparison::Is, yes(true)),
+            all_of(vec![
+                rule(MatchableField::Channels, Comparison::EqualTo, number(1)),
+                rule_not(MatchableField::Genre, Comparison::Is, needle("électronique")),
+            ]),
+        ]),
+    ]);
+    assert_rule_membership(&store, &tracks, &mixed, None, &clock, "mixed siblings");
+    assert_eq!(
+        rule_window(&store, &mixed, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["four.m4a", "one.flac", "seven.mp3"],
+        "1975, and either a favorite or a mono Track that is not the lowercase \
+         electronic tag"
+    );
+
+    // The store's spelling and the domain's Root Box are one tree: the read is
+    // driven from a frontend-shaped value in exactly the case above.
+    let boxed = riff_persistence::rule::RootBox::new(
+        riff_persistence::rule::RuleBox::new(riff_persistence::rule::Combine::All)
+            .with_children(vec![riff_persistence::rule::RuleChild::Rule(
+                riff_persistence::rule::Rule::new(
+                    MatchableField::Year,
+                    Comparison::EqualTo,
+                    number(1975),
+                ),
+            )]),
+    );
+    let spelled = from_root(boxed.clone());
+    assert_eq!(
+        rule_window(&store, &spelled, None),
+        rule_window(
+            &store,
+            &rule(MatchableField::Year, Comparison::EqualTo, number(1975)),
+            None
+        ),
+        "`RuleTree::from_root_box` writes the ids the compiler reads"
+    );
+    assert_eq!(
+        RuleTree::from_rule_box(boxed.inner()),
+        spelled,
+        "the Root Box and its inner Box spell the same tree"
+    );
+    assert_rule_membership(&store, &tracks, &spelled, None, &clock, "from a Root Box");
+}
+
+#[test]
+fn test_a_zone_less_boundary_is_read_against_the_machines_own_local_midnight() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (store, tracks) = seeded_rules_store(&db_path);
+    let clock = rule_clock(&store);
+
+    // The corpus places `one.flac` at 23:30 on the evening of 1 March and
+    // `two.wav` at 00:30 the next morning, *local*, and `four.m4a` weeks
+    // earlier. The boundary is the zone-less string a listener would have
+    // typed. On a machine set to UTC the two halves are 23:30 and 00:30 UTC and
+    // the answer is the same; on any machine with an offset the pair brackets
+    // that machine's own midnight rather than the epoch boundary, which is what
+    // "read against the listener's own clock on that machine" promises.
+    let midnight = civil(2024, 3, 2, 0, 0, 0);
+    let before = rule(MatchableField::LastPlayed, Comparison::Before, boundary(midnight));
+    assert_rule_membership(&store, &tracks, &before, None, &clock, "before local midnight");
+    assert_eq!(
+        rule_window(&store, &before, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["four.m4a", "one.flac"],
+        "the evening before the boundary is before it, and the half hour after \
+         it is not — nothing in the tree or the data carries a zone"
+    );
+
+    let after = rule(MatchableField::LastPlayed, Comparison::After, boundary(midnight));
+    assert_rule_membership(&store, &tracks, &after, None, &clock, "after local midnight");
+    assert_eq!(
+        rule_window(&store, &after, None)
+            .iter()
+            .map(rule_name)
+            .collect::<Vec<_>>(),
+        vec!["aged.mp3", "recent.mp3", "two.wav"],
+        "the boundary's own second belongs to neither side, and every Track with no \
+         history answers false: the two rows stamped weeks after the boundary are \
+         `aged` and `recent`, whose history is measured back from the read"
+    );
+
+    // Negated, the same boundary takes in every Track that has no history at
+    // all: absent means the test is false, and `is not` inverts that.
+    let not_after = rule_not(MatchableField::LastPlayed, Comparison::After, boundary(midnight));
+    assert_rule_membership(&store, &tracks, &not_after, None, &clock, "not after midnight");
+    assert_eq!(
+        rule_total(&store, &not_after, None),
+        12,
+        "fifteen rows, three of them after the boundary"
+    );
+}
+
+/// A `RuleTree` naming a field id this build does not know.
+fn unreadable_field(field_id: &str) -> RuleTree {
+    RuleTree::Rule {
+        field_id: field_id.to_string(),
+        operator_id: "is".to_string(),
+        negated: false,
+        value: needle("whatever"),
+    }
+}
+
+#[test]
+fn test_an_unreadable_tree_is_refused_with_a_reason_and_never_as_an_empty_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (store, tracks) = seeded_rules_store(&db_path);
+    let clock = rule_clock(&store);
+
+    // `smart_rules.field_id` CHECKs the ids this build writes, and nothing
+    // else: a row written by a newer riff still reads back. `MatchableField`
+    // is closed, so the row cannot be coerced — the refusal is the answer, and
+    // it arrives before any SQL is produced.
+    let cases = vec![
+        (
+            "a field id this build cannot read",
+            unreadable_field("bpm"),
+            "bpm",
+        ),
+        (
+            "an operator id this build cannot read",
+            RuleTree::Rule {
+                field_id: "title".to_string(),
+                operator_id: "starts_with".to_string(),
+                negated: false,
+                value: needle("x"),
+            },
+            "starts_with",
+        ),
+        (
+            "a test its field does not permit, which the schema allows",
+            rule(MatchableField::Genre, Comparison::GreaterThan, number(3)),
+            "greater_than",
+        ),
+        (
+            "a value of the wrong kind for the field",
+            rule(MatchableField::Year, Comparison::EqualTo, needle("1975")),
+            "year",
+        ),
+        (
+            "a day count where a day-and-a-time is what the field takes",
+            rule(MatchableField::LastPlayed, Comparison::Before, days(7)),
+            "last_played",
+        ),
+        (
+            "a Rule with no value where one is needed",
+            RuleTree::Rule {
+                field_id: "title".to_string(),
+                operator_id: "is".to_string(),
+                negated: false,
+                value: None,
+            },
+            "title",
+        ),
+        (
+            "a combine word this build cannot read",
+            RuleTree::Box {
+                combine: "none".to_string(),
+                children: vec![rule(MatchableField::Title, Comparison::Is, needle("x"))],
+            },
+            "none",
+        ),
+        (
+            "a Box holding no Rule at all",
+            all_of(Vec::new()),
+            "no Rule",
+        ),
+        (
+            "an empty Box buried inside a tree that is not empty",
+            all_of(vec![
+                rule(MatchableField::Year, Comparison::EqualTo, number(1975)),
+                any_of(Vec::new()),
+            ]),
+            "no Rule",
+        ),
+    ];
+
+    // A value sitting on a row whose test takes none is deliberately NOT here:
+    // see the tolerance asserted after these cases.
+    for (why, tree, needle_text) in cases {
+        let answer = store.custom_smart_playlist_page(&tree, TrackListOrder::PathAsc, None, 0, 50);
+        let error = match answer {
+            Ok(page) => panic!(
+                "{why}: a tree this build cannot read must be refused, not answered \
+                 ({} rows, total {})",
+                page.rows().len(),
+                page.total()
+            ),
+            Err(error) => error,
+        };
+        let reason = error.to_string();
+        assert!(
+            reason.contains("cannot match this Custom Smart Playlist"),
+            "{why}: the refusal names the surface it failed on, so a listing that \
+             cannot be computed is distinguishable from one that matched nothing: {reason}"
+        );
+        assert!(
+            reason.contains(needle_text),
+            "{why}: the reason carries the offender's own id: {reason}"
+        );
+        assert!(
+            !rules_reference::can_read(&tree, &clock),
+            "{why}: the independent walk refuses the same tree, so the store is not \
+             refusing alone by accident"
+        );
+    }
+
+    // The one tolerance: a value sitting on a row whose test takes none is the
+    // save path's mistake, and absence is the column's answer either way.
+    let spare = RuleTree::Rule {
+        field_id: "genre".to_string(),
+        operator_id: "is_missing".to_string(),
+        negated: false,
+        value: needle("ignored"),
+    };
+    assert_rule_membership(
+        &store,
+        &tracks,
+        &spare,
+        None,
+        &clock,
+        "a spare value on a valueless test",
+    );
+    assert_eq!(
+        rule_window(&store, &spare, None),
+        rule_window(
+            &store,
+            &rule(MatchableField::Genre, Comparison::IsMissing, None),
+            None
+        ),
+        "the spare value changes nothing: absence is decided by the column"
+    );
+}
+
+#[test]
+fn test_a_tree_wider_than_the_engine_can_bind_is_refused_with_its_own_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (store, _tracks) = seeded_rules_store(&db_path);
+
+    // Rules are uncapped, so a Box can genuinely outgrow SQLite's ceiling on
+    // bound values (~32,766). That is a store error like any other: it carries
+    // a reason, and no path renders it as an empty list. The compiler neither
+    // chunks nor splits a predicate to dodge it — half a predicate answers a
+    // different question than the one the listener wrote.
+    let wide = 33_000;
+    let arms = (0..wide)
+        .map(|_| rule(MatchableField::Title, Comparison::Is, needle("x")))
+        .collect();
+    let tree = any_of(arms);
+    let error = store
+        .custom_smart_playlist_page(&tree, TrackListOrder::PathAsc, None, 0, 50)
+        .expect_err("a tree past the binding ceiling is refused, never answered");
+    let reason = error.to_string();
+    assert!(
+        reason.contains("cannot match this Custom Smart Playlist")
+            && reason.contains("32766")
+            && reason.contains("33000"),
+        "the refusal names the tree's own width and the ceiling it passed: {reason}"
+    );
+
+    // Just under the ceiling the same shape answers: the limit is the engine's,
+    // not a cap this build invents.
+    let boxes = 30;
+    let arms = 500;
+    let page = store
+        .custom_smart_playlist_page(
+            &all_of(
+                (0..boxes)
+                    .map(|box_index| {
+                        any_of(
+                            (0..arms)
+                                .map(|arm| {
+                                    rule(
+                                        MatchableField::Title,
+                                        Comparison::Is,
+                                        needle(&format!("no such title {box_index}-{arm}")),
+                                    )
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            ),
+            TrackListOrder::PathAsc,
+            None,
+            0,
+            50,
+        )
+        .expect("a wide tree under the ceiling is answered");
+    assert_eq!(
+        (page.total(), page.rows().len()),
+        (0, 0),
+        "and it matches nothing: {} parameters, under the ceiling",
+        boxes * arms
+    );
+
+    // Depth is the engine's other ceiling, and this build does not count
+    // nesting levels to pre-empt it: a deep tree is prepared, and SQLite says
+    // no in its own words, which the read surfaces as a reason rather than a
+    // silent empty listing.
+    // Depth is the engine's other ceiling, and this build does not count
+    // nesting levels to pre-empt it. Four hundred Box levels is a tree this
+    // store answers; eight hundred is the bundled parser saying no in its own
+    // words, which the read carries out as a reason rather than swallowing it
+    // or rendering it as an empty listing.
+    let mut deep = rule(MatchableField::Year, Comparison::EqualTo, number(1975));
+    for _ in 0..400 {
+        deep = all_of(vec![deep]);
+    }
+    let answered = store
+        .custom_smart_playlist_page(&deep, TrackListOrder::PathAsc, None, 0, 50)
+        .expect("four hundred levels is a tree, not a failure");
+    assert_eq!(answered.total(), 3, "and it answers the same rows");
+
+    let mut too_deep = rule(MatchableField::Year, Comparison::EqualTo, number(1975));
+    for _ in 0..800 {
+        too_deep = all_of(vec![too_deep]);
+    }
+    let error = store
+        .custom_smart_playlist_page(&too_deep, TrackListOrder::PathAsc, None, 0, 50)
+        .expect_err("a tree past the engine's own expression depth is refused");
+    let reason = error.to_string();
+    assert!(
+        reason.contains("failed to read a listing page") && reason.len() > 40,
+        "the engine's reason is carried out of the read, not swallowed: {reason}"
     );
 }

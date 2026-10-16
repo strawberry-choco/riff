@@ -14566,13 +14566,14 @@ mod browser_column_ui_tests {
 /// it is what the titlebar renders verbatim.
 #[cfg(test)]
 mod whole_frame_tests {
-    use egui_kittest::kittest::{By, Queryable};
+    use egui_kittest::kittest::{By, NodeT, Queryable};
     use riff_backend::app::MutexExt;
     use riff_backend::app::cover_service::{ClearCacheOutcome, Covers};
     use riff_backend::app::scan_service::ScanOutcome;
     use riff_backend::app::state::{LibrarySession, LibraryStatus, PlaybackSession, ViewMode};
     use riff_backend::app::store::{
         CustomSmartPlaylist, LibraryMutationStore, LibraryQueryStore, PlaylistStore, SettingsStore,
+        SmartPlaylistTree,
     };
     use riff_backend::app::transport::Transport;
     use riff_backend::app::views::SessionViews;
@@ -14584,8 +14585,9 @@ mod whole_frame_tests {
     use std::sync::{Arc, Mutex};
 
     use crate::mocks::{
-        FailingQuery, MockLibraryMutationStore, MockLibraryQueryStore, MockPlaylistStore,
-        MockScans, MockSettingsStore, MockTransport, SettingsCall, TransportIntent,
+        FailingQuery, LibraryQueryCall, MockLibraryMutationStore, MockLibraryQueryStore,
+        MockPlaylistStore, MockScans, MockSettingsStore, MockTransport, SettingsCall,
+        SharedQueryStore, TransportIntent,
     };
     use crate::test_utils::{create_test_track_with_metadata, float_close};
 
@@ -18787,6 +18789,386 @@ mod whole_frame_tests {
                 .query_by_role_and_label(egui::accesskit::Role::Label, "New smart playlist")
                 .is_some(),
             "the editor says it is creating again"
+        );
+    }
+
+    // --- Ticket 12: the listener's lists in the sidebar -------------------------
+    //
+    // The Custom Smart Playlists join the six Built-ins in the SMART LISTS
+    // section, in creation order, with no count beside a row and no Advanced
+    // gate, and the whole row pass costs ONE enumeration read per frame
+    // however many rows it paints. The clicks here are real pointer presses at
+    // the rows' own hit areas: this repo has four measured cases of a control
+    // that paints but cannot be clicked, so every assertion reads what the
+    // click DID, not that a label exists.
+
+    /// A shell over a shared mock query port, with the mock handle kept so a
+    /// test can count exactly which reads the frames issued.
+    fn counting_mock_shell(
+        mock: MockLibraryQueryStore,
+    ) -> (Shell, Arc<Mutex<MockLibraryQueryStore>>) {
+        let handle = Arc::new(Mutex::new(mock));
+        let settings_calls = Arc::new(Mutex::new(Vec::new()));
+        let (playlist_store, views) = crate::composed_shell::playlist_ports(
+            Box::new(SharedQueryStore(Arc::clone(&handle))),
+            MockPlaylistStore::default(),
+        );
+        let shell = build(
+            Box::new(MockTransport::new()),
+            MockScans::default(),
+            Box::new(MockSettingsStore::with_shared_calls(Arc::clone(
+                &settings_calls,
+            ))),
+            settings_calls,
+            playlist_store,
+            Box::new(MockLibraryMutationStore::new()),
+            views,
+        );
+        (shell, handle)
+    }
+
+    /// One canned Custom Smart Playlist with a fixed id, name and creation
+    /// instant.
+    fn custom_list(id: &str, name: &str) -> CustomSmartPlaylist {
+        CustomSmartPlaylist {
+            id: PlaylistId(id.to_string()),
+            name: name.to_string(),
+            created_at: std::time::SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    /// A savable one-Rule tree — `Title is "alpha"` in the Root Box, the
+    /// minimum a save accepts. The sidebar rows never read it; the stage's
+    /// route asks whether the store still answers one.
+    fn one_rule_tree() -> SmartPlaylistTree {
+        use riff_backend::domain::{
+            Combine, Comparison, MatchableField, RootBox, Rule, RuleBox, RuleChild, RuleValue,
+        };
+        SmartPlaylistTree::new(RootBox::new(RuleBox::new(Combine::All).with_children(
+            vec![RuleChild::Rule(Rule::new(
+                MatchableField::Title,
+                Comparison::Is,
+                Some(RuleValue::Text("alpha".to_string())),
+            ))],
+        )))
+    }
+
+    /// Where the first node whose label CONTAINS `text` sits vertically — for
+    /// labels that fold a count in (`Name (3)`) or repeat elsewhere.
+    fn y_of_contains(harness: &egui_kittest::Harness<'static, RiffApp>, text: &str) -> f32 {
+        harness
+            .query_all_by_label_contains(text)
+            .next()
+            .unwrap_or_else(|| panic!("no rendered node labelled like {text}"))
+            .rect()
+            .center()
+            .y
+    }
+
+    /// The three saved lists render as rows after the six Built-ins, in the
+    /// order the read answered — the store's creation order — with NO count;
+    /// and the whole row pass is ONE enumeration read per frame, not one per
+    /// row, and issues no per-list count read at all.
+    #[test]
+    fn custom_rows_render_after_the_built_ins_with_no_count_and_one_read_per_frame() {
+        let (mut shell, mock) = counting_mock_shell(MockLibraryQueryStore {
+            custom_smart_playlists: vec![
+                custom_list("spl-late-night-1", "Late night jazz"),
+                custom_list("spl-deep-focus-1", "Deep focus"),
+                custom_list("spl-sunday-1", "Sunday morning"),
+            ],
+            ..MockLibraryQueryStore::default()
+        });
+        shell.harness.step();
+        shell.harness.step();
+
+        // Present, by exact label — a count folds into the label as
+        // "Name (count)", so the exact match is itself an assertion that no
+        // count is painted, and the negative below states it outright.
+        for name in ["Late night jazz", "Deep focus", "Sunday morning"] {
+            assert!(
+                shell.harness.query(By::new().label(name)).is_some(),
+                "{name} must render as a sidebar row"
+            );
+            assert!(
+                shell
+                    .harness
+                    .query_all_by_label_contains(&format!("{name} ("))
+                    .next()
+                    .is_none(),
+                "{name} must carry no count — a count would read as \"{name} (n)\""
+            );
+        }
+
+        // Order: the custom rows sit after the last always-visible Built-in
+        // ("Favorites") and keep the read's own order among themselves.
+        let favorites = y_of_contains(&shell.harness, "Favorites");
+        let late = y_of_contains(&shell.harness, "Late night jazz");
+        let deep = y_of_contains(&shell.harness, "Deep focus");
+        let sunday = y_of_contains(&shell.harness, "Sunday morning");
+        assert!(
+            favorites < late,
+            "custom rows render after the six Built-ins"
+        );
+        assert!(
+            late < deep && deep < sunday,
+            "custom rows keep the read's order (creation order)"
+        );
+
+        // One enumeration read for the whole pass: a frame delta of exactly 1
+        // with three rows on screen (a per-row read would make it 3).
+        let enumeration_reads = |handle: &Arc<Mutex<MockLibraryQueryStore>>| {
+            handle
+                .lock()
+                .unwrap()
+                .calls()
+                .iter()
+                .filter(|call| matches!(call, LibraryQueryCall::CustomSmartPlaylists))
+                .count()
+        };
+        let before = enumeration_reads(&mock);
+        shell.harness.step();
+        let after_one = enumeration_reads(&mock);
+        shell.harness.step();
+        let after_two = enumeration_reads(&mock);
+        assert_eq!(
+            after_one - before,
+            1,
+            "three rows cost exactly one enumeration read, not one per row"
+        );
+        assert_eq!(after_two - after_one, 1);
+
+        // And no count read: a custom count could only arrive through the
+        // ticket-11 listing reads, and none may be issued for a sidebar row.
+        for call in mock.lock().unwrap().calls() {
+            assert!(
+                !matches!(call, LibraryQueryCall::CustomSmartPlaylistPage(..)),
+                "no custom-listing count or window read may be issued for a sidebar row: {call:?}"
+            );
+        }
+    }
+
+    /// A click on a custom row opens it. The click is a real pointer press at
+    /// the row's own hit area, and what it DID is observable: the gesture
+    /// lands on the Library view with the search box cleared (the
+    /// `OpenSmartList` arm's `land_on_library()`), and the stage asks the
+    /// store for the list's tree — the read only an open custom identity
+    /// issues. The row's selected band is pinned as pixels by the light
+    /// sidebar golden, which clicks the row before it captures.
+    #[test]
+    fn a_custom_row_click_opens_its_list() {
+        let id = PlaylistId("spl-late-night-1".to_string());
+        let (mut shell, mock) = counting_mock_shell(MockLibraryQueryStore {
+            custom_smart_playlists: vec![custom_list("spl-late-night-1", "Late night jazz")],
+            // The stage asks the store whether the open list still exists; a
+            // real store answers both reads from the same row.
+            smart_playlist_trees: [(id.clone(), one_rule_tree())].into(),
+            ..MockLibraryQueryStore::default()
+        });
+        // Opening must land on the Library view and clear the box, wherever
+        // the frame starts. The Settings view still draws the sidebar, so the
+        // row sits where the click expects it.
+        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
+        shell.library.lock().unwrap().search_query = "boards".to_string();
+        shell.harness.step();
+        shell.harness.step();
+
+        let tree_reads = |handle: &Arc<Mutex<MockLibraryQueryStore>>| {
+            handle
+                .lock()
+                .unwrap()
+                .calls()
+                .iter()
+                .filter(|call| matches!(call, LibraryQueryCall::SmartPlaylistTree(_)))
+                .count()
+        };
+        assert_eq!(tree_reads(&mock), 0, "no custom list is open yet");
+
+        shell.harness.get_by_label("Late night jazz").click();
+        shell.harness.step();
+
+        assert_eq!(
+            shell.library.lock().unwrap().view_mode,
+            ViewMode::Library,
+            "the click landed on the Library view"
+        );
+        assert_eq!(
+            shell.library.lock().unwrap().search_query,
+            "",
+            "the open gesture clears the search box"
+        );
+        assert_eq!(
+            tree_reads(&mock),
+            1,
+            "the stage asked for the open list's tree — the identity reached the slot"
+        );
+        shell.harness.step();
+        assert_eq!(
+            tree_reads(&mock),
+            1,
+            "the tree read is cached per epoch, not re-issued every frame"
+        );
+    }
+
+    /// Deleting the list that is currently open clears the slot and returns
+    /// the Library view — the same shape as deleting an open Playlist: no
+    /// `land_on_library()` call, the Library returns because the stage's
+    /// single-stage route is re-derived every frame and falls through. The
+    /// deletion here is the layer ticket 21's confirmation will call.
+    #[test]
+    fn deleting_the_open_custom_list_clears_the_slot_and_the_store_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("opening a fresh store must work");
+        let id = store
+            .save_smart_playlist(None, "Late night jazz", &one_rule_tree())
+            .expect("the save works");
+
+        let mut slot = Some(riff_gui::ui::app::SmartListIdentity::Custom(id.clone()));
+        riff_gui::ui::app::delete_custom_smart_playlist(&id, &mut store, &mut slot);
+
+        assert_eq!(
+            slot, None,
+            "deleting the open Custom Smart Playlist empties the slot, like deleting an open playlist"
+        );
+        assert!(
+            store
+                .custom_smart_playlists()
+                .expect("the enumeration reads")
+                .is_empty(),
+            "the deletion is one durable store transaction"
+        );
+    }
+
+    /// Deleting a list that is NOT the open one leaves the slot alone: only
+    /// the id that was open is cleared.
+    #[test]
+    fn deleting_another_custom_list_leaves_the_open_slot_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("riff.sqlite3");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("opening a fresh store must work");
+        let open = store
+            .save_smart_playlist(None, "Late night jazz", &one_rule_tree())
+            .expect("the save works");
+        let other = store
+            .save_smart_playlist(None, "Deep focus", &one_rule_tree())
+            .expect("the second save works");
+
+        let mut slot = Some(riff_gui::ui::app::SmartListIdentity::Custom(open.clone()));
+        riff_gui::ui::app::delete_custom_smart_playlist(&other, &mut store, &mut slot);
+
+        assert_eq!(
+            slot,
+            Some(riff_gui::ui::app::SmartListIdentity::Custom(open)),
+            "a deletion that is not the open list's leaves the slot untouched"
+        );
+    }
+
+    /// A real store, three scanned tracks and one saved Custom Smart Playlist
+    /// — over the composed shell, with the store handle kept so a test can
+    /// move the store *outside* the UI (what no in-repo gesture does) and a
+    /// `Shell`. The temp dir comes back too: the store lives in it.
+    fn custom_list_store_shell() -> (
+        Shell,
+        tempfile::TempDir,
+        PlaylistId,
+        riff_infra::store::SqliteStore,
+    ) {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let db_path = dir.path().join("riff.sqlite3");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("opening a fresh store must work");
+
+        for (file, title) in [
+            ("one.mp3", "Alpha"),
+            ("two.mp3", "Beta"),
+            ("three.mp3", "Gamma"),
+        ] {
+            let path = dir.path().join(file);
+            std::fs::write(&path, b"fake audio bytes").expect("scratch file writes");
+            let track = create_test_track_with_metadata(
+                &path.to_string_lossy(),
+                &path.to_string_lossy(),
+                "Artist",
+                title,
+                "Album",
+            );
+            store
+                .apply_scan_batch(std::slice::from_ref(&track))
+                .expect("seed scan commits");
+        }
+
+        let list_id = store
+            .save_smart_playlist(None, "Late night jazz", &one_rule_tree())
+            .expect("saving the list works");
+
+        let settings_calls = Arc::new(Mutex::new(Vec::new()));
+        // The store's own generations, so its commits (the save above, and any
+        // delete after) move the projections the shell reads.
+        let (playlist_store, views) = crate::composed_shell::playlist_ports_at(
+            Box::new(store.clone()),
+            store.clone(),
+            store.library_generation(),
+            store.playlist_generation(),
+        );
+        let shell = build(
+            Box::new(MockTransport::new()),
+            MockScans::default(),
+            Box::new(MockSettingsStore::with_shared_calls(Arc::clone(
+                &settings_calls,
+            ))),
+            settings_calls,
+            playlist_store,
+            Box::new(store.clone()),
+            views,
+        );
+        (shell, dir, list_id, store)
+    }
+
+    /// A stale custom id — the list was deleted from under the frame, with no
+    /// UI gesture — never leaves the stage on a listing of something that no
+    /// longer exists, and never on an empty listing, which reads as a
+    /// matching bug: the route refuses an id the store no longer answers, the
+    /// row is gone, and the Library's own flat listing draws.
+    #[test]
+    fn a_deleted_open_custom_list_falls_back_to_the_library_not_an_empty_listing() {
+        let (mut shell, _dir, id, mut store) = custom_list_store_shell();
+        shell.harness.step();
+        shell.harness.step();
+
+        shell.harness.get_by_label("Late night jazz").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query(By::new().label("Alpha")).is_none(),
+            "the open custom list replaced the Library's flat listing"
+        );
+
+        // The store moves outside the UI: no gesture clears the slot.
+        store
+            .delete_smart_playlist(&id)
+            .expect("the delete commits");
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Late night jazz"))
+                .is_none(),
+            "the deleted list's row is gone from the sidebar"
+        );
+        assert!(
+            shell.harness.query(By::new().label("Alpha")).is_some(),
+            "the Library's own listing is what draws — a stale id cannot render as an empty listing"
         );
     }
 }

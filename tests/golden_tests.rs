@@ -2221,6 +2221,73 @@ mod tests {
         );
     }
 
+    /// The Smart Playlists pane holding a **nested** tree (ticket 16): a
+    /// saved list whose Rules sit inside Boxes inside Boxes, loaded by
+    /// clicking the list's row. The draft is frontend-local, so the click is
+    /// the only honest way in, and the tree itself is data the query port
+    /// serves like every other row a golden seeds.
+    ///
+    /// What the picture pins: each Box's combine control, the root's own
+    /// Rule above a nested any-of Box drawn one indent step in with its own
+    /// remove control, a Box inside that one two steps in, Rules and Boxes
+    /// interleaved in one list, and every box's own add controls under its
+    /// children.
+    #[test]
+    fn settings_smart_playlists_nested_dark_matches_golden_baseline() {
+        use riff_backend::app::store::{CustomSmartPlaylist, SmartPlaylistTree};
+        use riff_backend::domain::{
+            Combine, Comparison, MatchableField, PlaylistId, RootBox, Rule, RuleBox, RuleChild,
+            RuleValue,
+        };
+
+        let library = Library::geogaddi();
+        let id = PlaylistId::new("spl-morning-1");
+        let mut seed = on_settings(scanned(Seed::over(&library), &library, 1284));
+        seed.query.custom_smart_playlists = vec![CustomSmartPlaylist {
+            id: id.clone(),
+            name: "Morning drive".to_string(),
+            created_at: std::time::SystemTime::UNIX_EPOCH,
+        }];
+        let root = RootBox::new(RuleBox::new(Combine::All).with_children(vec![
+            RuleChild::Rule(Rule::new(
+                MatchableField::Title,
+                Comparison::Is,
+                Some(RuleValue::Text("midnight".to_string())),
+            )),
+            RuleChild::Box(RuleBox::new(Combine::Any).with_children(vec![
+                RuleChild::Rule(Rule::new(
+                    MatchableField::Year,
+                    Comparison::GreaterThan,
+                    Some(RuleValue::Number(1975)),
+                )),
+                RuleChild::Box(
+                    RuleBox::new(Combine::All).with_children(vec![RuleChild::Rule(Rule::new(
+                        MatchableField::PlayCount,
+                        Comparison::GreaterThan,
+                        Some(RuleValue::Number(10)),
+                    ))]),
+                ),
+            ])),
+        ]));
+        seed.query
+            .smart_playlist_trees
+            .insert(id.clone(), SmartPlaylistTree::new(root));
+        snapshot_composed(
+            "settings_smart_playlists_nested_dark",
+            window_with_stage(egui::vec2(1280.0, 960.0)),
+            Region::Stage,
+            Plan::columns(1),
+            |shell| {
+                click(shell, "Smart Playlists");
+                // The nav click applies at the end of its frame; the list's
+                // row exists in the tree only after the pane has painted.
+                shell.run_steps(2);
+                click(shell, "Morning drive");
+            },
+            seed,
+        );
+    }
+
     /// The Playback pane, reached by clicking its nav item — the nav's current
     /// section is a frontend-local field, so the gesture is the only honest way
     /// in.

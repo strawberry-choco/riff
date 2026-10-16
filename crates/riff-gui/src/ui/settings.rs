@@ -7,7 +7,7 @@ use riff_backend::app::state::{
 use riff_backend::app::store::{
     AUDIO_EXTENSIONS, CustomSmartPlaylist, FullScanSummary, SmartPlaylistTree,
 };
-use riff_backend::domain::PlaylistId;
+use riff_backend::domain::{Combine, PlaylistId};
 use riff_gui_components::button::{self as button, TextButton, Variant};
 use riff_gui_components::prompts::{self as prompts, PromptOutcome};
 use riff_gui_theme::icons::{Icon, IconCache};
@@ -26,6 +26,8 @@ use riff_gui_theme::theme::styled_font;
 use riff_gui_theme::theme::{self, Palette};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use crate::ui::rule_box::BoxPath;
 
 /// How the Library pane's lower four sections are arranged at a given width.
 ///
@@ -555,8 +557,36 @@ pub enum SettingsAction {
     /// new, empty, unsaved draft. Like the sidebar's `+`, it writes nothing;
     /// the list appears in the sidebar only at Save.
     NewSmartPlaylist,
-    /// The editor's "Add rule" control: append one blank Rule row.
-    AddSmartPlaylistRule,
+    /// The editor's "Add rule" control: append one blank Rule row to the Box
+    /// at `parent` — the Root Box, for a fresh draft.
+    AddSmartPlaylistRule {
+        /// The Box the new Rule row joins.
+        parent: BoxPath,
+    },
+    /// The editor's "Add box" control: append one new Box, holding one blank
+    /// Rule, to the Box at `parent`. The control is absent at the seventh
+    /// level — the cap is displayed, never refused — so no `parent` the paint
+    /// can produce lands deeper than the cap.
+    AddSmartPlaylistBox {
+        /// The Box the new Box joins.
+        parent: BoxPath,
+    },
+    /// Remove the child at `parent`/`index`: a Rule, or a whole Box **with
+    /// everything inside it**, in one gesture.
+    RemoveSmartPlaylistChild {
+        /// The Box whose sibling list holds the child.
+        parent: BoxPath,
+        /// The child's index in that box's interleaved order.
+        index: usize,
+    },
+    /// The combine chosen for the Box at `path`: all of the following, or any
+    /// of the following.
+    SetSmartPlaylistCombine {
+        /// The Box whose combine changed.
+        path: BoxPath,
+        /// The choice clicked.
+        combine: Combine,
+    },
     /// The editor's Save control. **The decision is ticket 18's** — this pane
     /// only puts the button down and reports the intent; dirtiness, the
     /// reconcile hook and every refusal reason live there.
@@ -3098,14 +3128,26 @@ impl super::app::RiffApp {
             SettingsAction::ClearThumbnailCache => {
                 self.clear_thumbnail_cache_confirm = true;
             }
-            // --- Smart Playlists page (ticket 15) ---
+            // --- Smart Playlists page (ticket 15; the tree is ticket 16) ---
             SettingsAction::SelectSmartPlaylist(id) => self.load_smart_playlist_into_editor(&id),
             // The page's own button opens the same new, empty, unsaved draft
-            // as the sidebar's `+`; Add rule appends one blank row; Save,
-            // Cancel and every refusal reason are ticket 18's decision, so
-            // those arms report their intent and write nothing.
+            // as the sidebar's `+`; the four tree gestures below land on the
+            // box model the pane drew; Save, Cancel and every refusal reason
+            // are ticket 18's decision, so those arms report their intent and
+            // write nothing.
             SettingsAction::NewSmartPlaylist => self.smart_playlists_editor.start_new(),
-            SettingsAction::AddSmartPlaylistRule => self.smart_playlists_editor.add_rule(),
+            SettingsAction::AddSmartPlaylistRule { parent } => {
+                self.smart_playlists_editor.add_rule(&parent);
+            }
+            SettingsAction::AddSmartPlaylistBox { parent } => {
+                self.smart_playlists_editor.add_box(&parent);
+            }
+            SettingsAction::RemoveSmartPlaylistChild { parent, index } => {
+                self.smart_playlists_editor.remove_child(&parent, index);
+            }
+            SettingsAction::SetSmartPlaylistCombine { path, combine } => {
+                self.smart_playlists_editor.set_combine(&path, combine);
+            }
             SettingsAction::SaveSmartPlaylist | SettingsAction::CancelSmartPlaylist => {}
             SettingsAction::SetAdvanced(value) => {
                 library.ui_flags.advanced_mode = value;

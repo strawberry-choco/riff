@@ -42,6 +42,9 @@ fn children_at<'a>(root: &'a RuleBoxDraft, path: &[usize]) -> &'a Vec<RuleChildD
         .fold(root, |boxed, index| match &boxed.children[*index] {
             RuleChildDraft::Box(nested) => nested,
             RuleChildDraft::Rule(_) => panic!("path index {index} names a Rule, not a Box"),
+            RuleChildDraft::Unreadable(_) => {
+                panic!("path index {index} names an Unreadable Rule, not a Box")
+            }
         })
         .children
         .as_ref()
@@ -53,6 +56,9 @@ fn box_at_mut<'a>(root: &'a mut RuleBoxDraft, path: &[usize]) -> &'a mut RuleBox
         .fold(root, |boxed, index| match &mut boxed.children[*index] {
             RuleChildDraft::Box(nested) => nested,
             RuleChildDraft::Rule(_) => panic!("path index {index} names a Rule, not a Box"),
+            RuleChildDraft::Unreadable(_) => {
+                panic!("path index {index} names an Unreadable Rule, not a Box")
+            }
         })
 }
 
@@ -296,7 +302,9 @@ fn the_seven_level_cap_gates_the_offer_and_nothing_else() {
             RuleChildDraft::Rule(draft) => {
                 *draft = filled_rule(MatchableField::Artist, &format!("level {level}"));
             }
-            RuleChildDraft::Box(_) => panic!("a new Box starts with a Rule"),
+            RuleChildDraft::Box(_) | RuleChildDraft::Unreadable(_) => {
+                panic!("a new Box starts with a Rule")
+            }
         }
         assert_eq!(path.level(), level);
     }
@@ -361,11 +369,15 @@ fn the_picker_tidy_up_closes_every_other_rows_value_panel() {
     // nested row's list must close the root row's.
     match &mut root.children[0] {
         RuleChildDraft::Rule(draft) => draft.open = Some(RulePanel::Value),
-        RuleChildDraft::Box(_) => panic!("the root's first child is a Rule"),
+        RuleChildDraft::Box(_) | RuleChildDraft::Unreadable(_) => {
+            panic!("the root's first child is a Rule")
+        }
     }
     match &mut box_at_mut(&mut root, &[1]).children[0] {
         RuleChildDraft::Rule(draft) => draft.open = Some(RulePanel::Value),
-        RuleChildDraft::Box(_) => panic!("the box's first child is a Rule"),
+        RuleChildDraft::Box(_) | RuleChildDraft::Unreadable(_) => {
+            panic!("the box's first child is a Rule")
+        }
     }
 
     let keep = ChildSlot::new(nested, 0);
@@ -383,4 +395,128 @@ fn the_picker_tidy_up_closes_every_other_rows_value_panel() {
         Some(RulePanel::Value),
         "the row that reported the picker keeps its list open"
     );
+}
+
+/// One child spelled for comparison: a Rule by its value text, a Box by the
+/// value text of its first Rule — enough identity to read a renumbered list
+/// back in order.
+fn child_label(child: &RuleChildDraft) -> String {
+    match child {
+        RuleChildDraft::Rule(rule) => spelled(rule).1,
+        RuleChildDraft::Box(nested) => match nested.children.first() {
+            Some(RuleChildDraft::Rule(rule)) => format!("box:{}", spelled(rule).1),
+            other => panic!("a test fixture Box holds a Rule first, got {other:?}"),
+        },
+        RuleChildDraft::Unreadable(_) => panic!("an Unreadable Rule spells no value"),
+    }
+}
+
+/// The labels of one box's children, in order.
+fn labels_at(root: &RuleBoxDraft, path: &[usize]) -> Vec<String> {
+    let boxed = path
+        .iter()
+        .fold(root, |boxed, index| match &boxed.children[*index] {
+            RuleChildDraft::Box(nested) => nested,
+            RuleChildDraft::Rule(_) => panic!("path index {index} names a Rule, not a Box"),
+            RuleChildDraft::Unreadable(_) => {
+                panic!("path index {index} names an Unreadable Rule, not a Box")
+            }
+        });
+    boxed.children.iter().map(child_label).collect()
+}
+
+/// A drag's resulting order: the child at `from` lands at `to`, everything
+/// between shifts one step to close and open the gaps — `reorder_tracks`'
+/// math over the one interleaved numbering Rules and Boxes share.
+#[test]
+fn moving_a_child_renumbers_the_one_interleaved_sibling_order() {
+    let mut root = RuleBoxDraft::empty(Combine::All);
+    root.children = vec![
+        RuleChildDraft::Rule(filled_rule(MatchableField::Title, "first")),
+        RuleChildDraft::Box(RuleBoxDraft {
+            combine: Combine::Any,
+            open: false,
+            children: vec![RuleChildDraft::Rule(filled_rule(
+                MatchableField::Artist,
+                "inner",
+            ))],
+        }),
+        RuleChildDraft::Rule(filled_rule(MatchableField::Album, "last")),
+    ];
+
+    // The last Rule drags up past the Box: Rule, Box, Rule renumbers as
+    // [last, first, box] — one numbering for both kinds, no Rule-only or
+    // Box-only subsequence anywhere.
+    root.move_child(&BoxPath::root(), 2, 0);
+    assert_eq!(
+        labels_at(&root, &[]),
+        vec!["last", "first", "box:inner"],
+        "the moved Rule leads and the others close up"
+    );
+
+    // And the Box drags down past a Rule in the same list.
+    root.move_child(&BoxPath::root(), 1, 2);
+    assert_eq!(
+        labels_at(&root, &[]),
+        vec!["last", "box:inner", "first"],
+        "the Box lands at the Rule's old position"
+    );
+}
+
+/// A nested Box's own list reorders independently, and a move inside it does
+/// not touch its parent's list.
+#[test]
+fn a_nested_boxes_sibling_list_reorders_on_its_own() {
+    let mut root = RuleBoxDraft::empty(Combine::All);
+    root.children = vec![
+        RuleChildDraft::Box(RuleBoxDraft {
+            combine: Combine::All,
+            open: false,
+            children: vec![
+                RuleChildDraft::Rule(filled_rule(MatchableField::Title, "a")),
+                RuleChildDraft::Rule(filled_rule(MatchableField::Title, "b")),
+                RuleChildDraft::Rule(filled_rule(MatchableField::Title, "c")),
+            ],
+        }),
+        RuleChildDraft::Rule(filled_rule(MatchableField::Title, "outside")),
+    ];
+
+    root.move_child(&BoxPath::root().child(0), 2, 0);
+
+    assert_eq!(labels_at(&root, &[0]), vec!["c", "a", "b"]);
+    assert_eq!(
+        labels_at(&root, &[]),
+        vec!["box:c", "outside"],
+        "the root's own list is untouched"
+    );
+}
+
+/// A drop on the row it came from, and any out-of-range gesture, changes
+/// nothing — the same no-op rule `reorder_tracks` applies to a playlist.
+#[test]
+fn a_self_drop_and_an_out_of_range_gesture_change_nothing() {
+    let mut root = RuleBoxDraft::empty(Combine::All);
+    root.children = vec![
+        RuleChildDraft::Rule(filled_rule(MatchableField::Title, "a")),
+        RuleChildDraft::Rule(filled_rule(MatchableField::Title, "b")),
+    ];
+    let before = labels_at(&root, &[]);
+
+    root.move_child(&BoxPath::root(), 1, 1);
+    assert_eq!(labels_at(&root, &[]), before, "a self-drop is a no-op");
+
+    root.move_child(&BoxPath::root(), 0, 2);
+    assert_eq!(labels_at(&root, &[]), before, "to out of bounds is a no-op");
+
+    root.move_child(&BoxPath::root(), 5, 0);
+    assert_eq!(
+        labels_at(&root, &[]),
+        before,
+        "from out of bounds is a no-op"
+    );
+
+    // And a path that names no Box drops the gesture rather than inventing
+    // one (the path comes from the paint, so a miss means the tree moved).
+    root.move_child(&BoxPath::root().child(3), 0, 0);
+    assert_eq!(labels_at(&root, &[]), before);
 }

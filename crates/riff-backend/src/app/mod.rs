@@ -2,6 +2,7 @@ pub mod errors;
 pub mod events;
 pub mod library_paths;
 pub mod pass_service;
+pub mod playlist_name;
 pub mod preferences;
 pub mod state;
 pub mod store;

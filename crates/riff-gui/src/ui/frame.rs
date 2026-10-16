@@ -108,6 +108,7 @@ use super::settings::SettingsSection;
 use super::sidebar::PlaylistRowAction;
 use super::smart_playlists_page::SmartPlaylistsEditor;
 use riff_backend::app::pass_service::Passes;
+use riff_backend::app::playlist_name::builtin_smart_list_name_conflict;
 use riff_backend::app::replaygain_pass::PassCommand;
 use riff_backend::app::replaygain_pass::PassReport;
 use riff_gui_components::prompts::PromptOutcome;
@@ -1078,6 +1079,15 @@ impl<'a> Frame<'a> {
         if name.is_empty() {
             return;
         }
+        // The application layer's half of the sidebar name rule, before the
+        // store is asked: the six Built-in Smart Playlists exist only as code,
+        // so no query can refuse a Playlist named after one — and the sidebar
+        // must never show two rows reading "Most Played" (story 8).
+        if let Some(reason) = builtin_smart_list_name_conflict(&name) {
+            *self.parts.playlist_create_name = Some(typed);
+            *self.parts.playlist_create_error = Some(reason);
+            return;
+        }
         match self.parts.playlist_store.create_playlist(&name, &[]) {
             Ok(id) => {
                 // The committed create bumps the playlist generation;
@@ -1110,6 +1120,19 @@ impl<'a> Frame<'a> {
         let Some((rid, typed)) = self.parts.playlist_rename.take() else {
             return;
         };
+        // The application layer's half of the sidebar name rule, the same one
+        // the create prompt asks: a rename must not take a Built-in Smart
+        // Playlist's name either, and the store deliberately cannot say so.
+        // The check trims and folds exactly as [`commit_playlist_rename`]
+        // does on its way to the store, so the two cannot disagree about what
+        // "the name" is.
+        //
+        // [`commit_playlist_rename`]: super::app::commit_playlist_rename
+        if let Some(reason) = builtin_smart_list_name_conflict(&typed) {
+            *self.parts.playlist_rename = Some((rid, typed));
+            *self.parts.playlist_rename_error = Some(reason);
+            return;
+        }
         // Same Store flow as before the restyle: trim, rename as one durable
         // transaction. The seam's next read reflects the new name on its own
         // (ADR 0002). The prompt slot is keyed by id, so the slot the row

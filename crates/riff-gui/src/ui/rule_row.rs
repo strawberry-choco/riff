@@ -758,9 +758,9 @@ pub fn rule_row(
         );
         ui.add_space(theme::SPACE_XS);
         if toggle_switch(ui, palette, id.with("not"), "Not", draft.negated) {
-            let negated = !draft.negated;
-            draft.negated = negated;
-            intents.push(RuleIntent::NegationToggled { negated });
+            intents.push(RuleIntent::NegationToggled {
+                negated: !draft.negated,
+            });
         }
         ui.add_space(PART_GAP);
         draw_value(ui, cache, palette, id, draft, &mut intents);

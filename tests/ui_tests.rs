@@ -7712,6 +7712,84 @@ mod tests {
         );
     }
 
+    /// A tree with an arbitrary number of Rules saves and reads back whole
+    /// through the **real** SQLite store, and so does one deeper than the
+    /// seven-level editor cap: the editor imposes no Rule count and no depth
+    /// on the way out, and the store enforces neither on the way in — the
+    /// cap is an editor rule the store and the compiler do not share.
+    #[test]
+    fn test_the_editor_tree_saves_and_reads_back_through_a_real_store() {
+        use riff_backend::app::store::{LibraryMutationStore, LibraryQueryStore, SmartPlaylistTree};
+        use riff_backend::domain::{
+            Combine, Comparison, MatchableField, RootBox, Rule, RuleBox, RuleChild, RuleValue,
+        };
+        use riff_gui::ui::rule_box::{BoxPath, RuleChildDraft};
+        use riff_gui::ui::rule_row::RuleDraft;
+
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (changes_tx, _changes_rx) = crossbeam_channel::unbounded();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(
+            &dir.path().join("riff.sqlite3"),
+            changes_tx,
+        )
+        .expect("opening a fresh store must work");
+
+        // Sixty Rules in one box: the editor's own tree, spelled for Save.
+        let mut editor = riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor::default();
+        for _ in 0..59 {
+            editor.add_rule(&BoxPath::root());
+        }
+        for (index, child) in editor.root.children.iter_mut().enumerate() {
+            let RuleChildDraft::Rule(draft) = child else {
+                panic!("the root's children are Rules");
+            };
+            *draft = RuleDraft::from_rule(&Rule::new(
+                MatchableField::Artist,
+                Comparison::Is,
+                Some(RuleValue::Text(format!("artist {index}"))),
+            ));
+        }
+        let tree = SmartPlaylistTree::new(
+            editor
+                .root
+                .to_root_box()
+                .expect("sixty whole Rules spell a tree"),
+        );
+        let id = store
+            .save_smart_playlist(None, "Sixty Rules", &tree)
+            .expect("the save lands");
+        let read = store
+            .smart_playlist_tree(&id)
+            .expect("the read works")
+            .expect("the tree exists");
+        assert_eq!(read.root().rule_count(), 60);
+        assert_eq!(
+            read.root().children().len(),
+            60,
+            "no row cap on either side of the seam"
+        );
+
+        // A tree nine levels deep — two past the editor's cap — round-trips
+        // with its order and nesting untouched.
+        let mut deep = RuleBox::new(Combine::All).with_children(vec![RuleChild::Rule(Rule::new(
+            MatchableField::Title,
+            Comparison::Contains,
+            Some(RuleValue::Text("deep".to_string())),
+        ))]);
+        for _ in 0..8 {
+            deep = RuleBox::new(Combine::Any).with_children(vec![RuleChild::Box(deep)]);
+        }
+        let nine_levels = SmartPlaylistTree::new(RootBox::new(deep));
+        let deep_id = store
+            .save_smart_playlist(None, "Nine levels", &nine_levels)
+            .expect("a deeper tree still saves");
+        let read = store
+            .smart_playlist_tree(&deep_id)
+            .expect("the read works")
+            .expect("the tree exists");
+        assert_eq!(read.root(), nine_levels.root(), "nesting and order survive");
+    }
+
     fn sample_content() -> SettingsContent {
         SettingsContent {
             libraries: vec![LibraryRow {

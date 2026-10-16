@@ -162,7 +162,7 @@ impl SmartPlaylistsEditor {
                 .collect()
         });
         self.selected = Some(list.id.clone());
-        self.name = list.name.clone();
+        self.name.clone_from(&list.name);
         self.drafts = drafts;
         self.picker = None;
         self.pending_picker = None;
@@ -429,30 +429,41 @@ fn editor_column(
     }
     ui.add_space(theme::SPACE_MD);
 
-    let save = pane_button(
+    save_cancel_row(ui, cache, palette, content.reduce_motion, actions);
+}
+
+/// The editor's Save/Cancel line, as one flow-placed pair: the controls and
+/// their typed intents are this pane's, and what Save and Cancel *mean* is
+/// ticket 18's.
+fn save_cancel_row(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    reduce_motion: bool,
+    actions: &mut Vec<SettingsAction>,
+) {
+    if pane_button(
         ui,
         cache,
         palette,
-        content.reduce_motion,
+        reduce_motion,
         "Save",
         egui::Id::new("smart_playlists_save"),
         None,
         Variant::Primary,
-    );
-    if save {
+    ) {
         actions.push(SettingsAction::SaveSmartPlaylist);
     }
-    let cancel = pane_button(
+    if pane_button(
         ui,
         cache,
         palette,
-        content.reduce_motion,
+        reduce_motion,
         "Cancel",
         egui::Id::new("smart_playlists_cancel"),
         None,
         Variant::Secondary,
-    );
-    if cancel {
+    ) {
         actions.push(SettingsAction::CancelSmartPlaylist);
     }
 }
@@ -469,6 +480,7 @@ fn editor_column(
 /// by its label alone clips its own words at `painter_at`'s rect edges.
 /// The `16.0 + 8.0` is the button component's arithmetic, spelled out here
 /// exactly as the Settings header's Back control spells it.
+#[expect(clippy::too_many_arguments, reason = "one button-paint call")]
 fn pane_button(
     ui: &mut egui::Ui,
     cache: &mut IconCache,

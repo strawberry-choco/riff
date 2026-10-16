@@ -4,7 +4,9 @@ use riff_backend::app::replaygain_pass::PassCommand;
 use riff_backend::app::state::{
     LibrarySession, LibraryStatus, PlaybackSession, ReplayGainMode, ViewMode, WatchState,
 };
-use riff_backend::app::store::{AUDIO_EXTENSIONS, CustomSmartPlaylist, FullScanSummary};
+use riff_backend::app::store::{
+    AUDIO_EXTENSIONS, CustomSmartPlaylist, FullScanSummary, SmartPlaylistTree,
+};
 use riff_backend::domain::PlaylistId;
 use riff_gui_components::button::{self as button, TextButton, Variant};
 use riff_gui_components::prompts::{self as prompts, PromptOutcome};
@@ -3025,8 +3027,34 @@ fn replaygain_pass_action_row(
 // --- App adapter --------------------------------------------------------------------
 
 impl super::app::RiffApp {
+    /// Load one saved Custom Smart Playlist into the frontend-local editor:
+    /// its name and its Root Box's Rules. The tree comes through ticket 11's
+    /// projection read — the D6 reason channel — like every other Custom-list
+    /// read; a degraded answer still hands the last good tree (or none), and
+    /// what to do with the reason is ticket 18's refusal decision, not this
+    /// load's.
+    fn load_smart_playlist_into_editor(&mut self, id: &PlaylistId) {
+        let lists = self.views.custom_smart_playlists();
+        let list = lists.iter().find(|list| &list.id == id).cloned();
+        if let Some(list) = list {
+            let tree = self
+                .views
+                .custom_list_tree(id)
+                .unwrap_or_else(|degraded| degraded.value);
+            // `SmartPlaylistTree::root()` is the public accessor for the
+            // interpretable half; the unreadable side list stays ticket 18's
+            // sibling state, per ticket 14's note.
+            self.smart_playlists_editor
+                .load_saved(&list, tree.as_ref().map(SmartPlaylistTree::root));
+        }
+    }
+
     /// Apply one [`SettingsAction`] through the app's state/service/store
     /// paths.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one SettingsAction dispatch, the house shape for the action tables"
+    )]
     fn apply_settings_action(
         &mut self,
         action: SettingsAction,
@@ -3071,36 +3099,14 @@ impl super::app::RiffApp {
                 self.clear_thumbnail_cache_confirm = true;
             }
             // --- Smart Playlists page (ticket 15) ---
-            // Picking a saved list loads its name and Root Box Rules into the
-            // frontend-local draft. The tree comes through ticket 11's
-            // projection read — the D6 reason channel — like every other
-            // Custom-list read; a degraded answer still hands the last good
-            // tree (or none), and what to do with the reason is ticket 18's
-            // refusal decision, not this load's.
-            SettingsAction::SelectSmartPlaylist(id) => {
-                let lists = self.views.custom_smart_playlists();
-                let list = lists.iter().find(|list| list.id == id).cloned();
-                if let Some(list) = list {
-                    let tree = self
-                        .views
-                        .custom_list_tree(&id)
-                        .unwrap_or_else(|degraded| degraded.value);
-                    // `SmartPlaylistTree::root()` is the public accessor for
-                    // the interpretable half; the unreadable side list stays
-                    // ticket 18's sibling state, per ticket 14's note.
-                    self.smart_playlists_editor
-                        .load_saved(&list, tree.as_ref().map(|tree| tree.root()));
-                }
-            }
-            // The page's own button: the same new, empty, unsaved draft the
-            // sidebar's `+` opens, reached from inside the page.
+            SettingsAction::SelectSmartPlaylist(id) => self.load_smart_playlist_into_editor(&id),
+            // The page's own button opens the same new, empty, unsaved draft
+            // as the sidebar's `+`; Add rule appends one blank row; Save,
+            // Cancel and every refusal reason are ticket 18's decision, so
+            // those arms report their intent and write nothing.
             SettingsAction::NewSmartPlaylist => self.smart_playlists_editor.start_new(),
             SettingsAction::AddSmartPlaylistRule => self.smart_playlists_editor.add_rule(),
-            // Save, Cancel and every refusal reason are ticket 18's decision.
-            // This pane puts the controls down and reports the intent; nothing
-            // here writes the store or discards the draft.
-            SettingsAction::SaveSmartPlaylist => {}
-            SettingsAction::CancelSmartPlaylist => {}
+            SettingsAction::SaveSmartPlaylist | SettingsAction::CancelSmartPlaylist => {}
             SettingsAction::SetAdvanced(value) => {
                 library.ui_flags.advanced_mode = value;
             }

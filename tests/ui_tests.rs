@@ -18716,12 +18716,14 @@ mod whole_frame_tests {
     #[test]
     fn test_selecting_a_list_loads_its_name_and_the_pages_button_starts_fresh() {
         let id = PlaylistId::new("spl-late-night-2");
-        let mut mock = MockLibraryQueryStore::default();
-        mock.custom_smart_playlists = vec![CustomSmartPlaylist {
-            id: id.clone(),
-            name: "Late night jazz".to_string(),
-            created_at: std::time::SystemTime::UNIX_EPOCH,
-        }];
+        let mock = MockLibraryQueryStore {
+            custom_smart_playlists: vec![CustomSmartPlaylist {
+                id: id.clone(),
+                name: "Late night jazz".to_string(),
+                created_at: std::time::SystemTime::UNIX_EPOCH,
+            }],
+            ..MockLibraryQueryStore::default()
+        };
         let (mut shell, _transport) = recording_transport_shell(mock);
         shell.library.lock().unwrap().view_mode = ViewMode::Settings;
         shell.harness.step();

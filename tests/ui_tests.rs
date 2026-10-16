@@ -21516,8 +21516,19 @@ mod whole_frame_tests {
     /// Open the row's context menu the way a listener does: a real secondary
     /// click at the row's hit area, then the two settling steps the popup
     /// needs before its items are queryable (the harness's measured recipe).
+    ///
+    /// The ROW is picked by the sidebar's own bounds, not by label alone: an
+    /// open Custom list's listing carries the same name in its heading (its
+    /// header paints the list's name), so a bare by-label lookup is ambiguous
+    /// while that list is open. The menu hangs off the row, never the
+    /// heading.
     fn open_custom_row_menu(shell: &mut Shell, row_label: &str) {
-        shell.harness.get_by_label(row_label).click_secondary();
+        shell
+            .harness
+            .query_all_by_label(row_label)
+            .find(|node| node.rect().center().x < riff_gui_theme::theme::SIDEBAR_W)
+            .expect("the sidebar row bearing the name")
+            .click_secondary();
         shell.harness.step();
         shell.harness.step();
     }
@@ -21721,20 +21732,27 @@ mod whole_frame_tests {
         // flag, the harness's measured shape — so the open row is the enabled
         // one and every idle row reads disabled. (`toggled()` is the
         // OptionList's projection, not a row's.)
+        //
+        // The rows are picked by the sidebar's own bounds: the open copy's
+        // listing paints its name in its heading too, so the by-label lookup
+        // is ambiguous while a list is open — and the claim here is about the
+        // sidebar row's state, never the heading's.
+        let copy_row = shell
+            .harness
+            .query_all_by_label("Copy of Late night jazz")
+            .find(|node| node.rect().center().x < riff_gui_theme::theme::SIDEBAR_W)
+            .expect("the copy's own sidebar row");
         assert!(
-            !shell
-                .harness
-                .get_by_label("Copy of Late night jazz")
-                .accesskit_node()
-                .is_disabled(),
+            !copy_row.accesskit_node().is_disabled(),
             "the copy's row is the selected one — the page opened on the copy"
         );
+        let original_row = shell
+            .harness
+            .query_all_by_label("Late night jazz")
+            .find(|node| node.rect().center().x < riff_gui_theme::theme::SIDEBAR_W)
+            .expect("the original's own sidebar row");
         assert!(
-            shell
-                .harness
-                .get_by_label("Late night jazz")
-                .accesskit_node()
-                .is_disabled(),
+            original_row.accesskit_node().is_disabled(),
             "not on the original: its row is idle"
         );
 
@@ -21823,7 +21841,8 @@ mod whole_frame_tests {
         assert!(
             shell
                 .harness
-                .query(By::new().label("Late night jazz"))
+                .query_all_by_label("Late night jazz")
+                .next()
                 .is_some(),
             "and the row is still there"
         );

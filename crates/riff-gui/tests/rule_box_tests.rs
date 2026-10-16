@@ -407,6 +407,7 @@ fn child_label(child: &RuleChildDraft) -> String {
             Some(RuleChildDraft::Rule(rule)) => format!("box:{}", spelled(rule).1),
             other => panic!("a test fixture Box holds a Rule first, got {other:?}"),
         },
+        RuleChildDraft::Unreadable(_) => panic!("an Unreadable Rule spells no value"),
     }
 }
 
@@ -417,6 +418,9 @@ fn labels_at(root: &RuleBoxDraft, path: &[usize]) -> Vec<String> {
         .fold(root, |boxed, index| match &boxed.children[*index] {
             RuleChildDraft::Box(nested) => nested,
             RuleChildDraft::Rule(_) => panic!("path index {index} names a Rule, not a Box"),
+            RuleChildDraft::Unreadable(_) => {
+                panic!("path index {index} names an Unreadable Rule, not a Box")
+            }
         });
     boxed.children.iter().map(child_label).collect()
 }

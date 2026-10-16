@@ -31,24 +31,6 @@ fn list(id: &str, name: &str) -> CustomSmartPlaylist {
     }
 }
 
-/// The editor holding `tree` **and the row it was opened from**, so a test can
-/// hand the reconcile an enumeration naming the very list the draft carries.
-fn editor_and_list(tree: &SmartPlaylistTree) -> (SmartPlaylistsEditor, CustomSmartPlaylist) {
-    let saved = list("spl-late-night-2", "Late night jazz");
-    let mut editor = SmartPlaylistsEditor::default();
-    editor.load_saved(&saved, Some(tree));
-    (editor, saved)
-}
-
-/// [`editor_and_list`]'s row under a different stored name — the rename a
-/// sidebar write commits, with the row's identity preserved.
-fn renamed_row(row: &CustomSmartPlaylist, name: &str) -> CustomSmartPlaylist {
-    CustomSmartPlaylist {
-        name: name.to_string(),
-        ..row.clone()
-    }
-}
-
 /// A whole Rule for `field`, spelled through `RuleDraft::from_rule` so no test
 /// reaches past the row's own constructors.
 fn whole_rule(field: MatchableField) -> RuleDraft {

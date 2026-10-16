@@ -2303,7 +2303,20 @@ mod tests {
                 // The nav click applies at the end of its frame; the list's
                 // row exists in the tree only after the pane has painted.
                 shell.run_steps(2);
-                click(shell, "Morning drive");
+                // The saved list's name is worn by the pane's own row AND by
+                // ticket 12's sidebar row — the same shared `tree_row`
+                // primitive, the same label and role, so the a11y tree cannot
+                // tell them apart. This golden crops the stage, so the click
+                // must take the stage's row: the match right of the sidebar.
+                use egui_kittest::kittest::Queryable as _;
+                let row = shell
+                    .query_all_by_label("Morning drive")
+                    .find(|node| {
+                        node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W
+                    })
+                    .expect("the pane's own row for the saved list");
+                row.click();
+                shell.remove_cursor();
             },
             seed,
         );

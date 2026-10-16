@@ -751,6 +751,11 @@ fn test_generated_trees_page_one_ordered_answer_under_every_sort_and_needle() {
             "{text}: the generator built this tree from the catalog's own comparisons"
         );
         let reference = rules_reference::matches(&tracks, &tree, None, &clock);
+        // The four directions' whole answers, kept so the direction itself can
+        // be asserted below: the tiling further down is only self-consistent,
+        // and a read that ignored `order` would tile just as consistently.
+        let mut wholes: Vec<(TrackListOrder, Vec<TrackId>)> =
+            Vec::with_capacity(PAGED_ORDERS.len());
 
         for order in PAGED_ORDERS {
             let (whole, whole_total) = page_of(&store, &tree, order, None, 0, usize::MAX, &text);
@@ -759,6 +764,7 @@ fn test_generated_trees_page_one_ordered_answer_under_every_sort_and_needle() {
                 reference.len(),
                 "{text}: the total under {order:?} must be the reference's count"
             );
+            wholes.push((order, whole.clone()));
             let mut canon = whole.clone();
             canon.sort_by(|left, right| left.0.cmp(&right.0));
             assert_eq!(
@@ -799,6 +805,24 @@ fn test_generated_trees_page_one_ordered_answer_under_every_sort_and_needle() {
                 "{text}: the windows of one answer must be disjoint and complete ({order:?})"
             );
         }
+
+        // The window respects the shared sort directions, asked of the read's
+        // own four answers: `path` is unique and the title order flips its
+        // `path` tiebreak together with its key, so each descending answer is
+        // the exact reversal of its ascending twin. This is what an
+        // order-blind read fails — the tiling above and the set comparison
+        // before it would both stay green if `order` never reached the
+        // `ORDER BY`.
+        assert_eq!(
+            ids_in(&wholes, TrackListOrder::PathDesc),
+            reversed(ids_in(&wholes, TrackListOrder::PathAsc)),
+            "{text}: path-descending must be the exact reversal of path-ascending"
+        );
+        assert_eq!(
+            ids_in(&wholes, TrackListOrder::TitleDesc),
+            reversed(ids_in(&wholes, TrackListOrder::TitleAsc)),
+            "{text}: title Z-A must be the exact reversal of title A-Z"
+        );
 
         // The needle is ANDed with the tree inside the store read — never chosen
         // against it, and never applied after the window is cut.
@@ -867,6 +891,22 @@ fn page_of(
         ),
         Err(error) => panic!("{text}: a legal tree must be answerable, got {error}"),
     }
+}
+
+/// One order's whole answer out of a generated tree's four reads.
+fn ids_in<'a>(
+    wholes: &'a [(TrackListOrder, Vec<TrackId>)],
+    order: TrackListOrder,
+) -> &'a [TrackId] {
+    &wholes
+        .iter()
+        .find(|(asked, _)| *asked == order)
+        .expect("every order in PAGED_ORDERS is read once")
+        .1
+}
+
+fn reversed(ids: &[TrackId]) -> Vec<TrackId> {
+    ids.iter().rev().cloned().collect()
 }
 
 fn slice_of(ids: &[TrackId], offset: usize, limit: usize) -> Vec<TrackId> {
